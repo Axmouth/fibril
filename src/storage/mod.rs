@@ -51,7 +51,7 @@ pub fn make_rocksdb_store(path: &str) -> Result<rocksdb_store::RocksStorage, Sto
 
 /// Defines the persistent storage API for a durable queue system.
 #[async_trait]
-pub trait Storage: Send + Sync {
+pub trait Storage: Send + Sync + std::fmt::Debug {
     /// Append a message to the end of a topic/partition log.
     async fn append(
         &self,
@@ -76,6 +76,14 @@ pub trait Storage: Send + Sync {
         group: &Group,
     ) -> Result<(), StorageError>;
 
+    /// Fetch a message by its exact offset.
+    async fn fetch_by_offset(
+    &self,
+    topic: &Topic,
+    partition: Partition,
+    offset: Offset,
+) -> Result<StoredMessage, StorageError>;
+
     /// Fetch messages starting *after* a given offset,
     /// limited to max count, excluding messages currently in-flight.
     async fn fetch_available(
@@ -86,6 +94,33 @@ pub trait Storage: Send + Sync {
         from_offset: Offset,
         max: usize,
     ) -> Result<Vec<DeliverableMessage>, StorageError>;
+
+    /// Get the current next offset for appending new messages.
+    async fn current_next_offset(&self, topic:&Topic, partition:Partition) -> Result<Offset, StorageError>;
+
+    /// Fetch messages starting *after* a given offset,
+    async fn fetch_available_clamped(
+    &self,
+    topic: &Topic,
+    partition: Partition,
+    group: &Group,
+    from_offset: Offset,
+    max_offset_exclusive: Offset,
+    max_batch: usize,
+) -> Result<Vec<DeliverableMessage>, StorageError>;
+
+
+/// Fetch messages in a given offset range [from_offset, to_offset),
+async fn fetch_range(
+    &self,
+    topic: &Topic,
+    partition: Partition,
+    group: &Group,
+    from_offset: Offset,
+    to_offset: Offset,
+    max_batch: usize,
+) -> Result<Vec<DeliverableMessage>, StorageError>;
+
 
     /// Mark a message as "in-flight" for a consumer group with a deadline.
     async fn mark_inflight(
@@ -104,6 +139,15 @@ pub trait Storage: Send + Sync {
         partition: Partition,
         group: &Group,
         offset: Offset,
+    ) -> Result<(), StorageError>;
+
+    /// Acknowledge a batch of messages.
+    async fn ack_batch(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+        offsets: &[Offset],
     ) -> Result<(), StorageError>;
 
     /// Return messages whose deadline expired → need redelivery.
@@ -127,6 +171,21 @@ pub trait Storage: Send + Sync {
         group: &Group,
         offset: Offset,
     ) -> Result<(), StorageError>;
+
+    async fn clear_all_inflight(&self) -> Result<(), StorageError>;
+
+    async fn count_inflight(&self, topic: &Topic, partition: Partition, group: &Group) -> Result<usize, StorageError>;
+
+    async fn is_inflight_or_acked(
+    &self,
+    topic: &Topic,
+    partition: Partition,
+    group: &Group,
+    offset: Offset,
+) -> Result<bool, StorageError>;
+
+
+    async fn dump_meta_keys(&self);
 
     // TODO: Batch append support (Performance)
     // We don't need this now, but all high-performance brokers rely on batching.

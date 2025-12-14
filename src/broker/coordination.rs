@@ -4,6 +4,8 @@ pub trait Coordination: Send + Sync {
     async fn await_leadership(&self, topic: &str, partition: u32);
     // stub: no-op for single node now
 }
+
+#[derive(Debug, Clone)]
 pub struct NoopCoordination;
 
 #[async_trait::async_trait]
