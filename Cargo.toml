@@ -1,0 +1,20 @@
+[package]
+name = "thetube"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bench-basic"
+path = "benches/basic.rs"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+dashmap = "6.1"
+fastrand = "2"
+futures = "0.3"
+rocksdb = "0.24.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1", features = ["full"] }
