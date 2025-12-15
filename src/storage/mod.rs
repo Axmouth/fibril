@@ -78,11 +78,11 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
 
     /// Fetch a message by its exact offset.
     async fn fetch_by_offset(
-    &self,
-    topic: &Topic,
-    partition: Partition,
-    offset: Offset,
-) -> Result<StoredMessage, StorageError>;
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        offset: Offset,
+    ) -> Result<StoredMessage, StorageError>;
 
     /// Fetch messages starting *after* a given offset,
     /// limited to max count, excluding messages currently in-flight.
@@ -96,31 +96,33 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     ) -> Result<Vec<DeliverableMessage>, StorageError>;
 
     /// Get the current next offset for appending new messages.
-    async fn current_next_offset(&self, topic:&Topic, partition:Partition) -> Result<Offset, StorageError>;
+    async fn current_next_offset(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+    ) -> Result<Offset, StorageError>;
 
     /// Fetch messages starting *after* a given offset,
     async fn fetch_available_clamped(
-    &self,
-    topic: &Topic,
-    partition: Partition,
-    group: &Group,
-    from_offset: Offset,
-    max_offset_exclusive: Offset,
-    max_batch: usize,
-) -> Result<Vec<DeliverableMessage>, StorageError>;
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+        from_offset: Offset,
+        max_offset_exclusive: Offset,
+        max_batch: usize,
+    ) -> Result<Vec<DeliverableMessage>, StorageError>;
 
-
-/// Fetch messages in a given offset range [from_offset, to_offset),
-async fn fetch_range(
-    &self,
-    topic: &Topic,
-    partition: Partition,
-    group: &Group,
-    from_offset: Offset,
-    to_offset: Offset,
-    max_batch: usize,
-) -> Result<Vec<DeliverableMessage>, StorageError>;
-
+    /// Fetch messages in a given offset range [from_offset, to_offset),
+    async fn fetch_range(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+        from_offset: Offset,
+        to_offset: Offset,
+        max_batch: usize,
+    ) -> Result<Vec<DeliverableMessage>, StorageError>;
 
     /// Mark a message as "in-flight" for a consumer group with a deadline.
     async fn mark_inflight(
@@ -130,6 +132,15 @@ async fn fetch_range(
         group: &Group,
         offset: Offset,
         deadline_ts: u64,
+    ) -> Result<(), StorageError>;
+
+    /// Marks a batch of messages as "in-flight"
+    async fn mark_inflight_batch(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+        entries: &[(Offset, u64)], // offset -> deadline
     ) -> Result<(), StorageError>;
 
     /// Remove message from inflight and mark as acknowledged.
@@ -174,16 +185,41 @@ async fn fetch_range(
 
     async fn clear_all_inflight(&self) -> Result<(), StorageError>;
 
-    async fn count_inflight(&self, topic: &Topic, partition: Partition, group: &Group) -> Result<usize, StorageError>;
+    async fn count_inflight(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+    ) -> Result<usize, StorageError>;
+
+    async fn is_acked(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+        offset: Offset,
+    ) -> Result<bool, StorageError>;
 
     async fn is_inflight_or_acked(
-    &self,
-    topic: &Topic,
-    partition: Partition,
-    group: &Group,
-    offset: Offset,
-) -> Result<bool, StorageError>;
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+        offset: Offset,
+    ) -> Result<bool, StorageError>;
 
+    async fn list_topics(&self) -> Result<Vec<Topic>, StorageError>;
+
+    async fn list_groups(&self) -> Result<Vec<(Topic, Partition, Group)>, StorageError>;
+
+    async fn lowest_not_acked_offset(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+    ) -> Result<Offset, StorageError>;
+
+    async fn flush(&self) -> Result<(), StorageError>;
 
     async fn dump_meta_keys(&self);
 

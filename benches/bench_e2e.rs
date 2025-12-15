@@ -8,7 +8,7 @@ use std::{
 
 use tokio::task::JoinSet;
 
-use thetube::storage::make_rocksdb_store;
+use thetube::{broker::AckRequest, storage::make_rocksdb_store};
 use thetube::{broker::coordination::NoopCoordination, storage::Storage};
 use thetube::{
     broker::{Broker, BrokerConfig, BrokerError, ConsumerHandle},
@@ -167,7 +167,8 @@ async fn consumer_task(mut consumer: ConsumerHandle, ack_mode: AckMode, metrics:
     let metrics2 = metrics.clone();
     tokio::spawn(async move {
         while let Some(off) = ackq_rx.recv().await {
-            if acker.send(off).await.is_ok() {
+            let req = AckRequest { offset: off };
+            if acker.send(req).await.is_ok() {
                 metrics2.acked.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -178,7 +179,10 @@ async fn consumer_task(mut consumer: ConsumerHandle, ack_mode: AckMode, metrics:
 
         match ack_mode {
             AckMode::Sync => {
-                let _ = consumer.acker.try_send(msg.delivery_tag);
+                let req = AckRequest {
+                    offset: msg.delivery_tag,
+                };
+                let _ = consumer.acker.try_send(req);
                 metrics.acked.fetch_add(1, Ordering::Relaxed);
             }
             AckMode::Async => {
@@ -215,11 +219,15 @@ async fn reporter(
 }
 
 async fn make_broker_with_cfg(cmd: &E2EBench) -> Broker<NoopCoordination> {
-    let mut cfg = BrokerConfig::default();
-    cfg.publish_batch_size = cmd.batch_size;
-    cfg.publish_batch_timeout_ms = cmd.batch_timeout_ms;
-    cfg.ack_batch_size = 512;
-    cfg.ack_batch_timeout_ms = 1;
+    let mut cfg = BrokerConfig {
+        publish_batch_size: cmd.batch_size,
+        publish_batch_timeout_ms: cmd.batch_timeout_ms,
+        ack_batch_size: 512,
+        ack_batch_timeout_ms: 1,
+        inflight_ttl_secs: 60,
+        cleanup_interval_secs: 5,
+        ..Default::default()
+    };
 
     // IMPORTANT: inflight TTL must exceed bench duration
     cfg.inflight_ttl_secs = 60;
@@ -231,12 +239,7 @@ async fn make_broker_with_cfg(cmd: &E2EBench) -> Broker<NoopCoordination> {
     let store = make_rocksdb_store(&db_path).unwrap();
     let coord = NoopCoordination {};
 
-    let broker = Broker::try_new(store, coord, cfg).await.unwrap();
-
-    // Redelivery worker is REQUIRED for correctness
-    broker.start_redelivery_worker();
-
-    broker
+    Broker::try_new(store, coord, cfg).await.unwrap()
 }
 
 async fn run_e2e_bench(cmd: E2EBench) {
@@ -250,7 +253,10 @@ async fn run_e2e_bench(cmd: E2EBench) {
 
     // Consumers
     for _ in 0..cmd.consumers {
-        let consumer = broker.subscribe(&topic, "bench_group").await.unwrap();
+        let consumer = broker
+            .subscribe(&topic, "bench_group", 100000)
+            .await
+            .unwrap();
         tokio::spawn(consumer_task(
             consumer,
             cmd.ack_mode.clone(),
@@ -276,7 +282,7 @@ async fn run_e2e_bench(cmd: E2EBench) {
     // Reporter
     tokio::spawn(reporter(
         metrics.clone(),
-        broker,
+        broker.clone(),
         topic.clone(),
         cmd.report_interval_secs,
     ));
@@ -285,6 +291,10 @@ async fn run_e2e_bench(cmd: E2EBench) {
     while metrics.acked.load(Ordering::Relaxed) < cmd.messages {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+
+    broker.flush_storage().await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     broker_clone.dump_meta_keys().await;
 

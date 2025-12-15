@@ -2,12 +2,14 @@ pub mod coordination;
 
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
-use std::pin::pin;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+use std::{
+    mem,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -55,6 +57,10 @@ pub enum BrokerError {
 }
 
 type ConsumerId = u64;
+#[derive(Debug)]
+struct GroupCursor {
+    pub next_offset: u64,
+}
 
 #[derive(Debug)]
 struct GroupState {
@@ -63,6 +69,9 @@ struct GroupState {
     delivery_task_started: AtomicBool,
     rr_counter: AtomicU64,
     redelivery: Arc<SegQueue<Offset>>, // lock-free FIFO queue
+    pending_delivery: SegQueue<DeliverableMessage>,
+    pending_inflight: SegQueue<(Offset, u64)>, // offset + deadline
+    inflight_sem: Arc<Semaphore>,
 }
 
 impl GroupState {
@@ -73,8 +82,18 @@ impl GroupState {
             delivery_task_started: AtomicBool::new(false),
             rr_counter: AtomicU64::new(0),
             redelivery: Arc::new(SegQueue::new()),
+            pending_delivery: SegQueue::new(),
+            pending_inflight: SegQueue::new(),
+            inflight_sem: Arc::new(Semaphore::new(0)),
         }
     }
+}
+
+pub struct AckRequest {
+    // pub group: Group,
+    // pub topic: Topic,
+    // pub partition: Partition,
+    pub offset: Offset,
 }
 
 pub struct PublishRequest {
@@ -84,6 +103,7 @@ pub struct PublishRequest {
 
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
+    pub cleanup_interval_secs: u64,
     pub inflight_ttl_secs: u64, // seconds
     pub publish_batch_size: usize,
     pub publish_batch_timeout_ms: u64,
@@ -96,6 +116,7 @@ pub struct BrokerConfig {
 impl Default for BrokerConfig {
     fn default() -> Self {
         BrokerConfig {
+            cleanup_interval_secs: 60,
             inflight_ttl_secs: 60,
             publish_batch_size: 128,
             publish_batch_timeout_ms: 50,
@@ -115,16 +136,19 @@ pub struct ConsumerConfig {
 // TODO: empty and close channels on drop/shutdown
 pub struct ConsumerHandle {
     pub config: ConsumerConfig,
+    pub group: Group,
+    pub topic: Topic,
+    pub partition: Partition,
     // TODO: find way to make this complete not on channel deliver, but response sent
     pub messages: tokio::sync::mpsc::Receiver<DeliverableMessage>,
     // TODO: Should it be ack only or generally respond?
-    pub acker: tokio::sync::mpsc::Sender<Offset>,
+    pub acker: tokio::sync::mpsc::Sender<AckRequest>,
 }
 
 impl ConsumerHandle {
-    pub async fn ack(&self, offset: Offset) -> Result<(), BrokerError> {
+    pub async fn ack(&self, ack_request: AckRequest) -> Result<(), BrokerError> {
         self.acker
-            .send(offset)
+            .send(ack_request)
             .await
             .map_err(|_| BrokerError::ChannelClosed)
     }
@@ -138,7 +162,9 @@ impl ConsumerHandle {
 // TODO: empty and close channels on drop/shutdown
 pub struct PublisherHandle {
     pub publisher: tokio::sync::mpsc::Sender<PublishRequest>,
+    // TODO: separate?
     confirm_tx: tokio::sync::mpsc::Sender<Result<Offset, BrokerError>>,
+    task_group: Arc<TaskGroup>,
 }
 
 // TODO: empty and close channels on drop/shutdown
@@ -156,7 +182,7 @@ impl PublisherHandle {
             .map_err(|_| BrokerError::ChannelClosed)?;
 
         let confirm_rx = self.confirm_tx.clone();
-        tokio::spawn(async move {
+        self.task_group.spawn(async move {
             if let Ok(Ok(offset)) = rx.await {
                 let _ = confirm_rx.send(Ok(offset)).await;
             } else {
@@ -166,6 +192,10 @@ impl PublisherHandle {
 
         Ok(())
     }
+
+    pub async fn shutdown(&self) {
+        self.task_group.shutdown().await;
+    }
 }
 
 impl ConfirmStream {
@@ -174,15 +204,62 @@ impl ConfirmStream {
     }
 }
 
+#[derive(Debug)]
+struct TaskGroup {
+    handles: SegQueue<tokio::task::JoinHandle<()>>,
+    shutdown: AtomicBool,
+}
+
+impl TaskGroup {
+    fn new() -> Self {
+        Self {
+            handles: SegQueue::new(),
+            shutdown: AtomicBool::new(false),
+        }
+    }
+
+    fn spawn<F>(&self, fut: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        // Hard gate: no tasks after shutdown
+        if self.shutdown.load(Ordering::Acquire) {
+            return;
+        }
+
+        let handle = tokio::spawn(fut);
+
+        // Push only if still open
+        if self.shutdown.load(Ordering::Acquire) {
+            handle.abort(); // defensive, extremely rare
+        } else {
+            self.handles.push(handle);
+        }
+    }
+
+    async fn shutdown(&self) {
+        // Close the gate
+        self.shutdown.store(true, Ordering::Release);
+
+        // Drain deterministically
+        while let Some(h) = self.handles.pop() {
+            let _ = h.await;
+        }
+    }
+}
+
 // TODO: Injectable clock for testing
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Broker<C: Coordination + Send + Sync + 'static> {
     pub config: BrokerConfig,
     storage: Arc<dyn Storage>,
     coord: Arc<C>,
     groups: Arc<DashMap<(Topic, Group), Arc<GroupState>>>,
+    topics: Arc<DashMap<Topic, ()>>,
     batchers: Arc<DashMap<(Topic, Partition), mpsc::Sender<PublishRequest>>>,
     shutdown: CancellationToken,
+    task_group: Arc<TaskGroup>,
+    recovered_cursors: Arc<DashMap<(Topic, Partition, Group), GroupCursor>>,
 }
 
 impl<C: Coordination + Send + Sync + 'static> Broker<C> {
@@ -214,14 +291,42 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                 .await?;
         }
 
-        Ok(Broker {
+        // Reconstructing cursor
+        let groups = storage.list_groups().await?;
+        let recovered_cursors = Arc::new(DashMap::new());
+
+        for (topic, partition, group) in groups {
+            let lowest = storage
+                .lowest_unacked_offset(&topic, partition, &group)
+                .await?;
+            let cur = compute_start_offset(&storage, &topic, partition, &group, lowest).await?;
+
+            debug_assert!(
+                !storage
+                    .is_inflight_or_acked(&topic, partition, &group, cur)
+                    .await?,
+                "recovered cursor points at inflight/acked offset"
+            );
+
+            recovered_cursors.insert((topic, partition, group), GroupCursor { next_offset: cur });
+        }
+
+        let broker = Broker {
             config,
             storage,
             coord: Arc::new(coord),
             groups: Arc::new(DashMap::new()),
+            topics: Arc::new(DashMap::new()),
             batchers: Arc::new(DashMap::new()),
             shutdown,
-        })
+            task_group: Arc::new(TaskGroup::new()),
+            recovered_cursors,
+        };
+
+        broker.start_redelivery_worker();
+        broker.start_cleanup_worker();
+
+        Ok(broker)
     }
 
     pub async fn debug_upper(&self, topic: &str, partition: u32) -> u64 {
@@ -235,28 +340,45 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         self.storage.dump_meta_keys().await;
     }
 
+    pub async fn flush_storage(&self) -> Result<(), BrokerError> {
+        self.storage.flush().await?;
+        Ok(())
+    }
+
+    pub async fn forced_cleanup(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+    ) -> Result<(), BrokerError> {
+        self.storage.cleanup_topic(topic, partition).await?;
+        Ok(())
+    }
+
     pub async fn get_publisher(
         &self,
         topic: &str,
     ) -> Result<(PublisherHandle, ConfirmStream), BrokerError> {
+        let partition = 0;
         let (confirm_tx, confirm_rx) =
             mpsc::channel::<Result<Offset, BrokerError>>(self.config.publish_batch_size * 4);
 
-        let batcher = self.get_or_create_batcher(&topic.to_string(), 0).await;
+        let batcher = self.get_or_create_batcher(&topic.to_string(), partition).await;
 
         Ok((
             PublisherHandle {
                 publisher: batcher,
                 confirm_tx,
+                task_group: self.task_group.clone(),
             },
             ConfirmStream { rx: confirm_rx },
         ))
     }
 
     pub async fn publish(&self, topic: &str, payload: &[u8]) -> Result<Offset, BrokerError> {
+        let partition = 0;
         let (tx, rx) = oneshot::channel();
 
-        let batcher = self.get_or_create_batcher(&topic.to_string(), 0).await;
+        let batcher = self.get_or_create_batcher(&topic.to_string(), partition).await;
 
         batcher
             .send(PublishRequest {
@@ -273,7 +395,19 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         Ok(offset)
     }
 
-    pub async fn subscribe(&self, topic: &str, group: &str) -> Result<ConsumerHandle, BrokerError> {
+    pub async fn subscribe(
+        &self,
+        topic: &str,
+        group: &str,
+        prefetch_count: usize,
+    ) -> Result<ConsumerHandle, BrokerError> {
+        let prefetch_count = if prefetch_count == 0 {
+            1024
+        } else {
+            prefetch_count
+        };
+        self.topics.entry(topic.to_string()).or_insert(());
+
         self.storage
             .register_group(&topic.to_string(), 0, &group.to_string())
             .await?;
@@ -282,31 +416,39 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         let group_clone = group.to_string();
         let key = (topic_clone.clone(), group_clone.clone());
 
-        let (msg_tx, msg_rx) = mpsc::channel(100);
-        let (ack_tx, mut ack_rx) = mpsc::channel::<Offset>(100);
+        let (msg_tx, msg_rx) = mpsc::channel(prefetch_count);
+        let (ack_tx, mut ack_rx) = mpsc::channel::<AckRequest>(prefetch_count);
 
         // Register consumer in group state
         let entry = self.groups.entry(key.clone());
 
+        let partition = 0;
         let group_state_arc = match entry {
             dashmap::mapref::entry::Entry::Occupied(e) => e.get().clone(),
             dashmap::mapref::entry::Entry::Vacant(v) => {
-                let gs = Arc::new(GroupState::new());
+                let gs = Arc::new(GroupState {
+                    inflight_sem: Arc::new(Semaphore::new(prefetch_count)),
+                    ..GroupState::new()
+                });
 
-                // Initialize next_offset from durable state (important on restart)
-                // restore delivery cursor after restart
-                let lowest = self
-                    .storage
-                    .lowest_unacked_offset(&topic_clone, 0, &group_clone)
+                if let Some((_key, cursor)) = self.recovered_cursors.remove(&(
+                    topic_clone.clone(),
+                    partition,
+                    group_clone.clone(),
+                )) {
+                    gs.next_offset.store(cursor.next_offset, Ordering::SeqCst);
+                } else {
+                    // brand-new group => start from 0 (or retention floor)
+                    let cur = compute_start_offset(
+                        &self.storage,
+                        &topic_clone,
+                        partition,
+                        &group_clone,
+                        0,
+                    )
                     .await?;
-
-                let upper = self.storage.current_next_offset(&topic_clone, 0).await?;
-
-                let safe = lowest.min(upper);
-
-                // Simple consumer id: increment rr_counter
-                gs.next_offset.store(safe, Ordering::SeqCst);
-
+                    gs.next_offset.store(cur, Ordering::SeqCst);
+                }
                 v.insert(gs).clone()
             }
         };
@@ -328,12 +470,16 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
             let ttl = self.config.inflight_ttl_secs;
             let shutdown = self.shutdown.clone();
 
-            tokio::spawn(async move {
+            self.task_group.spawn(async move {
+                let mut inflight_batch = Vec::with_capacity(32);
                 // Dedicated delivery loop for this (topic, group)
                 loop {
                     if shutdown.is_cancelled() {
                         break;
                     }
+
+                    // ⚠️ DO NOT add storage scans here. This loop must stay O(1).
+
                     // Lookup group_state each iteration so we see updated consumers
                     let group_state_opt = groups.get(&key);
                     let group_state = match group_state_opt {
@@ -362,8 +508,11 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         continue;
                     }
 
+                    let mut did_redeliver = false;
+
                     // 1. Deliver all expired messages first
                     while let Some(expired_off) = group_state.redelivery.pop() {
+                        did_redeliver = true;
                         // fetch the message directly by offset
                         if let Ok(msg) = storage.fetch_by_offset(&topic_clone, 0, expired_off).await
                         {
@@ -380,6 +529,11 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                             // TODO: handle empty consumers case
                             let (cid, tx) = &consumers[rr % consumers.len()];
 
+                            let permit: OwnedSemaphorePermit =
+                                match group_state.inflight_sem.clone().acquire_owned().await {
+                                    Ok(p) => p,
+                                    Err(_) => break, // no capacity -> stop redelivery
+                                };
                             if tx
                                 .send(DeliverableMessage {
                                     message: msg.clone(),
@@ -389,26 +543,55 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                                 .await
                                 .is_err()
                             {
+                                drop(permit);
                                 group_state.consumers.remove(cid);
                             } else {
-                                let _ = storage
-                                    .mark_inflight(
-                                        &topic_clone,
-                                        0,
-                                        &group_clone,
-                                        expired_off,
-                                        new_deadline,
-                                    )
-                                    .await;
+                                inflight_batch.push((expired_off, new_deadline, permit));
                             }
 
                             // IMPORTANT: DO NOT TOUCH next_offset HERE
                         }
                     }
 
+                    if did_redeliver && !inflight_batch.is_empty() {
+                        let res = storage
+                            .mark_inflight_batch(
+                                &topic_clone,
+                                0,
+                                &group_clone,
+                                &inflight_batch
+                                    .iter()
+                                    .map(|(e, d, _)| (*e, *d))
+                                    .collect::<Vec<_>>(),
+                            )
+                            .await;
+
+                        if res.is_err() {
+                            drop(inflight_batch.drain(..));
+                            // durability failed -> retry later
+                            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            continue;
+                        } else {
+                            // inflight is now durable -> consume capacity
+                            for (_, _, permit) in inflight_batch.drain(..) {
+                                mem::forget(permit);
+                            }
+                        }
+
+                        inflight_batch.clear();
+                    }
+
+                    if did_redeliver {
+                        // We delivered retries this iteration.
+                        // Do NOT deliver fresh messages yet.
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+
                     let start_offset = group_state.next_offset.load(Ordering::SeqCst);
 
-                    let upper = match storage.current_next_offset(&topic_clone, 0).await {
+                    let partition = 0;
+                    let upper = match storage.current_next_offset(&topic_clone, partition).await {
                         Ok(v) => v,
                         Err(_) => {
                             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -416,14 +599,19 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         }
                     };
 
+                    let available = group_state.inflight_sem.available_permits();
+if available == 0 {
+    tokio::task::yield_now().await;
+    continue;
+}
                     let msgs = match storage
                         .fetch_available_clamped(
                             &topic_clone,
-                            0,
+                            partition,
                             &group_clone,
                             start_offset,
                             upper,
-                            32,
+                            available,
                         )
                         .await
                     {
@@ -434,15 +622,22 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         }
                     };
 
+                    // do NOT fast-forward cursor if redelivery is pending
+                    if !group_state.redelivery.is_empty() {
+                        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                        continue;
+                    }
+
                     if msgs.is_empty() {
                         // debug / liveness: detect stuck cursor
                         let mut cur = group_state.next_offset.load(Ordering::SeqCst);
 
-                        // Fast-forward over offsets that are already ACKed or currently inflight.
+                        // Fast-forward over offsets that are already ACKed.
                         // This prevents deadlock when cur points at an inflight gap.
                         while cur < upper {
+                            let partition = 0;
                             let done = storage
-                                .is_inflight_or_acked(&topic_clone, 0, &group_clone, cur)
+                                .is_acked(&topic_clone, partition, &group_clone, cur)
                                 .await
                                 .unwrap_or(false);
 
@@ -467,6 +662,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         continue;
                     }
 
+                    let mut max_delivered: Option<u64> = None;
                     for msg in msgs {
                         let off = msg.delivery_tag;
                         let prev = group_state.next_offset.load(Ordering::SeqCst);
@@ -499,11 +695,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         );
 
                         // Mark inflight with deadline = now + ttl
-                        let deadline = (std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs())
-                            + ttl;
+                        let deadline = unix_ts() + ttl;
 
                         // Choose consumer round-robin
                         let rr = group_state.rr_counter.fetch_add(1, Ordering::SeqCst) as usize;
@@ -519,29 +711,80 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                             "delivering message behind cursor"
                         );
 
+                        // we're in the "fresh fetch" path (msgs from fetch_available_clamped)
+                        debug_assert!(
+                            !did_redeliver,
+                            "fresh delivery in same iteration as redelivery"
+                        );
+
+                        let permit = match group_state.inflight_sem.clone().acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => break, // no capacity, stop delivering
+                        };
+
                         // Try deliver
                         if tx.send(msg).await.is_err() {
+                            drop(permit); // return capacity
                             // consumer dropped; remove and DO NOT advance cursor
                             group_state.consumers.remove(&consumers[idx].0);
                             break; // break out so we re-snapshot consumers next loop
                         }
 
                         // Only mark inflight AFTER we know message is in consumer channel
-                        let mark_res = storage
-                            .mark_inflight(&topic_clone, 0, &group_clone, off, deadline)
+                        inflight_batch.push((off, deadline, permit));
+                        max_delivered = Some(off);
+                    }
+
+                    let partition = 0;
+                    if !inflight_batch.is_empty() {
+                        invariant!(
+                            inflight_batch.windows(2).all(|w| w[0].0 < w[1].0),
+                            "inflight batch not strictly ordered"
+                        );
+
+                        let mut permits = Vec::new();
+                        let batch = &inflight_batch
+                            .drain(..)
+                            .map(|(e, d, p)| {
+                                permits.push(p);
+                                (e, d)
+                            })
+                            .collect::<Vec<_>>();
+
+                        let res = storage
+                            .mark_inflight_batch(&topic_clone, partition, &group_clone, batch)
                             .await;
-                        if let Err(err) = mark_res {
-                            // Could not mark inflight -> DO NOT advance cursor.
-                            // (Optional: may want to log this)
-                            eprintln!(
-                                "mark_inflight failed for topic={} group={} offset={} error={:?}",
-                                &topic_clone, &group_clone, off, err
+
+                        if res.is_err() {
+                            for p in permits {
+                                drop(p);
+                            }
+                            // Important: do NOT advance further this iteration
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        } else {
+                            for p in permits {
+                                mem::forget(p);
+                            }
+                            // Advance cursor ONLY AFTER durability
+                            if let Some(off) = max_delivered {
+                                group_state.next_offset.store(off + 1, Ordering::SeqCst);
+                            }
+
+                            debug_assert!(
+                                storage
+                                    .is_inflight_or_acked(
+                                        &topic_clone,
+                                        partition,
+                                        &group_clone,
+                                        group_state.next_offset.load(Ordering::SeqCst) - 1
+                                    )
+                                    .await
+                                    .unwrap_or(false),
+                                "cursor advanced past durable inflight state"
                             );
-                            break;
                         }
 
-                        // Now safe to advance
-                        group_state.next_offset.store(off + 1, Ordering::SeqCst);
+                        inflight_batch.clear();
                     }
                 }
             });
@@ -556,12 +799,13 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         let ack_batch_size = self.config.ack_batch_size;
         let ack_batch_timeout_ms = self.config.ack_batch_timeout_ms;
 
-        tokio::spawn(async move {
+        self.task_group.spawn(async move {
             let mut buf: Vec<Offset> = Vec::with_capacity(ack_batch_size);
             let mut tick =
                 tokio::time::interval(std::time::Duration::from_millis(ack_batch_timeout_ms));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
+            let sem = group_state_arc.inflight_sem.clone();
             loop {
                 tokio::select! {
                     biased;
@@ -569,9 +813,11 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                     _ = shutdown.cancelled() => {
                         // Drain channel, flush once.
                         while let Ok(off) = ack_rx.try_recv() {
-                            buf.push(off);
+                            buf.push(off.offset);
                             if buf.len() >= ack_batch_size {
+                                let n = buf.len();
                                 flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf).await;
+                                sem.add_permits(n);
                             }
                         }
                         flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf).await;
@@ -579,20 +825,27 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                     }
 
                     Some(off) = ack_rx.recv() => {
-                        buf.push(off);
+                        buf.push(off.offset);
                         if buf.len() >= ack_batch_size {
+                            let n = buf.len();
                             flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf).await;
+                            sem.add_permits(n);
                         }
                     }
 
                     _ = tick.tick() => {
+                        let n = buf.len();
                         flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf).await;
+                        sem.add_permits(n);
                     }
                 }
             }
         });
 
         Ok(ConsumerHandle {
+            group: group.to_string(),
+            topic: topic.to_string(),
+            partition,
             config: ConsumerConfig {
                 prefetch_count: 100,
             },
@@ -601,13 +854,40 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         })
     }
 
-    pub fn start_redelivery_worker(&self) {
+    fn start_cleanup_worker(&self) {
+        let topics = self.topics.clone();
+        // TODO: List partitions too
+        let storage = self.storage.clone();
+        let cleanup_interval_secs = self.config.cleanup_interval_secs;
+        let shutdown = self.shutdown.clone();
+        self.task_group.spawn(async move {
+            loop {
+                if shutdown.is_cancelled() {
+                    break;
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(cleanup_interval_secs)).await;
+
+                for topic in topics.iter() {
+                    // TODO: Handle partition better
+                    if let Err(err) = storage.cleanup_topic(&topic.key().to_string(), 0).await {
+                        eprintln!("Error in cleanup worker: {}", err);
+                    } else {
+                        // TODO: Use logging (set level to warn for benches)
+                        // println!("Successfully cleaned up: {}", &topic.key())
+                    }
+                }
+            }
+        });
+    }
+
+    fn start_redelivery_worker(&self) {
         let storage = Arc::clone(&self.storage);
         let coord = self.coord.clone();
 
         let groups = self.groups.clone();
         let shutdown = self.shutdown.clone();
-        tokio::spawn(async move {
+        self.task_group.spawn(async move {
             loop {
                 if shutdown.is_cancelled() {
                     break;
@@ -633,16 +913,6 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         continue;
                     }
 
-                    // REMOVE expired inflight entry
-                    let _ = storage
-                        .clear_inflight(
-                            &msg.message.topic,
-                            msg.message.partition,
-                            &msg.group,
-                            msg.message.offset,
-                        )
-                        .await;
-
                     // TODO adjust to handle more than one expired message per group
                     if let Some(gs) = groups.get(&(msg.message.topic.clone(), msg.group.clone())) {
                         let current = gs.next_offset.load(Ordering::SeqCst);
@@ -660,6 +930,28 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                             continue;
                         }
 
+                        let is_acked = storage
+                            .is_acked(
+                                &msg.message.topic,
+                                msg.message.partition,
+                                &msg.group,
+                                expired_offset,
+                            )
+                            .await
+                            .unwrap_or(true); // conservative
+
+                        if is_acked {
+                            continue; // nothing to do
+                        }
+                        // now we know it still matters
+                        let _ = storage
+                            .clear_inflight(
+                                &msg.message.topic,
+                                msg.message.partition,
+                                &msg.group,
+                                expired_offset,
+                            )
+                            .await;
                         gs.redelivery.push(expired_offset);
                     }
                 }
@@ -675,6 +967,8 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         partition: Partition,
     ) -> mpsc::Sender<PublishRequest> {
         let key = (topic.clone(), partition);
+
+        self.topics.entry(topic.clone()).or_insert(());
 
         match self.batchers.entry(key) {
             dashmap::Entry::Occupied(e) => e.get().clone(),
@@ -697,7 +991,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         let cfg = self.config.clone();
         let shutdown = self.shutdown.clone();
 
-        tokio::spawn(async move {
+        self.task_group.spawn(async move {
             let mut pending = Vec::<PublishRequest>::new();
             let mut last_flush = tokio::time::Instant::now();
 
@@ -760,6 +1054,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
 
         // Signal shutdown to background tasks
         self.shutdown.cancel();
+        self.task_group.shutdown().await;
 
         // Give tasks time to see the closed channels & exit
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
@@ -809,6 +1104,31 @@ async fn flush_ack_batch(
         return;
     }
     // best-effort; you can log errors
-    let _ = storage.ack_batch(topic, 0, group, buf).await;
+    let partition = 0;
+    let _ = storage.ack_batch(topic, partition, group, buf).await;
     buf.clear();
+}
+
+async fn compute_start_offset(
+    storage: &Arc<impl Storage + ?Sized>,
+    topic: &str,
+    partition: u32,
+    group: &str,
+    mut cur: u64,
+) -> Result<u64, StorageError> {
+    let upper = storage
+        .current_next_offset(&topic.to_string(), partition)
+        .await?;
+
+    while cur < upper {
+        if storage
+            .is_inflight_or_acked(&topic.to_string(), partition, &group.to_string(), cur)
+            .await?
+        {
+            cur += 1;
+        } else {
+            break;
+        }
+    }
+    Ok(cur)
 }

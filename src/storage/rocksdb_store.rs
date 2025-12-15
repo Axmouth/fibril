@@ -449,6 +449,33 @@ impl Storage for RocksStorage {
         Ok(())
     }
 
+    async fn mark_inflight_batch(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+        entries: &[(Offset, u64)],
+    ) -> Result<(), StorageError> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let inflight_cf = self
+            .db
+            .cf_handle("inflight")
+            .ok_or(StorageError::MissingColumnFamily("inflight"))?;
+
+        let mut batch = WriteBatch::default();
+
+        for (offset, deadline) in entries {
+            let key = Self::encode_group_key(topic, partition, group, *offset);
+            batch.put_cf(&inflight_cf, key, deadline.to_be_bytes());
+        }
+
+        self.db.write(batch)?;
+        Ok(())
+    }
+
     async fn ack(
         &self,
         topic: &Topic,
@@ -560,10 +587,17 @@ impl Storage for RocksStorage {
             let msg_key = RocksStorage::encode_msg_key(&topic, partition, offset);
 
             // Fetch the message
-            let msg_val = self
-                .db
-                .get_cf(&messages_cf, msg_key)?
-                .ok_or_else(|| StorageError::MessageNotFound { offset })?;
+            let Some(msg_val) = self.db.get_cf(&messages_cf, msg_key)? else {
+                // stale inflight entry pointing to a deleted/missing message
+                // don't poison the whole scan
+                eprintln!(
+                    "[WARN] stale inflight entry: topic={} partition={} group={} offset={} (message missing)",
+                    topic, partition, group, offset
+                );
+                let inflight_cf = self.db.cf_handle("inflight").unwrap();
+                self.db.delete_cf(&inflight_cf, &key)?;
+                continue;
+            };
 
             out.push(DeliverableMessage {
                 message: StoredMessage {
@@ -684,7 +718,7 @@ impl Storage for RocksStorage {
         let mut min_unacked = u64::MAX;
 
         for g in groups {
-            let unacked = self.lowest_unacked_offset(topic, partition, &g).await?;
+            let unacked = self.lowest_not_acked_offset(topic, partition, &g).await?;
             if unacked < min_unacked {
                 min_unacked = unacked;
             }
@@ -801,6 +835,146 @@ impl Storage for RocksStorage {
         }
 
         Ok(false)
+    }
+
+    async fn is_acked(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+        offset: Offset,
+    ) -> Result<bool, StorageError> {
+        let acked_cf = self
+            .db
+            .cf_handle("acked")
+            .ok_or(StorageError::MissingColumnFamily("acked"))?;
+
+        let key = Self::encode_group_key(topic, partition, group, offset);
+
+        if self.db.get_cf(&acked_cf, &key)?.is_some() {
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    async fn list_topics(&self) -> Result<Vec<Topic>, StorageError> {
+        let groups_cf = self
+            .db
+            .cf_handle("groups")
+            .ok_or(StorageError::MissingColumnFamily("groups"))?;
+
+        let iter = self.db.iterator_cf(&groups_cf, IteratorMode::Start);
+
+        let mut topics = std::collections::HashSet::new();
+
+        for pair in iter {
+            let (key, _) = pair?;
+
+            // key format: topic \0 partition(4) group
+            let mut i = 0;
+            while i < key.len() && key[i] != 0 {
+                i += 1;
+            }
+
+            if i == 0 || i >= key.len() {
+                continue;
+            }
+
+            let topic = String::from_utf8(key[..i].to_vec())
+                .map_err(|_| StorageError::KeyDecode("invalid topic".into()))?;
+
+            topics.insert(topic);
+        }
+
+        Ok(topics.into_iter().collect())
+    }
+
+    async fn list_groups(&self) -> Result<Vec<(Topic, Partition, Group)>, StorageError> {
+        let groups_cf = self
+            .db
+            .cf_handle("groups")
+            .ok_or(StorageError::MissingColumnFamily("groups"))?;
+
+        let iter = self.db.iterator_cf(&groups_cf, IteratorMode::Start);
+
+        let mut out = Vec::new();
+
+        for pair in iter {
+            let (key, _) = pair?;
+
+            // find topic terminator
+            let Some(zero) = key.iter().position(|&b| b == 0) else {
+                continue;
+            };
+
+            if zero + 1 + 4 > key.len() {
+                continue;
+            }
+
+            let topic = String::from_utf8(key[..zero].to_vec())
+                .map_err(|_| StorageError::KeyDecode("invalid topic".into()))?;
+
+            let partition = u32::from_be_bytes(key[zero + 1..zero + 5].try_into().unwrap());
+
+            let group = String::from_utf8(key[zero + 5..].to_vec())
+                .map_err(|_| StorageError::KeyDecode("invalid group".into()))?;
+
+            out.push((topic, partition, group));
+        }
+
+        Ok(out)
+    }
+
+    async fn lowest_not_acked_offset(
+        &self,
+        topic: &Topic,
+        partition: Partition,
+        group: &Group,
+    ) -> Result<Offset, StorageError> {
+        let messages_cf = self.db.cf_handle("messages").unwrap();
+        let acked_cf = self.db.cf_handle("acked").unwrap();
+
+        let mut prefix = Vec::new();
+        prefix.extend_from_slice(topic.as_bytes());
+        prefix.push(0);
+        prefix.extend_from_slice(&partition.to_be_bytes());
+
+        let iter = self.db.iterator_cf(
+            &messages_cf,
+            rocksdb::IteratorMode::From(&prefix, rocksdb::Direction::Forward),
+        );
+
+        for pair in iter {
+            let (key, _) = pair?;
+            if !key.starts_with(&prefix) {
+                break;
+            }
+
+            let offset = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+            let ack_key = Self::encode_group_key(topic, partition, group, offset);
+
+            if self.db.get_cf(&acked_cf, &ack_key)?.is_some() {
+                continue;
+            }
+
+            // first offset that is NOT acked (could be inflight or never delivered)
+            return Ok(offset);
+        }
+
+        // everything acked => return next_offset
+        let meta_cf = self.db.cf_handle("meta").unwrap();
+        let next_key = Self::next_offset_key(topic, partition);
+        let next = self.db.get_cf(&meta_cf, next_key.as_bytes())?;
+        Ok(match next {
+            Some(v) => u64::from_be_bytes(v.try_into().unwrap()),
+            None => 0,
+        })
+    }
+
+    async fn flush(&self) -> Result<(), StorageError> {
+        self.db.flush()?;
+        Ok(())
     }
 
     // TODO: Better timestamp support
