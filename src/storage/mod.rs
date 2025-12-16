@@ -2,6 +2,8 @@ pub mod rocksdb_store;
 
 use async_trait::async_trait;
 
+use crate::util::UnixMillis;
+
 pub type Topic = String;
 pub type Partition = u32;
 pub type Offset = u64;
@@ -45,8 +47,8 @@ pub enum StorageError {
     Anyhow(#[from] anyhow::Error),
 }
 
-pub fn make_rocksdb_store(path: &str) -> Result<rocksdb_store::RocksStorage, StorageError> {
-    rocksdb_store::RocksStorage::open(path)
+pub fn make_rocksdb_store(path: &str, sync_write: bool) -> Result<rocksdb_store::RocksStorage, StorageError> {
+    rocksdb_store::RocksStorage::open(path, sync_write)
 }
 
 /// Defines the persistent storage API for a durable queue system.
@@ -131,7 +133,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         partition: Partition,
         group: &Group,
         offset: Offset,
-        deadline_ts: u64,
+        deadline_ts: UnixMillis,
     ) -> Result<(), StorageError>;
 
     /// Marks a batch of messages as "in-flight"
@@ -140,7 +142,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         topic: &Topic,
         partition: Partition,
         group: &Group,
-        entries: &[(Offset, u64)], // offset -> deadline
+        entries: &[(Offset, UnixMillis)], // offset -> deadline
     ) -> Result<(), StorageError>;
 
     /// Remove message from inflight and mark as acknowledged.
@@ -162,7 +164,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     ) -> Result<(), StorageError>;
 
     /// Return messages whose deadline expired → need redelivery.
-    async fn list_expired(&self, now_ts: u64) -> Result<Vec<DeliverableMessage>, StorageError>;
+    async fn list_expired(&self, now_ts: UnixMillis) -> Result<Vec<DeliverableMessage>, StorageError>;
 
     /// Get the lowest unacknowledged offset for a consumer group.
     async fn lowest_unacked_offset(
@@ -220,6 +222,13 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     ) -> Result<Offset, StorageError>;
 
     async fn flush(&self) -> Result<(), StorageError>;
+
+    /// Read the hint (global earliest inflight deadline).
+    async fn next_expiry_hint(&self) -> Result<Option<u64>, StorageError>;
+
+    /// Full recompute: scan inflight CF for the minimum deadline and store it.
+    /// Call this from the redelivery worker after scanning/processing.
+    async fn recompute_and_store_next_expiry_hint(&self) -> Result<Option<u64>, StorageError>;
 
     async fn dump_meta_keys(&self);
 

@@ -2,19 +2,17 @@ pub mod coordination;
 
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
-use std::{
-    mem,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     broker::coordination::Coordination,
     storage::{DeliverableMessage, Group, Offset, Partition, Storage, StorageError, Topic},
+    util::unix_millis,
 };
 
 macro_rules! invariant {
@@ -23,13 +21,6 @@ macro_rules! invariant {
             panic!($($arg)*);
         }
     };
-}
-
-fn unix_ts() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -57,6 +48,7 @@ pub enum BrokerError {
 }
 
 type ConsumerId = u64;
+
 #[derive(Debug)]
 struct GroupCursor {
     pub next_offset: u64,
@@ -72,6 +64,8 @@ struct GroupState {
     pending_delivery: SegQueue<DeliverableMessage>,
     pending_inflight: SegQueue<(Offset, u64)>, // offset + deadline
     inflight_sem: Arc<Semaphore>,
+    inflight_permits: DashMap<Offset, OwnedSemaphorePermit>,
+    notify: Arc<Notify>,
 }
 
 impl GroupState {
@@ -85,6 +79,8 @@ impl GroupState {
             pending_delivery: SegQueue::new(),
             pending_inflight: SegQueue::new(),
             inflight_sem: Arc::new(Semaphore::new(0)),
+            inflight_permits: DashMap::new(),
+            notify: Arc::new(Notify::new()),
         }
     }
 }
@@ -93,7 +89,7 @@ pub struct AckRequest {
     // pub group: Group,
     // pub topic: Topic,
     // pub partition: Partition,
-    pub offset: Offset,
+    pub delivery_tag: Offset,
 }
 
 pub struct PublishRequest {
@@ -130,6 +126,18 @@ impl Default for BrokerConfig {
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
     pub prefetch_count: usize,
+}
+
+impl Default for ConsumerConfig {
+    fn default() -> Self {
+        Self { prefetch_count: 32 }
+    }
+}
+
+impl ConsumerConfig {
+    pub fn with_prefetch_count(self, prefetch_count: usize) -> Self {
+        Self { prefetch_count }
+    }
 }
 
 // TODO: Use request IDs?
@@ -275,8 +283,8 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
             storage.clear_all_inflight().await?;
         }
 
-        let now = unix_ts();
-        let expired = storage.list_expired(now).await?;
+        let now_unix_ts = unix_millis();
+        let expired = storage.list_expired(now_unix_ts).await?;
 
         // Clear expired inflight entries on startup, to avoid stuck messages
         // Rest can be redelivered after TTL by redelivery worker
@@ -362,7 +370,9 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         let (confirm_tx, confirm_rx) =
             mpsc::channel::<Result<Offset, BrokerError>>(self.config.publish_batch_size * 4);
 
-        let batcher = self.get_or_create_batcher(&topic.to_string(), partition).await;
+        let batcher = self
+            .get_or_create_batcher(&topic.to_string(), partition)
+            .await;
 
         Ok((
             PublisherHandle {
@@ -378,7 +388,9 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         let partition = 0;
         let (tx, rx) = oneshot::channel();
 
-        let batcher = self.get_or_create_batcher(&topic.to_string(), partition).await;
+        let batcher = self
+            .get_or_create_batcher(&topic.to_string(), partition)
+            .await;
 
         batcher
             .send(PublishRequest {
@@ -399,12 +411,12 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         &self,
         topic: &str,
         group: &str,
-        prefetch_count: usize,
+        cfg: ConsumerConfig,
     ) -> Result<ConsumerHandle, BrokerError> {
-        let prefetch_count = if prefetch_count == 0 {
+        let prefetch_count = if cfg.prefetch_count == 0 {
             1024
         } else {
-            prefetch_count
+            cfg.prefetch_count
         };
         self.topics.entry(topic.to_string()).or_insert(());
 
@@ -418,6 +430,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
 
         let (msg_tx, msg_rx) = mpsc::channel(prefetch_count);
         let (ack_tx, mut ack_rx) = mpsc::channel::<AckRequest>(prefetch_count);
+        let ack_tx_clone = ack_tx.clone();
 
         // Register consumer in group state
         let entry = self.groups.entry(key.clone());
@@ -490,8 +503,11 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         }
                     };
 
-                    if !coord.is_leader(&topic_clone, 0).await {
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    let partition = 0;
+
+                    // TODO: replace with leadership watch / notification
+                    if !coord.is_leader(topic_clone.clone(), partition).await {
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         continue;
                     }
 
@@ -508,20 +524,15 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         continue;
                     }
 
-                    let mut did_redeliver = false;
+                    let mut delivered_any_redelivery = false;
 
                     // 1. Deliver all expired messages first
                     while let Some(expired_off) = group_state.redelivery.pop() {
-                        did_redeliver = true;
                         // fetch the message directly by offset
                         if let Ok(msg) = storage.fetch_by_offset(&topic_clone, 0, expired_off).await
                         {
                             // reinsert inflight entry with new deadline
-                            let new_deadline = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_secs()
-                                + ttl;
+                            let new_deadline = unix_millis() + ttl * 1000;
 
                             // deliver to consumer via round-robin
                             let rr = group_state.rr_counter.fetch_add(1, Ordering::SeqCst) as usize;
@@ -547,13 +558,14 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                                 group_state.consumers.remove(cid);
                             } else {
                                 inflight_batch.push((expired_off, new_deadline, permit));
+                                delivered_any_redelivery = true;
                             }
 
                             // IMPORTANT: DO NOT TOUCH next_offset HERE
                         }
                     }
 
-                    if did_redeliver && !inflight_batch.is_empty() {
+                    if delivered_any_redelivery && !inflight_batch.is_empty() {
                         let res = storage
                             .mark_inflight_batch(
                                 &topic_clone,
@@ -573,15 +585,30 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                             continue;
                         } else {
                             // inflight is now durable -> consume capacity
-                            for (_, _, permit) in inflight_batch.drain(..) {
-                                mem::forget(permit);
+                            for (offset, _, permit) in inflight_batch.drain(..) {
+                                group_state.inflight_permits.insert(offset, permit);
                             }
                         }
 
                         inflight_batch.clear();
                     }
 
-                    if did_redeliver {
+                    // IMPORTANT INVARIANT:
+                    //
+                    // Redeliveries always have priority over fresh messages.
+                    //
+                    // If we delivered *any* expired message in this iteration, we must NOT
+                    // deliver fresh messages yet. This prevents newer offsets from overtaking
+                    // older ones that were previously inflight and expired.
+                    //
+                    // Even if fresh messages are already buffered from fetch_available_clamped(),
+                    // we intentionally drop them and retry in the next loop iteration, after
+                    // all pending redeliveries are drained.
+                    //
+                    // Cursor advancement is safe because:
+                    // - next_offset is only advanced after durable inflight writes
+                    // - redeliveries never advance the cursor
+                    if delivered_any_redelivery {
                         // We delivered retries this iteration.
                         // Do NOT deliver fresh messages yet.
                         tokio::task::yield_now().await;
@@ -593,17 +620,27 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                     let partition = 0;
                     let upper = match storage.current_next_offset(&topic_clone, partition).await {
                         Ok(v) => v,
-                        Err(_) => {
+                        Err(err) => {
+                            eprintln!("Error: {}", err);
                             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                             continue;
                         }
                     };
 
+                    while group_state.inflight_sem.available_permits() == 0 {
+                        tokio::select! {
+                            _ = group_state.notify.notified() => {}
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                        }
+                    }
                     let available = group_state.inflight_sem.available_permits();
-if available == 0 {
-    tokio::task::yield_now().await;
-    continue;
-}
+
+                    // If anything became eligible for redelivery, do not fetch fresh.
+                    if !group_state.redelivery.is_empty() {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+
                     let msgs = match storage
                         .fetch_available_clamped(
                             &topic_clone,
@@ -616,7 +653,8 @@ if available == 0 {
                         .await
                     {
                         Ok(v) => v,
-                        Err(_) => {
+                        Err(err) => {
+                            eprintln!("Error: {}", err);
                             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                             continue;
                         }
@@ -624,41 +662,18 @@ if available == 0 {
 
                     // do NOT fast-forward cursor if redelivery is pending
                     if !group_state.redelivery.is_empty() {
-                        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                        tokio::task::yield_now().await;
                         continue;
                     }
 
                     if msgs.is_empty() {
-                        // debug / liveness: detect stuck cursor
-                        let mut cur = group_state.next_offset.load(Ordering::SeqCst);
-
-                        // Fast-forward over offsets that are already ACKed.
-                        // This prevents deadlock when cur points at an inflight gap.
-                        while cur < upper {
-                            let partition = 0;
-                            let done = storage
-                                .is_acked(&topic_clone, partition, &group_clone, cur)
-                                .await
-                                .unwrap_or(false);
-
-                            if done {
-                                cur += 1;
-                                continue;
-                            }
-
-                            // cur is neither acked nor inflight, so it's a real deliverable candidate
-                            // but fetch_available returned empty => likely no message exists at cur
-                            // (or there's a bug). Stop here.
-                            break;
+                        // No messages available *right now*.
+                        // Wait until something changes (publish, ack, or redelivery).
+                        tokio::select! {
+                            _ = group_state.notify.notified() => {}
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
                         }
 
-                        // Only store if we actually moved
-                        let prev = group_state.next_offset.load(Ordering::SeqCst);
-                        if cur > prev {
-                            group_state.next_offset.store(cur, Ordering::SeqCst);
-                        }
-
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                         continue;
                     }
 
@@ -695,7 +710,7 @@ if available == 0 {
                         );
 
                         // Mark inflight with deadline = now + ttl
-                        let deadline = unix_ts() + ttl;
+                        let deadline = unix_millis() + ttl * 1000;
 
                         // Choose consumer round-robin
                         let rr = group_state.rr_counter.fetch_add(1, Ordering::SeqCst) as usize;
@@ -713,9 +728,14 @@ if available == 0 {
 
                         // we're in the "fresh fetch" path (msgs from fetch_available_clamped)
                         debug_assert!(
-                            !did_redeliver,
+                            !delivered_any_redelivery,
                             "fresh delivery in same iteration as redelivery"
                         );
+
+                        // Prevent sending any fresh if redelivery appears mid-iteration
+                        if !group_state.redelivery.is_empty() {
+                            break; // drop msgs, go to next loop iteration
+                        }
 
                         let permit = match group_state.inflight_sem.clone().acquire_owned().await {
                             Ok(p) => p,
@@ -742,29 +762,26 @@ if available == 0 {
                             "inflight batch not strictly ordered"
                         );
 
-                        let mut permits = Vec::new();
                         let batch = &inflight_batch
                             .drain(..)
                             .map(|(e, d, p)| {
-                                permits.push(p);
+                                group_state.inflight_permits.insert(e, p);
                                 (e, d)
                             })
                             .collect::<Vec<_>>();
+                        let batch_clone = batch.clone();
 
                         let res = storage
                             .mark_inflight_batch(&topic_clone, partition, &group_clone, batch)
                             .await;
 
                         if res.is_err() {
-                            for p in permits {
-                                drop(p);
+                            for (offset, _) in batch_clone {
+                                group_state.inflight_permits.remove(&offset);
                             }
                             // Important: do NOT advance further this iteration
                             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                         } else {
-                            for p in permits {
-                                mem::forget(p);
-                            }
                             // Advance cursor ONLY AFTER durability
                             if let Some(off) = max_delivered {
                                 group_state.next_offset.store(off + 1, Ordering::SeqCst);
@@ -799,6 +816,8 @@ if available == 0 {
         let ack_batch_size = self.config.ack_batch_size;
         let ack_batch_timeout_ms = self.config.ack_batch_timeout_ms;
 
+        let group_state = group_state_arc.clone();
+
         self.task_group.spawn(async move {
             let mut buf: Vec<Offset> = Vec::with_capacity(ack_batch_size);
             let mut tick =
@@ -813,11 +832,18 @@ if available == 0 {
                     _ = shutdown.cancelled() => {
                         // Drain channel, flush once.
                         while let Ok(off) = ack_rx.try_recv() {
-                            buf.push(off.offset);
+                            buf.push(off.delivery_tag);
                             if buf.len() >= ack_batch_size {
                                 let n = buf.len();
+                                let offsets = buf.clone();
                                 flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf).await;
+                                for offset in offsets {
+                                    if let Some((_, permit)) = group_state_arc.inflight_permits.remove(&offset) {
+                                        drop(permit);
+                                    }
+                                }
                                 sem.add_permits(n);
+                                group_state_arc.notify.notify_one();
                             }
                         }
                         flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf).await;
@@ -825,32 +851,46 @@ if available == 0 {
                     }
 
                     Some(off) = ack_rx.recv() => {
-                        buf.push(off.offset);
+                        buf.push(off.delivery_tag);
                         if buf.len() >= ack_batch_size {
                             let n = buf.len();
+                            let offets = buf.clone();
                             flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf).await;
+                            for offset in offets {
+                                if let Some((_, permit)) = group_state_arc.inflight_permits.remove(&offset) {
+                                    drop(permit);
+                                }
+                            }
                             sem.add_permits(n);
+                            group_state_arc.notify.notify_one();
                         }
                     }
 
                     _ = tick.tick() => {
                         let n = buf.len();
+                        let offets = buf.clone();
                         flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf).await;
+                        for offset in offets {
+                            if let Some((_, permit)) = group_state_arc.inflight_permits.remove(&offset) {
+                                drop(permit);
+                            }
+                        }
                         sem.add_permits(n);
+                        group_state_arc.notify.notify_one();
                     }
                 }
             }
         });
 
+        group_state.notify.notify_one();
+
         Ok(ConsumerHandle {
             group: group.to_string(),
             topic: topic.to_string(),
             partition,
-            config: ConsumerConfig {
-                prefetch_count: 100,
-            },
+            config: cfg,
             messages: msg_rx,
-            acker: ack_tx,
+            acker: ack_tx_clone,
         })
     }
 
@@ -892,14 +932,34 @@ if available == 0 {
                 if shutdown.is_cancelled() {
                     break;
                 }
-                let now_ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
 
-                let expired = match storage.list_expired(now_ts).await {
+                //read hint; if none, just sleep a bit or await notify
+                let hint = match storage.next_expiry_hint().await {
                     Ok(v) => v,
-                    Err(_) => {
+                    Err(err) => {
+                        eprintln!("Error: {}", err);
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+
+                if let Some(ts) = hint {
+                    let now = unix_millis();
+                    if ts > now {
+                        tokio::time::sleep(std::time::Duration::from_millis(ts - now)).await;
+                        continue;
+                    }
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    continue;
+                }
+
+                // (we believe something may be expired now -> scan expired + process
+                let now = unix_millis();
+                let expired = match storage.list_expired(now).await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        eprintln!("Error: {}", err);
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         continue;
                     }
@@ -907,7 +967,7 @@ if available == 0 {
 
                 for msg in expired {
                     if !coord
-                        .is_leader(&msg.message.topic, msg.message.partition)
+                        .is_leader(msg.message.topic.clone(), msg.message.partition)
                         .await
                     {
                         continue;
@@ -952,11 +1012,25 @@ if available == 0 {
                                 expired_offset,
                             )
                             .await;
+                        if let Some((_, permit)) = gs.inflight_permits.remove(&expired_offset) {
+                            drop(permit);
+                        }
                         gs.redelivery.push(expired_offset);
+                        gs.notify.notify_one();
                     }
                 }
 
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                // recompute hint after processing so next sleep is accurate
+                match storage.recompute_and_store_next_expiry_hint().await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        eprintln!("Error: {}", err);
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+
+                tokio::task::yield_now().await;
             }
         });
     }
@@ -991,6 +1065,7 @@ if available == 0 {
         let cfg = self.config.clone();
         let shutdown = self.shutdown.clone();
 
+        let groups = self.groups.clone();
         self.task_group.spawn(async move {
             let mut pending = Vec::<PublishRequest>::new();
             let mut last_flush = tokio::time::Instant::now();
@@ -1006,7 +1081,14 @@ if available == 0 {
 
                         // If we reached batch_size -> flush immediately
                         if pending.len() >= cfg.publish_batch_size {
-                            flush_publish_batch(&storage, &topic, partition, &mut pending).await;
+                            flush_publish_batch(
+                                &storage,
+                                groups.clone(),
+                                &topic,
+                                partition,
+                                &mut pending,
+                            )
+                            .await;
                             last_flush = tokio::time::Instant::now();
                         }
 
@@ -1017,7 +1099,14 @@ if available == 0 {
                         // Queue is empty
                         if !pending.is_empty() {
                             // SMART FLUSH: Don't wait for timeout
-                            flush_publish_batch(&storage, &topic, partition, &mut pending).await;
+                            flush_publish_batch(
+                                &storage,
+                                groups.clone(),
+                                &topic,
+                                partition,
+                                &mut pending,
+                            )
+                            .await;
                             last_flush = tokio::time::Instant::now();
                         }
                     }
@@ -1025,7 +1114,14 @@ if available == 0 {
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                         // Should almost never happen
                         if !pending.is_empty() {
-                            flush_publish_batch(&storage, &topic, partition, &mut pending).await;
+                            flush_publish_batch(
+                                &storage,
+                                groups.clone(),
+                                &topic,
+                                partition,
+                                &mut pending,
+                            )
+                            .await;
                         }
                         return;
                     }
@@ -1034,7 +1130,14 @@ if available == 0 {
                 // Timeout flush
                 if last_flush.elapsed().as_millis() > cfg.publish_batch_timeout_ms as u128 {
                     if !pending.is_empty() {
-                        flush_publish_batch(&storage, &topic, partition, &mut pending).await;
+                        flush_publish_batch(
+                            &storage,
+                            groups.clone(),
+                            &topic,
+                            partition,
+                            &mut pending,
+                        )
+                        .await;
                     }
                     last_flush = tokio::time::Instant::now();
                 }
@@ -1063,6 +1166,7 @@ if available == 0 {
 
 async fn flush_publish_batch(
     storage: &Arc<dyn Storage>,
+    groups: Arc<DashMap<(String, String), Arc<GroupState>>>,
     topic: &Topic,
     partition: u32,
     pending: &mut Vec<PublishRequest>,
@@ -1079,6 +1183,13 @@ async fn flush_publish_batch(
         Ok(offsets) => {
             for (req, off) in pending.drain(..).zip(offsets) {
                 let _ = req.reply.send(Ok(off));
+            }
+
+            for entry in groups.iter() {
+                let ((t, _g), gs) = entry.pair();
+                if t == topic {
+                    gs.notify.notify_one();
+                }
             }
         }
         Err(err) => {
@@ -1131,4 +1242,12 @@ async fn compute_start_offset(
         }
     }
     Ok(cur)
+}
+
+pub fn maybe_auto_ack(auto_ack: bool, ack_tx: &mpsc::Sender<AckRequest>, offset: Offset) {
+    if auto_ack {
+        let _ = ack_tx.try_send(AckRequest {
+            delivery_tag: offset,
+        });
+    }
 }

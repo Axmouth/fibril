@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::Framed;
 use tokio::net::TcpStream;
-use futures::{SinkExt, StreamExt};
 
 use crate::protocol::v1::{Op, PROTOCOL_V1, frame::{Frame, ProtoCodec}};
 

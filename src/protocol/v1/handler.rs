@@ -6,7 +6,7 @@ use tokio::{net::TcpListener, sync::mpsc};
 use tokio_util::codec::Framed;
 
 use crate::{
-    broker::{AckRequest, Broker, ConsumerHandle, coordination::Coordination},
+    broker::{AckRequest, Broker, ConsumerConfig, ConsumerHandle, coordination::Coordination},
     protocol::v1::{
         frame::{Frame, ProtoCodec},
         helper::{decode, encode},
@@ -29,6 +29,7 @@ struct SubscriptionHandle {
 }
 
 struct SubState {
+    auto_ack: bool,
     acker: tokio::sync::mpsc::Sender<AckRequest>,
 }
 
@@ -154,7 +155,13 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                 let sub: Subscribe = decode(&frame);
 
                 let consumer = broker
-                    .subscribe(&sub.topic, &sub.group, sub.prefetch as usize)
+                    .subscribe(
+                        &sub.topic,
+                        &sub.group,
+                        ConsumerConfig {
+                            prefetch_count: sub.prefetch as usize,
+                        },
+                    )
                     .await
                     .context("subscribe failed")?;
 
@@ -162,14 +169,16 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                     messages, acker, ..
                 } = consumer;
 
-                let key: SubKey = (sub.topic.clone(), sub.group.clone(), consumer.partition);
-
-                // Spawn delivery forwarder
-                let mut msg_rx = messages;
+                let auto_ack = sub.auto_ack;
                 let tx_clone = tx.clone();
 
+                let key: SubKey = (sub.topic.clone(), sub.group.clone(), consumer.partition);
+
+                let acker_clone = acker.clone();
                 tokio::spawn(async move {
-                    while let Some(msg) = msg_rx.recv().await {
+                    let mut rx = messages;
+
+                    while let Some(msg) = rx.recv().await {
                         let deliver = Deliver {
                             topic: msg.message.topic.clone(),
                             group: msg.group.clone(),
@@ -179,21 +188,30 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                             payload: msg.message.payload.clone(),
                         };
 
+                        // 1. Try to write to socket
                         if tx_clone
-                            .send(encode(
-                                Op::Deliver,
-                                0, // TODO: ?
-                                &deliver,
-                            ))
+                            .send(encode(Op::Deliver, 0, &deliver))
                             .await
                             .is_err()
                         {
+                            // Socket dead → do NOT auto-ack
                             break;
+                        }
+
+                        // 2. Auto-ack ONLY after successful send
+                        if auto_ack {
+                            let _ = acker.send(AckRequest { delivery_tag: msg.delivery_tag }).await;
                         }
                     }
                 });
 
-                state.subs.insert(key, SubState { acker });
+                state.subs.insert(
+                    key,
+                    SubState {
+                        auto_ack: sub.auto_ack,
+                        acker: acker_clone,
+                    },
+                );
 
                 tx.send(encode(
                     Op::SubscribeOk,
@@ -209,18 +227,18 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
 
             // -------- ACK ----------------------------------------------------
             x if x == Op::Ack as u16 => {
+                // TODO: Decline ack when auto ack? Log?
                 let ack: Ack = decode(&frame);
 
                 let key: SubKey = (ack.topic.clone(), ack.group.clone(), ack.partition);
 
-                if let Some(sub) = state.subs.get(&key) {
-                    for off in ack.offsets {
-                        let req = AckRequest {
-                            offset: off,
-                        };
-                        let _ = sub.acker.send(req).await;
+                if let Some(sub) = state.subs.get(&key)
+                    && !sub.auto_ack {
+                        for off in ack.offsets {
+                            let req = AckRequest { delivery_tag: off };
+                            let _ = sub.acker.send(req).await;
+                        }
                     }
-                }
                 // Unknown subscription: ignore (idempotent)
             }
 

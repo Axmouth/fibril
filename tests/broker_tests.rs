@@ -1,28 +1,24 @@
 use std::sync::Arc;
 
-use thetube::broker::coordination::*;
-use thetube::broker::*;
-use thetube::storage::*;
-
-fn unix_ts() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
+use anyhow::Context;
+use fibril::broker::coordination::*;
+use fibril::broker::*;
+use fibril::storage::*;
+use fibril::util::unix_millis;
+use tokio::task::JoinHandle;
 
 // TODO: make shared
-fn make_test_store() -> impl Storage {
+fn make_test_store() -> anyhow::Result<impl Storage> {
     // make testdata dir
-    std::fs::create_dir_all("test_data").unwrap();
+    std::fs::create_dir_all("test_data")?;
     // make random temp filename to avoid conflicts
     let filename = format!("test_data/{}", fastrand::u64(..));
-    make_rocksdb_store(&filename).unwrap()
+    Ok(make_rocksdb_store(&filename, false)?)
 }
 
-async fn make_test_broker() -> Broker<NoopCoordination> {
-    let store = make_test_store();
-    Broker::try_new(
+async fn make_test_broker() -> anyhow::Result<Broker<NoopCoordination>> {
+    let store = make_test_store()?;
+    Ok(Broker::try_new(
         store,
         NoopCoordination,
         BrokerConfig {
@@ -35,96 +31,115 @@ async fn make_test_broker() -> Broker<NoopCoordination> {
             reset_inflight: false,
         },
     )
-    .await
-    .unwrap()
+    .await?)
 }
 
-async fn make_test_broker_with_cfg(config: BrokerConfig) -> Broker<NoopCoordination> {
-    let store = make_test_store();
-    Broker::try_new(store, NoopCoordination, config)
-        .await
-        .unwrap()
+async fn make_test_broker_with_cfg(
+    config: BrokerConfig,
+) -> anyhow::Result<Broker<NoopCoordination>> {
+    let store = make_test_store()?;
+    Ok(Broker::try_new(store, NoopCoordination, config).await?)
+}
+
+fn make_default_cons_cfg() -> ConsumerConfig {
+    ConsumerConfig::default().with_prefetch_count(100)
 }
 
 #[tokio::test]
-async fn broker_basic_delivery() {
-    let broker = make_test_broker().await;
+async fn broker_basic_delivery() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     // Publish 3 messages
-    broker.publish("t1", b"hello").await.unwrap();
-    broker.publish("t1", b"world").await.unwrap();
-    broker.publish("t1", b"!").await.unwrap();
+    broker.publish("t1", b"hello").await?;
+    broker.publish("t1", b"world").await?;
+    broker.publish("t1", b"!").await?;
 
     // Subscribe
-    let mut consumer = broker.subscribe("t1", "g1", 1).await.unwrap();
+    let mut consumer = broker
+        .subscribe("t1", "g1", make_default_cons_cfg())
+        .await?;
 
     let mut received = vec![];
     for _ in 0..3 {
-        let msg = consumer.messages.recv().await.unwrap();
-        received.push(String::from_utf8(msg.message.payload.clone()).unwrap());
+        let msg = consumer
+            .messages
+            .recv()
+            .await
+            .context("receiving message")?;
+        received.push(String::from_utf8(msg.message.payload.clone())?);
         consumer
             .acker
             .send(AckRequest {
-                offset: msg.delivery_tag,
+                delivery_tag: msg.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
 
     assert_eq!(received, ["hello", "world", "!"]);
+    Ok(())
 }
 
 #[tokio::test]
-async fn broker_ack_behavior() {
-    let broker = make_test_broker().await;
+async fn broker_ack_behavior() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
-    broker.publish("t", b"a").await.unwrap();
-    broker.publish("t", b"b").await.unwrap();
+    broker.publish("t", b"a").await?;
+    broker.publish("t", b"b").await?;
 
-    let mut consumer = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut consumer = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
     // Receive & ack first message
-    let m1 = consumer.messages.recv().await.unwrap();
+    let m1 = consumer
+        .messages
+        .recv()
+        .await
+        .context("receiving message")?;
     assert_eq!(m1.message.payload, b"a");
     consumer
         .acker
         .send(AckRequest {
-            offset: m1.delivery_tag,
+            delivery_tag: m1.delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
 
     // Receive & ack second
-    let m2 = consumer.messages.recv().await.unwrap();
+    let m2 = consumer
+        .messages
+        .recv()
+        .await
+        .context("receiving message")?;
     assert_eq!(m2.message.payload, b"b");
     consumer
         .acker
         .send(AckRequest {
-            offset: m2.delivery_tag,
+            delivery_tag: m2.delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
 
     // Should not receive anything else now
     tokio::time::sleep(std::time::Duration::from_millis(3)).await;
     assert!(consumer.messages.try_recv().is_err());
+    Ok(())
 }
 
 #[tokio::test]
-async fn broker_work_queue_distribution() {
-    let broker = make_test_broker().await;
+async fn broker_work_queue_distribution() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     // Publish some work
     for i in 0..6 {
         broker
             .publish("jobs", format!("job-{i}").as_bytes())
-            .await
-            .unwrap();
+            .await?;
     }
 
     // Two consumers, same group (competing consumers)
-    let mut c1 = broker.subscribe("jobs", "workers", 2).await.unwrap();
-    let mut c2 = broker.subscribe("jobs", "workers", 2).await.unwrap();
+    let mut c1 = broker
+        .subscribe("jobs", "workers", make_default_cons_cfg())
+        .await?;
+    let mut c2 = broker
+        .subscribe("jobs", "workers", make_default_cons_cfg())
+        .await?;
 
     let mut got1 = 0;
     let mut got2 = 0;
@@ -134,12 +149,13 @@ async fn broker_work_queue_distribution() {
         tokio::select! {
             Some(msg) = c1.messages.recv() => {
                 got1 += 1;
-                c1.acker.send(AckRequest { offset: msg.delivery_tag }).await.unwrap();
+                c1.acker.send(AckRequest { delivery_tag: msg.delivery_tag }).await?;
             }
             Some(msg) = c2.messages.recv() => {
                 got2 += 1;
-                c2.acker.send(AckRequest { offset: msg.delivery_tag }).await.unwrap();
+                c2.acker.send(AckRequest { delivery_tag: msg.delivery_tag }).await?;
             }
+            else => anyhow::bail!("all consumers closed unexpectedly"),
         }
     }
 
@@ -147,85 +163,94 @@ async fn broker_work_queue_distribution() {
     assert_eq!(got1 + got2, 6);
     assert!(got1 > 0);
     assert!(got2 > 0);
+    Ok(())
 }
 
 #[tokio::test]
-async fn broker_pubsub_multiple_groups() {
-    let broker = make_test_broker().await;
+async fn broker_pubsub_multiple_groups() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
-    broker.publish("events", b"alpha").await.unwrap();
-    broker.publish("events", b"beta").await.unwrap();
+    broker.publish("events", b"alpha").await?;
+    broker.publish("events", b"beta").await?;
 
-    let mut g1 = broker.subscribe("events", "g1", 1).await.unwrap();
-    let mut g2 = broker.subscribe("events", "g2", 1).await.unwrap();
+    let mut g1 = broker
+        .subscribe("events", "g1", make_default_cons_cfg())
+        .await?;
+    let mut g2 = broker
+        .subscribe("events", "g2", make_default_cons_cfg())
+        .await?;
 
     let mut recv_g1 = vec![];
     let mut recv_g2 = vec![];
 
     for _ in 0..2 {
-        let m1 = g1.messages.recv().await.unwrap();
-        recv_g1.push(String::from_utf8(m1.message.payload.clone()).unwrap());
+        let m1 = g1.messages.recv().await.context("receiving message")?;
+        recv_g1.push(String::from_utf8(m1.message.payload.clone())?);
         g1.acker
             .send(AckRequest {
-                offset: m1.delivery_tag,
+                delivery_tag: m1.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
 
-        let m2 = g2.messages.recv().await.unwrap();
-        recv_g2.push(String::from_utf8(m2.message.payload.clone()).unwrap());
+        let m2 = g2.messages.recv().await.context("receiving message")?;
+        recv_g2.push(String::from_utf8(m2.message.payload.clone())?);
         g2.acker
             .send(AckRequest {
-                offset: m2.delivery_tag,
+                delivery_tag: m2.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
 
     assert_eq!(recv_g1, ["alpha", "beta"]);
     assert_eq!(recv_g2, ["alpha", "beta"]);
+    Ok(())
 }
 
 #[tokio::test]
-async fn broker_delivery_in_order() {
-    let broker = make_test_broker().await;
+async fn broker_delivery_in_order() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     for i in 0..10 {
         broker
             .publish("numbers", format!("{}", i).as_bytes())
-            .await
-            .unwrap();
+            .await?;
     }
 
-    let mut consumer = broker.subscribe("numbers", "g", 1).await.unwrap();
+    let mut consumer = broker
+        .subscribe("numbers", "g", make_default_cons_cfg())
+        .await?;
 
     let mut collected = vec![];
 
     for _ in 0..10 {
-        let msg = consumer.messages.recv().await.unwrap();
-        collected.push(String::from_utf8(msg.message.payload.clone()).unwrap());
+        let msg = consumer
+            .messages
+            .recv()
+            .await
+            .context("receiving message")?;
+        collected.push(String::from_utf8(msg.message.payload.clone())?);
         consumer
             .acker
             .send(AckRequest {
-                offset: msg.delivery_tag,
+                delivery_tag: msg.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
 
     assert_eq!(
         collected,
         (0..10).map(|i| i.to_string()).collect::<Vec<_>>()
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn broker_consumer_drop_stops_delivery() {
-    let broker = make_test_broker().await;
+async fn broker_consumer_drop_stops_delivery() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
-    broker.publish("t", b"x").await.unwrap();
+    broker.publish("t", b"x").await?;
 
-    let consumer = broker.subscribe("t", "g", 1).await.unwrap();
+    let consumer = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
     // Drop receiver
     drop(consumer.messages);
@@ -235,54 +260,58 @@ async fn broker_consumer_drop_stops_delivery() {
 
     // Publishing more messages should not cause issues
     assert!(broker.publish("t", b"y").await.is_ok());
+    Ok(())
 }
 
 #[tokio::test]
-async fn redelivery_occurs_after_expiration() {
-    let broker = make_test_broker().await;
+async fn redelivery_occurs_after_expiration() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     // Publish 1 message
-    broker.publish("topic", b"hello").await.unwrap();
+    broker.publish("topic", b"hello").await?;
 
     // Subscribe
-    let mut cons = broker.subscribe("topic", "g", 1).await.unwrap();
+    let mut cons = broker
+        .subscribe("topic", "g", make_default_cons_cfg())
+        .await?;
 
     // First delivery
-    let m1 = cons.messages.recv().await.unwrap();
+    let m1 = cons.messages.recv().await.context("receiving message")?;
     assert_eq!(m1.message.payload, b"hello");
 
     // Do NOT ack → let it expire
     tokio::time::sleep(std::time::Duration::from_secs(4)).await; // >3s TTL
 
     // Message should be redelivered
-    let m2 = cons.messages.recv().await.unwrap();
+    let m2 = cons.messages.recv().await.context("receiving message")?;
     assert_eq!(m2.message.offset, m1.message.offset);
     assert_eq!(m2.message.payload, b"hello");
 
     // Now ACK to finish
     cons.acker
         .send(AckRequest {
-            offset: m2.delivery_tag,
+            delivery_tag: m2.delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn ack_prevents_redelivery() {
-    let broker = make_test_broker().await;
+async fn ack_prevents_redelivery() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
-    broker.publish("topic", b"hi").await.unwrap();
+    broker.publish("topic", b"hi").await?;
 
-    let mut cons = broker.subscribe("topic", "g", 1).await.unwrap();
+    let mut cons = broker
+        .subscribe("topic", "g", make_default_cons_cfg())
+        .await?;
 
-    let msg = cons.messages.recv().await.unwrap();
+    let msg = cons.messages.recv().await.context("receiving message")?;
     cons.acker
         .send(AckRequest {
-            offset: msg.delivery_tag,
+            delivery_tag: msg.delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
 
     // Wait past expiration window
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
@@ -292,18 +321,19 @@ async fn ack_prevents_redelivery() {
 
     drop(cons);
     drop(broker);
+    Ok(())
 }
 
 #[tokio::test]
-async fn redelivery_load_balanced_to_consumers() {
-    let broker = make_test_broker().await;
+async fn redelivery_load_balanced_to_consumers() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
-    broker.publish("t", b"x").await.unwrap();
+    broker.publish("t", b"x").await?;
 
-    let mut c1 = broker.subscribe("t", "g", 1).await.unwrap();
-    let mut c2 = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut c1 = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let mut c2 = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
-    let m = c1.messages.recv().await.unwrap();
+    let m = c1.messages.recv().await.context("receiving message")?;
     assert_eq!(m.message.payload, b"x");
 
     // Let it expire
@@ -313,153 +343,139 @@ async fn redelivery_load_balanced_to_consumers() {
     let redelivered = tokio::select! {
         Some(m2) = c1.messages.recv() => m2,
         Some(m2) = c2.messages.recv() => m2,
+        else => anyhow::bail!("all consumers closed unexpectedly"),
     };
 
     assert_eq!(redelivered.message.payload, b"x");
+    Ok(())
 }
 
 #[tokio::test]
-async fn selective_ack_out_of_order() {
-    let broker = make_test_broker().await;
+async fn selective_ack_out_of_order() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     // Publish messages 0..4
     for i in 0..5 {
-        broker
-            .publish("t", format!("m{i}").as_bytes())
-            .await
-            .unwrap();
+        broker.publish("t", format!("m{i}").as_bytes()).await?;
     }
 
-    let mut cons = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut cons = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
     // Receive messages
     let mut messages = vec![];
     for _ in 0..5 {
-        let msg = cons.messages.recv().await.unwrap();
+        let msg = cons.messages.recv().await.context("receiving message")?;
         messages.push(msg);
     }
 
     // ACK out-of-order: ACK offset 3 and 4 first
     cons.acker
         .send(AckRequest {
-            offset: messages[3].delivery_tag,
+            delivery_tag: messages[3].delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
     cons.acker
         .send(AckRequest {
-            offset: messages[4].delivery_tag,
+            delivery_tag: messages[4].delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
 
     // ACK 0 next
     cons.acker
         .send(AckRequest {
-            offset: messages[0].delivery_tag,
+            delivery_tag: messages[0].delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
 
     // ACK 2 before 1
     cons.acker
         .send(AckRequest {
-            offset: messages[2].delivery_tag,
+            delivery_tag: messages[2].delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
     cons.acker
         .send(AckRequest {
-            offset: messages[1].delivery_tag,
+            delivery_tag: messages[1].delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
 
     // No redelivery should occur
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(cons.messages.try_recv().is_err());
+    Ok(())
 }
 
 #[tokio::test]
-async fn selective_ack_expiry_redelivery() {
-    let broker = make_test_broker().await;
+async fn selective_ack_expiry_redelivery() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     for i in 0..5 {
-        broker
-            .publish("t", format!("v{i}").as_bytes())
-            .await
-            .unwrap();
+        broker.publish("t", format!("v{i}").as_bytes()).await?;
     }
 
-    let mut cons = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut cons = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
     // Receive all messages 0..4
     let mut msgs = vec![];
     for _ in 0..5 {
-        msgs.push(cons.messages.recv().await.unwrap());
+        msgs.push(cons.messages.recv().await.context("receiving message")?);
     }
 
     // ACK everything except offset 2
     for i in [0, 1, 3, 4] {
         cons.acker
             .send(AckRequest {
-                offset: msgs[i].delivery_tag,
+                delivery_tag: msgs[i].delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
 
     // Let inflight(2) expire
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     // Should re-deliver only offset 2
-    let redelivered = cons.messages.recv().await.unwrap();
+    let redelivered = cons.messages.recv().await.context("receiving message")?;
     assert_eq!(redelivered.message.offset, 2);
 
     // ACK it finally
     cons.acker
         .send(AckRequest {
-            offset: redelivered.delivery_tag,
+            delivery_tag: redelivered.delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
 
     // Should not redeliver again
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let next = cons.messages.try_recv();
     assert!(next.is_err());
+    Ok(())
 }
 
 #[tokio::test]
-async fn selective_ack_no_wrong_rewind() {
-    let broker = make_test_broker().await;
+async fn selective_ack_no_wrong_rewind() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     for i in 0..3 {
-        broker
-            .publish("t", format!("x{i}").as_bytes())
-            .await
-            .unwrap();
+        broker.publish("t", format!("x{i}").as_bytes()).await?;
     }
 
-    let mut cons = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut cons = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
-    let m0 = cons.messages.recv().await.unwrap();
-    let _m1 = cons.messages.recv().await.unwrap();
-    let m2 = cons.messages.recv().await.unwrap();
+    let m0 = cons.messages.recv().await.context("receiving message")?;
+    let _m1 = cons.messages.recv().await.context("receiving message")?;
+    let m2 = cons.messages.recv().await.context("receiving message")?;
 
     // ACK 2 then 0 (skipping 1)
     cons.acker
         .send(AckRequest {
-            offset: m2.delivery_tag,
+            delivery_tag: m2.delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
     cons.acker
         .send(AckRequest {
-            offset: m0.delivery_tag,
+            delivery_tag: m0.delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
 
     // No redelivery yet
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -469,92 +485,95 @@ async fn selective_ack_no_wrong_rewind() {
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
     // Should redeliver only offset=1
-    let redelivered = cons.messages.recv().await.unwrap();
+    let redelivered = cons.messages.recv().await.context("receiving message")?;
     assert_eq!(redelivered.message.offset, 1);
+    Ok(())
 }
 
 #[tokio::test]
-async fn batch_basic() {
-    let store = make_test_store();
+async fn batch_basic() -> anyhow::Result<()> {
+    let store = make_test_store()?;
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         publish_batch_size: 5,
         publish_batch_timeout_ms: 10,
         ..Default::default()
     };
-    let broker = Arc::new(Broker::try_new(store, coord, cfg).await.unwrap());
+    let broker = Arc::new(Broker::try_new(store, coord, cfg).await?);
 
-    // Publish 10 messages → expect two batches
+    // Publish 10 messages -> expect two batches
     let mut handles = Vec::new();
     for _ in 0..10 {
         handles.push(tokio::spawn({
             let b = broker.clone();
-            async move { b.publish("topic", b"x").await.unwrap() }
+            async move { b.publish("topic", b"x").await }
         }));
     }
 
     let mut offsets = Vec::new();
     for h in handles {
-        offsets.push(h.await.unwrap());
+        offsets.push(h.await??);
     }
 
     offsets.sort();
     assert_eq!(offsets, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
     // Verify fetch delivers all
-    let mut c = broker.subscribe("topic", "g", 1).await.unwrap();
+    let mut c = broker
+        .subscribe("topic", "g", make_default_cons_cfg())
+        .await?;
     let mut recv = Vec::new();
     for _ in 0..10 {
-        let msg = c.messages.recv().await.unwrap();
+        let msg = c.messages.recv().await.context("receiving message")?;
         recv.push(msg.message.offset);
     }
     recv.sort();
     assert_eq!(recv, offsets);
+    Ok(())
 }
 
 #[tokio::test]
-async fn batch_timeout_flushes() {
-    let store = make_test_store();
+async fn batch_timeout_flushes() -> anyhow::Result<()> {
+    let store = make_test_store()?;
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         publish_batch_size: 100,
         publish_batch_timeout_ms: 20,
         ..Default::default()
     }; // Large batch size, short timeout
-    let broker = Broker::try_new(store, coord, cfg).await.unwrap();
+    let broker = Broker::try_new(store, coord, cfg).await?;
 
     // Publish 3 messages, waiting briefly so timeout triggers
-    let off1 = broker.publish("topic", b"a").await.unwrap();
-    let off2 = broker.publish("topic", b"b").await.unwrap();
-    let off3 = broker.publish("topic", b"c").await.unwrap();
+    let off1 = broker.publish("topic", b"a").await?;
+    let off2 = broker.publish("topic", b"b").await?;
+    let off3 = broker.publish("topic", b"c").await?;
 
     assert_eq!(vec![off1, off2, off3], vec![0, 1, 2]);
+    Ok(())
 }
 
 #[tokio::test]
-async fn batch_concurrent_ordering() {
-    let store = make_test_store();
+async fn batch_concurrent_ordering() -> anyhow::Result<()> {
+    let store = make_test_store()?;
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         publish_batch_size: 10,
         publish_batch_timeout_ms: 50,
         ..Default::default()
     };
-    let broker = Arc::new(Broker::try_new(store, coord, cfg).await.unwrap());
+    let broker = Arc::new(Broker::try_new(store, coord, cfg).await?);
 
     let publish_count = 200;
     let mut tasks = Vec::new();
 
     for _ in 0..publish_count {
         let b = broker.clone();
-        tasks.push(tokio::spawn(
-            async move { b.publish("t", b"m").await.unwrap() },
-        ));
+        tasks.push(tokio::spawn(async move { b.publish("t", b"m").await }));
     }
 
     let mut offsets = Vec::new();
     for t in tasks {
-        offsets.push(t.await.unwrap());
+        offsets.push(t.await??);
     }
 
     offsets.sort();
@@ -566,39 +585,38 @@ async fn batch_concurrent_ordering() {
         (0..offsets.len() as u64).collect::<Vec<_>>(),
         "phantom or missing offsets detected"
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn batch_publish_and_consume() {
-    let store = make_test_store();
+async fn batch_publish_and_consume() -> anyhow::Result<()> {
+    let store = make_test_store()?;
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         publish_batch_size: 5,
         publish_batch_timeout_ms: 50,
         ..Default::default()
     };
-    let broker = Broker::try_new(store, coord, cfg).await.unwrap();
+    let broker = Broker::try_new(store, coord, cfg).await?;
 
     // Publish 12 messages
     for i in 0..12 {
-        broker
-            .publish("topic", format!("x{i}").as_bytes())
-            .await
-            .unwrap();
+        broker.publish("topic", format!("x{i}").as_bytes()).await?;
     }
 
-    let mut c = broker.subscribe("topic", "g", 1).await.unwrap();
+    let mut c = broker
+        .subscribe("topic", "g", make_default_cons_cfg())
+        .await?;
 
     let mut seen = Vec::new();
     for _ in 0..12 {
-        let msg = c.messages.recv().await.unwrap();
+        let msg = c.messages.recv().await.context("receiving message")?;
         seen.push((msg.message.offset, msg.message.payload.clone()));
         c.acker
             .send(AckRequest {
-                offset: msg.delivery_tag,
+                delivery_tag: msg.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
 
     seen.sort_by_key(|x| x.0);
@@ -607,37 +625,39 @@ async fn batch_publish_and_consume() {
         assert_eq!(s.0, i as u64);
         assert_eq!(s.1, format!("x{i}").as_bytes());
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn batch_multiple_topics() {
-    let store = make_test_store();
+async fn batch_multiple_topics() -> anyhow::Result<()> {
+    let store = make_test_store()?;
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         publish_batch_size: 4,
         publish_batch_timeout_ms: 20,
         ..Default::default()
     };
-    let broker = Broker::try_new(store, coord, cfg).await.unwrap();
+    let broker = Broker::try_new(store, coord, cfg).await?;
 
     // Publish into two topics interleaved
-    let off_a1 = broker.publish("A", b"a1").await.unwrap();
-    let off_b1 = broker.publish("B", b"b1").await.unwrap();
-    let off_a2 = broker.publish("A", b"a2").await.unwrap();
-    let off_b2 = broker.publish("B", b"b2").await.unwrap();
+    let off_a1 = broker.publish("A", b"a1").await?;
+    let off_b1 = broker.publish("B", b"b1").await?;
+    let off_a2 = broker.publish("A", b"a2").await?;
+    let off_b2 = broker.publish("B", b"b2").await?;
 
     assert_eq!(off_a1, 0);
     assert_eq!(off_a2, 1);
     assert_eq!(off_b1, 0);
     assert_eq!(off_b2, 1);
+    Ok(())
 }
 
 #[tokio::test]
-async fn publish_burst_then_consume_everything() {
+async fn publish_burst_then_consume_everything() -> anyhow::Result<()> {
     let total = 50_000;
     let max_payload = 512;
 
-    let store = make_test_store();
+    let store = make_test_store()?;
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         publish_batch_size: 64,
@@ -645,7 +665,7 @@ async fn publish_burst_then_consume_everything() {
         ..Default::default()
     };
 
-    let broker = Broker::try_new(store, coord, cfg).await.unwrap();
+    let broker = Broker::try_new(store, coord, cfg).await?;
 
     // Insert messages with known patterns
     let mut payloads = Vec::new();
@@ -654,22 +674,23 @@ async fn publish_burst_then_consume_everything() {
         let mut buf = vec![0u8; size];
         fastrand::fill(&mut buf);
         payloads.push((i as u64, buf.clone()));
-        broker.publish("topic", &buf).await.unwrap();
+        broker.publish("topic", &buf).await?;
     }
 
     // Now consume them
-    let mut c = broker.subscribe("topic", "group", 1).await.unwrap();
+    let mut c = broker
+        .subscribe("topic", "group", make_default_cons_cfg())
+        .await?;
 
     let mut seen = Vec::new();
     for _ in 0..total {
-        let msg = c.messages.recv().await.unwrap();
+        let msg = c.messages.recv().await.context("receiving message")?;
         seen.push((msg.message.offset, msg.message.payload.clone()));
         c.acker
             .send(AckRequest {
-                offset: msg.message.offset,
+                delivery_tag: msg.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
 
     // Sort by offset
@@ -680,13 +701,14 @@ async fn publish_burst_then_consume_everything() {
         assert_eq!(seen[i].0, i as u64, "Offset mismatch");
         assert_eq!(seen[i].1, payloads[i].1, "Payload mismatch at offset {}", i,);
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn concurrent_publish_and_consume() {
+async fn concurrent_publish_and_consume() -> anyhow::Result<()> {
     let total = 100_000;
 
-    let store = make_test_store();
+    let store = make_test_store()?;
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         publish_batch_size: 64,
@@ -694,35 +716,45 @@ async fn concurrent_publish_and_consume() {
         ..Default::default()
     };
 
-    let broker = Arc::new(Broker::try_new(store, coord, cfg).await.unwrap());
+    let broker = Arc::new(Broker::try_new(store, coord, cfg).await?);
 
     // Start consumer
-    let mut consumer = broker.subscribe("topic", "g", 1).await.unwrap();
+    let mut consumer = broker
+        .subscribe("topic", "g", make_default_cons_cfg())
+        .await?;
 
     // Start publishers
-    let mut pub_tasks = Vec::new();
+    let mut pub_tasks: Vec<JoinHandle<anyhow::Result<()>>> = Vec::new();
     for _ in 0..4 {
         let b = broker.clone();
         pub_tasks.push(tokio::spawn(async move {
             for i in 0..(total / 4) {
                 let mut buf = vec![0u8; 128];
                 buf[0..8].copy_from_slice(&(i as u64).to_be_bytes());
-                b.publish("topic", &buf).await.unwrap();
+                b.publish("topic", &buf).await?;
             }
+            Ok(())
         }));
+    }
+
+    for task in pub_tasks {
+        task.await??;
     }
 
     // Collect consumed
     let mut seen = Vec::with_capacity(total);
     for _ in 0..total {
-        let msg = consumer.messages.recv().await.unwrap();
+        let msg = consumer
+            .messages
+            .recv()
+            .await
+            .context("receiving message")?;
         consumer
             .acker
             .send(AckRequest {
-                offset: msg.delivery_tag,
+                delivery_tag: msg.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
         seen.push(msg);
     }
 
@@ -741,24 +773,51 @@ async fn concurrent_publish_and_consume() {
     for (i, offset) in offsets.into_iter().enumerate().take(total) {
         assert_eq!(offset, i as u64, "Missing or reordered messages");
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn redelivery_under_load_8k() {
+async fn redelivery_under_load_8k() -> anyhow::Result<()> {
     let total = 8_000;
 
-    redelivery_under_load(total).await;
+    redelivery_under_load(total).await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn redelivery_under_load_2k() {
+async fn redelivery_under_load_2k() -> anyhow::Result<()> {
     let total = 2_000;
 
-    redelivery_under_load(total).await;
+    redelivery_under_load(total).await?;
+    Ok(())
 }
 
-async fn redelivery_under_load(total: usize) {
-    let store = make_test_store();
+#[tokio::test]
+async fn redelivery_under_load_16k() -> anyhow::Result<()> {
+    let total = 16_000;
+
+    redelivery_under_load(total).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn redelivery_under_load_32k() -> anyhow::Result<()> {
+    let total = 32_000;
+
+    redelivery_under_load(total).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn redelivery_under_load_64k() -> anyhow::Result<()> {
+    let total = 64_000;
+
+    redelivery_under_load(total).await?;
+    Ok(())
+}
+
+async fn redelivery_under_load(total: usize) -> anyhow::Result<()> {
+    let store = make_test_store()?;
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         publish_batch_size: 32,
@@ -766,20 +825,26 @@ async fn redelivery_under_load(total: usize) {
         inflight_ttl_secs: 5,
         ..Default::default()
     }; // <-- generous TTL
-    let broker = Broker::try_new(store, coord, cfg).await.unwrap();
+    let broker = Broker::try_new(store, coord, cfg).await?;
 
     // Publish burst
     for _ in 0..total {
-        broker.publish("t", b"x").await.unwrap();
+        broker.publish("t", b"x").await?;
     }
 
-    let mut c = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut c = broker
+        .subscribe(
+            "t",
+            "g",
+            make_default_cons_cfg().with_prefetch_count(total + 1),
+        )
+        .await?;
 
     // FIRST PHASE: receive *all* unique offsets once
     use std::collections::HashSet;
     let mut seen_once = HashSet::new();
     while seen_once.len() < total {
-        let msg = c.messages.recv().await.unwrap();
+        let msg = c.messages.recv().await.context("receiving message")?;
         seen_once.insert(msg.message.offset);
         // DON'T ACK
     }
@@ -797,7 +862,7 @@ async fn redelivery_under_load(total: usize) {
     let mut received = 0;
 
     while counts.contains(&0) && received < max_deliveries {
-        let msg = c.messages.recv().await.unwrap();
+        let msg = c.messages.recv().await.context("receiving message")?;
         let idx = msg.message.offset as usize;
         if idx < total {
             counts[idx] += 1;
@@ -805,10 +870,9 @@ async fn redelivery_under_load(total: usize) {
         // ACK now
         c.acker
             .send(AckRequest {
-                offset: msg.message.offset,
+                delivery_tag: msg.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
         received += 1;
     }
 
@@ -816,6 +880,7 @@ async fn redelivery_under_load(total: usize) {
         counts.iter().all(|&c| c >= 1),
         "Some offsets never redelivered at least once"
     );
+    Ok(())
 }
 
 fn _dupes_with_counts<T>(v: &[T]) -> std::collections::BTreeMap<&T, usize>
@@ -830,8 +895,8 @@ where
 }
 
 #[tokio::test]
-async fn restart_persists_messages() {
-    use thetube::storage::make_rocksdb_store;
+async fn restart_persists_messages() -> anyhow::Result<()> {
+    use fibril::storage::make_rocksdb_store;
 
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
@@ -842,21 +907,18 @@ async fn restart_persists_messages() {
     };
 
     // Dedicated DB path for this test
-    std::fs::create_dir_all("test_data").unwrap();
+    std::fs::create_dir_all("test_data")?;
     let db_path = format!("test_data/restart_persist_{}", fastrand::u64(..));
 
     // 1) First broker instance: publish messages
     {
-        let store = make_rocksdb_store(&db_path).unwrap();
-        let broker = Broker::try_new(store, coord.clone(), cfg.clone())
-            .await
-            .unwrap();
+        let store = make_rocksdb_store(&db_path, false)?;
+        let broker = Broker::try_new(store, coord.clone(), cfg.clone()).await?;
 
         for i in 0..20 {
             broker
                 .publish("restart_topic", format!("m{i}").as_bytes())
-                .await
-                .unwrap();
+                .await?;
         }
 
         // Drop broker (and storage), simulating process exit
@@ -867,23 +929,22 @@ async fn restart_persists_messages() {
 
     // 2) New broker instance on the same path
     {
-        let store = make_rocksdb_store(&db_path).unwrap();
-        let broker = Broker::try_new(store, coord.clone(), cfg.clone())
-            .await
-            .unwrap();
+        let store = make_rocksdb_store(&db_path, false)?;
+        let broker = Broker::try_new(store, coord.clone(), cfg.clone()).await?;
 
-        let mut cons = broker.subscribe("restart_topic", "g", 1).await.unwrap();
+        let mut cons = broker
+            .subscribe("restart_topic", "g", make_default_cons_cfg())
+            .await?;
 
         let mut msgs = Vec::new();
         for _ in 0..20 {
-            let m = cons.messages.recv().await.unwrap();
-            msgs.push(String::from_utf8(m.message.payload.clone()).unwrap());
+            let m = cons.messages.recv().await.context("receiving message")?;
+            msgs.push(String::from_utf8(m.message.payload.clone())?);
             cons.acker
                 .send(AckRequest {
-                    offset: m.delivery_tag,
+                    delivery_tag: m.delivery_tag,
                 })
-                .await
-                .unwrap();
+                .await?;
         }
 
         assert_eq!(msgs, (0..20).map(|i| format!("m{i}")).collect::<Vec<_>>());
@@ -892,11 +953,12 @@ async fn restart_persists_messages() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(cons.messages.try_recv().is_err());
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn restart_persists_ack_state() {
-    use thetube::storage::make_rocksdb_store;
+async fn restart_persists_ack_state() -> anyhow::Result<()> {
+    use fibril::storage::make_rocksdb_store;
 
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
@@ -907,34 +969,32 @@ async fn restart_persists_ack_state() {
         ..BrokerConfig::default()
     };
 
-    std::fs::create_dir_all("test_data").unwrap();
+    std::fs::create_dir_all("test_data")?;
     let db_path = format!("test_data/restart_acks_{}", fastrand::u64(..));
 
     // 1) First broker: publish and ACK some messages
     {
-        let store = make_rocksdb_store(&db_path).unwrap();
-        let broker = Broker::try_new(store, coord.clone(), cfg.clone())
-            .await
-            .unwrap();
+        let store = make_rocksdb_store(&db_path, false)?;
+        let broker = Broker::try_new(store, coord.clone(), cfg.clone()).await?;
 
         for i in 0..10 {
             broker
                 .publish("restart_ack_topic", format!("m{i}").as_bytes())
-                .await
-                .unwrap();
+                .await?;
         }
 
-        let mut cons = broker.subscribe("restart_ack_topic", "g", 1).await.unwrap();
+        let mut cons = broker
+            .subscribe("restart_ack_topic", "g", make_default_cons_cfg())
+            .await?;
 
         // ACK first 7 messages
         for _ in 0..7 {
-            let m = cons.messages.recv().await.unwrap();
+            let m = cons.messages.recv().await.context("receiving message")?;
             cons.acker
                 .send(AckRequest {
-                    offset: m.delivery_tag,
+                    delivery_tag: m.delivery_tag,
                 })
-                .await
-                .unwrap();
+                .await?;
         }
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
@@ -950,24 +1010,23 @@ async fn restart_persists_ack_state() {
         // Wait past inflight TTL to ensure no inflight entries remain
         tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
-        let store = make_rocksdb_store(&db_path).unwrap();
-        let broker = Broker::try_new(store, coord.clone(), cfg.clone())
-            .await
-            .unwrap();
+        let store = make_rocksdb_store(&db_path, false)?;
+        let broker = Broker::try_new(store, coord.clone(), cfg.clone()).await?;
 
-        let mut cons = broker.subscribe("restart_ack_topic", "g", 1).await.unwrap();
+        let mut cons = broker
+            .subscribe("restart_ack_topic", "g", make_default_cons_cfg())
+            .await?;
 
         let mut seen = Vec::new();
         // Expect only 3 messages left
         for _ in 0..3 {
-            let m = cons.messages.recv().await.unwrap();
-            seen.push(String::from_utf8(m.message.payload.clone()).unwrap());
+            let m = cons.messages.recv().await.context("receiving message")?;
+            seen.push(String::from_utf8(m.message.payload.clone())?);
             cons.acker
                 .send(AckRequest {
-                    offset: m.delivery_tag,
+                    delivery_tag: m.delivery_tag,
                 })
-                .await
-                .unwrap();
+                .await?;
         }
 
         // No more messages should arrive
@@ -979,11 +1038,12 @@ async fn restart_persists_ack_state() {
             vec!["m7".to_string(), "m8".to_string(), "m9".to_string()]
         );
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn restart_redelivery_across_restart() {
-    use thetube::storage::make_rocksdb_store;
+async fn restart_redelivery_across_restart() -> anyhow::Result<()> {
+    use fibril::storage::make_rocksdb_store;
 
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
@@ -994,22 +1054,22 @@ async fn restart_redelivery_across_restart() {
         ..Default::default()
     };
 
-    std::fs::create_dir_all("test_data").unwrap();
+    std::fs::create_dir_all("test_data")?;
     let db_path = format!("test_data/restart_redel_{}", fastrand::u64(..));
 
     let offset: Offset;
 
     // 1) First broker: publish + first delivery (no ACK)
     {
-        let store = make_rocksdb_store(&db_path).unwrap();
-        let broker = Broker::try_new(store, coord.clone(), cfg.clone())
-            .await
-            .unwrap();
+        let store = make_rocksdb_store(&db_path, false)?;
+        let broker = Broker::try_new(store, coord.clone(), cfg.clone()).await?;
 
-        broker.publish("rr_topic", b"hello").await.unwrap();
+        broker.publish("rr_topic", b"hello").await?;
 
-        let mut cons = broker.subscribe("rr_topic", "g", 1).await.unwrap();
-        let m1 = cons.messages.recv().await.unwrap();
+        let mut cons = broker
+            .subscribe("rr_topic", "g", make_default_cons_cfg())
+            .await?;
+        let m1 = cons.messages.recv().await.context("receiving message")?;
         assert_eq!(m1.message.payload, b"hello");
         offset = m1.message.offset;
 
@@ -1025,34 +1085,32 @@ async fn restart_redelivery_across_restart() {
 
     // 2) Second broker: same DB, new worker, must redeliver
     {
-        let store = make_rocksdb_store(&db_path).unwrap();
-        let broker = Arc::new(
-            Broker::try_new(store, coord.clone(), cfg.clone())
-                .await
-                .unwrap(),
-        );
+        let store = make_rocksdb_store(&db_path, false)?;
+        let broker = Arc::new(Broker::try_new(store, coord.clone(), cfg.clone()).await?);
 
-        let mut cons = broker.subscribe("rr_topic", "g", 1).await.unwrap();
+        let mut cons = broker
+            .subscribe("rr_topic", "g", make_default_cons_cfg())
+            .await?;
 
-        let redelivered = cons.messages.recv().await.unwrap();
+        let redelivered = cons.messages.recv().await.context("receiving message")?;
         assert_eq!(redelivered.message.offset, offset);
         assert_eq!(redelivered.message.payload, b"hello");
 
         cons.acker
             .send(AckRequest {
-                offset: redelivered.delivery_tag,
+                delivery_tag: redelivered.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
         drop(cons);
         broker.shutdown().await;
         drop(broker);
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn work_queue_fair_distribution() {
-    let broker = make_test_broker().await;
+async fn work_queue_fair_distribution() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     let total = 6000;
 
@@ -1060,13 +1118,18 @@ async fn work_queue_fair_distribution() {
     for i in 0..total {
         broker
             .publish("jobs_fair", format!("job-{i}").as_bytes())
-            .await
-            .unwrap();
+            .await?;
     }
 
-    let mut c1 = broker.subscribe("jobs_fair", "workers", 1).await.unwrap();
-    let mut c2 = broker.subscribe("jobs_fair", "workers", 1).await.unwrap();
-    let mut c3 = broker.subscribe("jobs_fair", "workers", 1).await.unwrap();
+    let mut c1 = broker
+        .subscribe("jobs_fair", "workers", make_default_cons_cfg())
+        .await?;
+    let mut c2 = broker
+        .subscribe("jobs_fair", "workers", make_default_cons_cfg())
+        .await?;
+    let mut c3 = broker
+        .subscribe("jobs_fair", "workers", make_default_cons_cfg())
+        .await?;
 
     let mut counts = [0usize; 3];
 
@@ -1074,16 +1137,17 @@ async fn work_queue_fair_distribution() {
         tokio::select! {
             Some(msg) = c1.messages.recv() => {
                 counts[0] += 1;
-                c1.acker.send(AckRequest { offset: msg.delivery_tag }).await.unwrap();
+                c1.acker.send(AckRequest { delivery_tag: msg.delivery_tag }).await?;
             }
             Some(msg) = c2.messages.recv() => {
                 counts[1] += 1;
-                c2.acker.send(AckRequest { offset: msg.delivery_tag }).await.unwrap();
+                c2.acker.send(AckRequest { delivery_tag: msg.delivery_tag }).await?;
             }
             Some(msg) = c3.messages.recv() => {
                 counts[2] += 1;
-                c3.acker.send(AckRequest { offset: msg.delivery_tag }).await.unwrap();
+                c3.acker.send(AckRequest { delivery_tag: msg.delivery_tag }).await?;
             }
+            else => anyhow::bail!("all consumers closed unexpectedly"),
         }
     }
 
@@ -1100,44 +1164,42 @@ async fn work_queue_fair_distribution() {
             total
         );
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn multi_topic_multi_group_isolation() {
-    let broker = make_test_broker().await;
+async fn multi_topic_multi_group_isolation() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     // Topic A: 100 messages, group GA
     for i in 0..100 {
-        broker
-            .publish("A", format!("a-{i}").as_bytes())
-            .await
-            .unwrap();
+        broker.publish("A", format!("a-{i}").as_bytes()).await?;
     }
 
     // Topic B: 60 messages, groups GB1 and GB2
     for i in 0..60 {
-        broker
-            .publish("B", format!("b-{i}").as_bytes())
-            .await
-            .unwrap();
+        broker.publish("B", format!("b-{i}").as_bytes()).await?;
     }
 
-    let mut a_ga = broker.subscribe("A", "GA", 1).await.unwrap();
+    let mut a_ga = broker.subscribe("A", "GA", make_default_cons_cfg()).await?;
 
-    let mut b_gb1 = broker.subscribe("B", "GB1", 1).await.unwrap();
-    let mut b_gb2 = broker.subscribe("B", "GB2", 1).await.unwrap();
+    let mut b_gb1 = broker
+        .subscribe("B", "GB1", make_default_cons_cfg())
+        .await?;
+    let mut b_gb2 = broker
+        .subscribe("B", "GB2", make_default_cons_cfg())
+        .await?;
 
     // Collect A/GA
     let mut a_seen = Vec::new();
     for _ in 0..100 {
-        let m = a_ga.messages.recv().await.unwrap();
-        a_seen.push(String::from_utf8(m.message.payload.clone()).unwrap());
+        let m = a_ga.messages.recv().await.context("receiving message")?;
+        a_seen.push(String::from_utf8(m.message.payload.clone())?);
         a_ga.acker
             .send(AckRequest {
-                offset: m.delivery_tag,
+                delivery_tag: m.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
 
     // Collect B/GB1 and B/GB2 (fanout: both see all messages)
@@ -1145,26 +1207,24 @@ async fn multi_topic_multi_group_isolation() {
     let mut b2_seen = Vec::new();
 
     for _ in 0..60 {
-        let m1 = b_gb1.messages.recv().await.unwrap();
-        let m2 = b_gb2.messages.recv().await.unwrap();
+        let m1 = b_gb1.messages.recv().await.context("receiving message")?;
+        let m2 = b_gb2.messages.recv().await.context("receiving message")?;
 
-        b1_seen.push(String::from_utf8(m1.message.payload.clone()).unwrap());
-        b2_seen.push(String::from_utf8(m2.message.payload.clone()).unwrap());
+        b1_seen.push(String::from_utf8(m1.message.payload.clone())?);
+        b2_seen.push(String::from_utf8(m2.message.payload.clone())?);
 
         b_gb1
             .acker
             .send(AckRequest {
-                offset: m1.delivery_tag,
+                delivery_tag: m1.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
         b_gb2
             .acker
             .send(AckRequest {
-                offset: m2.delivery_tag,
+                delivery_tag: m2.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
 
     // Assertions
@@ -1181,11 +1241,12 @@ async fn multi_topic_multi_group_isolation() {
     // No topic bleed
     assert!(a_seen.iter().all(|s| s.starts_with("a-")));
     assert!(b1_seen.iter().all(|s| s.starts_with("b-")));
+    Ok(())
 }
 
 #[tokio::test]
-async fn randomized_publish_consume_fuzz() {
-    let store = make_test_store();
+async fn randomized_publish_consume_fuzz_delivery_tags() -> anyhow::Result<()> {
+    let store = make_test_store()?;
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         publish_batch_size: 32,
@@ -1194,27 +1255,134 @@ async fn randomized_publish_consume_fuzz() {
         ..Default::default()
     };
 
-    let broker = Arc::new(Broker::try_new(store, coord, cfg).await.unwrap());
+    let broker = Arc::new(Broker::try_new(store, coord, cfg).await?);
 
-    let mut cons = broker.subscribe("fuzz_topic", "g", 1).await.unwrap();
+    let mut cons = broker
+        .subscribe(
+            "fuzz_topic",
+            "g",
+            make_default_cons_cfg().with_prefetch_count(2048),
+        )
+        .await?;
 
     let total = 10_000;
 
     // Publisher task
     let b_pub = broker.clone();
-    let pub_task = tokio::spawn(async move {
+    let pub_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
         for i in 0..total {
             let action = fastrand::u8(..100);
 
             if action < 80 {
                 // publish
                 let payload = format!("m-{i}").into_bytes();
-                b_pub.publish("fuzz_topic", &payload).await.unwrap();
+                b_pub.publish("fuzz_topic", &payload).await?;
             } else {
                 // short pause to mix timing
                 tokio::time::sleep(std::time::Duration::from_micros(100)).await;
             }
         }
+        Ok(())
+    });
+
+    // Consumer/ACK behavior with some random drops
+    let mut received = Vec::new();
+    let mut acked = Vec::new();
+
+    while received.len() < total {
+        if let Some(msg) = cons.messages.recv().await {
+            let delivery_tag = msg.delivery_tag;
+            let payload = msg.message.payload.clone();
+            received.push((delivery_tag, payload.clone()));
+
+            let r = fastrand::u8(..100);
+            if r < 70 {
+                // ACK most of the time
+                cons.acker
+                    .send(AckRequest {
+                        delivery_tag: msg.delivery_tag,
+                    })
+                    .await?;
+                acked.push(delivery_tag);
+            } else {
+                // Let some expire for redelivery
+            }
+        }
+    }
+
+    pub_task.await??;
+
+    // Wait for redeliveries to settle
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    // Drain any last messages
+    while let Ok(msg) = cons.messages.try_recv() {
+        received.push((msg.delivery_tag, msg.message.payload.clone()));
+        cons.acker
+            .send(AckRequest {
+                delivery_tag: msg.delivery_tag,
+            })
+            .await?;
+    }
+
+    // Invariants:
+    // - No gaps in delivery tags from 0..max_delivery_tag
+    // - Every delivery tag that ever existed appears at least once in `received`
+    let mut delivery_tags: Vec<u64> = received.iter().map(|(o, _)| *o).collect();
+    delivery_tags.sort();
+    delivery_tags.dedup();
+
+    let max_delivery_tag = *delivery_tags
+        .last()
+        .ok_or(anyhow::Error::msg("delivery_tags empty"))?;
+    assert_eq!(delivery_tags, (0..=max_delivery_tag).collect::<Vec<_>>());
+    assert_eq!(
+        delivery_tags,
+        (0..delivery_tags.len() as u64).collect::<Vec<_>>(),
+        "phantom or missing delivery tags detected"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn randomized_publish_consume_fuzz_offsets() -> anyhow::Result<()> {
+    let store = make_test_store()?;
+    let coord = NoopCoordination {};
+    let cfg = BrokerConfig {
+        publish_batch_size: 32,
+        publish_batch_timeout_ms: 5,
+        inflight_ttl_secs: 2,
+        ..Default::default()
+    };
+
+    let broker = Arc::new(Broker::try_new(store, coord, cfg).await?);
+
+    let mut cons = broker
+        .subscribe(
+            "fuzz_topic",
+            "g",
+            make_default_cons_cfg().with_prefetch_count(2048),
+        )
+        .await?;
+
+    let total = 10_000;
+
+    // Publisher task
+    let b_pub = broker.clone();
+    let pub_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
+        for i in 0..total {
+            let action = fastrand::u8(..100);
+
+            if action < 80 {
+                // publish
+                let payload = format!("m-{i}").into_bytes();
+                b_pub.publish("fuzz_topic", &payload).await?;
+            } else {
+                // short pause to mix timing
+                tokio::time::sleep(std::time::Duration::from_micros(100)).await;
+            }
+        }
+        Ok(())
     });
 
     // Consumer/ACK behavior with some random drops
@@ -1232,10 +1400,9 @@ async fn randomized_publish_consume_fuzz() {
                 // ACK most of the time
                 cons.acker
                     .send(AckRequest {
-                        offset: msg.delivery_tag,
+                        delivery_tag: msg.delivery_tag,
                     })
-                    .await
-                    .unwrap();
+                    .await?;
                 acked.push(offset);
             } else {
                 // Let some expire for redelivery
@@ -1243,7 +1410,7 @@ async fn randomized_publish_consume_fuzz() {
         }
     }
 
-    pub_task.await.unwrap();
+    pub_task.await??;
 
     // Wait for redeliveries to settle
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -1253,10 +1420,9 @@ async fn randomized_publish_consume_fuzz() {
         received.push((msg.message.offset, msg.message.payload.clone()));
         cons.acker
             .send(AckRequest {
-                offset: msg.delivery_tag,
+                delivery_tag: msg.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
 
     // Invariants:
@@ -1266,37 +1432,36 @@ async fn randomized_publish_consume_fuzz() {
     offsets.sort();
     offsets.dedup();
 
-    let max_off = *offsets.last().unwrap();
-    assert_eq!(offsets, (0..=max_off).collect::<Vec<_>>());
+    let max_offset = *offsets.last().ok_or(anyhow::Error::msg("offsets empty"))?;
+    assert_eq!(offsets, (0..=max_offset).collect::<Vec<_>>());
     assert_eq!(
         offsets,
         (0..offsets.len() as u64).collect::<Vec<_>>(),
         "phantom or missing offsets detected"
     );
+    Ok(())
 }
 
 #[tokio::test]
-async fn storage_inflight_implies_message_exists() {
-    let store = make_test_store();
+async fn storage_inflight_implies_message_exists() -> anyhow::Result<()> {
+    let store = make_test_store()?;
 
     let topic = "t".to_string();
     let group = "g".to_string();
     let partition = 0;
 
-    let off = store.append(&topic, partition, b"x").await.unwrap();
+    let off = store.append(&topic, partition, b"x").await?;
     store
-        .mark_inflight(&topic, partition, &group, off, unix_ts() + 100)
-        .await
-        .unwrap();
+        .mark_inflight(&topic, partition, &group, off, unix_millis() + 100000)
+        .await?;
 
     // Run cleanup aggressively
-    store.cleanup_topic(&topic, partition).await.unwrap();
+    store.cleanup_topic(&topic, partition).await?;
 
     // Invariant: if inflight exists, message must exist OR inflight must be gone
     let inflight = store
         .is_inflight_or_acked(&topic, partition, &group, off)
-        .await
-        .unwrap();
+        .await?;
 
     if inflight {
         let res = store.fetch_by_offset(&topic, partition, off).await;
@@ -1306,40 +1471,38 @@ async fn storage_inflight_implies_message_exists() {
             res
         );
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn cursor_never_moves_backwards() {
-    let broker = make_test_broker().await;
+async fn cursor_never_moves_backwards() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     for i in 0..10 {
-        broker
-            .publish("t", format!("m{i}").as_bytes())
-            .await
-            .unwrap();
+        broker.publish("t", format!("m{i}").as_bytes()).await?;
     }
 
-    let mut c = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
     let mut last = None;
 
     for _ in 0..10 {
-        let m = c.messages.recv().await.unwrap();
+        let m = c.messages.recv().await.context("receiving message")?;
         if let Some(prev) = last {
             assert!(m.message.offset > prev, "cursor went backwards");
         }
         last = Some(m.message.offset);
         c.acker
             .send(AckRequest {
-                offset: m.delivery_tag,
+                delivery_tag: m.delivery_tag,
             })
-            .await
-            .unwrap();
+            .await?;
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn crash_after_send_before_inflight_causes_redelivery() {
+async fn crash_after_send_before_inflight_causes_redelivery() -> anyhow::Result<()> {
     let coord = NoopCoordination {};
     let cfg = BrokerConfig {
         inflight_ttl_secs: 1,
@@ -1351,15 +1514,13 @@ async fn crash_after_send_before_inflight_causes_redelivery() {
     let offset;
 
     {
-        let store = make_rocksdb_store(&db_path).unwrap();
-        let broker = Broker::try_new(store, coord.clone(), cfg.clone())
-            .await
-            .unwrap();
+        let store = make_rocksdb_store(&db_path, false)?;
+        let broker = Broker::try_new(store, coord.clone(), cfg.clone()).await?;
 
-        broker.publish("t", b"x").await.unwrap();
-        let mut c = broker.subscribe("t", "g", 1).await.unwrap();
+        broker.publish("t", b"x").await?;
+        let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
-        let m = c.messages.recv().await.unwrap();
+        let m = c.messages.recv().await.context("receiving message")?;
         offset = m.message.offset;
 
         // NO ACK, NO TIME for inflight batch flush
@@ -1370,82 +1531,87 @@ async fn crash_after_send_before_inflight_causes_redelivery() {
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     {
-        let store = make_rocksdb_store(&db_path).unwrap();
-        let broker = Broker::try_new(store, coord, cfg).await.unwrap();
-        let mut c = broker.subscribe("t", "g", 1).await.unwrap();
+        let store = make_rocksdb_store(&db_path, false)?;
+        let broker = Broker::try_new(store, coord, cfg).await?;
+        let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
-        let redelivered = c.messages.recv().await.unwrap();
+        let redelivered = c.messages.recv().await.context("receiving message")?;
         assert_eq!(redelivered.message.offset, offset);
     }
+    Ok(())
 }
 
 #[tokio::test]
-async fn ack_before_delivery_is_ignored() {
-    let broker = make_test_broker().await;
+async fn ack_before_delivery_is_ignored() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
-    broker.publish("t", b"x").await.unwrap();
+    broker.publish("t", b"x").await?;
 
-    let mut c = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
     // ACK offset 0 before receiving it
-    c.acker.send(AckRequest { offset: 0 }).await.unwrap();
+    c.acker.send(AckRequest { delivery_tag: 0 }).await?;
 
     // Must still be delivered
-    let m = c.messages.recv().await.unwrap();
+    let m = c.messages.recv().await.context("receiving message")?;
     assert_eq!(m.message.offset, 0);
 
     c.acker
         .send(AckRequest {
-            offset: m.delivery_tag,
+            delivery_tag: m.delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn redelivery_does_not_advance_cursor() {
-    let broker = make_test_broker().await;
+async fn redelivery_does_not_advance_cursor() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
-    broker.publish("t", b"a").await.unwrap();
-    broker.publish("t", b"b").await.unwrap();
-    broker.publish("t", b"c").await.unwrap();
-    broker.publish("t", b"d").await.unwrap();
+    broker.publish("t", b"a").await?;
+    broker.publish("t", b"b").await?;
+    broker.publish("t", b"c").await?;
+    broker.publish("t", b"d").await?;
 
-    let mut c = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut c = broker
+        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .await?;
 
-    let m0 = c.messages.recv().await.unwrap(); // don't ack
+    let m0 = c.messages.recv().await.context("receiving message")?; // don't ack
 
     tokio::time::sleep(std::time::Duration::from_secs(4)).await;
 
-    let redelivered = c.messages.recv().await.unwrap();
+    let redelivered = c.messages.recv().await.context("receiving message")?;
     assert_eq!(redelivered.message.offset, m0.message.offset);
 
     // ACK now
     c.acker
         .send(AckRequest {
-            offset: redelivered.delivery_tag,
+            delivery_tag: redelivered.delivery_tag,
         })
-        .await
-        .unwrap();
+        .await?;
 
     // Next message must be offset 1
-    let m1 = c.messages.recv().await.unwrap();
+    let m1 = c.messages.recv().await.context("receiving message")?;
     assert_eq!(m1.message.offset, 1);
+    Ok(())
 }
 
 #[tokio::test]
-async fn prefetch_limits_inflight() {
-    let broker = make_test_broker().await;
+async fn prefetch_limits_inflight() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
     // publish 3 messages
     for b in [b"a", b"b", b"c", b"d", b"e", b"f", b"g"] {
-        broker.publish("t", b).await.unwrap();
+        broker.publish("t", b).await?;
     }
 
-    let mut c = broker.subscribe("t", "g", 1).await.unwrap(); // prefetch = 1
+    let mut c = broker
+        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .await?; // prefetch = 1
 
     // receive first
-    let m0 = c.recv().await.unwrap();
+    let m0 = c.recv().await.context("receiving message")?;
     assert_eq!(m0.message.offset, 0);
 
     // should NOT receive second until ack or expiry
@@ -1469,98 +1635,133 @@ async fn prefetch_limits_inflight() {
     }
 
     assert_eq!(extra, 0, "received {extra} extra messages beyond prefetch");
+    Ok(())
 }
 
 #[tokio::test]
-async fn prefetch_releases_on_ack() {
-    let broker = make_test_broker().await;
+async fn prefetch_releases_on_ack() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
-    broker.publish("t", b"a").await.unwrap();
-    broker.publish("t", b"b").await.unwrap();
-    broker.publish("t", b"c").await.unwrap();
-    broker.publish("t", b"d").await.unwrap();
+    broker.publish("t", b"a").await?;
+    broker.publish("t", b"b").await?;
+    broker.publish("t", b"c").await?;
+    broker.publish("t", b"d").await?;
 
-    let mut c = broker.subscribe("t", "g", 1).await.unwrap();
+    let mut c = broker
+        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .await?;
 
-    let m0 = c.recv().await.unwrap();
+    let m0 = c.recv().await.context("receiving message")?;
     assert_eq!(m0.message.offset, 0);
 
     c.ack(AckRequest {
-        offset: m0.delivery_tag,
+        delivery_tag: m0.delivery_tag,
     })
-    .await
-    .unwrap();
+    .await?;
 
-    let m1 = c.recv().await.unwrap();
+    let m1 = c.recv().await.context("receiving message")?;
     assert_eq!(m1.message.offset, 1);
+    Ok(())
 }
 
 #[tokio::test]
-async fn prefetch_releases_on_expiry() {
+async fn prefetch_releases_on_expiry() -> anyhow::Result<()> {
     let broker = make_test_broker_with_cfg(BrokerConfig {
         inflight_ttl_secs: 1,
         ..Default::default()
     })
-    .await;
+    .await?;
 
-    broker.publish("t", b"a").await.unwrap();
-    broker.publish("t", b"b").await.unwrap();
-    broker.publish("t", b"c").await.unwrap();
-    broker.publish("t", b"d").await.unwrap();
+    let (publisher, _confirmer) = broker.get_publisher("t").await?;
 
-    let mut c = broker.subscribe("t", "g", 1).await.unwrap();
+    publisher.publish(b"a".to_vec()).await?;
+    publisher.publish(b"b".to_vec()).await?;
+    publisher.publish(b"c".to_vec()).await?;
+    publisher.publish(b"d".to_vec()).await?;
 
-    let m0 = c.recv().await.unwrap();
+    let mut c = broker
+        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .await?;
+
+    let m0 = c.recv().await.context("receiving message")?;
     assert_eq!(m0.message.offset, 0);
 
     // don't ack, wait for expiry
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
     // redelivery should come, not offset 1
-    let redelivered = c.recv().await.unwrap();
+    let redelivered = c.recv().await.context("receiving message")?;
     assert_eq!(redelivered.message.offset, 0);
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
     // ack redelivery
     c.ack(AckRequest {
-        offset: redelivered.delivery_tag,
+        delivery_tag: redelivered.delivery_tag,
     })
-    .await
-    .unwrap();
+    .await?;
 
     // now offset 1
-    let m1 = c.recv().await.unwrap();
+    let m1 = c.recv().await.context("receiving message")?;
     assert_eq!(m1.message.offset, 1);
+    Ok(())
 }
 
 #[tokio::test]
-async fn offsets_are_never_reused_after_cleanup() {
-    let broker = make_test_broker().await;
+async fn offsets_are_never_reused_after_cleanup() -> anyhow::Result<()> {
+    let broker = make_test_broker().await?;
 
-    let _o0 = broker.publish("t", b"a").await.unwrap();
-    let o1 = broker.publish("t", b"b").await.unwrap();
+    let _o0 = broker.publish("t", b"a").await?;
+    let o1 = broker.publish("t", b"b").await?;
 
-    let mut c = broker.subscribe("t", "g", 10).await.unwrap();
+    let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
 
-    let m0 = c.recv().await.unwrap();
+    let m0 = c.recv().await.context("receiving message")?;
     c.ack(AckRequest {
-        offset: m0.delivery_tag,
+        delivery_tag: m0.delivery_tag,
     })
-    .await
-    .unwrap();
+    .await?;
 
-    let m1 = c.recv().await.unwrap();
+    let m1 = c.recv().await.context("receiving message")?;
     c.ack(AckRequest {
-        offset: m1.delivery_tag,
+        delivery_tag: m1.delivery_tag,
     })
-    .await
-    .unwrap();
+    .await?;
 
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // force cleanup
-    broker.forced_cleanup(&"t".into(), 0).await.unwrap();
+    broker.forced_cleanup(&"t".into(), 0).await?;
 
-    let o2 = broker.publish("t", b"c").await.unwrap();
+    let o2 = broker.publish("t", b"c").await?;
 
     assert!(o2 > o1, "offset reused after cleanup");
+    Ok(())
+}
+
+#[tokio::test]
+async fn redelivery_has_priority_over_fresh() -> anyhow::Result<()> {
+    let broker = make_test_broker_with_cfg(BrokerConfig {
+        inflight_ttl_secs: 1,
+        ..Default::default()
+    })
+    .await?;
+
+    for ch in [b"a", b"b", b"c"] {
+        broker.publish("t", ch).await?;
+    }
+
+    let mut c = broker
+        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(2))
+        .await?;
+
+    let m0 = c.recv().await.context("receiving message")?; // don't ack 0
+    let _m1 = c.recv().await.context("receiving message")?; // allow prefetch to pull more
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Next delivery must be a redelivery of 0 (priority), not fresh 2
+    let next = c.recv().await.context("receiving message")?;
+    assert_eq!(next.message.offset, m0.message.offset);
+    Ok(())
 }

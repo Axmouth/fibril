@@ -37,6 +37,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
         topic: "t1".into(),
         group: "g1".into(),
         prefetch: 100,
+        auto_ack: true,
     })).await?;
 
     // Publish (require confirm)

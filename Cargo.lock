@@ -333,6 +333,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
+name = "fibril"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "clap",
+ "crossbeam",
+ "dashmap",
+ "fastrand",
+ "futures",
+ "postcard",
+ "rmp-serde",
+ "rocksdb",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -923,28 +945,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "thetube"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "bytes",
- "clap",
- "crossbeam",
- "dashmap",
- "fastrand",
- "futures",
- "postcard",
- "rmp-serde",
- "rocksdb",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]

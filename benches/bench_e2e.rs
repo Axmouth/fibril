@@ -3,22 +3,20 @@ use std::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
-use tokio::task::JoinSet;
-
-use thetube::{broker::AckRequest, storage::make_rocksdb_store};
-use thetube::{broker::coordination::NoopCoordination, storage::Storage};
-use thetube::{
-    broker::{Broker, BrokerConfig, BrokerError, ConsumerHandle},
-    storage::Offset,
+use fibril::broker::coordination::NoopCoordination;
+use fibril::broker::{Broker, BrokerConfig, ConsumerHandle};
+use fibril::{
+    broker::{AckRequest, ConsumerConfig},
+    storage::make_rocksdb_store,
 };
 
 use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug)]
-#[command(name = "thetube")]
+#[command(name = "fibril")]
 pub enum Command {
     Bench(BenchCmd),
 }
@@ -57,6 +55,10 @@ pub struct E2EBench {
     #[arg(long, default_value = "1")]
     pub batch_timeout_ms: u64,
 
+    /// Sync Writes for RocksDB backend
+    #[arg(long, default_value = "false")]
+    pub sync_write: bool,
+
     #[arg(long, default_value = "10000")]
     pub producer_inflight: usize,
 
@@ -67,7 +69,7 @@ pub struct E2EBench {
     pub ack_mode: AckMode,
 }
 
-#[derive(ValueEnum, Clone, Debug)]
+#[derive(ValueEnum, Clone, Debug, PartialEq, Eq)]
 pub enum AckMode {
     Sync,
     Async,
@@ -106,6 +108,12 @@ struct Metrics {
     acked: AtomicU64,
     inflight: AtomicUsize,
     duplicates: AtomicU64,
+
+    start: Instant,
+
+    publish_done_at: AtomicU64, // nanos since start
+    consume_done_at: AtomicU64,
+    ack_done_at: AtomicU64,
 }
 
 impl Metrics {
@@ -117,8 +125,18 @@ impl Metrics {
             acked: AtomicU64::new(0),
             inflight: AtomicUsize::new(0),
             duplicates: AtomicU64::new(0),
+
+            start: Instant::now(),
+            publish_done_at: AtomicU64::new(0),
+            consume_done_at: AtomicU64::new(0),
+            ack_done_at: AtomicU64::new(0),
         }
     }
+}
+
+fn mark_done_once(slot: &AtomicU64, start: Instant) {
+    let elapsed = start.elapsed().as_nanos() as u64;
+    let _ = slot.compare_exchange(0, elapsed, Ordering::Relaxed, Ordering::Relaxed);
 }
 
 async fn producer_task(
@@ -157,9 +175,18 @@ async fn producer_task(
 
         publisher.publish(payload).await.unwrap();
     }
+
+    if metrics.published.load(Ordering::Relaxed) >= start_id + count {
+        mark_done_once(&metrics.publish_done_at, metrics.start);
+    }
 }
 
-async fn consumer_task(mut consumer: ConsumerHandle, ack_mode: AckMode, metrics: Arc<Metrics>) {
+async fn consumer_task(
+    mut consumer: ConsumerHandle,
+    ack_mode: AckMode,
+    metrics: Arc<Metrics>,
+    total: u64,
+) {
     let (ackq_tx, mut ackq_rx) = tokio::sync::mpsc::channel::<u64>(10_000);
 
     // One task that actually sends acks
@@ -167,7 +194,7 @@ async fn consumer_task(mut consumer: ConsumerHandle, ack_mode: AckMode, metrics:
     let metrics2 = metrics.clone();
     tokio::spawn(async move {
         while let Some(off) = ackq_rx.recv().await {
-            let req = AckRequest { offset: off };
+            let req = AckRequest { delivery_tag: off };
             if acker.send(req).await.is_ok() {
                 metrics2.acked.fetch_add(1, Ordering::Relaxed);
             }
@@ -175,15 +202,21 @@ async fn consumer_task(mut consumer: ConsumerHandle, ack_mode: AckMode, metrics:
     });
 
     while let Some(msg) = consumer.messages.recv().await {
-        metrics.consumed.fetch_add(1, Ordering::Relaxed);
+        let c = metrics.consumed.fetch_add(1, Ordering::Relaxed) + 1;
+        if c == total {
+            mark_done_once(&metrics.consume_done_at, metrics.start);
+        }
 
         match ack_mode {
             AckMode::Sync => {
                 let req = AckRequest {
-                    offset: msg.delivery_tag,
+                    delivery_tag: msg.delivery_tag,
                 };
                 let _ = consumer.acker.try_send(req);
-                metrics.acked.fetch_add(1, Ordering::Relaxed);
+                let a = metrics.acked.fetch_add(1, Ordering::Relaxed);
+                if a == total {
+                    mark_done_once(&metrics.ack_done_at, metrics.start);
+                }
             }
             AckMode::Async => {
                 // queue ack; backpressure here is fine
@@ -199,22 +232,28 @@ async fn reporter(
     broker: Arc<Broker<NoopCoordination>>,
     topic: String,
     interval: u64,
+    total: u64,
 ) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
     let upper = broker.debug_upper(&topic, 0).await;
 
     loop {
         ticker.tick().await;
+        let acked = metrics.acked.load(Ordering::Relaxed);
         println!(
             "pub={} conf={} inflight={} cons={} ack={} dup={} upper={}",
             metrics.published.load(Ordering::Relaxed),
             metrics.confirmed.load(Ordering::Relaxed),
             metrics.inflight.load(Ordering::Relaxed),
             metrics.consumed.load(Ordering::Relaxed),
-            metrics.acked.load(Ordering::Relaxed),
+            acked,
             metrics.duplicates.load(Ordering::Relaxed),
             upper
         );
+
+        if acked >= total {
+            break;
+        }
     }
 }
 
@@ -236,7 +275,7 @@ async fn make_broker_with_cfg(cmd: &E2EBench) -> Broker<NoopCoordination> {
     let _ = std::fs::remove_dir_all(&db_path);
     std::fs::create_dir_all(&db_path).unwrap();
 
-    let store = make_rocksdb_store(&db_path).unwrap();
+    let store = make_rocksdb_store(&db_path, cmd.sync_write).unwrap();
     let coord = NoopCoordination {};
 
     Broker::try_new(store, coord, cfg).await.unwrap()
@@ -254,13 +293,18 @@ async fn run_e2e_bench(cmd: E2EBench) {
     // Consumers
     for _ in 0..cmd.consumers {
         let consumer = broker
-            .subscribe(&topic, "bench_group", 100000)
+            .subscribe(
+                &topic,
+                "bench_group",
+                ConsumerConfig::default().with_prefetch_count(8192),
+            )
             .await
             .unwrap();
         tokio::spawn(consumer_task(
             consumer,
             cmd.ack_mode.clone(),
             metrics.clone(),
+            cmd.messages,
         ));
     }
 
@@ -280,21 +324,48 @@ async fn run_e2e_bench(cmd: E2EBench) {
     }
 
     // Reporter
-    tokio::spawn(reporter(
+    let handle = tokio::spawn(reporter(
         metrics.clone(),
         broker.clone(),
         topic.clone(),
         cmd.report_interval_secs,
+        cmd.messages
     ));
 
     // Wait until done
     while metrics.acked.load(Ordering::Relaxed) < cmd.messages {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1001)).await;
+    }
+
+    handle.await.unwrap();
+
+    let total = cmd.messages as f64;
+
+    let pub_ns = metrics.publish_done_at.load(Ordering::Relaxed);
+    let con_ns = metrics.consume_done_at.load(Ordering::Relaxed);
+    let ack_ns = metrics.ack_done_at.load(Ordering::Relaxed);
+
+    println!();
+    println!("=== FINAL THROUGHPUT ===");
+
+    if pub_ns > 0 {
+        let secs = pub_ns as f64 / 1e9;
+        println!("Published: {:.0} msg/s", total / secs);
+    }
+
+    if con_ns > 0 {
+        let secs = con_ns as f64 / 1e9;
+        println!("Consumed:  {:.0} msg/s", total / secs);
+    }
+
+    if ack_ns > 0 {
+        let secs = ack_ns as f64 / 1e9;
+        println!("Acked:     {:.0} msg/s", total / secs);
     }
 
     broker.flush_storage().await.unwrap();
-
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let partition = 0;
+    broker.forced_cleanup(&topic, partition).await.unwrap();
 
     broker_clone.dump_meta_keys().await;
 

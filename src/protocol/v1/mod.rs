@@ -70,6 +70,7 @@ pub struct Subscribe {
     pub topic: String,
     pub group: String,
     pub prefetch: u32,
+    pub auto_ack: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

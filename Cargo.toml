@@ -1,5 +1,5 @@
 [package]
-name = "thetube"
+name = "fibril"
 version = "0.1.0"
 edition = "2024"
 

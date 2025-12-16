@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use thetube::{
+use fibril::{
     broker::{Broker, BrokerConfig, coordination::NoopCoordination},
     storage::make_rocksdb_store,
 };
@@ -30,9 +30,13 @@ struct Args {
     #[arg(long, default_value = "1")]
     batch_timeout_ms: u64,
 
-    /// Path for RocksDB backend
+    /// Path Writes for RocksDB backend
     #[arg(long, default_value = "test_data/bench_data")]
     db_path: String,
+
+    /// Sync Writes for RocksDB backend
+    #[arg(long, default_value = "false")]
+    pub sync_write: bool,
 }
 
 #[tokio::main]
@@ -44,7 +48,7 @@ async fn main() {
 
     // RocksDB setup
     std::fs::create_dir_all(&args.db_path).unwrap();
-    let storage = make_rocksdb_store(&args.db_path).unwrap();
+    let storage = make_rocksdb_store(&args.db_path, args.sync_write).unwrap();
 
     let broker = Arc::new(Broker::try_new(storage, NoopCoordination {}, cfg).await.unwrap());
 

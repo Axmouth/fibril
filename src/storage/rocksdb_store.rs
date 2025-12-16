@@ -1,20 +1,62 @@
-use crate::storage::*;
+use crate::{storage::*, util::unix_millis};
 use async_trait::async_trait;
 use rocksdb::{
-    ColumnFamilyDescriptor, DBWithThreadMode, IteratorMode, MultiThreaded, Options, WriteBatch,
+    BoundColumnFamily, ColumnFamilyDescriptor, DBWithThreadMode, IteratorMode, MultiThreaded,
+    Options, WriteBatch, WriteOptions,
 };
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct RocksStorage {
     db: Arc<DBWithThreadMode<MultiThreaded>>,
+    sync_write: bool,
 }
 
 impl RocksStorage {
-    pub fn open(path: &str) -> Result<Self, StorageError> {
+    const META_NEXT_EXPIRY_TS: &'static [u8] = b"NEXT_EXPIRY_TS"; // global hint (UnixMillis)
+
+    fn write_opts(&self) -> WriteOptions {
+        let mut write_opts = WriteOptions::default();
+        write_opts.set_sync(self.sync_write); // fsync WAL before returning
+        write_opts
+    }
+
+    pub fn open(path: &str, sync_write: bool) -> Result<Self, StorageError> {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+
+        let bg_jobs = match cpus {
+            0..=2 => 2,
+            3..=4 => 4,
+            5..=8 => 6,
+            _ => 8,
+        };
+
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+        // TODO: based on num CPUs?
+        opts.set_max_background_jobs(bg_jobs);
+        opts.set_enable_pipelined_write(true);
+        // TODO: Configurable?
+        opts.set_write_buffer_size(128 * 1024 * 1024); // 64MB
+        opts.set_max_write_buffer_number(3);
+        opts.set_min_write_buffer_number_to_merge(2);
+
+        let mut block_opts = rocksdb::BlockBasedOptions::default();
+        block_opts.set_bloom_filter(10.0, false);
+        block_opts.set_cache_index_and_filter_blocks(true);
+        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+
+        opts.set_block_based_table_factory(&block_opts);
+
+        // If key layout is stable:
+        // TODO: Might be doable if we make a map from names to stable length IDs here.
+        // const PREFIX_LEN: usize = topic.len() + 1 + 4, // topic + 0 + partition;
+        // opts.set_prefix_extractor(
+        //     rocksdb::SliceTransform::create_fixed_prefix(PREFIX_LEN)
+        // );
 
         let cfs = vec![
             ColumnFamilyDescriptor::new("messages", Options::default()),
@@ -25,7 +67,7 @@ impl RocksStorage {
         ];
 
         let db = DBWithThreadMode::open_cf_descriptors(&opts, path, cfs)?;
-        let storage = Self { db: Arc::new(db) };
+        let storage = Self { db: Arc::new(db), sync_write };
 
         Ok(storage)
     }
@@ -57,6 +99,62 @@ impl RocksStorage {
         v.push(0);
         v.extend_from_slice(&offset.to_be_bytes());
         v
+    }
+
+    #[inline]
+    fn cf(&self, name: &'static str) -> Result<Arc<BoundColumnFamily<'_>>, StorageError> {
+        self.db
+            .cf_handle(name)
+            .ok_or(StorageError::MissingColumnFamily(name))
+    }
+
+    #[inline]
+    fn be_u64(bytes: &[u8], ctx: &str) -> Result<u64, StorageError> {
+        let arr: [u8; 8] = bytes.try_into().map_err(|_| {
+            StorageError::KeyDecode(format!("{ctx}: expected 8 bytes, got {}", bytes.len()))
+        })?;
+        Ok(u64::from_be_bytes(arr))
+    }
+
+    #[inline]
+    fn be_u32(bytes: &[u8], ctx: &str) -> Result<u32, StorageError> {
+        let arr: [u8; 4] = bytes.try_into().map_err(|_| {
+            StorageError::KeyDecode(format!("{ctx}: expected 4 bytes, got {}", bytes.len()))
+        })?;
+        Ok(u32::from_be_bytes(arr))
+    }
+    #[inline]
+    async fn meta_get_u64(&self, key: &[u8]) -> Result<Option<u64>, StorageError> {
+        let meta_cf = self.cf("meta")?;
+        match self.db.get_cf(&meta_cf, key)? {
+            Some(v) => Ok(Some(Self::be_u64(&v, "meta u64")?)),
+            None => Ok(None),
+        }
+    }
+
+    #[inline]
+    fn meta_put_u64(
+        batch: &mut WriteBatch,
+        meta_cf: &Arc<BoundColumnFamily<'_>>,
+        key: &[u8],
+        v: u64,
+    ) {
+        batch.put_cf(meta_cf, key, v.to_be_bytes());
+    }
+
+    /// Best-effort "earliest deadline wins" update.
+    /// Only moves the hint earlier (or sets it if missing).
+    async fn maybe_advance_next_expiry_hint_batch(
+        &self,
+        batch: &mut WriteBatch,
+        meta_cf: &Arc<BoundColumnFamily<'_>>,
+        new_deadline: u64,
+    ) -> Result<(), StorageError> {
+        let cur = self.meta_get_u64(Self::META_NEXT_EXPIRY_TS).await?;
+        if cur.is_none_or(|c| new_deadline < c) {
+            Self::meta_put_u64(batch, meta_cf, Self::META_NEXT_EXPIRY_TS, new_deadline);
+        }
+        Ok(())
     }
 }
 
@@ -92,7 +190,7 @@ impl Storage for RocksStorage {
         let mut batch = WriteBatch::default();
         batch.put_cf(&messages_cf, msg_key, payload);
         batch.put_cf(&meta_cf, key.as_bytes(), (offset + 1).to_be_bytes());
-        self.db.write(batch)?;
+        self.db.write_opt(batch, &self.write_opts())?;
 
         Ok(offset)
     }
@@ -107,19 +205,18 @@ impl Storage for RocksStorage {
             return Ok(Vec::new());
         }
 
-        let meta_cf = self.db.cf_handle("meta").unwrap();
-        let messages_cf = self.db.cf_handle("messages").unwrap();
+        let meta_cf = self.cf("meta")?;
+        let messages_cf = self.cf("messages")?;
 
         // Read next offset
         let next_key = Self::next_offset_key(topic, partition);
         let next = self.db.get_cf(&meta_cf, next_key.as_bytes())?;
 
         let mut offset = match next {
-            Some(v) => u64::from_be_bytes(v.try_into().unwrap()),
+            Some(v) => Self::be_u64(&v, "next_offset")?,
             None => 0,
         };
 
-        let start_offset = offset;
         let mut batch = WriteBatch::default();
         let mut out = Vec::with_capacity(payloads.len());
 
@@ -133,7 +230,7 @@ impl Storage for RocksStorage {
         // Update next_offset
         batch.put_cf(&meta_cf, next_key.as_bytes(), offset.to_be_bytes());
 
-        self.db.write(batch)?;
+        self.db.write_opt(batch, &self.write_opts())?;
 
         Ok(out)
     }
@@ -144,7 +241,7 @@ impl Storage for RocksStorage {
         partition: Partition,
         group: &Group,
     ) -> Result<(), StorageError> {
-        let groups_cf = self.db.cf_handle("groups").unwrap();
+        let groups_cf = self.cf("groups")?;
 
         let mut key = Vec::new();
         key.extend_from_slice(topic.as_bytes());
@@ -178,10 +275,7 @@ impl Storage for RocksStorage {
             topic: topic.clone(),
             partition,
             offset,
-            timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            timestamp: unix_millis(),
             payload: val.to_vec(),
         })
     }
@@ -268,10 +362,7 @@ impl Storage for RocksStorage {
                     topic: topic.clone(),
                     partition,
                     offset: off,
-                    timestamp: SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
+                    timestamp: unix_millis(),
                     payload: value.to_vec(),
                 },
                 delivery_tag: off,
@@ -406,10 +497,7 @@ impl Storage for RocksStorage {
                     topic: topic.clone(),
                     partition,
                     offset: off,
-                    timestamp: SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
+                    timestamp: unix_millis(),
                     payload: value.to_vec(),
                 },
                 delivery_tag: off,
@@ -426,26 +514,19 @@ impl Storage for RocksStorage {
         partition: Partition,
         group: &Group,
         offset: Offset,
-        deadline_ts: u64,
+        deadline_ts: UnixMillis,
     ) -> Result<(), StorageError> {
-        let inflight_cf = self
-            .db
-            .cf_handle("inflight")
-            .ok_or(StorageError::MissingColumnFamily("inflight"))?;
+        let inflight_cf = self.cf("inflight")?;
+        let meta_cf = self.cf("meta")?;
+
         let key = Self::encode_group_key(topic, partition, group, offset);
 
-        let acked_cf = self
-            .db
-            .cf_handle("acked")
-            .ok_or(StorageError::MissingColumnFamily("acked"))?;
-        debug_assert!(
-            self.db.get_cf(&acked_cf, &key)?.is_none(),
-            "mark_inflight on ACKed message {}",
-            offset
-        );
+        let mut batch = WriteBatch::default();
+        batch.put_cf(&inflight_cf, key, deadline_ts.to_be_bytes());
 
-        self.db
-            .put_cf(&inflight_cf, key, deadline_ts.to_be_bytes())?;
+        self.maybe_advance_next_expiry_hint_batch(&mut batch, &meta_cf, deadline_ts)
+            .await?;
+        self.db.write_opt(batch, &self.write_opts())?;
         Ok(())
     }
 
@@ -454,25 +535,29 @@ impl Storage for RocksStorage {
         topic: &Topic,
         partition: Partition,
         group: &Group,
-        entries: &[(Offset, u64)],
+        entries: &[(Offset, UnixMillis)],
     ) -> Result<(), StorageError> {
         if entries.is_empty() {
             return Ok(());
         }
 
-        let inflight_cf = self
-            .db
-            .cf_handle("inflight")
-            .ok_or(StorageError::MissingColumnFamily("inflight"))?;
+        let inflight_cf = self.cf("inflight")?;
+        let meta_cf = self.cf("meta")?;
 
         let mut batch = WriteBatch::default();
+
+        // Track min deadline in this batch
+        let mut min_deadline = u64::MAX;
 
         for (offset, deadline) in entries {
             let key = Self::encode_group_key(topic, partition, group, *offset);
             batch.put_cf(&inflight_cf, key, deadline.to_be_bytes());
+            min_deadline = min_deadline.min(*deadline);
         }
 
-        self.db.write(batch)?;
+        self.maybe_advance_next_expiry_hint_batch(&mut batch, &meta_cf, min_deadline)
+            .await?;
+        self.db.write_opt(batch, &self.write_opts())?;
         Ok(())
     }
 
@@ -511,7 +596,7 @@ impl Storage for RocksStorage {
         let mut batch = WriteBatch::default();
         batch.delete_cf(&inflight_cf, &key);
         batch.put_cf(&acked_cf, &key, []);
-        self.db.write(batch)?;
+        self.db.write_opt(batch, &self.write_opts())?;
 
         Ok(())
     }
@@ -555,19 +640,13 @@ impl Storage for RocksStorage {
             batch.put_cf(&acked_cf, &key, []);
         }
 
-        self.db.write(batch)?;
+        self.db.write_opt(batch, &self.write_opts())?;
         Ok(())
     }
 
     async fn list_expired(&self, now_ts: u64) -> Result<Vec<DeliverableMessage>, StorageError> {
-        let inflight_cf = self
-            .db
-            .cf_handle("inflight")
-            .ok_or(StorageError::MissingColumnFamily("inflight"))?;
-        let messages_cf = self
-            .db
-            .cf_handle("messages")
-            .ok_or(StorageError::MissingColumnFamily("messages"))?;
+        let inflight_cf = self.cf("inflight")?;
+        let messages_cf = self.cf("messages")?;
 
         let mut out = Vec::new();
 
@@ -594,7 +673,6 @@ impl Storage for RocksStorage {
                     "[WARN] stale inflight entry: topic={} partition={} group={} offset={} (message missing)",
                     topic, partition, group, offset
                 );
-                let inflight_cf = self.db.cf_handle("inflight").unwrap();
                 self.db.delete_cf(&inflight_cf, &key)?;
                 continue;
             };
@@ -604,10 +682,7 @@ impl Storage for RocksStorage {
                     topic: topic.clone(),
                     partition,
                     offset,
-                    timestamp: SystemTime::now()
-                        .duration_since(SystemTime::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs(),
+                    timestamp: unix_millis(),
                     payload: msg_val.to_vec(),
                 },
                 delivery_tag: offset,
@@ -624,9 +699,9 @@ impl Storage for RocksStorage {
         partition: Partition,
         group: &Group,
     ) -> Result<Offset, StorageError> {
-        let messages_cf = self.db.cf_handle("messages").unwrap();
-        let acked_cf = self.db.cf_handle("acked").unwrap();
-        let inflight_cf = self.db.cf_handle("inflight").unwrap();
+        let messages_cf = self.cf("messages")?;
+        let acked_cf = self.cf("acked")?;
+        let inflight_cf = self.cf("inflight")?;
 
         // prefix: topic + 0x00 + partition bytes
         let mut prefix = Vec::new();
@@ -646,7 +721,7 @@ impl Storage for RocksStorage {
                 break;
             }
 
-            let offset = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+            let offset = Self::be_u64(&key[key.len() - 8..], "message key offset")?;
 
             let inflight_key = Self::encode_group_key(topic, partition, group, offset);
             if self.db.get_cf(&inflight_cf, &inflight_key)?.is_some() {
@@ -661,14 +736,13 @@ impl Storage for RocksStorage {
             return Ok(offset);
         }
 
-        // No unacked messages remain → everything is acked
+        // No unacked messages remain -> everything is acked
         // Need to compute next_offset from meta CF
-        let meta_cf = self.db.cf_handle("meta").unwrap();
+        let meta_cf = self.cf("meta")?;
         let next_key = Self::next_offset_key(topic, partition);
-
         let next = self.db.get_cf(&meta_cf, next_key.as_bytes())?;
         let next_offset = match next {
-            Some(v) => u64::from_be_bytes(v.try_into().unwrap()),
+            Some(v) => Self::be_u64(&v, "next_offset")?,
             None => 0,
         };
 
@@ -676,10 +750,10 @@ impl Storage for RocksStorage {
     }
 
     async fn cleanup_topic(&self, topic: &Topic, partition: Partition) -> Result<(), StorageError> {
-        let messages_cf = self.db.cf_handle("messages").unwrap();
+        let messages_cf = self.cf("messages")?;
 
         // Find all groups for this topic/partition
-        let groups_cf = self.db.cf_handle("groups").unwrap();
+        let groups_cf = self.cf("groups")?;
         let mut groups = Vec::new();
 
         // Build prefix for this topic + partition
@@ -759,6 +833,11 @@ impl Storage for RocksStorage {
         // Drop and re-create CF
         self.db.drop_cf("inflight")?;
         self.db.create_cf("inflight", &Options::default())?;
+
+        if let Ok(meta_cf) = self.cf("meta") {
+            self.db.delete_cf(&meta_cf, Self::META_NEXT_EXPIRY_TS)?;
+        }
+
         Ok(())
     }
 
@@ -800,11 +879,11 @@ impl Storage for RocksStorage {
     }
 
     async fn dump_meta_keys(&self) {
-        let meta_cf = self.db.cf_handle("meta").unwrap(); // however you expose this
-        let iter = self.db.iterator_cf(&meta_cf, IteratorMode::Start);
-        for pair in iter {
-            let (key, _) = pair.unwrap();
-            eprintln!("META KEY = {:?}", String::from_utf8_lossy(&key));
+        if let Ok(meta_cf) = self.cf("meta") {
+            let iter = self.db.iterator_cf(&meta_cf, IteratorMode::Start);
+            for (key, _) in iter.flatten() {
+                eprintln!("META KEY = {:?}", String::from_utf8_lossy(&key));
+            }
         }
     }
 
@@ -915,7 +994,7 @@ impl Storage for RocksStorage {
             let topic = String::from_utf8(key[..zero].to_vec())
                 .map_err(|_| StorageError::KeyDecode("invalid topic".into()))?;
 
-            let partition = u32::from_be_bytes(key[zero + 1..zero + 5].try_into().unwrap());
+            let partition = Self::be_u32(&key[zero + 1..zero + 5], "partition")?;
 
             let group = String::from_utf8(key[zero + 5..].to_vec())
                 .map_err(|_| StorageError::KeyDecode("invalid group".into()))?;
@@ -932,8 +1011,8 @@ impl Storage for RocksStorage {
         partition: Partition,
         group: &Group,
     ) -> Result<Offset, StorageError> {
-        let messages_cf = self.db.cf_handle("messages").unwrap();
-        let acked_cf = self.db.cf_handle("acked").unwrap();
+        let messages_cf = self.cf("messages")?;
+        let acked_cf = self.cf("acked")?;
 
         let mut prefix = Vec::new();
         prefix.extend_from_slice(topic.as_bytes());
@@ -951,7 +1030,7 @@ impl Storage for RocksStorage {
                 break;
             }
 
-            let offset = u64::from_be_bytes(key[key.len() - 8..].try_into().unwrap());
+            let offset = RocksStorage::be_u64(&key[key.len() - 8..], "offset")?;
             let ack_key = Self::encode_group_key(topic, partition, group, offset);
 
             if self.db.get_cf(&acked_cf, &ack_key)?.is_some() {
@@ -963,11 +1042,11 @@ impl Storage for RocksStorage {
         }
 
         // everything acked => return next_offset
-        let meta_cf = self.db.cf_handle("meta").unwrap();
+        let meta_cf = self.cf("meta")?;
         let next_key = Self::next_offset_key(topic, partition);
         let next = self.db.get_cf(&meta_cf, next_key.as_bytes())?;
         Ok(match next {
-            Some(v) => u64::from_be_bytes(v.try_into().unwrap()),
+            Some(v) => Self::be_u64(&v, "next")?,
             None => 0,
         })
     }
@@ -975,6 +1054,37 @@ impl Storage for RocksStorage {
     async fn flush(&self) -> Result<(), StorageError> {
         self.db.flush()?;
         Ok(())
+    }
+
+    async fn next_expiry_hint(&self) -> Result<Option<u64>, StorageError> {
+        self.meta_get_u64(Self::META_NEXT_EXPIRY_TS).await
+    }
+
+    async fn recompute_and_store_next_expiry_hint(&self) -> Result<Option<u64>, StorageError> {
+        let inflight_cf = self.cf("inflight")?;
+        let meta_cf = self.cf("meta")?;
+
+        let mut min_deadline: Option<u64> = None;
+
+        let iter = self.db.iterator_cf(&inflight_cf, IteratorMode::Start);
+        for pair in iter {
+            let (_key, value) = pair?;
+            let deadline = Self::be_u64(&value, "inflight deadline")?;
+            min_deadline = Some(match min_deadline {
+                None => deadline,
+                Some(cur) => cur.min(deadline),
+            });
+        }
+
+        let mut batch = WriteBatch::default();
+        if let Some(d) = min_deadline {
+            Self::meta_put_u64(&mut batch, &meta_cf, Self::META_NEXT_EXPIRY_TS, d);
+        } else {
+            // No inflight → remove hint (or set to 0 if you prefer)
+            batch.delete_cf(&meta_cf, Self::META_NEXT_EXPIRY_TS);
+        }
+        self.db.write_opt(batch, &self.write_opts())?;
+        Ok(min_deadline)
     }
 
     // TODO: Better timestamp support
@@ -1008,29 +1118,51 @@ impl Storage for RocksStorage {
     // Stub: no action needed now, but design broker around explicit "state applies".
 }
 
-fn decode_inflight_key(key: &[u8]) -> Result<(Topic, Partition, Group, Offset), anyhow::Error> {
+fn decode_inflight_key(key: &[u8]) -> Result<(Topic, Partition, Group, Offset), StorageError> {
     // topic: up to first 0
-    let mut i = 0;
-    while i < key.len() && key[i] != 0 {
-        i += 1;
-    }
-    let topic = String::from_utf8(key[..i].to_vec())?;
-    i += 1; // skip delimiter
+    let Some(z1) = key.iter().position(|&b| b == 0) else {
+        return Err(StorageError::KeyDecode(
+            "inflight key missing topic terminator".into(),
+        ));
+    };
+    let topic = String::from_utf8(key[..z1].to_vec())
+        .map_err(|_| StorageError::KeyDecode("invalid topic utf8".into()))?;
 
+    // skip delimiter
+    let p_start = z1 + 1;
     // partition: 4 bytes
-    let partition = Partition::from_be_bytes(key[i..i + 4].try_into()?);
-    i += 4;
+    let p_end = p_start + 4;
+    if p_end > key.len() {
+        return Err(StorageError::KeyDecode(
+            "inflight key missing partition".into(),
+        ));
+    }
+    debug_assert!(p_start < p_end);
+    let partition = RocksStorage::be_u32(&key[p_start..p_end], "partition")?;
 
     // group: up to next 0
-    let mut j = i;
-    while j < key.len() && key[j] != 0 {
-        j += 1;
-    }
-    let group = String::from_utf8(key[i..j].to_vec())?;
-    j += 1;
+    let g_start = p_end;
+    let Some(z2_rel) = key[g_start..].iter().position(|&b| b == 0) else {
+        return Err(StorageError::KeyDecode(
+            "inflight key missing group terminator".into(),
+        ));
+    };
+    let z2 = g_start + z2_rel;
 
+    debug_assert!(g_start < z2);
+    let group = String::from_utf8(key[g_start..z2].to_vec())
+        .map_err(|_| StorageError::KeyDecode("invalid group utf8".into()))?;
+
+    let o_start = z2 + 1;
     // offset: last 8 bytes
-    let offset = Offset::from_be_bytes(key[j..j + 8].try_into()?);
+    let o_end = o_start + 8;
+    if o_end > key.len() {
+        return Err(StorageError::KeyDecode(
+            "inflight key missing offset".into(),
+        ));
+    }
+    debug_assert!(o_start < o_end);
+    let offset = RocksStorage::be_u64(&key[o_start..o_end], "offset")?;
 
     Ok((topic, partition, group, offset))
 }
