@@ -1,17 +1,15 @@
 [package]
-name = "fibril"
+name = "fibril-tui-example"
 version = "0.1.0"
 edition = "2024"
-
-[[bin]]
-name = "fibril-server"
-path = "bin/server.rs"
 
 [dependencies]
 fibril-broker = { path = "../broker" }
 fibril-protocol = { path = "../protocol" }
 fibril-storage = { path = "../storage" }
 fibril-util = { path = "../util" }
+ratatui = "0.29"
+crossterm = "0.29"
 anyhow = "1.0"
 async-trait = "0.1"
 bytes = "1"

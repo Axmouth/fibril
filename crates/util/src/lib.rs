@@ -16,7 +16,7 @@ async fn sleep_until(ts_millis: u64) {
     }
 }
 
-fn deadline_instant(ts_millis: u64) -> Option<tokio::time::Instant> {
+pub fn deadline_instant(ts_millis: u64) -> Option<tokio::time::Instant> {
     let now = unix_millis();
     ts_millis
         .checked_sub(now)

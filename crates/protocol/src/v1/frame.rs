@@ -11,6 +11,7 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
 pub struct ProtoCodec;
 
 impl Decoder for ProtoCodec {

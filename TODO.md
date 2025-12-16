@@ -1,6 +1,10 @@
+cleanups per crate deps?
+
 stats
 
 config
+
+tracing (no more prints..)
 
 better error handling(return loud errors when failing to publish)
 
@@ -15,8 +19,6 @@ Instead of inferring:
 store next_offset durably per (topic, group)
 advance it only after mark_inflight_batch succeeds
 on restart, read it directly
-
-tracing (no more prints..)
 
 auth
 

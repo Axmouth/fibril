@@ -64,7 +64,9 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
     // ---- Writer task -------------------------------------------------------
     let writer_task = tokio::spawn(async move {
         while let Some(frame) = rx.recv().await {
-            if writer.send(frame).await.is_err() {
+            println!("Writing Frame to tcp socket.. code={}", frame.opcode);
+            if let Err(err) = writer.send(frame).await {
+                eprintln!("Error writing to tcp socket : {err}");
                 break;
             }
         }
@@ -186,13 +188,15 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                             payload: msg.message.payload.clone(),
                         };
 
+                        println!("Sending Deliver");
+
                         // 1. Try to write to socket
-                        if tx_clone
+                        if let Err(err) = tx_clone
                             .send(encode(Op::Deliver, 0, &deliver))
                             .await
-                            .is_err()
                         {
-                            // Socket dead → do NOT auto-ack
+                            // Socket dead -> do NOT auto-ack
+                            eprintln!("Failed to send to socket writer : {err}");
                             break;
                         }
 
