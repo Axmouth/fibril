@@ -16,7 +16,7 @@ use ratatui::{
     style::Color,
     widgets::{Block, Borders, Paragraph},
 };
-use std::io::stdout;
+use std::{collections::HashMap, io::stdout};
 use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
@@ -43,11 +43,7 @@ struct Node {
     y: u16,
 }
 
-struct Link {
-    from: usize,
-    to: usize,
-}
-
+#[derive(Debug, Clone)]
 struct InFlight {
     from: usize,
     to: usize,
@@ -59,11 +55,21 @@ struct App {
     pubs: Vec<Node>,
     subs: Vec<Node>,
     broker: Node,
-    links: Vec<Link>,
     inflight: Vec<InFlight>,
+    path_cache: HashMap<(usize, usize), Vec<(u16, u16)>>,
 }
 
 static REQ: AtomicU64 = AtomicU64::new(1);
+
+fn get_path<'a>(app: &'a mut App, from: &Node, to: &Node) -> &'a [(u16, u16)] {
+    app.path_cache
+        .entry((from.id, to.id))
+        .or_insert_with(|| route_path(from, to))
+}
+
+fn invalidate_paths(app: &mut App) {
+    app.path_cache.clear();
+}
 
 fn next_req_id() -> u64 {
     REQ.fetch_add(1, Ordering::Relaxed)
@@ -103,8 +109,6 @@ fn init_app() -> App {
         })
         .collect();
 
-    let mut links = Vec::new();
-
     let broker = Node {
         id: 50,
         label: "BROKER".into(),
@@ -112,157 +116,130 @@ fn init_app() -> App {
         y: 8,
     };
 
-    // pubs -> broker
-    for p in &pubs {
-        links.push(Link {
-            from: (p as &Node).id,
-            to: broker.id,
-        });
-    }
-
-    // broker -> subs
-    for s in &subs {
-        links.push(Link {
-            from: broker.id,
-            to: (s as &Node).id,
-        });
-    }
-
     App {
         pubs,
         subs,
         broker,
-        links,
         inflight: Vec::new(),
+        path_cache: HashMap::new(),
     }
 }
 
-fn find_node(app: &App, id: usize) -> Option<&Node> {
+fn find_node(app: &App, id: usize) -> Option<Node> {
     app.pubs
         .iter()
         .chain(app.subs.iter())
         .chain(std::iter::once(&app.broker))
         .find(|n| n.id == id)
-}
-
-fn node_center(n: &Node) -> (f32, f32) {
-    (n.x as f32 + 6.0, n.y as f32 + 1.5)
+        .cloned()
 }
 
 fn node_rect(n: &Node) -> Rect {
     Rect::new(n.x, n.y, 12, 3)
 }
 
-fn is_inside_any_node(app: &App, x: u16, y: u16) -> bool {
-    app.pubs
-        .iter()
-        .chain(app.subs.iter())
-        .chain(std::iter::once(&app.broker))
-        .any(|n| {
-            let r = node_rect(n);
-            x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
-        })
-}
-
 fn out_port(n: &Node) -> (u16, u16) {
-    (n.x + 12, n.y + 1) // right middle
+    (n.x + 12 + 1, n.y + 1)
 }
-
 fn in_port(n: &Node) -> (u16, u16) {
-    (n.x, n.y + 1) // left middle
+    (n.x.saturating_sub(1), n.y + 1)
 }
 
-fn clipped_endpoints(from: &Node, to: &Node) -> ((f32, f32), (f32, f32)) {
-    let (fx, fy) = node_center(from);
-    let (tx, ty) = node_center(to);
+fn route_path(from: &Node, to: &Node) -> Vec<(u16, u16)> {
+    let (sx, sy) = out_port(from);
+    let (ex, ey) = in_port(to);
+    let mid_x = (sx + ex) / 2;
 
-    let dx = tx - fx;
-    let dy = ty - fy;
-    let len = (dx * dx + dy * dy).sqrt();
-
-    // how far from center to edge of node
-    let margin = 7.0;
-
-    let ux = dx / len;
-    let uy = dy / len;
-
-    (
-        (fx + ux * margin, fy + uy * margin),
-        (tx - ux * margin, ty - uy * margin),
-    )
-}
-
-fn draw_link(f: &mut ratatui::Frame, app: &App, link: &Link) {
-    let (from, to) = match (find_node(app, link.from), find_node(app, link.to)) {
-        (Some(f), Some(t)) => (f, t),
-        _ => return,
-    };
-
-    let steps = 20; // higher = smoother line
-
-    for i in 0..=steps {
-        let t = i as f32 / steps as f32;
-        let x = from.x as f32 + (to.x as f32 - from.x as f32) * t;
-        let y = from.y as f32 + (to.y as f32 - from.y as f32) * t;
-
-        let rect = Rect::new(x as u16 + 5, y as u16 + 1, 1, 1);
-
-        let dot = Paragraph::new("·").style(ratatui::style::Style::default().fg(Color::DarkGray));
-
-        f.render_widget(dot, rect);
-    }
+    vec![(sx, sy), (mid_x, sy), (mid_x, ey), (ex, ey)]
 }
 
 fn draw_hline(f: &mut ratatui::Frame, app: &App, x1: u16, x2: u16, y: u16, color: Color) {
-    let (a, b) = if x1 <= x2 { (x1, x2) } else { (x2, x1) };
+    let (a, b, glyph) = if x1 <= x2 {
+        (x1, x2, "→")
+    } else {
+        (x2, x1, "←")
+    };
+
     for x in a..=b {
         if is_near_any_node(app, x, y, 1) {
             continue;
         }
         f.render_widget(
-            Paragraph::new("·").style(ratatui::style::Style::default().fg(color)),
+            Paragraph::new(glyph).style(ratatui::style::Style::default().fg(color)),
             Rect::new(x, y, 1, 1),
         );
     }
 }
 
 fn draw_vline(f: &mut ratatui::Frame, app: &App, y1: u16, y2: u16, x: u16, color: Color) {
-    let (a, b) = if y1 <= y2 { (y1, y2) } else { (y2, y1) };
+    let (a, b, glyph) = if y1 <= y2 {
+        (y1, y2, "↓")
+    } else {
+        (y2, y1, "↑")
+    };
+
     for y in a..=b {
         if is_near_any_node(app, x, y, 1) {
             continue;
         }
         f.render_widget(
-            Paragraph::new("·").style(ratatui::style::Style::default().fg(color)),
+            Paragraph::new(glyph).style(ratatui::style::Style::default().fg(color)),
             Rect::new(x, y, 1, 1),
         );
     }
 }
 
-fn draw_path(f: &mut ratatui::Frame, app: &App, from: &Node, to: &Node, color: Color) {
-    let ((sx, sy), (ex, ey), mid_x) = routed_path(from, to);
+fn draw_path(f: &mut ratatui::Frame, app: &mut App, from: &Node, to: &Node, color: Color) {
+    let path = get_path(app, from, to).to_vec();
 
-    draw_hline(f, app, sx, mid_x, sy, color);
+    for seg in path.windows(2) {
+        let (x1, y1) = seg[0];
+        let (x2, y2) = seg[1];
 
-    // Corner dot at (mid_x, sy)
-    if !is_inside_any_node(app, mid_x, sy) {
-        f.render_widget(
-            Paragraph::new("·").style(ratatui::style::Style::default().fg(color)),
-            Rect::new(mid_x, sy, 1, 1),
-        );
+        if x1 == x2 {
+            draw_vline(f, app, y1, y2, x1, color);
+        } else {
+            draw_hline(f, app, x1, x2, y1, color);
+        }
+    }
+}
+
+fn interpolate_along_path(path: &[(u16, u16)], t: f32) -> (u16, u16) {
+    let mut segments = Vec::new();
+    let mut total = 0.0;
+
+    for w in path.windows(2) {
+        let dx = w[1].0.abs_diff(w[0].0) as f32;
+        let dy = w[1].1.abs_diff(w[0].1) as f32;
+        let len = dx + dy; // Manhattan length
+        segments.push((w[0], w[1], len));
+        total += len;
     }
 
-    draw_vline(f, app, sy, ey, mid_x, color);
+    let mut d = t.clamp(0.0, 1.0) * total;
 
-    // Corner dot at (mid_x, ey)
-    if !is_inside_any_node(app, mid_x, ey) {
-        f.render_widget(
-            Paragraph::new("·").style(ratatui::style::Style::default().fg(color)),
-            Rect::new(mid_x, ey, 1, 1),
-        );
+    for (from, to, len) in segments {
+        if d <= len {
+            if from.0 == to.0 {
+                let y = if to.1 > from.1 {
+                    from.1 + d as u16
+                } else {
+                    from.1 - d as u16
+                };
+                return (from.0, y);
+            } else {
+                let x = if to.0 > from.0 {
+                    from.0 + d as u16
+                } else {
+                    from.0 - d as u16
+                };
+                return (x, from.1);
+            }
+        }
+        d -= len;
     }
 
-    draw_hline(f, app, mid_x, ex, ey, color);
+    *path.last().unwrap()
 }
 
 fn is_near_any_node(app: &App, x: u16, y: u16, pad: u16) -> bool {
@@ -288,8 +265,50 @@ fn draw_node(f: &mut ratatui::Frame, n: &Node) {
     f.render_widget(block, Rect::new(n.x, n.y, 12, 3));
 }
 
-fn draw_ui(f: &mut ratatui::Frame, app: &App) {
-    // Draw nodes
+fn ease_in_out(t: f32) -> f32 {
+    // smoothstep
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn draw_cached_path(f: &mut ratatui::Frame, app: &App, path: &[(u16, u16)], color: Color) {
+    for seg in path.windows(2) {
+        let (x1, y1) = seg[0];
+        let (x2, y2) = seg[1];
+
+        if x1 == x2 {
+            draw_vline(f, app, y1, y2, x1, color);
+        } else {
+            draw_hline(f, app, x1, x2, y1, color);
+        }
+    }
+}
+
+fn draw_hud(f: &mut ratatui::Frame, app: &App) {
+    let text = format!(
+        "inflight: {} \npubs:     {} \nsubs:     {} \n(Q/Esc: quit)",
+        app.inflight.len(),
+        app.pubs.len(),
+        app.subs.len()
+    );
+
+    let hud = Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Status"));
+
+    f.render_widget(hud, Rect::new(1, 18, 18, 6));
+}
+
+fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
+    let area = f.area();
+
+    if area.width < 80 || area.height < 20 {
+        f.render_widget(
+            Paragraph::new("Terminal too small - resize me!")
+                .style(ratatui::style::Style::default().fg(Color::Red)),
+            area,
+        );
+        return;
+    }
+
+    // nodes
     draw_node(f, &app.broker);
 
     for p in &app.pubs {
@@ -299,44 +318,62 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     for s in &app.subs {
         draw_node(f, s);
     }
-
-    // PUB -> BROKER paths
-    for p in &app.pubs {
-        draw_path(f, app, p, &app.broker, Color::DarkGray);
+    let broker = app.broker.clone();
+    for p in &app.pubs.clone() {
+        let path = get_path(app, p, &broker).to_vec();
+        draw_cached_path(f, app, &path, Color::DarkGray);
+    }
+    for s in &app.subs.clone() {
+        let path = get_path(app, &broker, s).to_vec();
+        draw_cached_path(f, app, &path, Color::DarkGray);
     }
 
-    // BROKER -> SUB paths
-    for s in &app.subs {
-        draw_path(f, app, &app.broker, s, Color::DarkGray);
+    // pipes
+    for p in app.pubs.clone() {
+        // darker shadow
+        draw_path(f, app, &p, &app.broker.clone(), Color::Black);
+
+        // actual pipe
+        draw_path(f, app, &p, &app.broker.clone(), Color::DarkGray);
+    }
+    for s in app.subs.clone() {
+        // darker shadow
+        draw_path(f, app, &app.broker.clone(), &s, Color::Black);
+
+        // actual pipe
+        draw_path(f, app, &app.broker.clone(), &s, Color::DarkGray);
     }
 
-    // Draw inflight messages
-    for m in &app.inflight {
-        let (x, y) = interpolate(app, m);
-        if x > 0 && y > 0 {
-            let (x, y) = interpolate(app, m);
-            if x == 0 && y == 0 {
-                continue;
-            }
-            if is_near_any_node(app, x, y, 0) {
-                continue;
-            } // don't draw inside/border
+    // moving dots
+    for m in app.inflight.clone() {
+        let (from, to) = match (find_node(app, m.from), find_node(app, m.to)) {
+            (Some(f), Some(t)) => (f, t),
+            _ => continue,
+        };
 
-            f.set_cursor_position((x, y));
+        let path = get_path(app, &from, &to);
+        let eased = ease_in_out(m.progress);
+        let (x, y) = interpolate_along_path(path, eased);
 
-            let glyph = if m.progress < 0.2 || m.progress > 0.8 {
-                "•" // small near ends
-            } else if m.progress < 0.4 || m.progress > 0.6 {
-                "●"
-            } else {
-                "⬤" // fattest in the middle
-            };
-
-            let dot = Paragraph::new(glyph).style(ratatui::style::Style::default().fg(m.color));
-
-            f.render_widget(dot, Rect::new(x, y, 1, 1));
+        if is_near_any_node(app, x, y, 0) {
+            continue;
         }
+
+        let glyph = if m.progress < 0.2 || m.progress > 0.8 {
+            "•"
+        } else if m.progress < 0.4 || m.progress > 0.6 {
+            "●"
+        } else {
+            "⬤"
+        };
+
+        f.render_widget(
+            Paragraph::new(glyph).style(ratatui::style::Style::default().fg(m.color)),
+            Rect::new(x, y, 1, 1),
+        );
     }
+
+    draw_hud(f, app);
 }
 
 pub async fn run_ui(mut rx: mpsc::Receiver<VisualEvent>) -> anyhow::Result<()> {
@@ -378,7 +415,7 @@ pub async fn run_ui(mut rx: mpsc::Receiver<VisualEvent>) -> anyhow::Result<()> {
         update_inflight(&mut app, dt);
 
         // 4. Draw
-        terminal.draw(|f| draw_ui(f, &app))?;
+        terminal.draw(|f| draw_ui(f, &mut app))?;
 
         tokio::time::sleep(Duration::from_millis(33)).await;
     }
@@ -393,63 +430,9 @@ pub async fn run_ui(mut rx: mpsc::Receiver<VisualEvent>) -> anyhow::Result<()> {
 
 fn update_inflight(app: &mut App, dt: f32) {
     for m in &mut app.inflight {
-        m.progress += dt * 0.4;
+        m.progress = (m.progress + dt * 0.4).min(1.0);
     }
     app.inflight.retain(|m| m.progress < 1.0);
-}
-
-fn routed_path(from: &Node, to: &Node) -> ((u16, u16), (u16, u16), u16) {
-    let (sx, sy) = out_port(from);
-    let (ex, ey) = in_port(to);
-    let mid_x = (sx + ex) / 2;
-    ((sx, sy), (ex, ey), mid_x)
-}
-
-fn interpolate(app: &App, m: &InFlight) -> (u16, u16) {
-    let (from, to) = match (find_node(app, m.from), find_node(app, m.to)) {
-        (Some(f), Some(t)) => (f, t),
-        _ => return (0, 0),
-    };
-
-    let ((sx, sy), (ex, ey), mid_x) = routed_path(from, to);
-
-    // segment lengths (Manhattan)
-    let l1 = sx.abs_diff(mid_x) as f32;
-    let l2 = sy.abs_diff(ey) as f32;
-    let l3 = mid_x.abs_diff(ex) as f32;
-    let total = (l1 + l2 + l3).max(1.0);
-
-    let mut d = (m.progress.clamp(0.0, 1.0)) * total;
-
-    // Walk segment 1: (sx,sy) -> (mid_x,sy)
-    if d <= l1 {
-        let x = if mid_x >= sx {
-            sx + d as u16
-        } else {
-            sx - d as u16
-        };
-        return (x, sy);
-    }
-    d -= l1;
-
-    // Walk segment 2: (mid_x,sy) -> (mid_x,ey)
-    if d <= l2 {
-        let y = if ey >= sy {
-            sy + d as u16
-        } else {
-            sy - d as u16
-        };
-        return (mid_x, y);
-    }
-    d -= l2;
-
-    // Walk segment 3: (mid_x,ey) -> (ex,ey)
-    let x = if ex >= mid_x {
-        mid_x + d as u16
-    } else {
-        mid_x - d as u16
-    };
-    (x, ey)
 }
 
 fn handle_event(app: &mut App, ev: VisualEvent) {

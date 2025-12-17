@@ -6,6 +6,8 @@ config
 
 tracing (no more prints..)
 
+Heartbeat?
+
 better error handling(return loud errors when failing to publish)
 
 multiple brokers on same storage tests (must fail)
