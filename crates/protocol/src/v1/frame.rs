@@ -1,6 +1,6 @@
-use bytes::{BytesMut, Buf, BufMut};
-use tokio_util::codec::{Decoder, Encoder};
+use bytes::{Buf, BufMut, BytesMut};
 use std::io;
+use tokio_util::codec::{Decoder, Encoder};
 
 #[derive(Debug)]
 pub struct Frame {
@@ -41,7 +41,13 @@ impl Decoder for ProtoCodec {
 
         let payload = src.split_to(payload_len).to_vec();
 
-        Ok(Some(Frame { version, opcode, flags, request_id, payload }))
+        Ok(Some(Frame {
+            version,
+            opcode,
+            flags,
+            request_id,
+            payload,
+        }))
     }
 }
 

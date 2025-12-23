@@ -1,15 +1,18 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 // TODO: Save ip/host per connection (to display connections list)
 // TODO: Save above connection info per sub too(topic, group too), plus ways to calculate uptime for each
 // TODO: also similar data per publisher
 // TODO: Messages per unit of time for each subs and pubs too
-// TODO: Optionally persist stats too, clean up what is old
+// TODO: Optionally persist stats too, clean up what is old, user can have a minimal idea what led uo to crashes without complex external systems
 
 #[derive(Debug)]
 pub struct RollingCounter {
@@ -566,6 +569,7 @@ struct MetricsInner {
     pub storage: Arc<StorageStats>,
     pub broker: Arc<BrokerStats>,
     pub tcp: Arc<TcpStats>,
+    pub conn: Arc<ConnectionStats>,
     // later: protocol, client, etc
 }
 
@@ -576,6 +580,7 @@ impl Metrics {
                 storage: StorageStats::new(buckets),
                 broker: BrokerStats::new(buckets),
                 tcp: TcpStats::new(buckets),
+                conn: ConnectionStats::new(),
             }),
         }
     }
@@ -598,6 +603,10 @@ impl Metrics {
 
     pub fn tcp(&self) -> Arc<TcpStats> {
         self.inner.tcp.clone()
+    }
+
+    pub fn connections(&self) -> Arc<ConnectionStats> {
+        self.inner.conn.clone()
     }
 }
 
@@ -792,5 +801,157 @@ impl ShutdownSignal {
 
     pub fn signal(&self) {
         let _ = self.tx.send(true);
+    }
+}
+
+type ConnId = Uuid;
+type SubId = Uuid;
+type Topic = String;
+type Group = String;
+
+struct PublisherInfo {
+    peer_addr: SocketAddr,
+    connected_at: Instant,
+    last_publish_at: AtomicU64,
+}
+
+struct SubInfo {
+    sub_id: Uuid,
+    topic: Topic,
+    group: Group,
+    connected_at: Instant,
+    auto_ack: bool,
+}
+
+impl SubInfo {
+    pub fn new(
+        sub_id: SubId,
+        topic: Topic,
+        group: Group,
+        connected_at: Instant,
+        auto_ack: bool,
+    ) -> Self {
+        Self {
+            sub_id,
+            topic,
+            group,
+            connected_at,
+            auto_ack,
+        }
+    }
+}
+
+struct ConnectionState {
+    conn_id: ConnId,
+    peer: SocketAddr,
+    connected_at: Instant,
+    authenticated: bool,
+    subs: DashMap<SubId, SubInfo>,
+}
+
+impl ConnectionState {
+    pub fn new(
+        conn_id: ConnId,
+        peer: SocketAddr,
+        connected_at: Instant,
+        authenticated: bool,
+    ) -> Self {
+        Self {
+            conn_id,
+            peer,
+            connected_at,
+            authenticated,
+            subs: DashMap::new(),
+        }
+    }
+
+    pub fn add_sub(
+        &self,
+        topic: Topic,
+        group: Group,
+        connected_at: Instant,
+        auto_ack: bool,
+    ) -> SubId {
+        let sub_id = Uuid::now_v7();
+        self.subs.insert(
+            sub_id,
+            SubInfo {
+                sub_id,
+                topic,
+                group,
+                connected_at,
+                auto_ack,
+            },
+        );
+
+        sub_id
+    }
+
+    pub fn remove_sub(&self, key: &SubId) -> bool {
+        self.subs.remove(key).is_some()
+    }
+}
+
+pub struct ConnectionStats {
+    connections: DashMap<ConnId, ConnectionState>,
+}
+
+impl ConnectionStats {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            connections: DashMap::new(),
+        })
+    }
+
+    pub fn add_connection(
+        &self,
+        peer: SocketAddr,
+        connected_at: Instant,
+        authenticated: bool,
+    ) -> ConnId {
+        let conn_id = Uuid::now_v7();
+        self.connections.insert(
+            conn_id,
+            ConnectionState::new(conn_id, peer, connected_at, authenticated),
+        );
+
+        conn_id
+    }
+
+    pub fn set_connection_auth(&self, key: &Uuid, auth: bool) -> bool {
+        if let Some(mut conn) = self.connections.get_mut(key) {
+            conn.authenticated = auth;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn add_sub(
+        &self,
+        conn_id: &ConnId,
+        topic: Topic,
+        group: Group,
+        connected_at: Instant,
+        auto_ack: bool,
+    ) -> Option<SubId> {
+        if let Some(conn) = self.connections.get(conn_id) {
+            let key = conn.add_sub(topic, group, connected_at, auto_ack);
+            return Some(key);
+        }
+
+        None
+    }
+
+    pub fn remove_connection(&self, conn_id: &ConnId) -> bool {
+        self.connections.remove(conn_id).is_some()
+    }
+
+    pub fn remove_sub(&self, conn_id: &ConnId, key: &SubId) -> bool {
+        if let Some(conn) = self.connections.get(conn_id) {
+            return conn.remove_sub(key);
+        }
+
+        false
     }
 }

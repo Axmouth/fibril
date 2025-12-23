@@ -10,6 +10,14 @@ ack correct matching(sub id?), in tcp layer
 
 partitions nuke or adjust
 
+max unconfirmed per publisher
+
+slow ingress on memory/storage pressure
+
+better enforced write guarantees(getting a confirm, etc, means already on disk) (enqueue confirms, send on batch write?)
+
+unwrap/expect cleanup
+
 proper connection handling(heartbeat, ping pong, early dc detection)
 
 experiment with spreading delivered messages by making some consumers slower and see what happens
@@ -26,8 +34,9 @@ shutdown stops publishing immediately, tries to drain inflight, ensure no late a
 
 define a formal delivery state machine (very useful later)?
 
-better backpressure on publish(related to storage limits too?)
+Eval persisting inflight map, or delivery tags for inflight, so inflight state can be recovered on startup after crash
 
+reeval:
 Persist a delivery cursor
 Instead of inferring:
 store next_offset durably per (topic, group)
@@ -46,8 +55,6 @@ metadata(content type, redelivered, etc)
 
 RabidMQ easter egg(--version during April 1st? rabbitmq compatibility layer?)
 
-fast consumer crash detection?(might need keeping track of un-acked messages)
-
 routing layer? (in order to keep invariants stable, maybe we'd need a separate layer, broker delivers to itself, runs script, acks onces derived message completes, effectively)
 
 dead letter queue? (expired, nacked too much, etc) (part of routing?)
@@ -59,3 +66,7 @@ queues with ttl to discard(not just resend)
 define ops/infra story for easy convenient deployments and handling(not error prone by default, don't assume user does things right)
 
 write an operator runbook
+
+rabbitmq compatible endpoint?
+
+replace epoch in delivery tag with gen and seq. Seq is simple monotonic counter, gen is increased per instance(process? task?) created

@@ -7,10 +7,10 @@ use std::{
 };
 
 use fibril_broker::coordination::NoopCoordination;
-use fibril_broker::{Broker, BrokerConfig, ConsumerHandle};
 use fibril_broker::{AckRequest, ConsumerConfig};
+use fibril_broker::{Broker, BrokerConfig, ConsumerHandle};
 use fibril_metrics::{Metrics, MetricsConfig};
-use fibril_storage::{make_rocksdb_store, observable_storage::ObservableStorage};
+use fibril_storage::{DeliveryTag, make_rocksdb_store, observable_storage::ObservableStorage};
 
 use clap::{Parser, ValueEnum};
 use fibril_util::init_tracing;
@@ -52,7 +52,7 @@ pub struct E2EBench {
     #[arg(long, default_value = "64")]
     pub batch_size: usize,
 
-    #[arg(long, default_value = "1")]
+    #[arg(long, default_value = "25")]
     pub batch_timeout_ms: u64,
 
     /// Sync Writes for RocksDB backend
@@ -187,14 +187,14 @@ async fn consumer_task(
     metrics: Arc<BenchMetrics>,
     total: u64,
 ) {
-    let (ackq_tx, mut ackq_rx) = tokio::sync::mpsc::channel::<u64>(10_000);
+    let (ackq_tx, mut ackq_rx) = tokio::sync::mpsc::channel::<DeliveryTag>(10_000);
 
     // One task that actually sends acks
     let acker = consumer.acker.clone();
     let metrics2 = metrics.clone();
     tokio::spawn(async move {
-        while let Some(off) = ackq_rx.recv().await {
-            let req = AckRequest { delivery_tag: off };
+        while let Some(tag) = ackq_rx.recv().await {
+            let req = AckRequest { delivery_tag: tag };
             if acker.send(req).await.is_ok() {
                 metrics2.acked.fetch_add(1, Ordering::Relaxed);
             }
@@ -261,10 +261,10 @@ async fn make_broker_with_cfg(cmd: &E2EBench) -> Broker<NoopCoordination> {
     let mut cfg = BrokerConfig {
         publish_batch_size: cmd.batch_size,
         publish_batch_timeout_ms: cmd.batch_timeout_ms,
-        ack_batch_size: 512,
-        ack_batch_timeout_ms: 20,
-        inflight_batch_size: 512,
-        inflight_batch_timeout_ms: 20,
+        ack_batch_size: 1024,
+        ack_batch_timeout_ms: 25,
+        inflight_batch_size: 1024,
+        inflight_batch_timeout_ms: 25,
         inflight_ttl_secs: 60,
         cleanup_interval_secs: 5,
         ..Default::default()
@@ -282,7 +282,9 @@ async fn make_broker_with_cfg(cmd: &E2EBench) -> Broker<NoopCoordination> {
     let store = ObservableStorage::new(store, metrics.storage());
     let coord = NoopCoordination {};
 
-    let broker = Broker::try_new(store, coord, metrics.broker(), cfg).await.unwrap();
+    let broker = Broker::try_new(store, coord, metrics.broker(), cfg)
+        .await
+        .unwrap();
 
     metrics.start(MetricsConfig {
         log_broker: true,
@@ -341,7 +343,7 @@ async fn run_e2e_bench(cmd: E2EBench) {
         broker.clone(),
         topic.clone(),
         cmd.report_interval_secs,
-        cmd.messages
+        cmd.messages,
     ));
 
     // Wait until done

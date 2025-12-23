@@ -4,6 +4,7 @@ pub mod rocksdb_store;
 use async_trait::async_trait;
 
 use fibril_util::UnixMillis;
+use serde::{Deserialize, Serialize};
 
 pub type Topic = String;
 pub type LogId = u32;
@@ -19,11 +20,16 @@ pub struct StoredMessage {
     pub payload: Vec<u8>,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct DeliveryTag {
+    pub epoch: u64,
+}
+
 /// Returned by poll operations: the message plus its metadata
 #[derive(Debug, Clone)]
 pub struct DeliverableMessage {
     pub message: StoredMessage,
-    pub delivery_tag: Offset, // unique per (topic,partition)
+    pub delivery_tag: DeliveryTag, // unique per (topic,partition)
     pub group: Group,
 }
 
@@ -48,7 +54,10 @@ pub enum StorageError {
     Anyhow(#[from] anyhow::Error),
 }
 
-pub fn make_rocksdb_store(path: &str, sync_write: bool) -> Result<rocksdb_store::RocksStorage, StorageError> {
+pub fn make_rocksdb_store(
+    path: &str,
+    sync_write: bool,
+) -> Result<rocksdb_store::RocksStorage, StorageError> {
     rocksdb_store::RocksStorage::open(path, sync_write)
 }
 
@@ -116,17 +125,6 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         max_batch: usize,
     ) -> Result<Vec<DeliverableMessage>, StorageError>;
 
-    /// Fetch messages in a given offset range [from_offset, to_offset),
-    async fn fetch_range(
-        &self,
-        topic: &Topic,
-        partition: LogId,
-        group: &Group,
-        from_offset: Offset,
-        to_offset: Offset,
-        max_batch: usize,
-    ) -> Result<Vec<DeliverableMessage>, StorageError>;
-
     /// Mark a message as "in-flight" for a consumer group with a deadline.
     async fn mark_inflight(
         &self,
@@ -165,7 +163,10 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     ) -> Result<(), StorageError>;
 
     /// Return messages whose deadline expired → need redelivery.
-    async fn list_expired(&self, now_ts: UnixMillis) -> Result<Vec<DeliverableMessage>, StorageError>;
+    async fn list_expired(
+        &self,
+        now_ts: UnixMillis,
+    ) -> Result<Vec<DeliverableMessage>, StorageError>;
 
     /// Get the lowest unacknowledged offset for a consumer group.
     async fn lowest_unacked_offset(

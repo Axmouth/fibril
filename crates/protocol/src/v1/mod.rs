@@ -3,7 +3,8 @@ pub mod frame;
 pub mod handler;
 pub mod helper;
 
-use serde::{Serialize, Deserialize};
+use fibril_storage::DeliveryTag;
+use serde::{Deserialize, Serialize};
 
 /// Handshake magic bytes.
 /// IMPORTANT: This field MUST be included and preserved unchanged
@@ -22,28 +23,28 @@ pub const PROTOCOL_V1: u16 = 1;
 #[repr(u16)]
 #[derive(Debug, Copy, Clone)]
 pub enum Op {
-    Hello       = 1,
-    HelloOk     = 2,
-    HelloErr    = 3,
+    Hello = 1,
+    HelloOk = 2,
+    HelloErr = 3,
 
-    Auth        = 10,
-    AuthOk      = 11,
-    AuthErr     = 12,
+    Auth = 10,
+    AuthOk = 11,
+    AuthErr = 12,
 
-    Publish     = 20,
-    PublishOk   = 21,
+    Publish = 20,
+    PublishOk = 21,
 
-    Subscribe   = 30,
+    Subscribe = 30,
     SubscribeOk = 31,
-    SubscribeErr= 32,
+    SubscribeErr = 32,
 
-    Deliver     = 40,
-    Ack         = 41,
+    Deliver = 40,
+    Ack = 41,
 
-    Ping        = 50,
-    Pong        = 51,
+    Ping = 50,
+    Pong = 51,
 
-    Error       = 255,
+    Error = 255,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,7 +70,7 @@ pub struct Auth {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Publish {
     pub topic: String,
-    pub partition: u32,           // keep for later, default 0
+    pub partition: u32, // keep for later, default 0
     pub require_confirm: bool,
     pub payload: Vec<u8>,
 }
@@ -102,7 +103,8 @@ pub struct Deliver {
     pub group: String,
     pub partition: u32,
     pub offset: u64,
-    pub delivery_tag: u64, // keep opaque; you can set = offset
+    pub delivery_tag_epoch: u64, // keep opaque; you can set = offset
+    pub epoch: u64,
     pub payload: Vec<u8>,
 }
 
@@ -111,16 +113,11 @@ pub struct Ack {
     pub topic: String,
     pub group: String,
     pub partition: u32,
-    pub offsets: Vec<u64>, // batch
+    pub tags: Vec<DeliveryTag>, // batch
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorMsg {
     pub code: u16,
     pub message: String,
-}
-
-#[async_trait::async_trait]
-pub trait AuthHandler {
-    async fn verify(&self, username: &str, password: &str) -> bool;
 }

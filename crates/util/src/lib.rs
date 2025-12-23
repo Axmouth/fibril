@@ -108,3 +108,29 @@ pub fn init_tracing() {
         )
         .init();
 }
+
+// TODO: make a "common" crate?
+
+#[async_trait::async_trait]
+pub trait AuthHandler {
+    async fn verify(&self, username: &str, password: &str) -> bool;
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticAuthHandler {
+    username: String,
+    password: String,
+}
+
+impl StaticAuthHandler {
+    pub fn new(username: String, password: String) -> Self {
+        Self { username, password }
+    }
+}
+
+#[async_trait::async_trait]
+impl AuthHandler for StaticAuthHandler {
+    async fn verify(&self, username: &str, password: &str) -> bool {
+        username.to_lowercase() == self.username && password == self.password
+    }
+}

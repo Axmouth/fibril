@@ -1,4 +1,5 @@
 use fibril_metrics::*;
+use fibril_util::UnixMillis;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
@@ -176,23 +177,6 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         )
     }
 
-    async fn fetch_range(
-        &self,
-        topic: &Topic,
-        partition: LogId,
-        group: &Group,
-        from_offset: Offset,
-        to_offset: Offset,
-        max_batch: usize,
-    ) -> Result<Vec<crate::DeliverableMessage>, StorageError> {
-        observe!(
-            self.stats,
-            reads,
-            self.inner()
-                .fetch_range(topic, partition, group, from_offset, to_offset, max_batch)
-        )
-    }
-
     async fn mark_inflight(
         &self,
         topic: &Topic,
@@ -214,7 +198,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         topic: &Topic,
         partition: LogId,
         group: &Group,
-        entries: &[(Offset, crate::UnixMillis)],
+        entries: &[(Offset, UnixMillis)],
     ) -> Result<(), StorageError> {
         observe!(
             self.stats,

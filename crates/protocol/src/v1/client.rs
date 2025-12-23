@@ -1,8 +1,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fibril_storage::DeliveryTag;
 use futures::{SinkExt, StreamExt};
 
-use crate::v1::{Ack, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Publish, PublishOk, Subscribe, helper::{Conn, decode, encode}};
+use crate::v1::{
+    Ack, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Publish, PublishOk, Subscribe,
+    helper::{Conn, decode, encode},
+};
 
 static REQ: AtomicU64 = AtomicU64::new(1);
 
@@ -13,14 +17,22 @@ fn next_req_id() -> u64 {
 pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
     // Hello
     let req = next_req_id();
-    conn.send(encode(Op::Hello, req, &Hello {
-        client_name: "demo".into(),
-        client_version: "0.1".into(),
-        protocol_version: PROTOCOL_V1,
-    })).await?;
+    conn.send(encode(
+        Op::Hello,
+        req,
+        &Hello {
+            client_name: "demo".into(),
+            client_version: "0.1".into(),
+            protocol_version: PROTOCOL_V1,
+        },
+    ))
+    .await?;
 
     // Wait for HelloOk/Err
-    let frame = conn.next().await.ok_or_else(|| anyhow::anyhow!("closed"))??;
+    let frame = conn
+        .next()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("closed"))??;
     match frame.opcode {
         x if x == Op::HelloOk as u16 => {
             let ok: HelloOk = decode(&frame);
@@ -34,21 +46,31 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
 
     // Subscribe
     let req = next_req_id();
-    conn.send(encode(Op::Subscribe, req, &Subscribe {
-        topic: "t1".into(),
-        group: "g1".into(),
-        prefetch: 100,
-        auto_ack: true,
-    })).await?;
+    conn.send(encode(
+        Op::Subscribe,
+        req,
+        &Subscribe {
+            topic: "t1".into(),
+            group: "g1".into(),
+            prefetch: 100,
+            auto_ack: true,
+        },
+    ))
+    .await?;
 
     // Publish (require confirm)
     let req_pub = next_req_id();
-    conn.send(encode(Op::Publish, req_pub, &Publish {
-        topic: "t1".into(),
-        partition: 0,
-        require_confirm: true,
-        payload: b"hello".to_vec(),
-    })).await?;
+    conn.send(encode(
+        Op::Publish,
+        req_pub,
+        &Publish {
+            topic: "t1".into(),
+            partition: 0,
+            require_confirm: true,
+            payload: b"hello".to_vec(),
+        },
+    ))
+    .await?;
 
     // Event loop
     while let Some(frame) = conn.next().await {
@@ -59,12 +81,17 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
                 tracing::debug!("DELIVER off={} bytes={}", d.offset, d.payload.len());
 
                 // Ack single (or batch later)
-                conn.send(encode(Op::Ack, next_req_id(), &Ack {
-                    topic: d.topic.clone(),
-                    group: d.group.clone(),
-                    partition: d.partition,
-                    offsets: vec![d.delivery_tag],
-                })).await?;
+                conn.send(encode(
+                    Op::Ack,
+                    next_req_id(),
+                    &Ack {
+                        topic: d.topic.clone(),
+                        group: d.group.clone(),
+                        partition: d.partition,
+                        tags: vec![DeliveryTag { epoch: d.epoch }],
+                    },
+                ))
+                .await?;
             }
             x if x == Op::PublishOk as u16 => {
                 let ok: PublishOk = decode(&frame);

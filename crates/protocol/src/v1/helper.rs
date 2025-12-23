@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
-use tokio_util::codec::Framed;
 use tokio::net::TcpStream;
+use tokio_util::codec::Framed;
 
-use crate::v1::{Op, PROTOCOL_V1, frame::{Frame, ProtoCodec}};
+use crate::v1::{
+    Op, PROTOCOL_V1,
+    frame::{Frame, ProtoCodec},
+};
 
 pub type Conn = Framed<TcpStream, ProtoCodec>;
 

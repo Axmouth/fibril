@@ -9,7 +9,8 @@ fibril-util = { path = "../util" }
 anyhow = "1.0"
 async-trait = "0.1"
 bytes = "1"
-rocksdb = "0.24.0"
+rocksdb = { version = "0.24.0" }
+serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

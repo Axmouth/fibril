@@ -9,27 +9,24 @@ async fn main() -> anyhow::Result<()> {
     let storage = RocksStorage::open("test_data/server2", true)?;
     let coord = NoopCoordination;
     let metrics = Metrics::new(3 * 60 * 60); // 3 hours
-    let broker = Arc::new(Broker::try_new(storage, coord, metrics.broker(), BrokerConfig::default()).await?);
+    let broker =
+        Arc::new(Broker::try_new(storage, coord, metrics.broker(), BrokerConfig::default()).await?);
 
     let consumer = broker
-        .subscribe(
-            "topic",
-            "group",
-            ConsumerConfig { prefetch_count: 10 },
-        )
+        .subscribe("topic", "group", ConsumerConfig { prefetch_count: 10 })
         .await
         .unwrap();
 
-    let ConsumerHandle {mut messages, ..} = consumer;
+    let ConsumerHandle { mut messages, .. } = consumer;
 
     tracing::info!("consumer started");
-let handle = tokio::spawn(async move {
-    while let Some(msg) = messages.recv().await {
-                // intentionally do nothing
-                let tag = msg.delivery_tag;
-                tracing::info!("{}", tag);
-            }
-});
+    let handle = tokio::spawn(async move {
+        while let Some(msg) = messages.recv().await {
+            // intentionally do nothing
+            let tag = msg.delivery_tag;
+            tracing::info!("{}", tag.epoch);
+        }
+    });
 
     let (publisher, _confstream) = broker.get_publisher("topic").await?;
 
@@ -40,7 +37,7 @@ let handle = tokio::spawn(async move {
     tracing::info!("sleeping");
 
     tokio::time::sleep(Duration::from_secs(30)).await;
-handle.abort();
+    handle.abort();
 
     // drop(messages);
     tracing::info!("consumer dropped, sleeping");

@@ -1,3 +1,4 @@
+use fibril_storage::DeliveryTag;
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use std::{collections::HashMap, sync::Arc};
@@ -12,6 +13,8 @@ use tokio::{
 use tokio_util::codec::Framed;
 
 use fibril_protocol::v1::{frame::ProtoCodec, helper::*, *};
+
+// TODO: custom error, this error
 
 // ===== Public API ============================================================
 
@@ -51,6 +54,7 @@ pub struct AckableMessage {
 }
 
 impl AckableMessage {
+    // TODO: return simple message
     pub async fn ack(self) -> anyhow::Result<()> {
         let _ = self.ack.send(self.offset);
         Ok(())
@@ -167,7 +171,7 @@ enum Command {
     },
     Ack {
         sub_id: u64,
-        offset: u64,
+        delivery_tag_epoch: u64,
     },
 }
 
@@ -310,13 +314,13 @@ async fn start_engine(
                         waiters.insert(req_id, Waiter::SubscribeAuto(reply));
                         let _ = framed.send(encode(Op::Subscribe, req_id, &req)).await;
                     }
-                    Command::Ack { sub_id, offset } => {
+                    Command::Ack { sub_id, delivery_tag_epoch } => {
                         if let Some(s) = subs.lock().await.get(&sub_id) {
                             let ack = Ack {
                                 topic: s.topic.clone(),
                                 group: s.group.clone(),
                                 partition: s.partition,
-                                offsets: vec![offset],
+                                tags: vec![DeliveryTag { epoch: delivery_tag_epoch}],
                             };
                             let _ = framed.send(encode(Op::Ack, 0, &ack)).await;
                         }
@@ -364,8 +368,8 @@ async fn start_engine(
                                         if tx.send(msg).await.is_ok() {
                                             // TODO: will hang forever unless we cancel it? Investigate/fix
                                             tokio::select! {
-                                                Ok(offset) = ack_rx => {
-                                                    let _ = cmd_tx.send(Command::Ack { sub_id: d.sub_id, offset }).await;
+                                                Ok(tag_epoch) = ack_rx => {
+                                                    let _ = cmd_tx.send(Command::Ack { sub_id: d.sub_id, delivery_tag_epoch: tag_epoch  }).await;
                                                 }
                                                 _ = shutdown_acks.notified() => {
                                                     // engine is shutting down, drop silently

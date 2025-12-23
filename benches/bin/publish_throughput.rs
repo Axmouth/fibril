@@ -67,7 +67,10 @@ async fn main() {
     tracing::info!("Benchmark: Publishing {} messages...", args.messages);
     tracing::info!(
         "parallel={}, batch_size={}, timeout={}ms, max_payload={}",
-        args.parallelism, args.batch_size, args.batch_timeout_ms, args.max_payload
+        args.parallelism,
+        args.batch_size,
+        args.batch_timeout_ms,
+        args.max_payload
     );
 
     let mut tasks = Vec::new();

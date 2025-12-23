@@ -5,7 +5,8 @@ use crossterm::{
     terminal::{Clear, ClearType, disable_raw_mode},
 };
 use fibril_protocol::v1::{
-    Auth, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Publish, Subscribe, SubscribeOk, frame::ProtoCodec, helper::Conn
+    Auth, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Publish, Subscribe, SubscribeOk,
+    frame::ProtoCodec, helper::Conn,
 };
 use fibril_util::init_tracing;
 use futures::{SinkExt, StreamExt};
@@ -592,7 +593,6 @@ pub async fn visual_client(
 
     match frame.opcode {
         x if x == Op::AuthOk as u16 => {
-
             let _ = vis_tx.send(VisualEvent::AuthOk { sub_id }).await;
         }
         x if x == Op::AuthErr as u16 => {

@@ -19,9 +19,7 @@ struct GroupKeyPrefix {
 
 impl GroupKeyPrefix {
     fn new(topic: &Topic, partition: LogId, group: &Group) -> Self {
-        let mut v = Vec::with_capacity(
-            topic.len() + group.len() + 1 + 4 + 1
-        );
+        let mut v = Vec::with_capacity(topic.len() + group.len() + 1 + 4 + 1);
         v.extend_from_slice(topic.as_bytes());
         v.push(0);
         v.extend_from_slice(&partition.to_be_bytes());
@@ -68,11 +66,17 @@ impl RocksStorage {
         opts.set_write_buffer_size(128 * 1024 * 1024); // 128MB
         opts.set_max_write_buffer_number(3);
         opts.set_min_write_buffer_number_to_merge(2);
+        opts.set_manifest_preallocation_size(64 * 1024 * 1024);
+        opts.set_bytes_per_sync(1024 * 1024);
+        // opts.set_wal_bytes_per_sync(1024 * 1024);
+        // opts.set_wal_size_limit_mb(256);
+        // opts.set_wal_ttl_seconds(0);
 
         let mut block_opts = rocksdb::BlockBasedOptions::default();
         block_opts.set_bloom_filter(10.0, false);
-        block_opts.set_cache_index_and_filter_blocks(true);
-        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        // TODO: eval
+        block_opts.set_cache_index_and_filter_blocks(false);
+        block_opts.set_pin_l0_filter_and_index_blocks_in_cache(false);
 
         opts.set_block_based_table_factory(&block_opts);
 
@@ -92,7 +96,10 @@ impl RocksStorage {
         ];
 
         let db = DBWithThreadMode::open_cf_descriptors(&opts, path, cfs)?;
-        let storage = Self { db: Arc::new(db), sync_write };
+        let storage = Self {
+            db: Arc::new(db),
+            sync_write,
+        };
 
         Ok(storage)
     }
@@ -110,12 +117,7 @@ impl RocksStorage {
         v
     }
 
-    fn encode_group_key(
-        topic: &Topic,
-        partition: LogId,
-        group: &Group,
-        offset: Offset,
-    ) -> Vec<u8> {
+    fn encode_group_key(topic: &Topic, partition: LogId, group: &Group, offset: Offset) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(topic.as_bytes());
         v.push(0);
@@ -390,7 +392,7 @@ impl Storage for RocksStorage {
                     timestamp: unix_millis(),
                     payload: value.to_vec(),
                 },
-                delivery_tag: off,
+                delivery_tag: DeliveryTag { epoch: 0 },
                 group: group.clone(),
             });
         }
@@ -441,96 +443,10 @@ impl Storage for RocksStorage {
         // clamp based on next-offset snapshot
         let clamped = msgs
             .into_iter()
-            .take_while(|m| m.delivery_tag < max_offset_exclusive)
+            .take_while(|m| m.message.offset < max_offset_exclusive)
             .collect();
 
         Ok(clamped)
-    }
-
-    async fn fetch_range(
-        &self,
-        topic: &Topic,
-        partition: LogId,
-        group: &Group,
-        from_offset: Offset,
-        to_offset: Offset,
-        max: usize,
-    ) -> Result<Vec<DeliverableMessage>, StorageError> {
-        let messages_cf = self
-            .db
-            .cf_handle("messages")
-            .ok_or(StorageError::MissingColumnFamily("messages"))?;
-        let inflight_cf = self
-            .db
-            .cf_handle("inflight")
-            .ok_or(StorageError::MissingColumnFamily("inflight"))?;
-        let acked_cf = self
-            .db
-            .cf_handle("acked")
-            .ok_or(StorageError::MissingColumnFamily("acked"))?;
-
-        let start_key = Self::encode_msg_key(topic, partition, from_offset);
-
-        let mut prefix = Vec::new();
-        prefix.extend_from_slice(topic.as_bytes());
-        prefix.push(0);
-        prefix.extend_from_slice(&partition.to_be_bytes());
-
-        let mut iter = self.db.iterator_cf(
-            &messages_cf,
-            IteratorMode::From(&start_key, rocksdb::Direction::Forward),
-        );
-
-        let mut out = Vec::new();
-
-        for pair in iter.by_ref() {
-            let (key, value) = pair?;
-            if !key.starts_with(&prefix) {
-                break;
-            }
-
-            if out.len() >= max {
-                break;
-            }
-
-            let off = u64::from_be_bytes(key[key.len() - 8..].try_into().map_err(|e| {
-                StorageError::KeyDecode(format!("invalid message key length: {}", e))
-            })?);
-
-            if off >= to_offset {
-                break;
-            }
-
-            // Skip if inflight
-            let inflight_key = Self::encode_group_key(topic, partition, group, off);
-            if self
-                .db
-                .get_cf(&inflight_cf, inflight_key.clone())?
-                .is_some()
-            {
-                continue;
-            }
-
-            // Skip if ACKed
-            let acked_key = Self::encode_group_key(topic, partition, group, off);
-            if self.db.get_cf(&acked_cf, acked_key.clone())?.is_some() {
-                continue;
-            }
-
-            out.push(DeliverableMessage {
-                message: StoredMessage {
-                    topic: topic.clone(),
-                    partition,
-                    offset: off,
-                    timestamp: unix_millis(),
-                    payload: value.to_vec(),
-                },
-                delivery_tag: off,
-                group: group.clone(),
-            });
-        }
-
-        Ok(out)
     }
 
     async fn mark_inflight(
@@ -699,7 +615,10 @@ impl Storage for RocksStorage {
                 // TODO: handle better?
                 tracing::warn!(
                     "[WARN] stale inflight entry: topic={} partition={} group={} offset={} (message missing)",
-                    topic, partition, group, offset
+                    topic,
+                    partition,
+                    group,
+                    offset
                 );
                 self.db.delete_cf(&inflight_cf, &key)?;
                 continue;
@@ -713,7 +632,7 @@ impl Storage for RocksStorage {
                     timestamp: unix_millis(),
                     payload: msg_val.to_vec(),
                 },
-                delivery_tag: offset,
+                delivery_tag: DeliveryTag { epoch: 0 },
                 group,
             });
         }

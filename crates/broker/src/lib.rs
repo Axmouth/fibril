@@ -14,7 +14,9 @@ use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::coordination::Coordination;
-use fibril_storage::{DeliverableMessage, Group, LogId, Offset, Storage, StorageError, Topic};
+use fibril_storage::{
+    DeliverableMessage, DeliveryTag, Group, LogId, Offset, Storage, StorageError, Topic,
+};
 use fibril_util::{UnixMillis, unix_millis};
 
 macro_rules! invariant {
@@ -62,9 +64,11 @@ struct GroupState {
     next_offset: AtomicU64,
     delivery_task_started: AtomicBool,
     rr_counter: AtomicU64,
+    tag_counter: AtomicU64,
     redelivery: Arc<SegQueue<Offset>>, // lock-free FIFO queue
     inflight_sem: Arc<Semaphore>,
-    inflight_permits: DashMap<Offset, OwnedSemaphorePermit>,
+    delivery_tag_by_offset: DashMap<Offset, DeliveryTag>,
+    inflight_permits_by_tag: DashMap<DeliveryTag, (Offset, OwnedSemaphorePermit)>,
     events: Arc<Semaphore>,
 }
 
@@ -75,9 +79,11 @@ impl GroupState {
             next_offset: AtomicU64::new(0),
             delivery_task_started: AtomicBool::new(false),
             rr_counter: AtomicU64::new(0),
+            tag_counter: AtomicU64::new(1),
             redelivery: Arc::new(SegQueue::new()),
             inflight_sem: Arc::new(Semaphore::new(0)),
-            inflight_permits: DashMap::new(),
+            delivery_tag_by_offset: DashMap::new(),
+            inflight_permits_by_tag: DashMap::new(),
             events: Arc::new(Semaphore::new(0)),
         }
     }
@@ -93,7 +99,7 @@ pub struct AckRequest {
     // pub group: Group,
     // pub topic: Topic,
     // pub partition: Partition,
-    pub delivery_tag: Offset,
+    pub delivery_tag: DeliveryTag,
 }
 
 pub struct PublishRequest {
@@ -120,12 +126,12 @@ impl Default for BrokerConfig {
         BrokerConfig {
             cleanup_interval_secs: 60,
             inflight_ttl_secs: 60,
-            publish_batch_size: 128,
+            publish_batch_size: 256,
             publish_batch_timeout_ms: 10,
             ack_batch_size: 512,
-            ack_batch_timeout_ms: 2,
+            ack_batch_timeout_ms: 10,
             inflight_batch_size: 512,
-            inflight_batch_timeout_ms: 2,
+            inflight_batch_timeout_ms: 1,
 
             reset_inflight: false,
         }
@@ -231,7 +237,6 @@ struct DeliveryCtx {
     consumers: Vec<(ConsumerId, mpsc::Sender<DeliverableMessage>)>,
     ttl_deadline_delta_ms: u64,
     metrics: Arc<BrokerStats>,
-    prefetch_count: usize,
     broker_config: BrokerConfig,
 }
 
@@ -504,7 +509,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
             .swap(true, Ordering::SeqCst)
         {
             let storage = Arc::clone(&self.storage);
-            let coord = self.coord.clone();
+            let _coord = self.coord.clone();
             let groups = self.groups.clone();
 
             let ttl = self.config.inflight_ttl_secs;
@@ -513,10 +518,6 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
             let metrics = self.metrics.clone();
             let broker_config = self.config.clone();
             self.task_group.spawn(async move {
-                let mut inflight_batch: Vec<(Offset, UnixMillis, OwnedSemaphorePermit)> =
-                    Vec::with_capacity(broker_config.inflight_batch_size);
-                let mut inflight_deadline: Option<tokio::time::Instant> = None;
-                let mut pending_advance: Option<Offset> = None;
                 // TODO: Keep track of still unacked messages, redeliver on consumer disconnect
                 // Dedicated delivery loop for this (topic, group)
                 loop {
@@ -566,7 +567,6 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         consumers: consumers.clone(),
                         ttl_deadline_delta_ms: ttl * 1000,
                         metrics: metrics.clone(),
-                        prefetch_count,
                         broker_config: broker_config.clone(),
                     };
 
@@ -578,7 +578,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         continue;
                     }
 
-                        wait_for_event(&ctx.group_state).await;
+                    wait_for_event(&ctx.group_state).await;
                 }
 
                 tracing::debug!("Disconnect, Ending Sub");
@@ -617,15 +617,15 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                     }
 
                     Some(off) = ack_rx.recv() => {
-                        let offset = off.delivery_tag;
+                        let tag = off.delivery_tag;
 
                         debug_assert!(
-                            !group_state_arc.inflight_permits.is_empty(),
+                            !group_state_arc.inflight_permits_by_tag.is_empty(),
                             "ACK received but no inflight messages exist"
                         );
 
                         // ONLY accept ACKs for messages that are actually inflight
-                        if let Some((_, permit)) = group_state_arc.inflight_permits.remove(&offset) {
+                        if let Some((_, (offset, permit))) = group_state_arc.inflight_permits_by_tag.remove(&tag) {
                             // free capacity
                             drop(permit);
 
@@ -808,10 +808,13 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                                 expired_offset,
                             )
                             .await;
-                        if let Some((_, permit)) = gs.inflight_permits.remove(&expired_offset) {
-                            drop(permit);
-                        }
-                        gs.redelivery.push(expired_offset);
+                        if let Some((_, tag)) = gs.delivery_tag_by_offset.remove(&expired_offset)
+                            && let Some((_, (_off, permit))) =
+                                gs.inflight_permits_by_tag.remove(&tag)
+                            {
+                                drop(permit);
+                            }
+                        gs.redelivery.push(msg.message.offset);
                         metrics.expired();
                         gs.signal();
                     }
@@ -1030,11 +1033,9 @@ async fn compute_start_offset(
     Ok(cur)
 }
 
-pub fn maybe_auto_ack(auto_ack: bool, ack_tx: &mpsc::Sender<AckRequest>, offset: Offset) {
+pub fn maybe_auto_ack(auto_ack: bool, ack_tx: &mpsc::Sender<AckRequest>, tag: DeliveryTag) {
     if auto_ack {
-        let _ = ack_tx.try_send(AckRequest {
-            delivery_tag: offset,
-        });
+        let _ = ack_tx.try_send(AckRequest { delivery_tag: tag });
     }
 }
 
@@ -1051,10 +1052,11 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
     } = ctx;
 
     let mut delivered_any = false;
-    let mut inflight_batch: Vec<(Offset, UnixMillis, OwnedSemaphorePermit)> = Vec::new();
+    let mut inflight_batch: Vec<(DeliveryTag, Offset, UnixMillis, OwnedSemaphorePermit)> =
+        Vec::new();
 
-    while let Some(expired_off) = group_state.redelivery.pop() {
-        if let Ok(msg) = storage.fetch_by_offset(topic, 0, expired_off).await {
+    while let Some(expired_offset) = group_state.redelivery.pop() {
+        if let Ok(msg) = storage.fetch_by_offset(topic, 0, expired_offset).await {
             let new_deadline = unix_millis() + ttl_ms;
 
             let rr = group_state.rr_counter.fetch_add(1, Ordering::SeqCst) as usize;
@@ -1064,15 +1066,18 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
                 Ok(p) => p,
                 Err(_) => {
                     // no capacity; put it back and stop
-                    group_state.redelivery.push(expired_off);
+                    group_state.redelivery.push(expired_offset);
                     break;
                 }
             };
 
+            let epoch = group_state.tag_counter.fetch_add(1, Ordering::SeqCst);
+            let tag = DeliveryTag { epoch };
+            group_state.delivery_tag_by_offset.insert(msg.offset, tag);
             if tx
                 .send(DeliverableMessage {
                     message: msg,
-                    delivery_tag: expired_off,
+                    delivery_tag: tag,
                     group: group.clone(),
                 })
                 .await
@@ -1082,9 +1087,10 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
                 group_state.consumers.remove(cid);
                 group_state.signal(); // consumer set changed
                 // requeue the message for someone else later
-                group_state.redelivery.push(expired_off);
+                group_state.redelivery.push(expired_offset);
             } else {
-                inflight_batch.push((expired_off, new_deadline, permit));
+                // group_state.inflight_permits.remove(&tag);
+                inflight_batch.push((tag, expired_offset, new_deadline, permit));
                 delivered_any = true;
                 metrics.redelivered();
                 metrics.delivered();
@@ -1103,16 +1109,17 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
             group,
             &inflight_batch
                 .iter()
-                .map(|(o, d, _)| (*o, *d))
+                .map(|(_t, o, d, _p)| (*o, *d))
                 .collect::<Vec<_>>(),
         )
         .await;
 
     if res.is_err() {
         // Not durable: release capacity and requeue offsets
-        for (off, _, permit) in inflight_batch.drain(..) {
+        for (tag, offset, _deadline, permit) in inflight_batch.drain(..) {
+            group_state.inflight_permits_by_tag.remove(&tag);
             drop(permit);
-            group_state.redelivery.push(off);
+            group_state.redelivery.push(offset);
         }
         // make sure we run again promptly
         group_state.signal();
@@ -1122,16 +1129,18 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
     }
 
     // Durable: keep permits held by inflight_permits
-    for (off, _, permit) in inflight_batch.drain(..) {
-        group_state.inflight_permits.insert(off, permit);
+    for (tag, offset, _deadline, permit) in inflight_batch.drain(..) {
+        // TODO: make sure it happened earlier as much as possible, eval whether we need to replace tags
+        group_state
+            .inflight_permits_by_tag
+            .insert(tag, (offset, permit));
+        group_state.delivery_tag_by_offset.insert(offset, tag);
     }
 
     delivered_any
 }
 
-async fn process_fresh_deliveries(
-    ctx: &DeliveryCtx,
-) -> bool {
+async fn process_fresh_deliveries(ctx: &DeliveryCtx) -> bool {
     let DeliveryCtx {
         storage,
         group_state,
@@ -1144,7 +1153,9 @@ async fn process_fresh_deliveries(
     } = ctx;
 
     // capacity gate
-    let available = group_state.inflight_sem.available_permits()
+    let available = group_state
+        .inflight_sem
+        .available_permits()
         .min(ctx.broker_config.inflight_batch_size);
     if available == 0 || !group_state.redelivery.is_empty() {
         return false;
@@ -1156,7 +1167,7 @@ async fn process_fresh_deliveries(
         Err(_) => return false,
     };
 
-    let msgs = match storage
+    let mut msgs = match storage
         .fetch_available_clamped(topic, 0, group, start, upper, available)
         .await
     {
@@ -1168,14 +1179,14 @@ async fn process_fresh_deliveries(
     let mut entries = Vec::with_capacity(msgs.len());
     let mut permits = Vec::with_capacity(msgs.len());
 
-    for msg in &msgs {
+    for msg in &mut msgs {
         match group_state.inflight_sem.clone().acquire_owned().await {
             Ok(p) => {
+                let epoch = group_state.tag_counter.fetch_add(1, Ordering::SeqCst);
+                msg.delivery_tag.epoch = epoch;
+                group_state.delivery_tag_by_offset.insert(msg.message.offset, msg.delivery_tag);
                 permits.push((msg.delivery_tag, p));
-                entries.push((
-                    msg.delivery_tag,
-                    unix_millis() + ttl_deadline_delta_ms,
-                ));
+                entries.push((msg.message.offset, unix_millis() + ttl_deadline_delta_ms));
             }
             Err(_) => break,
         }
@@ -1201,11 +1212,12 @@ async fn process_fresh_deliveries(
     // ---- phase 3: deliver + register permits
     let mut max_off = None;
 
-    for ((off, permit), msg) in permits.into_iter().zip(msgs.into_iter()) {
+    for ((tag, permit), msg) in permits.into_iter().zip(msgs.into_iter()) {
         let rr = group_state.rr_counter.fetch_add(1, Ordering::SeqCst) as usize;
         let idx = rr % consumers.len();
         let (_cid, tx) = &consumers[idx];
 
+        let offset = msg.message.offset;
         if tx.send(msg).await.is_err() {
             drop(permit);
             group_state.consumers.remove(&consumers[idx].0);
@@ -1214,9 +1226,11 @@ async fn process_fresh_deliveries(
             continue;
         }
 
-        group_state.inflight_permits.insert(off, permit);
+        group_state
+            .inflight_permits_by_tag
+            .insert(tag, (offset, permit));
+        max_off = Some(offset);
         metrics.delivered();
-        max_off = Some(off);
     }
 
     if let Some(off) = max_off {
@@ -1225,7 +1239,6 @@ async fn process_fresh_deliveries(
 
     true
 }
-
 
 #[inline]
 async fn wait_for_event(group_state: &GroupState) {

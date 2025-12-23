@@ -30,7 +30,7 @@ async fn run_bench(max_msg_size: usize) -> anyhow::Result<()> {
     // First delete any existing test DB
     let _ = std::fs::remove_dir_all("test_data/bench_db");
 
-    let store = RocksStorage::open("test_data/bench_db" , false)?;
+    let store = RocksStorage::open("test_data/bench_db", false)?;
     let start = Instant::now();
 
     for buf in messages {

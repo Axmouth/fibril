@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
 
 use crate::v1::{
     frame::{Frame, ProtoCodec},
@@ -9,11 +9,13 @@ use anyhow::Context;
 use fibril_broker::{
     AckRequest, Broker, ConsumerConfig, ConsumerHandle, coordination::Coordination,
 };
-use fibril_metrics::TcpStats;
-use fibril_storage::{Group, LogId, Topic};
+use fibril_metrics::{ConnectionStats, TcpStats};
+use fibril_storage::{Group, Topic};
+use fibril_util::AuthHandler;
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpListener, sync::mpsc};
 use tokio_util::codec::Framed;
+use uuid::Uuid;
 
 type SubKey = (Topic, Group); // (topic, group)
 
@@ -32,7 +34,8 @@ struct SubState {
 pub async fn run_server<C: Coordination + Send + Sync + 'static>(
     addr: SocketAddr,
     broker: Arc<Broker<C>>,
-    metrics: Arc<TcpStats>,
+    tcp_stats: Arc<TcpStats>,
+    connection_stats: Arc<ConnectionStats>,
     auth: Option<impl AuthHandler + Send + Sync + Clone + 'static>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
@@ -40,15 +43,28 @@ pub async fn run_server<C: Coordination + Send + Sync + 'static>(
 
     loop {
         let (socket, peer) = listener.accept().await?;
-        metrics.connection_opened();
+        tcp_stats.connection_opened();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         let broker = broker.clone();
 
         let auth = auth.clone();
-        let metrics = metrics.clone();
+        let tcp_stats = tcp_stats.clone();
+        let connection_stats = connection_stats.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(socket, broker, metrics.clone(), auth).await {
+            if let Err(e) = handle_connection(
+                socket,
+                broker,
+                tcp_stats.clone(),
+                connection_stats.clone(),
+                conn_id,
+                auth,
+            )
+            .await
+            {
                 tracing::error!("conn {} error: {:?}", peer, e);
             }
+
+            connection_stats.remove_connection(&conn_id);
         });
     }
 }
@@ -56,7 +72,9 @@ pub async fn run_server<C: Coordination + Send + Sync + 'static>(
 pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
     socket: tokio::net::TcpStream,
     broker: Arc<Broker<C>>,
-    metrics: Arc<TcpStats>,
+    tcp_stats: Arc<TcpStats>,
+    connection_stats: Arc<ConnectionStats>,
+    conn_id: Uuid,
     auth_handler: Option<impl AuthHandler + Send + Sync>,
 ) -> anyhow::Result<()> {
     // ---- Framed socket -----------------------------------------------------
@@ -67,7 +85,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
     // ---- Write fan-in channel ---------------------------------------------
     let (tx, mut rx) = mpsc::channel::<Frame>(256);
 
-    let metrics_clone = metrics.clone();
+    let metrics_clone = tcp_stats.clone();
     // ---- Writer task -------------------------------------------------------
     let writer_task = tokio::spawn(async move {
         tracing::debug!("[writer] START");
@@ -114,7 +132,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
         ))
         .await
         .ok();
-        metrics.error();
+        tcp_stats.error();
         return Ok(());
     }
 
@@ -131,7 +149,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
         ))
         .await
         .ok();
-        metrics.error();
+        tcp_stats.error();
         return Ok(());
     }
 
@@ -159,7 +177,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
     while let Some(frame) =
         tokio::time::timeout(std::time::Duration::from_secs(30), reader.next()).await?
     {
-        let metrics = metrics.clone();
+        let metrics = tcp_stats.clone();
         let frame = frame?;
         let size = size_of_val(&frame) + frame.payload.len();
         metrics.bytes_in(size as u64);
@@ -220,6 +238,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                         if verified {
                             state.authenticated = true;
                             tx.send(encode(Op::AuthOk, frame.request_id, &())).await?;
+                            connection_stats.set_connection_auth(&conn_id, true);
                         } else {
                             tx.send(encode(
                                 Op::AuthErr,
@@ -279,6 +298,14 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                 let auto_ack = sub.auto_ack;
                 let tx_clone = tx.clone();
 
+                connection_stats.add_sub(
+                    &conn_id,
+                    sub.topic.clone(),
+                    sub.group.clone(),
+                    Instant::now(),
+                    auto_ack,
+                );
+
                 let acker_clone = acker.clone();
                 let handle = tokio::spawn(async move {
                     let mut rx = messages;
@@ -290,7 +317,8 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                             group: msg.group.clone(),
                             partition: msg.message.partition,
                             offset: msg.message.offset,
-                            delivery_tag: msg.delivery_tag,
+                            delivery_tag_epoch: msg.delivery_tag.epoch,
+                            epoch: msg.delivery_tag.epoch,
                             payload: msg.message.payload.clone(),
                         };
 
@@ -348,8 +376,8 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                 if let Some(sub) = state.subs.get(&key)
                     && !sub.auto_ack
                 {
-                    for off in ack.offsets {
-                        let req = AckRequest { delivery_tag: off };
+                    for tag in ack.tags {
+                        let req = AckRequest { delivery_tag: tag };
                         let _ = sub.acker.send(req).await;
                     }
                 }
@@ -418,6 +446,6 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
 
     tracing::debug!("[conn] EXIT handle_connection peer={:?}", peer_addr);
 
-    metrics.connection_closed();
+    tcp_stats.connection_closed();
     Ok(())
 }
