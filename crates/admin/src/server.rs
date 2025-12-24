@@ -1,12 +1,16 @@
 use askama::Template;
 use axum::{
     Router,
-    response::Html,
+    extract::Path,
+    response::{Html, IntoResponse},
     routing::{get, get_service},
 };
 use fibril_util::StaticAuthHandler;
+use http::{Response, Uri, header};
+use rust_embed::{Embed, RustEmbed};
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tower::util::ServiceExt;
 use tower_http::services::ServeDir;
 
 use crate::routes;
@@ -23,6 +27,16 @@ pub struct AdminServer {
     pub config: AdminConfig,
 }
 
+fn render<T: Template>(tpl: T) -> Html<String> {
+    match tpl.render() {
+        Ok(v) => Html(v),
+        Err(e) => {
+            tracing::error!("template render error: {e}");
+            Html("<h1>500 – template error</h1>".into())
+        }
+    }
+}
+
 impl AdminServer {
     pub fn new(metrics: Metrics, config: AdminConfig) -> Self {
         Self { metrics, config }
@@ -31,62 +45,28 @@ impl AdminServer {
     pub async fn run(self) -> anyhow::Result<()> {
         let state = Arc::new(self);
 
-        let handler404 = move || async move {
-            Html(Html(
-                NotFound {
-                    page: "404",
-                    title: "Not Found",
-                }
-                .render()
-                .unwrap(),
-            ))
-        };
+        let mut app = Router::new();
 
-        let app = Router::new()
-            .nest_service("/static", get_service(ServeDir::new("admin-ui")))
-            .route(
-                "/",
-                get(move || async move {
-                    Html(
-                        OverviewPage {
-                            page: "dashboard",
-                            title: "Overview",
-                        }
-                        .render()
-                        .unwrap(),
-                    )
-                }),
-            )
-            .route(
-                "/admin/connections",
-                get(move || async move {
-                    Html(
-                        Connections {
-                            page: "connections",
-                            title: "Connections",
-                        }
-                        .render()
-                        .unwrap(),
-                    )
-                }),
-            )
-            .route(
-                "/admin/subscriptions",
-                get(move || async move {
-                    Html(
-                        Subscriptions {
-                            page: "subscriptions",
-                            title: "Subscriptions",
-                        }
-                        .render()
-                        .unwrap(),
-                    )
-                }),
-            )
+        #[cfg(debug_assertions)]
+        {
+            // DEV: serve the whole admin-ui folder from disk
+            app = app.nest_service("/static", ServeDir::new("crates/admin/admin-ui"));
+        }
+
+        #[cfg(not(debug_assertions))]
+        {
+            // RELEASE: serve embedded assets
+            app = app.route("/static/{*file}", get(admin_static));
+        }
+
+        let app = app
+            .route("/", get(overview_page))
+            .route("/admin/connections", get(connections_page))
+            .route("/admin/subscriptions", get(subscriptions_page))
             .route("/admin/api/overview", get(routes::overview))
             .route("/admin/api/connections", get(routes::connections))
             .route("/admin/api/subscriptions", get(routes::subscriptions))
-            .fallback(handler404)
+            .fallback(not_found)
             .with_state(state.clone());
 
         let listener = TcpListener::bind(&state.config.bind).await?;
@@ -94,6 +74,49 @@ impl AdminServer {
         axum::serve(listener, app).await?;
         Ok(())
     }
+}
+
+#[derive(RustEmbed)]
+#[folder = "admin-ui"]
+struct AdminAssets;
+
+async fn admin_static(Path(path): Path<String>) -> impl IntoResponse {
+    let path = path.trim_start_matches('/');
+    if let Some(file) = AdminAssets::get(path) {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        return ([(header::CONTENT_TYPE, mime.as_ref())], file.data).into_response();
+    }
+    tracing::debug!("admin static not found: {path}");
+
+    not_found().await.into_response()
+}
+
+async fn not_found() -> impl IntoResponse {
+    render(NotFound {
+        page: "404",
+        title: "Not Found",
+    })
+}
+
+async fn overview_page() -> impl IntoResponse {
+    render(OverviewPage {
+        page: "dashboard",
+        title: "Overview",
+    })
+}
+
+async fn connections_page() -> impl IntoResponse {
+    render(Connections {
+        page: "connections",
+        title: "Connections",
+    })
+}
+
+async fn subscriptions_page() -> impl IntoResponse {
+    render(Subscriptions {
+        page: "subscriptions",
+        title: "Subscriptions",
+    })
 }
 
 #[derive(Template)]
