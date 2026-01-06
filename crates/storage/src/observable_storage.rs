@@ -3,7 +3,7 @@ use fibril_util::UnixMillis;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::{Group, LogId, Offset, Storage, StorageError, StoredMessage, Topic};
+use crate::{AppendReceiptExt, Group, LogId, Offset, Storage, StorageError, StoredMessage, Topic};
 
 macro_rules! observe {
     ($stats:expr, $field:ident, $call:expr) => {{
@@ -39,7 +39,23 @@ impl<S> ObservableStorage<S> {
 }
 
 #[async_trait::async_trait]
-impl<S: Storage> Storage for ObservableStorage<S> {
+impl<O, S: Storage<O>> Storage<O> for ObservableStorage<S>
+where
+    O: AppendReceiptExt<Offset>,
+{
+    async fn append_enqueue(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        payload: &[u8],
+    ) -> Result<O, StorageError> {
+        observe!(
+            self.stats,
+            writes,
+            self.inner().append_enqueue(topic, partition, payload)
+        )
+    }
+
     async fn append(
         &self,
         topic: &Topic,
@@ -331,11 +347,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
     }
 
     async fn estimate_disk_used(&self) -> Result<u64, StorageError> {
-        observe!(
-            self.stats,
-            control_plane,
-            self.inner().estimate_disk_used()
-        )
+        observe!(self.stats, control_plane, self.inner().estimate_disk_used())
     }
 
     async fn dump_meta_keys(&self) {

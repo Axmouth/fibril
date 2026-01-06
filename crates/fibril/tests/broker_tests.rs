@@ -9,7 +9,7 @@ use fibril_util::unix_millis;
 use tokio::task::JoinHandle;
 
 // TODO: make shared
-async fn make_test_store() -> anyhow::Result<impl Storage> {
+async fn make_test_store() -> anyhow::Result<impl Storage<AppendReceiptS>> {
     // make testdata dir
     std::fs::create_dir_all("test_data")?;
     // make random temp filename to avoid conflicts
@@ -20,7 +20,8 @@ async fn make_test_store() -> anyhow::Result<impl Storage> {
     Ok(res?)
 }
 
-async fn make_test_broker() -> anyhow::Result<Broker<NoopCoordination>> {
+async fn make_test_broker()
+-> anyhow::Result<Broker<NoopCoordination, impl AppendReceiptExt<Offset>>> {
     let store = Arc::new(make_test_store().await?);
     let metrics = Metrics::new(60 * 60);
     Ok(Broker::try_new(
@@ -30,11 +31,11 @@ async fn make_test_broker() -> anyhow::Result<Broker<NoopCoordination>> {
         BrokerConfig {
             cleanup_interval_secs: 150,
             inflight_ttl_secs: 3,
-            publish_batch_size: 64,
+            publish_batch_size: 512,
             publish_batch_timeout_ms: 1,
-            ack_batch_size: 64,
+            ack_batch_size: 512,
             ack_batch_timeout_ms: 1,
-            inflight_batch_size: 64,
+            inflight_batch_size: 512,
             inflight_batch_timeout_ms: 1,
             reset_inflight: false,
         },
@@ -44,7 +45,7 @@ async fn make_test_broker() -> anyhow::Result<Broker<NoopCoordination>> {
 
 async fn make_test_broker_with_cfg(
     config: BrokerConfig,
-) -> anyhow::Result<Broker<NoopCoordination>> {
+) -> anyhow::Result<Broker<NoopCoordination, AppendReceiptS>> {
     let store = Arc::new(make_test_store().await?);
     let metrics = Metrics::new(60 * 60);
     Ok(Broker::try_new(store, NoopCoordination, metrics.broker(), config).await?)

@@ -10,7 +10,7 @@ use fibril_broker::{
     AckRequest, Broker, ConsumerConfig, ConsumerHandle, coordination::Coordination,
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
-use fibril_storage::{Group, Topic};
+use fibril_storage::{AppendReceiptExt, Group, Offset, Topic};
 use fibril_util::AuthHandler;
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpListener, sync::mpsc};
@@ -31,9 +31,12 @@ struct SubState {
     task: tokio::task::JoinHandle<()>,
 }
 
-pub async fn run_server<C: Coordination + Send + Sync + 'static>(
+pub async fn run_server<
+    C: Coordination + Send + Sync + 'static,
+    O: AppendReceiptExt<Offset> + 'static,
+>(
     addr: SocketAddr,
-    broker: Arc<Broker<C>>,
+    broker: Arc<Broker<C, O>>,
     tcp_stats: Arc<TcpStats>,
     connection_stats: Arc<ConnectionStats>,
     auth: Option<impl AuthHandler + Send + Sync + Clone + 'static>,
@@ -69,9 +72,12 @@ pub async fn run_server<C: Coordination + Send + Sync + 'static>(
     }
 }
 
-pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
+pub async fn handle_connection<
+    C: Coordination + Send + Sync + 'static,
+    O: AppendReceiptExt<Offset> + 'static,
+>(
     socket: tokio::net::TcpStream,
-    broker: Arc<Broker<C>>,
+    broker: Arc<Broker<C, O>>,
     tcp_stats: Arc<TcpStats>,
     connection_stats: Arc<ConnectionStats>,
     conn_id: Uuid,
@@ -456,7 +462,8 @@ pub fn print_banner(bind: &SocketAddr) {
     tracing::info!("\n{art}\nListening on {bind}\n");
 }
 
-const ASCII_ARTS: &[&str] = &[r#"
+const ASCII_ARTS: &[&str] = &[
+    r#"
 ███████╗██╗██████╗ ██████╗ ██╗██╗     
 ██╔════╝██║██╔══██╗██╔══██╗██║██║     
 █████╗  ██║██████╔╝██████╔╝██║██║     
@@ -465,7 +472,8 @@ const ASCII_ARTS: &[&str] = &[r#"
 ╚═╝     ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝╚══════╝
                                          
                                          
-"#,r#"
+"#,
+    r#"
                                                   
 88888888888  88  88                       88  88  
 88           ""  88                       ""  88  
@@ -477,7 +485,8 @@ const ASCII_ARTS: &[&str] = &[r#"
 88           88  8Y"Ybbd8"'   88          88  88  
                                                   
                                                   
-"#,r#"
+"#,
+    r#"
 '||''''|  ||  '||               ||  '||  
  ||  .   ...   || ...  ... ..  ...   ||  
  ||''|    ||   ||'  ||  ||' ''  ||   ||  
@@ -485,7 +494,8 @@ const ASCII_ARTS: &[&str] = &[r#"
 .||.     .||.  '|...'  .||.    .||. .||. 
                                          
                                          
-"#,r#"
+"#,
+    r#"
 '||''''|      '||                 '||` 
  ||  .    ''   ||             ''   ||  
  ||''|    ||   ||''|, '||''|  ||   ||  
@@ -493,7 +503,8 @@ const ASCII_ARTS: &[&str] = &[r#"
 .||.     .||. .||..|' .||.   .||. .||. 
                                        
                                        
-"#,r#"
+"#,
+    r#"
  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄   ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄           
 ▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░▌ ▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░▌          
 ▐░█▀▀▀▀▀▀▀▀▀  ▀▀▀▀█░█▀▀▀▀ ▐░█▀▀▀▀▀▀▀█░▌▐░█▀▀▀▀▀▀▀█░▌ ▀▀▀▀█░█▀▀▀▀ ▐░▌          
@@ -506,7 +517,8 @@ const ASCII_ARTS: &[&str] = &[r#"
 ▐░▌          ▐░░░░░░░░░░░▌▐░░░░░░░░░░▌ ▐░▌       ▐░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌
  ▀            ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀   ▀         ▀  ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀ 
                                                                               
-"#,r#"
+"#,
+    r#"
                                                                                     
                              bbbbbbbb                                               
 FFFFFFFFFFFFFFFFFFFFFF  iiii b::::::b                                 iiii  lllllll 
@@ -532,5 +544,5 @@ FFFFFFFFFFF           iiiiiiiibbbbbbbbbbbbbbbb    rrrrrrr           iiiiiiiillll
                                                                                     
                                                                                     
                                                                                     
-"#
+"#,
 ];

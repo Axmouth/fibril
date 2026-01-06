@@ -15,7 +15,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::coordination::Coordination;
 use fibril_storage::{
-    DeliverableMessage, DeliveryTag, Group, LogId, Offset, Storage, StorageError, Topic,
+    AppendReceiptExt, DeliverableMessage, DeliveryTag, Group, LogId, Offset, Storage, StorageError,
+    Topic,
 };
 use fibril_util::{UnixMillis, unix_millis};
 
@@ -190,6 +191,8 @@ pub struct PublisherHandle {
     // TODO: separate?
     confirm_tx: tokio::sync::mpsc::Sender<Result<Offset, BrokerError>>,
     task_group: Arc<TaskGroup>,
+    topic: Topic,
+    partition: LogId,
 }
 
 // TODO: empty and close channels on drop/shutdown
@@ -229,8 +232,11 @@ impl ConfirmStream {
     }
 }
 
-struct DeliveryCtx {
-    storage: Arc<dyn Storage>,
+struct DeliveryCtx<O>
+where
+    O: AppendReceiptExt<Offset> + 'static,
+{
+    storage: Arc<dyn Storage<O>>,
     group_state: Arc<GroupState>,
     topic: Topic,
     group: Group,
@@ -287,9 +293,9 @@ impl TaskGroup {
 
 // TODO: Injectable clock for testing
 #[derive(Debug)]
-pub struct Broker<C: Coordination + Send + Sync + 'static> {
+pub struct Broker<C: Coordination + Send + Sync + 'static, O: AppendReceiptExt<Offset> + 'static> {
     pub config: BrokerConfig,
-    storage: Arc<dyn Storage>,
+    storage: Arc<dyn Storage<O>>,
     coord: Arc<C>,
     metrics: Arc<BrokerStats>,
     // TODO: Add partition to groups key for corrected and independent cursors
@@ -302,9 +308,9 @@ pub struct Broker<C: Coordination + Send + Sync + 'static> {
     next_sub_id: AtomicU64,
 }
 
-impl<C: Coordination + Send + Sync + 'static> Broker<C> {
+impl<C: Coordination + Send + Sync + 'static, O: AppendReceiptExt<Offset> + 'static> Broker<C, O> {
     pub async fn try_new(
-        storage: Arc<impl Storage + 'static>,
+        storage: Arc<impl Storage<O> + 'static>,
         coord: C,
         metrics: Arc<BrokerStats>,
         config: BrokerConfig,
@@ -397,8 +403,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         topic: &str,
     ) -> Result<(PublisherHandle, ConfirmStream), BrokerError> {
         let partition = 0;
-        let (confirm_tx, confirm_rx) =
-            mpsc::channel::<Result<Offset, BrokerError>>(self.config.publish_batch_size * 4);
+        let (confirm_tx, confirm_rx) = mpsc::channel::<Result<Offset, BrokerError>>(1024 * 4);
 
         let batcher = self
             .get_or_create_batcher(&topic.to_string(), partition)
@@ -409,6 +414,8 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                 publisher: batcher,
                 confirm_tx,
                 task_group: self.task_group.clone(),
+                topic: topic.to_string(),
+                partition,
             },
             ConfirmStream { rx: confirm_rx },
         ))
@@ -849,7 +856,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         match self.batchers.entry(key) {
             dashmap::Entry::Occupied(e) => e.get().clone(),
             dashmap::Entry::Vacant(v) => {
-                let (tx, rx) = mpsc::channel::<PublishRequest>(self.config.publish_batch_size * 4);
+                let (tx, rx) = mpsc::channel::<PublishRequest>(1024 * 16);
                 v.insert(tx.clone());
                 self.spawn_batcher(topic.clone(), partition, rx);
                 tx
@@ -884,7 +891,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                                 pending.push(msg);
 
                                 // arm timer on first message
-                                if pending.len() == 1 {
+                                if pending.len() == 1 && cfg.publish_batch_timeout_ms > 0 {
                                     timer = Some(Box::pin(tokio::time::sleep(
                                         tokio::time::Duration::from_millis(cfg.publish_batch_timeout_ms)
                                     )));
@@ -936,8 +943,8 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
     }
 }
 
-async fn flush_publish_batch(
-    storage: &Arc<dyn Storage>,
+async fn flush_publish_batch<O: AppendReceiptExt<Offset>>(
+    storage: &Arc<dyn Storage<O>>,
     groups: Arc<DashMap<(String, String), Arc<GroupState>>>,
     topic: &Topic,
     partition: u32,
@@ -986,8 +993,8 @@ async fn flush_publish_batch(
     }
 }
 
-async fn flush_ack_batch(
-    storage: &Arc<dyn Storage>,
+async fn flush_ack_batch<O: AppendReceiptExt<Offset>>(
+    storage: &Arc<dyn Storage<O>>,
     topic: &String,
     group: &String,
     buf: &mut Vec<Offset>,
@@ -1010,8 +1017,8 @@ async fn flush_ack_batch(
     buf.clear();
 }
 
-async fn compute_start_offset(
-    storage: &Arc<impl Storage + ?Sized>,
+async fn compute_start_offset<O: AppendReceiptExt<Offset>>(
+    storage: &Arc<impl Storage<O> + ?Sized>,
     topic: &str,
     partition: u32,
     group: &str,
@@ -1040,7 +1047,7 @@ pub fn maybe_auto_ack(auto_ack: bool, ack_tx: &mpsc::Sender<AckRequest>, tag: De
     }
 }
 
-async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
+async fn process_redeliveries<O: AppendReceiptExt<Offset>>(ctx: &DeliveryCtx<O>) -> bool {
     let DeliveryCtx {
         storage,
         group_state,
@@ -1141,7 +1148,7 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
     delivered_any
 }
 
-async fn process_fresh_deliveries(ctx: &DeliveryCtx) -> bool {
+async fn process_fresh_deliveries<O: AppendReceiptExt<Offset>>(ctx: &DeliveryCtx<O>) -> bool {
     let DeliveryCtx {
         storage,
         group_state,

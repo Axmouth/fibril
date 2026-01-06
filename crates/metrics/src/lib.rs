@@ -578,10 +578,7 @@ impl SystemStats {
             (0., 0.)
         };
 
-        SystemSnapshot {
-            rss_mb,
-            cpu,
-        }
+        SystemSnapshot { rss_mb, cpu }
     }
 }
 

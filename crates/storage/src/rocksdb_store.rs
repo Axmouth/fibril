@@ -1,11 +1,16 @@
-use crate::*;
-use fibril_util::unix_millis;
+use fibril_util::{UnixMillis, unix_millis};
 
 use async_trait::async_trait;
 use rocksdb::{
-    BoundColumnFamily, ColumnFamilyDescriptor, CompactOptions, DBWithThreadMode, IteratorMode, MultiThreaded, Options, WriteBatch, WriteOptions
+    BoundColumnFamily, ColumnFamilyDescriptor, CompactOptions, DBWithThreadMode, IteratorMode,
+    MultiThreaded, Options, WriteBatch, WriteOptions,
 };
 use std::sync::Arc;
+
+use crate::{
+    DeliverableMessage, DeliveryTag, Group, LogId, Offset, Storage, StorageAppendReceipt,
+    StorageError, StoredMessage, Topic,
+};
 
 #[derive(Debug, Clone)]
 pub struct RocksStorage {
@@ -112,7 +117,6 @@ impl RocksStorage {
         Ok(storage)
     }
 
-
     fn next_offset_key(topic: &Topic, partition: LogId) -> String {
         format!("NEXT_OFFSET:{}:{}", topic, partition)
     }
@@ -195,7 +199,55 @@ impl RocksStorage {
 }
 
 #[async_trait]
-impl Storage for RocksStorage {
+impl Storage<StorageAppendReceipt<Offset>> for RocksStorage {
+    async fn append_enqueue(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        payload: &[u8],
+    ) -> Result<StorageAppendReceipt<Offset>, StorageError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let ar = StorageAppendReceipt { result_rx: rx };
+        let topic = topic.clone();
+        let payload = payload.to_vec();
+        let db = self.db.clone();
+        let write_opts = self.write_opts();
+        tokio::spawn(async move {
+            let res: Result<u64, StorageError> = async move {
+                let meta_cf = db
+                    .cf_handle("meta")
+                    .ok_or(StorageError::MissingColumnFamily("meta"))?;
+                let messages_cf = db
+                    .cf_handle("messages")
+                    .ok_or(StorageError::MissingColumnFamily("messages"))?;
+
+                // Read next offset, default 0
+                let key = Self::next_offset_key(&topic, partition);
+                let next = db.get_cf(&meta_cf, key.as_bytes())?;
+                let offset = match &next {
+                    Some(v) => u64::from_be_bytes(v.as_slice().try_into().map_err(|_| {
+                        StorageError::KeyDecode(format!("invalid next offset length: {}", v.len()))
+                    })?),
+                    None => 0,
+                };
+
+                let msg_key = Self::encode_msg_key(&topic, partition, offset);
+
+                let mut batch = WriteBatch::default();
+                batch.put_cf(&messages_cf, msg_key, payload);
+                batch.put_cf(&meta_cf, key.as_bytes(), (offset + 1).to_be_bytes());
+                db.write_opt(batch, &write_opts)?;
+
+                Ok(offset)
+            }
+            .await;
+
+            let _ = tx.send(res);
+        });
+
+        Ok(ar)
+    }
+
     async fn append(
         &self,
         topic: &Topic,
@@ -770,7 +822,8 @@ impl Storage for RocksStorage {
         opts.set_change_level(true);
         opts.set_target_level(0); // bottommost
 
-        self.db.compact_range_cf_opt(&messages_cf, None::<&[u8]>, None::<&[u8]>, &opts);
+        self.db
+            .compact_range_cf_opt(&messages_cf, None::<&[u8]>, None::<&[u8]>, &opts);
 
         Ok(())
     }
@@ -1056,10 +1109,10 @@ impl Storage for RocksStorage {
         for cf_name in ["messages", "inflight", "acked", "meta", "groups"] {
             let cf = self.cf(cf_name)?;
 
-            if let Some(v) = self.db.property_int_value_cf(
-                &cf,
-                "rocksdb.total-sst-files-size"
-            )? {
+            if let Some(v) = self
+                .db
+                .property_int_value_cf(&cf, "rocksdb.total-sst-files-size")?
+            {
                 total += v;
             }
         }

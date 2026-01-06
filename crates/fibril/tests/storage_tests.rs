@@ -1,6 +1,6 @@
 use fibril_storage::*;
 
-fn make_test_store() -> anyhow::Result<Box<dyn Storage>> {
+fn make_test_store() -> anyhow::Result<Box<dyn Storage<StorageAppendReceipt<Offset>>>> {
     // make testdata dir
     std::fs::create_dir_all("test_data")?;
     // make random temp filename to avoid conflicts

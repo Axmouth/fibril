@@ -5,7 +5,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, get_service},
 };
-use fibril_storage::Storage;
+use fibril_storage::{AppendReceiptExt, Offset, Storage};
 use fibril_util::StaticAuthHandler;
 use http::{Response, Uri, header};
 use rust_embed::{Embed, RustEmbed};
@@ -23,10 +23,10 @@ pub struct AdminConfig {
     pub auth: Option<StaticAuthHandler>,
 }
 
-pub struct AdminServer {
+pub struct AdminServer<O: AppendReceiptExt<Offset> + 'static> {
     pub metrics: Metrics,
     pub config: AdminConfig,
-    pub storage: Arc<dyn Storage>,
+    pub storage: Arc<dyn Storage<O>>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -39,9 +39,13 @@ fn render<T: Template>(tpl: T) -> Html<String> {
     }
 }
 
-impl AdminServer {
-    pub fn new(metrics: Metrics, config: AdminConfig, storage: Arc<dyn Storage>) -> Self {
-        Self { metrics, config, storage }
+impl<O: AppendReceiptExt<Offset> + 'static> AdminServer<O> {
+    pub fn new(metrics: Metrics, config: AdminConfig, storage: Arc<dyn Storage<O>>) -> Self {
+        Self {
+            metrics,
+            config,
+            storage,
+        }
     }
 
     pub async fn run(self) -> anyhow::Result<()> {

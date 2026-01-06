@@ -7,6 +7,9 @@ use async_trait::async_trait;
 use fibril_util::UnixMillis;
 use serde::{Deserialize, Serialize};
 
+pub use stroma_core::AppendReceipt;
+pub use stroma_core::AppendReceipt as AppendReceiptS;
+
 pub type Topic = String;
 pub type LogId = u32;
 pub type Offset = u64;
@@ -66,13 +69,51 @@ pub async fn make_stroma_store(
     path: &str,
     sync_write: bool,
 ) -> Result<stroma_store::StromaStorage, StorageError> {
-    stroma_store::StromaStorage::open(path, sync_write)
-        .await
+    stroma_store::StromaStorage::open(path, sync_write).await
+}
+
+#[async_trait]
+pub trait AppendReceiptExt<T> {
+    async fn wait(self) -> Result<T, impl Into<StorageError>>;
+}
+
+pub struct StorageAppendReceipt<T> {
+    pub result_rx: tokio::sync::oneshot::Receiver<Result<T, StorageError>>,
+}
+
+#[async_trait]
+impl AppendReceiptExt<Offset> for StorageAppendReceipt<Offset> {
+    async fn wait(self) -> Result<Offset, StorageError> {
+        self.result_rx
+            .await
+            .unwrap_or_else(|_| Err(StorageError::Internal("writer dropped".into())))
+    }
+}
+
+#[async_trait]
+impl AppendReceiptExt<Offset> for stroma_core::AppendReceipt {
+    async fn wait(self) -> Result<Offset, StorageError> {
+        self.wait()
+            .await
+            .map_err(|e| StorageError::Internal(e.to_string()))
+            .map(|v| v.base_offset)
+    }
 }
 
 /// Defines the persistent storage API for a durable queue system.
 #[async_trait]
-pub trait Storage: Send + Sync + std::fmt::Debug {
+pub trait Storage<O>: Send + Sync + std::fmt::Debug
+where
+    O: AppendReceiptExt<Offset>,
+{
+    /// Append a message to the end of a topic/partition log asynchronously(a receipt is returned that can be used to await batch commit).
+    async fn append_enqueue(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        payload: &[u8],
+    ) -> Result<O, StorageError>;
+
     /// Append a message to the end of a topic/partition log.
     async fn append(
         &self,

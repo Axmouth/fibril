@@ -13,7 +13,7 @@ use fibril_broker::{AckRequest, ConsumerConfig};
 use fibril_broker::{Broker, BrokerConfig, ConsumerHandle};
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_storage::{
-    DeliveryTag, Offset, make_rocksdb_store, make_stroma_store,
+    AppendReceiptExt, DeliveryTag, Offset, make_rocksdb_store, make_stroma_store,
     observable_storage::ObservableStorage,
 };
 
@@ -37,7 +37,7 @@ pub enum BenchMode {
     E2E(E2EBench),
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 pub struct E2EBench {
     #[arg(long, default_value = "1000000")]
     pub messages: u64,
@@ -143,8 +143,8 @@ fn mark_done_once(slot: &AtomicU64, start: Instant) {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn producer_task(
-    broker: Arc<Broker<NoopCoordination>>,
+async fn producer_task<O>(
+    broker: Arc<Broker<NoopCoordination, O>>,
     topic: String,
     producer_id: u32,
     produce_counter: Arc<AtomicU64>,
@@ -152,7 +152,9 @@ async fn producer_task(
     inflight_limit: usize,
     prod_id_tx: tokio::sync::mpsc::UnboundedSender<(u64, u32)>,
     metrics: Arc<BenchMetrics>,
-) {
+) where
+    O: AppendReceiptExt<Offset> + 'static,
+{
     let (publisher, mut confirm_stream) = broker.get_publisher(&topic).await.unwrap();
 
     let metrics_clone = metrics.clone();
@@ -176,7 +178,7 @@ async fn producer_task(
         if msg_id >= total {
             break;
         }
-        let size = 512;
+        let size = 1024;
         let payload = make_payload(msg_id, producer_id, size);
 
         publisher.publish(payload).await.unwrap();
@@ -246,13 +248,15 @@ async fn consumer_task(
     }
 }
 
-async fn reporter(
+async fn reporter<O>(
     metrics: Arc<BenchMetrics>,
-    broker: Arc<Broker<NoopCoordination>>,
+    broker: Arc<Broker<NoopCoordination, O>>,
     topic: String,
     interval: u64,
     total: u64,
-) {
+) where
+    O: AppendReceiptExt<Offset> + 'static,
+{
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
     let upper = broker.debug_upper(&topic, 0).await;
 
@@ -275,7 +279,9 @@ async fn reporter(
     }
 }
 
-async fn make_broker_with_cfg(cmd: &E2EBench) -> Broker<NoopCoordination> {
+async fn make_broker_with_cfg(
+    cmd: E2EBench,
+) -> Broker<NoopCoordination, impl AppendReceiptExt<Offset>> {
     let mut cfg = BrokerConfig {
         publish_batch_size: cmd.batch_size,
         publish_batch_timeout_ms: cmd.batch_timeout_ms,
@@ -315,7 +321,7 @@ async fn make_broker_with_cfg(cmd: &E2EBench) -> Broker<NoopCoordination> {
 }
 
 async fn run_e2e_bench(cmd: E2EBench) {
-    let broker = make_broker_with_cfg(&cmd).await;
+    let broker = make_broker_with_cfg(cmd.clone()).await;
     let broker = Arc::new(broker);
     let broker_clone = broker.clone();
 

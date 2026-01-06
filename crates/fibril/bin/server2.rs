@@ -9,8 +9,15 @@ async fn main() -> anyhow::Result<()> {
     let storage = Arc::new(RocksStorage::open("test_data/server2", true)?);
     let coord = NoopCoordination;
     let metrics = Metrics::new(3 * 60 * 60); // 3 hours
-    let broker =
-        Arc::new(Broker::try_new(storage.clone(), coord, metrics.broker(), BrokerConfig::default()).await?);
+    let broker = Arc::new(
+        Broker::try_new(
+            storage.clone(),
+            coord,
+            metrics.broker(),
+            BrokerConfig::default(),
+        )
+        .await?,
+    );
 
     let consumer = broker
         .subscribe("topic", "group", ConsumerConfig { prefetch_count: 10 })

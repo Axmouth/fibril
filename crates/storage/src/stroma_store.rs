@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use fibril_util::unix_millis;
@@ -7,7 +7,7 @@ use crate::{
     DeliverableMessage, DeliveryTag, Group, LogId, Offset, Storage, StorageError, StoredMessage,
     Topic, UnixMillis,
 };
-use stroma_core::{Durability, KeratinConfig, SnapshotConfig, Stroma, StromaError};
+use stroma_core::{AppendReceipt, Durability, KeratinConfig, SnapshotConfig, Stroma, StromaError};
 
 #[derive(Debug, Clone)]
 pub struct StromaStorage {
@@ -21,7 +21,7 @@ impl StromaStorage {
             index_stride_bytes: 64 * 1024,
             max_batch_bytes: 4 * 1024 * 1024,
             max_batch_records: 2048,
-            batch_linger_ms: 2,
+            batch_linger_ms: 5,
             fsync_interval_ms: 2,
             flush_target_bytes: 32 * 1024 * 1024,
             default_durability: (if sync_write {
@@ -51,13 +51,33 @@ impl StromaStorage {
 }
 
 #[async_trait]
-impl Storage for StromaStorage {
+impl Storage<AppendReceipt> for StromaStorage {
     async fn append(
         &self,
         topic: &Topic,
         partition: LogId,
         payload: &[u8],
     ) -> Result<Offset, StorageError> {
+        let ar = self
+            .inner
+            .append_message(topic, partition, payload)
+            .await
+            .map_err(Self::map_err)?;
+
+        Ok(ar
+            .wait()
+            .await
+            .map_err(|e| StromaError::Io(e.to_string()))
+            .map_err(Self::map_err)?
+            .base_offset)
+    }
+
+    async fn append_enqueue(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        payload: &[u8],
+    ) -> Result<AppendReceipt, StorageError> {
         self.inner
             .append_message(topic, partition, payload)
             .await
