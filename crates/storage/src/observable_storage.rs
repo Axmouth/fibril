@@ -96,6 +96,21 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         )
     }
 
+    async fn ack_enqueue(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: &str,
+        offset: Offset,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StorageError> {
+        observe!(
+            self.stats,
+            acks,
+            self.inner().ack_enqueue(topic, partition, group, offset, completion)
+        )
+    }
+
     async fn ack(
         &self,
         topic: &Topic,
@@ -112,16 +127,16 @@ impl<S: Storage> Storage for ObservableStorage<S> {
 
     async fn ack_batch(
         &self,
-        topic: &Topic,
+        topic: &str,
         partition: LogId,
-        group: &Group,
+        group: &str,
         offsets: &[Offset],
     ) -> Result<(), StorageError> {
         self.stats.ack_batches.observe(offsets.len(), 0);
         self.stats.record_acks(offsets.len() as u64);
         let _t = Timer::new(&self.stats.ack_batches.batches.latency);
         self.inner()
-            .ack_batch(topic, partition, group, offsets)
+            .ack_batch(topic.into(), partition, group.into(), offsets)
             .await
     }
 

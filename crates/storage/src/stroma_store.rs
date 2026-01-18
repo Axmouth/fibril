@@ -22,11 +22,11 @@ impl StromaStorage {
         let keratin_cfg = KeratinConfig {
             segment_max_bytes: 256 * 1024 * 1024,
             index_stride_bytes: 64 * 1024,
-            max_batch_bytes: 32 * 1024 * 1024,
+            max_batch_bytes: 12 * 1024 * 1024,
             max_batch_records: 8192,
             batch_linger_ms: 25,
             fsync_interval_ms: 25,
-            flush_target_bytes: 32 * 1024 * 1024,
+            flush_target_bytes: 48 * 1024 * 1024,
             default_durability: (if sync_write {
                 Durability::AfterFsync
             } else {
@@ -171,7 +171,7 @@ impl Storage for StromaStorage {
             .map_err(Self::map_err)?;
 
         // let mut candidates = Vec::new();
-        
+
         while out.len() < max && cur < tail {
             let chunk = self
                 .inner
@@ -194,7 +194,7 @@ impl Storage for StromaStorage {
             // self.inner.filter_not_enqueued(topic, partition, &mut candidates);
 
             // for (off, payload) in candidates.drain(..) {
-            //     out.push(DeliverableMessage { 
+            //     out.push(DeliverableMessage {
             //         message: StoredMessage {
             //             topic: topic.clone(),
             //             partition,
@@ -207,7 +207,6 @@ impl Storage for StromaStorage {
             //      });
             //     if out.len() >= max { break; }
             // }
-
 
             for (off, payload) in chunk {
                 cur = off + 1;
@@ -302,6 +301,22 @@ impl Storage for StromaStorage {
             .map_err(Self::map_err)
     }
 
+    async fn ack_enqueue(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: &str,
+        offset: Offset,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .ack_enqueue(topic, partition, offset, completion)
+            .await
+            .map_err(Self::map_err)?;
+
+        Ok(())
+    }
+
     async fn ack(
         &self,
         topic: &Topic,
@@ -317,13 +332,13 @@ impl Storage for StromaStorage {
 
     async fn ack_batch(
         &self,
-        topic: &Topic,
+        topic: &str,
         partition: LogId,
-        group: &Group,
+        group: &str,
         offsets: &[Offset],
     ) -> Result<(), StorageError> {
         self.inner
-            .ack_batch(topic, partition, offsets)
+            .ack_batch(topic.into(), partition, offsets)
             .await
             .map_err(Self::map_err)
     }
@@ -457,13 +472,21 @@ impl Storage for StromaStorage {
     }
 
     async fn list_topics(&self) -> Result<Vec<Topic>, StorageError> {
-        Ok(self.inner.list_topics().into_iter().map(|s| s.into()).collect())
+        Ok(self
+            .inner
+            .list_topics()
+            .into_iter()
+            .map(|s| s.into())
+            .collect())
     }
 
     async fn list_groups(&self) -> Result<Vec<(Topic, LogId, Group)>, StorageError> {
-        Ok(self.inner.list_queues().into_iter().map(|(tp, part)| {
-            (tp.into(), part, "group".into())
-        }).collect())
+        Ok(self
+            .inner
+            .list_queues()
+            .into_iter()
+            .map(|(tp, part)| (tp.into(), part, "group".into()))
+            .collect())
     }
 
     async fn flush(&self) -> Result<(), StorageError> {

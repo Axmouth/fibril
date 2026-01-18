@@ -337,7 +337,7 @@ async fn run_e2e_bench(cmd: E2EBench) {
             .subscribe(
                 &topic,
                 "bench_group",
-                ConsumerConfig::default().with_prefetch_count(8192),
+                ConsumerConfig::default().with_prefetch_count(8192*8),
             )
             .await
             .unwrap();

@@ -166,8 +166,8 @@ impl ConsumerConfig {
 pub struct ConsumerHandle {
     pub sub_id: u64,
     pub config: ConsumerConfig,
-    pub group: Group,
-    pub topic: Topic,
+    pub group: Box<str>,
+    pub topic: Box<str>,
     pub partition: LogId,
     // TODO: find way to make this complete not on channel deliver, but response sent
     pub messages: tokio::sync::mpsc::Receiver<DeliverableMessage>,
@@ -595,92 +595,66 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
 
         // Ack handler for this consumer
         let storage_clone = Arc::clone(&self.storage);
-        let topic_clone = topic.to_string();
-        let group_clone = group.to_string();
 
         let shutdown = self.shutdown.clone();
-        let ack_batch_size = self.config.ack_batch_size;
-        let ack_batch_timeout_ms = self.config.ack_batch_timeout_ms;
 
         let group_state = group_state_arc.clone();
 
         let metrics = self.metrics.clone();
+        let task_group_clone = self.task_group.clone();
+        let topic_clone: Box<str> = topic.into();
+        let group_clone: Box<str> = group.into();
         self.task_group.spawn(async move {
-            let mut buf: Vec<Offset> = Vec::with_capacity(ack_batch_size);
-            let mut tick =
-                tokio::time::interval(std::time::Duration::from_millis(ack_batch_timeout_ms));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut flush_deadline: Option<tokio::time::Instant> = None;
-
             loop {
                 tokio::select! {
-                    biased;
+                        biased;
 
-                    _ = shutdown.cancelled() => {
-                        // flush remaining
-                        if !buf.is_empty() {
-                            flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf, metrics.clone()).await;
+                        _ = shutdown.cancelled() => {
+                            break;
                         }
-                        break;
-                    }
 
-                    Some(off) = ack_rx.recv() => {
+                        Some(off) = ack_rx.recv() => {
                         let tag = off.delivery_tag;
 
-                        debug_assert!(
-                            !group_state_arc.inflight_permits_by_tag.is_empty(),
-                            "ACK received but no inflight messages exist"
-                        );
+                        if !group_state_arc.inflight_permits_by_tag.is_empty() {
+                            tracing::warn!("ACK received but no inflight messages exist {tag:?}");
+                        }
 
                         // ONLY accept ACKs for messages that are actually inflight
-                        if let Some((_, (offset, permit))) = group_state_arc.inflight_permits_by_tag.remove(&tag) {
+                        if let Some((_, (offset, permit))) =
+                            group_state_arc.inflight_permits_by_tag.remove(&tag)
+                        {
                             // free capacity
                             drop(permit);
                             group_state_arc.delivery_tag_by_offset.remove(&offset);
-
-                            // enqueue for durable ack
-                            buf.push(offset);
-
-                            // wake delivery loop (capacity changed)
-                            group_state_arc.signal();
-
-                            // start/extend the flush timer
-                            flush_deadline = Some(
-                                tokio::time::Instant::now()
-                                    + std::time::Duration::from_millis(ack_batch_timeout_ms)
-                            );
-
-                            // size-based flush
-                            if buf.len() >= ack_batch_size {
-                                flush_ack_batch(
-                                    &storage_clone,
-                                    &topic_clone,
-                                    &group_clone,
-                                    &mut buf,
-                                    metrics.clone(),
-                                )
-                                .await;
-                                flush_deadline = None;
-                            }
+                            let (completion, receiver) = BrokerCompletionPair::pair();
+                            match storage_clone.ack_enqueue(
+                                &topic_clone,
+                                partition,
+                                &group_clone,
+                                offset,
+                                completion,
+                            ).await {
+                                Ok(()) => {},
+                                Err(err) => {
+                                    tracing::error!("Error acknowledging message: {err}");
+                                    // TODO: Send error back? Retry?
+                                },
+                            };
+                            let group_state_arc = group_state_arc.clone();
+                            let metrics = metrics.clone();
+                            task_group_clone.spawn(async move {
+                                let _ = receiver.await;
+                                // wake delivery loop (capacity changed)
+                                group_state_arc.signal();
+                                metrics.acked();
+                                // TODO: handle error?
+                            });
                         } else {
                             // ACK before delivery -> ignore
                             // (optional todo: metrics / trace)
                             // metrics.ack_before_delivery();
                         }
-                    }
-
-                    // idle-timeout flush
-                    _ = async {
-                        if let Some(dl) = flush_deadline {
-                            tokio::time::sleep_until(dl).await;
-                        } else {
-                            futures::future::pending::<()>().await;
-                        }
-                    } => {
-                        if !buf.is_empty() {
-                            flush_ack_batch(&storage_clone, &topic_clone, &group_clone, &mut buf, metrics.clone()).await;
-                        }
-                        flush_deadline = None;
                     }
                 }
             }
@@ -690,8 +664,8 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
 
         Ok(ConsumerHandle {
             sub_id,
-            group: group.to_string(),
-            topic: topic.to_string(),
+            group: group.into(),
+            topic: topic.into(),
             partition,
             config: cfg,
             messages: msg_rx,
@@ -715,7 +689,11 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
 
                 for topic in topics.iter() {
                     // TODO: Handle partition better
-                    if let Err(err) = storage.cleanup_topic(&topic.key().to_string(), 0).await {
+                    let partition = 0;
+                    if let Err(err) = storage
+                        .cleanup_topic(&topic.key().to_string(), partition)
+                        .await
+                    {
                         tracing::error!("Error in cleanup worker: {}", err);
                     } else {
                         tracing::info!("Successfully cleaned up: {}", &topic.key())
@@ -1003,8 +981,8 @@ async fn flush_publish_batch(
 
 async fn flush_ack_batch(
     storage: &Arc<dyn Storage>,
-    topic: &String,
-    group: &String,
+    topic: &Box<str>,
+    group: &Box<str>,
     buf: &mut Vec<Offset>,
     metrics: Arc<BrokerStats>,
 ) {

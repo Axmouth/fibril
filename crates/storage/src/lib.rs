@@ -204,6 +204,16 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     ) -> Result<(), StorageError>;
 
     /// Remove message from inflight and mark as acknowledged.
+    async fn ack_enqueue(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: &str,
+        offset: Offset,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StorageError>;
+
+    /// Remove message from inflight and mark as acknowledged.
     async fn ack(
         &self,
         topic: &Topic,
@@ -215,9 +225,9 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     /// Acknowledge a batch of messages.
     async fn ack_batch(
         &self,
-        topic: &Topic,
+        topic: &str,
         partition: LogId,
-        group: &Group,
+        group: &str,
         offsets: &[Offset],
     ) -> Result<(), StorageError>;
 

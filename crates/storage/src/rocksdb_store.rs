@@ -131,12 +131,12 @@ impl RocksStorage {
         v
     }
 
-    fn encode_group_key(topic: &Topic, partition: LogId, group: &Group, offset: Offset) -> Vec<u8> {
+    fn encode_group_key(topic: impl AsRef<str>, partition: LogId, group: impl AsRef<str>, offset: Offset) -> Vec<u8> {
         let mut v = Vec::new();
-        v.extend_from_slice(topic.as_bytes());
+        v.extend_from_slice(topic.as_ref().as_bytes());
         v.push(0);
         v.extend_from_slice(&partition.to_be_bytes());
-        v.extend_from_slice(group.as_bytes());
+        v.extend_from_slice(group.as_ref().as_bytes());
         v.push(0);
         v.extend_from_slice(&offset.to_be_bytes());
         v
@@ -569,6 +569,17 @@ impl Storage for RocksStorage {
         Ok(())
     }
 
+    async fn ack_enqueue(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: &str,
+        offset: Offset,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StorageError> {
+        todo!()
+    }
+
     async fn ack(
         &self,
         topic: &Topic,
@@ -611,9 +622,9 @@ impl Storage for RocksStorage {
 
     async fn ack_batch(
         &self,
-        topic: &Topic,
+        topic: &str,
         partition: LogId,
-        group: &Group,
+        group: &str,
         offsets: &[Offset],
     ) -> Result<(), StorageError> {
         if offsets.is_empty() {
