@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{ops::Deref, sync::{Arc, atomic::AtomicU64}};
 
 use async_trait::async_trait;
+use dashmap::DashSet;
 use fibril_util::unix_millis;
 
 use crate::{
@@ -15,6 +16,12 @@ use stroma_core::{
 #[derive(Debug, Clone)]
 pub struct StromaStorage {
     inner: std::sync::Arc<Stroma>,
+
+    pub(crate) msg_count: Arc<AtomicU64>,
+
+    pub(crate) event_count: Arc<AtomicU64>,
+
+    pub(crate) group_reg: Arc<DashSet<(Topic, LogId, Option<Group>)>>,
 }
 
 impl StromaStorage {
@@ -40,11 +47,21 @@ impl StromaStorage {
                 .await
                 .map_err(Self::map_err)?,
         );
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            msg_count: Arc::new(AtomicU64::new(0)),
+            event_count: Arc::new(AtomicU64::new(0)),
+            group_reg: Arc::new(DashSet::new()),
+        })
     }
 
     pub fn new(inner: std::sync::Arc<Stroma>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            msg_count: Arc::new(AtomicU64::new(0)),
+            event_count: Arc::new(AtomicU64::new(0)),
+            group_reg: Arc::new(DashSet::new()),
+        }
     }
 
     fn map_err(e: StromaError) -> StorageError {
@@ -56,10 +73,11 @@ impl StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_enqueued(topic, partition, offset)
+            .is_ready(topic, partition, group.as_deref(), offset)
             .map_err(Self::map_err)
     }
 }
@@ -70,11 +88,12 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payload: &[u8],
     ) -> Result<Offset, StorageError> {
         let (completion, rx) = BrokerCompletionPair::pair();
         self.inner
-            .append_message(topic, partition, payload, completion)
+            .append_message(topic, partition, group.as_deref(), payload, completion)
             .await
             .map_err(Self::map_err)?;
 
@@ -91,11 +110,12 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payload: &[u8],
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StorageError> {
         self.inner
-            .append_message(topic, partition, payload, completion)
+            .append_message(topic, partition, group.as_deref(), payload, completion)
             .await
             .map_err(Self::map_err)?;
         Ok(())
@@ -105,22 +125,25 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payloads: &[Vec<u8>],
     ) -> Result<Vec<Offset>, StorageError> {
         self.inner
-            .append_messages_batch(topic, partition, payloads)
+            .append_messages_batch(topic, partition, group.as_deref(), payloads)
             .await
             .map_err(Self::map_err)
     }
 
     async fn register_group(
         &self,
-        _topic: &Topic,
-        _partition: LogId,
-        _group: &Group,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
     ) -> Result<(), StorageError> {
         // Stroma creates group state lazily on first event/use.
         // Keep this as a no-op for API compatibility.
+        self.group_reg
+            .insert((topic.clone(), partition, group.clone()));
         Ok(())
     }
 
@@ -128,11 +151,12 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<StoredMessage, StorageError> {
         let Some(record) = self
             .inner
-            .fetch_message_by_offset(topic, partition, offset)
+            .fetch_message_by_offset(topic, partition, group.as_deref(), offset)
             .await
             .map_err(Self::map_err)?
         else {
@@ -141,6 +165,7 @@ impl Storage for StromaStorage {
 
         Ok(StoredMessage {
             topic: topic.clone(),
+            group: group.clone(),
             partition,
             offset,
             timestamp: unix_millis(),
@@ -152,10 +177,10 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         from_offset: Offset,
         max: usize,
-    ) -> Result<Vec<DeliverableMessage>, StorageError> {
+    ) -> Result<Vec<StoredMessage>, StorageError> {
         let mut out = Vec::with_capacity(max);
 
         // We scan message log from from_offset, then filter by Stroma state.
@@ -166,16 +191,16 @@ impl Storage for StromaStorage {
         // We'll keep scanning until we either collect `max` or we hit tail.
         let tail = self
             .inner
-            .current_next_offset(topic, partition)
+            .current_next_offset(topic, partition, group.as_deref())
             .await
             .map_err(Self::map_err)?;
 
-        // let mut candidates = Vec::new();
+        let mut candidates = Vec::new();
 
         while out.len() < max && cur < tail {
             let chunk = self
                 .inner
-                .scan_messages_from(topic, partition, cur, max - out.len())
+                .scan_messages_from(topic, partition, group.as_deref(), cur, max - out.len())
                 .await
                 .map_err(Self::map_err)?;
 
@@ -183,59 +208,53 @@ impl Storage for StromaStorage {
                 break;
             }
 
-            // candidates.clear();
-            // candidates.reserve(chunk.len());
-
-            // for (off, payload) in chunk {
-            //     cur = off + 1;
-            //     candidates.push((off, payload));
-            // }
-
-            // self.inner.filter_not_enqueued(topic, partition, &mut candidates);
-
-            // for (off, payload) in candidates.drain(..) {
-            //     out.push(DeliverableMessage {
-            //         message: StoredMessage {
-            //             topic: topic.clone(),
-            //             partition,
-            //             offset: off,
-            //             timestamp: unix_millis(),
-            //             payload,
-            //         },
-            //         delivery_tag: DeliveryTag { epoch: 0 },
-            //         group: group.clone(),
-            //      });
-            //     if out.len() >= max { break; }
-            // }
+            candidates.clear();
+            candidates.reserve(chunk.len());
 
             for (off, payload) in chunk {
                 cur = off + 1;
+                candidates.push((off, payload));
+            }
 
-                let ok = self
-                    .inner
-                    .is_enqueued(topic, partition, off)
-                    .map_err(Self::map_err)?;
+            self.inner.filter_not_enqueued(topic, partition, group.as_deref(), &mut candidates);
 
-                if !ok {
-                    continue;
-                }
-
-                out.push(DeliverableMessage {
-                    message: StoredMessage {
+            for (off, payload) in candidates.drain(..) {
+                out.push(StoredMessage {
                         topic: topic.clone(),
                         partition,
+                        group: group.clone(),
                         offset: off,
                         timestamp: unix_millis(),
                         payload,
-                    },
-                    delivery_tag: DeliveryTag { epoch: 0 },
-                    group: group.clone(),
-                });
-
-                if out.len() >= max {
-                    break;
-                }
+                    });
+                if out.len() >= max { break; }
             }
+
+            // for (off, payload) in chunk {
+            //     cur = off + 1;
+
+            //     let ok = self
+            //         .inner
+            //         .is_enqueued(topic, partition, group.as_deref(), off)
+            //         .map_err(Self::map_err)?;
+
+            //     if !ok {
+            //         continue;
+            //     }
+
+            //     out.push(StoredMessage {
+            //         topic: topic.clone(),
+            //         group: group.clone(),
+            //         partition,
+            //         offset: off,
+            //         timestamp: unix_millis(),
+            //         payload,
+            //     });
+
+            //     if out.len() >= max {
+            //         break;
+            //     }
+            // }
         }
 
         Ok(out)
@@ -245,9 +264,10 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         self.inner
-            .current_next_offset(topic, partition)
+            .current_next_offset(topic, partition, group.as_deref())
             .await
             .map_err(Self::map_err)
     }
@@ -256,21 +276,21 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         from_offset: Offset,
         max_offset_exclusive: Offset,
         max: usize,
-    ) -> Result<Vec<DeliverableMessage>, StorageError> {
+    ) -> Result<Vec<StoredMessage>, StorageError> {
         if from_offset >= max_offset_exclusive {
             return Ok(vec![]);
         }
 
         let msgs = self
-            .fetch_available(topic, partition, group, from_offset, max)
+            .fetch_available(topic, partition, &group, from_offset, max)
             .await?;
         Ok(msgs
             .into_iter()
-            .take_while(|m| m.message.offset < max_offset_exclusive)
+            .take_while(|m| m.offset < max_offset_exclusive)
             .collect())
     }
 
@@ -278,12 +298,12 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
         deadline_ts: UnixMillis,
     ) -> Result<(), StorageError> {
         self.inner
-            .mark_inflight_one(topic, partition, offset, deadline_ts)
+            .mark_inflight_one(topic, partition, group.as_deref(), offset, deadline_ts)
             .await
             .map_err(Self::map_err)
     }
@@ -292,11 +312,11 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         entries: &[(Offset, UnixMillis)],
     ) -> Result<(), StorageError> {
         self.inner
-            .mark_inflight_batch(topic, partition, entries)
+            .mark_inflight_batch(topic, partition, group.as_deref(), entries)
             .await
             .map_err(Self::map_err)
     }
@@ -305,12 +325,12 @@ impl Storage for StromaStorage {
         &self,
         topic: &str,
         partition: LogId,
-        group: &str,
+        group: &Option<Group>,
         offset: Offset,
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StorageError> {
         self.inner
-            .ack_enqueue(topic, partition, offset, completion)
+            .ack_enqueue(topic, partition, group.as_deref(), offset, completion)
             .await
             .map_err(Self::map_err)?;
 
@@ -321,11 +341,11 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<(), StorageError> {
         self.inner
-            .ack_one(topic, partition, offset)
+            .ack_one(topic, partition, group.as_deref(), offset)
             .await
             .map_err(Self::map_err)
     }
@@ -334,16 +354,16 @@ impl Storage for StromaStorage {
         &self,
         topic: &str,
         partition: LogId,
-        group: &str,
+        group: &Option<Group>,
         offsets: &[Offset],
     ) -> Result<(), StorageError> {
         self.inner
-            .ack_batch(topic.into(), partition, offsets)
+            .ack_batch(topic.into(), partition, group.as_deref(), offsets)
             .await
             .map_err(Self::map_err)
     }
 
-    async fn list_expired(&self, now_ts: u64) -> Result<Vec<DeliverableMessage>, StorageError> {
+    async fn list_expired(&self, now_ts: u64) -> Result<Vec<StoredMessage>, StorageError> {
         // Rocks implementation returned messages too.
         // Here we:
         // 1) ask Stroma which (tp,part,group,off) expired
@@ -355,10 +375,10 @@ impl Storage for StromaStorage {
 
         let mut out = Vec::with_capacity(expired.len());
 
-        for (tp, part, off) in expired {
+        for (tp, part, group, off) in expired {
             let Some(record) = self
                 .inner
-                .fetch_message_by_offset(&tp, part, off)
+                .fetch_message_by_offset(&tp, part, group.as_deref(), off)
                 .await
                 .map_err(Self::map_err)?
             else {
@@ -366,16 +386,14 @@ impl Storage for StromaStorage {
                 continue;
             };
 
-            out.push(DeliverableMessage {
-                message: StoredMessage {
-                    topic: tp.clone(),
-                    partition: part,
-                    offset: off,
-                    timestamp: unix_millis(),
-                    payload: record.payload,
-                },
-                delivery_tag: DeliveryTag { epoch: 0 },
-                group: "group".into(),
+            out.push(StoredMessage {
+                topic: tp.clone(),
+                // TODO: Fix
+                group: group.clone(),
+                partition: part,
+                offset: off,
+                timestamp: unix_millis(),
+                payload: record.payload,
             });
         }
 
@@ -386,10 +404,10 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         self.inner
-            .lowest_unacked_offset(topic, partition)
+            .lowest_unacked_offset(topic, partition, group.as_deref())
             .map_err(Self::map_err)
     }
 
@@ -397,15 +415,16 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         // In your stroma state model, "lowest_unacked" is the same as "lowest_not_acked".
         self.lowest_unacked_offset(topic, partition, group).await
     }
 
-    async fn cleanup_topic(&self, topic: &Topic, partition: LogId) -> Result<(), StorageError> {
+    async fn cleanup_topic(&self, topic: &Topic, partition: LogId, 
+        group: &Option<Group>) -> Result<(), StorageError> {
         self.inner
-            .cleanup_topic_partition(topic, partition)
+            .cleanup_topic_partition(topic, partition, group.as_deref())
             .await
             .map_err(Self::map_err)
     }
@@ -414,11 +433,38 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<(), StorageError> {
         self.inner
-            .clear_inflight(topic, partition, offset)
+            .clear_inflight(topic, partition, group.as_deref(), offset)
+            .await
+            .map_err(Self::map_err)
+    }
+
+    async fn requeue(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .requeue(topic, partition, group.as_deref(), offset)
+            .await
+            .map_err(Self::map_err)
+    }
+
+    async fn add_to_redelivery(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+        deadline: UnixMillis,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .add_to_redelivery(topic, partition, group.as_deref(), offset)
             .await
             .map_err(Self::map_err)
     }
@@ -436,10 +482,10 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<usize, StorageError> {
         self.inner
-            .count_inflight(topic, partition)
+            .count_inflight(topic, partition, group.as_deref())
             .map_err(Self::map_err)
     }
 
@@ -451,11 +497,22 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_inflight_or_acked(topic, partition, offset)
+            .is_inflight_or_acked(topic, partition, group.as_deref(), offset)
+            .map_err(Self::map_err)
+    }
+    async fn is_enqueued(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+    ) -> Result<bool, StorageError> {
+        self.inner
+            .is_ready(topic, partition, group.as_deref(), offset)
             .map_err(Self::map_err)
     }
 
@@ -463,11 +520,11 @@ impl Storage for StromaStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_acked(topic, partition, offset)
+            .is_acked(topic, partition, group.as_deref(), offset)
             .map_err(Self::map_err)
     }
 
@@ -480,13 +537,15 @@ impl Storage for StromaStorage {
             .collect())
     }
 
-    async fn list_groups(&self) -> Result<Vec<(Topic, LogId, Group)>, StorageError> {
+    async fn list_groups(&self) -> Result<Vec<(Topic, LogId, Option<Group>)>, StorageError> {
         Ok(self
-            .inner
-            .list_queues()
-            .into_iter()
-            .map(|(tp, part)| (tp.into(), part, "group".into()))
-            .collect())
+            .group_reg
+            .iter()
+            .map(|key| {
+                let (topic, part, group) = key.key();
+                (topic.clone(), *part, group.clone())
+            })
+            .collect::<Vec<_>>())
     }
 
     async fn flush(&self) -> Result<(), StorageError> {

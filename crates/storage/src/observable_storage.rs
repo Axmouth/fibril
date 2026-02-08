@@ -45,6 +45,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payload: &[u8],
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StorageError> {
@@ -52,7 +53,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
             self.stats,
             writes,
             self.inner()
-                .append_enqueue(topic, partition, payload, completion)
+                .append_enqueue(topic, partition, group, payload, completion)
         )
     }
 
@@ -60,12 +61,13 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payload: &[u8],
     ) -> Result<Offset, StorageError> {
         observe!(
             self.stats,
             writes,
-            self.inner().append(topic, partition, payload)
+            self.inner().append(topic, partition, group, payload)
         )
     }
 
@@ -73,6 +75,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payloads: &[Vec<u8>],
     ) -> Result<Vec<Offset>, StorageError> {
         let bytes: usize = payloads.iter().map(|p| p.len()).sum();
@@ -80,19 +83,20 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         self.stats.record_write();
 
         let _t = Timer::new(&self.stats.append_batches.batches.latency);
-        self.inner().append_batch(topic, partition, payloads).await
+        self.inner().append_batch(topic, partition, group, payloads).await
     }
 
     async fn fetch_by_offset(
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<StoredMessage, StorageError> {
         observe!(
             self.stats,
             reads,
-            self.inner().fetch_by_offset(topic, partition, offset)
+            self.inner().fetch_by_offset(topic, partition, group, offset)
         )
     }
 
@@ -100,7 +104,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &str,
         partition: LogId,
-        group: &str,
+        group: &Option<Group>,
         offset: Offset,
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StorageError> {
@@ -115,7 +119,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<(), StorageError> {
         observe!(
@@ -129,14 +133,14 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &str,
         partition: LogId,
-        group: &str,
+        group: &Option<Group>,
         offsets: &[Offset],
     ) -> Result<(), StorageError> {
         self.stats.ack_batches.observe(offsets.len(), 0);
         self.stats.record_acks(offsets.len() as u64);
         let _t = Timer::new(&self.stats.ack_batches.batches.latency);
         self.inner()
-            .ack_batch(topic.into(), partition, group.into(), offsets)
+            .ack_batch(topic, partition, group, offsets)
             .await
     }
 
@@ -148,7 +152,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<(), StorageError> {
         observe!(
             self.stats,
@@ -161,10 +165,10 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         from_offset: Offset,
         max: usize,
-    ) -> Result<Vec<crate::DeliverableMessage>, StorageError> {
+    ) -> Result<Vec<crate::StoredMessage>, StorageError> {
         observe!(
             self.stats,
             reads,
@@ -177,11 +181,12 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         observe!(
             self.stats,
             reads,
-            self.inner().current_next_offset(topic, partition)
+            self.inner().current_next_offset(topic, partition, group)
         )
     }
 
@@ -189,11 +194,11 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         from_offset: Offset,
         max_offset_exclusive: Offset,
         max_batch: usize,
-    ) -> Result<Vec<crate::DeliverableMessage>, StorageError> {
+    ) -> Result<Vec<crate::StoredMessage>, StorageError> {
         observe!(
             self.stats,
             reads,
@@ -212,7 +217,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
         deadline_ts: crate::UnixMillis,
     ) -> Result<(), StorageError> {
@@ -228,7 +233,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         entries: &[(Offset, UnixMillis)],
     ) -> Result<(), StorageError> {
         observe!(
@@ -242,7 +247,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
     async fn list_expired(
         &self,
         now_ts: crate::UnixMillis,
-    ) -> Result<Vec<crate::DeliverableMessage>, StorageError> {
+    ) -> Result<Vec<crate::StoredMessage>, StorageError> {
         observe!(self.stats, redelivery, self.inner().list_expired(now_ts))
     }
 
@@ -250,7 +255,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         observe!(
             self.stats,
@@ -259,11 +264,41 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         )
     }
 
-    async fn cleanup_topic(&self, topic: &Topic, partition: LogId) -> Result<(), StorageError> {
+    async fn cleanup_topic(&self, topic: &Topic, partition: LogId, 
+        group: &Option<Group>,) -> Result<(), StorageError> {
         observe!(
             self.stats,
             maintenance,
-            self.inner().cleanup_topic(topic, partition)
+            self.inner().cleanup_topic(topic, partition, group)
+        )
+    }
+
+    async fn add_to_redelivery(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+        deadline: UnixMillis,
+    ) -> Result<(), StorageError> {
+        observe!(
+            self.stats,
+            inflight,
+            self.inner().add_to_redelivery(topic, partition, group, offset, deadline)
+        )
+    }
+
+    async fn requeue(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+    ) -> Result<(), StorageError> {
+        observe!(
+            self.stats,
+            inflight,
+            self.inner().requeue(topic, partition, group, offset)
         )
     }
 
@@ -271,7 +306,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<(), StorageError> {
         observe!(
@@ -289,7 +324,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<usize, StorageError> {
         observe!(
             self.stats,
@@ -298,11 +333,25 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         )
     }
 
+    async fn is_enqueued(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+    ) -> Result<bool, StorageError> {
+        observe!(
+            self.stats,
+            reads,
+            self.inner().is_enqueued(topic, partition, group, offset)
+        )
+    }
+
     async fn is_acked(
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<bool, StorageError> {
         observe!(
@@ -316,7 +365,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<bool, StorageError> {
         observe!(
@@ -331,7 +380,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         observe!(self.stats, control_plane, self.inner().list_topics())
     }
 
-    async fn list_groups(&self) -> Result<Vec<(Topic, LogId, Group)>, StorageError> {
+    async fn list_groups(&self) -> Result<Vec<(Topic, LogId, Option<Group>)>, StorageError> {
         observe!(self.stats, control_plane, self.inner().list_groups())
     }
 
@@ -339,7 +388,7 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         observe!(
             self.stats,

@@ -23,12 +23,12 @@ struct GroupKeyPrefix {
 }
 
 impl GroupKeyPrefix {
-    fn new(topic: &Topic, partition: LogId, group: &Group) -> Self {
-        let mut v = Vec::with_capacity(topic.len() + group.len() + 1 + 4 + 1);
+    fn new(topic: &Topic, partition: LogId, group: &Option<Group>) -> Self {
+        let mut v = Vec::with_capacity(topic.len() + group.clone().unwrap_or_default().len() + 1 + 4 + 1);
         v.extend_from_slice(topic.as_bytes());
         v.push(0);
         v.extend_from_slice(&partition.to_be_bytes());
-        v.extend_from_slice(group.as_bytes());
+        v.extend_from_slice(group.clone().unwrap_or_default().as_bytes());
         v.push(0);
         Self { bytes: v }
     }
@@ -131,7 +131,12 @@ impl RocksStorage {
         v
     }
 
-    fn encode_group_key(topic: impl AsRef<str>, partition: LogId, group: impl AsRef<str>, offset: Offset) -> Vec<u8> {
+    fn encode_group_key(
+        topic: impl AsRef<str>,
+        partition: LogId,
+        group: impl AsRef<str>,
+        offset: Offset,
+    ) -> Vec<u8> {
         let mut v = Vec::new();
         v.extend_from_slice(topic.as_ref().as_bytes());
         v.push(0);
@@ -205,6 +210,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payload: &[u8],
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StorageError> {
@@ -257,6 +263,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payload: &[u8],
     ) -> Result<Offset, StorageError> {
         let meta_cf = self
@@ -292,6 +299,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payloads: &[Vec<u8>],
     ) -> Result<Vec<Offset>, StorageError> {
         if payloads.is_empty() {
@@ -332,7 +340,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<(), StorageError> {
         let groups_cf = self.cf("groups")?;
 
@@ -340,7 +348,7 @@ impl Storage for RocksStorage {
         key.extend_from_slice(topic.as_bytes());
         key.push(0);
         key.extend_from_slice(&partition.to_be_bytes());
-        key.extend_from_slice(group.as_bytes());
+        key.extend_from_slice(group.clone().map_or(String::new(), |g| g.to_owned()).as_bytes());
 
         self.db.put_cf(&groups_cf, key, [])?;
         Ok(())
@@ -350,6 +358,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<StoredMessage, StorageError> {
         let messages_cf = self
@@ -366,6 +375,7 @@ impl Storage for RocksStorage {
 
         Ok(StoredMessage {
             topic: topic.clone(),
+            group: group.clone(),
             partition,
             offset,
             timestamp: unix_millis(),
@@ -377,10 +387,10 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         from_offset: Offset,
         max: usize,
-    ) -> Result<Vec<DeliverableMessage>, StorageError> {
+    ) -> Result<Vec<StoredMessage>, StorageError> {
         let messages_cf = self
             .db
             .cf_handle("messages")
@@ -423,7 +433,7 @@ impl Storage for RocksStorage {
             })?);
 
             // Skip if inflight
-            let inflight_key = Self::encode_group_key(topic, partition, group, off);
+            let inflight_key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), off);
             if self
                 .db
                 .get_cf(&inflight_cf, inflight_key.clone())?
@@ -433,7 +443,7 @@ impl Storage for RocksStorage {
             }
 
             // Skip if ACKed
-            let acked_key = Self::encode_group_key(topic, partition, group, off);
+            let acked_key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), off);
             if self.db.get_cf(&acked_cf, acked_key.clone())?.is_some() {
                 continue;
             }
@@ -450,17 +460,14 @@ impl Storage for RocksStorage {
                 off
             );
 
-            out.push(DeliverableMessage {
-                message: StoredMessage {
+            out.push(StoredMessage {
                     topic: topic.clone(),
+                    group: group.clone(),
                     partition,
                     offset: off,
                     timestamp: unix_millis(),
                     payload: value.to_vec(),
-                },
-                delivery_tag: DeliveryTag { epoch: 0 },
-                group: group.clone(),
-            });
+                });
         }
 
         Ok(out)
@@ -470,6 +477,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         let meta_cf = self
             .db
@@ -493,11 +501,11 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         from_offset: Offset,
         max_offset_exclusive: Offset,
         max: usize,
-    ) -> Result<Vec<DeliverableMessage>, StorageError> {
+    ) -> Result<Vec<StoredMessage>, StorageError> {
         if from_offset >= max_offset_exclusive {
             return Ok(vec![]);
         }
@@ -509,7 +517,7 @@ impl Storage for RocksStorage {
         // clamp based on next-offset snapshot
         let clamped = msgs
             .into_iter()
-            .take_while(|m| m.message.offset < max_offset_exclusive)
+            .take_while(|m| m.offset < max_offset_exclusive)
             .collect();
 
         Ok(clamped)
@@ -519,14 +527,14 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
         deadline_ts: UnixMillis,
     ) -> Result<(), StorageError> {
         let inflight_cf = self.cf("inflight")?;
         let meta_cf = self.cf("meta")?;
 
-        let key = Self::encode_group_key(topic, partition, group, offset);
+        let key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
 
         let mut batch = WriteBatch::default();
         batch.put_cf(&inflight_cf, key, deadline_ts.to_be_bytes());
@@ -541,7 +549,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         entries: &[(Offset, UnixMillis)],
     ) -> Result<(), StorageError> {
         if entries.is_empty() {
@@ -573,18 +581,64 @@ impl Storage for RocksStorage {
         &self,
         topic: &str,
         partition: LogId,
-        group: &str,
+        group: &Option<Group>,
         offset: Offset,
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StorageError> {
-        todo!()
+        let topic: Box<str> = topic.into();
+        let group: Box<str> = group.clone().unwrap_or_default().into();
+        let db = self.db.clone();
+        let write_opts = self.write_opts();
+        tokio::spawn(async move {
+            let res: Result<u64, StorageError> = async move {
+                let inflight_cf = db
+                    .cf_handle("inflight")
+                    .ok_or(StorageError::MissingColumnFamily("inflight"))?;
+                let acked_cf = db
+                    .cf_handle("acked")
+                    .ok_or(StorageError::MissingColumnFamily("acked"))?;
+
+                let key = Self::encode_group_key(&topic, partition, &group, offset);
+
+                debug_assert!(
+                    db.get_cf(&acked_cf, &key)?.is_none(),
+                    "double ACK for offset {}",
+                    offset
+                );
+
+                debug_assert!(
+                    db.get_cf(&inflight_cf, &key)?.is_some(),
+                    "ACK on non-inflight message {}",
+                    offset
+                );
+
+                let key = Self::encode_group_key(topic, partition, group, offset);
+
+                let mut batch = WriteBatch::default();
+                batch.delete_cf(&inflight_cf, &key);
+                batch.put_cf(&acked_cf, &key, []);
+                db.write_opt(batch, &write_opts)?;
+
+                Ok(offset)
+            }
+            .await;
+
+            completion.complete(res.map_err(|e| IoError::new(e.to_string())).map(|off| {
+                AppendResult {
+                    base_offset: off,
+                    count: 1,
+                }
+            }));
+        });
+
+        Ok(())
     }
 
     async fn ack(
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<(), StorageError> {
         let inflight_cf = self
@@ -596,7 +650,7 @@ impl Storage for RocksStorage {
             .cf_handle("acked")
             .ok_or(StorageError::MissingColumnFamily("acked"))?;
 
-        let key = Self::encode_group_key(topic, partition, group, offset);
+        let key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
 
         debug_assert!(
             self.db.get_cf(&acked_cf, &key)?.is_none(),
@@ -610,7 +664,7 @@ impl Storage for RocksStorage {
             offset
         );
 
-        let key = Self::encode_group_key(topic, partition, group, offset);
+        let key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
 
         let mut batch = WriteBatch::default();
         batch.delete_cf(&inflight_cf, &key);
@@ -624,7 +678,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &str,
         partition: LogId,
-        group: &str,
+        group: &Option<Group>,
         offsets: &[Offset],
     ) -> Result<(), StorageError> {
         if offsets.is_empty() {
@@ -651,7 +705,7 @@ impl Storage for RocksStorage {
 
         for &offset in offsets {
             // TODO: precompute part with first 3?
-            let key = Self::encode_group_key(topic, partition, group, offset);
+            let key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
 
             // Idempotent:
             // - delete inflight even if missing
@@ -664,7 +718,7 @@ impl Storage for RocksStorage {
         Ok(())
     }
 
-    async fn list_expired(&self, now_ts: u64) -> Result<Vec<DeliverableMessage>, StorageError> {
+    async fn list_expired(&self, now_ts: u64) -> Result<Vec<StoredMessage>, StorageError> {
         let inflight_cf = self.cf("inflight")?;
         let messages_cf = self.cf("messages")?;
 
@@ -701,17 +755,14 @@ impl Storage for RocksStorage {
                 continue;
             };
 
-            out.push(DeliverableMessage {
-                message: StoredMessage {
+            out.push(StoredMessage {
                     topic: topic.clone(),
+                    group: if group.is_empty() {None} else {Some(group)},
                     partition,
                     offset,
                     timestamp: unix_millis(),
                     payload: msg_val.to_vec(),
-                },
-                delivery_tag: DeliveryTag { epoch: 0 },
-                group,
-            });
+                });
         }
 
         Ok(out)
@@ -721,7 +772,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         let messages_cf = self.cf("messages")?;
         let acked_cf = self.cf("acked")?;
@@ -747,12 +798,12 @@ impl Storage for RocksStorage {
 
             let offset = Self::be_u64(&key[key.len() - 8..], "message key offset")?;
 
-            let inflight_key = Self::encode_group_key(topic, partition, group, offset);
+            let inflight_key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
             if self.db.get_cf(&inflight_cf, &inflight_key)?.is_some() {
                 continue;
             }
 
-            let ack_key = Self::encode_group_key(topic, partition, group, offset);
+            let ack_key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
             if self.db.get_cf(&acked_cf, &ack_key)?.is_some() {
                 continue;
             }
@@ -773,7 +824,8 @@ impl Storage for RocksStorage {
         Ok(next_offset)
     }
 
-    async fn cleanup_topic(&self, topic: &Topic, partition: LogId) -> Result<(), StorageError> {
+    async fn cleanup_topic(&self, topic: &Topic, partition: LogId, 
+        group: &Option<Group>,) -> Result<(), StorageError> {
         let messages_cf = self.cf("messages")?;
 
         // Find all groups for this topic/partition
@@ -816,6 +868,11 @@ impl Storage for RocksStorage {
         let mut min_unacked = u64::MAX;
 
         for g in groups {
+            let g = if g.is_empty() {
+                None
+            } else {
+                Some(g)
+            };
             // TODO: evaluate unacked instead and not clean inflight?
             let unacked = self.lowest_not_acked_offset(topic, partition, &g).await?;
             if unacked < min_unacked {
@@ -844,18 +901,40 @@ impl Storage for RocksStorage {
         Ok(())
     }
 
+    async fn requeue(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+    ) -> Result<(), StorageError> {
+        self.clear_inflight(topic, partition, group, offset).await
+    }
+
+    async fn add_to_redelivery(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+        deadline: UnixMillis,
+    ) -> Result<(), StorageError> {
+        self.clear_inflight(topic, partition, group, offset).await?;
+        self.mark_inflight(topic, partition, group, offset, deadline).await
+    }
+
     async fn clear_inflight(
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<(), StorageError> {
         let inflight_cf = self
             .db
             .cf_handle("inflight")
             .ok_or(StorageError::MissingColumnFamily("inflight"))?;
-        let key = Self::encode_group_key(topic, partition, group, offset);
+        let key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
 
         self.db.delete_cf(&inflight_cf, key)?;
         Ok(())
@@ -877,7 +956,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<usize, StorageError> {
         let inflight_cf = self
             .db
@@ -889,7 +968,7 @@ impl Storage for RocksStorage {
         prefix.extend_from_slice(topic.as_bytes());
         prefix.push(0);
         prefix.extend_from_slice(&partition.to_be_bytes());
-        prefix.extend_from_slice(group.as_bytes());
+        prefix.extend_from_slice(group.clone().unwrap_or_default().as_bytes());
         prefix.push(0);
 
         let iter = self.db.iterator_cf(
@@ -923,7 +1002,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<bool, StorageError> {
         let inflight_cf = self
@@ -935,7 +1014,7 @@ impl Storage for RocksStorage {
             .cf_handle("acked")
             .ok_or(StorageError::MissingColumnFamily("acked"))?;
 
-        let key = Self::encode_group_key(topic, partition, group, offset);
+        let key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
 
         if self.db.get_cf(&acked_cf, &key)?.is_some() {
             return Ok(true);
@@ -948,11 +1027,33 @@ impl Storage for RocksStorage {
         Ok(false)
     }
 
+    // ToDO
+    async fn is_enqueued(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+    ) -> Result<bool, StorageError> {
+            let acked_cf = self
+                .db
+                .cf_handle("acked")
+                .ok_or(StorageError::MissingColumnFamily("acked"))?;
+
+            let key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
+
+            if self.db.get_cf(&acked_cf, &key)?.is_some() {
+                return Ok(false);
+            }
+
+            Ok(true)
+    }
+
     async fn is_acked(
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<bool, StorageError> {
         let acked_cf = self
@@ -960,7 +1061,7 @@ impl Storage for RocksStorage {
             .cf_handle("acked")
             .ok_or(StorageError::MissingColumnFamily("acked"))?;
 
-        let key = Self::encode_group_key(topic, partition, group, offset);
+        let key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
 
         if self.db.get_cf(&acked_cf, &key)?.is_some() {
             return Ok(true);
@@ -1001,7 +1102,7 @@ impl Storage for RocksStorage {
         Ok(topics.into_iter().collect())
     }
 
-    async fn list_groups(&self) -> Result<Vec<(Topic, LogId, Group)>, StorageError> {
+    async fn list_groups(&self) -> Result<Vec<(Topic, LogId, Option<Group>)>, StorageError> {
         let groups_cf = self
             .db
             .cf_handle("groups")
@@ -1031,6 +1132,11 @@ impl Storage for RocksStorage {
             let group = String::from_utf8(key[zero + 5..].to_vec())
                 .map_err(|_| StorageError::KeyDecode("invalid group".into()))?;
 
+            let group = if group.is_empty() {
+                None
+            } else {
+                Some(group)
+            };
             out.push((topic, partition, group));
         }
 
@@ -1041,7 +1147,7 @@ impl Storage for RocksStorage {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         let messages_cf = self.cf("messages")?;
         let acked_cf = self.cf("acked")?;
@@ -1063,7 +1169,7 @@ impl Storage for RocksStorage {
             }
 
             let offset = RocksStorage::be_u64(&key[key.len() - 8..], "offset")?;
-            let ack_key = Self::encode_group_key(topic, partition, group, offset);
+            let ack_key = Self::encode_group_key(topic, partition, group.clone().unwrap_or_default(), offset);
 
             if self.db.get_cf(&acked_cf, &ack_key)?.is_some() {
                 continue;

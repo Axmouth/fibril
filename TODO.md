@@ -1,6 +1,8 @@
 deny topic etc names beyond simple fs compatible setups
 
-groups will be cosmetic to create topics like Topic::Group
+stroma/keratin graceful shutdown
+
+actor like system, instead of needing to lock dashmaps, we could have simple map maybe or such, each queuestate contained in a thread receiving messages, sending reply back through a one shot channel, fully async, no locking overheads, but potentially less parallelism
 
 Add display names to topics/groups for logging/ui
 
@@ -9,8 +11,6 @@ add global event log for stroma setting changes
 Investigate need for Requeued event?
 Use enqueued map to fetch available(event log is now source of truth and atomicity)
 append message must now add enqueued event too and make sure both succeed before returning ok(maybe add a custom completion type that can add the event if event possible? or find another efficvient way)
-
-split Keratin writer to three threads, for pipelinining 1. Batching, 2. Writing and Fsyncing(or fsync yet another?), 3. Notifying awaiters when done. Use channels to efficiently pass data to the next.
 
 Make all broker side channels bounder(to avoid OOM on slow consumers by creating backpressure upstream)
 
@@ -29,6 +29,8 @@ loop compute_start_offset() by calling is_inflight_or_acked() repeatedly.
 Instead:
 start = stroma.next_deliverable(tp,g, current_cursor, upper)
 Also: redelivery queue should remain bounded by inflight cap (it mostly is already), but don’t let it accumulate unbounded offsets from repeated failures—Stroma can own "expired offsets" listing.
+
+consider interning topics etc to save some memory
 
 Redelivery not counted as inflight(not added to set)? Consider how to handle
 
@@ -52,7 +54,9 @@ proper connection handling(heartbeat, ping pong, early dc detection)
 
 ack correct matching(sub id?), in tcp layer
 
-partitions nuke or adjust
+partitions internal generation and assignment
+
+delivery not just with roundrobin bout account for prefetch capacity etc
 
 max unconfirmed per publisher
 

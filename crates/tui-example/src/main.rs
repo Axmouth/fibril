@@ -616,7 +616,7 @@ pub async fn visual_client(
         next_req_id(),
         &Subscribe {
             topic: "t1".into(),
-            group: "g1".into(),
+            group: Some("g1".to_string()),
             prefetch: 100,
             auto_ack: true,
         },
@@ -678,6 +678,7 @@ pub async fn visual_client(
                 if pub_tx
                     .send(Publish {
                         topic: "t1".into(),
+                        group: Some("g1".to_string()),
                         partition: 0,
                         require_confirm: false,
                         payload: b"hello".to_vec(),

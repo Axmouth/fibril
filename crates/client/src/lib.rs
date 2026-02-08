@@ -236,7 +236,7 @@ enum SubDelivery {
 
 struct SubState {
     topic: String,
-    group: String,
+    group: Option<String>,
     partition: u32,
     delivery: SubDelivery,
 }
@@ -331,6 +331,7 @@ async fn start_engine(
                         let req_id = next_req; next_req += 1;
                         let p = Publish {
                             topic,
+                            group: None,
                             partition: 0,
                             require_confirm: false,
                             payload,
@@ -342,6 +343,7 @@ async fn start_engine(
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
                             topic,
+                            group: None,
                             partition: 0,
                             require_confirm: true,
                             payload,

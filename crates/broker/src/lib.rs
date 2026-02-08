@@ -1,12 +1,18 @@
+pub mod broker;
 pub mod coordination;
+pub mod queue_engine;
+pub mod test_util;
 
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 use fibril_metrics::BrokerStats;
 use fibril_storage::{BrokerCompletionPair, CompletionPair};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -57,7 +63,7 @@ struct GroupCursor {
 }
 
 #[derive(Debug)]
-struct GroupState {
+struct TopicState {
     consumers: DashMap<ConsumerId, mpsc::Sender<DeliverableMessage>>,
     next_offset: AtomicU64,
     delivery_task_started: AtomicBool,
@@ -70,7 +76,7 @@ struct GroupState {
     events: Arc<Semaphore>,
 }
 
-impl GroupState {
+impl TopicState {
     fn new() -> Self {
         Self {
             consumers: DashMap::new(),
@@ -96,7 +102,7 @@ impl GroupState {
 pub enum SettleType {
     Ack,
     Nack { requeue: Option<bool> },
-    Reject,
+    Reject { requeue: Option<bool> },
 }
 
 pub struct SettleRequest {
@@ -166,7 +172,7 @@ impl ConsumerConfig {
 pub struct ConsumerHandle {
     pub sub_id: u64,
     pub config: ConsumerConfig,
-    pub group: Box<str>,
+    pub group: Option<Box<str>>,
     pub topic: Box<str>,
     pub partition: LogId,
     // TODO: find way to make this complete not on channel deliver, but response sent
@@ -197,6 +203,8 @@ pub struct PublisherHandle {
     task_group: Arc<TaskGroup>,
     topic: Topic,
     partition: LogId,
+
+    pub(crate) msg_count: Arc<AtomicU64>,
 }
 
 // TODO: empty and close channels on drop/shutdown
@@ -211,14 +219,28 @@ impl PublisherHandle {
         self.publisher
             .send(PublishRequest { payload, reply: tx })
             .await
-            .map_err(|_| BrokerError::ChannelClosed)?;
+            .map_err(|err| {
+                tracing::error!("Error sending publish request: {err}");
+                BrokerError::ChannelClosed
+            })?;
 
         let confirm_rx = self.confirm_tx.clone();
+
+        // TODO: move deeper in? do, perhaps, inside a completion impl? At least test
         self.task_group.spawn(async move {
-            if let Ok(Ok(offset)) = rx.await {
-                let _ = confirm_rx.send(Ok(offset)).await;
-            } else {
-                let _ = confirm_rx.send(Err(BrokerError::ChannelClosed)).await;
+            match rx.await {
+                // TODO: Better error handling, at least log
+                Ok(Ok(offset)) => {
+                    let _ = confirm_rx.send(Ok(offset)).await;
+                }
+                Err(err) => {
+                    tracing::error!("Error sending confirm: {err:?}");
+                    let _ = confirm_rx.send(Err(BrokerError::ChannelClosed)).await;
+                }
+                Ok(Err(err)) => {
+                    tracing::error!("Error during confirm: {err}");
+                    let _ = confirm_rx.send(Err(err)).await;
+                }
             }
         });
 
@@ -238,9 +260,9 @@ impl ConfirmStream {
 
 struct DeliveryCtx {
     storage: Arc<dyn Storage>,
-    group_state: Arc<GroupState>,
+    group_state: Arc<TopicState>,
     topic: Topic,
-    group: Group,
+    group: Option<Group>,
     partition: LogId,
     consumers: Vec<(ConsumerId, mpsc::Sender<DeliverableMessage>)>,
     ttl_deadline_delta_ms: u64,
@@ -300,12 +322,12 @@ pub struct Broker<C: Coordination + Send + Sync + 'static> {
     coord: Arc<C>,
     metrics: Arc<BrokerStats>,
     // TODO: Add partition to groups key for corrected and independent cursors
-    groups: Arc<DashMap<(Topic, Group), Arc<GroupState>>>,
-    topics: Arc<DashMap<Topic, ()>>,
-    batchers: Arc<DashMap<(Topic, LogId), mpsc::Sender<PublishRequest>>>,
+    groups: Arc<DashMap<(Topic, Option<Group>), Arc<TopicState>>>,
+    topics: Arc<DashMap<(Topic, Option<Group>), ()>>,
+    batchers: Arc<DashMap<(Topic, LogId, Option<Group>), mpsc::Sender<PublishRequest>>>,
     shutdown: CancellationToken,
     task_group: Arc<TaskGroup>,
-    recovered_cursors: Arc<DashMap<(Topic, LogId, Group), GroupCursor>>,
+    recovered_cursors: Arc<DashMap<(Topic, LogId, Option<Group>), GroupCursor>>,
     next_sub_id: AtomicU64,
 }
 
@@ -325,16 +347,16 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         let now_unix_ts = unix_millis();
         let expired = storage.list_expired(now_unix_ts).await?;
 
+        let ttl_ms = config.inflight_ttl_secs * 1000;
         // Clear expired inflight entries on startup, to avoid stuck messages
         // Rest can be redelivered after TTL by redelivery worker
         for msg in expired {
+            // storage
+            //     .clear_inflight(&msg.topic, msg.partition, &msg.group, msg.offset)
+            //     .await?;
+            let deadline = now_unix_ts + ttl_ms;
             storage
-                .clear_inflight(
-                    &msg.message.topic,
-                    msg.message.partition,
-                    &msg.group,
-                    msg.message.offset,
-                )
+                .add_to_redelivery(&msg.topic, msg.partition, &msg.group, msg.offset, deadline)
                 .await?;
         }
 
@@ -378,9 +400,9 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         Ok(broker)
     }
 
-    pub async fn debug_upper(&self, topic: &str, partition: u32) -> u64 {
+    pub async fn debug_upper(&self, topic: &str, partition: u32, group: &Option<Group>) -> u64 {
         self.storage
-            .current_next_offset(&topic.to_string(), partition)
+            .current_next_offset(&topic.to_string(), partition, group)
             .await
             .unwrap_or(0)
     }
@@ -394,20 +416,26 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         Ok(())
     }
 
-    pub async fn forced_cleanup(&self, topic: &Topic, partition: LogId) -> Result<(), BrokerError> {
-        self.storage.cleanup_topic(topic, partition).await?;
+    pub async fn forced_cleanup(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+    ) -> Result<(), BrokerError> {
+        self.storage.cleanup_topic(topic, partition, group).await?;
         Ok(())
     }
 
     pub async fn get_publisher(
         &self,
         topic: &str,
+        group: &Option<Group>,
     ) -> Result<(PublisherHandle, ConfirmStream), BrokerError> {
         let partition = 0;
         let (confirm_tx, confirm_rx) = mpsc::channel::<Result<Offset, BrokerError>>(1024 * 4);
 
         let batcher = self
-            .get_or_create_batcher(&topic.to_string(), partition)
+            .get_or_create_batcher(&topic.to_string(), partition, group)
             .await;
 
         Ok((
@@ -417,17 +445,23 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                 task_group: self.task_group.clone(),
                 topic: topic.to_string(),
                 partition,
+                msg_count: Arc::new(AtomicU64::new(0)),
             },
             ConfirmStream { rx: confirm_rx },
         ))
     }
 
-    pub async fn publish(&self, topic: &str, payload: &[u8]) -> Result<Offset, BrokerError> {
+    pub async fn publish(
+        &self,
+        topic: &str,
+        group: &Option<Group>,
+        payload: &[u8],
+    ) -> Result<Offset, BrokerError> {
         let partition = 0;
         let (tx, rx) = oneshot::channel();
 
         let batcher = self
-            .get_or_create_batcher(&topic.to_string(), partition)
+            .get_or_create_batcher(&topic.to_string(), partition, group)
             .await;
 
         batcher
@@ -445,10 +479,54 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         Ok(offset)
     }
 
+    pub async fn publish_async(
+        self: &Arc<Self>,
+        topic: &str,
+        partition: LogId,
+        group: &Option<Group>,
+        payload: &[u8],
+    ) -> Result<oneshot::Receiver<Result<Offset, BrokerError>>, BrokerError> {
+        let partition = 0;
+        let (tx, rx) = oneshot::channel();
+        let (response_tx, response_rx) = oneshot::channel();
+        let broker = self.clone();
+
+        let topic: Box<str> = topic.into();
+        let payload = payload.to_vec();
+        let group = group.clone();
+
+        self.task_group.spawn(async move {
+            let res: Result<u64, BrokerError> = async move {
+                let batcher = broker
+                    .get_or_create_batcher(&topic.to_string(), partition, &group)
+                    .await;
+
+                batcher
+                    .send(PublishRequest {
+                        payload: payload.to_vec(),
+                        reply: tx,
+                    })
+                    .await
+                    .map_err(|_| BrokerError::Unknown("batcher closed".into()))?;
+
+                let offset = rx
+                    .await
+                    .map_err(|_| BrokerError::Unknown("batcher died".into()))??;
+
+                Ok(offset)
+            }
+            .await;
+
+            let _ = response_tx.send(res);
+        });
+
+        Ok(response_rx)
+    }
+
     pub async fn subscribe(
         &self,
         topic: &str,
-        group: &str,
+        group: Option<&str>,
         cfg: ConsumerConfig,
     ) -> Result<ConsumerHandle, BrokerError> {
         let prefetch_count = if cfg.prefetch_count == 0 {
@@ -457,14 +535,16 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
             cfg.prefetch_count
         };
         let sub_id = self.next_sub_id.fetch_add(1, Ordering::SeqCst);
-        self.topics.entry(topic.to_string()).or_insert(());
+        self.topics
+            .entry((topic.to_string(), group.map(|s| s.into())))
+            .or_insert(());
 
         self.storage
-            .register_group(&topic.to_string(), 0, &group.to_string())
+            .register_group(&topic.to_string(), 0, &group.map(|g| g.into()))
             .await?;
 
         let topic_clone = topic.to_string();
-        let group_clone = group.to_string();
+        let group_clone = group.map(|g| g.to_string());
         let key = (topic_clone.clone(), group_clone.clone());
 
         let (msg_tx, msg_rx) = mpsc::channel(prefetch_count);
@@ -478,9 +558,9 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         let group_state_arc = match entry {
             dashmap::mapref::entry::Entry::Occupied(e) => e.get().clone(),
             dashmap::mapref::entry::Entry::Vacant(v) => {
-                let gs = Arc::new(GroupState {
+                let gs = Arc::new(TopicState {
                     inflight_sem: Arc::new(Semaphore::new(prefetch_count)),
-                    ..GroupState::new()
+                    ..TopicState::new()
                 });
 
                 if let Some((_key, cursor)) = self.recovered_cursors.remove(&(
@@ -603,7 +683,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         let metrics = self.metrics.clone();
         let task_group_clone = self.task_group.clone();
         let topic_clone: Box<str> = topic.into();
-        let group_clone: Box<str> = group.into();
+        let group_clone: Option<Box<str>> = group.map(|g| g.into());
         self.task_group.spawn(async move {
             loop {
                 tokio::select! {
@@ -614,48 +694,53 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         }
 
                         Some(off) = ack_rx.recv() => {
-                        let tag = off.delivery_tag;
+                            let tag = off.delivery_tag;
 
-                        if !group_state_arc.inflight_permits_by_tag.is_empty() {
-                            tracing::warn!("ACK received but no inflight messages exist {tag:?}");
-                        }
+                            debug_assert!(
+                                !group_state_arc.inflight_permits_by_tag.is_empty(),
+                                "ACK received but no inflight messages exist {tag:?}"
+                            );
 
-                        // ONLY accept ACKs for messages that are actually inflight
-                        if let Some((_, (offset, permit))) =
-                            group_state_arc.inflight_permits_by_tag.remove(&tag)
-                        {
-                            // free capacity
-                            drop(permit);
-                            group_state_arc.delivery_tag_by_offset.remove(&offset);
-                            let (completion, receiver) = BrokerCompletionPair::pair();
-                            match storage_clone.ack_enqueue(
-                                &topic_clone,
-                                partition,
-                                &group_clone,
-                                offset,
-                                completion,
-                            ).await {
-                                Ok(()) => {},
-                                Err(err) => {
-                                    tracing::error!("Error acknowledging message: {err}");
-                                    // TODO: Send error back? Retry?
-                                },
-                            };
-                            let group_state_arc = group_state_arc.clone();
-                            let metrics = metrics.clone();
-                            task_group_clone.spawn(async move {
-                                let _ = receiver.await;
-                                // wake delivery loop (capacity changed)
-                                group_state_arc.signal();
-                                metrics.acked();
-                                // TODO: handle error?
-                            });
-                        } else {
-                            // ACK before delivery -> ignore
-                            // (optional todo: metrics / trace)
-                            // metrics.ack_before_delivery();
+                            if group_state_arc.inflight_permits_by_tag.is_empty() {
+                                tracing::warn!("ACK received but no inflight messages exist {tag:?}");
+                            }
+
+                            // ONLY accept ACKs for messages that are actually inflight
+                            if let Some((_, (offset, permit))) =
+                                group_state_arc.inflight_permits_by_tag.remove(&tag)
+                            {
+                                // free capacity
+                                drop(permit);
+                                group_state_arc.delivery_tag_by_offset.remove(&offset);
+                                let (completion, receiver) = BrokerCompletionPair::pair();
+                                match storage_clone.ack_enqueue(
+                                    &topic_clone,
+                                    partition,
+                                    &group_clone.clone().map(|s| s.into()),
+                                    offset,
+                                    completion,
+                                ).await {
+                                    Ok(()) => {},
+                                    Err(err) => {
+                                        tracing::error!("Error acknowledging message: {err}");
+                                        // TODO: Send error back? Retry?
+                                    },
+                                };
+                                let group_state_arc = group_state_arc.clone();
+                                let metrics = metrics.clone();
+                                task_group_clone.spawn(async move {
+                                    let _ = receiver.await;
+                                    // wake delivery loop (capacity changed)
+                                    group_state_arc.signal();
+                                    metrics.acked();
+                                    // TODO: handle error?
+                                });
+                            } else {
+                                // ACK before delivery -> ignore
+                                // (optional todo: metrics / trace)
+                                // metrics.ack_before_delivery();
+                            }
                         }
-                    }
                 }
             }
         });
@@ -664,7 +749,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
 
         Ok(ConsumerHandle {
             sub_id,
-            group: group.into(),
+            group: group.map(|g| g.into()),
             topic: topic.into(),
             partition,
             config: cfg,
@@ -675,6 +760,14 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
 
     fn start_cleanup_worker(&self) {
         let topics = self.topics.clone();
+        let keys = self
+            .groups
+            .iter()
+            .map(|kv| {
+                let (tp, g) = kv.key();
+                (tp.clone(), g.clone())
+            })
+            .collect::<Vec<_>>();
         // TODO: List partitions too
         let storage = self.storage.clone();
         let cleanup_interval_secs = self.config.cleanup_interval_secs;
@@ -687,16 +780,20 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
 
                 tokio::time::sleep(std::time::Duration::from_secs(cleanup_interval_secs)).await;
 
-                for topic in topics.iter() {
+                for (topic, group) in keys.iter() {
                     // TODO: Handle partition better
                     let partition = 0;
                     if let Err(err) = storage
-                        .cleanup_topic(&topic.key().to_string(), partition)
+                        .cleanup_topic(&topic.to_string(), partition, group)
                         .await
                     {
                         tracing::error!("Error in cleanup worker: {}", err);
                     } else {
-                        tracing::info!("Successfully cleaned up: {}", &topic.key())
+                        tracing::info!(
+                            "Successfully cleaned up: {} {}",
+                            &topic,
+                            group.clone().unwrap_or_default()
+                        )
                     }
                 }
             }
@@ -710,6 +807,8 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         let groups = self.groups.clone();
         let shutdown = self.shutdown.clone();
         let metrics = self.metrics.clone();
+        let task_group = self.task_group.clone();
+        let ttl_ms = self.config.inflight_ttl_secs * 1000;
         self.task_group.spawn(async move {
             loop {
                 if shutdown.is_cancelled() {
@@ -748,38 +847,32 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                     }
                 };
 
+                let mut handles = vec![];
                 for msg in expired {
-                    if !coord
-                        .is_leader(msg.message.topic.clone(), msg.message.partition)
-                        .await
-                    {
+                    if !coord.is_leader(msg.topic.clone(), msg.partition).await {
                         continue;
                     }
 
                     // TODO adjust to handle more than one expired message per group
-                    if let Some(gs) = groups.get(&(msg.message.topic.clone(), msg.group.clone())) {
+                    if let Some(gs) = groups.get(&(msg.topic.clone(), msg.group.clone())) {
                         let current = gs.next_offset.load(Ordering::SeqCst);
 
                         debug_assert!(
-                            msg.message.offset < current,
+                            msg.offset < current,
                             "expired offset >= next_offset (would duplicate): off={} next={}",
-                            msg.message.offset,
+                            msg.offset,
                             current
                         );
 
-                        let expired_offset = msg.message.offset;
+                        let expired_offset = msg.offset;
 
                         if expired_offset >= current {
                             continue;
                         }
 
+                        // TODO: Maybe check if settled/enqueued
                         let is_acked = storage
-                            .is_acked(
-                                &msg.message.topic,
-                                msg.message.partition,
-                                &msg.group,
-                                expired_offset,
-                            )
+                            .is_acked(&msg.topic, msg.partition, &msg.group, expired_offset)
                             .await
                             .unwrap_or(true); // conservative
 
@@ -787,25 +880,45 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                             continue; // nothing to do
                         }
                         // now we know it still matters
-                        let _ = storage
-                            .clear_inflight(
-                                &msg.message.topic,
-                                msg.message.partition,
-                                &msg.group,
-                                expired_offset,
-                            )
-                            .await;
-                        if let Some((_, tag)) = gs.delivery_tag_by_offset.remove(&expired_offset)
-                            && let Some((_, (_off, permit))) =
-                                gs.inflight_permits_by_tag.remove(&tag)
-                        {
-                            drop(permit);
-                        }
-                        gs.redelivery.push(msg.message.offset);
-                        metrics.expired();
-                        gs.signal();
+                        let storage = storage.clone();
+                        let metrics = metrics.clone();
+                        let gs = gs.value().clone();
+                        let (txn, rxn) = tokio::sync::oneshot::channel();
+                        task_group.spawn(async move {
+                            let deadline = unix_millis() + ttl_ms;
+                            // let _ = storage
+                            //     .clear_inflight(&msg.topic, msg.partition, &msg.group, msg.offset)
+                            //     .await;
+                            let _ = storage
+                                .add_to_redelivery(
+                                    &msg.topic,
+                                    msg.partition,
+                                    &msg.group,
+                                    expired_offset,
+                                    deadline,
+                                )
+                                .await;
+
+                            if let Some((_, tag)) =
+                                gs.delivery_tag_by_offset.remove(&expired_offset)
+                            {
+                                // Only remove if above is true
+                                if let Some((_tag, (_off, permit))) =
+                                    gs.inflight_permits_by_tag.remove(&tag)
+                                {
+                                    drop(permit);
+                                }
+                            }
+                            gs.redelivery.push(msg.offset);
+                            metrics.expired();
+                            gs.signal();
+                            let _ = txn.send(());
+                        });
+                        handles.push(rxn);
                     }
                 }
+
+                futures::future::join_all(handles).await;
 
                 // recompute hint after processing so next sleep is accurate
                 match storage.recompute_and_store_next_expiry_hint().await {
@@ -827,17 +940,21 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
     ) -> mpsc::Sender<PublishRequest> {
-        let key = (topic.clone(), partition);
+        let key = (topic.clone(), partition, group.clone());
 
-        self.topics.entry(topic.clone()).or_insert(());
+        self.topics
+            .entry((topic.clone(), group.clone()))
+            .or_insert(());
 
         match self.batchers.entry(key) {
             dashmap::Entry::Occupied(e) => e.get().clone(),
             dashmap::Entry::Vacant(v) => {
+                // TODO: Use config
                 let (tx, rx) = mpsc::channel::<PublishRequest>(1024 * 16);
                 v.insert(tx.clone());
-                self.spawn_batcher(topic.clone(), partition, rx);
+                self.spawn_batcher(topic.clone(), partition, group.clone(), rx);
                 tx
             }
         }
@@ -848,6 +965,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
         &self,
         topic: Topic,
         partition: LogId,
+        group: Option<Group>,
         mut rx: mpsc::Receiver<PublishRequest>,
     ) {
         let storage = Arc::clone(&self.storage);
@@ -866,7 +984,7 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                         match maybe {
                             Some(PublishRequest { payload, reply }) => {
                                 let (completion, rx) = BrokerCompletionPair::pair();
-                                match storage.append_enqueue(&topic, partition, &payload, completion).await {
+                                match storage.append_enqueue(&topic, partition, &group, &payload, completion).await {
                                     Ok(()) => {
                                         // TODO: move all this logic to the publisher?
                                         // TODO: Single task to await completions with queue?
@@ -879,10 +997,13 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
                                                     if res.is_ok() {
                                                         metrics.published();
                                                         // metrics.publish_payload(payload.len() as u64);
+                                                    } else {
+                                                        tracing::error!("Error waiting append enqueue: {res:?}");
                                                     }
                                                     let _ = reply.send(res.map(|r| r.base_offset).map_err(|_e| BrokerError::ChannelClosed));
                                                 },
-                                                Err(_err) => {
+                                                Err(err) => {
+                                                    tracing::error!("Error waiting append enqueue level 1: {err}");
                                                     // append failed
                                                     let _ = reply.send(Err(BrokerError::ChannelClosed));
                                                     return;
@@ -931,9 +1052,10 @@ impl<C: Coordination + Send + Sync + 'static> Broker<C> {
 
 async fn flush_publish_batch(
     storage: &Arc<dyn Storage>,
-    groups: Arc<DashMap<(String, String), Arc<GroupState>>>,
+    groups: Arc<DashMap<(String, String), Arc<TopicState>>>,
     topic: &Topic,
     partition: u32,
+    group: &Option<Group>,
     pending: &mut Vec<PublishRequest>,
     metrics: Arc<BrokerStats>,
 ) {
@@ -949,7 +1071,9 @@ async fn flush_publish_batch(
     let batch_size = payloads.len();
     let bytes = payloads.iter().map(|p| p.len()).sum::<usize>();
 
-    let result = storage.append_batch(topic, partition, &payloads).await;
+    let result = storage
+        .append_batch(topic, partition, group, &payloads)
+        .await;
 
     match result {
         Ok(offsets) => {
@@ -981,8 +1105,8 @@ async fn flush_publish_batch(
 
 async fn flush_ack_batch(
     storage: &Arc<dyn Storage>,
-    topic: &Box<str>,
-    group: &Box<str>,
+    topic: &str,
+    group: &Option<&str>,
     buf: &mut Vec<Offset>,
     metrics: Arc<BrokerStats>,
 ) {
@@ -993,7 +1117,7 @@ async fn flush_ack_batch(
     let partition = 0;
     let batch_size = buf.len();
     if storage
-        .ack_batch(topic, partition, group, buf)
+        .ack_batch(topic, partition, &group.map(|s| s.into()), buf)
         .await
         .is_ok()
     {
@@ -1003,20 +1127,51 @@ async fn flush_ack_batch(
     buf.clear();
 }
 
+async fn advance_cursor(
+    storage: &Arc<dyn Storage>,
+    topic: &Topic,
+    partition: LogId,
+    group: &Option<Group>,
+    mut cur: Offset,
+) -> Result<Offset, StorageError> {
+    let upper = storage.current_next_offset(topic, partition, group).await?;
+
+    while cur < upper {
+        // If it is inflight or acked, it can never be delivered again
+        if storage
+            .is_inflight_or_acked(topic, partition, group, cur)
+            .await?
+        {
+            cur += 1;
+            continue;
+        }
+
+        // If it is NOT enqueued yet, we must stop here
+        if !storage.is_enqueued(topic, partition, group, cur).await? {
+            break;
+        }
+
+        // Otherwise: enqueued + not inflight + not acked → deliverable
+        break;
+    }
+
+    Ok(cur)
+}
+
 async fn compute_start_offset(
     storage: &Arc<impl Storage + ?Sized>,
     topic: &str,
     partition: u32,
-    group: &str,
+    group: &Option<Group>,
     mut cur: u64,
 ) -> Result<u64, StorageError> {
     let upper = storage
-        .current_next_offset(&topic.to_string(), partition)
+        .current_next_offset(&topic.to_string(), partition, group)
         .await?;
 
     while cur < upper {
         if storage
-            .is_inflight_or_acked(&topic.to_string(), partition, &group.to_string(), cur)
+            .is_inflight_or_acked(&topic.to_string(), partition, group, cur)
             .await?
         {
             cur += 1;
@@ -1025,15 +1180,6 @@ async fn compute_start_offset(
         }
     }
     Ok(cur)
-}
-
-pub fn maybe_auto_ack(auto_ack: bool, ack_tx: &mpsc::Sender<SettleRequest>, tag: DeliveryTag) {
-    if auto_ack {
-        let _ = ack_tx.try_send(SettleRequest {
-            delivery_tag: tag,
-            settle_type: SettleType::Ack,
-        });
-    }
 }
 
 async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
@@ -1049,19 +1195,42 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
     } = ctx;
 
     let mut delivered_any = false;
-    let mut inflight_batch: Vec<(DeliveryTag, Offset, UnixMillis, OwnedSemaphorePermit)> =
-        Vec::new();
+    let mut inflight_batch: Vec<(DeliveryTag, Offset, UnixMillis)> = Vec::new();
+    let partition = 0;
 
+    // println!("Processing Redelivery");
+    // println!(
+    //     "Processing Redelivery: len {}",
+    //     group_state.redelivery.len()
+    // );
+
+    let mut to_redeliver = Vec::new();
+
+    let new_deadline = unix_millis() + ttl_ms;
     while let Some(expired_offset) = group_state.redelivery.pop() {
-        if let Ok(msg) = storage.fetch_by_offset(topic, 0, expired_offset).await {
-            let new_deadline = unix_millis() + ttl_ms;
+        // println!("Processing Redelivery pop");
+        if let Ok(msg) = storage
+            .fetch_by_offset(topic, partition, group, expired_offset)
+            .await
+        {
+            if let Ok(false) = storage.is_enqueued(topic, partition, group, msg.offset).await {
+                // this is a serious invariant violation; log loudly
+                // println!("Enqueued?");
+                tracing::error!("redelivery offset not enqueued: off={}", msg.offset);
+                continue;
+            }
 
-            let rr = group_state.rr_counter.fetch_add(1, Ordering::SeqCst) as usize;
-            let (cid, tx) = &consumers[rr % consumers.len()];
+
+            // let rr = group_state.rr_counter.fetch_add(1, Ordering::SeqCst) as usize;
+            // if consumers.is_empty() {
+            //     break;
+            // }
+            // let (cid, tx) = &consumers[rr % consumers.len()];
 
             let permit = match group_state.inflight_sem.clone().acquire_owned().await {
                 Ok(p) => p,
                 Err(_) => {
+                    // println!("No capacity while sending redelivered");
                     // no capacity; put it back and stop
                     group_state.redelivery.push(expired_offset);
                     break;
@@ -1071,27 +1240,41 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
             let epoch = group_state.tag_counter.fetch_add(1, Ordering::SeqCst);
             let tag = DeliveryTag { epoch };
             group_state.delivery_tag_by_offset.insert(msg.offset, tag);
-            if tx
-                .send(DeliverableMessage {
+            // println!("Sending redelivered: {expired_offset}");
+            to_redeliver.push((
+                DeliverableMessage {
                     message: msg,
                     delivery_tag: tag,
                     group: group.clone(),
-                })
-                .await
-                .is_err()
-            {
-                drop(permit);
-                group_state.consumers.remove(cid);
-                group_state.signal(); // consumer set changed
-                // requeue the message for someone else later
-                group_state.redelivery.push(expired_offset);
-            } else {
-                // group_state.inflight_permits.remove(&tag);
-                inflight_batch.push((tag, expired_offset, new_deadline, permit));
-                delivered_any = true;
-                metrics.redelivered();
-                metrics.delivered();
-            }
+                },
+                permit,
+            ));
+            inflight_batch.push((tag, expired_offset, new_deadline));
+            // if tx
+            //     .send(DeliverableMessage {
+            //         message: msg,
+            //         delivery_tag: tag,
+            //         group: group.clone(),
+            //     })
+            //     .await
+            //     .is_err()
+            // {
+            //     // println!("Failed sending redelivered: {expired_offset}");
+            //     drop(permit);
+            //     group_state.consumers.remove(cid);
+            //     group_state.signal(); // consumer set changed
+            //     // requeue the message for someone else later
+            //     group_state.redelivery.push(expired_offset);
+            // } else {
+            //     // println!("Succeeded sending redelivered: {expired_offset}");
+            //     // group_state.inflight_permits.remove(&tag);
+            //     inflight_batch.push((tag, expired_offset, new_deadline, permit));
+            //     delivered_any = true;
+            //     metrics.redelivered();
+            //     metrics.delivered();
+            // }
+        } else {
+            tracing::error!("Offset not found: {expired_offset}");
         }
     }
 
@@ -1106,16 +1289,17 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
             group,
             &inflight_batch
                 .iter()
-                .map(|(_t, o, d, _p)| (*o, *d))
+                .map(|(_t, o, d)| (*o, *d))
                 .collect::<Vec<_>>(),
         )
         .await;
 
-    if res.is_err() {
+    if let Err(err) = res {
+        tracing::error!("Failed to mark inflight during redelivery : {err}");
         // Not durable: release capacity and requeue offsets
-        for (tag, offset, _deadline, permit) in inflight_batch.drain(..) {
+        for (tag, offset, _deadline) in inflight_batch.drain(..) {
             group_state.inflight_permits_by_tag.remove(&tag);
-            drop(permit);
+            // drop(permit);
             group_state.redelivery.push(offset);
         }
         // make sure we run again promptly
@@ -1125,14 +1309,46 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
         return true;
     }
 
-    // Durable: keep permits held by inflight_permits
-    for (tag, offset, _deadline, permit) in inflight_batch.drain(..) {
-        // TODO: make sure it happened earlier as much as possible, eval whether we need to replace tags
+    for (msg, permit) in to_redeliver {
+        let rr = group_state.rr_counter.fetch_add(1, Ordering::SeqCst) as usize;
+        if consumers.is_empty() {
+            break;
+        }
+        let (cid, tx) = &consumers[rr % consumers.len()];
+
+        let offset = msg.message.offset;
+        let tag = msg.delivery_tag;
         group_state
             .inflight_permits_by_tag
-            .insert(tag, (offset, permit));
-        group_state.delivery_tag_by_offset.insert(offset, tag);
+            .insert(msg.delivery_tag, (msg.message.offset, permit));
+        group_state
+            .delivery_tag_by_offset
+            .insert(msg.message.offset, msg.delivery_tag);
+        if tx.send(msg).await.is_err() {
+            // println!("Failed sending redelivered: {expired_offset}");
+            group_state.inflight_permits_by_tag.remove(&tag);
+            group_state.delivery_tag_by_offset.remove(&offset);
+            group_state.consumers.remove(cid);
+            group_state.signal(); // consumer set changed
+            // requeue the message for someone else later
+            group_state.redelivery.push(offset);
+        } else {
+            // println!("Succeeded sending redelivered: {expired_offset}");
+            // group_state.inflight_permits.remove(&tag);
+            delivered_any = true;
+            metrics.redelivered();
+            metrics.delivered();
+        }
     }
+
+    // Durable: keep permits held by inflight_permits
+    // for (tag, offset, _deadline) in inflight_batch.drain(..) {
+    //     // TODO: make sure it happened earlier as much as possible, eval whether we need to replace tags
+    //     group_state
+    //         .inflight_permits_by_tag
+    //         .insert(tag, (offset, permit));
+    //     group_state.delivery_tag_by_offset.insert(offset, tag);
+    // }
 
     delivered_any
 }
@@ -1146,8 +1362,13 @@ async fn process_fresh_deliveries(ctx: &DeliveryCtx) -> bool {
         consumers,
         ttl_deadline_delta_ms,
         metrics,
+        partition,
         ..
     } = ctx;
+
+    if consumers.is_empty() {
+        return false;
+    }
 
     // capacity gate
     let available = group_state
@@ -1159,13 +1380,14 @@ async fn process_fresh_deliveries(ctx: &DeliveryCtx) -> bool {
     }
 
     let start = group_state.next_offset.load(Ordering::SeqCst);
-    let upper = match storage.current_next_offset(topic, 0).await {
+    let upper = match storage.current_next_offset(topic, *partition, group).await {
         Ok(v) => v,
         Err(_) => return false,
     };
 
+    let partition = 0;
     let mut msgs = match storage
-        .fetch_available_clamped(topic, 0, group, start, upper, available)
+        .fetch_available_clamped(topic, partition, group, start, upper, available)
         .await
     {
         Ok(v) if !v.is_empty() => v,
@@ -1180,12 +1402,12 @@ async fn process_fresh_deliveries(ctx: &DeliveryCtx) -> bool {
         match group_state.inflight_sem.clone().acquire_owned().await {
             Ok(p) => {
                 let epoch = group_state.tag_counter.fetch_add(1, Ordering::SeqCst);
-                msg.delivery_tag.epoch = epoch;
+                let delivery_tag = DeliveryTag { epoch };
                 group_state
                     .delivery_tag_by_offset
-                    .insert(msg.message.offset, msg.delivery_tag);
-                permits.push((msg.delivery_tag, p));
-                entries.push((msg.message.offset, unix_millis() + ttl_deadline_delta_ms));
+                    .insert(msg.offset, delivery_tag);
+                permits.push((delivery_tag, p));
+                entries.push((msg.offset, unix_millis() + ttl_deadline_delta_ms));
             }
             Err(_) => break,
         }
@@ -1196,11 +1418,12 @@ async fn process_fresh_deliveries(ctx: &DeliveryCtx) -> bool {
     }
 
     // ---- phase 2: durable inflight
-    if storage
-        .mark_inflight_batch(topic, 0, group, &entries)
-        .await
-        .is_err()
+    let mark_res = storage
+        .mark_inflight_batch(topic, partition, group, &entries)
+        .await;
+    if let Err(err) = mark_res
     {
+        tracing::error!("Error marking deliveries as inflight : {err}");
         // release permits
         for (_, p) in permits {
             drop(p);
@@ -1216,8 +1439,15 @@ async fn process_fresh_deliveries(ctx: &DeliveryCtx) -> bool {
         let idx = rr % consumers.len();
         let (_cid, tx) = &consumers[idx];
 
-        let offset = msg.message.offset;
-        if tx.send(msg).await.is_err() {
+        let offset = msg.offset;
+        let deliverable_msg = DeliverableMessage {
+            message: msg,
+            delivery_tag: tag,
+            group: group.clone(),
+        };
+        let send_res = tx.send(deliverable_msg).await;
+        if let Err(err) = send_res {
+            tracing::error!("Failure to deliver message {} : {}", offset, err);
             drop(permit);
             group_state.consumers.remove(&consumers[idx].0);
             group_state.signal();
@@ -1232,15 +1462,26 @@ async fn process_fresh_deliveries(ctx: &DeliveryCtx) -> bool {
         metrics.delivered();
     }
 
-    if let Some(off) = max_off {
-        group_state.next_offset.store(off + 1, Ordering::SeqCst);
+    if let Some(max_off) = max_off {
+        let base = group_state.next_offset.load(Ordering::SeqCst);
+        let seed = base.max(max_off + 1);
+
+        match advance_cursor(storage, topic, partition, group, seed).await {
+            Ok(new_cur) => {
+                group_state.next_offset.store(new_cur, Ordering::SeqCst);
+            }
+            Err(err) => {
+                tracing::error!("failed to advance cursor: {err}");
+                // conservative: do not advance
+            }
+        };
     }
 
     true
 }
 
 #[inline]
-async fn wait_for_event(group_state: &GroupState) {
+async fn wait_for_event(group_state: &TopicState) {
     // wait until at least one event happens
     let permit = group_state.events.acquire().await;
     if let Ok(p) = permit {

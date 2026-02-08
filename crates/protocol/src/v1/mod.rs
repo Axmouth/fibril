@@ -73,6 +73,7 @@ pub struct Auth {
 pub struct Publish {
     pub topic: String,
     pub partition: u32, // keep for later, default 0
+    pub group: Option<String>,
     pub require_confirm: bool,
     pub payload: Vec<u8>,
 }
@@ -85,7 +86,7 @@ pub struct PublishOk {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Subscribe {
     pub topic: String,
-    pub group: String,
+    pub group: Option<String>,
     pub prefetch: u32,
     pub auto_ack: bool,
 }
@@ -94,7 +95,7 @@ pub struct Subscribe {
 pub struct SubscribeOk {
     pub sub_id: u64,
     pub topic: String,
-    pub group: String,
+    pub group: Option<String>,
     pub partition: u32,
 }
 
@@ -102,7 +103,7 @@ pub struct SubscribeOk {
 pub struct Deliver {
     pub sub_id: u64,
     pub topic: String,
-    pub group: String,
+    pub group: Option<String>,
     pub partition: u32,
     pub offset: u64,
     pub delivery_tag: DeliveryTag,
@@ -112,7 +113,7 @@ pub struct Deliver {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Ack {
     pub topic: String,
-    pub group: String,
+    pub group: Option<String>,
     pub partition: u32,
     pub tags: Vec<DeliveryTag>, // batch
 }
@@ -120,7 +121,7 @@ pub struct Ack {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Nack {
     pub topic: String,
-    pub group: String,
+    pub group: Option<String>,
     pub partition: u32,
     pub tags: Vec<DeliveryTag>, // batch
     pub requeue: bool,
@@ -129,7 +130,7 @@ pub struct Nack {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Reject {
     pub topic: String,
-    pub group: String,
+    pub group: Option<String>,
     pub partition: u32,
     pub tags: Vec<DeliveryTag>, // batch
     pub requeue: bool,

@@ -80,7 +80,7 @@ async fn main() {
 
     for _ in 0..args.parallelism {
         let max_payload = args.max_payload;
-        let (publisher, mut confirm_stream) = broker.get_publisher("bench").await.unwrap();
+        let (publisher, mut confirm_stream) = broker.get_publisher("bench", &None).await.unwrap();
         tasks.push(tokio::spawn(async move {
             for _ in 0..msgs_per_worker {
                 let size = fastrand::usize(32..max_payload);

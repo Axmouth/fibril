@@ -20,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let consumer = broker
-        .subscribe("topic", "group", ConsumerConfig { prefetch_count: 10 })
+        .subscribe("topic", Some("group"), ConsumerConfig { prefetch_count: 10 })
         .await
         .unwrap();
 
@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    let (publisher, _confstream) = broker.get_publisher("topic").await?;
+    let (publisher, _confstream) = broker.get_publisher("topic", &None).await?;
 
     for i in 0..1000 {
         publisher.publish(vec![0; 1024 + i]).await?;

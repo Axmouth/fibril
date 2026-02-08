@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
         log_broker: true,
         log_storage: true,
         log_tcp: true,
-    });
+    }, std::time::Duration::from_secs(10));
 
     let admin_server_dut = admin.run();
 

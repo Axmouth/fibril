@@ -34,7 +34,7 @@ async fn run_bench(max_msg_size: usize) -> anyhow::Result<()> {
     let start = Instant::now();
 
     for buf in messages {
-        store.append(&"t".into(), 0, &buf).await?;
+        store.append(&"t".into(), 0, &None, &buf).await?;
     }
 
     tracing::info!(

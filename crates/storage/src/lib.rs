@@ -17,6 +17,7 @@ pub type Group = String;
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
     pub topic: Topic,
+    pub group: Option<Group>,
     pub partition: LogId,
     pub offset: Offset,
     pub timestamp: u64,
@@ -33,7 +34,7 @@ pub struct DeliveryTag {
 pub struct DeliverableMessage {
     pub message: StoredMessage,
     pub delivery_tag: DeliveryTag, // unique per (topic,partition)
-    pub group: Group,
+    pub group: Option<Group>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -96,6 +97,7 @@ pub struct BrokerCompletion {
 impl AppendCompletion<IoError> for BrokerCompletion {
     fn complete(self: Box<Self>, res: Result<AppendResult, IoError>) {
         let _ = self.tx.send(res);
+        
     }
 }
 
@@ -119,6 +121,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payload: &[u8],
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StorageError>;
@@ -128,6 +131,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payload: &[u8],
     ) -> Result<Offset, StorageError>;
 
@@ -136,6 +140,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         payloads: &[Vec<u8>],
     ) -> Result<Vec<Offset>, StorageError>;
 
@@ -144,7 +149,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<(), StorageError>;
 
     /// Fetch a message by its exact offset.
@@ -152,6 +157,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<StoredMessage, StorageError>;
 
@@ -161,16 +167,17 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         from_offset: Offset,
         max: usize,
-    ) -> Result<Vec<DeliverableMessage>, StorageError>;
+    ) -> Result<Vec<StoredMessage>, StorageError>;
 
     /// Get the current next offset for appending new messages.
     async fn current_next_offset(
         &self,
         topic: &Topic,
         partition: LogId,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError>;
 
     /// Fetch messages starting *after* a given offset,
@@ -178,18 +185,18 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         from_offset: Offset,
         max_offset_exclusive: Offset,
         max_batch: usize,
-    ) -> Result<Vec<DeliverableMessage>, StorageError>;
+    ) -> Result<Vec<StoredMessage>, StorageError>;
 
     /// Mark a message as "in-flight" for a consumer group with a deadline.
     async fn mark_inflight(
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
         deadline_ts: UnixMillis,
     ) -> Result<(), StorageError>;
@@ -199,7 +206,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         entries: &[(Offset, UnixMillis)], // offset -> deadline
     ) -> Result<(), StorageError>;
 
@@ -208,7 +215,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &str,
         partition: LogId,
-        group: &str,
+        group: &Option<Group>,
         offset: Offset,
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StorageError>;
@@ -218,7 +225,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<(), StorageError>;
 
@@ -227,7 +234,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &str,
         partition: LogId,
-        group: &str,
+        group: &Option<Group>,
         offsets: &[Offset],
     ) -> Result<(), StorageError>;
 
@@ -235,24 +242,42 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     async fn list_expired(
         &self,
         now_ts: UnixMillis,
-    ) -> Result<Vec<DeliverableMessage>, StorageError>;
+    ) -> Result<Vec<StoredMessage>, StorageError>;
 
     /// Get the lowest unacknowledged offset for a consumer group.
     async fn lowest_unacked_offset(
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError>;
 
     /// Cleanup fully acknowledged messages safely.
-    async fn cleanup_topic(&self, topic: &Topic, partition: LogId) -> Result<(), StorageError>;
+    async fn cleanup_topic(&self, topic: &Topic, partition: LogId, 
+        group: &Option<Group>,) -> Result<(), StorageError>;
+
+    async fn add_to_redelivery(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+        deadline: UnixMillis,
+    ) -> Result<(), StorageError>;
+
+    async fn requeue(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+    ) -> Result<(), StorageError>;
 
     async fn clear_inflight(
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<(), StorageError>;
 
@@ -262,14 +287,22 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<usize, StorageError>;
+
+    async fn is_enqueued(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+        offset: Offset,
+    ) -> Result<bool, StorageError>;
 
     async fn is_acked(
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<bool, StorageError>;
 
@@ -277,19 +310,19 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
         offset: Offset,
     ) -> Result<bool, StorageError>;
 
     async fn list_topics(&self) -> Result<Vec<Topic>, StorageError>;
 
-    async fn list_groups(&self) -> Result<Vec<(Topic, LogId, Group)>, StorageError>;
+    async fn list_groups(&self) -> Result<Vec<(Topic, LogId, Option<Group>)>, StorageError>;
 
     async fn lowest_not_acked_offset(
         &self,
         topic: &Topic,
         partition: LogId,
-        group: &Group,
+        group: &Option<Group>,
     ) -> Result<Offset, StorageError>;
 
     async fn flush(&self) -> Result<(), StorageError>;

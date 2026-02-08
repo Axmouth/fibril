@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -6,6 +7,7 @@ use fibril_broker::*;
 use fibril_metrics::Metrics;
 use fibril_storage::*;
 use fibril_util::unix_millis;
+use std::collections::HashSet;
 use tokio::task::JoinHandle;
 
 // TODO: make shared
@@ -14,6 +16,17 @@ async fn make_test_store() -> anyhow::Result<impl Storage> {
     std::fs::create_dir_all("test_data")?;
     // make random temp filename to avoid conflicts
     let filename = format!("test_data/{}", fastrand::u64(..));
+    // Ok(make_rocksdb_store(&filename, false)?)
+    let res = make_stroma_store(&filename, true).await;
+
+    Ok(res?)
+}
+
+async fn make_test_store_with_path(p: impl AsRef<Path>) -> anyhow::Result<impl Storage> {
+    // make testdata dir
+    std::fs::create_dir_all(p.as_ref())?;
+    // make random temp filename to avoid conflicts
+    let filename = format!("test_data/{}/{}", p.as_ref().display(), fastrand::u64(..));
     // Ok(make_rocksdb_store(&filename, false)?)
     let res = make_stroma_store(&filename, true).await;
 
@@ -51,22 +64,25 @@ async fn make_test_broker_with_cfg(
 }
 
 fn make_default_cons_cfg() -> ConsumerConfig {
-    ConsumerConfig::default().with_prefetch_count(100)
+    ConsumerConfig::default().with_prefetch_count(1024)
 }
 
 #[tokio::test]
 async fn broker_basic_delivery() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g1 = Some("g1");
 
     // Publish 3 messages
-    broker.publish("t1", b"hello").await?;
-    broker.publish("t1", b"world").await?;
-    broker.publish("t1", b"!").await?;
+    broker
+        .publish("t1", &g1.map(|s| s.into()), b"hello")
+        .await?;
+    broker
+        .publish("t1", &g1.map(|s| s.into()), b"world")
+        .await?;
+    broker.publish("t1", &g1.map(|s| s.into()), b"!").await?;
 
     // Subscribe
-    let mut consumer = broker
-        .subscribe("t1", "g1", make_default_cons_cfg())
-        .await?;
+    let mut consumer = broker.subscribe("t1", g1, make_default_cons_cfg()).await?;
 
     let mut received = vec![];
     for _ in 0..3 {
@@ -92,11 +108,12 @@ async fn broker_basic_delivery() -> anyhow::Result<()> {
 #[tokio::test]
 async fn broker_ack_behavior() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
-    broker.publish("t", b"a").await?;
-    broker.publish("t", b"b").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"a").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"b").await?;
 
-    let mut consumer = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let mut consumer = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
     // Receive & ack first message
     let m1 = consumer
@@ -137,21 +154,18 @@ async fn broker_ack_behavior() -> anyhow::Result<()> {
 #[tokio::test]
 async fn broker_work_queue_distribution() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("workers");
 
     // Publish some work
     for i in 0..6 {
         broker
-            .publish("jobs", format!("job-{i}").as_bytes())
+            .publish("jobs", &g.map(|s| s.into()), format!("job-{i}").as_bytes())
             .await?;
     }
 
     // Two consumers, same group (competing consumers)
-    let mut c1 = broker
-        .subscribe("jobs", "workers", make_default_cons_cfg())
-        .await?;
-    let mut c2 = broker
-        .subscribe("jobs", "workers", make_default_cons_cfg())
-        .await?;
+    let mut c1 = broker.subscribe("jobs", g, make_default_cons_cfg()).await?;
+    let mut c2 = broker.subscribe("jobs", g, make_default_cons_cfg()).await?;
 
     let mut got1 = 0;
     let mut got2 = 0;
@@ -185,57 +199,67 @@ async fn broker_work_queue_distribution() -> anyhow::Result<()> {
 #[tokio::test]
 async fn broker_pubsub_multiple_groups() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g1 = Some("g1");
+    let g2 = Some("g2");
 
-    broker.publish("events", b"alpha").await?;
-    broker.publish("events", b"beta").await?;
-
-    let mut g1 = broker
-        .subscribe("events", "g1", make_default_cons_cfg())
+    broker
+        .publish("events", &g1.map(|s| s.into()), b"alpha")
         .await?;
-    let mut g2 = broker
-        .subscribe("events", "g2", make_default_cons_cfg())
+    broker
+        .publish("events", &g2.map(|s| s.into()), b"beta")
+        .await?;
+
+    let mut c1 = broker
+        .subscribe("events", g1, make_default_cons_cfg())
+        .await?;
+    let mut c2 = broker
+        .subscribe("events", g2, make_default_cons_cfg())
         .await?;
 
     let mut recv_g1 = vec![];
     let mut recv_g2 = vec![];
 
-    for _ in 0..2 {
-        let m1 = g1.messages.recv().await.context("receiving message")?;
-        recv_g1.push(String::from_utf8(m1.message.payload.clone())?);
-        g1.settler
-            .send(SettleRequest {
-                settle_type: SettleType::Ack,
-                delivery_tag: m1.delivery_tag,
-            })
-            .await?;
+    println!("aaa");
+    let m1 = c1.messages.recv().await.context("receiving message")?;
+    println!("bbb");
+    recv_g1.push(String::from_utf8(m1.message.payload.clone())?);
+    c1.settler
+        .send(SettleRequest {
+            settle_type: SettleType::Ack,
+            delivery_tag: m1.delivery_tag,
+        })
+        .await?;
+    println!("ccc");
 
-        let m2 = g2.messages.recv().await.context("receiving message")?;
-        recv_g2.push(String::from_utf8(m2.message.payload.clone())?);
-        g2.settler
-            .send(SettleRequest {
-                settle_type: SettleType::Ack,
-                delivery_tag: m2.delivery_tag,
-            })
-            .await?;
-    }
+    let m2 = c2.messages.recv().await.context("receiving message")?;
+    println!("ddd");
+    recv_g2.push(String::from_utf8(m2.message.payload.clone())?);
+    c2.settler
+        .send(SettleRequest {
+            settle_type: SettleType::Ack,
+            delivery_tag: m2.delivery_tag,
+        })
+        .await?;
+    println!("eees");
 
-    assert_eq!(recv_g1, ["alpha", "beta"]);
-    assert_eq!(recv_g2, ["alpha", "beta"]);
+    assert_eq!(recv_g1, ["alpha"]);
+    assert_eq!(recv_g2, ["beta"]);
     Ok(())
 }
 
 #[tokio::test]
 async fn broker_delivery_in_order() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
     for i in 0..10 {
         broker
-            .publish("numbers", format!("{}", i).as_bytes())
+            .publish("numbers", &g.map(|s| s.into()), format!("{}", i).as_bytes())
             .await?;
     }
 
     let mut consumer = broker
-        .subscribe("numbers", "g", make_default_cons_cfg())
+        .subscribe("numbers", g, make_default_cons_cfg())
         .await?;
 
     let mut collected = vec![];
@@ -266,10 +290,11 @@ async fn broker_delivery_in_order() -> anyhow::Result<()> {
 #[tokio::test]
 async fn broker_consumer_drop_stops_delivery() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
-    broker.publish("t", b"x").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"x").await?;
 
-    let consumer = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let consumer = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
     // Drop receiver
     drop(consumer.messages);
@@ -278,20 +303,28 @@ async fn broker_consumer_drop_stops_delivery() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(3)).await;
 
     // Publishing more messages should not cause issues
-    assert!(broker.publish("t", b"y").await.is_ok());
+    assert!(
+        broker
+            .publish("t", &g.map(|s| s.into()), b"y")
+            .await
+            .is_ok()
+    );
     Ok(())
 }
 
 #[tokio::test]
 async fn redelivery_occurs_after_expiration() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
     // Publish 1 message
-    broker.publish("topic", b"hello").await?;
+    broker
+        .publish("topic", &g.map(|s| s.into()), b"hello")
+        .await?;
 
     // Subscribe
     let mut cons = broker
-        .subscribe("topic", "g", make_default_cons_cfg())
+        .subscribe("topic", g, make_default_cons_cfg())
         .await?;
 
     // First delivery
@@ -319,11 +352,12 @@ async fn redelivery_occurs_after_expiration() -> anyhow::Result<()> {
 #[tokio::test]
 async fn ack_prevents_redelivery() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
-    broker.publish("topic", b"hi").await?;
+    broker.publish("topic", &g.map(|s| s.into()), b"hi").await?;
 
     let mut cons = broker
-        .subscribe("topic", "g", make_default_cons_cfg())
+        .subscribe("topic", g, make_default_cons_cfg())
         .await?;
 
     let msg = cons.messages.recv().await.context("receiving message")?;
@@ -348,11 +382,12 @@ async fn ack_prevents_redelivery() -> anyhow::Result<()> {
 #[tokio::test]
 async fn redelivery_load_balanced_to_consumers() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
-    broker.publish("t", b"x").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"x").await?;
 
-    let mut c1 = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
-    let mut c2 = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let mut c1 = broker.subscribe("t", g, make_default_cons_cfg()).await?;
+    let mut c2 = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
     let m = c1.messages.recv().await.context("receiving message")?;
     assert_eq!(m.message.payload, b"x");
@@ -374,13 +409,16 @@ async fn redelivery_load_balanced_to_consumers() -> anyhow::Result<()> {
 #[tokio::test]
 async fn selective_ack_out_of_order() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
     // Publish messages 0..4
     for i in 0..5 {
-        broker.publish("t", format!("m{i}").as_bytes()).await?;
+        broker
+            .publish("t", &g.map(|s| s.into()), format!("m{i}").as_bytes())
+            .await?;
     }
 
-    let mut cons = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let mut cons = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
     // Receive messages
     let mut messages = vec![];
@@ -434,12 +472,15 @@ async fn selective_ack_out_of_order() -> anyhow::Result<()> {
 #[tokio::test]
 async fn selective_ack_expiry_redelivery() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
     for i in 0..5 {
-        broker.publish("t", format!("v{i}").as_bytes()).await?;
+        broker
+            .publish("t", &g.map(|s| s.into()), format!("v{i}").as_bytes())
+            .await?;
     }
 
-    let mut cons = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let mut cons = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
     // Receive all messages 0..4
     let mut msgs = vec![];
@@ -482,12 +523,15 @@ async fn selective_ack_expiry_redelivery() -> anyhow::Result<()> {
 #[tokio::test]
 async fn selective_ack_no_wrong_rewind() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
     for i in 0..3 {
-        broker.publish("t", format!("x{i}").as_bytes()).await?;
+        broker
+            .publish("t", &g.map(|s| s.into()), format!("x{i}").as_bytes())
+            .await?;
     }
 
-    let mut cons = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let mut cons = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
     let m0 = cons.messages.recv().await.context("receiving message")?;
     let _m1 = cons.messages.recv().await.context("receiving message")?;
@@ -531,13 +575,14 @@ async fn batch_basic() -> anyhow::Result<()> {
     };
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
+    let g = Some("g");
 
     // Publish 10 messages -> expect two batches
     let mut handles = Vec::new();
     for _ in 0..10 {
         handles.push(tokio::spawn({
             let b = broker.clone();
-            async move { b.publish("topic", b"x").await }
+            async move { b.publish("topic", &g.map(|s| s.into()), b"x").await }
         }));
     }
 
@@ -551,7 +596,7 @@ async fn batch_basic() -> anyhow::Result<()> {
 
     // Verify fetch delivers all
     let mut c = broker
-        .subscribe("topic", "g", make_default_cons_cfg())
+        .subscribe("topic", g, make_default_cons_cfg())
         .await?;
     let mut recv = Vec::new();
     for _ in 0..10 {
@@ -572,14 +617,15 @@ async fn batch_timeout_flushes() -> anyhow::Result<()> {
         publish_batch_timeout_ms: 20,
         ..Default::default()
     }; // Large batch size, short timeout
+    let g = Some("g");
 
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
 
     // Publish 3 messages, waiting briefly so timeout triggers
-    let off1 = broker.publish("topic", b"a").await?;
-    let off2 = broker.publish("topic", b"b").await?;
-    let off3 = broker.publish("topic", b"c").await?;
+    let off1 = broker.publish("topic", &g.map(|s| s.into()), b"a").await?;
+    let off2 = broker.publish("topic", &g.map(|s| s.into()), b"b").await?;
+    let off3 = broker.publish("topic", &g.map(|s| s.into()), b"c").await?;
 
     assert_eq!(vec![off1, off2, off3], vec![0, 1, 2]);
     Ok(())
@@ -596,13 +642,16 @@ async fn batch_concurrent_ordering() -> anyhow::Result<()> {
     };
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
+    let g = Some("g");
 
     let publish_count = 200;
     let mut tasks = Vec::new();
 
     for _ in 0..publish_count {
         let b = broker.clone();
-        tasks.push(tokio::spawn(async move { b.publish("t", b"m").await }));
+        tasks.push(tokio::spawn(async move {
+            b.publish("t", &g.map(|s| s.into()), b"m").await
+        }));
     }
 
     let mut offsets = Vec::new();
@@ -631,17 +680,20 @@ async fn batch_publish_and_consume() -> anyhow::Result<()> {
         publish_batch_timeout_ms: 50,
         ..Default::default()
     };
+    let g = Some("g");
 
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
 
     // Publish 12 messages
     for i in 0..12 {
-        broker.publish("topic", format!("x{i}").as_bytes()).await?;
+        broker
+            .publish("topic", &g.map(|s| s.into()), format!("x{i}").as_bytes())
+            .await?;
     }
 
     let mut c = broker
-        .subscribe("topic", "g", make_default_cons_cfg())
+        .subscribe("topic", g, make_default_cons_cfg())
         .await?;
 
     let mut seen = Vec::new();
@@ -674,15 +726,16 @@ async fn batch_multiple_topics() -> anyhow::Result<()> {
         publish_batch_timeout_ms: 20,
         ..Default::default()
     };
+    let g = Some("g");
 
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
 
     // Publish into two topics interleaved
-    let off_a1 = broker.publish("A", b"a1").await?;
-    let off_b1 = broker.publish("B", b"b1").await?;
-    let off_a2 = broker.publish("A", b"a2").await?;
-    let off_b2 = broker.publish("B", b"b2").await?;
+    let off_a1 = broker.publish("A", &g.map(|s| s.into()), b"a1").await?;
+    let off_b1 = broker.publish("B", &g.map(|s| s.into()), b"b1").await?;
+    let off_a2 = broker.publish("A", &g.map(|s| s.into()), b"a2").await?;
+    let off_b2 = broker.publish("B", &g.map(|s| s.into()), b"b2").await?;
 
     assert_eq!(off_a1, 0);
     assert_eq!(off_a2, 1);
@@ -703,10 +756,11 @@ async fn publish_burst_then_consume_everything() -> anyhow::Result<()> {
         publish_batch_timeout_ms: 1,
         ..Default::default()
     };
+    let g = Some("g");
 
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
-    let (pubh, mut confirms) = broker.get_publisher("topic").await?;
+    let (pubh, mut confirms) = broker.get_publisher("topic", &g.map(|s| s.into())).await?;
 
     // Insert messages with known patterns
     let mut payloads = Vec::new();
@@ -731,7 +785,7 @@ async fn publish_burst_then_consume_everything() -> anyhow::Result<()> {
 
     // Now consume them
     let mut c = broker
-        .subscribe("topic", "group", make_default_cons_cfg())
+        .subscribe("topic", g, make_default_cons_cfg())
         .await?;
 
     let mut seen = Vec::new();
@@ -770,13 +824,14 @@ async fn concurrent_publish_and_consume() -> anyhow::Result<()> {
         inflight_batch_timeout_ms: 15,
         ..Default::default()
     };
+    let g = Some("g");
 
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
 
     // Start consumer
     let mut consumer = broker
-        .subscribe("topic", "g", make_default_cons_cfg())
+        .subscribe("topic", g, make_default_cons_cfg())
         .await?;
 
     // Start publishers
@@ -784,7 +839,7 @@ async fn concurrent_publish_and_consume() -> anyhow::Result<()> {
     for _ in 0..4 {
         let b = broker.clone();
         pub_tasks.push(tokio::spawn(async move {
-            let (pubh, mut confirms) = b.get_publisher("topic").await?;
+            let (pubh, mut confirms) = b.get_publisher("topic", &g.map(|s| s.into())).await?;
             let handle = tokio::spawn(async move {
                 for _i in 0..(total / 4) {
                     confirms.recv_confirm().await;
@@ -806,7 +861,7 @@ async fn concurrent_publish_and_consume() -> anyhow::Result<()> {
     }
 
     // Collect consumed
-    let mut seen = Vec::with_capacity(total);
+    let mut seen: Vec<DeliverableMessage> = Vec::with_capacity(total);
     for _ in 0..total {
         let msg = consumer
             .messages
@@ -842,16 +897,16 @@ async fn concurrent_publish_and_consume() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn redelivery_under_load_8k() -> anyhow::Result<()> {
-    let total = 8_000;
+async fn redelivery_under_load_2k() -> anyhow::Result<()> {
+    let total = 2_000;
 
     redelivery_under_load(total).await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn redelivery_under_load_2k() -> anyhow::Result<()> {
-    let total = 2_000;
+async fn redelivery_under_load_8k() -> anyhow::Result<()> {
+    let total = 8_000;
 
     redelivery_under_load(total).await?;
     Ok(())
@@ -911,10 +966,12 @@ async fn redelivery_under_load(total: usize) -> anyhow::Result<()> {
         ..Default::default()
     }; // <-- generous TTL
 
+    let group = Some("g".to_string());
+
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
 
-    let (pubh, mut confirms) = broker.get_publisher("t").await?;
+    let (pubh, mut confirms) = broker.get_publisher("t", &group).await?;
 
     // Publish burst
     for _ in 0..total {
@@ -935,19 +992,20 @@ async fn redelivery_under_load(total: usize) -> anyhow::Result<()> {
     let mut c = broker
         .subscribe(
             "t",
-            "g",
-            make_default_cons_cfg().with_prefetch_count(total * 1000 + 200),
+            group.as_deref(),
+            make_default_cons_cfg().with_prefetch_count(total * 2),
         )
         .await?;
 
     // FIRST PHASE: receive *all* unique offsets once
-    use std::collections::HashSet;
     let mut seen_once = HashSet::new();
     while seen_once.len() < total {
         let msg = c.messages.recv().await.context("receiving message")?;
         seen_once.insert(msg.message.offset);
         // DON'T ACK
     }
+
+    println!("Finished receiving");
 
     assert_eq!(seen_once.len(), total);
 
@@ -963,6 +1021,7 @@ async fn redelivery_under_load(total: usize) -> anyhow::Result<()> {
 
     while counts.contains(&0) && received < max_deliveries {
         let msg = c.messages.recv().await.context("receiving message")?;
+        println!("Redelivered {}", msg.message.offset);
         let idx = msg.message.offset as usize;
         if idx < total {
             counts[idx] += 1;
@@ -1006,6 +1065,7 @@ async fn restart_persists_messages() -> anyhow::Result<()> {
         cleanup_interval_secs: 1,
         ..Default::default()
     };
+    let g = Some("g");
 
     // Dedicated DB path for this test
     std::fs::create_dir_all("test_data")?;
@@ -1019,7 +1079,11 @@ async fn restart_persists_messages() -> anyhow::Result<()> {
 
         for i in 0..20 {
             broker
-                .publish("restart_topic", format!("m{i}").as_bytes())
+                .publish(
+                    "restart_topic",
+                    &g.map(|s| s.into()),
+                    format!("m{i}").as_bytes(),
+                )
                 .await?;
         }
 
@@ -1036,7 +1100,7 @@ async fn restart_persists_messages() -> anyhow::Result<()> {
         let broker = Broker::try_new(store, coord.clone(), metrics.broker(), cfg.clone()).await?;
 
         let mut cons = broker
-            .subscribe("restart_topic", "g", make_default_cons_cfg())
+            .subscribe("restart_topic", g, make_default_cons_cfg())
             .await?;
 
         let mut msgs = Vec::new();
@@ -1072,6 +1136,7 @@ async fn restart_persists_ack_state() -> anyhow::Result<()> {
         publish_batch_timeout_ms: 10,
         ..BrokerConfig::default()
     };
+    let g = Some("g");
 
     std::fs::create_dir_all("test_data")?;
     let db_path = format!("test_data/restart_acks_{}", fastrand::u64(..));
@@ -1081,7 +1146,9 @@ async fn restart_persists_ack_state() -> anyhow::Result<()> {
         let store = Arc::new(make_rocksdb_store(&db_path, false)?);
         let metrics = Metrics::new(60 * 60);
         let broker = Broker::try_new(store, coord.clone(), metrics.broker(), cfg.clone()).await?;
-        let (pubh, mut confirms) = broker.get_publisher("restart_ack_topic").await?;
+        let (pubh, mut confirms) = broker
+            .get_publisher("restart_ack_topic", &g.map(|s| s.into()))
+            .await?;
 
         for i in 0..10 {
             pubh.publish(format!("m{i}").as_bytes().to_vec()).await?;
@@ -1092,7 +1159,7 @@ async fn restart_persists_ack_state() -> anyhow::Result<()> {
         }
 
         let mut cons = broker
-            .subscribe("restart_ack_topic", "g", make_default_cons_cfg())
+            .subscribe("restart_ack_topic", Some("g"), make_default_cons_cfg())
             .await?;
 
         // ACK first 7 messages
@@ -1124,7 +1191,7 @@ async fn restart_persists_ack_state() -> anyhow::Result<()> {
         let broker = Broker::try_new(store, coord.clone(), metrics.broker(), cfg.clone()).await?;
 
         let mut cons = broker
-            .subscribe("restart_ack_topic", "g", make_default_cons_cfg())
+            .subscribe("restart_ack_topic", g, make_default_cons_cfg())
             .await?;
 
         let mut seen = Vec::new();
@@ -1164,6 +1231,7 @@ async fn restart_redelivery_across_restart() -> anyhow::Result<()> {
         cleanup_interval_secs: 7,
         ..Default::default()
     };
+    let g = Some("g");
 
     std::fs::create_dir_all("test_data")?;
     let db_path = format!("test_data/restart_redel_{}", fastrand::u64(..));
@@ -1177,13 +1245,13 @@ async fn restart_redelivery_across_restart() -> anyhow::Result<()> {
         let metrics = Metrics::new(60 * 60);
         let broker = Broker::try_new(store, coord.clone(), metrics.broker(), cfg.clone()).await?;
 
-        let (pubh, mut confirms) = broker.get_publisher(&topic).await?;
+        let (pubh, mut confirms) = broker.get_publisher(&topic, &g.map(|s| s.into())).await?;
         pubh.publish(b"hello".to_vec()).await?;
 
         confirms.recv_confirm().await;
 
         let mut cons = broker
-            .subscribe(&topic, "g", make_default_cons_cfg())
+            .subscribe(&topic, Some("g"), make_default_cons_cfg())
             .await?;
         let m1 = cons.messages.recv().await.context("receiving message")?;
         assert_eq!(m1.message.payload, b"hello");
@@ -1206,9 +1274,7 @@ async fn restart_redelivery_across_restart() -> anyhow::Result<()> {
         let broker =
             Arc::new(Broker::try_new(store, coord.clone(), metrics.broker(), cfg.clone()).await?);
 
-        let mut cons = broker
-            .subscribe(&topic, "g", make_default_cons_cfg())
-            .await?;
+        let mut cons = broker.subscribe(&topic, g, make_default_cons_cfg()).await?;
 
         let redelivered = cons.messages.recv().await.context("receiving message")?;
         assert_eq!(redelivered.message.offset, offset);
@@ -1230,10 +1296,13 @@ async fn restart_redelivery_across_restart() -> anyhow::Result<()> {
 #[tokio::test]
 async fn work_queue_fair_distribution() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("workers");
 
     let total = 6000;
 
-    let (pubh, mut confirms) = broker.get_publisher("jobs_fair").await?;
+    let (pubh, mut confirms) = broker
+        .get_publisher("jobs_fair", &g.map(|s| s.into()))
+        .await?;
 
     // Publish work
     for i in 0..total {
@@ -1247,13 +1316,13 @@ async fn work_queue_fair_distribution() -> anyhow::Result<()> {
     });
 
     let mut c1 = broker
-        .subscribe("jobs_fair", "workers", make_default_cons_cfg())
+        .subscribe("jobs_fair", g, make_default_cons_cfg())
         .await?;
     let mut c2 = broker
-        .subscribe("jobs_fair", "workers", make_default_cons_cfg())
+        .subscribe("jobs_fair", g, make_default_cons_cfg())
         .await?;
     let mut c3 = broker
-        .subscribe("jobs_fair", "workers", make_default_cons_cfg())
+        .subscribe("jobs_fair", g, make_default_cons_cfg())
         .await?;
 
     let mut counts = [0usize; 3];
@@ -1296,86 +1365,6 @@ async fn work_queue_fair_distribution() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn multi_topic_multi_group_isolation() -> anyhow::Result<()> {
-    let broker = make_test_broker().await?;
-
-    // Topic A: 100 messages, group GA
-    for i in 0..100 {
-        broker.publish("A", format!("a-{i}").as_bytes()).await?;
-    }
-
-    // Topic B: 60 messages, groups GB1 and GB2
-    for i in 0..60 {
-        broker.publish("B", format!("b-{i}").as_bytes()).await?;
-    }
-
-    let mut a_ga = broker.subscribe("A", "GA", make_default_cons_cfg()).await?;
-
-    let mut b_gb1 = broker
-        .subscribe("B", "GB1", make_default_cons_cfg())
-        .await?;
-    let mut b_gb2 = broker
-        .subscribe("B", "GB2", make_default_cons_cfg())
-        .await?;
-
-    // Collect A/GA
-    let mut a_seen = Vec::new();
-    for _ in 0..100 {
-        let m = a_ga.messages.recv().await.context("receiving message")?;
-        a_seen.push(String::from_utf8(m.message.payload.clone())?);
-        a_ga.settler
-            .send(SettleRequest {
-                settle_type: SettleType::Ack,
-                delivery_tag: m.delivery_tag,
-            })
-            .await?;
-    }
-
-    // Collect B/GB1 and B/GB2 (fanout: both see all messages)
-    let mut b1_seen = Vec::new();
-    let mut b2_seen = Vec::new();
-
-    for _ in 0..60 {
-        let m1 = b_gb1.messages.recv().await.context("receiving message")?;
-        let m2 = b_gb2.messages.recv().await.context("receiving message")?;
-
-        b1_seen.push(String::from_utf8(m1.message.payload.clone())?);
-        b2_seen.push(String::from_utf8(m2.message.payload.clone())?);
-
-        b_gb1
-            .settler
-            .send(SettleRequest {
-                settle_type: SettleType::Ack,
-                delivery_tag: m1.delivery_tag,
-            })
-            .await?;
-        b_gb2
-            .settler
-            .send(SettleRequest {
-                settle_type: SettleType::Ack,
-                delivery_tag: m2.delivery_tag,
-            })
-            .await?;
-    }
-
-    // Assertions
-    assert_eq!(
-        a_seen,
-        (0..100).map(|i| format!("a-{i}")).collect::<Vec<_>>()
-    );
-    assert_eq!(
-        b1_seen,
-        (0..60).map(|i| format!("b-{i}")).collect::<Vec<_>>()
-    );
-    assert_eq!(b1_seen, b2_seen); // both groups see same B stream
-
-    // No topic bleed
-    assert!(a_seen.iter().all(|s| s.starts_with("a-")));
-    assert!(b1_seen.iter().all(|s| s.starts_with("b-")));
-    Ok(())
-}
-
-#[tokio::test]
 async fn randomized_publish_consume_fuzz_delivery_tags() -> anyhow::Result<()> {
     let store = Arc::new(make_test_store().await?);
     let coord = NoopCoordination {};
@@ -1385,6 +1374,7 @@ async fn randomized_publish_consume_fuzz_delivery_tags() -> anyhow::Result<()> {
         inflight_ttl_secs: 2,
         ..Default::default()
     };
+    let g = Some("g");
 
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
@@ -1392,7 +1382,7 @@ async fn randomized_publish_consume_fuzz_delivery_tags() -> anyhow::Result<()> {
     let mut cons = broker
         .subscribe(
             "fuzz_topic",
-            "g",
+            g,
             make_default_cons_cfg().with_prefetch_count(2048),
         )
         .await?;
@@ -1400,7 +1390,9 @@ async fn randomized_publish_consume_fuzz_delivery_tags() -> anyhow::Result<()> {
     let total = 10_000;
 
     // Publisher task
-    let (b_pub, mut confirms) = broker.get_publisher("fuzz_topic").await?;
+    let (b_pub, mut confirms) = broker
+        .get_publisher("fuzz_topic", &g.map(|s| s.into()))
+        .await?;
     let pub_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
         for i in 0..total {
             let action = fastrand::u8(..100);
@@ -1511,6 +1503,7 @@ async fn randomized_publish_consume_fuzz_offsets() -> anyhow::Result<()> {
         inflight_ttl_secs: 2,
         ..Default::default()
     };
+    let g = Some("g");
 
     let metrics = Metrics::new(60 * 60);
     let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
@@ -1518,7 +1511,7 @@ async fn randomized_publish_consume_fuzz_offsets() -> anyhow::Result<()> {
     let mut cons = broker
         .subscribe(
             "fuzz_topic",
-            "g",
+            g,
             make_default_cons_cfg().with_prefetch_count(2048),
         )
         .await?;
@@ -1526,7 +1519,9 @@ async fn randomized_publish_consume_fuzz_offsets() -> anyhow::Result<()> {
     let total = 10_000;
 
     // Publisher task
-    let (b_pub, mut confirms) = broker.get_publisher("fuzz_topic").await?;
+    let (b_pub, mut confirms) = broker
+        .get_publisher("fuzz_topic", &g.map(|s| s.into()))
+        .await?;
     let pub_task: JoinHandle<anyhow::Result<()>> = tokio::spawn(async move {
         for i in 0..total {
             let action = fastrand::u8(..100);
@@ -1609,16 +1604,16 @@ async fn storage_inflight_implies_message_exists() -> anyhow::Result<()> {
     let store = Arc::new(make_test_store().await?);
 
     let topic = "t".to_string();
-    let group = "g".to_string();
+    let group = Some("g".to_string());
     let partition = 0;
 
-    let off = store.append(&topic, partition, b"x").await?;
+    let off = store.append(&topic, partition, &group, b"x").await?;
     store
         .mark_inflight(&topic, partition, &group, off, unix_millis() + 100000)
         .await?;
 
     // Run cleanup aggressively
-    store.cleanup_topic(&topic, partition).await?;
+    store.cleanup_topic(&topic, partition, &group).await?;
 
     // Invariant: if inflight exists, message must exist OR inflight must be gone
     let inflight = store
@@ -1626,7 +1621,7 @@ async fn storage_inflight_implies_message_exists() -> anyhow::Result<()> {
         .await?;
 
     if inflight {
-        let res = store.fetch_by_offset(&topic, partition, off).await;
+        let res = store.fetch_by_offset(&topic, partition, &group, off).await;
         assert!(
             res.is_ok(),
             "inflight exists but message missing: {:?}",
@@ -1639,12 +1634,15 @@ async fn storage_inflight_implies_message_exists() -> anyhow::Result<()> {
 #[tokio::test]
 async fn cursor_never_moves_backwards() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
     for i in 0..10 {
-        broker.publish("t", format!("m{i}").as_bytes()).await?;
+        broker
+            .publish("t", &g.map(|s| s.into()), format!("m{i}").as_bytes())
+            .await?;
     }
 
-    let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let mut c = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
     let mut last = None;
 
@@ -1672,18 +1670,20 @@ async fn crash_after_send_before_inflight_causes_redelivery() -> anyhow::Result<
         cleanup_interval_secs: 5,
         ..Default::default()
     };
+    let g = Some("g");
 
     let db_path = format!("test_data/crash_inflight_{}", fastrand::u64(..));
     let offset;
 
     {
+        // TODO: use shared
         let store = Arc::new(make_rocksdb_store(&db_path, false)?);
         let metrics = Metrics::new(60 * 60);
         let broker = Broker::try_new(store, coord.clone(), metrics.broker(), cfg.clone()).await?;
-        let (pubh, mut confirms) = broker.get_publisher("t").await?;
+        let (pubh, mut confirms) = broker.get_publisher("t", &g.map(|s| s.into())).await?;
         pubh.publish(b"x".to_vec()).await?;
         confirms.recv_confirm().await;
-        let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+        let mut c = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
         let m = c.messages.recv().await.context("receiving message")?;
         offset = m.message.offset;
@@ -1700,7 +1700,7 @@ async fn crash_after_send_before_inflight_causes_redelivery() -> anyhow::Result<
 
         let metrics = Metrics::new(60 * 60);
         let broker = Arc::new(Broker::try_new(store, coord, metrics.broker(), cfg).await?);
-        let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+        let mut c = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
         let redelivered = c.messages.recv().await.context("receiving message")?;
         assert_eq!(redelivered.message.offset, offset);
@@ -1711,10 +1711,11 @@ async fn crash_after_send_before_inflight_causes_redelivery() -> anyhow::Result<
 #[tokio::test]
 async fn ack_before_delivery_is_ignored() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
-    broker.publish("t", b"x").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"x").await?;
 
-    let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let mut c = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
     // ACK offset 0 before receiving it
     c.settler
@@ -1740,14 +1741,15 @@ async fn ack_before_delivery_is_ignored() -> anyhow::Result<()> {
 #[tokio::test]
 async fn redelivery_does_not_advance_cursor() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
-    broker.publish("t", b"a").await?;
-    broker.publish("t", b"b").await?;
-    broker.publish("t", b"c").await?;
-    broker.publish("t", b"d").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"a").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"b").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"c").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"d").await?;
 
     let mut c = broker
-        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .subscribe("t", g, make_default_cons_cfg().with_prefetch_count(1))
         .await?;
 
     let m0 = c.messages.recv().await.context("receiving message")?; // don't ack
@@ -1774,14 +1776,15 @@ async fn redelivery_does_not_advance_cursor() -> anyhow::Result<()> {
 #[tokio::test]
 async fn prefetch_limits_inflight() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
     // publish 3 messages
     for b in [b"a", b"b", b"c", b"d", b"e", b"f", b"g"] {
-        broker.publish("t", b).await?;
+        broker.publish("t", &g.map(|s| s.into()), b).await?;
     }
 
     let mut c = broker
-        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .subscribe("t", g, make_default_cons_cfg().with_prefetch_count(1))
         .await?; // prefetch = 1
 
     // receive first
@@ -1815,14 +1818,15 @@ async fn prefetch_limits_inflight() -> anyhow::Result<()> {
 #[tokio::test]
 async fn prefetch_releases_on_ack() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
-    broker.publish("t", b"a").await?;
-    broker.publish("t", b"b").await?;
-    broker.publish("t", b"c").await?;
-    broker.publish("t", b"d").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"a").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"b").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"c").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"d").await?;
 
     let mut c = broker
-        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .subscribe("t", g, make_default_cons_cfg().with_prefetch_count(1))
         .await?;
 
     let m0 = c.recv().await.context("receiving message")?;
@@ -1846,8 +1850,9 @@ async fn prefetch_releases_on_expiry() -> anyhow::Result<()> {
         ..Default::default()
     })
     .await?;
+    let g = Some("g");
 
-    let (publisher, _confirmer) = broker.get_publisher("t").await?;
+    let (publisher, _confirmer) = broker.get_publisher("t", &g.map(|s| s.into())).await?;
 
     publisher.publish(b"a".to_vec()).await?;
     publisher.publish(b"b".to_vec()).await?;
@@ -1855,7 +1860,7 @@ async fn prefetch_releases_on_expiry() -> anyhow::Result<()> {
     publisher.publish(b"d".to_vec()).await?;
 
     let mut c = broker
-        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .subscribe("t", g, make_default_cons_cfg().with_prefetch_count(1))
         .await?;
 
     let m0 = c.recv().await.context("receiving message")?;
@@ -1886,11 +1891,12 @@ async fn prefetch_releases_on_expiry() -> anyhow::Result<()> {
 #[tokio::test]
 async fn offsets_are_never_reused_after_cleanup() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
-    let _o0 = broker.publish("t", b"a").await?;
-    let o1 = broker.publish("t", b"b").await?;
+    let _o0 = broker.publish("t", &g.map(|s| s.into()), b"a").await?;
+    let o1 = broker.publish("t", &g.map(|s| s.into()), b"b").await?;
 
-    let mut c = broker.subscribe("t", "g", make_default_cons_cfg()).await?;
+    let mut c = broker.subscribe("t", g, make_default_cons_cfg()).await?;
 
     let m0 = c.recv().await.context("receiving message")?;
     c.ack(SettleRequest {
@@ -1909,9 +1915,11 @@ async fn offsets_are_never_reused_after_cleanup() -> anyhow::Result<()> {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // force cleanup
-    broker.forced_cleanup(&"t".into(), 0).await?;
+    broker
+        .forced_cleanup(&"t".into(), 0, &g.map(|s| s.into()))
+        .await?;
 
-    let o2 = broker.publish("t", b"c").await?;
+    let o2 = broker.publish("t", &g.map(|s| s.into()), b"c").await?;
 
     assert!(o2 > o1, "offset reused after cleanup");
     Ok(())
@@ -1924,13 +1932,14 @@ async fn redelivery_has_priority_over_fresh() -> anyhow::Result<()> {
         ..Default::default()
     })
     .await?;
+    let g = Some("g");
 
     for ch in [b"a", b"b", b"c"] {
-        broker.publish("t", ch).await?;
+        broker.publish("t", &g.map(|s| s.into()), ch).await?;
     }
 
     let mut c = broker
-        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(2))
+        .subscribe("t", g, make_default_cons_cfg().with_prefetch_count(2))
         .await?;
 
     let m0 = c.recv().await.context("receiving message")?; // don't ack 0
@@ -1947,12 +1956,14 @@ async fn redelivery_has_priority_over_fresh() -> anyhow::Result<()> {
 #[tokio::test]
 async fn inflight_capacity_never_exceeds_prefetch() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
+
     let mut c = broker
-        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .subscribe("t", g, make_default_cons_cfg().with_prefetch_count(1))
         .await?;
 
-    broker.publish("t", b"a").await?;
-    broker.publish("t", b"b").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"a").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"b").await?;
 
     let m0 = c.recv().await.context("receiving message")?;
     c.ack(SettleRequest {
@@ -1973,13 +1984,14 @@ async fn inflight_capacity_never_exceeds_prefetch() -> anyhow::Result<()> {
 #[tokio::test]
 async fn ack_spam_does_not_increase_capacity() -> anyhow::Result<()> {
     let broker = make_test_broker().await?;
+    let g = Some("g");
 
     for _ in 0..10 {
-        broker.publish("t", b"x").await?;
+        broker.publish("t", &g.map(|s| s.into()), b"x").await?;
     }
 
     let mut c = broker
-        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .subscribe("t", g, make_default_cons_cfg().with_prefetch_count(1))
         .await?;
 
     // Receive first message
@@ -2075,11 +2087,12 @@ async fn expiry_and_ack_race_never_double_frees() -> anyhow::Result<()> {
         ..Default::default()
     })
     .await?;
+    let g = Some("g");
 
-    broker.publish("t", b"x").await?;
+    broker.publish("t", &g.map(|s| s.into()), b"x").await?;
 
     let mut c = broker
-        .subscribe("t", "g", make_default_cons_cfg().with_prefetch_count(1))
+        .subscribe("t", g, make_default_cons_cfg().with_prefetch_count(1))
         .await?;
 
     let m = c.recv().await.context("receiving message")?;

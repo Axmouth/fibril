@@ -441,6 +441,7 @@ impl BrokerStats {
                 }
             },
 
+            total_published: self.published.total.load(Ordering::Relaxed),
             total_delivered: self.delivered.total.load(Ordering::Relaxed),
             total_acked: self.acked.total.load(Ordering::Relaxed),
             total_redelivered: self.redelivered.total.load(Ordering::Relaxed),
@@ -460,6 +461,7 @@ pub struct BrokerStatsSnapshot {
     pub avg_publish_batch_size: Option<f64>,
     pub avg_ack_batch_size: Option<f64>,
 
+    pub total_published: u64,
     pub total_delivered: u64,
     pub total_acked: u64,
     pub total_redelivered: u64,
@@ -630,8 +632,8 @@ impl Metrics {
         }
     }
 
-    pub fn start(self, config: MetricsConfig) -> MetricsHandle {
-        let runtime = MetricsRuntime::start(self.clone(), config);
+    pub fn start(self, config: MetricsConfig, interval: Duration) -> MetricsHandle {
+        let runtime = MetricsRuntime::start(self.clone(), config, interval);
         MetricsHandle {
             metrics: self,
             runtime,
@@ -665,10 +667,10 @@ pub struct MetricsRuntime {
 }
 
 impl MetricsRuntime {
-    pub fn start(metrics: Metrics, config: MetricsConfig) -> Self {
+    pub fn start(metrics: Metrics, config: MetricsConfig, interval: Duration) -> Self {
         let shutdown = ShutdownSignal::new();
         let mut handles = Vec::new();
-        let dur = Duration::from_secs(10);
+        let dur = interval;
 
         if config.log_storage {
             handles.push(tokio::spawn(run_storage_logger(
@@ -782,8 +784,11 @@ pub async fn run_broker_logger(
 
                     redelivered_s = round1(snap.redelivered_per_sec_1m),
                     expired_s = round1(snap.expired_per_sec_1m),
+                    total_published = snap.total_published,
                     total_delivered = snap.total_delivered,
                     total_acked = snap.total_acked,
+                    total_expired = snap.total_expired,
+                    total_redelivered = snap.total_redelivered,
                     "[broker]"
                 );
             }
@@ -867,7 +872,7 @@ struct PublisherInfo {
 struct SubInfo {
     sub_id: Uuid,
     topic: Topic,
-    group: Group,
+    group: Option<Group>,
     connected_at: Instant,
     auto_ack: bool,
 }
@@ -876,7 +881,7 @@ impl SubInfo {
     pub fn new(
         sub_id: SubId,
         topic: Topic,
-        group: Group,
+        group: Option<Group>,
         connected_at: Instant,
         auto_ack: bool,
     ) -> Self {
@@ -917,7 +922,7 @@ impl ConnectionState {
     pub fn add_sub(
         &self,
         topic: Topic,
-        group: Group,
+        group: Option<Group>,
         connected_at: Instant,
         auto_ack: bool,
     ) -> SubId {
@@ -980,7 +985,7 @@ impl ConnectionStats {
         &self,
         conn_id: &ConnId,
         topic: Topic,
-        group: Group,
+        group: Option<Group>,
         connected_at: Instant,
         auto_ack: bool,
     ) -> Option<SubId> {

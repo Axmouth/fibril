@@ -51,7 +51,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
         req,
         &Subscribe {
             topic: "t1".into(),
-            group: "g1".into(),
+            group: Some("g1".into()),
             prefetch: 100,
             auto_ack: true,
         },
@@ -65,6 +65,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
         req_pub,
         &Publish {
             topic: "t1".into(),
+            group: None,
             partition: 0,
             require_confirm: true,
             payload: b"hello".to_vec(),

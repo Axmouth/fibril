@@ -17,7 +17,7 @@ use tokio::{net::TcpListener, sync::mpsc};
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
-type SubKey = (Topic, Group); // (topic, group)
+type SubKey = (Topic, Option<Group>); // (topic, group)
 
 struct ConnState {
     authenticated: bool,
@@ -27,7 +27,7 @@ struct ConnState {
 struct SubState {
     sub_id: u64,
     auto_ack: bool,
-    acker: tokio::sync::mpsc::Sender<SettleRequest>,
+    state_settler: tokio::sync::mpsc::Sender<SettleRequest>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -174,6 +174,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
         .await?;
 
     // ---- Main reader loop --------------------------------------------------
+    // TODO: Make handling more async? Spawn task per frame, or have a task pool
     while let Some(frame) =
         tokio::time::timeout(std::time::Duration::from_secs(30), reader.next()).await?
     {
@@ -280,7 +281,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                 let consumer = broker
                     .subscribe(
                         &sub.topic,
-                        &sub.group,
+                        sub.group.as_deref(),
                         ConsumerConfig {
                             prefetch_count: sub.prefetch as usize,
                         },
@@ -290,7 +291,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
 
                 let ConsumerHandle {
                     messages,
-                    settler: acker,
+                    settler,
                     sub_id,
                     ..
                 } = consumer;
@@ -306,7 +307,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                     auto_ack,
                 );
 
-                let acker_clone = acker.clone();
+                let settler_clone = settler.clone();
                 let handle = tokio::spawn(async move {
                     let mut rx = messages;
 
@@ -333,7 +334,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
 
                         // 2. Auto-ack ONLY after successful send
                         if auto_ack {
-                            let _ = acker
+                            let _ = settler
                                 .send(SettleRequest {
                                     settle_type: SettleType::Ack,
                                     delivery_tag: msg.delivery_tag,
@@ -349,7 +350,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                         sub_id,
                         task: handle,
                         auto_ack: sub.auto_ack,
-                        acker: acker_clone,
+                        state_settler: settler_clone,
                     },
                 );
 
@@ -381,7 +382,53 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                             delivery_tag: tag,
                             settle_type: SettleType::Ack,
                         };
-                        let _ = sub.acker.send(req).await;
+                        let _ = sub.state_settler.send(req).await;
+                    }
+                }
+                // Unknown subscription: ignore (idempotent)
+            }
+
+            // -------- NACK ----------------------------------------------------
+            x if x == Op::Nack as u16 => {
+                // TODO: Decline ack when auto ack? Log?
+                let nack: Nack = decode(&frame);
+
+                let key: SubKey = (nack.topic.clone(), nack.group.clone());
+
+                if let Some(sub) = state.subs.get(&key)
+                    && !sub.auto_ack
+                {
+                    for tag in nack.tags {
+                        let req = SettleRequest {
+                            delivery_tag: tag,
+                            settle_type: SettleType::Nack {
+                                requeue: Some(nack.requeue),
+                            },
+                        };
+                        let _ = sub.state_settler.send(req).await;
+                    }
+                }
+                // Unknown subscription: ignore (idempotent)
+            }
+
+            // -------- REJECT ----------------------------------------------------
+            x if x == Op::Reject as u16 => {
+                // TODO: Decline ack when auto ack? Log?
+                let reject: Reject = decode(&frame);
+
+                let key: SubKey = (reject.topic.clone(), reject.group.clone());
+
+                if let Some(sub) = state.subs.get(&key)
+                    && !sub.auto_ack
+                {
+                    for tag in reject.tags {
+                        let req = SettleRequest {
+                            delivery_tag: tag,
+                            settle_type: SettleType::Reject {
+                                requeue: Some(reject.requeue),
+                            },
+                        };
+                        let _ = sub.state_settler.send(req).await;
                     }
                 }
                 // Unknown subscription: ignore (idempotent)
@@ -392,7 +439,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                 let pubreq: Publish = decode(&frame);
 
                 // TODO: USE PUBLISHER(cache them in a dashmap?)
-                match broker.publish(&pubreq.topic, &pubreq.payload).await {
+                match broker.publish(&pubreq.topic, &pubreq.group, &pubreq.payload).await {
                     Ok(offset) => {
                         if pubreq.require_confirm {
                             tx.send(encode(
@@ -402,6 +449,39 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                             ))
                             .await?;
                         }
+                        // Ok(offset_notifier) => match offset_notifier.await {
+                        //     Ok(Ok(offset)) => {
+                        //         if pubreq.require_confirm {
+                        //             tx.send(encode(
+                        //                 Op::PublishOk,
+                        //                 frame.request_id,
+                        //                 &PublishOk { offset },
+                        //             ))
+                        //             .await?;
+                        //         }
+                        //     }
+                        //     Ok(Err(err)) => {
+                        //         tx.send(encode(
+                        //             Op::Error,
+                        //             frame.request_id,
+                        //             &ErrorMsg {
+                        //                 code: 500,
+                        //                 message: err.to_string(),
+                        //             },
+                        //         ))
+                        //         .await?;
+                        //     }
+                        //     Err(err) => {
+                        //         tx.send(encode(
+                        //             Op::Error,
+                        //             frame.request_id,
+                        //             &ErrorMsg {
+                        //                 code: 500,
+                        //                 message: "Channel closed".into(),
+                        //             },
+                        //         ))
+                        //         .await?;
+                        //     }
                     }
                     Err(err) => {
                         tx.send(encode(
