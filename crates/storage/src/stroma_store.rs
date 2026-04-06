@@ -69,7 +69,7 @@ impl StromaStorage {
         StorageError::Internal(e.to_string())
     }
 
-    fn is_enqueued(
+    async fn is_enqueued(
         &self,
         topic: &Topic,
         partition: LogId,
@@ -77,7 +77,7 @@ impl StromaStorage {
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_ready(topic, partition, group.as_deref(), offset)
+            .is_ready(topic, partition, group.as_deref(), offset).await
             .map_err(Self::map_err)
     }
 }
@@ -216,7 +216,7 @@ impl Storage for StromaStorage {
                 candidates.push((off, payload));
             }
 
-            self.inner.filter_not_enqueued(topic, partition, group.as_deref(), &mut candidates);
+            candidates = self.inner.filter_not_enqueued(topic, partition, group.as_deref(), candidates.clone()).await;
 
             for (off, payload) in candidates.drain(..) {
                 out.push(StoredMessage {
@@ -286,7 +286,7 @@ impl Storage for StromaStorage {
         }
 
         let msgs = self
-            .fetch_available(topic, partition, &group, from_offset, max)
+            .fetch_available(topic, partition, group, from_offset, max)
             .await?;
         Ok(msgs
             .into_iter()
@@ -370,7 +370,7 @@ impl Storage for StromaStorage {
         // 2) fetch the message payload from Stroma message log
         let expired = self
             .inner
-            .list_expired(now_ts, usize::MAX)
+            .list_expired(now_ts, usize::MAX).await
             .map_err(Self::map_err)?;
 
         let mut out = Vec::with_capacity(expired.len());
@@ -407,7 +407,7 @@ impl Storage for StromaStorage {
         group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         self.inner
-            .lowest_unacked_offset(topic, partition, group.as_deref())
+            .lowest_unacked_offset(topic, partition, group.as_deref()).await
             .map_err(Self::map_err)
     }
 
@@ -485,7 +485,7 @@ impl Storage for StromaStorage {
         group: &Option<Group>,
     ) -> Result<usize, StorageError> {
         self.inner
-            .count_inflight(topic, partition, group.as_deref())
+            .count_inflight(topic, partition, group.as_deref()).await
             .map_err(Self::map_err)
     }
 
@@ -501,7 +501,7 @@ impl Storage for StromaStorage {
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_inflight_or_acked(topic, partition, group.as_deref(), offset)
+            .is_inflight_or_acked(topic, partition, group.as_deref(), offset).await
             .map_err(Self::map_err)
     }
     async fn is_enqueued(
@@ -512,7 +512,7 @@ impl Storage for StromaStorage {
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_ready(topic, partition, group.as_deref(), offset)
+            .is_ready(topic, partition, group.as_deref(), offset).await
             .map_err(Self::map_err)
     }
 
@@ -524,7 +524,7 @@ impl Storage for StromaStorage {
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_acked(topic, partition, group.as_deref(), offset)
+            .is_acked(topic, partition, group.as_deref(), offset).await
             .map_err(Self::map_err)
     }
 
@@ -554,7 +554,7 @@ impl Storage for StromaStorage {
     }
 
     async fn next_expiry_hint(&self) -> Result<Option<u64>, StorageError> {
-        self.inner.next_expiry_hint().map_err(Self::map_err)
+        self.inner.next_expiry_hint().await.map_err(Self::map_err)
     }
 
     async fn recompute_and_store_next_expiry_hint(&self) -> Result<Option<u64>, StorageError> {

@@ -1,6 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{sync::OnceLock, time::{Duration, SystemTime, UNIX_EPOCH}};
 
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_appender::non_blocking;
 
 /// Milliseconds since UNIX epoch
 pub type UnixMillis = u64;
@@ -94,17 +95,54 @@ mod tests {
     }
 }
 
+static LOG_GUARD: OnceLock<non_blocking::WorkerGuard> = OnceLock::new();
+
 pub fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let app_filter  = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    // Console needs TRACE-ish telemetry
+    // let console_filter = EnvFilter::new("trace");
+
+    // let console_layer = console_subscriber::ConsoleLayer::builder().spawn();
+
+    let (non_blocking, guard) = non_blocking(std::io::stdout());
+
+    // Store globally
+    LOG_GUARD.set(guard).expect("Tracing already initialized");
+    
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_line_number(true)
+        .with_file(true)
+        .with_writer(non_blocking);
+
+    tracing_subscriber::registry()
+        // .with(console_layer.with_filter(console_filter))
+        .with(fmt_layer.with_filter(app_filter))
+        .init();
+}
+
+pub fn init_tracing_dbg() {
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+
+    let console_layer = console_subscriber::ConsoleLayer::builder().spawn();
+
+    let (non_blocking, guard) = non_blocking(std::io::stdout());
+
+    // Store globally
+    LOG_GUARD.set(guard).expect("Tracing already initialized");
 
     tracing_subscriber::registry()
         .with(filter)
+        .with(console_layer)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_target(true)
                 .with_thread_ids(true)
                 .with_line_number(true)
-                .with_file(true),
+                .with_file(true)
+                .with_writer(non_blocking),
         )
         .init();
 }

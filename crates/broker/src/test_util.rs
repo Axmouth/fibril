@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use fibril_storage::{DeliveryTag, Offset};
-use fibril_util::init_tracing;
+use fibril_util::{init_tracing, init_tracing_dbg};
 use hashbrown::HashMap;
 use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, test_dir};
 
@@ -24,9 +24,15 @@ impl Default for TestState {
     }
 }
 
+
+// static INIT_TRACING_ONCE: std::sync::Once = std::sync::Once::new();
+
 impl TestState {
     pub fn new() -> Self {
-        // init_tracing();
+        // INIT_TRACING_ONCE.call_once(|| {
+        //     println!("Initializing tracing for tests");
+        //     init_tracing_dbg();
+        // });
         Self {
             broker_cfg: BrokerConfig {
                 inflight_ttl_ms: 5000,
@@ -41,7 +47,10 @@ impl TestState {
     }
 
     pub fn new_with_cfg(cfg: BrokerConfig) -> Self {
-        // init_tracing();
+        // INIT_TRACING_ONCE.call_once(|| {
+        //     println!("Initializing tracing for tests");
+        //     init_tracing_dbg();
+        // });
         Self {
             broker_cfg: cfg,
             brokers: HashMap::new(),
@@ -85,7 +94,7 @@ impl TestState {
 
     pub async fn stop_broker(&mut self, id: &str) {
         if let Some(b) = self.brokers.remove(id) {
-            b.shutdown().await;
+            b.shutdown_graceful().await;
         }
 
         self.consumers.retain(|_, (broker_id, _)| broker_id != id);
@@ -104,8 +113,7 @@ impl TestState {
         topic: &str,
         group: Option<&str>,
         payload: &[u8],
-        n: usize,
-    ) -> Result<Vec<Offset>, BrokerError> {
+    ) -> Result<(), BrokerError> {
         let broker = self
             .brokers
             .get(broker)
@@ -115,11 +123,9 @@ impl TestState {
             .get_publisher(topic, &group.map(|s| s.into()))
             .await?;
 
-        let mut offs = Vec::new();
-        for _ in 0..n {
-            offs.push(pubh.publish(payload).await?);
-        }
-        Ok(offs)
+        let off = pubh.publish(payload).await?;
+        
+        Ok(())
     }
 
     pub async fn publish_many(
@@ -129,7 +135,7 @@ impl TestState {
         group: Option<&str>,
         payload: &[u8],
         n: usize,
-    ) -> Result<Vec<Offset>, BrokerError> {
+    ) -> Result<(), BrokerError> {
         let broker = self
             .brokers
             .get(broker)
@@ -143,7 +149,7 @@ impl TestState {
         for _ in 0..n {
             offsets.push(pubh.publish(payload).await?);
         }
-        Ok(offsets)
+        Ok(())
     }
 }
 

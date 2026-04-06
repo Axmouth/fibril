@@ -69,7 +69,7 @@ pub trait QueueEngine {
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError>;
 
-    fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError>;
+    async fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError>;
 
     async fn requeue_expired(
         &self,
@@ -98,14 +98,14 @@ impl StromaEngine {
     }
 }
 
-pub fn make_stroma_engine(root: impl AsRef<Path>) -> Result<StromaEngine, StromaError> {
-    let keratin_cfg = KeratinConfig::test_default();
-    let snap_cfg = SnapshotConfig::default();
-    let stroma = futures::executor::block_on(Stroma::open(root, keratin_cfg, snap_cfg))?;
-    Ok(StromaEngine {
-        inner: stroma,
-    })
-}
+// pub fn make_stroma_engine(root: impl AsRef<Path>) -> Result<StromaEngine, StromaError> {
+//     let keratin_cfg = KeratinConfig::test_default();
+//     let snap_cfg = SnapshotConfig::default();
+//     let stroma = futures::executor::block_on(Stroma::open(root, keratin_cfg, snap_cfg))?;
+//     Ok(StromaEngine {
+//         inner: stroma,
+//     })
+// }
 
 #[async_trait]
 impl QueueEngine for StromaEngine {
@@ -193,8 +193,8 @@ impl QueueEngine for StromaEngine {
         Ok(())
     }
 
-    fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError> {
-        self.inner.next_expiry_hint()
+    async fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError> {
+        self.inner.next_expiry_hint().await
     }
 
     async fn requeue_expired(
@@ -206,7 +206,7 @@ impl QueueEngine for StromaEngine {
     }
 
     async fn shutdown(&self) -> Result<(), StromaError> {
-        self.inner.shutdown()?;
+        self.inner.shutdown().await?;
 
         Ok(())
     }

@@ -6,6 +6,8 @@ actor like system, instead of needing to lock dashmaps, we could have simple map
 
 Add display names to topics/groups for logging/ui
 
+ack/nack/reject confirms (opt in?)
+
 add events for changing queue settings (ttl, max inflight, etc)
 add global event log for stroma setting changes
 Investigate need for Requeued event?

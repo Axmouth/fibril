@@ -1,28 +1,23 @@
 use std::{
-    collections::HashSet,
-    sync::{
+    collections::HashSet, sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    },
-    time::Duration,
+    }, task, time::Duration
 };
 
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use fibril_storage::{DeliverableMessage, DeliveryTag, Group, LogId, Offset, StorageError, Topic};
 use fibril_util::unix_millis;
+use tracing::{Instrument, instrument::Instrumented};
 
-// ---- QueueEngine you just defined ----
 use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
 use stroma_core::{
     AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion, StromaError,
-    unix_millis,
 };
-
-// ---------------- Public API types (keep same-ish) ----------------
 
 #[derive(thiserror::Error, Debug)]
 pub enum BrokerError {
@@ -39,17 +34,20 @@ pub enum BrokerError {
     Unknown(String),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SettleType {
     Ack,
     Nack { requeue: Option<bool> },
-    Reject { requeue: Option<bool> }, // you can map Reject to Nack{requeue:false} or a dedicated event later
+    Reject { requeue: Option<bool> },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SettleRequest {
     pub settle_type: SettleType,
     pub delivery_tag: DeliveryTag,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConsumerConfig {
     pub prefetch: usize,
 }
@@ -75,17 +73,32 @@ pub struct ConsumerHandle {
     pub partition: LogId,
     pub messages: mpsc::Receiver<DeliverableMessage>,
     pub settler: mpsc::Sender<SettleRequest>,
+    pub pending_settles: Arc<AtomicUsize>,
 }
 
 impl ConsumerHandle {
     pub async fn settle(&self, req: SettleRequest) -> Result<(), BrokerError> {
+        if self.settler.is_closed() {
+            tracing::debug!("Settle channel is closed for consumer {}", self.sub_id);
+        }
+        let s = self.pending_settles.fetch_add(1, Ordering::AcqRel);
+        tracing::debug!("Pending settles incremented to {}", s + 1);
         self.settler
             .send(req)
             .await
-            .map_err(|_| BrokerError::ChannelClosed)
+            .map_err(|_| {
+                let s = self.pending_settles.fetch_sub(1, Ordering::AcqRel);
+                tracing::debug!("Pending settles decremented to {} due to send failure", s - 1);
+                BrokerError::ChannelClosed
+            })
     }
+
     pub async fn recv(&mut self) -> Option<DeliverableMessage> {
         self.messages.recv().await
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
     }
 }
 
@@ -99,7 +112,7 @@ pub struct PublisherHandle {
 }
 
 impl PublisherHandle {
-    pub async fn publish(&self, payload: &[u8]) -> Result<Offset, BrokerError> {
+    pub async fn publish(&self, payload: &[u8]) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();
 
         self.publisher
@@ -110,7 +123,14 @@ impl PublisherHandle {
             .await
             .map_err(|_| BrokerError::ChannelClosed)?;
 
-        rx.await.map_err(|_| BrokerError::ChannelClosed)?
+        // // TODO: move to separare task per publisher
+        // tokio::spawn(async move {
+        //     if let Err(e) = rx.await {
+        //         tracing::error!("Error receiving publish response: {e:?}");
+        //     }
+        // });
+
+        Ok(rx)
     }
 }
 
@@ -119,8 +139,12 @@ pub struct ConfirmStream {
 }
 
 impl ConfirmStream {
-    pub async fn recv_confirm(&mut self) -> Option<Offset> {
+    pub async fn recv(&mut self) -> Option<Offset> {
         self.rx.recv().await
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rx.is_empty()
     }
 }
 
@@ -138,7 +162,7 @@ impl TaskGroup {
         }
     }
 
-    fn spawn<F>(&self, fut: F)
+    fn spawn<F>(&self, name: &'static str, fut: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -147,6 +171,13 @@ impl TaskGroup {
             return;
         }
 
+        #[cfg(tokio_unstable)]
+        let handle = tokio::task::Builder::new()
+            .name(name)
+            .spawn(fut)
+            .unwrap();
+
+        #[cfg(not(tokio_unstable))]
         let handle = tokio::spawn(fut);
 
         // Push only if still open
@@ -197,8 +228,6 @@ struct ConsumerState {
     // flow control
     prefetch: AtomicUsize,
     inflight: AtomicUsize,
-    // settle input (per consumer)
-    settle_rx: tokio::sync::Mutex<mpsc::Receiver<SettleRequest>>,
 }
 
 impl ConsumerState {
@@ -259,25 +288,43 @@ impl QueueLoopState {
     }
 }
 
+#[derive(Debug, Clone)]
 enum WakeReason {
     Notify,
     Timer,
 }
 
+impl std::fmt::Display for WakeReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WakeReason::Notify => write!(f, "notify"),
+            WakeReason::Timer => write!(f, "timer"),
+        }
+    }
+}
+
 // ---------------- Broker ----------------
 
+// TODO cleanup old?
 #[derive(Debug)]
 pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     cfg: BrokerConfig,
     engine: E,
-    shutdown: CancellationToken,
+    shutdown_publishers: CancellationToken,
+    shutdown_consumers: CancellationToken,
+    shutdown_settle: CancellationToken,
+    shutdown_expiry: CancellationToken,
 
     next_sub_id: AtomicU64,
     next_consumer_id: AtomicU64,
     next_tag_epoch: AtomicU64,
 
     queues: DashMap<QueueKey, Arc<QueueLoopState>>,
-    tags: DashMap<DeliveryTag, TagRecord>,
+    records_by_tags: DashMap<DeliveryTag, TagRecord>,
+    tags_by_key_offset: DashMap<(QueueKey, Offset), DeliveryTag>,
+
+    pending_settles: Arc<AtomicUsize>,
+    settle_drained: Arc<Notify>,
 
     task_group: Arc<TaskGroup>,
 }
@@ -287,12 +334,18 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let this = Arc::new(Self {
             cfg,
             engine,
-            shutdown: CancellationToken::new(),
+            shutdown_publishers: CancellationToken::new(),
+            shutdown_consumers: CancellationToken::new(),
+            shutdown_settle: CancellationToken::new(),
+            shutdown_expiry: CancellationToken::new(),
             next_sub_id: AtomicU64::new(1),
             next_consumer_id: AtomicU64::new(1),
             next_tag_epoch: AtomicU64::new(1),
             queues: DashMap::new(),
-            tags: DashMap::new(),
+            records_by_tags: DashMap::new(),
+            tags_by_key_offset: DashMap::new(),
+            pending_settles: Arc::new(AtomicUsize::new(0)),
+            settle_drained: Arc::new(Notify::new()),
             task_group: Arc::new(TaskGroup::new()),
         });
 
@@ -303,11 +356,50 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 
     pub async fn shutdown(&self) {
-        self.shutdown.cancel();
+        self.shutdown_publishers.cancel();
+        self.shutdown_consumers.cancel();
+        self.shutdown_settle.cancel();
+        self.shutdown_expiry.cancel();
         self.task_group.shutdown().await;
-        self.engine.shutdown().await.inspect_err(|e| {
+        self.engine
+            .shutdown()
+            .await
+            .inspect_err(|e| {
+                tracing::error!("engine shutdown error: {:?}", e);
+            })
+            .ok();
+    }
+
+    pub async fn shutdown_graceful(&self) {
+        tracing::info!("Broker initiating graceful shutdown");
+
+        // Stop accepting new publishers, consumers immediately
+        self.shutdown_publishers.cancel();
+        self.shutdown_consumers.cancel();
+        self.shutdown_expiry.cancel();
+        tracing::debug!("Signaled shutdown to publishers, consumers, and expiry worker");
+        self.shutdown_settle.cancel();
+        tracing::debug!("Signaled shutdown to settle workers");
+
+        // TODO: find a bette way to reliably wait for settles
+        // tokio::time::sleep(Duration::from_millis(150)).await; // give some time for in-flight messages to be processed and settle requests to be sent
+
+        // TODO: should we pending confirms too?
+        // Wait until settle channels drained
+        while self.pending_settles.load(Ordering::Acquire) != 0 {
+            tracing::debug!("Waiting for pending settles to drain: {}", self.pending_settles.load(Ordering::Acquire));
+            self.settle_drained.notified().await;
+        }
+
+        tracing::debug!("All pending settles drained, proceeding with shutdown");
+
+        // Now stop tasks
+        self.task_group.shutdown().await;
+
+        // Shutdown engine
+        if let Err(e) = self.engine.shutdown().await {
             tracing::error!("engine shutdown error: {:?}", e);
-        }).ok();
+        }
     }
 
     pub async fn get_publisher(
@@ -315,18 +407,29 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         topic: &str,
         group: &Option<Group>,
     ) -> Result<(PublisherHandle, ConfirmStream), BrokerError> {
+        // TODO: make configurable?
         let (tx, mut rx) = mpsc::channel::<PublishRequest>(16_384);
         let (confirm_tx, confirm_rx) = mpsc::channel::<Offset>(16_384);
 
         let engine = self.engine.clone();
-        let shutdown = self.shutdown.clone();
+        let shutdown = self.shutdown_publishers.clone();
         let tp: Topic = topic.to_string();
         let part: LogId = 0;
         let group = group.clone();
 
-        self.task_group.spawn(async move {
+        let qs = self.queue(&QueueKey {
+            tp: tp.clone(),
+            part,
+            group: group.clone(),
+        }).await;
+
+        // TODO: make async by maybe making two tasks: one to receive publish requests and one to wait for completions and send confirms? Or use a bounded channel and backpressure?
+        let (confirm_sink_tx, mut confirm_sink_rx) = mpsc::channel::<(oneshot::Receiver<Result<AppendResult, IoError>>, oneshot::Sender<Result<u64, BrokerError>>)>(16_384);
+        self.task_group.spawn("publisher_confirm_sink", async move {
             loop {
                 tokio::select! {
+                    biased;
+
                     _ = shutdown.cancelled() => break,
 
                     maybe = rx.recv() => {
@@ -347,19 +450,51 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             continue;
                         }
 
-                        // Wait for durability
-                        match rx_completion.await {
-                            Ok(Ok(append)) => {
-                                let offset = append.base_offset;
-                                let _ = reply.send(Ok(offset));
-                                let _ = confirm_tx.send(offset).await;
-                            }
-                            Ok(Err(_)) | Err(_) => {
-                                let _ = reply.send(Err(BrokerError::ChannelClosed));
-                            }
+                        if let Err(e) = confirm_sink_tx.send((rx_completion, reply)).await {
+                            tracing::error!("Failed to send completion receiver to confirm sink: {e:?}");
+                            // let _ = reply.send(Err(BrokerError::ChannelClosed));
+                            continue;
                         }
+
+                        // // Wait for durability
+                        // match rx_completion.await {
+                        //     Ok(Ok(append)) => {
+                        //         let offset = append.base_offset;
+                        //         let _ = reply.send(Ok(offset));
+                        //         let _ = confirm_tx.send(offset).await;
+                        //     }
+                        //     Ok(Err(_)) | Err(_) => {
+                        //         let _ = reply.send(Err(BrokerError::ChannelClosed));
+                        //     }
+                        // }
                     }
                 }
+            }
+        });
+
+        self.task_group.spawn("confirm_sink_loop", async move {
+            while let Some((rx_completion, reply)) = confirm_sink_rx.recv().await {
+                // Wait for durability
+                match rx_completion.await {
+                    Ok(Ok(append)) => {
+                        let offset = append.base_offset;
+                        if let Err(e) = confirm_tx.send(offset).await {
+                            tracing::error!("Failed to send confirm offset: {e:?}");
+                        }
+                        let res: Result<u64, BrokerError> = Ok(offset);
+                        if let Err(e) = reply.send(res) {
+                            tracing::error!("Failed to send publish response: {e:?}");
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("Append failed: {e:?}");
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to receive append completion: {e:?}");
+                    }
+                }
+
+                qs.wake();
             }
         });
 
@@ -367,6 +502,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             PublisherHandle { publisher: tx },
             ConfirmStream { rx: confirm_rx },
         ))
+    }
+
+    async fn queue(&self, key: &QueueKey) -> Arc<QueueLoopState> {
+        self.queues
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(QueueLoopState::new()))
+            .value()
+            .clone()
     }
 
     pub async fn subscribe(
@@ -392,7 +535,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             tx: msg_tx.clone(),
             prefetch: AtomicUsize::new(prefetch),
             inflight: AtomicUsize::new(0),
-            settle_rx: tokio::sync::Mutex::new(settle_rx),
         });
 
         let key = QueueKey {
@@ -400,19 +542,18 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             part,
             group: group.clone(),
         };
-        let qs = self
-            .queues
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(QueueLoopState::new()))
-            .clone();
+
+        
+        let qs = self.queue(&key).await;
 
         qs.consumers.insert(consumer_id, consumer.clone());
 
         // spawn settle loop for this consumer
-        self.spawn_settle_loop(consumer.clone());
+        self.spawn_settle_loop(consumer.clone(), settle_rx);
 
         // spawn delivery loop once per queue
         if !qs.started.swap(true, Ordering::SeqCst) {
+            tracing::debug!("Starting delivery loop for tp={} part={} group={:?}", tp, part, group);
             self.spawn_delivery_loop(key.clone(), qs.clone());
         }
 
@@ -426,38 +567,62 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             partition: part,
             messages: msg_rx,
             settler: settle_tx,
+            pending_settles: self.pending_settles.clone(),
         })
     }
 
-    fn spawn_settle_loop(self: &Arc<Self>, consumer: Arc<ConsumerState>) {
+    fn spawn_settle_loop(self: &Arc<Self>, consumer: Arc<ConsumerState>, mut settle_rx: mpsc::Receiver<SettleRequest>) {
         let broker = self.clone();
-        self.task_group.spawn(async move {
+        self.task_group.spawn("settle_loop", async move {
             loop {
                 tokio::select! {
-                    _ = broker.shutdown.cancelled() => break,
-                    req = async {
-                        let mut rx = consumer.settle_rx.lock().await;
-                        rx.recv().await
-                    } => {
-                        let Some(req) = req else { break; };
+                    biased;
+
+                    _ = broker.shutdown_settle.cancelled() => break,
+                    req = settle_rx.recv() => {
+                        let Some(req) = req else { 
+                            tracing::debug!("Settle channel closed for consumer {}", consumer.id);
+                            break;
+                        };
+                        tracing::debug!("Received settle request from consumer {}: {:?}", consumer.id, req);
                         broker.handle_settle(&consumer, req).await;
                     }
                 }
             }
+            settle_rx.close();
+            tracing::debug!("Settle loop exiting for consumer {}", consumer.id);
+            while let Some(req) = settle_rx.recv().await {
+                tracing::debug!("Draining settle request from consumer {}: {:?}", consumer.id, req);
+                broker.handle_settle(&consumer, req).await;
+            }
+            tracing::debug!("Settle loop fully exited for consumer {}", consumer.id);
         });
     }
 
     async fn handle_settle(&self, consumer: &Arc<ConsumerState>, req: SettleRequest) {
-        let Some(tag_rec) = self.tags.remove(&req.delivery_tag).map(|kv| kv.1) else {
+        let Some(tag_rec) = self.records_by_tags.remove(&req.delivery_tag).map(|kv| kv.1) else {
             // unknown tag -> ignore (or warn)
+            tracing::warn!(
+                "Received settle for unknown delivery tag {:?} from consumer {}",
+                req.delivery_tag,
+                consumer.id
+            );
             return;
         };
 
         // validate consumer
         if tag_rec.consumer_id != consumer.id {
             // wrong consumer: ignore (or warn)
+            tracing::warn!(
+                "Received settle for delivery tag {:?} from consumer {}, but tag belongs to consumer {}",
+                req.delivery_tag,
+                consumer.id,
+                tag_rec.consumer_id
+            );
             return;
         }
+
+        tracing::debug!("Handling settle for consumer {}: {:?} (tag {:?}) (offset {})", consumer.id, req.settle_type, req.delivery_tag, tag_rec.offset);
 
         let settle_kind = match req.settle_type {
             SettleType::Ack => SettleKind::Ack,
@@ -476,9 +641,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         // Make a completion that wakes the queue loop and decrements inflight.
         let consumer2 = consumer.clone();
+        let pending_settles = self.pending_settles.clone();
+        let settle_drained = self.settle_drained.clone();
         let done = move |ok: bool| {
             if ok {
                 consumer2.dec_inflight();
+
                 if let Some(qs) = &qs {
                     qs.wake();
                 }
@@ -491,11 +659,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     qs.wake();
                 }
             }
+
+            let pending = pending_settles.fetch_sub(1, Ordering::AcqRel);
+            if pending <= 1 {
+                settle_drained.notify_waiters();
+            }
+            tracing::debug!("Settle completed for consumer {}, pending settles now {}", consumer2.id, pending - 1);
         };
 
         // You’ll implement a real completion type; here is the intent:
         let completion: Box<dyn AppendCompletion<IoError>> = Box::new(SimpleCompletion::new(done));
-
         let _ = engine
             .settle(
                 &tag_rec.key.tp,
@@ -512,33 +685,44 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     fn spawn_delivery_loop(self: &Arc<Self>, key: QueueKey, qs: Arc<QueueLoopState>) {
         let broker = self.clone();
-        self.task_group.spawn(async move {
+        self.task_group.spawn("delivery_loop", async move {
             let mut last_epoch_seen = qs.current_epoch();
             let ttl_ms = broker.cfg.inflight_ttl_ms;
             let poll = Duration::from_millis(broker.cfg.delivery_poll_max_ms.max(1));
+            let mut tick = tokio::time::interval(poll);
 
             loop {
                 let reason = tokio::select! {
-                    _ = broker.shutdown.cancelled() => break,
+                    biased;
+
+                    _ = broker.shutdown_consumers.cancelled() => break,
                     _ = qs.notify.notified() => WakeReason::Notify,
-                    _ = tokio::time::sleep(poll) => WakeReason::Timer,
+                    _ = tick.tick() => WakeReason::Timer,
                 };
+
+                // if let WakeReason::Notify = reason {
+                //     // Stagger to pick up more potential wakes
+                //     tokio::time::sleep(Duration::from_millis(10)).await;
+                // }
 
                 let epoch_now = qs.current_epoch();
                 let epoch_advanced = epoch_now != last_epoch_seen;
                 last_epoch_seen = epoch_now;
 
+                tracing::debug!("Delivery loop woke up for tp={} part={} group={:?} due to {:?}, epoch advanced: {}, current epoch: {}", key.tp, key.part, key.group, reason, epoch_advanced, epoch_now);
+
                 let mut progressed = false;
 
                 // try deliver until we stall
                 loop {
-                    if broker.shutdown.is_cancelled() {
+                    if broker.shutdown_consumers.is_cancelled() {
                         break;
                     }
 
                     let consumers: Vec<Arc<ConsumerState>> =
                         qs.consumers.iter().map(|e| e.value().clone()).collect();
                     if consumers.is_empty() {
+                        tracing::debug!("No consumers for tp={} part={} group={:?}, skipping delivery", key.tp, key.part, key.group);
                         break;
                     }
 
@@ -551,8 +735,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         })
                         .sum();
 
+                    tracing::debug!("Total delivery capacity for tp={} part={} group={:?}: {}, Total consumers: {}", key.tp, key.part, key.group, total_cap, consumers.len());
+
                     if total_cap == 0 {
-                        dbg!(total_cap);
                         break;
                     }
 
@@ -572,8 +757,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         Ok(v) if !v.is_empty() => v,
                         _ => break,
                     };
-                    dbg!(deliverables.len());
 
+                    tracing::debug!("Polled {} deliverables for tp={} part={} group={:?}", deliverables.len(), key.tp, key.part, key.group);
+
+                    let mut delivered = 0;
                     let mut rr = qs.rr.fetch_add(1, Ordering::Relaxed) as usize;
                     for d in deliverables {
                         let mut picked = None;
@@ -593,7 +780,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         let epoch = broker.next_tag_epoch.fetch_add(1, Ordering::SeqCst);
                         let tag = DeliveryTag { epoch };
 
-                        broker.tags.insert(
+                        broker.records_by_tags.insert(
                             tag,
                             TagRecord {
                                 key: key.clone(),
@@ -601,6 +788,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                                 consumer_id: c.id,
                             },
                         );
+                        broker
+                            .tags_by_key_offset
+                            .insert((key.clone(), d.offset), tag);
 
                         c.inc_inflight();
 
@@ -623,6 +813,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         } else {
                             progressed = true;
                         }
+
+                        delivered += 1;
+
+                        if delivered % 1024 == 0 {
+                            tokio::task::yield_now().await;
+                        }
                     }
                 }
 
@@ -640,13 +836,15 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     fn spawn_expiry_worker(broker: Arc<Self>) {
         let broker_clone = broker.clone();
-        broker_clone.task_group.spawn(async move {
+        broker_clone.task_group.spawn("expiry_worker", async move {
             loop {
                 tokio::select! {
-                    _ = broker.shutdown.cancelled() => break,
+                    biased;
+
+                    _ = broker.shutdown_expiry.cancelled() => break,
 
                     _ = async {
-                        let hint = broker.engine.next_expiry_hint().unwrap_or(None);
+                        let hint = broker.engine.next_expiry_hint().await.unwrap_or(None);
                         match hint {
                             Some(ts) => {
                                 let now = unix_millis();
@@ -676,6 +874,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     }
                 };
 
+                tracing::debug!("Expiry worker woke up, requeued {} expired messages", expired.len());
+
                 if expired.is_empty() {
                     continue;
                 }
@@ -684,21 +884,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     let key = QueueKey { tp, part, group };
 
                     // find the tag for this offset
-                    let tag = broker
-                        .tags
-                        .iter()
-                        .find(|e| e.value().key == key && e.value().offset == offset)
-                        .map(|e| *e.key());
+                    let tag = broker.tags_by_key_offset.remove(&(key.clone(), offset)).map(|kv| kv.1);
 
-                    if let Some(tag) = tag {
-                        if let Some((_, rec)) = broker.tags.remove(&tag) {
-                            if let Some(qs) = broker.queues.get(&rec.key) {
-                                if let Some(consumer) = qs.consumers.get(&rec.consumer_id) {
-                                    consumer.dec_inflight();
-                                }
-                                qs.wake();
-                            }
+                    if let Some(tag) = tag
+                        && let Some((_, rec)) = broker.records_by_tags.remove(&tag)
+                        && let Some(qs) = broker.queues.get(&rec.key)
+                    {
+                        if let Some(consumer) = qs.consumers.get(&rec.consumer_id) {
+                            consumer.dec_inflight();
                         }
+                        qs.wake();
                     }
                 }
 
@@ -725,21 +920,21 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 // This already shows the intent: call closure on complete.
 
 struct SimpleCompletion {
-    f: std::sync::Mutex<Option<Box<dyn FnOnce(bool) + Send>>>,
+    f: Option<Box<dyn FnOnce(bool) + Send>>,
 }
 
 impl SimpleCompletion {
     fn new<F: FnOnce(bool) + Send + 'static>(f: F) -> Self {
         Self {
-            f: std::sync::Mutex::new(Some(Box::new(f))),
+            f: Some(Box::new(f)),
         }
     }
 }
 
 impl AppendCompletion<IoError> for SimpleCompletion {
-    fn complete(self: Box<Self>, res: Result<AppendResult, IoError>) {
+    fn complete(mut self: Box<Self>, res: Result<AppendResult, IoError>) {
         let ok = res.is_ok();
-        if let Some(f) = self.f.lock().unwrap().take() {
+        if let Some(f) = self.f.take() {
             f(ok);
         }
     }

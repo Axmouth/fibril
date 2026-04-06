@@ -8,9 +8,13 @@ use std::{
     time::Instant,
 };
 
-use fibril_broker::{Broker, BrokerConfig, ConsumerHandle};
-use fibril_broker::{ConsumerConfig, SettleRequest};
-use fibril_broker::{SettleType, coordination::NoopCoordination};
+use fibril_broker::broker::SettleType;
+use fibril_broker::broker::{ConsumerConfig, SettleRequest};
+use fibril_broker::{
+    broker::{Broker, BrokerConfig, ConsumerHandle},
+    coordination::NoopCoordination,
+    queue_engine::StromaEngine,
+};
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_storage::{
     DeliveryTag, Offset, make_rocksdb_store, make_stroma_store,
@@ -144,7 +148,7 @@ fn mark_done_once(slot: &AtomicU64, start: Instant) {
 
 #[allow(clippy::too_many_arguments)]
 async fn producer_task(
-    broker: Arc<Broker<NoopCoordination>>,
+    broker: Arc<Broker<StromaEngine>>,
     topic: String,
     producer_id: u32,
     produce_counter: Arc<AtomicU64>,
@@ -159,17 +163,18 @@ async fn producer_task(
     let metrics_clone = metrics.clone();
 
     tokio::spawn(async move {
-        while let Some(res) = confirm_stream.recv_confirm().await {
-            if res.is_ok() {
-                metrics_clone.confirmed.fetch_add(1, Ordering::SeqCst);
-                metrics_clone.inflight.fetch_sub(1, Ordering::SeqCst);
-            } else {
-                tracing::error!("Error receiving confirm: {res:?}");
-            }
+        while let Some(res) = confirm_stream.recv().await {
+            // if res.is_ok() {
+            metrics_clone.confirmed.fetch_add(1, Ordering::SeqCst);
+            metrics_clone.inflight.fetch_sub(1, Ordering::SeqCst);
+            // } else {
+            //     tracing::error!("Error receiving confirm: {res:?}");
+            // }
         }
     });
 
     let mut msg_id;
+    let mut recvs = vec![];
     loop {
         while metrics.inflight.load(Ordering::SeqCst) >= inflight_limit {
             tokio::task::yield_now().await;
@@ -182,7 +187,9 @@ async fn producer_task(
         let size = 1024;
         let payload = make_payload(msg_id, producer_id, size);
 
-        publisher.publish(payload).await.unwrap();
+        let recv = publisher.publish(&payload).await.unwrap();
+        recvs.push(recv);
+        // broker.publish(&topic, None, &payload).await.unwrap();
         prod_id_tx.send((msg_id, producer_id)).unwrap();
 
         metrics.inflight.fetch_add(1, Ordering::SeqCst);
@@ -191,6 +198,12 @@ async fn producer_task(
 
     if msg_id == total {
         mark_done_once(&metrics.publish_done_at, metrics.start);
+    }
+
+    for recv in recvs {
+        if let Err(e) = recv.await {
+            tracing::error!("Error receiving publish confirm: {e:?}");
+        }
     }
 }
 
@@ -261,16 +274,20 @@ async fn consumer_task(
 
 async fn reporter(
     metrics: Arc<BenchMetrics>,
-    broker: Arc<Broker<NoopCoordination>>,
+    broker: Arc<Broker<StromaEngine>>,
     topic: String,
     interval: u64,
     total: u64,
 ) {
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval));
-    let upper = broker.debug_upper(&topic, 0, &None).await;
+    let upper = 0; // broker.debug_upper(&topic, 0, &None).await;
+
+    let mut last_awoke = Instant::now();
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
 
     loop {
         ticker.tick().await;
+        tracing::info!("Reporter awake after {:?}", last_awoke.elapsed());
+        last_awoke = Instant::now();
         let acked = metrics.acked.load(Ordering::SeqCst);
         tracing::info!(
             "pub={} conf={} inflight={} cons={} ack={} upper={}",
@@ -288,18 +305,12 @@ async fn reporter(
     }
 }
 
-async fn make_broker_with_cfg(cmd: E2EBench) -> Broker<NoopCoordination> {
+async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
     let cfg = BrokerConfig {
-        publish_batch_size: cmd.batch_size,
-        publish_batch_timeout_ms: cmd.batch_timeout_ms,
-        ack_batch_size: 8192,
-        ack_batch_timeout_ms: 15,
-        inflight_batch_size: 8192,
-        inflight_batch_timeout_ms: 15,
-        // IMPORTANT: inflight TTL should exceed bench duration
-        inflight_ttl_secs: 15,
-        cleanup_interval_secs: 50,
-        ..Default::default()
+        inflight_ttl_ms: 60_000,
+        delivery_poll_max_ms: 100,
+        expiry_batch_max: 10_000,
+        expiry_poll_min_ms: 100,
     };
 
     let storage_path = format!("bench_data/{}", fastrand::u64(..)); // stable path for E2E
@@ -307,28 +318,32 @@ async fn make_broker_with_cfg(cmd: E2EBench) -> Broker<NoopCoordination> {
     std::fs::create_dir_all(&storage_path).unwrap();
 
     // let _store = make_rocksdb_store(&db_path, cmd.sync_write).unwrap();
-    let store = make_stroma_store(&storage_path, cmd.sync_write).await.unwrap();
+    // let store = make_stroma_store(&storage_path, cmd.sync_write).await.unwrap();
     let metrics = Metrics::new(60 * 60);
-    let store = Arc::new(ObservableStorage::new(store, metrics.storage()));
-    let coord = NoopCoordination {};
+    // let store = Arc::new(ObservableStorage::new(store, metrics.storage()));
+    // let coord = NoopCoordination {};
 
-    let broker = Broker::try_new(store, coord, metrics.broker(), cfg)
+    let engine = StromaEngine::open(&storage_path, Default::default(), Default::default())
         .await
         .unwrap();
 
-    metrics.start(MetricsConfig {
-        log_broker: true,
-        log_storage: true,
-        log_tcp: false,
-    }, std::time::Duration::from_secs(1));
+    let broker = Broker::new(engine, cfg);
+
+    metrics.start(
+        MetricsConfig {
+            log_broker: true,
+            log_storage: true,
+            log_tcp: false,
+        },
+        std::time::Duration::from_secs(1),
+    );
 
     broker
 }
 
 async fn run_e2e_bench(cmd: E2EBench) {
     let broker = make_broker_with_cfg(cmd.clone()).await;
-    let broker = Arc::new(broker);
-    let broker_clone = broker.clone();
+    // let broker_clone = broker.clone();
 
     let metrics = Arc::new(BenchMetrics::new());
 
@@ -390,6 +405,8 @@ async fn run_e2e_bench(cmd: E2EBench) {
         cmd.messages,
     ));
 
+    tracing::info!("Started producers and consumers, waiting for completion...");
+
     // Wait until done
     while metrics.acked.load(Ordering::SeqCst) < cmd.messages {
         tokio::time::sleep(std::time::Duration::from_millis(1001)).await;
@@ -421,15 +438,16 @@ async fn run_e2e_bench(cmd: E2EBench) {
         tracing::info!("Acked:     {:.0} msg/s, at {secs} secs", total / secs);
     }
 
-    broker.flush_storage().await.unwrap();
+    // broker.flush_storage().await.unwrap();
     let partition = 0;
-    broker
-        .forced_cleanup(&topic, partition, &None)
-        .await
-        .unwrap();
+    // broker
+    //     .forced_cleanup(&topic, partition, &None)
+    //     .await
+    //     .unwrap();
 
-    broker_clone.dump_meta_keys().await;
-    broker.shutdown().await;
+    // broker_clone.dump_meta_keys().await;
+    // return;
+    // broker.shutdown_graceful().await;
 
     drop(res_tx);
     // let mut received = vec![];
@@ -491,13 +509,16 @@ async fn run_e2e_bench(cmd: E2EBench) {
 
         let entry = seen_fp_counts.entry(fp).or_insert(0);
         *entry += 1;
-
     }
     drop(seen);
     drop(received);
 
     let max_fp_dup = seen_fp_counts.values().max().copied().unwrap_or_default();
-    let max_off_dup = seen_offset_counts.values().max().copied().unwrap_or_default();
+    let max_off_dup = seen_offset_counts
+        .values()
+        .max()
+        .copied()
+        .unwrap_or_default();
 
     if max_fp_dup > 1 {
         tracing::info!("Max duplicity per payload {max_fp_dup}");
@@ -509,8 +530,16 @@ async fn run_e2e_bench(cmd: E2EBench) {
         tracing::info!("Max duplicity per offset {max_off_dup}");
         let total_off_dupes = seen_offset_counts.values().filter(|&&v| v > 1).count();
         tracing::info!("{total_off_dupes} offset dupes");
-        let min_dupe_offset = seen_offset_counts.iter().filter(|(_k, v)| **v > 1).map(|(k, _)| k).min();
-        let max_dupe_offset = seen_offset_counts.iter().filter(|(_k, v)| **v > 1).map(|(k, _)| k).max();
+        let min_dupe_offset = seen_offset_counts
+            .iter()
+            .filter(|(_k, v)| **v > 1)
+            .map(|(k, _)| k)
+            .min();
+        let max_dupe_offset = seen_offset_counts
+            .iter()
+            .filter(|(_k, v)| **v > 1)
+            .map(|(k, _)| k)
+            .max();
         if let Some(min_dupe_offset) = min_dupe_offset {
             tracing::info!("{min_dupe_offset} min dupe offset");
         }
@@ -563,6 +592,16 @@ async fn run_e2e_bench(cmd: E2EBench) {
 async fn main() {
     init_tracing();
 
+    let h = tokio::spawn(async {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+
+    return 1;
+});
+
+    // console_subscriber::init();
+
     let cmd = Command::parse();
 
     match cmd {
@@ -573,4 +612,6 @@ async fn main() {
             }
         },
     }
+
+    h.await.unwrap();
 }
