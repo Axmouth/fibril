@@ -92,9 +92,7 @@ impl StromaEngine {
         snap_cfg: SnapshotConfig,
     ) -> Result<Self, StromaError> {
         let stroma = Stroma::open(root, keratin_cfg, snap_cfg).await?;
-        Ok(Self {
-            inner: stroma,
-        })
+        Ok(Self { inner: stroma })
     }
 }
 

@@ -15,8 +15,8 @@ async fn append_and_fetch() -> anyhow::Result<()> {
     let topic = "t1".to_string();
     let group = Some("g1".to_string());
 
-    let o1 = store.append(&topic, 0, &None,  b"hello").await?;
-    let o2 = store.append(&topic, 0, &None,  b"world").await?;
+    let o1 = store.append(&topic, 0, &None, b"hello").await?;
+    let o2 = store.append(&topic, 0, &None, b"world").await?;
 
     assert_eq!(o1, 0);
     assert_eq!(o2, 1);
@@ -174,7 +174,9 @@ async fn out_of_order_ack_behavior() -> anyhow::Result<()> {
 
     // Write 3 messages: 0,1,2
     for i in 0..3 {
-        store.append(&topic, 0, &None, format!("m{i}").as_bytes()).await?;
+        store
+            .append(&topic, 0, &None, format!("m{i}").as_bytes())
+            .await?;
     }
 
     let msgs = store.fetch_available(&topic, 0, &group, 0, 10).await?;
@@ -242,7 +244,9 @@ async fn consumer_groups_are_isolated() -> anyhow::Result<()> {
     let g2 = Some("g2".to_string());
 
     for i in 0..3 {
-        store.append(&t, 0, &None, format!("v{i}").as_bytes()).await?;
+        store
+            .append(&t, 0, &None, format!("v{i}").as_bytes())
+            .await?;
     }
 
     // Group 1 acks message 0
@@ -281,7 +285,9 @@ async fn large_offset_ranges() -> anyhow::Result<()> {
     let group = Some("g".to_string());
 
     for i in 0..2000 {
-        store.append(&topic, 0, &None, format!("{i}").as_bytes()).await?;
+        store
+            .append(&topic, 0, &None, format!("{i}").as_bytes())
+            .await?;
     }
 
     let msgs = store.fetch_available(&topic, 0, &group, 1500, 100).await?;
@@ -419,7 +425,7 @@ async fn append_and_batch_interleave() -> anyhow::Result<()> {
         .await?;
     assert_eq!(offs, vec![1, 2]);
 
-    let off2 = store.append(&topic, 0, &None,  b"z").await?;
+    let off2 = store.append(&topic, 0, &None, b"z").await?;
     assert_eq!(off2, 3);
 
     let msgs = store

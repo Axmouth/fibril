@@ -48,17 +48,9 @@ impl Message {
 }
 
 pub enum SettleRequest {
-    Ack {
-        offset: DeliveryTag,
-    },
-    Nack {
-        offset: DeliveryTag,
-        requeue: bool,
-    },
-    Reject {
-        offset: DeliveryTag,
-        requeue: bool,
-    },
+    Ack { offset: DeliveryTag },
+    Nack { offset: DeliveryTag, requeue: bool },
+    Reject { offset: DeliveryTag, requeue: bool },
 }
 
 pub struct AckableMessage {
@@ -71,7 +63,9 @@ impl AckableMessage {
     // TODO: return simple message
     pub async fn ack(self) -> anyhow::Result<Message> {
         // TODO: bubble errors
-        let _ = self.settle.send(SettleRequest::Ack { offset: self.delivery_tag });
+        let _ = self.settle.send(SettleRequest::Ack {
+            offset: self.delivery_tag,
+        });
         Ok(Message {
             delivery_tag: self.delivery_tag,
             payload: self.payload,
@@ -79,7 +73,10 @@ impl AckableMessage {
     }
 
     pub async fn nack(self) -> anyhow::Result<Message> {
-        let _ = self.settle.send(SettleRequest::Nack { offset: self.delivery_tag, requeue: false });
+        let _ = self.settle.send(SettleRequest::Nack {
+            offset: self.delivery_tag,
+            requeue: false,
+        });
         Ok(Message {
             delivery_tag: self.delivery_tag,
             payload: self.payload,
@@ -87,7 +84,10 @@ impl AckableMessage {
     }
 
     pub async fn reject(self, requeue: bool) -> anyhow::Result<Message> {
-        let _ = self.settle.send(SettleRequest::Reject { offset: self.delivery_tag, requeue });
+        let _ = self.settle.send(SettleRequest::Reject {
+            offset: self.delivery_tag,
+            requeue,
+        });
         Ok(Message {
             delivery_tag: self.delivery_tag,
             payload: self.payload,

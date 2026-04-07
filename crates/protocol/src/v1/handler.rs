@@ -439,7 +439,10 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                 let pubreq: Publish = decode(&frame);
 
                 // TODO: USE PUBLISHER(cache them in a dashmap?)
-                match broker.publish(&pubreq.topic, &pubreq.group, &pubreq.payload).await {
+                match broker
+                    .publish(&pubreq.topic, &pubreq.group, &pubreq.payload)
+                    .await
+                {
                     Ok(offset) => {
                         if pubreq.require_confirm {
                             tx.send(encode(

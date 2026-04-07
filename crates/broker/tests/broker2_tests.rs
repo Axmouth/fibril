@@ -798,5 +798,7 @@ async fn stress_single_consumer(total: usize) {
         }
     }
 
+    // TODO: verify no duplicates or missing messages via offsets/content
+
     assert_eq!(seen, total);
 }

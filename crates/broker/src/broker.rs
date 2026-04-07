@@ -1,8 +1,11 @@
 use std::{
-    collections::HashSet, sync::{
+    collections::HashSet,
+    sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    }, task, time::Duration
+    },
+    task,
+    time::Duration,
 };
 
 use crossbeam::queue::SegQueue;
@@ -83,14 +86,14 @@ impl ConsumerHandle {
         }
         let s = self.pending_settles.fetch_add(1, Ordering::AcqRel);
         tracing::debug!("Pending settles incremented to {}", s + 1);
-        self.settler
-            .send(req)
-            .await
-            .map_err(|_| {
-                let s = self.pending_settles.fetch_sub(1, Ordering::AcqRel);
-                tracing::debug!("Pending settles decremented to {} due to send failure", s - 1);
-                BrokerError::ChannelClosed
-            })
+        self.settler.send(req).await.map_err(|_| {
+            let s = self.pending_settles.fetch_sub(1, Ordering::AcqRel);
+            tracing::debug!(
+                "Pending settles decremented to {} due to send failure",
+                s - 1
+            );
+            BrokerError::ChannelClosed
+        })
     }
 
     pub async fn recv(&mut self) -> Option<DeliverableMessage> {
@@ -112,7 +115,10 @@ pub struct PublisherHandle {
 }
 
 impl PublisherHandle {
-    pub async fn publish(&self, payload: &[u8]) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
+    pub async fn publish(
+        &self,
+        payload: &[u8],
+    ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();
 
         self.publisher
@@ -172,10 +178,7 @@ impl TaskGroup {
         }
 
         #[cfg(tokio_unstable)]
-        let handle = tokio::task::Builder::new()
-            .name(name)
-            .spawn(fut)
-            .unwrap();
+        let handle = tokio::task::Builder::new().name(name).spawn(fut).unwrap();
 
         #[cfg(not(tokio_unstable))]
         let handle = tokio::spawn(fut);
@@ -387,7 +390,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         // TODO: should we pending confirms too?
         // Wait until settle channels drained
         while self.pending_settles.load(Ordering::Acquire) != 0 {
-            tracing::debug!("Waiting for pending settles to drain: {}", self.pending_settles.load(Ordering::Acquire));
+            tracing::debug!(
+                "Waiting for pending settles to drain: {}",
+                self.pending_settles.load(Ordering::Acquire)
+            );
             self.settle_drained.notified().await;
         }
 
@@ -417,14 +423,19 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let part: LogId = 0;
         let group = group.clone();
 
-        let qs = self.queue(&QueueKey {
-            tp: tp.clone(),
-            part,
-            group: group.clone(),
-        }).await;
+        let qs = self
+            .queue(&QueueKey {
+                tp: tp.clone(),
+                part,
+                group: group.clone(),
+            })
+            .await;
 
         // TODO: make async by maybe making two tasks: one to receive publish requests and one to wait for completions and send confirms? Or use a bounded channel and backpressure?
-        let (confirm_sink_tx, mut confirm_sink_rx) = mpsc::channel::<(oneshot::Receiver<Result<AppendResult, IoError>>, oneshot::Sender<Result<u64, BrokerError>>)>(16_384);
+        let (confirm_sink_tx, mut confirm_sink_rx) = mpsc::channel::<(
+            oneshot::Receiver<Result<AppendResult, IoError>>,
+            oneshot::Sender<Result<u64, BrokerError>>,
+        )>(16_384);
         self.task_group.spawn("publisher_confirm_sink", async move {
             loop {
                 tokio::select! {
@@ -543,7 +554,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             group: group.clone(),
         };
 
-        
         let qs = self.queue(&key).await;
 
         qs.consumers.insert(consumer_id, consumer.clone());
@@ -553,7 +563,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         // spawn delivery loop once per queue
         if !qs.started.swap(true, Ordering::SeqCst) {
-            tracing::debug!("Starting delivery loop for tp={} part={} group={:?}", tp, part, group);
+            tracing::debug!(
+                "Starting delivery loop for tp={} part={} group={:?}",
+                tp,
+                part,
+                group
+            );
             self.spawn_delivery_loop(key.clone(), qs.clone());
         }
 
@@ -571,7 +586,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         })
     }
 
-    fn spawn_settle_loop(self: &Arc<Self>, consumer: Arc<ConsumerState>, mut settle_rx: mpsc::Receiver<SettleRequest>) {
+    fn spawn_settle_loop(
+        self: &Arc<Self>,
+        consumer: Arc<ConsumerState>,
+        mut settle_rx: mpsc::Receiver<SettleRequest>,
+    ) {
         let broker = self.clone();
         self.task_group.spawn("settle_loop", async move {
             loop {
@@ -580,7 +599,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                     _ = broker.shutdown_settle.cancelled() => break,
                     req = settle_rx.recv() => {
-                        let Some(req) = req else { 
+                        let Some(req) = req else {
                             tracing::debug!("Settle channel closed for consumer {}", consumer.id);
                             break;
                         };
@@ -600,7 +619,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 
     async fn handle_settle(&self, consumer: &Arc<ConsumerState>, req: SettleRequest) {
-        let Some(tag_rec) = self.records_by_tags.remove(&req.delivery_tag).map(|kv| kv.1) else {
+        let Some(tag_rec) = self
+            .records_by_tags
+            .remove(&req.delivery_tag)
+            .map(|kv| kv.1)
+        else {
             // unknown tag -> ignore (or warn)
             tracing::warn!(
                 "Received settle for unknown delivery tag {:?} from consumer {}",
@@ -622,7 +645,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             return;
         }
 
-        tracing::debug!("Handling settle for consumer {}: {:?} (tag {:?}) (offset {})", consumer.id, req.settle_type, req.delivery_tag, tag_rec.offset);
+        tracing::debug!(
+            "Handling settle for consumer {}: {:?} (tag {:?}) (offset {})",
+            consumer.id,
+            req.settle_type,
+            req.delivery_tag,
+            tag_rec.offset
+        );
 
         let settle_kind = match req.settle_type {
             SettleType::Ack => SettleKind::Ack,
@@ -664,7 +693,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             if pending <= 1 {
                 settle_drained.notify_waiters();
             }
-            tracing::debug!("Settle completed for consumer {}, pending settles now {}", consumer2.id, pending - 1);
+            tracing::debug!(
+                "Settle completed for consumer {}, pending settles now {}",
+                consumer2.id,
+                pending - 1
+            );
         };
 
         // You’ll implement a real completion type; here is the intent:
@@ -874,7 +907,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     }
                 };
 
-                tracing::debug!("Expiry worker woke up, requeued {} expired messages", expired.len());
+                tracing::debug!(
+                    "Expiry worker woke up, requeued {} expired messages",
+                    expired.len()
+                );
 
                 if expired.is_empty() {
                     continue;
@@ -884,7 +920,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     let key = QueueKey { tp, part, group };
 
                     // find the tag for this offset
-                    let tag = broker.tags_by_key_offset.remove(&(key.clone(), offset)).map(|kv| kv.1);
+                    let tag = broker
+                        .tags_by_key_offset
+                        .remove(&(key.clone(), offset))
+                        .map(|kv| kv.1);
 
                     if let Some(tag) = tag
                         && let Some((_, rec)) = broker.records_by_tags.remove(&tag)

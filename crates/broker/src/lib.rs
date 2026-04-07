@@ -1213,13 +1213,15 @@ async fn process_redeliveries(ctx: &DeliveryCtx) -> bool {
             .fetch_by_offset(topic, partition, group, expired_offset)
             .await
         {
-            if let Ok(false) = storage.is_enqueued(topic, partition, group, msg.offset).await {
+            if let Ok(false) = storage
+                .is_enqueued(topic, partition, group, msg.offset)
+                .await
+            {
                 // this is a serious invariant violation; log loudly
                 // println!("Enqueued?");
                 tracing::error!("redelivery offset not enqueued: off={}", msg.offset);
                 continue;
             }
-
 
             // let rr = group_state.rr_counter.fetch_add(1, Ordering::SeqCst) as usize;
             // if consumers.is_empty() {
@@ -1421,8 +1423,7 @@ async fn process_fresh_deliveries(ctx: &DeliveryCtx) -> bool {
     let mark_res = storage
         .mark_inflight_batch(topic, partition, group, &entries)
         .await;
-    if let Err(err) = mark_res
-    {
+    if let Err(err) = mark_res {
         tracing::error!("Error marking deliveries as inflight : {err}");
         // release permits
         for (_, p) in permits {

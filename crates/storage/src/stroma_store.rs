@@ -1,4 +1,7 @@
-use std::{ops::Deref, sync::{Arc, atomic::AtomicU64}};
+use std::{
+    ops::Deref,
+    sync::{Arc, atomic::AtomicU64},
+};
 
 use async_trait::async_trait;
 use dashmap::DashSet;
@@ -77,7 +80,8 @@ impl StromaStorage {
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_ready(topic, partition, group.as_deref(), offset).await
+            .is_ready(topic, partition, group.as_deref(), offset)
+            .await
             .map_err(Self::map_err)
     }
 }
@@ -216,18 +220,24 @@ impl Storage for StromaStorage {
                 candidates.push((off, payload));
             }
 
-            candidates = self.inner.filter_not_enqueued(topic, partition, group.as_deref(), candidates.clone()).await;
+            candidates = self
+                .inner
+                .filter_not_enqueued(topic, partition, group.as_deref(), candidates.clone())
+                .await
+                .map_err(Self::map_err)?;
 
             for (off, payload) in candidates.drain(..) {
                 out.push(StoredMessage {
-                        topic: topic.clone(),
-                        partition,
-                        group: group.clone(),
-                        offset: off,
-                        timestamp: unix_millis(),
-                        payload,
-                    });
-                if out.len() >= max { break; }
+                    topic: topic.clone(),
+                    partition,
+                    group: group.clone(),
+                    offset: off,
+                    timestamp: unix_millis(),
+                    payload,
+                });
+                if out.len() >= max {
+                    break;
+                }
             }
 
             // for (off, payload) in chunk {
@@ -370,7 +380,8 @@ impl Storage for StromaStorage {
         // 2) fetch the message payload from Stroma message log
         let expired = self
             .inner
-            .list_expired(now_ts, usize::MAX).await
+            .list_expired(now_ts, usize::MAX)
+            .await
             .map_err(Self::map_err)?;
 
         let mut out = Vec::with_capacity(expired.len());
@@ -407,7 +418,8 @@ impl Storage for StromaStorage {
         group: &Option<Group>,
     ) -> Result<Offset, StorageError> {
         self.inner
-            .lowest_unacked_offset(topic, partition, group.as_deref()).await
+            .lowest_unacked_offset(topic, partition, group.as_deref())
+            .await
             .map_err(Self::map_err)
     }
 
@@ -421,8 +433,12 @@ impl Storage for StromaStorage {
         self.lowest_unacked_offset(topic, partition, group).await
     }
 
-    async fn cleanup_topic(&self, topic: &Topic, partition: LogId, 
-        group: &Option<Group>) -> Result<(), StorageError> {
+    async fn cleanup_topic(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+    ) -> Result<(), StorageError> {
         self.inner
             .cleanup_topic_partition(topic, partition, group.as_deref())
             .await
@@ -485,7 +501,8 @@ impl Storage for StromaStorage {
         group: &Option<Group>,
     ) -> Result<usize, StorageError> {
         self.inner
-            .count_inflight(topic, partition, group.as_deref()).await
+            .count_inflight(topic, partition, group.as_deref())
+            .await
             .map_err(Self::map_err)
     }
 
@@ -501,7 +518,8 @@ impl Storage for StromaStorage {
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_inflight_or_acked(topic, partition, group.as_deref(), offset).await
+            .is_inflight_or_acked(topic, partition, group.as_deref(), offset)
+            .await
             .map_err(Self::map_err)
     }
     async fn is_enqueued(
@@ -512,7 +530,8 @@ impl Storage for StromaStorage {
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_ready(topic, partition, group.as_deref(), offset).await
+            .is_ready(topic, partition, group.as_deref(), offset)
+            .await
             .map_err(Self::map_err)
     }
 
@@ -524,7 +543,8 @@ impl Storage for StromaStorage {
         offset: Offset,
     ) -> Result<bool, StorageError> {
         self.inner
-            .is_acked(topic, partition, group.as_deref(), offset).await
+            .is_acked(topic, partition, group.as_deref(), offset)
+            .await
             .map_err(Self::map_err)
     }
 

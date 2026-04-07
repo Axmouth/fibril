@@ -1,7 +1,10 @@
-use std::{sync::OnceLock, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    sync::OnceLock,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 use tracing_appender::non_blocking;
+use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Milliseconds since UNIX epoch
 pub type UnixMillis = u64;
@@ -98,7 +101,7 @@ mod tests {
 static LOG_GUARD: OnceLock<non_blocking::WorkerGuard> = OnceLock::new();
 
 pub fn init_tracing() {
-    let app_filter  = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let app_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     // Console needs TRACE-ish telemetry
     // let console_filter = EnvFilter::new("trace");
@@ -109,7 +112,7 @@ pub fn init_tracing() {
 
     // Store globally
     LOG_GUARD.set(guard).expect("Tracing already initialized");
-    
+
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(true)
         .with_thread_ids(true)

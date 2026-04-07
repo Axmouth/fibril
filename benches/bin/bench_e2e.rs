@@ -593,12 +593,12 @@ async fn main() {
     init_tracing();
 
     let h = tokio::spawn(async {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-    }
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        }
 
-    return 1;
-});
+        return 1;
+    });
 
     // console_subscriber::init();
 

@@ -58,11 +58,14 @@ async fn main() -> anyhow::Result<()> {
         observable_storage.clone(),
     );
 
-    metrics.start(MetricsConfig {
-        log_broker: true,
-        log_storage: true,
-        log_tcp: true,
-    }, std::time::Duration::from_secs(10));
+    metrics.start(
+        MetricsConfig {
+            log_broker: true,
+            log_storage: true,
+            log_tcp: true,
+        },
+        std::time::Duration::from_secs(10),
+    );
 
     let admin_server_dut = admin.run();
 

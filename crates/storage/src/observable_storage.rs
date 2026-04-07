@@ -83,7 +83,9 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         self.stats.record_write();
 
         let _t = Timer::new(&self.stats.append_batches.batches.latency);
-        self.inner().append_batch(topic, partition, group, payloads).await
+        self.inner()
+            .append_batch(topic, partition, group, payloads)
+            .await
     }
 
     async fn fetch_by_offset(
@@ -96,7 +98,8 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         observe!(
             self.stats,
             reads,
-            self.inner().fetch_by_offset(topic, partition, group, offset)
+            self.inner()
+                .fetch_by_offset(topic, partition, group, offset)
         )
     }
 
@@ -111,7 +114,8 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         observe!(
             self.stats,
             acks,
-            self.inner().ack_enqueue(topic, partition, group, offset, completion)
+            self.inner()
+                .ack_enqueue(topic, partition, group, offset, completion)
         )
     }
 
@@ -264,8 +268,12 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         )
     }
 
-    async fn cleanup_topic(&self, topic: &Topic, partition: LogId, 
-        group: &Option<Group>,) -> Result<(), StorageError> {
+    async fn cleanup_topic(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+    ) -> Result<(), StorageError> {
         observe!(
             self.stats,
             maintenance,
@@ -284,7 +292,8 @@ impl<S: Storage> Storage for ObservableStorage<S> {
         observe!(
             self.stats,
             inflight,
-            self.inner().add_to_redelivery(topic, partition, group, offset, deadline)
+            self.inner()
+                .add_to_redelivery(topic, partition, group, offset, deadline)
         )
     }
 

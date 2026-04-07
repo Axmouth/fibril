@@ -97,7 +97,6 @@ pub struct BrokerCompletion {
 impl AppendCompletion<IoError> for BrokerCompletion {
     fn complete(self: Box<Self>, res: Result<AppendResult, IoError>) {
         let _ = self.tx.send(res);
-        
     }
 }
 
@@ -239,10 +238,7 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     ) -> Result<(), StorageError>;
 
     /// Return messages whose deadline expired → need redelivery.
-    async fn list_expired(
-        &self,
-        now_ts: UnixMillis,
-    ) -> Result<Vec<StoredMessage>, StorageError>;
+    async fn list_expired(&self, now_ts: UnixMillis) -> Result<Vec<StoredMessage>, StorageError>;
 
     /// Get the lowest unacknowledged offset for a consumer group.
     async fn lowest_unacked_offset(
@@ -253,8 +249,12 @@ pub trait Storage: Send + Sync + std::fmt::Debug {
     ) -> Result<Offset, StorageError>;
 
     /// Cleanup fully acknowledged messages safely.
-    async fn cleanup_topic(&self, topic: &Topic, partition: LogId, 
-        group: &Option<Group>,) -> Result<(), StorageError>;
+    async fn cleanup_topic(
+        &self,
+        topic: &Topic,
+        partition: LogId,
+        group: &Option<Group>,
+    ) -> Result<(), StorageError>;
 
     async fn add_to_redelivery(
         &self,

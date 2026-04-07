@@ -14,7 +14,6 @@ pub struct TestState {
 
     consumers: HashMap<String, (String, ConsumerHandle)>,
     // publishers: HashMap<String, (String, PublisherHandle)>,
-
     next_consumer_id: usize,
 }
 
@@ -23,7 +22,6 @@ impl Default for TestState {
         Self::new()
     }
 }
-
 
 // static INIT_TRACING_ONCE: std::sync::Once = std::sync::Once::new();
 
@@ -66,19 +64,19 @@ impl TestState {
     }
 
     pub async fn start_broker(&mut self, id: &str) -> Result<(), BrokerError> {
-        let dir = self
-            .broker_dirs
-            .entry(id.to_string())
-            .or_insert_with(|| {
-                println!("Creating test dir for broker {id}");
-                test_dir(id)
-            });
+        let dir = self.broker_dirs.entry(id.to_string()).or_insert_with(|| {
+            println!("Creating test dir for broker {id}");
+            test_dir(id)
+        });
 
         if let Some(_b) = self.brokers.get(id) {
             panic!("Broker {id} already started at {}", dir.root.display());
         }
 
-        println!("Did not find existing, starting broker {id} with data dir {}", dir.root.display());
+        println!(
+            "Did not find existing, starting broker {id} with data dir {}",
+            dir.root.display()
+        );
 
         let engine = StromaEngine::open(
             &dir.root,
@@ -124,7 +122,7 @@ impl TestState {
             .await?;
 
         let off = pubh.publish(payload).await?;
-        
+
         Ok(())
     }
 

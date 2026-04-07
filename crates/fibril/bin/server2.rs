@@ -20,7 +20,11 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let consumer = broker
-        .subscribe("topic", Some("group"), ConsumerConfig { prefetch_count: 10 })
+        .subscribe(
+            "topic",
+            Some("group"),
+            ConsumerConfig { prefetch_count: 10 },
+        )
         .await
         .unwrap();
 
