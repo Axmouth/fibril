@@ -1,0 +1,66 @@
+{% extends "layout.html" %}
+{% block content %}
+<h4 class="metrics-header">Queues</h4>
+
+<div id="queues"></div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/admin.js"></script>
+<script>
+function parseKey(k) {
+  const [topic, group] = k.split(":");
+  return { topic, group: group || "default" };
+}
+
+function groupQueues(queues) {
+  const grouped = {};
+
+  for (const [key, state] of Object.entries(queues || {})) {
+    const { topic, group } = parseKey(key);
+
+    if (!grouped[group]) grouped[group] = [];
+    grouped[group].push({ topic, state });
+  }
+
+  return grouped;
+}
+
+async function refresh() {
+  const data = await api('/admin/api/queues');
+  const container = document.getElementById("queues");
+
+  const grouped = groupQueues(data.queues);
+
+  const html = Object.entries(grouped)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([group, items]) => {
+      const rows = items
+        .sort((a, b) => a.topic.localeCompare(b.topic))
+        .map(({ topic, state }) => `
+          <tr>
+            <td>${topic}</td>
+            <td class="text-right">${state.ready_count}</td>
+            <td class="text-right">${state.inflight_count}</td>
+          </tr>
+        `).join('');
+
+      return `
+        <h5 class="metrics-header" style="margin-top: 1rem;">Group: ${group}</h5>
+        <table class="table table-compact narrow metric-table">
+          <tr>
+            <th>Topic</th>
+            <th class="text-right">Ready</th>
+            <th class="text-right">In-flight</th>
+          </tr>
+          ${rows}
+        </table>
+      `;
+    }).join('');
+
+  container.innerHTML = html;
+}
+
+setInterval(refresh, 2000);
+refresh();
+</script>
+{% endblock %}
