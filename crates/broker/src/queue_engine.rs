@@ -1,16 +1,20 @@
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use fibril_storage::Offset;
+use fibril_metrics::{QueuesStateSnapshot};
+use fibril_storage::{Offset, Storage, observable_storage::ObservableStorage};
 use fibril_util::UnixMillis;
 use hashbrown::HashSet;
-use stroma_core::{AppendCompletion, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError};
+pub use stroma_core::{
+    AppendCompletion, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
+};
 
 pub struct Deliverable {
     pub offset: Offset,
     pub payload: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub enum SettleKind {
     Ack,
     Nack { requeue: bool },
@@ -78,11 +82,17 @@ pub trait QueueEngine {
     ) -> Result<HashSet<(String, u32, Option<String>, u64)>, StromaError>;
 
     async fn shutdown(&self) -> Result<(), StromaError>;
+
+    async fn estimate_disk_used(&self) -> Result<u64, StromaError>;
+
+    async fn list_queues(&self) -> Result<Vec<(String, Option<String>)>, StromaError>;
+
+    async fn queue_stats_snapshot(&self) -> Result<QueuesStateSnapshot, StromaError>;
 }
 
 #[derive(Debug, Clone)]
 pub struct StromaEngine {
-    inner: Stroma,
+    inner: Arc<Stroma>,
 }
 
 impl StromaEngine {
@@ -92,7 +102,7 @@ impl StromaEngine {
         snap_cfg: SnapshotConfig,
     ) -> Result<Self, StromaError> {
         let stroma = Stroma::open(root, keratin_cfg, snap_cfg).await?;
-        Ok(Self { inner: stroma })
+        Ok(Self { inner: Arc::new(stroma) })
     }
 }
 
@@ -207,5 +217,40 @@ impl QueueEngine for StromaEngine {
         self.inner.shutdown().await?;
 
         Ok(())
+    }
+
+    async fn estimate_disk_used(&self) -> Result<u64, StromaError> {
+        self.inner.estimate_disk_used().await
+    }
+
+    async fn list_queues(&self) -> Result<Vec<(String, Option<String>)>, StromaError> {
+        Ok(self.inner
+            .list_queues()
+            .into_iter()
+            .map(|(tp, _part, group)| (tp.to_string(), group.map(|s| s.to_string())))
+            .collect::<Vec<_>>())
+    }
+
+    async fn queue_stats_snapshot(&self) -> Result<QueuesStateSnapshot, StromaError> {
+        let stats = self.inner.get_queues_stats().await?;
+
+        let mut snapshot = QueuesStateSnapshot {
+            queues: Default::default(),
+        };
+
+        for ((tp, group), stat) in stats {
+            snapshot.queues.insert(
+                fibril_metrics::QueueKey {
+                    topic: tp.to_string(),
+                    group: group.map(|s| s.to_string()),
+                },
+                fibril_metrics::QueueStateSnapshot {
+                    ready_count: stat.ready_count,
+                    inflight_count: stat.inflight_count,
+                },
+            );
+        }
+
+        Ok(snapshot)
     }
 }

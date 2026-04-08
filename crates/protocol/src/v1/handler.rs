@@ -6,13 +6,14 @@ use crate::v1::{
     *,
 };
 use anyhow::Context;
-use fibril_broker::{
-    Broker, ConsumerConfig, ConsumerHandle, SettleRequest, SettleType, coordination::Coordination,
-};
+use fibril_broker::{broker::{
+    Broker, ConsumerConfig, ConsumerHandle, SettleRequest, SettleType
+}, queue_engine::StromaEngine};
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_storage::{AppendReceiptExt, Group, Offset, Topic};
 use fibril_util::AuthHandler;
 use futures::{SinkExt, StreamExt};
+use rmp_serde::config;
 use tokio::{net::TcpListener, sync::mpsc};
 use tokio_util::codec::Framed;
 use uuid::Uuid;
@@ -31,9 +32,9 @@ struct SubState {
     task: tokio::task::JoinHandle<()>,
 }
 
-pub async fn run_server<C: Coordination + Send + Sync + 'static>(
+pub async fn run_server(
     addr: SocketAddr,
-    broker: Arc<Broker<C>>,
+    broker: Arc<Broker<StromaEngine>>,
     tcp_stats: Arc<TcpStats>,
     connection_stats: Arc<ConnectionStats>,
     auth: Option<impl AuthHandler + Send + Sync + Clone + 'static>,
@@ -69,9 +70,9 @@ pub async fn run_server<C: Coordination + Send + Sync + 'static>(
     }
 }
 
-pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
+pub async fn handle_connection(
     socket: tokio::net::TcpStream,
-    broker: Arc<Broker<C>>,
+    broker: Arc<Broker<StromaEngine>>,
     tcp_stats: Arc<TcpStats>,
     connection_stats: Arc<ConnectionStats>,
     conn_id: Uuid,
@@ -283,7 +284,7 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
                         &sub.topic,
                         sub.group.as_deref(),
                         ConsumerConfig {
-                            prefetch_count: sub.prefetch as usize,
+                            prefetch: sub.prefetch as usize,
                         },
                     )
                     .await
@@ -438,12 +439,44 @@ pub async fn handle_connection<C: Coordination + Send + Sync + 'static>(
             x if x == Op::Publish as u16 => {
                 let pubreq: Publish = decode(&frame);
 
+                // TODO: Handle confirm stream properly
+                let (publisher, _confirmer) = broker.get_publisher(&pubreq.topic, &pubreq.group).await.context("get publisher failed")?;
+
                 // TODO: USE PUBLISHER(cache them in a dashmap?)
-                match broker
-                    .publish(&pubreq.topic, &pubreq.group, &pubreq.payload)
+                match publisher
+                    .publish(&pubreq.payload)
                     .await
                 {
-                    Ok(offset) => {
+                    Ok(offset_rx) => {
+                        let offset = match offset_rx.await {
+                            Ok(Ok(offset)) => offset,
+                            Ok(Err(err)) => {
+                                tx.send(encode(
+                                    Op::Error,
+                                    frame.request_id,
+                                    &ErrorMsg {
+                                        code: 500,
+                                        message: err.to_string(),
+                                    },
+                                ))
+                                .await?;
+                                metrics.error();
+                                continue;
+                            }
+                            Err(_err) => {
+                                tx.send(encode(
+                                    Op::Error,
+                                    frame.request_id,
+                                    &ErrorMsg {
+                                        code: 500,
+                                        message: "Channel closed".into(),
+                                    },
+                                ))
+                                .await?;
+                                metrics.error();
+                                continue;
+                            }
+                        };
                         if pubreq.require_confirm {
                             tx.send(encode(
                                 Op::PublishOk,

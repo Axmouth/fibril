@@ -327,7 +327,7 @@ async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
         .await
         .unwrap();
 
-    let broker = Broker::new(engine, cfg);
+    let broker = Broker::new(engine, cfg, Some(metrics.broker()));
 
     metrics.start(
         MetricsConfig {

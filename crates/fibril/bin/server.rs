@@ -3,11 +3,10 @@ use std::{
     sync::Arc,
 };
 
+use fibril_broker::{broker::{Broker, BrokerConfig}, queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine}};
 use fibril_admin::{AdminConfig, AdminServer};
-use fibril_broker::{Broker, BrokerConfig, coordination::NoopCoordination};
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::run_server;
-use fibril_storage::{observable_storage::ObservableStorage, rocksdb_store::RocksStorage};
 use fibril_util::{StaticAuthHandler, init_tracing};
 use mimalloc::MiMalloc;
 
@@ -20,23 +19,22 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     // TODO configurable stuff
-    let storage = RocksStorage::open("test_data/server", true)?;
+    let root = "test_data/server";
     let metrics = Metrics::new(3 * 60 * 60); // 3 hours
-    let observable_storage = Arc::new(ObservableStorage::new(storage, metrics.storage()));
-    let coord = NoopCoordination;
-    let broker = Arc::new(
-        Broker::try_new(
-            observable_storage.clone(),
-            coord,
-            metrics.broker(),
-            BrokerConfig {
-                ack_batch_timeout_ms: 2,
-                ack_batch_size: 128,
-                ..BrokerConfig::default()
-            },
-        )
-        .await?,
-    );
+    let engine = StromaEngine::open(
+        &root,
+        KeratinConfig::test_default(),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker_cfg = BrokerConfig {
+        inflight_ttl_ms: 2000,
+        expiry_poll_min_ms: 100,
+        expiry_batch_max: 100,
+        delivery_poll_max_ms: 100000, // Make tests timeout if they rely on polling to pass, to indicate the issue
+    };
+    let broker = Broker::new(engine.clone(), broker_cfg, Some(metrics.broker()));
 
     let auth_handler = StaticAuthHandler::new("fibril".to_string(), "fibril".to_string());
 
@@ -55,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
             // auth: Some(auth_handler),
             auth: None,
         },
-        observable_storage.clone(),
+        Arc::new(engine.clone()),
     );
 
     metrics.start(

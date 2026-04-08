@@ -1,13 +1,18 @@
+use std::collections::HashMap;
+use std::fmt;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::Serialize;
 use serde_json::json;
-use sysinfo::{ProcessRefreshKind, RefreshKind, System};
+use serde_with::{serde_as, DisplayFromStr};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -335,7 +340,55 @@ pub struct StorageStatsSnapshot {
     pub avg_flush_latency_ms: Option<f64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QueueStateSnapshot {
+    pub ready_count: usize,
+    pub inflight_count: usize,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
+pub struct QueueKey {
+    pub topic: String,
+    pub group: Option<String>,
+}
+
+impl fmt::Display for QueueKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.group {
+            Some(g) => write!(f, "{}:{}", self.topic, g),
+            None => write!(f, "{}", self.topic),
+        }
+    }
+}
+
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QueuesStateSnapshot {
+    #[serde_as(as = "HashMap<DisplayFromStr, _>")]
+    pub queues: HashMap<QueueKey, QueueStateSnapshot>,
+}
+
+impl QueuesStateSnapshot {
+    pub fn json(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        for (key, stat) in &self.queues {
+            let key_str = if let Some(group) = &key.group {
+                format!("{}:{}", key.topic, group)
+            } else {
+                key.topic.clone()
+            };
+            map.insert(key_str, json!({
+                "ready_count": stat.ready_count,
+                "inflight_count": stat.inflight_count,
+            }));
+        }
+        serde_json::Value::Object(map)
+    }
+}
+
+type QueueStateCallback =
+    dyn Fn() -> Pin<Box<dyn Future<Output = QueuesStateSnapshot> + Send>> + Send + Sync + 'static;
+
 pub struct BrokerStats {
     pub delivered: OpStats,
     pub published: OpStats,
@@ -345,6 +398,8 @@ pub struct BrokerStats {
 
     pub publish_batches: BatchStats,
     pub ack_batches: BatchStats,
+
+    pub queue_state_callback: ArcSwapOption<Arc<QueueStateCallback>>,
 }
 
 impl BrokerStats {
@@ -357,7 +412,23 @@ impl BrokerStats {
             expired: OpStats::new(buckets),
             publish_batches: BatchStats::new(buckets),
             ack_batches: BatchStats::new(buckets),
+            queue_state_callback: ArcSwapOption::from(None),
         })
+    }
+
+    pub fn register_queue_state_callback(&self, cb: Option<Arc<QueueStateCallback>>) {
+        self.queue_state_callback.store(cb.map(Arc::new));
+    }
+
+    pub async fn call_queue_state_callback(&self) -> Option<QueuesStateSnapshot> {
+        let cb = self.queue_state_callback.load();
+        {
+            let this = cb.as_ref();
+            match this {
+                Some(x) => Some((|f: &Arc<QueueStateCallback>| f())(x).await),
+                None => None,
+            }
+        }
     }
 
     #[inline]
@@ -393,6 +464,11 @@ impl BrokerStats {
     #[inline]
     pub fn expired(&self) {
         self.expired.incr();
+    }
+
+    #[inline]
+    pub fn expired_many(&self, expired: u64) {
+        self.expired.incr_many(expired);
     }
 
     #[inline]
@@ -562,9 +638,9 @@ pub struct SystemStats {
 impl SystemStats {
     pub fn new() -> Arc<Self> {
         let mut sys = System::new_with_specifics(
-            RefreshKind::new().with_processes(ProcessRefreshKind::everything()),
+            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
         );
-        sys.refresh_processes();
+        sys.refresh_processes(ProcessesToUpdate::All, true);
         Arc::new(Self {
             sys: RwLock::new(sys),
             pid: sysinfo::get_current_pid().unwrap(),
@@ -572,7 +648,7 @@ impl SystemStats {
     }
 
     pub fn snapshot(&self) -> SystemSnapshot {
-        self.sys.write().refresh_process(self.pid);
+        self.sys.write().refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
         let sys = self.sys.read();
         let (rss_mb, cpu) = if let Some(p) = sys.process(self.pid) {
             (p.memory() as f64 / 1024.0, p.cpu_usage())

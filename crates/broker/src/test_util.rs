@@ -85,7 +85,7 @@ impl TestState {
         )
         .await?;
 
-        let broker = Broker::new(engine, self.broker_cfg.clone());
+        let broker = Broker::new(engine, self.broker_cfg.clone(), None);
         self.brokers.insert(id.to_string(), broker);
         Ok(())
     }

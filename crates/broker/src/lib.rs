@@ -315,7 +315,6 @@ impl TaskGroup {
 }
 
 // TODO: Injectable clock for testing
-#[derive(Debug)]
 pub struct Broker<C: Coordination + Send + Sync + 'static> {
     pub config: BrokerConfig,
     storage: Arc<dyn Storage>,

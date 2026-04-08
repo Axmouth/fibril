@@ -23,7 +23,7 @@ async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
         expiry_batch_max: 100,
         delivery_poll_max_ms: 100000, // Make tests timeout if they rely on polling to pass, to indicate the issue
     };
-    let broker = Broker::new(engine, broker_cfg);
+    let broker = Broker::new(engine, broker_cfg, None);
 
     (broker, dir)
 }

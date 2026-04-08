@@ -50,3 +50,18 @@ pub async fn subscriptions(
 
     Ok(Json(server.metrics.connections().snapshot_subs()))
 }
+
+pub async fn queues(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_basic_auth(&headers, &server.config.auth).await?;
+
+    let queues = server.metrics.broker().call_queue_state_callback().await;
+
+    if let Some(queues) = queues {
+        Ok(Json(serde_json::to_value(queues).unwrap_or_default()))
+    } else {
+        Ok(Json(serde_json::json!({})))
+    }
+}

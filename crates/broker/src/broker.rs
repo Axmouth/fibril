@@ -10,6 +10,7 @@ use std::{
 
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
+use fibril_metrics::{BrokerStats, QueuesStateSnapshot};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -48,6 +49,20 @@ pub enum SettleType {
 pub struct SettleRequest {
     pub settle_type: SettleType,
     pub delivery_tag: DeliveryTag,
+}
+
+impl SettleRequest {
+    pub fn is_ack(&self) -> bool {
+        matches!(self.settle_type, SettleType::Ack)
+    }
+
+    pub fn is_nack(&self) -> bool {
+        matches!(self.settle_type, SettleType::Nack { .. })
+    }
+
+    pub fn is_reject(&self) -> bool {
+        matches!(self.settle_type, SettleType::Reject { .. })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -309,7 +324,6 @@ impl std::fmt::Display for WakeReason {
 // ---------------- Broker ----------------
 
 // TODO cleanup old?
-#[derive(Debug)]
 pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     cfg: BrokerConfig,
     engine: E,
@@ -330,10 +344,36 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     settle_drained: Arc<Notify>,
 
     task_group: Arc<TaskGroup>,
+
+    metrics: Option<Arc<BrokerStats>>,
 }
 
 impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
-    pub fn new(engine: E, cfg: BrokerConfig) -> Arc<Self> {
+    pub fn new(engine: E, cfg: BrokerConfig, metrics: Option<Arc<BrokerStats>>) -> Arc<Self> {
+
+        let metrics_clone = metrics.clone();
+        if let Some(metrics) = metrics_clone {
+            metrics.register_queue_state_callback(Some(Arc::new(
+                {
+                    let engine = engine.clone();
+                    move || {
+                        let engine = engine.clone();
+                        Box::pin(async move {
+                            match engine.queue_stats_snapshot().await {
+                                Ok(stats) => stats,
+                                Err(e) => {
+                                    tracing::error!("Failed to get queue stats snapshot for metrics: {e:?}");
+                                    QueuesStateSnapshot {
+                                        queues: std::collections::HashMap::new(),
+                                    }
+                                }
+                            }
+                        })
+                    }
+                }
+                
+            )));
+        }
         let this = Arc::new(Self {
             cfg,
             engine,
@@ -350,6 +390,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             pending_settles: Arc::new(AtomicUsize::new(0)),
             settle_drained: Arc::new(Notify::new()),
             task_group: Arc::new(TaskGroup::new()),
+            metrics,
         });
 
         // expiry worker: keeps Stroma turning inflight -> ready again
@@ -436,6 +477,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             oneshot::Receiver<Result<AppendResult, IoError>>,
             oneshot::Sender<Result<u64, BrokerError>>,
         )>(16_384);
+        let metrics = self.metrics.clone();
         self.task_group.spawn("publisher_confirm_sink", async move {
             loop {
                 tokio::select! {
@@ -488,6 +530,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 // Wait for durability
                 match rx_completion.await {
                     Ok(Ok(append)) => {
+                        if let Some(metrics) = &metrics {
+                            metrics.published();
+                        }
                         let offset = append.base_offset;
                         if let Err(e) = confirm_tx.send(offset).await {
                             tracing::error!("Failed to send confirm offset: {e:?}");
@@ -672,9 +717,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let consumer2 = consumer.clone();
         let pending_settles = self.pending_settles.clone();
         let settle_drained = self.settle_drained.clone();
+        let metrics = self.metrics.clone();
         let done = move |ok: bool| {
             if ok {
                 consumer2.dec_inflight();
+                if let SettleKind::Ack = settle_kind && let Some(metrics) = metrics {
+                    metrics.acked();
+                }
 
                 if let Some(qs) = &qs {
                     qs.wake();
@@ -841,9 +890,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         };
 
                         if c.tx.send(msg).await.is_err() {
+                            // TODO: Currently handled by expiry (since we keep inflight until completion),
+                            //          but you could also immediately decrement inflight and requeue here.
                             qs.consumers.remove(&c.id);
                             qs.wake();
                         } else {
+                            if let Some(metrics) = &broker.metrics {
+                                metrics.delivered();
+                            }
                             progressed = true;
                         }
 
@@ -914,6 +968,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                 if expired.is_empty() {
                     continue;
+                }
+
+                if let Some(metrics) = &broker.metrics {
+                    metrics.expired_many(expired.len() as u64);
                 }
 
                 for (tp, part, group, offset) in expired.iter().cloned() {

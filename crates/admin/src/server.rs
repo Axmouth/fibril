@@ -5,6 +5,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, get_service},
 };
+use fibril_broker::queue_engine::QueueEngine;
 use fibril_storage::{AppendReceiptExt, Offset, Storage};
 use fibril_util::StaticAuthHandler;
 use http::{Response, Uri, header};
@@ -26,7 +27,7 @@ pub struct AdminConfig {
 pub struct AdminServer {
     pub metrics: Metrics,
     pub config: AdminConfig,
-    pub storage: Arc<dyn Storage>,
+    pub storage: Arc<dyn QueueEngine + Send + Sync>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -40,7 +41,7 @@ fn render<T: Template>(tpl: T) -> Html<String> {
 }
 
 impl AdminServer {
-    pub fn new(metrics: Metrics, config: AdminConfig, storage: Arc<dyn Storage>) -> Self {
+    pub fn new(metrics: Metrics, config: AdminConfig, storage: Arc<dyn QueueEngine + Send + Sync>) -> Self {
         Self {
             metrics,
             config,
@@ -69,9 +70,11 @@ impl AdminServer {
             .route("/", get(overview_page))
             .route("/admin/connections", get(connections_page))
             .route("/admin/subscriptions", get(subscriptions_page))
+            .route("/admin/queues", get(queues_page))
             .route("/admin/api/overview", get(routes::overview))
             .route("/admin/api/connections", get(routes::connections))
             .route("/admin/api/subscriptions", get(routes::subscriptions))
+            .route("/admin/api/queues", get(routes::queues))
             .fallback(not_found)
             .with_state(state.clone());
 
@@ -126,6 +129,13 @@ async fn subscriptions_page() -> impl IntoResponse {
     })
 }
 
+async fn queues_page() -> impl IntoResponse {
+    render(Queues {
+        page: "queues",
+        title: "Queues",
+    })
+}
+
 #[derive(Template)]
 #[template(path = "pages/overview.html")]
 struct OverviewPage {
@@ -143,6 +153,13 @@ struct Connections {
 #[derive(Template)]
 #[template(path = "pages/subscriptions.html")]
 struct Subscriptions {
+    page: &'static str,
+    title: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "pages/queues.html")]
+struct Queues {
     page: &'static str,
     title: &'static str,
 }

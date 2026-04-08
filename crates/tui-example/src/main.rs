@@ -296,7 +296,7 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App) {
 
     let hud = Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Status"));
 
-    f.render_widget(hud, Rect::new(1, 18, 18, 6));
+    f.render_widget(hud, Rect::new(1, 26, 18, 6));
 }
 
 fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
@@ -750,7 +750,7 @@ async fn main() -> anyhow::Result<()> {
 
     execute!(stdout(), Clear(ClearType::All))?;
     execute!(stdout(), cursor::Hide)?;
-    for i in 0..9 {
+    for i in 0..6 {
         let conn = connect_to_server().await?;
         let tx = tx.clone();
         tokio::spawn(visual_client(conn, i, 100 + i, tx));
