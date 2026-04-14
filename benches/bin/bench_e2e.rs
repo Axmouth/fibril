@@ -190,7 +190,7 @@ async fn producer_task(
         let recv = publisher.publish(&payload).await.unwrap();
         recvs.push(recv);
         // broker.publish(&topic, None, &payload).await.unwrap();
-        prod_id_tx.send((msg_id, producer_id)).unwrap();
+        // prod_id_tx.send((msg_id, producer_id)).unwrap();
 
         metrics.inflight.fetch_add(1, Ordering::SeqCst);
         metrics.published.fetch_add(1, Ordering::SeqCst);
@@ -240,9 +240,9 @@ async fn consumer_task(
     }
 
     while let Some(msg) = consumer.messages.recv().await {
-        res_tx
-            .send((msg.message.offset, msg.delivery_tag, msg.message.payload))
-            .unwrap();
+        // res_tx
+        //     .send((msg.message.offset, msg.delivery_tag, msg.message.payload))
+        //     .unwrap();
         let c = metrics.consumed.fetch_add(1, Ordering::SeqCst) + 1;
         if c == total {
             mark_done_once(&metrics.consume_done_at, metrics.start);
@@ -455,134 +455,134 @@ async fn run_e2e_bench(cmd: E2EBench) {
         c_handle.await.unwrap();
     }
 
-    let mut received: Vec<(u64, DeliveryTag, Vec<u8>)> = vec![];
-    let mut got = res_rx.recv_many(&mut received, 10_000_000).await;
-    while got > 0 {
-        tracing::info!("Got msgs: {}", got);
-        got = res_rx.recv_many(&mut received, 10_000_000).await;
-    }
+    // let mut received: Vec<(u64, DeliveryTag, Vec<u8>)> = vec![];
+    // let mut got = res_rx.recv_many(&mut received, 10_000_000).await;
+    // while got > 0 {
+    //     tracing::info!("Got msgs: {}", got);
+    //     got = res_rx.recv_many(&mut received, 10_000_000).await;
+    // }
 
-    let mut seen = HashSet::with_capacity(received.len());
-    let mut dup_offsets = 0usize;
+    // let mut seen = HashSet::with_capacity(received.len());
+    // let mut dup_offsets = 0usize;
 
-    for (off, _, _) in &received {
-        if !seen.insert(*off) {
-            dup_offsets += 1;
-        }
-    }
-    drop(seen);
+    // for (off, _, _) in &received {
+    //     if !seen.insert(*off) {
+    //         dup_offsets += 1;
+    //     }
+    // }
+    // drop(seen);
 
-    tracing::info!("duplicate offsets: {}", dup_offsets);
+    // tracing::info!("duplicate offsets: {}", dup_offsets);
 
-    let mut seen = HashSet::with_capacity(received.len());
-    let mut dup = 0usize;
+    // let mut seen = HashSet::with_capacity(received.len());
+    // let mut dup = 0usize;
 
-    for (off, tag, _) in &received {
-        if !seen.insert((*off, *tag)) {
-            dup += 1;
-        }
-    }
+    // for (off, tag, _) in &received {
+    //     if !seen.insert((*off, *tag)) {
+    //         dup += 1;
+    //     }
+    // }
 
-    tracing::info!("duplicate delivery tags: {}", dup);
-    drop(seen);
+    // tracing::info!("duplicate delivery tags: {}", dup);
+    // drop(seen);
 
-    let mut seen = HashMap::with_capacity(received.len());
-    let mut seen_offset_counts: HashMap<u64, i32> = HashMap::with_capacity(received.len());
-    let mut seen_fp_counts: HashMap<u64, usize> = HashMap::with_capacity(received.len());
-    let mut payload_dupes = 0usize;
+    // let mut seen = HashMap::with_capacity(received.len());
+    // let mut seen_offset_counts: HashMap<u64, i32> = HashMap::with_capacity(received.len());
+    // let mut seen_fp_counts: HashMap<u64, usize> = HashMap::with_capacity(received.len());
+    // let mut payload_dupes = 0usize;
 
-    let mut received_prod_ids = vec![];
-    for (off, _, payload) in &received {
-        let mut h = std::hash::DefaultHasher::new();
-        payload.hash(&mut h);
-        let fp = h.finish();
+    // let mut received_prod_ids = vec![];
+    // for (off, _, payload) in &received {
+    //     let mut h = std::hash::DefaultHasher::new();
+    //     payload.hash(&mut h);
+    //     let fp = h.finish();
 
-        received_prod_ids.push(decode_payload(payload));
+    //     received_prod_ids.push(decode_payload(payload));
 
-        if let Some(_prev_off) = seen.insert(fp, *off) {
-            payload_dupes += 1;
-            // tracing::info!("payload dup: prev_off={} now_off={}", prev_off, off);
-        }
+    //     if let Some(_prev_off) = seen.insert(fp, *off) {
+    //         payload_dupes += 1;
+    //         // tracing::info!("payload dup: prev_off={} now_off={}", prev_off, off);
+    //     }
 
-        let entry = seen_offset_counts.entry(*off).or_insert(0);
-        *entry += 1;
+    //     let entry = seen_offset_counts.entry(*off).or_insert(0);
+    //     *entry += 1;
 
-        let entry = seen_fp_counts.entry(fp).or_insert(0);
-        *entry += 1;
-    }
-    drop(seen);
-    drop(received);
+    //     let entry = seen_fp_counts.entry(fp).or_insert(0);
+    //     *entry += 1;
+    // }
+    // drop(seen);
+    // drop(received);
 
-    let max_fp_dup = seen_fp_counts.values().max().copied().unwrap_or_default();
-    let max_off_dup = seen_offset_counts
-        .values()
-        .max()
-        .copied()
-        .unwrap_or_default();
+    // let max_fp_dup = seen_fp_counts.values().max().copied().unwrap_or_default();
+    // let max_off_dup = seen_offset_counts
+    //     .values()
+    //     .max()
+    //     .copied()
+    //     .unwrap_or_default();
 
-    if max_fp_dup > 1 {
-        tracing::info!("Max duplicity per payload {max_fp_dup}");
-        let total_fp_dupes = seen_fp_counts.values().filter(|&&v| v > 1).count();
-        tracing::info!("{total_fp_dupes} payload dupes")
-    }
+    // if max_fp_dup > 1 {
+    //     tracing::info!("Max duplicity per payload {max_fp_dup}");
+    //     let total_fp_dupes = seen_fp_counts.values().filter(|&&v| v > 1).count();
+    //     tracing::info!("{total_fp_dupes} payload dupes")
+    // }
 
-    if max_off_dup > 1 {
-        tracing::info!("Max duplicity per offset {max_off_dup}");
-        let total_off_dupes = seen_offset_counts.values().filter(|&&v| v > 1).count();
-        tracing::info!("{total_off_dupes} offset dupes");
-        let min_dupe_offset = seen_offset_counts
-            .iter()
-            .filter(|(_k, v)| **v > 1)
-            .map(|(k, _)| k)
-            .min();
-        let max_dupe_offset = seen_offset_counts
-            .iter()
-            .filter(|(_k, v)| **v > 1)
-            .map(|(k, _)| k)
-            .max();
-        if let Some(min_dupe_offset) = min_dupe_offset {
-            tracing::info!("{min_dupe_offset} min dupe offset");
-        }
-        if let Some(max_dupe_offset) = max_dupe_offset {
-            tracing::info!("{max_dupe_offset} max dupe offset");
-        }
-    }
-    drop(seen_offset_counts);
-    drop(seen_fp_counts);
+    // if max_off_dup > 1 {
+    //     tracing::info!("Max duplicity per offset {max_off_dup}");
+    //     let total_off_dupes = seen_offset_counts.values().filter(|&&v| v > 1).count();
+    //     tracing::info!("{total_off_dupes} offset dupes");
+    //     let min_dupe_offset = seen_offset_counts
+    //         .iter()
+    //         .filter(|(_k, v)| **v > 1)
+    //         .map(|(k, _)| k)
+    //         .min();
+    //     let max_dupe_offset = seen_offset_counts
+    //         .iter()
+    //         .filter(|(_k, v)| **v > 1)
+    //         .map(|(k, _)| k)
+    //         .max();
+    //     if let Some(min_dupe_offset) = min_dupe_offset {
+    //         tracing::info!("{min_dupe_offset} min dupe offset");
+    //     }
+    //     if let Some(max_dupe_offset) = max_dupe_offset {
+    //         tracing::info!("{max_dupe_offset} max dupe offset");
+    //     }
+    // }
+    // drop(seen_offset_counts);
+    // drop(seen_fp_counts);
 
-    tracing::info!("payload-level duplicates: {}", payload_dupes);
+    // tracing::info!("payload-level duplicates: {}", payload_dupes);
 
-    let mut prod_ids: Vec<(u64, u32)> = vec![];
-    let mut got = prod_id_rx.recv_many(&mut prod_ids, 10_000_000).await;
-    while got > 0 {
-        tracing::info!("Got prod ids: {}", got);
-        got = prod_id_rx.recv_many(&mut prod_ids, 10_000_000).await;
-    }
+    // let mut prod_ids: Vec<(u64, u32)> = vec![];
+    // let mut got = prod_id_rx.recv_many(&mut prod_ids, 10_000_000).await;
+    // while got > 0 {
+    //     tracing::info!("Got prod ids: {}", got);
+    //     got = prod_id_rx.recv_many(&mut prod_ids, 10_000_000).await;
+    // }
 
-    received_prod_ids.sort();
-    prod_ids.sort();
+    // received_prod_ids.sort();
+    // prod_ids.sort();
 
-    if received_prod_ids.len() != prod_ids.len() {
-        tracing::info!(
-            "received_prod_ids.len() {} != prod_ids.len() {}",
-            received_prod_ids.len(),
-            prod_ids.len()
-        );
-    }
+    // if received_prod_ids.len() != prod_ids.len() {
+    //     tracing::info!(
+    //         "received_prod_ids.len() {} != prod_ids.len() {}",
+    //         received_prod_ids.len(),
+    //         prod_ids.len()
+    //     );
+    // }
 
-    if received_prod_ids != prod_ids {
-        tracing::info!("received_prod_ids != prod_ids");
-    }
+    // if received_prod_ids != prod_ids {
+    //     tracing::info!("received_prod_ids != prod_ids");
+    // }
 
-    received_prod_ids.sort_unstable();
-    received_prod_ids.dedup();
-    prod_ids.sort_unstable();
-    prod_ids.dedup();
-    if received_prod_ids != prod_ids {
-        tracing::info!("deduped received_prod_ids != prod_ids");
-    }
-    drop(prod_ids);
-    drop(received_prod_ids);
+    // received_prod_ids.sort_unstable();
+    // received_prod_ids.dedup();
+    // prod_ids.sort_unstable();
+    // prod_ids.dedup();
+    // if received_prod_ids != prod_ids {
+    //     tracing::info!("deduped received_prod_ids != prod_ids");
+    // }
+    // drop(prod_ids);
+    // drop(received_prod_ids);
 
     tracing::info!("Bench complete.");
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
