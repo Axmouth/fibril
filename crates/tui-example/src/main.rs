@@ -5,8 +5,8 @@ use crossterm::{
     terminal::{Clear, ClearType, disable_raw_mode},
 };
 use fibril_protocol::v1::{
-    Auth, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Publish, Subscribe, SubscribeOk,
-    frame::ProtoCodec, helper::Conn,
+    Auth, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Pong, Publish, Subscribe,
+    SubscribeOk, frame::ProtoCodec, helper::Conn,
 };
 use fibril_util::init_tracing;
 use futures::{SinkExt, StreamExt};
@@ -35,6 +35,8 @@ pub enum VisualEvent {
     SubscribeOk { sub_id: usize },
     Publish { pub_id: usize, topic: String },
     Deliver { sub_id: usize, offset: u64 },
+    Ping,
+    Pong,
     ErrorMsg { sub_id: usize, code: u16 },
 }
 
@@ -512,6 +514,8 @@ fn handle_event(app: &mut App, ev: VisualEvent) {
                 color: Color::LightGreen,
             });
         }
+        VisualEvent::Ping => {}
+        VisualEvent::Pong => {}
     }
 }
 
@@ -525,6 +529,7 @@ pub async fn visual_client(
 
     // Visual: client initiating hello
     let _ = vis_tx.send(VisualEvent::Hello { pub_id }).await;
+    let (ping_tx, mut ping_rx) = mpsc::channel::<u64>(64);
 
     // Send HELLO
     conn.send(fibril_protocol::v1::helper::encode(
@@ -547,25 +552,35 @@ pub async fn visual_client(
         .await
         .ok_or_else(|| anyhow::anyhow!("connection closed during hello"))??;
 
-    match frame.opcode {
-        x if x == Op::HelloOk as u16 => {
-            let ok: HelloOk = fibril_protocol::v1::helper::decode(&frame);
-            tracing::debug!("HELLO OK, negotiated protocol {}", ok.protocol_version);
+    loop {
+        match frame.opcode {
+            x if x == Op::HelloOk as u16 => {
+                let ok: HelloOk = fibril_protocol::v1::helper::decode(&frame);
+                tracing::debug!("HELLO OK, negotiated protocol {}", ok.protocol_version);
 
-            let _ = vis_tx.send(VisualEvent::HelloOk { sub_id }).await;
-        }
-        x if x == Op::HelloErr as u16 => {
-            let err: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
-            let _ = vis_tx
-                .send(VisualEvent::ErrorMsg {
-                    sub_id,
-                    code: err.code,
-                })
-                .await;
-            // anyhow::bail!("HELLO rejected: {}", err.message);
-        }
-        _ => {
-            // anyhow::bail!("unexpected frame during HELLO: {}", frame.opcode);
+                let _ = vis_tx.send(VisualEvent::HelloOk { sub_id }).await;
+                break;
+            }
+            x if x == Op::HelloErr as u16 => {
+                let err: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
+                let _ = vis_tx
+                    .send(VisualEvent::ErrorMsg {
+                        sub_id,
+                        code: err.code,
+                    })
+                    .await;
+                break;
+                // anyhow::bail!("HELLO rejected: {}", err.message);
+            }
+            x if x == Op::Ping as u16 => {
+                ping_tx.send(frame.request_id).await?;
+            }
+            x if x == Op::Pong as u16 => {
+                // pass
+            }
+            _ => {
+                // anyhow::bail!("unexpected frame during HELLO: {}", frame.opcode);
+            }
         }
     }
 
@@ -591,22 +606,32 @@ pub async fn visual_client(
         .await
         .ok_or_else(|| anyhow::anyhow!("connection closed during hello"))??;
 
-    match frame.opcode {
-        x if x == Op::AuthOk as u16 => {
-            let _ = vis_tx.send(VisualEvent::AuthOk { sub_id }).await;
-        }
-        x if x == Op::AuthErr as u16 => {
-            let err: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
-            let _ = vis_tx
-                .send(VisualEvent::ErrorMsg {
-                    sub_id,
-                    code: err.code,
-                })
-                .await;
-            // anyhow::bail!("HELLO rejected: {}", err.message);
-        }
-        _ => {
-            // anyhow::bail!("unexpected frame during HELLO: {}", frame.opcode);
+    loop {
+        match frame.opcode {
+            x if x == Op::AuthOk as u16 => {
+                let _ = vis_tx.send(VisualEvent::AuthOk { sub_id }).await;
+                break;
+            }
+            x if x == Op::Ping as u16 => {
+                ping_tx.send(frame.request_id).await?;
+            }
+            x if x == Op::Pong as u16 => {
+                // pass
+            }
+            x if x == Op::AuthErr as u16 => {
+                let err: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
+                let _ = vis_tx
+                    .send(VisualEvent::ErrorMsg {
+                        sub_id,
+                        code: err.code,
+                    })
+                    .await;
+                break;
+                // anyhow::bail!("HELLO rejected: {}", err.message);
+            }
+            _ => {
+                // anyhow::bail!("unexpected frame during HELLO: {}", frame.opcode);
+            }
         }
     }
 
@@ -632,24 +657,33 @@ pub async fn visual_client(
         .await
         .ok_or_else(|| anyhow::anyhow!("connection closed during subscribe"))??;
 
-    match frame.opcode {
-        x if x == Op::SubscribeOk as u16 => {
-            let _ok: SubscribeOk = fibril_protocol::v1::helper::decode(&frame);
+    loop {
+        match frame.opcode {
+            x if x == Op::SubscribeOk as u16 => {
+                let _ok: SubscribeOk = fibril_protocol::v1::helper::decode(&frame);
 
-            let _ = vis_tx.send(VisualEvent::SubscribeOk { sub_id }).await;
-        }
+                let _ = vis_tx.send(VisualEvent::SubscribeOk { sub_id }).await;
+                break;
+            }
+            x if x == Op::Ping as u16 => {
+                ping_tx.send(frame.request_id).await?;
+            }
+            x if x == Op::Pong as u16 => {
+                // pass
+            }
 
-        x if x == Op::Error as u16 => {
-            let err: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
-            anyhow::bail!(
-                "SUBSCRIBE rejected: code={} msg='{}'",
-                err.code,
-                err.message
-            );
-        }
+            x if x == Op::Error as u16 => {
+                let err: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
+                anyhow::bail!(
+                    "SUBSCRIBE rejected: code={} msg='{}'",
+                    err.code,
+                    err.message
+                );
+            }
 
-        _ => {
-            anyhow::bail!("unexpected frame during SUBSCRIBE: {}", frame.opcode);
+            _ => {
+                anyhow::bail!("unexpected frame during SUBSCRIBE: {}", frame.opcode);
+            }
         }
     }
 
@@ -695,14 +729,42 @@ pub async fn visual_client(
     });
 
     tokio::spawn(async move {
-        while let Some(p) = pub_rx.recv().await {
-            let _ = sink
-                .send(fibril_protocol::v1::helper::encode(
-                    Op::Publish,
-                    next_req_id(),
-                    &p,
-                ))
-                .await;
+        loop {
+            tokio::select! {
+                biased;
+
+                // ---- PING -> PONG --------------------------------------------
+                Some(req_id) = ping_rx.recv() => {
+                    if let Err(err) = sink.send(
+                        fibril_protocol::v1::helper::encode(
+                            Op::Pong,
+                            req_id,
+                            &Pong,
+                        )
+                    ).await {
+                        tracing::error!("pong send failed: {err}");
+                        break;
+                    }
+                }
+                // ---- PUBLISH --------------------------------------------------
+                Some(p) = pub_rx.recv() => {
+                    if let Err(err) = sink.send(
+                        fibril_protocol::v1::helper::encode(
+                            Op::Publish,
+                            next_req_id(),
+                            &p,
+                        )
+                    ).await {
+                        tracing::error!("publish send failed: {err}");
+                        break;
+                    }
+                }
+
+                // ---- CHANNEL CLOSED ------------------------------------------
+                else => {
+                    break;
+                }
+            }
         }
     });
 
@@ -719,6 +781,12 @@ pub async fn visual_client(
                         offset: d.offset,
                     })
                     .await;
+            }
+            x if x == Op::Ping as u16 => {
+                ping_tx.send(frame.request_id).await?;
+            }
+            x if x == Op::Pong as u16 => {
+                // pass
             }
             x if x == Op::Error as u16 => {
                 let e: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);

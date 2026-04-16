@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use fibril_storage::DeliveryTag;
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
@@ -138,6 +139,11 @@ impl Client {
         let rx: Receiver<Message> = self.engine.subscribe_auto_ack(req).await?;
         Ok(AutoAckedSubscription { rx })
     }
+
+    /// Gracefully shut down the client, closing the connection and all subscription channels.
+    pub async fn shutdown(&self) {
+        self.engine.shutdown.notify_waiters();
+    }
 }
 
 impl Publisher {
@@ -229,11 +235,13 @@ struct AckableSubChannel {
     manual: mpsc::Receiver<AckableMessage>,
 }
 
+#[derive(Debug, Clone)]
 enum SubDelivery {
     Manual(mpsc::Sender<AckableMessage>),
     Auto(mpsc::Sender<Message>),
 }
 
+#[derive(Debug, Clone)]
 struct SubState {
     topic: String,
     group: Option<String>,
@@ -241,12 +249,17 @@ struct SubState {
     delivery: SubDelivery,
 }
 
-impl Drop for Client {
-    fn drop(&mut self) {
-        self.engine.shutdown.notify_waiters();
-    }
-}
 
+// Revisit later
+// impl Drop for Client {
+//     fn drop(&mut self) {
+//         self.engine.shutdown.notify_waiters();
+//     }
+// }
+
+const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
+
+// TODO: Better handle `t _ = framed.send(...)` errors, which currently just get swallowed. These errors indicate a broken connection and should trigger cleanup and reconnection logic.
 async fn start_engine(
     mut framed: Framed<TcpStream, ProtoCodec>,
     opts: ClientOptions,
@@ -314,18 +327,41 @@ async fn start_engine(
         shutdown: shutdown.clone(),
     });
 
-    let subs = Arc::new(Mutex::new(HashMap::<u64, SubState>::new()));
+    let subs = Arc::new(DashMap::<u64, SubState>::new());
 
     let shutdown_engine = shutdown.clone();
     let shutdown_acks = shutdown.clone();
+
+    // heartbeat task
+    let heartbeat_secs = opts
+        .heartbeat_interval
+        .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
 
     // writer + reader loop
     tokio::spawn(async move {
         let mut next_req = 1u64;
         let mut waiters: HashMap<u64, Waiter> = HashMap::new();
+        let mut heartbeat =
+            tokio::time::interval(std::time::Duration::from_secs(heartbeat_secs));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await; // consume immediate tick
+
+        let timeout = std::time::Duration::from_secs(heartbeat_secs * 3);
+        let mut last_seen = tokio::time::Instant::now();
 
         loop {
             tokio::select! {
+                _ = heartbeat.tick() => {
+                    if last_seen.elapsed() > timeout {
+                        break;
+                    }
+                    let _ = framed.send(encode(Op::Ping, 0, &())).await;
+                }
+
+                _ = shutdown.notified() => {
+                    break;
+                }
+
                 Some(cmd) = cmd_rx.recv() => match cmd {
                     Command::Publish { topic, payload } => {
                         let req_id = next_req; next_req += 1;
@@ -361,22 +397,28 @@ async fn start_engine(
                         let _ = framed.send(encode(Op::Subscribe, req_id, &req)).await;
                     }
                     Command::Ack { sub_id, delivery_tag } => {
-                        if let Some(s) = subs.lock().await.get(&sub_id) {
+                        if let Some(s) = subs.get(&sub_id) {
+                            // try to avoid holding the lock while awaiting
+                            let sub = s.value().clone();
+                            drop(s);
                             let ack = Ack {
-                                topic: s.topic.clone(),
-                                group: s.group.clone(),
-                                partition: s.partition,
+                                topic: sub.topic.clone(),
+                                group: sub.group.clone(),
+                                partition: sub.partition,
                                 tags: vec![delivery_tag],
                             };
                             let _ = framed.send(encode(Op::Ack, 0, &ack)).await;
                         }
                     }
                     Command::Nack { sub_id, delivery_tag, requeue } => {
-                        if let Some(s) = subs.lock().await.get(&sub_id) {
+                        if let Some(s) = subs.get(&sub_id) {
+                            // try to avoid holding the lock while awaiting
+                            let sub = s.value().clone();
+                            drop(s);
                             let nack = Nack {
-                                topic: s.topic.clone(),
-                                group: s.group.clone(),
-                                partition: s.partition,
+                                topic: sub.topic.clone(),
+                                group: sub.group.clone(),
+                                partition: sub.partition,
                                 tags: vec![delivery_tag],
                                 requeue,
                             };
@@ -384,11 +426,14 @@ async fn start_engine(
                         }
                     }
                     Command::Reject { sub_id, delivery_tag, requeue } => {
-                        if let Some(s) = subs.lock().await.get(&sub_id) {
+                        if let Some(s) = subs.get(&sub_id) {
+                            // try to avoid holding the lock while awaiting
+                            let sub = s.value().clone();
+                            drop(s);
                             let rej = Reject {
-                                topic: s.topic.clone(),
-                                group: s.group.clone(),
-                                partition: s.partition,
+                                topic: sub.topic.clone(),
+                                group: sub.group.clone(),
+                                partition: sub.partition,
                                 tags: vec![delivery_tag],
                                 requeue,
                             };
@@ -400,6 +445,8 @@ async fn start_engine(
                     let frame = match frame { Ok(f) => f, Err(_) => {
                         break;
                     } };
+                    last_seen = tokio::time::Instant::now();
+
                     match frame.opcode {
                         x if x == Op::PublishOk as u16 => {
                             let ok: PublishOk = decode(&frame);
@@ -425,8 +472,11 @@ async fn start_engine(
                         }
                         x if x == Op::Deliver as u16 => {
                             let d: Deliver = decode(&frame);
-                            if let Some(s) = subs.lock().await.get(&d.sub_id) {
-                                match &s.delivery {
+                            if let Some(s) = subs.get(&d.sub_id) {
+                                // try to avoid holding the lock while awaiting
+                                let sub = s.value().clone();
+                                drop(s);
+                                match &sub.delivery {
                                     SubDelivery::Manual(tx) => {
                                         let (ack_tx, ack_rx) = oneshot::channel();
                                         let msg = AckableMessage {
@@ -436,25 +486,43 @@ async fn start_engine(
                                         };
 
                                         if tx.send(msg).await.is_ok() {
-                                            // TODO: will hang forever unless we cancel it? Investigate/fix
-                                            tokio::select! {
-                                                Ok(settle_request) = ack_rx => {
-                                                    match settle_request {
-                                                        SettleRequest::Ack { offset } => {
-                                                            let _ = cmd_tx.send(Command::Ack { sub_id: d.sub_id, delivery_tag: offset }).await;
-                                                        }
-                                                        SettleRequest::Nack { offset, requeue } => {
-                                                            let _ = cmd_tx.send(Command::Nack { sub_id: d.sub_id, delivery_tag: offset, requeue }).await;
-                                                        }
-                                                        SettleRequest::Reject { offset, requeue } => {
-                                                            let _ = cmd_tx.send(Command::Reject { sub_id: d.sub_id, delivery_tag: offset, requeue }).await;
+                                            let cmd_tx = cmd_tx.clone();
+                                            let shutdown_acks = shutdown_acks.clone();
+                                            let sub_id = d.sub_id;
+
+                                            tokio::spawn(async move {
+                                                // TODO: add timeout or use a shared queue, or have server handle timeout and add proper handling of relevant error
+
+                                                tokio::select! {
+                                                    Ok(settle_request) = ack_rx => {
+                                                        match settle_request {
+                                                            SettleRequest::Ack { offset } => {
+                                                                let _ = cmd_tx.send(Command::Ack {
+                                                                    sub_id,
+                                                                    delivery_tag: offset,
+                                                                }).await;
+                                                            }
+                                                            SettleRequest::Nack { offset, requeue } => {
+                                                                let _ = cmd_tx.send(Command::Nack {
+                                                                    sub_id,
+                                                                    delivery_tag: offset,
+                                                                    requeue,
+                                                                }).await;
+                                                            }
+                                                            SettleRequest::Reject { offset, requeue } => {
+                                                                let _ = cmd_tx.send(Command::Reject {
+                                                                    sub_id,
+                                                                    delivery_tag: offset,
+                                                                    requeue,
+                                                                }).await;
+                                                            }
                                                         }
                                                     }
+                                                    _ = shutdown_acks.notified() => {
+                                                        // engine is shutting down
+                                                    }
                                                 }
-                                                _ = shutdown_acks.notified() => {
-                                                    // engine is shutting down, drop silently
-                                                }
-                                            }
+                                            });
                                         }
                                     }
 
@@ -475,7 +543,7 @@ async fn start_engine(
                                     Waiter::SubscribeManual(tx) => {
                                         let (txm, rxm) = mpsc::channel(32);
 
-                                        subs.lock().await.insert(ok.sub_id, SubState {
+                                        subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
                                             group: ok.group.clone(),
                                             partition: ok.partition,
@@ -488,7 +556,7 @@ async fn start_engine(
                                     Waiter::SubscribeAuto(tx) => {
                                         let (txa, rxa) = mpsc::channel(32);
 
-                                        subs.lock().await.insert(ok.sub_id, SubState {
+                                        subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
                                             group: ok.group.clone(),
                                             partition: ok.partition,
@@ -505,6 +573,12 @@ async fn start_engine(
                                     }
                                 }
                             }
+                        }
+                        x if x == Op::Ping as u16 => {
+                            let _ = framed.send(encode(Op::Pong, frame.request_id, &())).await;
+                        }
+                        x if x == Op::Pong as u16 => {
+                            // pass
                         }
                         x if x == Op::Error as u16 => {
                             let err: ErrorMsg = decode(&frame);
@@ -553,6 +627,10 @@ async fn start_engine(
                         _ => {}
                     }
                 }
+                else => {
+                    // EOF or channel closed
+                    break;
+                }
             }
         }
 
@@ -565,7 +643,7 @@ async fn start_engine(
         }
 
         // subs cleared
-        subs.lock().await.clear();
+        subs.clear();
 
         // notify shutdown listeners
         shutdown.notify_waiters();
@@ -629,4 +707,5 @@ pub struct ClientOptions {
     pub client_name: String,
     pub client_version: String,
     pub auth: Option<Auth>,
+    pub heartbeat_interval: Option<u64>,
 }

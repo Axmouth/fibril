@@ -1003,7 +1003,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 for key in touched {
                     if let Some(qs) = broker.queues.get(&key).map(|e| e.value().clone()) {
                         qs.wake();
-                        dbg!("expiry awoke");
                     }
                 }
             }

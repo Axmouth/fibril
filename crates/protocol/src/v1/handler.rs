@@ -32,6 +32,16 @@ struct SubState {
     task: tokio::task::JoinHandle<()>,
 }
 
+pub struct ConnectionSettings {
+    pub heartbeat_interval: Option<u64>,
+}
+
+impl ConnectionSettings {
+    pub fn new(heartbeat_interval: Option<u64>) -> Self {
+        Self { heartbeat_interval }
+    }
+}
+
 pub async fn run_server(
     addr: SocketAddr,
     broker: Arc<Broker<StromaEngine>>,
@@ -51,6 +61,7 @@ pub async fn run_server(
         let auth = auth.clone();
         let tcp_stats = tcp_stats.clone();
         let connection_stats = connection_stats.clone();
+        let connection_settings = ConnectionSettings::new(None);
         tokio::spawn(async move {
             if let Err(e) = handle_connection(
                 socket,
@@ -59,6 +70,7 @@ pub async fn run_server(
                 connection_stats.clone(),
                 conn_id,
                 auth,
+                connection_settings,
             )
             .await
             {
@@ -70,6 +82,15 @@ pub async fn run_server(
     }
 }
 
+pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
+
+pub enum LoopEvent {
+    Heartbeat,
+    Frame(Frame),
+    Disconnect,
+    Timeout,
+}
+
 pub async fn handle_connection(
     socket: tokio::net::TcpStream,
     broker: Arc<Broker<StromaEngine>>,
@@ -77,7 +98,17 @@ pub async fn handle_connection(
     connection_stats: Arc<ConnectionStats>,
     conn_id: Uuid,
     auth_handler: Option<impl AuthHandler + Send + Sync>,
+    connection_settings: ConnectionSettings,
 ) -> anyhow::Result<()> {
+    let heartbeat_interval = connection_settings
+        .heartbeat_interval
+        .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
+    let timeout = tokio::time::Duration::from_secs(heartbeat_interval * 3);
+
+    let mut last_seen = Instant::now();
+    let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_secs(heartbeat_interval));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await; // consume first tick
     // ---- Framed socket -----------------------------------------------------
     let peer_addr = socket.peer_addr().ok();
     let framed = Framed::new(socket, ProtoCodec);
@@ -88,22 +119,40 @@ pub async fn handle_connection(
 
     let metrics_clone = tcp_stats.clone();
     // ---- Writer task -------------------------------------------------------
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let writer_task = tokio::spawn(async move {
         tracing::debug!("[writer] START");
 
         let metrics = metrics_clone.clone();
-        while let Some(frame) = rx.recv().await {
-            tracing::debug!(
-                "[writer] Writing Frame to tcp socket.. code={}",
-                frame.opcode
-            );
-            let size = size_of_val(&frame) + frame.payload.len();
-            if let Err(err) = writer.send(frame).await {
-                metrics.error();
-                tracing::error!("[writer] Error writing to tcp socket : {err}");
-                break;
-            } else {
-                metrics.bytes_out(size as u64);
+
+        loop {
+            tokio::select! {
+                // ---- Normal write path ---------------------------------------
+                Some(frame) = rx.recv() => {
+                    tracing::debug!(
+                        "[writer] Writing Frame to tcp socket.. code={}",
+                        frame.opcode
+                    );
+
+                    let size = size_of_val(&frame) + frame.payload.len();
+
+                    if let Err(err) = writer.send(frame).await {
+                        metrics.error();
+                        tracing::error!("[writer] Error writing to tcp socket : {err}");
+                        break;
+                    } else {
+                        metrics.bytes_out(size as u64);
+                    }
+                }
+
+                // ---- Shutdown signal -----------------------------------------
+                _ = &mut shutdown_rx => {
+                    tracing::debug!("[writer] Received shutdown signal");
+                    break;
+                }
+
+                // ---- Channel closed ------------------------------------------
+                else => break,
             }
         }
 
@@ -176,19 +225,61 @@ pub async fn handle_connection(
 
     // ---- Main reader loop --------------------------------------------------
     // TODO: Make handling more async? Spawn task per frame, or have a task pool
-    while let Some(frame) =
-        tokio::time::timeout(std::time::Duration::from_secs(30), reader.next()).await?
-    {
+    loop {
+        let loop_event = tokio::select! {
+            // ---- Heartbeat tick ----
+            _ = heartbeat.tick() => {
+                if last_seen.elapsed() > timeout {
+                    tracing::warn!("Heartbeat timeout, closing connection");
+                    LoopEvent::Timeout
+                }
+                else if tx.send(encode(Op::Ping, 0, &())).await.is_err() {
+                    // channel full or closed -> treat as disconnect
+                    tracing::error!("Failed to send heartbeat ping, closing connection");
+                    LoopEvent::Timeout
+                }
+                else {
+                    LoopEvent::Heartbeat
+                }
+            }
+
+            // ---- Incoming frame ----
+            frame = reader.next() => {
+                match frame {
+                    Some(Ok(f)) => {
+                        last_seen = Instant::now();
+
+                        LoopEvent::Frame(f)
+                    },
+                    Some(Err(err)) => {
+                        tracing::error!("[reader] Error reading from tcp socket: {err}");
+                        LoopEvent::Disconnect
+                    },
+                    None => {
+                        tracing::error!("[reader] Disconnected from tcp socket");
+                        LoopEvent::Disconnect
+                    },
+                }
+            }
+        };
+
+        let frame = match loop_event {
+            LoopEvent::Frame(f) => f,
+            LoopEvent::Timeout => break,
+            LoopEvent::Disconnect => break,
+            LoopEvent::Heartbeat => continue,
+        };
+
         let metrics = tcp_stats.clone();
-        let frame = frame?;
         let size = size_of_val(&frame) + frame.payload.len();
         metrics.bytes_in(size as u64);
 
         let auth_required = auth_handler.is_some();
         let is_auth = frame.opcode == Op::Auth as u16;
         let is_ping = frame.opcode == Op::Ping as u16;
+        let is_pong = frame.opcode == Op::Pong as u16;
 
-        if auth_required && !state.authenticated && !(is_auth || is_ping) {
+        if auth_required && !state.authenticated && !(is_auth || is_ping || is_pong) {
             tx.send(encode(
                 Op::Error,
                 frame.request_id,
@@ -539,6 +630,11 @@ pub async fn handle_connection(
                 tx.send(encode(Op::Pong, frame.request_id, &())).await?;
             }
 
+            // -------- PONG ---------------------------------------------------
+            x if x == Op::Pong as u16 => {
+                // pass
+            }
+
             // -------- UNKNOWN -----------------------------------------------
             _ => {
                 tx.send(encode(
@@ -557,6 +653,7 @@ pub async fn handle_connection(
 
     // ---- Connection closing ------------------------------------------------
     drop(tx); // closes writer channel
+    let _ = shutdown_tx.send(());
     let _ = writer_task.await;
 
     for (_, sub) in state.subs.drain() {
@@ -570,7 +667,10 @@ pub async fn handle_connection(
 }
 
 pub fn print_banner(bind: &SocketAddr) {
-    let art = ASCII_ARTS[0];
+    let ts = Instant::now().elapsed().as_nanos();
+    let idx = (ts % (ASCII_ARTS.len() as u128)) as usize;
+
+    let art = ASCII_ARTS[idx];
 
     tracing::info!("\n{art}\nListening on {bind}\n");
 }

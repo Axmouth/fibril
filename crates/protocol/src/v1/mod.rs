@@ -136,6 +136,12 @@ pub struct Reject {
     pub requeue: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Ping;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Pong;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorMsg {
     pub code: u16,
