@@ -41,7 +41,11 @@ fn render<T: Template>(tpl: T) -> Html<String> {
 }
 
 impl AdminServer {
-    pub fn new(metrics: Metrics, config: AdminConfig, storage: Arc<dyn QueueEngine + Send + Sync>) -> Self {
+    pub fn new(
+        metrics: Metrics,
+        config: AdminConfig,
+        storage: Arc<dyn QueueEngine + Send + Sync>,
+    ) -> Self {
         Self {
             metrics,
             config,

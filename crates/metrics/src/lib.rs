@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use serde::Serialize;
 use serde_json::json;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -377,10 +377,13 @@ impl QueuesStateSnapshot {
             } else {
                 key.topic.clone()
             };
-            map.insert(key_str, json!({
-                "ready_count": stat.ready_count,
-                "inflight_count": stat.inflight_count,
-            }));
+            map.insert(
+                key_str,
+                json!({
+                    "ready_count": stat.ready_count,
+                    "inflight_count": stat.inflight_count,
+                }),
+            );
         }
         serde_json::Value::Object(map)
     }
@@ -648,7 +651,9 @@ impl SystemStats {
     }
 
     pub fn snapshot(&self) -> SystemSnapshot {
-        self.sys.write().refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
+        self.sys
+            .write()
+            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
         let sys = self.sys.read();
         let (rss_mb, cpu) = if let Some(p) = sys.process(self.pid) {
             (p.memory() as f64 / 1024.0, p.cpu_usage())

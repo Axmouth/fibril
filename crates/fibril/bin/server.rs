@@ -3,8 +3,11 @@ use std::{
     sync::Arc,
 };
 
-use fibril_broker::{broker::{Broker, BrokerConfig}, queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine}};
 use fibril_admin::{AdminConfig, AdminServer};
+use fibril_broker::{
+    broker::{Broker, BrokerConfig},
+    queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine},
+};
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::run_server;
 use fibril_util::{StaticAuthHandler, init_tracing};
@@ -29,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     .await
     .unwrap();
     let broker_cfg = BrokerConfig {
-        inflight_ttl_ms: 2000,
+        inflight_ttl_ms: 200000,
         expiry_poll_min_ms: 100,
         expiry_batch_max: 100,
         delivery_poll_max_ms: 100000, // Make tests timeout if they rely on polling to pass, to indicate the issue

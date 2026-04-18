@@ -1,4 +1,9 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, atomic::AtomicU64},
+    time::Instant,
+};
 
 use crate::v1::{
     frame::{Frame, ProtoCodec},
@@ -6,9 +11,13 @@ use crate::v1::{
     *,
 };
 use anyhow::Context;
-use fibril_broker::{broker::{
-    Broker, ConsumerConfig, ConsumerHandle, SettleRequest, SettleType
-}, queue_engine::StromaEngine};
+use fibril_broker::{
+    broker::{
+        Broker, ConfirmStream, ConsumerConfig, ConsumerHandle, PublisherHandle, SettleRequest,
+        SettleType,
+    },
+    queue_engine::StromaEngine,
+};
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_storage::{AppendReceiptExt, Group, Offset, Topic};
 use fibril_util::AuthHandler;
@@ -39,6 +48,24 @@ pub struct ConnectionSettings {
 impl ConnectionSettings {
     pub fn new(heartbeat_interval: Option<u64>) -> Self {
         Self { heartbeat_interval }
+    }
+}
+
+#[derive(Debug)]
+struct ReqIdGenerator {
+    current_id: AtomicU64,
+}
+
+impl ReqIdGenerator {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            current_id: AtomicU64::from(0),
+        })
+    }
+
+    pub fn next_id(&self) -> u64 {
+        self.current_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -104,6 +131,7 @@ pub async fn handle_connection(
         .heartbeat_interval
         .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
     let timeout = tokio::time::Duration::from_secs(heartbeat_interval * 3);
+    let req_id_gen = ReqIdGenerator::new();
 
     let mut last_seen = Instant::now();
     let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_secs(heartbeat_interval));
@@ -120,6 +148,7 @@ pub async fn handle_connection(
     let metrics_clone = tcp_stats.clone();
     // ---- Writer task -------------------------------------------------------
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let req_id_gen_clone = req_id_gen.clone();
     let writer_task = tokio::spawn(async move {
         tracing::debug!("[writer] START");
 
@@ -223,6 +252,8 @@ pub async fn handle_connection(
     tx.send(encode(Op::HelloOk, frame.request_id, &hello_ok))
         .await?;
 
+    let mut publishers = HashMap::<(Topic, Option<Group>), PublisherHandle>::new();
+
     // ---- Main reader loop --------------------------------------------------
     // TODO: Make handling more async? Spawn task per frame, or have a task pool
     loop {
@@ -233,7 +264,7 @@ pub async fn handle_connection(
                     tracing::warn!("Heartbeat timeout, closing connection");
                     LoopEvent::Timeout
                 }
-                else if tx.send(encode(Op::Ping, 0, &())).await.is_err() {
+                else if tx.send(encode(Op::Ping, req_id_gen_clone.next_id(), &())).await.is_err() {
                     // channel full or closed -> treat as disconnect
                     tracing::error!("Failed to send heartbeat ping, closing connection");
                     LoopEvent::Timeout
@@ -400,6 +431,7 @@ pub async fn handle_connection(
                 );
 
                 let settler_clone = settler.clone();
+                let req_id_gen_clone = req_id_gen.clone();
                 let handle = tokio::spawn(async move {
                     let mut rx = messages;
 
@@ -417,7 +449,10 @@ pub async fn handle_connection(
                         tracing::debug!("Sending Deliver");
 
                         // 1. Try to write to socket
-                        if let Err(err) = tx_clone.send(encode(Op::Deliver, 0, &deliver)).await {
+                        if let Err(err) = tx_clone
+                            .send(encode(Op::Deliver, req_id_gen_clone.next_id(), &deliver))
+                            .await
+                        {
                             // Socket dead -> do NOT auto-ack
                             tracing::error!("Failed to send to socket writer : {err}");
                             metrics.error();
@@ -531,18 +566,80 @@ pub async fn handle_connection(
                 let pubreq: Publish = decode(&frame);
 
                 // TODO: Handle confirm stream properly
-                let (publisher, _confirmer) = broker.get_publisher(&pubreq.topic, &pubreq.group).await.context("get publisher failed")?;
+                let key = &(pubreq.topic.clone(), pubreq.group.clone());
+                let publisher = if let Some(pubh) = publishers.get(key) {
+                    pubh.clone()
+                } else {
+                    let (pubh, _conf) = broker
+                        .get_publisher(&pubreq.topic, &pubreq.group)
+                        .await
+                        .context("get publisher failed")?;
+                    publishers.insert(key.clone(), pubh.clone());
+                    pubh
+                };
 
                 // TODO: USE PUBLISHER(cache them in a dashmap?)
-                match publisher
-                    .publish(&pubreq.payload)
-                    .await
-                {
-                    Ok(offset_rx) => {
-                        let offset = match offset_rx.await {
-                            Ok(Ok(offset)) => offset,
-                            Ok(Err(err)) => {
-                                tx.send(encode(
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let published = publisher.publish(&pubreq.payload).await;
+                    match published {
+                        Ok(offset_rx) => {
+                            let offset = match offset_rx.await {
+                                Ok(Ok(offset)) => offset,
+                                Ok(Err(err)) => {
+                                    let send_res = tx
+                                        .send(encode(
+                                            Op::Error,
+                                            frame.request_id,
+                                            &ErrorMsg {
+                                                code: 500,
+                                                message: err.to_string(),
+                                            },
+                                        ))
+                                        .await;
+
+                                    if let Err(err) = send_res {
+                                        tracing::error!("Error sending Publish Confirm: {err}");
+                                    }
+                                    metrics.error();
+                                    return;
+                                }
+                                Err(_err) => {
+                                    let send_res = tx
+                                        .send(encode(
+                                            Op::Error,
+                                            frame.request_id,
+                                            &ErrorMsg {
+                                                code: 500,
+                                                message: "Channel closed".into(),
+                                            },
+                                        ))
+                                        .await;
+
+                                    if let Err(err) = send_res {
+                                        tracing::error!("Error sending Publish Confirm: {err}");
+                                    }
+                                    metrics.error();
+                                    return;
+                                }
+                            };
+                            if pubreq.require_confirm {
+                                let send_res = tx
+                                    .send(encode(
+                                        Op::PublishOk,
+                                        frame.request_id,
+                                        &PublishOk { offset },
+                                    ))
+                                    .await;
+
+                                if let Err(err) = send_res {
+                                    tracing::error!("Error sending Publish Confirm: {err}");
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            let send_res = tx
+                                .send(encode(
                                     Op::Error,
                                     frame.request_id,
                                     &ErrorMsg {
@@ -550,79 +647,15 @@ pub async fn handle_connection(
                                         message: err.to_string(),
                                     },
                                 ))
-                                .await?;
-                                metrics.error();
-                                continue;
+                                .await;
+
+                            if let Err(err) = send_res {
+                                tracing::error!("Error sending Publish Confirm: {err}");
                             }
-                            Err(_err) => {
-                                tx.send(encode(
-                                    Op::Error,
-                                    frame.request_id,
-                                    &ErrorMsg {
-                                        code: 500,
-                                        message: "Channel closed".into(),
-                                    },
-                                ))
-                                .await?;
-                                metrics.error();
-                                continue;
-                            }
-                        };
-                        if pubreq.require_confirm {
-                            tx.send(encode(
-                                Op::PublishOk,
-                                frame.request_id,
-                                &PublishOk { offset },
-                            ))
-                            .await?;
+                            metrics.error();
                         }
-                        // Ok(offset_notifier) => match offset_notifier.await {
-                        //     Ok(Ok(offset)) => {
-                        //         if pubreq.require_confirm {
-                        //             tx.send(encode(
-                        //                 Op::PublishOk,
-                        //                 frame.request_id,
-                        //                 &PublishOk { offset },
-                        //             ))
-                        //             .await?;
-                        //         }
-                        //     }
-                        //     Ok(Err(err)) => {
-                        //         tx.send(encode(
-                        //             Op::Error,
-                        //             frame.request_id,
-                        //             &ErrorMsg {
-                        //                 code: 500,
-                        //                 message: err.to_string(),
-                        //             },
-                        //         ))
-                        //         .await?;
-                        //     }
-                        //     Err(err) => {
-                        //         tx.send(encode(
-                        //             Op::Error,
-                        //             frame.request_id,
-                        //             &ErrorMsg {
-                        //                 code: 500,
-                        //                 message: "Channel closed".into(),
-                        //             },
-                        //         ))
-                        //         .await?;
-                        //     }
                     }
-                    Err(err) => {
-                        tx.send(encode(
-                            Op::Error,
-                            frame.request_id,
-                            &ErrorMsg {
-                                code: 500,
-                                message: err.to_string(),
-                            },
-                        ))
-                        .await?;
-                        metrics.error();
-                    }
-                }
+                });
             }
 
             // -------- PING ---------------------------------------------------

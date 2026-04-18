@@ -1,7 +1,7 @@
 use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
-use fibril_metrics::{QueuesStateSnapshot};
+use fibril_metrics::QueuesStateSnapshot;
 use fibril_storage::{Offset, Storage, observable_storage::ObservableStorage};
 use fibril_util::UnixMillis;
 use hashbrown::HashSet;
@@ -102,7 +102,9 @@ impl StromaEngine {
         snap_cfg: SnapshotConfig,
     ) -> Result<Self, StromaError> {
         let stroma = Stroma::open(root, keratin_cfg, snap_cfg).await?;
-        Ok(Self { inner: Arc::new(stroma) })
+        Ok(Self {
+            inner: Arc::new(stroma),
+        })
     }
 }
 
@@ -224,7 +226,8 @@ impl QueueEngine for StromaEngine {
     }
 
     async fn list_queues(&self) -> Result<Vec<(String, Option<String>)>, StromaError> {
-        Ok(self.inner
+        Ok(self
+            .inner
             .list_queues()
             .into_iter()
             .map(|(tp, _part, group)| (tp.to_string(), group.map(|s| s.to_string())))

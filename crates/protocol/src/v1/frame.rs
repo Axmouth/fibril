@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, BytesMut};
 use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Frame {
     pub version: u16,
     pub opcode: u16,

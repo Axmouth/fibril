@@ -125,6 +125,7 @@ pub struct PublishRequest {
     pub reply: oneshot::Sender<Result<Offset, BrokerError>>,
 }
 
+#[derive(Debug, Clone)]
 pub struct PublisherHandle {
     pub publisher: mpsc::Sender<PublishRequest>,
 }
@@ -350,29 +351,27 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
 
 impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
     pub fn new(engine: E, cfg: BrokerConfig, metrics: Option<Arc<BrokerStats>>) -> Arc<Self> {
-
         let metrics_clone = metrics.clone();
         if let Some(metrics) = metrics_clone {
-            metrics.register_queue_state_callback(Some(Arc::new(
-                {
+            metrics.register_queue_state_callback(Some(Arc::new({
+                let engine = engine.clone();
+                move || {
                     let engine = engine.clone();
-                    move || {
-                        let engine = engine.clone();
-                        Box::pin(async move {
-                            match engine.queue_stats_snapshot().await {
-                                Ok(stats) => stats,
-                                Err(e) => {
-                                    tracing::error!("Failed to get queue stats snapshot for metrics: {e:?}");
-                                    QueuesStateSnapshot {
-                                        queues: std::collections::HashMap::new(),
-                                    }
+                    Box::pin(async move {
+                        match engine.queue_stats_snapshot().await {
+                            Ok(stats) => stats,
+                            Err(e) => {
+                                tracing::error!(
+                                    "Failed to get queue stats snapshot for metrics: {e:?}"
+                                );
+                                QueuesStateSnapshot {
+                                    queues: std::collections::HashMap::new(),
                                 }
                             }
-                        })
-                    }
+                        }
+                    })
                 }
-                
-            )));
+            })));
         }
         let this = Arc::new(Self {
             cfg,
@@ -583,8 +582,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         let prefetch = cfg.prefetch.max(1);
 
-        let (msg_tx, msg_rx) = mpsc::channel::<DeliverableMessage>(prefetch);
-        let (settle_tx, settle_rx) = mpsc::channel::<SettleRequest>(prefetch * 2);
+        let (msg_tx, msg_rx) = mpsc::channel::<DeliverableMessage>(prefetch * 128);
+        let (settle_tx, settle_rx) = mpsc::channel::<SettleRequest>(prefetch * 256);
 
         let consumer = Arc::new(ConsumerState {
             id: consumer_id,
@@ -721,7 +720,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let done = move |ok: bool| {
             if ok {
                 consumer2.dec_inflight();
-                if let SettleKind::Ack = settle_kind && let Some(metrics) = metrics {
+                if let SettleKind::Ack = settle_kind
+                    && let Some(metrics) = metrics
+                {
                     metrics.acked();
                 }
 

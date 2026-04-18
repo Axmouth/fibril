@@ -249,7 +249,6 @@ struct SubState {
     delivery: SubDelivery,
 }
 
-
 // Revisit later
 // impl Drop for Client {
 //     fn drop(&mut self) {
@@ -341,8 +340,7 @@ async fn start_engine(
     tokio::spawn(async move {
         let mut next_req = 1u64;
         let mut waiters: HashMap<u64, Waiter> = HashMap::new();
-        let mut heartbeat =
-            tokio::time::interval(std::time::Duration::from_secs(heartbeat_secs));
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(heartbeat_secs));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         heartbeat.tick().await; // consume immediate tick
 
