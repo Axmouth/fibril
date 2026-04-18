@@ -13,7 +13,6 @@ fibril-broker = { path = "../broker" }
 fibril-storage = { path = "../storage" }
 fibril-util = { path = "../util" }
 anyhow = "1.0"
-async-trait = "0.1"
 dashmap = "6.1"
 fastrand = "2"
 futures = "0.3"

@@ -18,7 +18,5 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::coordination::Coordination;
-use fibril_storage::{
-    DeliverableMessage, DeliveryTag, Group, LogId, Offset, StorageError, Topic,
-};
+use fibril_storage::{DeliverableMessage, DeliveryTag, Group, LogId, Offset, StorageError, Topic};
 use fibril_util::{UnixMillis, unix_millis};

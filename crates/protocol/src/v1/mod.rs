@@ -49,27 +49,27 @@ pub enum Op {
     Error = 255,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hello {
     pub client_name: String,
     pub client_version: String,
     pub protocol_version: u16, // client-supported version
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelloOk {
     pub protocol_version: u16, // negotiated
     pub server_name: String,
     pub compliance: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Auth {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publish {
     pub topic: String,
     pub partition: u32, // keep for later, default 0
@@ -78,12 +78,12 @@ pub struct Publish {
     pub payload: Vec<u8>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishOk {
     pub offset: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscribe {
     pub topic: String,
     pub group: Option<String>,
@@ -91,15 +91,16 @@ pub struct Subscribe {
     pub auto_ack: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubscribeOk {
     pub sub_id: u64,
     pub topic: String,
     pub group: Option<String>,
     pub partition: u32,
+    pub prefetch: u32,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Deliver {
     pub sub_id: u64,
     pub topic: String,
@@ -110,7 +111,7 @@ pub struct Deliver {
     pub payload: Vec<u8>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ack {
     pub topic: String,
     pub group: Option<String>,
@@ -118,7 +119,7 @@ pub struct Ack {
     pub tags: Vec<DeliveryTag>, // batch
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Nack {
     pub topic: String,
     pub group: Option<String>,
@@ -127,7 +128,7 @@ pub struct Nack {
     pub requeue: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Reject {
     pub topic: String,
     pub group: Option<String>,
@@ -136,10 +137,10 @@ pub struct Reject {
     pub requeue: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Ping;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Pong;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -489,6 +489,7 @@ pub async fn handle_connection(
                         topic: sub.topic,
                         group: sub.group,
                         partition: consumer.partition,
+                        prefetch: sub.prefetch
                     },
                 ))
                 .await?;
@@ -581,7 +582,11 @@ pub async fn handle_connection(
                 // TODO: USE PUBLISHER(cache them in a dashmap?)
                 let tx = tx.clone();
                 tokio::spawn(async move {
-                    let published = publisher.publish(&pubreq.payload).await;
+                    let published = if pubreq.require_confirm {
+                        publisher.publish(&pubreq.payload).await
+                    } else {
+                        publisher.publish_no_confirm(&pubreq.payload).await
+                    };
                     match published {
                         Ok(offset_rx) => {
                             let offset = match offset_rx.await {

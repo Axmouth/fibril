@@ -1,9 +1,15 @@
-use dashmap::DashMap;
 use fibril_storage::DeliveryTag;
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    net::{SocketAddr, ToSocketAddrs},
+    sync::Arc,
+};
+use thiserror::Error;
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::TcpStream,
     sync::{Notify, mpsc, oneshot},
 };
@@ -11,16 +17,36 @@ use tokio_util::codec::Framed;
 
 use fibril_protocol::v1::{frame::ProtoCodec, helper::*, *};
 
-// TODO: custom error, this error
-
 // ===== Public API ============================================================
+
+#[derive(Debug, Error)]
+pub enum FibrilError {
+    #[error("Client was disconnected: {msg}")]
+    Disconnection { msg: String },
+    #[error("Failed to deserialize data: {msg}")]
+    DeserializationFailure { msg: String },
+    #[error("Failed to serialize data: {msg}")]
+    SerializationFailure { msg: String },
+    #[error("Connection to the Client was severed, reconnection is advised")]
+    BrokenPipe,
+    #[error("Server returned error code {code}: {msg}")]
+    Failure { code: u16, msg: String },
+    #[error("EOF")]
+    Eof,
+    #[error("Unexpected error: {msg}")]
+    Unexpected { msg: String },
+}
+
+pub type FibrilResult<T> = Result<T, FibrilError>;
 
 #[derive(Debug, Clone)]
 pub struct Client {
+    address: SocketAddr,
+    opts: ClientOptions,
     engine: Arc<EngineHandle>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Publisher {
     engine: Arc<EngineHandle>,
     topic: String,
@@ -41,8 +67,9 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn deserialize<T: DeserializeOwned>(&self) -> anyhow::Result<T> {
-        Ok(rmp_serde::from_slice(&self.payload)?)
+    pub fn deserialize<T: DeserializeOwned>(&self) -> FibrilResult<T> {
+        rmp_serde::from_slice(&self.payload)
+            .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
     }
 }
 
@@ -59,49 +86,54 @@ pub struct AckableMessage {
 }
 
 impl AckableMessage {
-    // TODO: return simple message
-    pub async fn ack(self) -> anyhow::Result<Message> {
-        // TODO: bubble errors
-        let _ = self.settle.send(SettleRequest::Ack {
-            offset: self.delivery_tag,
-        });
+    pub async fn ack(self) -> FibrilResult<Message> {
+        self.settle
+            .send(SettleRequest::Ack {
+                offset: self.delivery_tag,
+            })
+            .map_err(|_e| FibrilError::BrokenPipe)?;
         Ok(Message {
             delivery_tag: self.delivery_tag,
             payload: self.payload,
         })
     }
 
-    pub async fn nack(self) -> anyhow::Result<Message> {
-        let _ = self.settle.send(SettleRequest::Nack {
-            offset: self.delivery_tag,
-            requeue: false,
-        });
+    pub async fn nack(self) -> FibrilResult<Message> {
+        self.settle
+            .send(SettleRequest::Nack {
+                offset: self.delivery_tag,
+                requeue: false,
+            })
+            .map_err(|_e| FibrilError::BrokenPipe)?;
         Ok(Message {
             delivery_tag: self.delivery_tag,
             payload: self.payload,
         })
     }
 
-    pub async fn reject(self, requeue: bool) -> anyhow::Result<Message> {
-        let _ = self.settle.send(SettleRequest::Reject {
-            offset: self.delivery_tag,
-            requeue,
-        });
+    pub async fn reject(self, requeue: bool) -> FibrilResult<Message> {
+        self.settle
+            .send(SettleRequest::Reject {
+                offset: self.delivery_tag,
+                requeue,
+            })
+            .map_err(|_e| FibrilError::BrokenPipe)?;
         Ok(Message {
             delivery_tag: self.delivery_tag,
             payload: self.payload,
         })
     }
 
-    pub fn deserialize<T: DeserializeOwned>(&self) -> anyhow::Result<T> {
-        Ok(rmp_serde::from_slice(&self.payload)?)
+    pub fn deserialize<T: DeserializeOwned>(&self) -> FibrilResult<T> {
+        rmp_serde::from_slice(&self.payload)
+            .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
     }
 }
 
 enum Waiter {
-    Publish(oneshot::Sender<anyhow::Result<u64>>),
-    SubscribeManual(oneshot::Sender<anyhow::Result<AckableSubChannel>>),
-    SubscribeAuto(oneshot::Sender<anyhow::Result<AutoAckedSubChannel>>),
+    Publish(oneshot::Sender<FibrilResult<u64>>),
+    SubscribeManual(oneshot::Sender<FibrilResult<AckableSubChannel>>),
+    SubscribeAuto(oneshot::Sender<FibrilResult<AutoAckedSubChannel>>),
 }
 
 #[derive(Debug, Clone)]
@@ -124,7 +156,8 @@ impl<'a> SubscriptionBuilder<'a> {
     }
 
     /// Messages must be acked explicitly; otherwise they may be redelivered.
-    pub async fn sub_manual_ack(self) -> anyhow::Result<Subscription> {
+    #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
+    pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
         let req = Subscribe {
             topic: self.topic,
             group: self.group,
@@ -137,7 +170,8 @@ impl<'a> SubscriptionBuilder<'a> {
     }
 
     /// Messages that have been received by the client will not be redelivered..
-    pub async fn sub_auto_ack(self) -> anyhow::Result<AutoAckedSubscription> {
+    #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
+    pub async fn sub_auto_ack(self) -> FibrilResult<AutoAckedSubscription> {
         let req = Subscribe {
             topic: self.topic,
             group: self.group,
@@ -154,17 +188,78 @@ impl<'a> SubscriptionBuilder<'a> {
 
 impl Client {
     /// Connect to a server socket.
-    // TODO: More flexible address type and smoother client options for unassuming user, specially auth
-    pub async fn connect(addr: &str, opts: ClientOptions) -> anyhow::Result<Self> {
-        let stream = TcpStream::connect(addr).await?;
+    #[tracing::instrument(fields(address = ?address, opts = ?opts))]
+    pub async fn connect(
+        address: impl ToSocketAddrs + fmt::Debug,
+        opts: ClientOptions,
+    ) -> FibrilResult<Self> {
+        let address = Self::convert_address(address)?;
+        let stream = TcpStream::connect(address)
+            .await
+            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
         let framed = Framed::new(stream, ProtoCodec);
 
-        let engine = start_engine(framed, opts).await?;
-        Ok(Client { engine })
+        let engine = start_engine(framed, opts.clone()).await?;
+        Ok(Client {
+            engine,
+            address,
+            opts,
+        })
+    }
+
+    /// Replaces the internal engine with a new connection.
+    /// Existing Publishers/Subscriptions created from the old connection
+    /// will remain "broken" (returning BrokenPipe/None).
+    #[tracing::instrument(fields(address = ?self.address, opts = ?self.opts))]
+    pub async fn reconnect(&mut self) -> FibrilResult<()> {
+        let address = self.address;
+        let opts = self.opts.clone();
+        let stream = TcpStream::connect(address)
+            .await
+            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+
+        let framed = Framed::new(stream, ProtoCodec);
+
+        // Start a fresh engine
+        let new_engine = start_engine(framed, opts).await?;
+
+        // Swap the handle
+        self.engine = new_engine;
+
+        Ok(())
+    }
+
+    /// Replaces the internal engine with a new connection.
+    /// Will attempt to restore existing Publishers/Subscriptions created from the old connection
+    /// returning an error if it does not fully succeed. Could lead to duplicated messages.
+    // TODO: try to handle inflight acks etc (resend?)
+    #[tracing::instrument(fields(address = ?self.address, opts = ?self.opts))]
+    pub async fn reconnect_restore(&mut self) -> FibrilResult<()> {
+        todo!()
+    }
+
+    fn convert_address(address: impl ToSocketAddrs + fmt::Debug) -> FibrilResult<SocketAddr> {
+        let mut address_iter = address
+            .to_socket_addrs()
+            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+        let first_address = if let Some(address) = address_iter.next() {
+            address
+        } else {
+            return Err(FibrilError::Disconnection {
+                msg: "No address provided".into(),
+            });
+        };
+        if address_iter.next().is_some() {
+            return Err(FibrilError::Disconnection {
+                msg: "More than one addresses provided".into(),
+            });
+        }
+        Ok(first_address)
     }
 
     /// Get a handle that you can use to publish messages to a specific topic.
-    pub fn publisher(&self, topic: impl Into<String>) -> Publisher {
+    #[tracing::instrument(fields(topic = %topic))]
+    pub fn publisher(&self, topic: impl Into<String> + fmt::Display) -> Publisher {
         Publisher {
             engine: self.engine.clone(),
             topic: topic.into(),
@@ -173,10 +268,11 @@ impl Client {
     }
 
     /// Get a handle that you can use to publish messages to a specific grouped topic.
+    #[tracing::instrument(fields(topic = %topic, group = %group))]
     pub fn publisher_grouped(
         &self,
-        topic: impl Into<String>,
-        group: impl Into<String>,
+        topic: impl Into<String> + fmt::Display,
+        group: impl Into<String> + fmt::Display,
     ) -> Publisher {
         Publisher {
             engine: self.engine.clone(),
@@ -186,7 +282,7 @@ impl Client {
     }
 
     /// Subscribe to receive messages from a topic, with manual acknowledgements.
-    pub fn subscribe(&'_ self, topic: impl Into<String>) -> SubscriptionBuilder<'_> {
+    pub fn subscribe(&'_ self, topic: impl Into<String> + fmt::Display) -> SubscriptionBuilder<'_> {
         SubscriptionBuilder {
             client: self,
             topic: topic.into(),
@@ -202,16 +298,26 @@ impl Client {
 }
 
 impl Publisher {
-    // TODO: Smooth out api here to take serializable things?
-    pub async fn publish(&self, payload: Vec<u8>) -> anyhow::Result<()> {
-        self.engine.publish(self.topic.clone(), self.group.clone(), payload).await
+    /// Publish a message with manual confirmation
+    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    pub async fn publish<T: serde::Serialize>(&self, payload: &T) -> FibrilResult<()> {
+        let bytes = rmp_serde::to_vec(payload)
+            .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })?;
+        self.engine
+            .publish(self.topic.clone(), self.group.clone(), bytes)
+            .await
+        // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
-    // TODO: Smooth out api here to take serializable things?
-    pub async fn publish_confirmed(&self, payload: Vec<u8>) -> anyhow::Result<u64> {
+    /// Publish a message with automatic confirmation (only returns once the server's publish confirm is received)
+    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    pub async fn publish_confirmed<T: serde::Serialize>(&self, payload: &T) -> FibrilResult<u64> {
+        let bytes = rmp_serde::to_vec(payload)
+            .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })?;
         self.engine
-            .publish_confirmed(self.topic.clone(), self.group.clone(), payload)
+            .publish_confirmed(self.topic.clone(), self.group.clone(), bytes)
             .await
+        // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 }
 
@@ -220,6 +326,7 @@ impl Subscription {
         self.rx.recv().await
     }
 
+    // TODO: use tokio_stream::wrappers::ReceiverStream?
     pub fn into_stream(self) -> impl futures::Stream<Item = AckableMessage> {
         futures::stream::unfold(self, |mut s| async move {
             s.rx.recv().await.map(|msg| (msg, s))
@@ -232,6 +339,7 @@ impl AutoAckedSubscription {
         self.rx.recv().await
     }
 
+    // TODO: use tokio_stream::wrappers::ReceiverStream?
     pub fn into_stream(self) -> impl futures::Stream<Item = Message> {
         futures::stream::unfold(self, |mut s| async move {
             s.rx.recv().await.map(|msg| (msg, s))
@@ -258,15 +366,15 @@ enum Command {
         topic: String,
         group: Option<String>,
         payload: Vec<u8>,
-        reply: oneshot::Sender<anyhow::Result<u64>>,
+        reply: oneshot::Sender<FibrilResult<u64>>,
     },
     Subscribe {
         req: Subscribe,
-        reply: oneshot::Sender<anyhow::Result<AckableSubChannel>>,
+        reply: oneshot::Sender<FibrilResult<AckableSubChannel>>,
     },
     SubscribeAutoAcked {
         req: Subscribe,
-        reply: oneshot::Sender<anyhow::Result<AutoAckedSubChannel>>,
+        reply: oneshot::Sender<FibrilResult<AutoAckedSubChannel>>,
     },
     Ack {
         sub_id: u64,
@@ -308,20 +416,17 @@ struct SubState {
     delivery: SubDelivery,
 }
 
-// Revisit later
-// impl Drop for Client {
-//     fn drop(&mut self) {
-//         self.engine.shutdown.notify_waiters();
-//     }
-// }
-
 const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
 
+// TODO: Further reconnection attempts logic
 // TODO: Better handle `t _ = framed.send(...)` errors, which currently just get swallowed. These errors indicate a broken connection and should trigger cleanup and reconnection logic.
-async fn start_engine(
-    mut framed: Framed<TcpStream, ProtoCodec>,
+async fn start_engine<S>(
+    mut framed: Framed<S, ProtoCodec>,
     opts: ClientOptions,
-) -> anyhow::Result<Arc<EngineHandle>> {
+) -> FibrilResult<Arc<EngineHandle>>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let shutdown = Arc::new(Notify::new());
     // handshake
     framed
@@ -334,12 +439,14 @@ async fn start_engine(
                 protocol_version: PROTOCOL_V1,
             },
         ))
-        .await?;
+        .await
+        .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
 
     let frame = framed
         .next()
         .await
-        .ok_or_else(|| anyhow::anyhow!("EOF"))??;
+        .ok_or(FibrilError::Eof)?
+        .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
     match frame.opcode {
         x if x == Op::HelloOk as u16 => {
             let ho: HelloOk = decode(&frame);
@@ -350,42 +457,64 @@ async fn start_engine(
                     got = %ho.compliance,
                     "Invariant violated: compliance marker altered or missing"
                 );
-                anyhow::bail!("Protocol compliance marker mismatch");
+                return Err(FibrilError::Disconnection {
+                    msg: "Protocol compliance marker mismatch".into(),
+                });
             }
             if ho.protocol_version != PROTOCOL_V1 {
-                anyhow::bail!("Protocol version mismatch");
+                return Err(FibrilError::Disconnection {
+                    msg: "Protocol version mismatch".into(),
+                });
             }
         }
         x if x == Op::HelloErr as u16 => {
             let e: ErrorMsg = decode(&frame);
-            anyhow::bail!("HELLO failed: {}", e.message);
+            return Err(FibrilError::Failure {
+                code: e.code,
+                msg: e.message,
+            });
         }
-        _ => anyhow::bail!("unexpected frame"),
+        _ => {
+            return Err(FibrilError::Unexpected {
+                msg: format!("Unexpected frame: opcode {}", frame.opcode),
+            });
+        }
     }
 
     if let Some(auth) = opts.auth {
-        framed.send(encode(Op::Auth, 2, &auth)).await?;
+        framed
+            .send(encode(Op::Auth, 2, &auth))
+            .await
+            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
         let frame = framed
             .next()
             .await
-            .ok_or_else(|| anyhow::anyhow!("EOF"))??;
+            .ok_or(FibrilError::Eof)?
+            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
         match frame.opcode {
             x if x == Op::AuthOk as u16 => {}
             x if x == Op::AuthErr as u16 => {
                 let e: ErrorMsg = decode(&frame);
-                anyhow::bail!("AUTH failed: {}", e.message);
+                return Err(FibrilError::Failure {
+                    code: e.code,
+                    msg: e.message,
+                });
             }
-            _ => anyhow::bail!("unexpected auth frame"),
+            _ => {
+                return Err(FibrilError::Unexpected {
+                    msg: format!("Unexpected auth frame: opcode {}", frame.opcode),
+                });
+            }
         }
     }
 
-    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(64);
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(8192);
     let handle = Arc::new(EngineHandle {
         tx: cmd_tx.clone(),
         shutdown: shutdown.clone(),
     });
 
-    let subs = Arc::new(DashMap::<u64, SubState>::new());
+    let mut subs = HashMap::<u64, SubState>::new();
 
     let shutdown_engine = shutdown.clone();
     let shutdown_acks = shutdown.clone();
@@ -454,10 +583,7 @@ async fn start_engine(
                         let _ = framed.send(encode(Op::Subscribe, req_id, &req)).await;
                     }
                     Command::Ack { sub_id, delivery_tag } => {
-                        if let Some(s) = subs.get(&sub_id) {
-                            // try to avoid holding the lock while awaiting
-                            let sub = s.value().clone();
-                            drop(s);
+                        if let Some(sub) = subs.get(&sub_id) {
                             let ack = Ack {
                                 topic: sub.topic.clone(),
                                 group: sub.group.clone(),
@@ -468,10 +594,7 @@ async fn start_engine(
                         }
                     }
                     Command::Nack { sub_id, delivery_tag, requeue } => {
-                        if let Some(s) = subs.get(&sub_id) {
-                            // try to avoid holding the lock while awaiting
-                            let sub = s.value().clone();
-                            drop(s);
+                        if let Some(sub) = subs.get(&sub_id) {
                             let nack = Nack {
                                 topic: sub.topic.clone(),
                                 group: sub.group.clone(),
@@ -483,10 +606,7 @@ async fn start_engine(
                         }
                     }
                     Command::Reject { sub_id, delivery_tag, requeue } => {
-                        if let Some(s) = subs.get(&sub_id) {
-                            // try to avoid holding the lock while awaiting
-                            let sub = s.value().clone();
-                            drop(s);
+                        if let Some(sub) = subs.get(&sub_id) {
                             let rej = Reject {
                                 topic: sub.topic.clone(),
                                 group: sub.group.clone(),
@@ -529,10 +649,7 @@ async fn start_engine(
                         }
                         x if x == Op::Deliver as u16 => {
                             let d: Deliver = decode(&frame);
-                            if let Some(s) = subs.get(&d.sub_id) {
-                                // try to avoid holding the lock while awaiting
-                                let sub = s.value().clone();
-                                drop(s);
+                            if let Some(sub) = subs.get(&d.sub_id) {
                                 match &sub.delivery {
                                     SubDelivery::Manual(tx) => {
                                         let (ack_tx, ack_rx) = oneshot::channel();
@@ -553,6 +670,7 @@ async fn start_engine(
                                                 tokio::select! {
                                                     Ok(settle_request) = ack_rx => {
                                                         match settle_request {
+                                                            // TODO: Find way to notify of engine disconnection if this happens.
                                                             SettleRequest::Ack { offset } => {
                                                                 let _ = cmd_tx.send(Command::Ack {
                                                                     sub_id,
@@ -584,10 +702,14 @@ async fn start_engine(
                                     }
 
                                     SubDelivery::Auto(tx) => {
-                                        let _ = tx.send(Message {
+                                        let res = tx.send(Message {
                                             delivery_tag: d.delivery_tag,
                                             payload: d.payload,
                                         }).await;
+
+                                        if res.is_err() {
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -598,7 +720,7 @@ async fn start_engine(
                             if let Some(waiter) = waiters.remove(&frame.request_id) {
                                 match waiter {
                                     Waiter::SubscribeManual(tx) => {
-                                        let (txm, rxm) = mpsc::channel(32);
+                                        let (txm, rxm) = mpsc::channel(ok.prefetch as usize);
 
                                         subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
@@ -607,11 +729,15 @@ async fn start_engine(
                                             delivery: SubDelivery::Manual(txm),
                                         });
 
-                                        let _ = tx.send(Ok(AckableSubChannel { manual: rxm }));
+                                        let res = tx.send(Ok(AckableSubChannel { manual: rxm }));
+
+                                        if res.is_err() {
+                                            break;
+                                        }
                                     }
 
                                     Waiter::SubscribeAuto(tx) => {
-                                        let (txa, rxa) = mpsc::channel(32);
+                                        let (txa, rxa) = mpsc::channel(ok.prefetch as usize);
 
                                         subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
@@ -620,7 +746,11 @@ async fn start_engine(
                                             delivery: SubDelivery::Auto(txa),
                                         });
 
-                                        let _ = tx.send(Ok(AutoAckedSubChannel { auto: rxa }));
+                                        let res = tx.send(Ok(AutoAckedSubChannel { auto: rxa }));
+
+                                        if res.is_err() {
+                                            break;
+                                        }
                                     }
 
                                     _ => {
@@ -632,7 +762,11 @@ async fn start_engine(
                             }
                         }
                         x if x == Op::Ping as u16 => {
-                            let _ = framed.send(encode(Op::Pong, frame.request_id, &())).await;
+                            let res = framed.send(encode(Op::Pong, frame.request_id, &())).await.map_err(|_e| FibrilError::BrokenPipe);
+
+                            if res.is_err() {
+                                break;
+                            }
                         }
                         x if x == Op::Pong as u16 => {
                             // pass
@@ -643,25 +777,25 @@ async fn start_engine(
                             if let Some(waiter) = waiters.remove(&frame.request_id) {
                                 match waiter {
                                     Waiter::Publish(tx) => {
-                                        let _ = tx.send(Err(anyhow::anyhow!(
-                                            "publish error {}: {}",
-                                            err.code,
-                                            err.message
-                                        )));
+                                        let res = tx.send(Err(FibrilError::Failure {code: err.code, msg: err.message }));
+
+                                        if res.is_err() {
+                                            break;
+                                        }
                                     }
                                     Waiter::SubscribeManual(tx) => {
-                                        let _ = tx.send(Err(anyhow::anyhow!(
-                                            "subscribe error {}: {}",
-                                            err.code,
-                                            err.message
-                                        )));
+                                        let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
+
+                                        if res.is_err() {
+                                            break;
+                                        }
                                     }
                                     Waiter::SubscribeAuto(tx) => {
-                                        let _ = tx.send(Err(anyhow::anyhow!(
-                                            "subscribe error {}: {}",
-                                            err.code,
-                                            err.message
-                                        )));
+                                        let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
+
+                                        if res.is_err() {
+                                            break;
+                                        }
                                     }
                                 }
                             } else {
@@ -669,8 +803,11 @@ async fn start_engine(
                                 // fail all waiters
                                 let msg = format!("connection error {}: {}", err.code, err.message);
                                 for (_, w) in waiters.drain() {
-                                    fail_waiter(w, anyhow::anyhow!(msg.clone()));
+                                    fail_waiter(w, FibrilError::Disconnection { msg: msg.clone() });
                                 }
+
+                                // subs cleared
+                                subs.clear();
 
                                 // TODO: notify subscriptions
                                 // TODO: possibly resubscribe
@@ -696,7 +833,12 @@ async fn start_engine(
         // ================================
 
         for (_, waiter) in waiters.drain() {
-            fail_waiter(waiter, anyhow::Error::msg("engine shutdown"));
+            fail_waiter(
+                waiter,
+                FibrilError::Disconnection {
+                    msg: "engine shutdown".into(),
+                },
+            );
         }
 
         // subs cleared
@@ -709,7 +851,7 @@ async fn start_engine(
     Ok(handle)
 }
 
-fn fail_waiter(waiter: Waiter, err: anyhow::Error) {
+fn fail_waiter(waiter: Waiter, err: FibrilError) {
     match waiter {
         Waiter::Publish(tx) => {
             let _ = tx.send(Err(err));
@@ -724,12 +866,29 @@ fn fail_waiter(waiter: Waiter, err: anyhow::Error) {
 }
 
 impl EngineHandle {
-    async fn publish(&self, topic: String, group: Option<String>, payload: Vec<u8>) -> anyhow::Result<()> {
-        self.tx.send(Command::Publish { topic, group, payload }).await?;
+    async fn publish(
+        &self,
+        topic: String,
+        group: Option<String>,
+        payload: Vec<u8>,
+    ) -> FibrilResult<()> {
+        self.tx
+            .send(Command::Publish {
+                topic,
+                group,
+                payload,
+            })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
         Ok(())
     }
 
-    async fn publish_confirmed(&self, topic: String, group: Option<String>, payload: Vec<u8>) -> anyhow::Result<u64> {
+    async fn publish_confirmed(
+        &self,
+        topic: String,
+        group: Option<String>,
+        payload: Vec<u8>,
+    ) -> FibrilResult<u64> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::PublishConfirmed {
@@ -738,32 +897,80 @@ impl EngineHandle {
                 payload,
                 reply: tx,
             })
-            .await?;
-        rx.await?
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_e| FibrilError::BrokenPipe)?
     }
 
-    async fn subscribe(&self, req: Subscribe) -> anyhow::Result<mpsc::Receiver<AckableMessage>> {
+    async fn subscribe(&self, req: Subscribe) -> FibrilResult<mpsc::Receiver<AckableMessage>> {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(Command::Subscribe { req, reply: tx }).await?;
-        let chans = rx.await??;
+        self.tx
+            .send(Command::Subscribe { req, reply: tx })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        let chans = rx.await.map_err(|_e| FibrilError::BrokenPipe)??;
         Ok(chans.manual)
+        // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
-    async fn subscribe_auto_ack(&self, req: Subscribe) -> anyhow::Result<mpsc::Receiver<Message>> {
+    async fn subscribe_auto_ack(&self, req: Subscribe) -> FibrilResult<mpsc::Receiver<Message>> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::SubscribeAutoAcked { req, reply: tx })
-            .await?;
-        let chans = rx.await??;
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        let chans = rx.await.map_err(|_e| FibrilError::BrokenPipe)??;
         Ok(chans.auto)
+        // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 }
 
 // ===== Options ===============================================================
 
+#[derive(Debug, Clone)]
 pub struct ClientOptions {
     pub client_name: String,
     pub client_version: String,
     pub auth: Option<Auth>,
     pub heartbeat_interval: Option<u64>,
+}
+
+impl ClientOptions {
+    pub fn new() -> Self {
+        let client_version = env!("CARGO_PKG_VERSION");
+        let client_name = "Fibril Rust Client";
+        Self {
+            client_name: client_name.into(),
+            client_version: client_version.into(),
+            auth: None,
+            heartbeat_interval: None,
+        }
+    }
+
+    pub fn auth(self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            auth: Some(Auth {
+                username: username.into(),
+                password: password.into(),
+            }),
+            ..self
+        }
+    }
+
+    pub fn heartbeat_interval(self, interval: u64) -> Self {
+        Self {
+            heartbeat_interval: Some(interval),
+            ..self
+        }
+    }
+
+    pub async fn connect(self, address: impl ToSocketAddrs + fmt::Debug) -> FibrilResult<Client> {
+        Client::connect(address, self).await
+    }
+}
+
+impl Default for ClientOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -1062,7 +1062,6 @@ name = "fibril-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "dashmap",
  "fastrand",
  "fibril-broker",

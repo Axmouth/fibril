@@ -1,10 +1,15 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use fibril_client::{AckableMessage, Client, ClientOptions};
-use fibril_protocol::v1::{Auth, Subscribe};
+use fibril_client::{AckableMessage, ClientOptions};
 use tokio::{sync::oneshot, time::Instant};
 
-async fn run_load_test(num_clients: usize, msgs_per_client: usize, start_reader: bool, start_writer: bool, txb: oneshot::Sender<()>) {
+async fn run_load_test(
+    num_clients: usize,
+    msgs_per_client: usize,
+    start_reader: bool,
+    start_writer: bool,
+    txb: oneshot::Sender<()>,
+) {
     let start = Instant::now();
 
     let mut handles: Vec<tokio::task::JoinHandle<()>> = vec![];
@@ -13,17 +18,11 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, start_reader:
         handles.push(tokio::spawn(async move {
             let payload = vec![8u8; 1024];
             let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([127, 0, 0, 1]), 9876));
-            let opts = ClientOptions {
-                auth: Some(Auth {
-                    username: "fibril".into(),
-                    password: "fibril".into(),
-                }),
-                client_name: "Client1".into(),
-                client_version: "0.1".into(),
-                heartbeat_interval: None,
-            };
-            let address_str = address.to_string();
-            let client = Client::connect(&address_str, opts).await.unwrap();
+            let client = ClientOptions::new()
+                .auth("fibril", "fibril")
+                .connect(address)
+                .await
+                .unwrap();
 
             let client_pub = client.clone();
             let pubber = tokio::spawn(async move {
@@ -34,7 +33,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, start_reader:
                 let publisher = client_pub.publisher("Topic1");
 
                 for i in 1..=msgs_per_client {
-                    publisher.publish(payload.clone()).await.unwrap();
+                    publisher.publish(&payload).await.unwrap();
 
                     if i.is_multiple_of(1000) {
                         let elapsed = start_inner.elapsed();

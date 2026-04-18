@@ -16,9 +16,7 @@ use fibril_broker::{
     queue_engine::StromaEngine,
 };
 use fibril_metrics::{Metrics, MetricsConfig};
-use fibril_storage::{
-    DeliveryTag, Offset
-};
+use fibril_storage::{DeliveryTag, Offset};
 
 use clap::{Parser, ValueEnum};
 use fibril_util::init_tracing;

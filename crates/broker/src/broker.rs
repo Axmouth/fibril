@@ -123,6 +123,7 @@ impl ConsumerHandle {
 pub struct PublishRequest {
     pub payload: Vec<u8>,
     pub reply: oneshot::Sender<Result<Offset, BrokerError>>,
+    pub require_confirm: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +142,32 @@ impl PublisherHandle {
             .send(PublishRequest {
                 payload: payload.to_vec(),
                 reply: tx,
+                require_confirm: true,
+            })
+            .await
+            .map_err(|_| BrokerError::ChannelClosed)?;
+
+        // // TODO: move to separare task per publisher
+        // tokio::spawn(async move {
+        //     if let Err(e) = rx.await {
+        //         tracing::error!("Error receiving publish response: {e:?}");
+        //     }
+        // });
+
+        Ok(rx)
+    }
+    
+    pub async fn publish_no_confirm(
+        &self,
+        payload: &[u8],
+    ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.publisher
+            .send(PublishRequest {
+                payload: payload.to_vec(),
+                reply: tx,
+                require_confirm: false,
             })
             .await
             .map_err(|_| BrokerError::ChannelClosed)?;
@@ -485,7 +512,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     _ = shutdown.cancelled() => break,
 
                     maybe = rx.recv() => {
-                        let Some(PublishRequest { payload, reply }) = maybe else { break; };
+                        let Some(PublishRequest { payload, reply, require_confirm }) = maybe else { break; };
 
                         let (completion, rx_completion) = KeratinAppendCompletion::pair();
 
@@ -502,10 +529,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             continue;
                         }
 
-                        if let Err(e) = confirm_sink_tx.send((rx_completion, reply)).await {
-                            tracing::error!("Failed to send completion receiver to confirm sink: {e:?}");
-                            // let _ = reply.send(Err(BrokerError::ChannelClosed));
-                            continue;
+                        if require_confirm {
+                            if let Err(e) = confirm_sink_tx.send((rx_completion, reply)).await {
+                                tracing::error!("Failed to send completion receiver to confirm sink: {e:?}");
+                                // let _ = reply.send(Err(BrokerError::ChannelClosed));
+                                continue;
+                            }
                         }
 
                         // // Wait for durability

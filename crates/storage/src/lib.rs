@@ -1,6 +1,4 @@
 use async_trait::async_trait;
-
-use fibril_util::UnixMillis;
 use serde::{Deserialize, Serialize};
 
 pub use stroma_core::{AppendCompletion, AppendResult, CompletionPair, IoError};

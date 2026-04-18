@@ -2,7 +2,7 @@ use std::{path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use fibril_metrics::QueuesStateSnapshot;
-use fibril_storage::{Offset};
+use fibril_storage::Offset;
 use fibril_util::UnixMillis;
 use hashbrown::HashSet;
 pub use stroma_core::{
