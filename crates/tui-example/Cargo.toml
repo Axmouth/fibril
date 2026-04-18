@@ -8,7 +8,7 @@ fibril-broker = { path = "../broker" }
 fibril-protocol = { path = "../protocol" }
 fibril-storage = { path = "../storage" }
 fibril-util = { path = "../util" }
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.29"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

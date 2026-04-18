@@ -203,19 +203,26 @@ Real-world performance will vary significantly depending on:
 * workload characteristics
 
 ## Core areas to expand on:
+* **Faster state loading utilizing snapshots**
+  Will likely pair with compation improvements, to make better use of snapshots feature, so a broker with longer history does not rerun many event sto initiate its state
+
 * **Client libraries**
 
   Building client libraries in various languages to make it easier to interact with the broker and test its
   features in real applications.
+
 * **Admin interface**
 
   A more robust and user-friendly interface for managing the broker, monitoring its state, and performing administrative tasks.
+
 * **Heartbeats and connection management**
 
   Implementing a heartbeat mechanism to detect and handle client disconnections more gracefully.
+
 * **Higher level test cases**
 
   Building more complex test cases that simulate real-world usage patterns, including failure scenarios, to validate the broker's behavior and robustness. Especially around the TCP layer.
+
 * **Dead letter queue and retry mechanisms**
 
   Implementing a dead letter queue for messages that cannot be delivered after a certain number of attempts, and exploring different retry strategies.

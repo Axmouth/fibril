@@ -7,10 +7,6 @@ edition = "2024"
 name = "fibril-server"
 path = "bin/server.rs"
 
-[[bin]]
-name = "fibril-server2"
-path = "bin/server2.rs"
-
 [dependencies]
 fibril-admin = { path = "../admin" }
 fibril-broker = { path = "../broker" }

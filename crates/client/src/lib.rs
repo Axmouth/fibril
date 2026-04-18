@@ -5,11 +5,7 @@ use serde::de::DeserializeOwned;
 use std::{collections::HashMap, sync::Arc};
 use tokio::{
     net::TcpStream,
-    sync::{
-        Mutex, Notify,
-        mpsc::{self, Receiver},
-        oneshot,
-    },
+    sync::{Notify, mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
 
@@ -19,6 +15,7 @@ use fibril_protocol::v1::{frame::ProtoCodec, helper::*, *};
 
 // ===== Public API ============================================================
 
+#[derive(Debug, Clone)]
 pub struct Client {
     engine: Arc<EngineHandle>,
 }
@@ -27,6 +24,7 @@ pub struct Client {
 pub struct Publisher {
     engine: Arc<EngineHandle>,
     topic: String,
+    group: Option<String>,
 }
 
 pub struct Subscription {
@@ -106,10 +104,57 @@ enum Waiter {
     SubscribeAuto(oneshot::Sender<anyhow::Result<AutoAckedSubChannel>>),
 }
 
+#[derive(Debug, Clone)]
+pub struct SubscriptionBuilder<'a> {
+    client: &'a Client,
+    topic: String,
+    group: Option<String>,
+    prefetch: u32,
+}
+
+impl<'a> SubscriptionBuilder<'a> {
+    pub fn group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+
+    pub fn prefetch(mut self, prefetch: u32) -> Self {
+        self.prefetch = prefetch;
+        self
+    }
+
+    /// Messages must be acked explicitly; otherwise they may be redelivered.
+    pub async fn sub_manual_ack(self) -> anyhow::Result<Subscription> {
+        let req = Subscribe {
+            topic: self.topic,
+            group: self.group,
+            prefetch: self.prefetch,
+            auto_ack: false,
+        };
+
+        let rx = self.client.engine.subscribe(req).await?;
+        Ok(Subscription { rx })
+    }
+
+    /// Messages that have been received by the client will not be redelivered..
+    pub async fn sub_auto_ack(self) -> anyhow::Result<AutoAckedSubscription> {
+        let req = Subscribe {
+            topic: self.topic,
+            group: self.group,
+            prefetch: self.prefetch,
+            auto_ack: false,
+        };
+
+        let rx = self.client.engine.subscribe_auto_ack(req).await?;
+        Ok(AutoAckedSubscription { rx })
+    }
+}
+
 // ===== Client API =============================================================
 
 impl Client {
     /// Connect to a server socket.
+    // TODO: More flexible address type and smoother client options for unassuming user, specially auth
     pub async fn connect(addr: &str, opts: ClientOptions) -> anyhow::Result<Self> {
         let stream = TcpStream::connect(addr).await?;
         let framed = Framed::new(stream, ProtoCodec);
@@ -123,21 +168,31 @@ impl Client {
         Publisher {
             engine: self.engine.clone(),
             topic: topic.into(),
+            group: None,
+        }
+    }
+
+    /// Get a handle that you can use to publish messages to a specific grouped topic.
+    pub fn publisher_grouped(
+        &self,
+        topic: impl Into<String>,
+        group: impl Into<String>,
+    ) -> Publisher {
+        Publisher {
+            engine: self.engine.clone(),
+            topic: topic.into(),
+            group: Some(group.into()),
         }
     }
 
     /// Subscribe to receive messages from a topic, with manual acknowledgements.
-    /// Messages must be acked explicitly; otherwise they may be redelivered.
-    pub async fn subscribe(&self, req: Subscribe) -> anyhow::Result<Subscription> {
-        let rx: Receiver<AckableMessage> = self.engine.subscribe(req).await?;
-        Ok(Subscription { rx })
-    }
-
-    /// Subscribe to receive messages from a topic, with automatic acknowledgements.
-    /// Messages that have been received by the client will not be redelivered.
-    pub async fn subscribe_acked(&self, req: Subscribe) -> anyhow::Result<AutoAckedSubscription> {
-        let rx: Receiver<Message> = self.engine.subscribe_auto_ack(req).await?;
-        Ok(AutoAckedSubscription { rx })
+    pub fn subscribe(&'_ self, topic: impl Into<String>) -> SubscriptionBuilder<'_> {
+        SubscriptionBuilder {
+            client: self,
+            topic: topic.into(),
+            group: None,
+            prefetch: 1, // sensible default
+        }
     }
 
     /// Gracefully shut down the client, closing the connection and all subscription channels.
@@ -147,13 +202,15 @@ impl Client {
 }
 
 impl Publisher {
+    // TODO: Smooth out api here to take serializable things?
     pub async fn publish(&self, payload: Vec<u8>) -> anyhow::Result<()> {
-        self.engine.publish(self.topic.clone(), payload).await
+        self.engine.publish(self.topic.clone(), self.group.clone(), payload).await
     }
 
+    // TODO: Smooth out api here to take serializable things?
     pub async fn publish_confirmed(&self, payload: Vec<u8>) -> anyhow::Result<u64> {
         self.engine
-            .publish_confirmed(self.topic.clone(), payload)
+            .publish_confirmed(self.topic.clone(), self.group.clone(), payload)
             .await
     }
 }
@@ -184,7 +241,7 @@ impl AutoAckedSubscription {
 
 // ===== Engine =================================================================
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct EngineHandle {
     tx: mpsc::Sender<Command>,
     shutdown: Arc<Notify>,
@@ -194,10 +251,12 @@ struct EngineHandle {
 enum Command {
     Publish {
         topic: String,
+        group: Option<String>,
         payload: Vec<u8>,
     },
     PublishConfirmed {
         topic: String,
+        group: Option<String>,
         payload: Vec<u8>,
         reply: oneshot::Sender<anyhow::Result<u64>>,
     },
@@ -361,23 +420,23 @@ async fn start_engine(
                 }
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    Command::Publish { topic, payload } => {
+                    Command::Publish { topic, group, payload } => {
                         let req_id = next_req; next_req += 1;
                         let p = Publish {
                             topic,
-                            group: None,
+                            group,
                             partition: 0,
                             require_confirm: false,
                             payload,
                         };
                         let _ = framed.send(encode(Op::Publish, req_id, &p)).await;
                     }
-                    Command::PublishConfirmed { topic, payload, reply } => {
+                    Command::PublishConfirmed { topic, group, payload, reply } => {
                         let req_id = next_req; next_req += 1;
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
                             topic,
-                            group: None,
+                            group,
                             partition: 0,
                             require_confirm: true,
                             payload,
@@ -665,16 +724,17 @@ fn fail_waiter(waiter: Waiter, err: anyhow::Error) {
 }
 
 impl EngineHandle {
-    async fn publish(&self, topic: String, payload: Vec<u8>) -> anyhow::Result<()> {
-        self.tx.send(Command::Publish { topic, payload }).await?;
+    async fn publish(&self, topic: String, group: Option<String>, payload: Vec<u8>) -> anyhow::Result<()> {
+        self.tx.send(Command::Publish { topic, group, payload }).await?;
         Ok(())
     }
 
-    async fn publish_confirmed(&self, topic: String, payload: Vec<u8>) -> anyhow::Result<u64> {
+    async fn publish_confirmed(&self, topic: String, group: Option<String>, payload: Vec<u8>) -> anyhow::Result<u64> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::PublishConfirmed {
                 topic,
+                group,
                 payload,
                 reply: tx,
             })

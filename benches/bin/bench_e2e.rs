@@ -17,8 +17,7 @@ use fibril_broker::{
 };
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_storage::{
-    DeliveryTag, Offset, make_rocksdb_store, make_stroma_store,
-    observable_storage::ObservableStorage,
+    DeliveryTag, Offset
 };
 
 use clap::{Parser, ValueEnum};
@@ -64,7 +63,7 @@ pub struct E2EBench {
     #[arg(long, default_value = "25")]
     pub batch_timeout_ms: u64,
 
-    /// Sync Writes for RocksDB backend
+    /// Sync Writes for storage backend
     #[arg(long, default_value = "false")]
     pub sync_write: bool,
 
@@ -317,7 +316,6 @@ async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
     let _ = std::fs::remove_dir_all(&storage_path);
     std::fs::create_dir_all(&storage_path).unwrap();
 
-    // let _store = make_rocksdb_store(&db_path, cmd.sync_write).unwrap();
     // let store = make_stroma_store(&storage_path, cmd.sync_write).await.unwrap();
     let metrics = Metrics::new(60 * 60);
     // let store = Arc::new(ObservableStorage::new(store, metrics.storage()));

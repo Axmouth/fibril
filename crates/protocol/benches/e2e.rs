@@ -1,18 +1,11 @@
-use std::{
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    time::Duration,
-};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use fibril_broker::{
-    broker::{Broker, BrokerConfig},
-    queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine},
-};
-use fibril_metrics::Metrics;
 use fibril_protocol::v1::{
-    Auth, Hello, Op, PROTOCOL_V1, Publish, Subscribe, frame::ProtoCodec, handler::run_server,
-    helper::encode,
+    Ack, Auth, Deliver, Hello, Op, PROTOCOL_V1, Publish, Subscribe,
+    frame::ProtoCodec,
+    helper::{decode, encode},
 };
-use fibril_util::{StaticAuthHandler, init_tracing};
+use fibril_storage::DeliveryTag;
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant};
 use tokio_util::codec::Framed;
@@ -42,8 +35,71 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
 
             let (mut sink, mut stream) = framed.split();
 
-            let writer = tokio::spawn(async move {
+            let (tx_writer, mut rx_writer) = tokio::sync::mpsc::channel(4096);
+            let tx_writer_clone = tx_writer.clone();
+            let pubber = tokio::spawn(async move {
                 let start_inner = Instant::now();
+
+                for i in 1..=msgs_per_client {
+                    tx_writer
+                        .send(encode(Op::Publish, i as u64, &publ))
+                        .await
+                        .unwrap();
+
+                    if i.is_multiple_of(1000) {
+                        let elapsed = start_inner.elapsed();
+                        println!("Client {j}: sent {i}, after {} secs", elapsed.as_secs_f64());
+                    }
+                }
+            });
+
+            let (tx_acker, mut rx_acker) = tokio::sync::mpsc::channel::<(DeliveryTag, u64)>(4096);
+            let reader = tokio::spawn(async move {
+                let start_inner = Instant::now();
+                let mut i: usize = 0;
+                while let Some(frame) = stream.next().await {
+                    // just drain
+                    let frame = frame.unwrap();
+                    if frame.opcode == Op::Deliver as u16 {
+                        i += 1;
+                        if i.is_multiple_of(1000) {
+                            let elapsed = start_inner.elapsed();
+                            println!(
+                                "Client {j}: received {i}, after {} secs",
+                                elapsed.as_secs_f64()
+                            );
+                        }
+                        let msg: Deliver = decode(&frame);
+                        tx_acker
+                            .send((msg.delivery_tag, frame.request_id))
+                            .await
+                            .unwrap();
+                    }
+                    if i >= msgs_per_client - 1 {
+                        break;
+                    }
+                }
+            });
+
+            let acker = tokio::spawn(async move {
+                while let Some((tag, req_id)) = rx_acker.recv().await {
+                    let ack_msg = encode(
+                        Op::Ack,
+                        req_id,
+                        &Ack {
+                            group: None,
+                            topic: "Topic1".into(),
+                            partition: 1,
+                            tags: vec![tag],
+                        },
+                    );
+
+                    tx_writer_clone.send(ack_msg).await.unwrap();
+                }
+            });
+
+            let sink_task = tokio::spawn(async move {
+                // initial handshake
                 sink.send(encode(
                     Op::Hello,
                     1,
@@ -55,7 +111,8 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                 ))
                 .await
                 .unwrap();
-                sink.send(fibril_protocol::v1::helper::encode(
+
+                sink.send(encode(
                     Op::Auth,
                     2,
                     &Auth {
@@ -65,52 +122,25 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                 ))
                 .await
                 .unwrap();
+
                 sink.send(encode(
                     Op::Subscribe,
                     3,
                     &Subscribe {
-                        auto_ack: true,
+                        auto_ack: false,
                         group: None,
                         topic: "Topic1".into(),
-                        prefetch: 100,
+                        prefetch: 1024,
                     },
                 ))
                 .await
                 .unwrap();
-
-                for i in 0..msgs_per_client {
-                    sink.send(encode(Op::Publish, i as u64, &publ))
-                        .await
-                        .unwrap();
-                    if i % 1000 == 0 {
-                        let elapsed = start_inner.elapsed();
-                        println!("Client {j}: sent {i}, after {} secs", elapsed.as_secs_f64());
-                    }
+                while let Some(msg) = rx_writer.recv().await {
+                    sink.send(msg).await.unwrap();
                 }
             });
 
-            let reader = tokio::spawn(async move {
-                let start_inner = Instant::now();
-                let mut i = 0;
-                while let Some(frame) = stream.next().await {
-                    // just drain
-                    if frame.unwrap().opcode == Op::Deliver as u16 {
-                        i += 1;
-                        if i % 1000 == 0 {
-                            let elapsed = start_inner.elapsed();
-                            println!(
-                                "Client {j}: received {i}, after {} secs",
-                                elapsed.as_secs_f64()
-                            );
-                        }
-                    }
-                    if i >= msgs_per_client - 1 {
-                        break;
-                    }
-                }
-            });
-
-            tokio::join!(reader, writer);
+            tokio::join!(reader, pubber, acker, sink_task);
         }));
     }
 
@@ -133,7 +163,7 @@ async fn main() {
     // init_tracing();
     let (txb, rxb) = oneshot::channel::<()>();
     tokio::spawn(async move {
-        run_load_test(1, 50000, txb).await;
+        run_load_test(15, 50000, txb).await;
     });
 
     rxb.await.unwrap();

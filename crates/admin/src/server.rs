@@ -6,7 +6,7 @@ use axum::{
     routing::{get, get_service},
 };
 use fibril_broker::queue_engine::QueueEngine;
-use fibril_storage::{AppendReceiptExt, Offset, Storage};
+use fibril_storage::{AppendReceiptExt, Offset};
 use fibril_util::StaticAuthHandler;
 use http::{Response, Uri, header};
 use rust_embed::{Embed, RustEmbed};

@@ -3,7 +3,6 @@ name = "fibril-protocol"
 version = "0.1.0"
 edition = "2024"
 
-
 [[bin]]
 name = "e2e"
 path = "benches/e2e.rs"

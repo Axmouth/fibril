@@ -4,14 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "bench-basic"
-path = "bin/basic.rs"
-
-[[bin]]
-name = "publish-throughput"
-path = "bin/publish_throughput.rs"
-
-[[bin]]
 name = "bench-e2e"
 path = "bin/bench_e2e.rs"
 

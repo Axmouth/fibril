@@ -3,6 +3,10 @@ name = "fibril-client"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "e2e_c"
+path = "benches/e2e_c.rs"
+
 [dependencies]
 fibril-protocol = { path = "../protocol" }
 fibril-broker = { path = "../broker" }
