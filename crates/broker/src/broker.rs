@@ -529,13 +529,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             continue;
                         }
 
-                        if require_confirm {
-                            if let Err(e) = confirm_sink_tx.send((rx_completion, reply)).await {
+                        if require_confirm
+                            && let Err(e) = confirm_sink_tx.send((rx_completion, reply)).await {
                                 tracing::error!("Failed to send completion receiver to confirm sink: {e:?}");
                                 // let _ = reply.send(Err(BrokerError::ChannelClosed));
                                 continue;
                             }
-                        }
 
                         // // Wait for durability
                         // match rx_completion.await {

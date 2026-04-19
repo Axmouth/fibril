@@ -39,6 +39,8 @@ pub enum FibrilError {
 
 pub type FibrilResult<T> = Result<T, FibrilError>;
 
+// TODO: Explore From<..> impls for relevant error types
+
 #[derive(Debug, Clone)]
 pub struct Client {
     address: SocketAddr,
@@ -300,24 +302,25 @@ impl Client {
 impl Publisher {
     /// Publish a message with manual confirmation
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
-    pub async fn publish<T: serde::Serialize>(&self, payload: &T) -> FibrilResult<()> {
+    pub async fn publish_unconfirmed<T: serde::Serialize>(&self, payload: &T) -> FibrilResult<()> {
         let bytes = rmp_serde::to_vec(payload)
             .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })?;
         self.engine
-            .publish(self.topic.clone(), self.group.clone(), bytes)
+            .publish_unconfirmed(self.topic.clone(), self.group.clone(), bytes)
             .await
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
     /// Publish a message with automatic confirmation (only returns once the server's publish confirm is received)
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
-    pub async fn publish_confirmed<T: serde::Serialize>(&self, payload: &T) -> FibrilResult<u64> {
+    pub async fn publish<T: serde::Serialize>(&self, payload: &T) -> FibrilResult<u64> {
         let bytes = rmp_serde::to_vec(payload)
             .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })?;
         self.engine
-            .publish_confirmed(self.topic.clone(), self.group.clone(), bytes)
+            .publish(self.topic.clone(), self.group.clone(), bytes)
             .await
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
+        // TODO: Or return a notifier you can await? As like async fn PublishResult::confirmed()
     }
 }
 
@@ -357,7 +360,7 @@ struct EngineHandle {
 
 #[derive(Debug)]
 enum Command {
-    Publish {
+    PublishUnconfirmed {
         topic: String,
         group: Option<String>,
         payload: Vec<u8>,
@@ -491,6 +494,7 @@ where
             .await
             .ok_or(FibrilError::Eof)?
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+        // TODO: prevent progress thiss AuthOk or AuthErr is received, IF auth is used
         match frame.opcode {
             x if x == Op::AuthOk as u16 => {}
             x if x == Op::AuthErr as u16 => {
@@ -539,17 +543,19 @@ where
             tokio::select! {
                 _ = heartbeat.tick() => {
                     if last_seen.elapsed() > timeout {
+                        tracing::warn!("Heartbeat time, exiting event loop.");
                         break;
                     }
                     let _ = framed.send(encode(Op::Ping, 0, &())).await;
                 }
 
                 _ = shutdown.notified() => {
+                    tracing::info!("Shutting down, exiting event loop.");
                     break;
                 }
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    Command::Publish { topic, group, payload } => {
+                    Command::PublishUnconfirmed { topic, group, payload } => {
                         let req_id = next_req; next_req += 1;
                         let p = Publish {
                             topic,
@@ -619,9 +625,13 @@ where
                     }
                 },
                 Some(frame) = framed.next() => {
-                    let frame = match frame { Ok(f) => f, Err(_) => {
-                        break;
-                    } };
+                    let frame = match frame {
+                        Ok(f) => f,
+                        Err(err) => {
+                            tracing::error!("Error receiving frame: {}", err);
+                            break;
+                        }
+                    };
                     last_seen = tokio::time::Instant::now();
 
                     match frame.opcode {
@@ -708,6 +718,7 @@ where
                                         }).await;
 
                                         if res.is_err() {
+                                            tracing::error!("Broken pipe");
                                             break;
                                         }
                                     }
@@ -732,6 +743,7 @@ where
                                         let res = tx.send(Ok(AckableSubChannel { manual: rxm }));
 
                                         if res.is_err() {
+                                            tracing::error!("Broken pipe");
                                             break;
                                         }
                                     }
@@ -749,6 +761,7 @@ where
                                         let res = tx.send(Ok(AutoAckedSubChannel { auto: rxa }));
 
                                         if res.is_err() {
+                                            tracing::error!("Broken pipe");
                                             break;
                                         }
                                     }
@@ -762,9 +775,10 @@ where
                             }
                         }
                         x if x == Op::Ping as u16 => {
-                            let res = framed.send(encode(Op::Pong, frame.request_id, &())).await.map_err(|_e| FibrilError::BrokenPipe);
+                            let res = framed.send(encode(Op::Pong, frame.request_id, &())).await.map_err(|e| FibrilError::Disconnection { msg: e.to_string() });
 
                             if res.is_err() {
+                                tracing::error!("Broken pipe");
                                 break;
                             }
                         }
@@ -780,6 +794,7 @@ where
                                         let res = tx.send(Err(FibrilError::Failure {code: err.code, msg: err.message }));
 
                                         if res.is_err() {
+                                            tracing::error!("Broken pipe");
                                             break;
                                         }
                                     }
@@ -787,6 +802,7 @@ where
                                         let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
 
                                         if res.is_err() {
+                                            tracing::error!("Broken pipe");
                                             break;
                                         }
                                     }
@@ -794,6 +810,7 @@ where
                                         let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
 
                                         if res.is_err() {
+                                            tracing::error!("Broken pipe");
                                             break;
                                         }
                                     }
@@ -866,14 +883,14 @@ fn fail_waiter(waiter: Waiter, err: FibrilError) {
 }
 
 impl EngineHandle {
-    async fn publish(
+    async fn publish_unconfirmed(
         &self,
         topic: String,
         group: Option<String>,
         payload: Vec<u8>,
     ) -> FibrilResult<()> {
         self.tx
-            .send(Command::Publish {
+            .send(Command::PublishUnconfirmed {
                 topic,
                 group,
                 payload,
@@ -883,7 +900,7 @@ impl EngineHandle {
         Ok(())
     }
 
-    async fn publish_confirmed(
+    async fn publish(
         &self,
         topic: String,
         group: Option<String>,

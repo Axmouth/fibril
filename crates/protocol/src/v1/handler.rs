@@ -489,7 +489,7 @@ pub async fn handle_connection(
                         topic: sub.topic,
                         group: sub.group,
                         partition: consumer.partition,
-                        prefetch: sub.prefetch
+                        prefetch: sub.prefetch,
                     },
                 ))
                 .await?;
@@ -579,7 +579,6 @@ pub async fn handle_connection(
                     pubh
                 };
 
-                // TODO: USE PUBLISHER(cache them in a dashmap?)
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let published = if pubreq.require_confirm {
@@ -592,39 +591,43 @@ pub async fn handle_connection(
                             let offset = match offset_rx.await {
                                 Ok(Ok(offset)) => offset,
                                 Ok(Err(err)) => {
-                                    let send_res = tx
-                                        .send(encode(
-                                            Op::Error,
-                                            frame.request_id,
-                                            &ErrorMsg {
-                                                code: 500,
-                                                message: err.to_string(),
-                                            },
-                                        ))
-                                        .await;
+                                    if pubreq.require_confirm {
+                                        let send_res = tx
+                                            .send(encode(
+                                                Op::Error,
+                                                frame.request_id,
+                                                &ErrorMsg {
+                                                    code: 500,
+                                                    message: err.to_string(),
+                                                },
+                                            ))
+                                            .await;
 
-                                    if let Err(err) = send_res {
-                                        tracing::error!("Error sending Publish Confirm: {err}");
+                                        if let Err(err) = send_res {
+                                            tracing::error!("Error sending Publish Confirm: {err}");
+                                        }
+                                        metrics.error();
                                     }
-                                    metrics.error();
                                     return;
                                 }
                                 Err(_err) => {
-                                    let send_res = tx
-                                        .send(encode(
-                                            Op::Error,
-                                            frame.request_id,
-                                            &ErrorMsg {
-                                                code: 500,
-                                                message: "Channel closed".into(),
-                                            },
-                                        ))
-                                        .await;
+                                    if pubreq.require_confirm {
+                                        let send_res = tx
+                                            .send(encode(
+                                                Op::Error,
+                                                frame.request_id,
+                                                &ErrorMsg {
+                                                    code: 500,
+                                                    message: "Channel closed".into(),
+                                                },
+                                            ))
+                                            .await;
 
-                                    if let Err(err) = send_res {
-                                        tracing::error!("Error sending Publish Confirm: {err}");
+                                        if let Err(err) = send_res {
+                                            tracing::error!("Error sending Publish Confirm: {err}");
+                                        }
+                                        metrics.error();
                                     }
-                                    metrics.error();
                                     return;
                                 }
                             };

@@ -29,8 +29,7 @@ async fn main() -> anyhow::Result<()> {
         KeratinConfig::test_default(),
         SnapshotConfig::default(),
     )
-    .await
-    .unwrap();
+    .await?;
     let broker_cfg = BrokerConfig {
         inflight_ttl_ms: 200000,
         expiry_poll_min_ms: 100,

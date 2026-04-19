@@ -33,7 +33,7 @@ async fn run_load_test(
                 let publisher = client_pub.publisher("Topic1");
 
                 for i in 1..=msgs_per_client {
-                    publisher.publish(&payload).await.unwrap();
+                    publisher.publish_unconfirmed(&payload).await.unwrap();
 
                     if i.is_multiple_of(1000) {
                         let elapsed = start_inner.elapsed();
@@ -100,12 +100,12 @@ async fn run_load_test(
 
 #[tokio::main]
 async fn main() {
-    // init_tracing();
+    fibril_util::init_tracing();
     let (txb, rxb) = oneshot::channel::<()>();
     let start_reader = true;
     let start_writer = true;
     tokio::spawn(async move {
-        run_load_test(10, 50000, start_reader, start_writer, txb).await;
+        run_load_test(25, 500000, start_reader, start_writer, txb).await;
     });
 
     rxb.await.unwrap();
