@@ -40,6 +40,7 @@ pub enum FibrilError {
 pub type FibrilResult<T> = Result<T, FibrilError>;
 
 // TODO: Explore From<..> impls for relevant error types
+// TODO: Add opt in event per message sent/received
 
 #[derive(Debug, Clone)]
 pub struct Client {

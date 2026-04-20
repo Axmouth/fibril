@@ -529,6 +529,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             continue;
                         }
 
+                        if let Some(metrics) = metrics.as_ref() {
+                            metrics.published();
+                        }
+
                         if require_confirm
                             && let Err(e) = confirm_sink_tx.send((rx_completion, reply)).await {
                                 tracing::error!("Failed to send completion receiver to confirm sink: {e:?}");
@@ -552,6 +556,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             }
         });
 
+        let metrics = self.metrics.clone();
+        let metrics_pub = self.metrics.clone();
         self.task_group.spawn("confirm_sink_loop", async move {
             while let Some((rx_completion, reply)) = confirm_sink_rx.recv().await {
                 // Wait for durability

@@ -5,6 +5,7 @@ use fibril_broker::{
     queue_engine::StromaEngine,
     test_util::TestState,
 };
+use hashbrown::HashSet;
 use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, offset, test_dir};
 
 async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
@@ -759,8 +760,11 @@ async fn stress_single_consumer(total: usize) {
 
     let (pubh, mut confirmer) = broker.get_publisher("t", &None).await.unwrap();
 
-    for i in 0..total {
-        pubh.publish(b"x").await.unwrap();
+    let mut to_publish_list = (0..total).map(|i| format!("b{i}").as_bytes().to_vec()).collect::<Vec<_>>();
+    to_publish_list.sort_unstable();
+
+    for (i, to_publish) in to_publish_list.iter().enumerate() {
+        pubh.publish(to_publish).await.unwrap();
         if i % 5_000 == 0 {
             println!("Published {}", i);
             while !confirmer.is_empty() {
@@ -781,8 +785,10 @@ async fn stress_single_consumer(total: usize) {
 
     let mut seen = 0;
 
+    let mut received = Vec::new();
     while seen < total {
         let m = sub.recv().await.unwrap();
+        received.push(m.message.payload);
 
         sub.settle(SettleRequest {
             settle_type: SettleType::Ack,
@@ -798,7 +804,21 @@ async fn stress_single_consumer(total: usize) {
         }
     }
 
-    // TODO: verify no duplicates or missing messages via offsets/content
+    // TODO: verify no duplicates or missing messages via offsets as well?
+    received.sort_unstable();
+
+    // Same payloads sent and received
+    assert_eq!(to_publish_list, received);
+
+    let received_len = received.len();
+    let received_set: HashSet<Vec<u8>> = HashSet::from_iter(received.into_iter());
+
+    // No duplicates
+    assert_eq!(received_len, received_set.len());
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+    // No overdelivery
+    assert!(sub.is_empty());
 
     assert_eq!(seen, total);
 }

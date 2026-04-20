@@ -24,24 +24,6 @@ async fn run_load_test(
                 .await
                 .unwrap();
 
-            let client_pub = client.clone();
-            let pubber = tokio::spawn(async move {
-                if !start_writer {
-                    return;
-                }
-                let start_inner = Instant::now();
-                let publisher = client_pub.publisher("Topic1");
-
-                for i in 1..=msgs_per_client {
-                    publisher.publish_unconfirmed(&payload).await.unwrap();
-
-                    if i.is_multiple_of(1000) {
-                        let elapsed = start_inner.elapsed();
-                        println!("Client {j}: sent {i}, after {} secs", elapsed.as_secs_f64());
-                    }
-                }
-            });
-
             let (tx_acker, mut rx_acker) = tokio::sync::mpsc::unbounded_channel::<AckableMessage>();
             let client_reader = client.clone();
             let reader = tokio::spawn(async move {
@@ -70,6 +52,29 @@ async fn run_load_test(
                     tx_acker.send(msg).unwrap();
                     if i >= msgs_per_client - 1 {
                         break;
+                    }
+                }
+            });
+
+            let client_pub = ClientOptions::new()
+                .auth("fibril", "fibril")
+                .connect(address)
+                .await
+                .unwrap();
+
+            let pubber = tokio::spawn(async move {
+                if !start_writer {
+                    return;
+                }
+                let start_inner = Instant::now();
+                let publisher = client_pub.publisher("Topic1");
+
+                for i in 1..=msgs_per_client {
+                    publisher.publish_unconfirmed(&payload).await.unwrap();
+
+                    if i.is_multiple_of(1000) {
+                        let elapsed = start_inner.elapsed();
+                        println!("Client {j}: sent {i}, after {} secs", elapsed.as_secs_f64());
                     }
                 }
             });
@@ -103,9 +108,9 @@ async fn main() {
     fibril_util::init_tracing();
     let (txb, rxb) = oneshot::channel::<()>();
     let start_reader = true;
-    let start_writer = true;
+    let start_writer = false;
     tokio::spawn(async move {
-        run_load_test(25, 500000, start_reader, start_writer, txb).await;
+        run_load_test(10, 500000, start_reader, start_writer, txb).await;
     });
 
     rxb.await.unwrap();

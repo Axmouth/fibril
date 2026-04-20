@@ -118,6 +118,8 @@ pub enum LoopEvent {
     Timeout,
 }
 
+// TODO: Resolve publish drowning out delivery
+
 pub async fn handle_connection(
     socket: tokio::net::TcpStream,
     broker: Arc<Broker<StromaEngine>>,
