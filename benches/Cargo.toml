@@ -7,8 +7,13 @@ edition = "2024"
 name = "bench-e2e"
 path = "bin/bench_e2e.rs"
 
+[[bin]]
+name = "e2e_c"
+path = "bin/e2e_c.rs"
+
 [dependencies]
 fibril-broker = { path = "../crates/broker" }
+fibril-client = { path = "../crates/client" }
 fibril-storage = { path = "../crates/storage" }
 fibril-metrics = { path = "../crates/metrics" }
 fibril-util = { path = "../crates/util" }

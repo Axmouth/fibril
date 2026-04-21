@@ -465,6 +465,11 @@ impl BrokerStats {
     }
 
     #[inline]
+    pub fn redelivered_many(&self, redelivered: u64) {
+        self.redelivered.incr_many(redelivered);
+    }
+
+    #[inline]
     pub fn expired(&self) {
         self.expired.incr();
     }

@@ -763,20 +763,28 @@ async fn stress_single_consumer(total: usize) {
     let mut to_publish_list = (0..total).map(|i| format!("b{i}").as_bytes().to_vec()).collect::<Vec<_>>();
     to_publish_list.sort_unstable();
 
+
+    let confirme_task = tokio::spawn(async move {
+        let mut i = 0;
+        while i < total {
+            confirmer.recv().await.unwrap();
+            i += 1;
+        }
+    });
+
     for (i, to_publish) in to_publish_list.iter().enumerate() {
         pubh.publish(to_publish).await.unwrap();
         if i % 5_000 == 0 {
             println!("Published {}", i);
-            while !confirmer.is_empty() {
-                confirmer.recv().await.unwrap();
-            }
         }
-    }
-    while !confirmer.is_empty() {
-        confirmer.recv().await.unwrap();
     }
 
     println!("Published {} messages", total);
+
+    confirme_task.await.unwrap();
+
+    
+    println!("Confirmed {} messages", total);
 
     let mut sub = broker
         .subscribe("t", None, ConsumerConfig { prefetch: 1000 })

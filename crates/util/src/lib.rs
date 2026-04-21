@@ -16,7 +16,7 @@ pub fn unix_millis() -> UnixMillis {
     }
 }
 
-async fn sleep_until(ts_millis: u64) {
+pub async fn sleep_until(ts_millis: u64) {
     if let Some(deadline) = deadline_instant(ts_millis) {
         tokio::time::sleep_until(deadline).await;
     }

@@ -1021,6 +1021,7 @@ dependencies = [
  "dashmap",
  "fastrand",
  "fibril-broker",
+ "fibril-client",
  "fibril-metrics",
  "fibril-storage",
  "fibril-util",

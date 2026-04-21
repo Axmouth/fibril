@@ -15,6 +15,7 @@ pub struct StoredMessage {
     pub partition: LogId,
     pub offset: Offset,
     pub timestamp: u64,
+    pub retried: u32,
     pub payload: Vec<u8>,
 }
 

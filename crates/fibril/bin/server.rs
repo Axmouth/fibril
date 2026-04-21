@@ -31,10 +31,10 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     let broker_cfg = BrokerConfig {
-        inflight_ttl_ms: 20000,
-        expiry_poll_min_ms: 500,
-        expiry_batch_max: 8192 * 8,
-        delivery_poll_max_ms: 100000, // Make tests timeout if they rely on polling to pass, to indicate the issue
+        inflight_ttl_ms: 30_000,
+        expiry_poll_min_ms: 15_000,
+        expiry_batch_max: 8192,
+        delivery_poll_max_ms: 5_000, // Make tests timeout if they rely on polling to pass, to indicate the issue
     };
     let broker = Broker::new(engine.clone(), broker_cfg, Some(metrics.broker()));
 

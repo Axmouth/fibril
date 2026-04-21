@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./bannerlogo.svg" width="240em">
+  <img src="./bannerlogo.png" width="640em">
 </p>
 
 # Fibril
@@ -57,7 +57,7 @@ The mapping is not strict, but serves as a guiding theme.
 ## Status
 
 Early and incomplete. Expect rough edges, missing features, and frequent changes.
-The early iteration used RocksDB as the persistence layer, but the current version is now fully migrating to Keratin. However the legacy code has still been left in place for now, as it may be useful for reference and comparison as the design has been evolving and parts reimplemented. The related code will be shed soon as the new design stabilizes and achieves the same or better guarantees and performance.
+The early iteration used RocksDB as the persistence layer, but the current version is now fully migrated to Keratin.
 All layers from the broker and below have a decent implementation of graceful shutdown.
 Glad to have reached a point where the current features should reliably work.
 The TCP layer can use meaningful improvements, and the admin interface and internal layers are still very basic.
@@ -203,8 +203,12 @@ Real-world performance will vary significantly depending on:
 * workload characteristics
 
 ## Core areas to expand on:
+
 * **Faster state loading utilizing snapshots**
-  Will likely pair with compation improvements, to make better use of snapshots feature, so a broker with longer history does not rerun many event sto initiate its state
+
+  ~~Will likely pair with compation improvements, to make better use of snapshots feature, so a broker with longer history does not rerun many event sto initiate its state~~
+
+  Update: Largely implemented
 
 * **Client libraries**
 
@@ -215,9 +219,15 @@ Real-world performance will vary significantly depending on:
 
   A more robust and user-friendly interface for managing the broker, monitoring its state, and performing administrative tasks.
 
+* **Event log debug interface**
+
+  Perhaps tucked in admin page somewhere, able to read paginated events to help debug things.
+
 * **Heartbeats and connection management**
 
-  Implementing a heartbeat mechanism to detect and handle client disconnections more gracefully.
+  ~~-Implementing a heartbeat mechanism to detect and handle client disconnections more gracefully.~~
+
+  Update: Largely implemented
 
 * **Higher level test cases**
 
@@ -229,7 +239,9 @@ Real-world performance will vary significantly depending on:
 
 * **Compaction and cleanup**
 
-  Implementing mechanisms for compacting the message log and cleaning up old messages to manage storage usage effectively. As well as shrinking in memory data structures for tracking state after prolonged inactivity.
+  ~~Implementing mechanisms for compacting the message log and cleaning up old messages to manage storage usage effectively. As well as shrinking in memory data structures for tracking state after prolonged inactivity.~~
+
+  Update: Largely implemented
 
 * **Consistent backpressure and flow control**
 
@@ -240,30 +252,40 @@ Real-world performance will vary significantly depending on:
   To improve type safety and code clarity, consider introducing newtype wrappers around primitive types like `u64` for offsets, `String` for topic names, etc. This can help prevent mix-ups and make the code more self-documenting.
 
 ## Potential areas to explore:
+
 * **Protocol improvements**
 
   Adding features like encryption, and more robust framing. Ability to set settings on the connection/queue/message level, etc.
+
 * **Message Expiration and TTL**
 
   Support for expiring messages after a certain time, and handling of expired messages.
+
 * **Expiration and cleanup of queues and other resources**
 
   Implementing mechanisms for expiring and cleaning up unused queues, connections, and other resources to prevent resource leaks.
+
 * **Exactly-once delivery semantics**
 
   Exploring how to implement exactly-once delivery semantics, and the trade-offs involved in achieving this level of guarantee. The goal is to improve delivery guarantees, not necessarily achieve true exactl once semantics in all cases, as that may not be possible or desirable. This would likely involve optional delivery confirmation acknowledgements and publish confirm acks as incremental improvements.
+
 * **Clustering and distributed coordination**
   Exploring how multiple broker instances can work together, share state, and provide high availability.
+
 ### The following features may be explored under a separate advanced routing layer on top of the core broker, to keep the core focused on durability and delivery semantics:
+
 * **Message prioritization**
 
   Allowing messages to be prioritized in the queue, and exploring different strategies for handling priorities.
+
 * **Delayed messages and scheduling**
 
   Support for scheduling messages to be delivered at a later time, and handling of delayed messages.
+
 * **Routing and topic-based messaging**
 
   Implementing more complex routing logic, such as topic-based messaging or content-based routing.
+
 * **Exchanges and bindings**
 
   Implementing concepts like exchanges and bindings to provide more flexible routing options.

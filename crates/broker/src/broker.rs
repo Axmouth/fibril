@@ -4,7 +4,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    task,
     time::Duration,
 };
 
@@ -16,7 +15,6 @@ use tokio_util::sync::CancellationToken;
 
 use fibril_storage::{DeliverableMessage, DeliveryTag, Group, LogId, Offset, StorageError, Topic};
 use fibril_util::unix_millis;
-use tracing::{Instrument, instrument::Instrumented};
 
 use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
 use stroma_core::{
@@ -156,7 +154,7 @@ impl PublisherHandle {
 
         Ok(rx)
     }
-    
+
     pub async fn publish_no_confirm(
         &self,
         payload: &[u8],
@@ -481,8 +479,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         group: &Option<Group>,
     ) -> Result<(PublisherHandle, ConfirmStream), BrokerError> {
         // TODO: make configurable?
-        let (tx, mut rx) = mpsc::channel::<PublishRequest>(16_384);
-        let (confirm_tx, confirm_rx) = mpsc::channel::<Offset>(16_384);
+        let (tx, mut rx) = mpsc::channel::<PublishRequest>(4_096);
+        let (confirm_tx, confirm_rx) = mpsc::channel::<Offset>(4_096);
 
         let engine = self.engine.clone();
         let shutdown = self.shutdown_publishers.clone();
@@ -502,7 +500,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let (confirm_sink_tx, mut confirm_sink_rx) = mpsc::channel::<(
             oneshot::Receiver<Result<AppendResult, IoError>>,
             oneshot::Sender<Result<u64, BrokerError>>,
-        )>(16_384);
+        )>(4_096);
         let metrics = self.metrics.clone();
         self.task_group.spawn("publisher_confirm_sink", async move {
             loop {
@@ -556,16 +554,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             }
         });
 
-        let metrics = self.metrics.clone();
-        let metrics_pub = self.metrics.clone();
         self.task_group.spawn("confirm_sink_loop", async move {
             while let Some((rx_completion, reply)) = confirm_sink_rx.recv().await {
                 // Wait for durability
                 match rx_completion.await {
                     Ok(Ok(append)) => {
-                        if let Some(metrics) = &metrics {
-                            metrics.published();
-                        }
                         let offset = append.base_offset;
                         if let Err(e) = confirm_tx.send(offset).await {
                             tracing::error!("Failed to send confirm offset: {e:?}");
@@ -616,8 +609,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         let prefetch = cfg.prefetch.max(1);
 
-        let (msg_tx, msg_rx) = mpsc::channel::<DeliverableMessage>(prefetch * 128);
-        let (settle_tx, settle_rx) = mpsc::channel::<SettleRequest>(prefetch * 256);
+        let (msg_tx, msg_rx) = mpsc::channel::<DeliverableMessage>(prefetch * 256);
+        let (settle_tx, settle_rx) = mpsc::channel::<SettleRequest>(prefetch * 512);
 
         let consumer = Arc::new(ConsumerState {
             id: consumer_id,
@@ -802,6 +795,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     fn spawn_delivery_loop(self: &Arc<Self>, key: QueueKey, qs: Arc<QueueLoopState>) {
         let broker = self.clone();
+        let metrics = self.metrics.clone();
         self.task_group.spawn("delivery_loop", async move {
             let mut last_epoch_seen = qs.current_epoch();
             let ttl_ms = broker.cfg.inflight_ttl_ms;
@@ -879,6 +873,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                     let mut delivered = 0;
                     let mut rr = qs.rr.fetch_add(1, Ordering::Relaxed) as usize;
+                    let mut redelivered = 0;
                     for d in deliverables {
                         let mut picked = None;
                         for _ in 0..consumers.len() {
@@ -918,11 +913,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                                 partition: key.part,
                                 offset: d.offset,
                                 timestamp: unix_millis(),
+                                retried: d.retries,
                                 payload: d.payload,
                             },
                             delivery_tag: tag,
                             group: key.group.clone(),
                         };
+
+                        if d.retries > 0 {
+                            redelivered += 1;
+                        }
 
                         if c.tx.send(msg).await.is_err() {
                             // TODO: Currently handled by expiry (since we keep inflight until completion),
@@ -942,11 +942,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             tokio::task::yield_now().await;
                         }
                     }
+
+                    if redelivered > 0
+                        && let Some(metrics) = &metrics {
+                            metrics.redelivered_many(redelivered);
+                        }
                 }
 
                 if progressed && matches!(reason, WakeReason::Timer) && epoch_advanced {
                     tracing::warn!(
-                        "delivery progressed only after timer wakeup (possible missed notify) tp={} part={} group={:?}",
+                        "Delivery progressed only after timer wakeup (possible missed notify) tp={} part={} group={:?}",
                         key.tp,
                         key.part,
                         key.group
@@ -971,10 +976,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             Some(ts) => {
                                 let now = unix_millis();
                                 if ts > now {
-                                    tokio::time::sleep(Duration::from_millis(ts - now)).await;
+                                    tracing::info!("Expiry worker sleeping for {} ms..", ts - now);
+                                    fibril_util::sleep_until(ts).await;
                                 }
                             }
                             None => {
+                                // TODO: move to timer?
+                                tracing::info!("Expiry worker sleeping for {} ms..", broker.cfg.expiry_poll_min_ms);
                                 tokio::time::sleep(Duration::from_millis(
                                     broker.cfg.expiry_poll_min_ms
                                 )).await;
@@ -983,6 +991,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     } => {}
                 }
 
+                tracing::info!("Expiry worker running..");
+
                 // Requeue expired inside Stroma (durable)
                 let expired = match broker
                     .engine
@@ -990,13 +1000,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     .await
                 {
                     Ok(v) => v,
-                    Err(_e) => {
+                    Err(err) => {
                         // TODO: log? handle?
+                        tracing::error!("Expiry worker error: {err}");
                         continue;
                     }
                 };
 
-                tracing::debug!(
+                tracing::info!(
                     "Expiry worker woke up, requeued {} expired messages",
                     expired.len()
                 );
@@ -1040,6 +1051,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         qs.wake();
                     }
                 }
+
+                tracing::info!(
+                    "Expiry worker iteration finished"
+                );
             }
         });
     }

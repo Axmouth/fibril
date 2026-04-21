@@ -814,7 +814,7 @@ async fn connect_to_server() -> anyhow::Result<Conn> {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let (tx, rx) = mpsc::channel(1000);
+    let (tx, rx) = mpsc::channel(1024);
 
     execute!(stdout(), Clear(ClearType::All))?;
     execute!(stdout(), cursor::Hide)?;

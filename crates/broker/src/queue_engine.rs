@@ -10,6 +10,7 @@ pub use stroma_core::{
 };
 
 pub struct Deliverable {
+    pub retries: u32,
     pub offset: Offset,
     pub payload: Vec<u8>,
 }
@@ -133,7 +134,7 @@ impl QueueEngine for StromaEngine {
             .await?;
 
         Ok(v.into_iter()
-            .map(|(offset, payload)| Deliverable { offset, payload })
+            .map(|(offset, payload, retries)| Deliverable { offset, payload, retries })
             .collect())
     }
 

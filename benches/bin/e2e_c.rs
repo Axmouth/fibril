@@ -1,5 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
+use clap::Parser;
 use fibril_client::{AckableMessage, ClientOptions};
 use tokio::{sync::oneshot, time::Instant};
 
@@ -32,7 +33,7 @@ async fn run_load_test(
                 }
                 let mut sub = client_reader
                     .subscribe("Topic1")
-                    .prefetch(1024)
+                    .prefetch(1024 * 64)
                     .sub_manual_ack()
                     .await
                     .unwrap();
@@ -45,7 +46,7 @@ async fn run_load_test(
                     if i.is_multiple_of(1000) {
                         let elapsed = start_inner.elapsed();
                         println!(
-                            "Client {j}: received {i}, after {} secs",
+                            "Client {j}: received {i}, after {:.5} secs",
                             elapsed.as_secs_f64()
                         );
                     }
@@ -74,18 +75,18 @@ async fn run_load_test(
 
                     if i.is_multiple_of(1000) {
                         let elapsed = start_inner.elapsed();
-                        println!("Client {j}: sent {i}, after {} secs", elapsed.as_secs_f64());
+                        println!("Client {j}: sent {i}, after {:.5} secs", elapsed.as_secs_f64());
                     }
                 }
             });
 
-            let _acker = tokio::spawn(async move {
+            let acker = tokio::spawn(async move {
                 while let Some(msg) = rx_acker.recv().await {
                     msg.ack().await.unwrap();
                 }
             });
 
-            tokio::join!(reader, pubber);
+            tokio::join!(reader, pubber, acker);
         }));
     }
 
@@ -103,14 +104,43 @@ async fn run_load_test(
     txb.send(()).unwrap();
 }
 
+#[derive(Parser, Debug)]
+#[command(author, version, about)]
+struct Args {
+    /// Number of concurrent clients
+    #[arg(short, long, default_value_t = 10)]
+    clients: usize,
+
+    /// Messages per client
+    #[arg(short, long, default_value_t = 500_000)]
+    messages: usize,
+
+    /// Enable reader
+    #[arg(long, default_value_t = false)]
+    reader: bool,
+
+    /// Enable writer
+    #[arg(long, default_value_t = false)]
+    writer: bool,
+}
+
 #[tokio::main]
 async fn main() {
     fibril_util::init_tracing();
+
+    let args = Args::parse();
+
     let (txb, rxb) = oneshot::channel::<()>();
-    let start_reader = true;
-    let start_writer = false;
+
     tokio::spawn(async move {
-        run_load_test(10, 500000, start_reader, start_writer, txb).await;
+        run_load_test(
+            args.clients,
+            args.messages,
+            args.reader,
+            args.writer,
+            txb,
+        )
+        .await;
     });
 
     rxb.await.unwrap();
