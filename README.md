@@ -8,7 +8,7 @@ Fibril is an experimental message broker built to explore queue semantics, durab
 
 This project is intentionally small and evolving. It is not production-ready, and it does not (yet) aim to compete with existing systems. The goal is to understand the problem space by building and using the pieces directly.
 
-Every layer and component is meant to be reusable, if desired, and the broker layer embeddable, effectively a channel factory with durabiltity and delivery semantics. While I do not expect this to be a common use case, it is an interesting possibility that the core broker logic could be used as a library for building custom brokers or even embedded directly in service instances.
+Every layer and component is meant to be reusable, if desired, and the broker layer embeddable, effectively a channel factory with durability and delivery semantics. While I do not expect this to be a common use case, it is an interesting possibility that the core broker logic could be used as a library for building custom brokers or even embedded directly in service instances.
 
 ## What's here
 
@@ -184,7 +184,7 @@ This represents the current working baseline. Some areas (DLQ, retries, protocol
 
 Informal internal benchmarks under preferential settings (broker level, skipping the TCP layer) show that the current implementation has been observed to sustain:
 
-* ~100k messages/sec (publish + consume)
+* ~100k messages/sec (for both publish and consume, each)
 * 1KB payloads
 * durable path enabled, with delivery verified under these conditions
 
@@ -196,24 +196,38 @@ Memory usage increases as expected with larger payloads, and throughout decrease
 
 These numbers are intended as a rough sanity check of the current design, not as a representative benchmark.
 
+Current performance tuning is aimed at architectural efficiency. Further micro-optimizations (zero-copy paths or Arc<str> for topic names, etc) are considered but not yet necessary or the main point of contention.
+
 Real-world performance will vary significantly depending on:
 
 * network overhead (TCP layer is still basic)
 * batching and client behavior
 * workload characteristics
 
+For a more regular usecase, ~400 rps of ~48kb size messages, running over around 5 hours, a 150mb peak memory working set was observed, with the memory usage falling back to the 40-70mb range. (Test using a full networked client/server setup)
+This kind of workload likely matches a lot more real world use cases.
+
+Any performance numbers mentioned are subject to change(but the trend is generally positive for performance and efficiency).
+
 ## Core areas to expand on:
+
+* **Removal of inefficiencies in command dispatch**
+  - Potential microbatching incoming publish events, settle events and append together, clogging the command queue and other inputs much less on high load
+  - Create Queue handles at Query Engine and Stroma level that do not need to seek the relevant Queue handle on every command, plus related checks
 
 * **Faster state loading utilizing snapshots**
 
-  ~~Will likely pair with compation improvements, to make better use of snapshots feature, so a broker with longer history does not rerun many event sto initiate its state~~
+  ~~Will likely pair with compation improvements, to make better use of snapshots feature, so a broker with longer history does not rerun many events to initiate its state~~
 
-  Update: Largely implemented
+  Compaction implemented and loading uses snapshots, vastly improving startup after long usage.
 
 * **Client libraries**
 
   Building client libraries in various languages to make it easier to interact with the broker and test its
   features in real applications.
+
+  Rust client is currently in decent shape.
+  Considered languages: Typescript, Python, C#
 
 * **Admin interface**
 
@@ -227,7 +241,7 @@ Real-world performance will vary significantly depending on:
 
   ~~-Implementing a heartbeat mechanism to detect and handle client disconnections more gracefully.~~
 
-  Update: Largely implemented
+  Update: Heartbeat plus timeout implemented on server side and Rust client.
 
 * **Higher level test cases**
 
@@ -239,13 +253,16 @@ Real-world performance will vary significantly depending on:
 
 * **Compaction and cleanup**
 
-  ~~Implementing mechanisms for compacting the message log and cleaning up old messages to manage storage usage effectively. As well as shrinking in memory data structures for tracking state after prolonged inactivity.~~
+  ~~Implementing mechanisms for compacting the message log and cleaning up old messages to manage storage usage effectively.~~ As well as shrinking in memory data structures for tracking state after prolonged inactivity. Plus potentially full teardown of relevant in memory structures after a longer period.
 
-  Update: Largely implemented
+  Update: Periodic compaction of event and message log implemented
 
 * **Consistent backpressure and flow control**
 
   Exploring strategies for applying backpressure to producers and consumers based on the broker's current load and capacity. (Note: Backpressure exists to some extent thanks to bounded channels in key parts of the broker)
+
+* **Memory/storage limits and message capacity limits**
+  Throttle(asymptotically?) publishers based on getting near a memory or undelivered message limit
 
 * **Transition from primitive types to newtype wrappers**
 
@@ -267,10 +284,16 @@ Real-world performance will vary significantly depending on:
 
 * **Exactly-once delivery semantics**
 
-  Exploring how to implement exactly-once delivery semantics, and the trade-offs involved in achieving this level of guarantee. The goal is to improve delivery guarantees, not necessarily achieve true exactl once semantics in all cases, as that may not be possible or desirable. This would likely involve optional delivery confirmation acknowledgements and publish confirm acks as incremental improvements.
+  Exploring how to implement exactly-once delivery semantics, and the trade-offs involved in achieving this level of guarantee. The goal is to improve delivery guarantees, not necessarily achieve true exactly once semantics in all cases, as that may not be possible or desirable. This would likely involve optional delivery confirmation acknowledgements and publish confirm acks as incremental improvements.
 
 * **Clustering and distributed coordination**
+
   Exploring how multiple broker instances can work together, share state, and provide high availability.
+
+* **Direct delivery/Express lane/Speculative Egress**
+
+  A mode to use when we know there are subscribers to a "channel" we publish to. Likely would need to use a shortcut to delivery loop, and confirm on disk write even if the consumer has already act, for zero durability compromise. Might end up too niche however, as stored messages, which came earlier, have higher priority anyway. Also could end up not worth the hassle for what it brings.
+  Potential implementation details: Semaphore to open lane slots, when we know ready state empty and no pending publishes. confirm on disk fsync as usual. Explore if better to directly set to inflight together with enqueue.
 
 ### The following features may be explored under a separate advanced routing layer on top of the core broker, to keep the core focused on durability and delivery semantics:
 

@@ -1,15 +1,19 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use fibril_metrics::QueuesStateSnapshot;
 use fibril_storage::Offset;
 use fibril_util::UnixMillis;
-use hashbrown::HashSet;
+use std::collections::HashSet;
+use stroma_core::MessageHeaders;
 pub use stroma_core::{
     AppendCompletion, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
 };
 
 pub struct Deliverable {
+    pub published: Option<u64>,
+    pub publish_received: Option<u64>,
+    pub extra_headers: HashMap<String, String>,
     pub retries: u32,
     pub offset: Offset,
     pub payload: Vec<u8>,
@@ -70,6 +74,7 @@ pub trait QueueEngine {
         tp: &str,
         part: u32,
         group: Option<&str>,
+        headers: &MessageHeaders,
         payload: &[u8],
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError>;
@@ -134,7 +139,14 @@ impl QueueEngine for StromaEngine {
             .await?;
 
         Ok(v.into_iter()
-            .map(|(offset, payload, retries)| Deliverable { offset, payload, retries })
+            .map(|(offset, headers, payload, retries)| Deliverable {
+                offset,
+                payload,
+                retries,
+                extra_headers: headers.extra,
+                publish_received: headers.publish_received,
+                published: headers.published,
+            })
             .collect())
     }
 
@@ -194,11 +206,12 @@ impl QueueEngine for StromaEngine {
         tp: &str,
         part: u32,
         group: Option<&str>,
+        headers: &MessageHeaders,
         payload: &[u8],
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError> {
         self.inner
-            .append_message(tp, part, group, payload, completion)
+            .append_message(tp, part, group, headers, payload, completion)
             .await?;
 
         Ok(())

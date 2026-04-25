@@ -1,3 +1,16 @@
+run instructions:
+cargo run --bin fibril
+
+simple cli:
+# publish
+fibril-cli pub topic "hello"
+
+# consume
+fibril-cli sub topic
+
+direct delivery/express lane (enqueue and inflight immediately whole also sending to delivery loop shortcut)
+"Fibril utilizes speculative delivery: messages are streamed to available consumers immediately upon receipt, while persistence to Keratin happens in parallel. Producer acknowledgments are strictly deferred until disk synchronization is confirmed, ensuring zero-compromise durability with sub-millisecond egress."
+
 deny topic etc names beyond simple fs compatible setups
 
 stroma/keratin graceful shutdown

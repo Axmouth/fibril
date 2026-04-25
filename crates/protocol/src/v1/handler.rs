@@ -20,7 +20,7 @@ use fibril_broker::{
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_storage::{Group, Topic};
-use fibril_util::AuthHandler;
+use fibril_util::{AuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
 use tokio::{
     net::TcpListener,
@@ -162,7 +162,7 @@ pub async fn handle_connection(
         tracing::debug!("[writer] START");
 
         let metrics = metrics_clone.clone();
-        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(10));
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(2));
         ticker.tick().await;
 
         let mut non_flushed_messages: usize = 0;
@@ -176,10 +176,6 @@ pub async fn handle_connection(
                 _ = &mut shutdown_rx => {
                     tracing::debug!("[writer] Received shutdown signal");
                     break;
-                }
-
-                _ = ticker.tick() => {
-                    // pass
                 }
 
                 // ---- Normal write path ---------------------------------------
@@ -199,8 +195,16 @@ pub async fn handle_connection(
                         metrics.bytes_out(size as u64);
                         non_flushed_messages += 1;
                         bytes_queued += size;
+
+                        if non_flushed_messages >= 32 {
+                            let _ = writer.flush().await;
+                            non_flushed_messages = 0;
+                            last_flush = Instant::now();
+                            bytes_queued = 0;
+                        }
                     }
                 }
+
                 Some(frame) = frame_rx_low_prio.recv() => {
                     tracing::debug!(
                         "[writer] Writing Frame to tcp socket.. code={}",
@@ -220,15 +224,19 @@ pub async fn handle_connection(
                     }
                 }
 
+                _ = ticker.tick() => {
+                    // pass
+                }
+
                 // ---- Channel closed ------------------------------------------
                 else => break,
             }
 
             // Basic batching logic, limited by message number, time or total bytes to send
             if (non_flushed_messages > 0)
-                && (non_flushed_messages >= 16
-                    || last_flush.elapsed().as_millis() >= 15
-                    || bytes_queued >= 1024 * 1024)
+                && (non_flushed_messages >= 128
+                    || bytes_queued >= 1024 * 1024
+                    || last_flush.elapsed().as_millis() >= 5)
             {
                 if let Err(err) = writer.flush().await {
                     metrics.error();
@@ -660,13 +668,16 @@ pub async fn handle_connection(
                 if let Some(sub) = state.subs.get(&key)
                     && !sub.auto_ack
                 {
-                    for tag in ack.tags {
-                        let req = SettleRequest {
-                            delivery_tag: tag,
-                            settle_type: SettleType::Ack,
-                        };
-                        let _ = sub.state_settler.send(req).await;
-                    }
+                    let state_settler = sub.state_settler.clone();
+                    tokio::spawn(async move {
+                        for tag in ack.tags {
+                            let req = SettleRequest {
+                                delivery_tag: tag,
+                                settle_type: SettleType::Ack,
+                            };
+                            let _ = state_settler.send(req).await;
+                        }
+                    });
                 }
                 // Unknown subscription: ignore (idempotent)
             }
@@ -681,15 +692,18 @@ pub async fn handle_connection(
                 if let Some(sub) = state.subs.get(&key)
                     && !sub.auto_ack
                 {
-                    for tag in nack.tags {
-                        let req = SettleRequest {
-                            delivery_tag: tag,
-                            settle_type: SettleType::Nack {
-                                requeue: Some(nack.requeue),
-                            },
-                        };
-                        let _ = sub.state_settler.send(req).await;
-                    }
+                    let state_settler = sub.state_settler.clone();
+                    tokio::spawn(async move {
+                        for tag in nack.tags {
+                            let req = SettleRequest {
+                                delivery_tag: tag,
+                                settle_type: SettleType::Nack {
+                                    requeue: Some(nack.requeue),
+                                },
+                            };
+                            let _ = state_settler.send(req).await;
+                        }
+                    });
                 }
                 // Unknown subscription: ignore (idempotent)
             }
@@ -704,21 +718,25 @@ pub async fn handle_connection(
                 if let Some(sub) = state.subs.get(&key)
                     && !sub.auto_ack
                 {
-                    for tag in reject.tags {
-                        let req = SettleRequest {
-                            delivery_tag: tag,
-                            settle_type: SettleType::Reject {
-                                requeue: Some(reject.requeue),
-                            },
-                        };
-                        let _ = sub.state_settler.send(req).await;
-                    }
+                    let state_settler = sub.state_settler.clone();
+                    tokio::spawn(async move {
+                        for tag in reject.tags {
+                            let req = SettleRequest {
+                                delivery_tag: tag,
+                                settle_type: SettleType::Reject {
+                                    requeue: Some(reject.requeue),
+                                },
+                            };
+                            let _ = state_settler.send(req).await;
+                        }
+                    });
                 }
                 // Unknown subscription: ignore (idempotent)
             }
 
             // -------- PUBLISH ------------------------------------------------
             x if x == Op::Publish as u16 => {
+                let publish_received = unix_millis();
                 let pubreq: Publish = decode(&frame);
 
                 // TODO: Handle confirm stream properly
@@ -733,37 +751,51 @@ pub async fn handle_connection(
                     publishers.insert(key.clone(), pubh.clone());
                     pubh
                 };
-
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
-                // let _permit = permit;
-                let published: Result<
-                    tokio::sync::oneshot::Receiver<Result<u64, fibril_broker::broker::BrokerError>>,
-                    fibril_broker::broker::BrokerError,
-                > = if pubreq.require_confirm {
-                    publisher.publish(&pubreq.payload).await
-                } else {
-                    publisher.publish_no_confirm(&pubreq.payload).await
-                };
-                let res = pub_tx
-                    .send((published, pubreq.require_confirm, frame.request_id))
-                    .await;
-                if let Err(_err) = res {
-                    tracing::error!("pub_tx closed : {}", pub_tx.is_closed());
-                    let _ = frame_tx_pub
-                        .send(encode(
-                            Op::Error,
-                            frame.request_id,
-                            &ErrorMsg {
-                                code: 500,
-                                message: "Broken pipe".into(),
-                            },
-                        ))
+                tokio::spawn(async move {
+                    // let _permit = permit;
+                    let published: Result<
+                        tokio::sync::oneshot::Receiver<
+                            Result<u64, fibril_broker::broker::BrokerError>,
+                        >,
+                        fibril_broker::broker::BrokerError,
+                    > = if pubreq.require_confirm {
+                        publisher
+                            .publish(
+                                &pubreq.payload,
+                                Some(pubreq.published),
+                                Some(publish_received),
+                                HashMap::new(),
+                            )
+                            .await
+                    } else {
+                        publisher
+                            .publish_no_confirm(
+                                &pubreq.payload,
+                                Some(pubreq.published),
+                                Some(publish_received),
+                                HashMap::new(),
+                            )
+                            .await
+                    };
+                    let res = pub_tx
+                        .send((published, pubreq.require_confirm, frame.request_id))
                         .await;
-                    tracing::error!("Error sending published to queue");
-                }
-                // tokio::spawn(async move {
-                // });
+                    if let Err(_err) = res {
+                        let _ = frame_tx_pub
+                            .send(encode(
+                                Op::Error,
+                                frame.request_id,
+                                &ErrorMsg {
+                                    code: 500,
+                                    message: "Broken pipe".into(),
+                                },
+                            ))
+                            .await;
+                        tracing::error!("Error sending published to queue");
+                    }
+                });
             }
 
             // -------- PING ---------------------------------------------------
@@ -802,7 +834,7 @@ pub async fn handle_connection(
 
     let _ = shutdown_tx.send(());
     writer_task.abort();
-    pub_queue_handle.abort();
+    pub_queue_handle.await?;
 
     for (_, sub) in state.subs.drain() {
         sub.task.abort();

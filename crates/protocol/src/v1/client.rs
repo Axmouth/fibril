@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fibril_storage::DeliveryTag;
+use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 
 use crate::v1::{
@@ -68,6 +69,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             group: None,
             partition: 0,
             require_confirm: true,
+            published: unix_millis(),
             payload: b"hello".to_vec(),
         },
     ))

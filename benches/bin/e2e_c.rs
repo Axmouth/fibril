@@ -33,7 +33,7 @@ async fn run_load_test(
                 }
                 let mut sub = client_reader
                     .subscribe("Topic1")
-                    .prefetch(1024 * 64)
+                    .prefetch(1024 * 8)
                     .sub_manual_ack()
                     .await
                     .unwrap();
@@ -75,7 +75,10 @@ async fn run_load_test(
 
                     if i.is_multiple_of(1000) {
                         let elapsed = start_inner.elapsed();
-                        println!("Client {j}: sent {i}, after {:.5} secs", elapsed.as_secs_f64());
+                        println!(
+                            "Client {j}: sent {i}, after {:.5} secs",
+                            elapsed.as_secs_f64()
+                        );
                     }
                 }
             });
@@ -133,14 +136,7 @@ async fn main() {
     let (txb, rxb) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
-        run_load_test(
-            args.clients,
-            args.messages,
-            args.reader,
-            args.writer,
-            txb,
-        )
-        .await;
+        run_load_test(args.clients, args.messages, args.reader, args.writer, txb).await;
     });
 
     rxb.await.unwrap();

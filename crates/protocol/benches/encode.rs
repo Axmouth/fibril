@@ -15,6 +15,7 @@ fn bench_encode_decode(c: &mut Criterion) {
             group: None,
             partition: 0,
             payload: payload.clone(),
+            published: 1234567890,
             require_confirm: false,
         },
     );

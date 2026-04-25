@@ -6,6 +6,7 @@ use fibril_protocol::v1::{
     helper::{decode, encode},
 };
 use fibril_storage::DeliveryTag;
+use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant};
 use tokio_util::codec::Framed;
@@ -24,6 +25,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                 payload: payload.clone(),
                 partition: 1,
                 require_confirm: true,
+                published: unix_millis(),
             };
             let stream = TcpStream::connect(SocketAddr::V4(SocketAddrV4::new(
                 Ipv4Addr::from([127, 0, 0, 1]),

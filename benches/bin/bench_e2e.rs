@@ -19,7 +19,7 @@ use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_storage::{DeliveryTag, Offset};
 
 use clap::{Parser, ValueEnum};
-use fibril_util::init_tracing;
+use fibril_util::{init_tracing, unix_millis};
 
 #[derive(Parser, Debug)]
 #[command(name = "fibril")]
@@ -184,7 +184,11 @@ async fn producer_task(
         let size = 1024;
         let payload = make_payload(msg_id, producer_id, size);
 
-        let recv = publisher.publish(&payload).await.unwrap();
+        let published = unix_millis();
+        let recv = publisher
+            .publish(&payload, Some(published), Some(published), HashMap::new())
+            .await
+            .unwrap();
         recvs.push(recv);
         // broker.publish(&topic, None, &payload).await.unwrap();
         // prod_id_tx.send((msg_id, producer_id)).unwrap();

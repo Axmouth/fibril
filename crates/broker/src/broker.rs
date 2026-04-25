@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -13,12 +13,15 @@ use fibril_metrics::{BrokerStats, QueuesStateSnapshot};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use fibril_storage::{DeliverableMessage, DeliveryTag, Group, LogId, Offset, StorageError, Topic};
+use fibril_storage::{
+    DeliverableMessage, DeliveryTag, Group, LogId, Offset, StorageError, StoredMessage, Topic,
+};
 use fibril_util::unix_millis;
 
 use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
 use stroma_core::{
-    AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion, StromaError,
+    AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
+    MessageHeaders, StromaError,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -122,6 +125,9 @@ pub struct PublishRequest {
     pub payload: Vec<u8>,
     pub reply: oneshot::Sender<Result<Offset, BrokerError>>,
     pub require_confirm: bool,
+    pub published: Option<u64>,
+    pub publish_received: Option<u64>,
+    pub extra: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +139,9 @@ impl PublisherHandle {
     pub async fn publish(
         &self,
         payload: &[u8],
+        published: Option<u64>,
+        publish_received: Option<u64>,
+        extra: HashMap<String, String>,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();
 
@@ -141,6 +150,9 @@ impl PublisherHandle {
                 payload: payload.to_vec(),
                 reply: tx,
                 require_confirm: true,
+                published,
+                publish_received,
+                extra,
             })
             .await
             .map_err(|_| BrokerError::ChannelClosed)?;
@@ -158,6 +170,9 @@ impl PublisherHandle {
     pub async fn publish_no_confirm(
         &self,
         payload: &[u8],
+        published: Option<u64>,
+        publish_received: Option<u64>,
+        extra: HashMap<String, String>,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();
 
@@ -166,6 +181,9 @@ impl PublisherHandle {
                 payload: payload.to_vec(),
                 reply: tx,
                 require_confirm: false,
+                publish_received,
+                published,
+                extra,
             })
             .await
             .map_err(|_| BrokerError::ChannelClosed)?;
@@ -209,7 +227,7 @@ impl TaskGroup {
         }
     }
 
-    fn spawn<F>(&self, name: &'static str, fut: F)
+    fn spawn<F>(&self, _name: &'static str, fut: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
@@ -219,7 +237,7 @@ impl TaskGroup {
         }
 
         #[cfg(tokio_unstable)]
-        let handle = tokio::task::Builder::new().name(name).spawn(fut).unwrap();
+        let handle = tokio::task::Builder::new().name(_name).spawn(fut).unwrap();
 
         #[cfg(not(tokio_unstable))]
         let handle = tokio::spawn(fut);
@@ -229,6 +247,15 @@ impl TaskGroup {
             handle.abort(); // defensive, extremely rare
         } else {
             self.handles.push(handle);
+            let mut handles = Vec::new();
+            while let Some(handle) = self.handles.pop() {
+                if !handle.is_finished() {
+                    handles.push(handle);
+                }
+            }
+            for handle in handles {
+                self.handles.push(handle);
+            }
         }
     }
 
@@ -479,8 +506,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         group: &Option<Group>,
     ) -> Result<(PublisherHandle, ConfirmStream), BrokerError> {
         // TODO: make configurable?
-        let (tx, mut rx) = mpsc::channel::<PublishRequest>(4_096);
-        let (confirm_tx, confirm_rx) = mpsc::channel::<Offset>(4_096);
+        let (tx, mut rx) = mpsc::channel::<PublishRequest>(16384);
+        let (confirm_tx, confirm_rx) = mpsc::channel::<Offset>(16384);
 
         let engine = self.engine.clone();
         let shutdown = self.shutdown_publishers.clone();
@@ -500,9 +527,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let (confirm_sink_tx, mut confirm_sink_rx) = mpsc::channel::<(
             oneshot::Receiver<Result<AppendResult, IoError>>,
             oneshot::Sender<Result<u64, BrokerError>>,
-        )>(4_096);
+        )>(16384);
         let metrics = self.metrics.clone();
-        self.task_group.spawn("publisher_confirm_sink", async move {
+        let qs_clone = qs.clone();
+        let batch: Vec<PublishRequest> = Vec::new();
+        // TODO: do not keep handle(memory leak effective) if relevant connection dies
+        self.task_group.spawn("publisher__sink", async move {
             loop {
                 tokio::select! {
                     biased;
@@ -510,14 +540,20 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     _ = shutdown.cancelled() => break,
 
                     maybe = rx.recv() => {
-                        let Some(PublishRequest { payload, reply, require_confirm }) = maybe else { break; };
+                        let Some(PublishRequest { payload, reply, require_confirm, published, publish_received, extra }) = maybe else { break; };
 
                         let (completion, rx_completion) = KeratinAppendCompletion::pair();
+                        let headers = MessageHeaders {
+                            published,
+                            publish_received,
+                            extra,
+                        };
 
                         let publish_res = engine.publish(
                             &tp,
                             part,
                             group.as_deref(),
+                            &headers,
                             &payload,
                             completion,
                         ).await;
@@ -536,7 +572,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                                 tracing::error!("Failed to send completion receiver to confirm sink: {e:?}");
                                 // let _ = reply.send(Err(BrokerError::ChannelClosed));
                                 continue;
-                            }
+                        } else {
+                            qs.wake();
+                        }
 
                         // // Wait for durability
                         // match rx_completion.await {
@@ -554,6 +592,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             }
         });
 
+        // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("confirm_sink_loop", async move {
             while let Some((rx_completion, reply)) = confirm_sink_rx.recv().await {
                 // Wait for durability
@@ -576,7 +615,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     }
                 }
 
-                qs.wake();
+                qs_clone.wake();
             }
         });
 
@@ -609,8 +648,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         let prefetch = cfg.prefetch.max(1);
 
-        let (msg_tx, msg_rx) = mpsc::channel::<DeliverableMessage>(prefetch * 256);
-        let (settle_tx, settle_rx) = mpsc::channel::<SettleRequest>(prefetch * 512);
+        let (msg_tx, msg_rx) = mpsc::channel::<DeliverableMessage>(prefetch * 4);
+        let (settle_tx, settle_rx) = mpsc::channel::<SettleRequest>(prefetch * 8);
 
         let consumer = Arc::new(ConsumerState {
             id: consumer_id,
@@ -663,6 +702,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         mut settle_rx: mpsc::Receiver<SettleRequest>,
     ) {
         let broker = self.clone();
+        // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("settle_loop", async move {
             loop {
                 tokio::select! {
@@ -703,6 +743,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             );
             return;
         };
+        self.tags_by_key_offset
+            .remove(&(tag_rec.key.clone(), tag_rec.offset));
 
         // validate consumer
         if tag_rec.consumer_id != consumer.id {
@@ -796,6 +838,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     fn spawn_delivery_loop(self: &Arc<Self>, key: QueueKey, qs: Arc<QueueLoopState>) {
         let broker = self.clone();
         let metrics = self.metrics.clone();
+        // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("delivery_loop", async move {
             let mut last_epoch_seen = qs.current_epoch();
             let ttl_ms = broker.cfg.inflight_ttl_ms;
@@ -907,12 +950,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         c.inc_inflight();
 
                         let msg = DeliverableMessage {
-                            message: fibril_storage::StoredMessage {
+                            message: StoredMessage {
                                 topic: key.tp.clone(),
                                 group: key.group.clone(),
                                 partition: key.part,
                                 offset: d.offset,
-                                timestamp: unix_millis(),
+                                published: d.published,
+                                publish_received: d.publish_received,
                                 retried: d.retries,
                                 payload: d.payload,
                             },
@@ -928,13 +972,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             // TODO: Currently handled by expiry (since we keep inflight until completion),
                             //          but you could also immediately decrement inflight and requeue here.
                             qs.consumers.remove(&c.id);
-                            qs.wake();
                         } else {
                             if let Some(metrics) = &broker.metrics {
                                 metrics.delivered();
                             }
                             progressed = true;
                         }
+                        qs.wake();
 
                         delivered += 1;
 

@@ -121,7 +121,14 @@ impl TestState {
             .get_publisher(topic, &group.map(|s| s.into()))
             .await?;
 
-        let off = pubh.publish(payload).await?;
+        let off = pubh
+            .publish(
+                payload,
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            )
+            .await?;
 
         Ok(())
     }
@@ -145,7 +152,15 @@ impl TestState {
 
         let mut offsets = Vec::with_capacity(n);
         for _ in 0..n {
-            offsets.push(pubh.publish(payload).await?);
+            offsets.push(
+                pubh.publish(
+                    payload,
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                )
+                .await?,
+            );
         }
         Ok(())
     }

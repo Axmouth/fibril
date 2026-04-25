@@ -8,7 +8,7 @@ use fibril_protocol::v1::{
     Auth, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Pong, Publish, Subscribe,
     SubscribeOk, frame::ProtoCodec, helper::Conn,
 };
-use fibril_util::init_tracing;
+use fibril_util::{init_tracing, unix_millis};
 use futures::{SinkExt, StreamExt};
 use ratatui::{
     Terminal,
@@ -82,17 +82,17 @@ fn next_req_id() -> u64 {
 
 fn random_idle_duration() -> Duration {
     // 200ms – 3s idle
-    Duration::from_millis(fastrand::u64(200..3000))
+    Duration::from_millis(fastrand::u64(20..300))
 }
 
 fn random_burst_size() -> usize {
     // 1–8 messages per burst
-    fastrand::usize(1..=800)
+    fastrand::usize(1..=1600)
 }
 
 fn random_inter_message_delay() -> Duration {
     // 20–200ms between messages in a burst
-    Duration::from_millis(fastrand::u64(20..200))
+    Duration::from_millis(fastrand::u64(2..20))
 }
 
 fn init_app() -> App {
@@ -715,7 +715,8 @@ pub async fn visual_client(
                         group: Some("g1".to_string()),
                         partition: 0,
                         require_confirm: false,
-                        payload: b"hello".to_vec(),
+                        published: unix_millis(),
+                        payload: b"hello".repeat(10000).to_vec(),
                     })
                     .await
                     .is_err()

@@ -6,7 +6,7 @@ use fibril_broker::{
     test_util::TestState,
 };
 use hashbrown::HashSet;
-use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, offset, test_dir};
+use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, test_dir};
 
 async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
     let dir = test_dir("broker_test");
@@ -36,7 +36,14 @@ async fn broker_delivers_messages_in_order() {
     let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
 
     for _ in 0..5 {
-        pubh.publish(b"x").await.unwrap();
+        pubh.publish(
+            b"x",
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
     }
 
     let mut sub = broker
@@ -65,7 +72,14 @@ async fn broker_respects_prefetch() {
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for i in 0..10 {
-        pubh.publish(b"x").await.unwrap();
+        pubh.publish(
+            b"x",
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
         println!("Published message {}", i);
     }
 
@@ -97,7 +111,14 @@ async fn ack_releases_prefetch_slot() {
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for i in 0..5 {
-        pubh.publish(format!("x{i}").as_bytes()).await.unwrap();
+        pubh.publish(
+            format!("x{i}").as_bytes(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
     }
 
     let mut sub = broker
@@ -166,7 +187,14 @@ async fn ack_releases_prefetch_slot2() {
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for i in 0..5 {
-        pubh.publish(format!("x{i}").as_bytes()).await.unwrap();
+        pubh.publish(
+            format!("x{i}").as_bytes(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
     }
 
     let mut sub = broker
@@ -229,7 +257,14 @@ async fn broker_redelivers_after_expiry() {
     let (broker, _dir) = open_test_broker().await;
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
-    pubh.publish(b"x").await.unwrap();
+    pubh.publish(
+        b"x",
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap();
     println!("Published message with offset 0");
 
     let mut sub = broker
@@ -260,7 +295,14 @@ async fn broker_distributes_across_consumers() {
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for _ in 0..10 {
-        pubh.publish(b"x").await.unwrap();
+        pubh.publish(
+            b"x",
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
     }
 
     let mut c1 = broker
@@ -284,7 +326,14 @@ async fn slow_consumer_does_not_starve_fast_one() {
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for _ in 0..5 {
-        pubh.publish(b"x").await.unwrap();
+        pubh.publish(
+            b"x",
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
     }
 
     let mut slow = broker
@@ -760,9 +809,10 @@ async fn stress_single_consumer(total: usize) {
 
     let (pubh, mut confirmer) = broker.get_publisher("t", &None).await.unwrap();
 
-    let mut to_publish_list = (0..total).map(|i| format!("b{i}").as_bytes().to_vec()).collect::<Vec<_>>();
+    let mut to_publish_list = (0..total)
+        .map(|i| format!("b{i}").as_bytes().to_vec())
+        .collect::<Vec<_>>();
     to_publish_list.sort_unstable();
-
 
     let confirme_task = tokio::spawn(async move {
         let mut i = 0;
@@ -773,7 +823,14 @@ async fn stress_single_consumer(total: usize) {
     });
 
     for (i, to_publish) in to_publish_list.iter().enumerate() {
-        pubh.publish(to_publish).await.unwrap();
+        pubh.publish(
+            to_publish,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
         if i % 5_000 == 0 {
             println!("Published {}", i);
         }
@@ -783,7 +840,6 @@ async fn stress_single_consumer(total: usize) {
 
     confirme_task.await.unwrap();
 
-    
     println!("Confirmed {} messages", total);
 
     let mut sub = broker

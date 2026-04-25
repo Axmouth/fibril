@@ -76,6 +76,7 @@ pub struct Publish {
     pub group: Option<String>,
     pub require_confirm: bool,
     pub payload: Vec<u8>,
+    pub published: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

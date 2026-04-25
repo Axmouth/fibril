@@ -1,4 +1,5 @@
 use fibril_storage::DeliveryTag;
+use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use std::{
@@ -365,11 +366,13 @@ enum Command {
         topic: String,
         group: Option<String>,
         payload: Vec<u8>,
+        published: u64,
     },
     PublishConfirmed {
         topic: String,
         group: Option<String>,
         payload: Vec<u8>,
+        published: u64,
         reply: oneshot::Sender<FibrilResult<u64>>,
     },
     Subscribe {
@@ -544,7 +547,7 @@ where
             tokio::select! {
                 _ = heartbeat.tick() => {
                     if last_seen.elapsed() > timeout {
-                        tracing::warn!("Heartbeat time, exiting event loop.");
+                        tracing::warn!("Heartbeat timout, exiting event loop.");
                         break;
                     }
                     let _ = framed.send(encode(Op::Ping, 0, &())).await;
@@ -556,7 +559,7 @@ where
                 }
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    Command::PublishUnconfirmed { topic, group, payload } => {
+                    Command::PublishUnconfirmed { topic, group, payload, published } => {
                         let req_id = next_req; next_req += 1;
                         let p = Publish {
                             topic,
@@ -564,10 +567,11 @@ where
                             partition: 0,
                             require_confirm: false,
                             payload,
+                            published,
                         };
                         let _ = framed.send(encode(Op::Publish, req_id, &p)).await;
                     }
-                    Command::PublishConfirmed { topic, group, payload, reply } => {
+                    Command::PublishConfirmed { topic, group, payload, published, reply } => {
                         let req_id = next_req; next_req += 1;
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
@@ -576,6 +580,7 @@ where
                             partition: 0,
                             require_confirm: true,
                             payload,
+                            published,
                         };
                         let _ = framed.send(encode(Op::Publish, req_id, &p)).await;
                     }
@@ -890,11 +895,13 @@ impl EngineHandle {
         group: Option<String>,
         payload: Vec<u8>,
     ) -> FibrilResult<()> {
+        let published = unix_millis();
         self.tx
             .send(Command::PublishUnconfirmed {
                 topic,
                 group,
                 payload,
+                published,
             })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
@@ -908,11 +915,13 @@ impl EngineHandle {
         payload: Vec<u8>,
     ) -> FibrilResult<u64> {
         let (tx, rx) = oneshot::channel();
+        let published = unix_millis();
         self.tx
             .send(Command::PublishConfirmed {
                 topic,
                 group,
                 payload,
+                published,
                 reply: tx,
             })
             .await
