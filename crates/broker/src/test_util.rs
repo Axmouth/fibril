@@ -66,7 +66,7 @@ impl TestState {
     pub async fn start_broker(&mut self, id: &str) -> Result<(), BrokerError> {
         let dir = self.broker_dirs.entry(id.to_string()).or_insert_with(|| {
             println!("Creating test dir for broker {id}");
-            test_dir(id)
+            test_dir!(id)
         });
 
         if let Some(_b) = self.brokers.get(id) {

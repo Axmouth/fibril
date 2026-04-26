@@ -22,11 +22,11 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     // TODO configurable stuff
-    let root = "test_data/server";
+    let root = "server_data";
     let metrics = Metrics::new(3 * 60 * 60); // 3 hours
     let engine = StromaEngine::open(
         &root,
-        KeratinConfig::test_default(),
+        KeratinConfig::default(),
         SnapshotConfig::default(),
     )
     .await?;

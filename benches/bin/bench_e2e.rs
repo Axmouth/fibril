@@ -186,7 +186,7 @@ async fn producer_task(
 
         let published = unix_millis();
         let recv = publisher
-            .publish(&payload, Some(published), Some(published), HashMap::new())
+            .publish(&payload, published, published, HashMap::new())
             .await
             .unwrap();
         recvs.push(recv);
@@ -314,7 +314,7 @@ async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
         expiry_poll_min_ms: 100,
     };
 
-    let storage_path = format!("bench_data/{}", fastrand::u64(..)); // stable path for E2E
+    let storage_path = format!("{}/bench_data/{}", env!("CARGO_MANIFEST_DIR"), fastrand::u64(..)); // stable path for E2E
     let _ = std::fs::remove_dir_all(&storage_path);
     std::fs::create_dir_all(&storage_path).unwrap();
 

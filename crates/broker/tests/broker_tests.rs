@@ -9,7 +9,7 @@ use hashbrown::HashSet;
 use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, test_dir};
 
 async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
-    let dir = test_dir("broker_test");
+    let dir = test_dir!("broker_test");
 
     let engine = StromaEngine::open(
         &dir.root,

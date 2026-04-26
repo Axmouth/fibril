@@ -109,6 +109,8 @@ pub struct Deliver {
     pub partition: u32,
     pub offset: u64,
     pub delivery_tag: DeliveryTag,
+    pub published: u64,
+    pub publish_received: u64,
     pub payload: Vec<u8>,
 }
 

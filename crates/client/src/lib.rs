@@ -20,7 +20,7 @@ use fibril_protocol::v1::{frame::ProtoCodec, helper::*, *};
 
 // ===== Public API ============================================================
 
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 pub enum FibrilError {
     #[error("Client was disconnected: {msg}")]
     Disconnection { msg: String },
@@ -58,7 +58,7 @@ pub struct Publisher {
 }
 
 pub struct Subscription {
-    rx: mpsc::Receiver<AckableMessage>,
+    rx: mpsc::Receiver<InflightMessage>,
 }
 
 pub struct AutoAckedSubscription {
@@ -78,50 +78,65 @@ impl Message {
 }
 
 pub enum SettleRequest {
-    Ack { offset: DeliveryTag },
-    Nack { offset: DeliveryTag, requeue: bool },
-    Reject { offset: DeliveryTag, requeue: bool },
+    Ack { tag: DeliveryTag, request_id: u64, response: oneshot::Sender<Result<(), FibrilError>> },
+    Nack { tag: DeliveryTag, requeue: bool, request_id: u64, response: oneshot::Sender<Result<(), FibrilError>> },
+    Reject { tag: DeliveryTag, requeue: bool, request_id: u64, response: oneshot::Sender<Result<(), FibrilError>> },
 }
 
-pub struct AckableMessage {
+#[must_use]
+pub struct InflightMessage {
     pub delivery_tag: DeliveryTag,
     pub payload: Vec<u8>,
+    pub request_id: u64,
     settle: oneshot::Sender<SettleRequest>,
 }
 
-impl AckableMessage {
-    pub async fn ack(self) -> FibrilResult<Message> {
+impl InflightMessage {
+    pub async fn complete(self) -> FibrilResult<Message> {
+        let (tx, rx) = oneshot::channel();
         self.settle
             .send(SettleRequest::Ack {
-                offset: self.delivery_tag,
+                tag: self.delivery_tag,
+                request_id: self.request_id,
+                response: tx,
             })
             .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_| FibrilError::BrokenPipe)??;
         Ok(Message {
             delivery_tag: self.delivery_tag,
             payload: self.payload,
         })
     }
 
-    pub async fn nack(self) -> FibrilResult<Message> {
+    pub async fn fail(self) -> FibrilResult<Message> {
+        let (tx, rx) = oneshot::channel();
         self.settle
             .send(SettleRequest::Nack {
-                offset: self.delivery_tag,
+                tag: self.delivery_tag,
                 requeue: false,
+                request_id: self.request_id,
+                response: tx,
             })
             .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_| FibrilError::BrokenPipe)??;
         Ok(Message {
             delivery_tag: self.delivery_tag,
             payload: self.payload,
         })
     }
 
-    pub async fn reject(self, requeue: bool) -> FibrilResult<Message> {
+    // TODO: Implement timeout. Could just markinflight with now + timeout?
+    pub async fn retry(self) -> FibrilResult<Message> {
+        let (tx, rx) = oneshot::channel();
         self.settle
-            .send(SettleRequest::Reject {
-                offset: self.delivery_tag,
-                requeue,
+            .send(SettleRequest::Nack {
+                tag: self.delivery_tag,
+                requeue: true,
+                request_id: self.request_id,
+                response: tx,
             })
             .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_| FibrilError::BrokenPipe)??;
         Ok(Message {
             delivery_tag: self.delivery_tag,
             payload: self.payload,
@@ -327,12 +342,12 @@ impl Publisher {
 }
 
 impl Subscription {
-    pub async fn recv(&mut self) -> Option<AckableMessage> {
+    pub async fn recv(&mut self) -> Option<InflightMessage> {
         self.rx.recv().await
     }
 
     // TODO: use tokio_stream::wrappers::ReceiverStream?
-    pub fn into_stream(self) -> impl futures::Stream<Item = AckableMessage> {
+    pub fn into_stream(self) -> impl futures::Stream<Item = InflightMessage> {
         futures::stream::unfold(self, |mut s| async move {
             s.rx.recv().await.map(|msg| (msg, s))
         })
@@ -386,16 +401,19 @@ enum Command {
     Ack {
         sub_id: u64,
         delivery_tag: DeliveryTag,
+        request_id: u64,
     },
     Nack {
         sub_id: u64,
         delivery_tag: DeliveryTag,
         requeue: bool,
+        request_id: u64,
     },
     Reject {
         sub_id: u64,
         delivery_tag: DeliveryTag,
         requeue: bool,
+        request_id: u64,
     },
 }
 
@@ -406,12 +424,12 @@ struct AutoAckedSubChannel {
 
 #[derive(Debug)]
 struct AckableSubChannel {
-    manual: mpsc::Receiver<AckableMessage>,
+    manual: mpsc::Receiver<InflightMessage>,
 }
 
 #[derive(Debug, Clone)]
 enum SubDelivery {
-    Manual(mpsc::Sender<AckableMessage>),
+    Manual(mpsc::Sender<InflightMessage>),
     Auto(mpsc::Sender<Message>),
 }
 
@@ -543,14 +561,29 @@ where
         let timeout = std::time::Duration::from_secs(heartbeat_secs * 3);
         let mut last_seen = tokio::time::Instant::now();
 
+        // In the engine task, before the select! loop:
+        let mut fatal_error: Option<FibrilError> = None;
+
+        // Helper closure (or just an inline pattern):
+        macro_rules! send_or_die {
+            ($framed:expr, $frame:expr, $err_slot:expr) => {
+                if let Err(e) = $framed.send($frame).await {
+                    $err_slot = Some(FibrilError::Disconnection { msg: e.to_string() });
+                    break;
+                }
+            };
+        }
+
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
                     if last_seen.elapsed() > timeout {
                         tracing::warn!("Heartbeat timout, exiting event loop.");
+                        fatal_error = Some(FibrilError::Disconnection { msg: "heartbeat timeout".into() });
                         break;
                     }
-                    let _ = framed.send(encode(Op::Ping, 0, &())).await;
+                    let req_id = next_req; next_req = next_req.wrapping_add(1);
+                    send_or_die!(framed, encode(Op::Ping, req_id, &()), fatal_error)
                 }
 
                 _ = shutdown.notified() => {
@@ -560,7 +593,7 @@ where
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
                     Command::PublishUnconfirmed { topic, group, payload, published } => {
-                        let req_id = next_req; next_req += 1;
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = Publish {
                             topic,
                             group,
@@ -569,10 +602,10 @@ where
                             payload,
                             published,
                         };
-                        let _ = framed.send(encode(Op::Publish, req_id, &p)).await;
+                        send_or_die!(framed, encode(Op::Publish, req_id, &p) , fatal_error)
                     }
                     Command::PublishConfirmed { topic, group, payload, published, reply } => {
-                        let req_id = next_req; next_req += 1;
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
                             topic,
@@ -582,19 +615,19 @@ where
                             payload,
                             published,
                         };
-                        let _ = framed.send(encode(Op::Publish, req_id, &p)).await;
+                        send_or_die!(framed, encode(Op::Publish, req_id, &p), fatal_error)
                     }
                     Command::Subscribe { req, reply } => {
-                        let req_id = next_req; next_req += 1;
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::SubscribeManual(reply));
-                        let _ = framed.send(encode(Op::Subscribe, req_id, &req)).await;
+                        send_or_die!(framed, encode(Op::Subscribe, req_id, &req), fatal_error)
                     }
                     Command::SubscribeAutoAcked { req, reply } => {
-                        let req_id = next_req; next_req += 1;
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::SubscribeAuto(reply));
-                        let _ = framed.send(encode(Op::Subscribe, req_id, &req)).await;
+                        send_or_die!(framed, encode(Op::Subscribe, req_id, &req),fatal_error)
                     }
-                    Command::Ack { sub_id, delivery_tag } => {
+                    Command::Ack { sub_id, delivery_tag, request_id } => {
                         if let Some(sub) = subs.get(&sub_id) {
                             let ack = Ack {
                                 topic: sub.topic.clone(),
@@ -602,10 +635,10 @@ where
                                 partition: sub.partition,
                                 tags: vec![delivery_tag],
                             };
-                            let _ = framed.send(encode(Op::Ack, 0, &ack)).await;
+                            send_or_die!(framed, encode(Op::Ack, request_id, &ack), fatal_error)
                         }
                     }
-                    Command::Nack { sub_id, delivery_tag, requeue } => {
+                    Command::Nack { sub_id, delivery_tag, requeue, request_id } => {
                         if let Some(sub) = subs.get(&sub_id) {
                             let nack = Nack {
                                 topic: sub.topic.clone(),
@@ -614,10 +647,10 @@ where
                                 tags: vec![delivery_tag],
                                 requeue,
                             };
-                            let _ = framed.send(encode(Op::Nack, 0, &nack)).await;
+                           send_or_die!(framed, encode(Op::Nack, request_id, &nack), fatal_error)
                         }
                     }
-                    Command::Reject { sub_id, delivery_tag, requeue } => {
+                    Command::Reject { sub_id, delivery_tag, requeue, request_id } => {
                         if let Some(sub) = subs.get(&sub_id) {
                             let rej = Reject {
                                 topic: sub.topic.clone(),
@@ -626,7 +659,7 @@ where
                                 tags: vec![delivery_tag],
                                 requeue,
                             };
-                            let _ = framed.send(encode(Op::Reject, 0, &rej)).await;
+                            send_or_die!(framed, encode(Op::Reject, request_id, &rej), fatal_error)
                         }
                     }
                 },
@@ -635,6 +668,7 @@ where
                         Ok(f) => f,
                         Err(err) => {
                             tracing::error!("Error receiving frame: {}", err);
+                            fatal_error = Some(FibrilError::DeserializationFailure { msg: err.to_string() });
                             break;
                         }
                     };
@@ -669,10 +703,11 @@ where
                                 match &sub.delivery {
                                     SubDelivery::Manual(tx) => {
                                         let (ack_tx, ack_rx) = oneshot::channel();
-                                        let msg = AckableMessage {
+                                        let msg = InflightMessage {
                                             delivery_tag: d.delivery_tag,
                                             payload: d.payload,
                                             settle: ack_tx,
+                                            request_id: frame.request_id,
                                         };
 
                                         if tx.send(msg).await.is_ok() {
@@ -687,25 +722,43 @@ where
                                                     Ok(settle_request) = ack_rx => {
                                                         match settle_request {
                                                             // TODO: Find way to notify of engine disconnection if this happens.
-                                                            SettleRequest::Ack { offset } => {
-                                                                let _ = cmd_tx.send(Command::Ack {
+                                                            SettleRequest::Ack { tag, request_id, response } => {
+                                                                let res = cmd_tx.send(Command::Ack {
                                                                     sub_id,
-                                                                    delivery_tag: offset,
+                                                                    delivery_tag: tag,
+                                                                    request_id,
                                                                 }).await;
+                                                                if let Err(_err) = res {
+                                                                    let _ = response.send(Err(FibrilError::BrokenPipe));
+                                                                } else {
+                                                                    let _ = response.send(Ok(()));
+                                                                }
                                                             }
-                                                            SettleRequest::Nack { offset, requeue } => {
-                                                                let _ = cmd_tx.send(Command::Nack {
+                                                            SettleRequest::Nack { tag, requeue, request_id, response } => {
+                                                                let res = cmd_tx.send(Command::Nack {
                                                                     sub_id,
-                                                                    delivery_tag: offset,
+                                                                    delivery_tag: tag,
                                                                     requeue,
+                                                                    request_id,
                                                                 }).await;
+                                                                if let Err(_err) = res {
+                                                                    let _ = response.send(Err(FibrilError::BrokenPipe));
+                                                                } else {
+                                                                    let _ = response.send(Ok(()));
+                                                                }
                                                             }
-                                                            SettleRequest::Reject { offset, requeue } => {
-                                                                let _ = cmd_tx.send(Command::Reject {
+                                                            SettleRequest::Reject { tag, requeue, request_id, response } => {
+                                                                let res = cmd_tx.send(Command::Reject {
                                                                     sub_id,
-                                                                    delivery_tag: offset,
+                                                                    delivery_tag: tag,
                                                                     requeue,
+                                                                    request_id,
                                                                 }).await;
+                                                                if let Err(_err) = res {
+                                                                    let _ = response.send(Err(FibrilError::BrokenPipe));
+                                                                } else {
+                                                                    let _ = response.send(Ok(()));
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -724,8 +777,7 @@ where
                                         }).await;
 
                                         if res.is_err() {
-                                            tracing::error!("Broken pipe");
-                                            break;
+                                            tracing::warn!("Broken pipe");
                                         }
                                     }
                                 }
@@ -749,8 +801,7 @@ where
                                         let res = tx.send(Ok(AckableSubChannel { manual: rxm }));
 
                                         if res.is_err() {
-                                            tracing::error!("Broken pipe");
-                                            break;
+                                            tracing::warn!("Broken pipe");
                                         }
                                     }
 
@@ -767,8 +818,7 @@ where
                                         let res = tx.send(Ok(AutoAckedSubChannel { auto: rxa }));
 
                                         if res.is_err() {
-                                            tracing::error!("Broken pipe");
-                                            break;
+                                            tracing::warn!("Broken pipe");
                                         }
                                     }
 
@@ -783,8 +833,9 @@ where
                         x if x == Op::Ping as u16 => {
                             let res = framed.send(encode(Op::Pong, frame.request_id, &())).await.map_err(|e| FibrilError::Disconnection { msg: e.to_string() });
 
-                            if res.is_err() {
-                                tracing::error!("Broken pipe");
+                            if let Err(err) = res {
+                                tracing::warn!("Broken pipe");
+                                fatal_error = Some(err);
                                 break;
                             }
                         }
@@ -800,24 +851,21 @@ where
                                         let res = tx.send(Err(FibrilError::Failure {code: err.code, msg: err.message }));
 
                                         if res.is_err() {
-                                            tracing::error!("Broken pipe");
-                                            break;
+                                            tracing::warn!("Broken pipe");
                                         }
                                     }
                                     Waiter::SubscribeManual(tx) => {
                                         let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
 
                                         if res.is_err() {
-                                            tracing::error!("Broken pipe");
-                                            break;
+                                            tracing::warn!("Broken pipe");
                                         }
                                     }
                                     Waiter::SubscribeAuto(tx) => {
                                         let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
 
                                         if res.is_err() {
-                                            tracing::error!("Broken pipe");
-                                            break;
+                                            tracing::warn!("Broken pipe");
                                         }
                                     }
                                 }
@@ -825,6 +873,7 @@ where
                                 // connection-level error
                                 // fail all waiters
                                 let msg = format!("connection error {}: {}", err.code, err.message);
+                                fatal_error = Some(FibrilError::Disconnection { msg: msg.clone() });
                                 for (_, w) in waiters.drain() {
                                     fail_waiter(w, FibrilError::Disconnection { msg: msg.clone() });
                                 }
@@ -858,9 +907,7 @@ where
         for (_, waiter) in waiters.drain() {
             fail_waiter(
                 waiter,
-                FibrilError::Disconnection {
-                    msg: "engine shutdown".into(),
-                },
+                fatal_error.clone().unwrap_or_else(|| FibrilError::Disconnection { msg: "engine shutdown".into() }),
             );
         }
 
@@ -929,7 +976,7 @@ impl EngineHandle {
         rx.await.map_err(|_e| FibrilError::BrokenPipe)?
     }
 
-    async fn subscribe(&self, req: Subscribe) -> FibrilResult<mpsc::Receiver<AckableMessage>> {
+    async fn subscribe(&self, req: Subscribe) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::Subscribe { req, reply: tx })
