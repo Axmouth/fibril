@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use clap::Parser;
-use fibril_client::{AckableMessage, ClientOptions};
+use fibril_client::{InflightMessage, ClientOptions};
 use tokio::{sync::oneshot, time::Instant};
 
 async fn run_load_test(
@@ -25,7 +25,7 @@ async fn run_load_test(
                 .await
                 .unwrap();
 
-            let (tx_acker, mut rx_acker) = tokio::sync::mpsc::unbounded_channel::<AckableMessage>();
+            let (tx_acker, mut rx_acker) = tokio::sync::mpsc::unbounded_channel::<InflightMessage>();
             let client_reader = client.clone();
             let reader = tokio::spawn(async move {
                 if !start_reader {
@@ -85,7 +85,7 @@ async fn run_load_test(
 
             let acker = tokio::spawn(async move {
                 while let Some(msg) = rx_acker.recv().await {
-                    msg.ack().await.unwrap();
+                    msg.complete().await.unwrap();
                 }
             });
 

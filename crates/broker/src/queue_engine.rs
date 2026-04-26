@@ -11,8 +11,8 @@ pub use stroma_core::{
 };
 
 pub struct Deliverable {
-    pub published: Option<u64>,
-    pub publish_received: Option<u64>,
+    pub published: u64,
+    pub publish_received: u64,
     pub extra_headers: HashMap<String, String>,
     pub retries: u32,
     pub offset: Offset,

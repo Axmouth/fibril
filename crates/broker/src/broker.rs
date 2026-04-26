@@ -125,8 +125,8 @@ pub struct PublishRequest {
     pub payload: Vec<u8>,
     pub reply: oneshot::Sender<Result<Offset, BrokerError>>,
     pub require_confirm: bool,
-    pub published: Option<u64>,
-    pub publish_received: Option<u64>,
+    pub published: u64,
+    pub publish_received: u64,
     pub extra: HashMap<String, String>,
 }
 
@@ -139,8 +139,8 @@ impl PublisherHandle {
     pub async fn publish(
         &self,
         payload: &[u8],
-        published: Option<u64>,
-        publish_received: Option<u64>,
+        published: u64,
+        publish_received: u64,
         extra: HashMap<String, String>,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();
@@ -170,8 +170,8 @@ impl PublisherHandle {
     pub async fn publish_no_confirm(
         &self,
         payload: &[u8],
-        published: Option<u64>,
-        publish_received: Option<u64>,
+        published: u64,
+        publish_received: u64,
         extra: HashMap<String, String>,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();

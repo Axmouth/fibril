@@ -295,6 +295,9 @@ Any performance numbers mentioned are subject to change(but the trend is general
   A mode to use when we know there are subscribers to a "channel" we publish to. Likely would need to use a shortcut to delivery loop, and confirm on disk write even if the consumer has already act, for zero durability compromise. Might end up too niche however, as stored messages, which came earlier, have higher priority anyway. Also could end up not worth the hassle for what it brings.
   Potential implementation details: Semaphore to open lane slots, when we know ready state empty and no pending publishes. confirm on disk fsync as usual. Explore if better to directly set to inflight together with enqueue.
 
+* **Message lease extension while it is being processed**
+  Especially some manner for the client side to keep the lease alive as long as connection is intact
+
 ### The following features may be explored under a separate advanced routing layer on top of the core broker, to keep the core focused on durability and delivery semantics:
 
 * **Message prioritization**

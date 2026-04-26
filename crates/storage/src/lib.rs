@@ -14,8 +14,8 @@ pub struct StoredMessage {
     pub group: Option<Group>,
     pub partition: LogId,
     pub offset: Offset,
-    pub published: Option<u64>,
-    pub publish_received: Option<u64>,
+    pub published: u64,
+    pub publish_received: u64,
     pub retried: u32,
     pub payload: Vec<u8>,
 }

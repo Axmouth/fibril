@@ -82,7 +82,7 @@ fn next_req_id() -> u64 {
 
 fn random_idle_duration() -> Duration {
     // 200ms – 3s idle
-    Duration::from_millis(fastrand::u64(20..300))
+    Duration::from_millis(fastrand::u64(200..3000))
 }
 
 fn random_burst_size() -> usize {
@@ -92,7 +92,7 @@ fn random_burst_size() -> usize {
 
 fn random_inter_message_delay() -> Duration {
     // 20–200ms between messages in a burst
-    Duration::from_millis(fastrand::u64(2..20))
+    Duration::from_millis(fastrand::u64(20..200))
 }
 
 fn init_app() -> App {
@@ -769,12 +769,15 @@ pub async fn visual_client(
         }
     });
 
+    // let mut latencies = Vec::new();
+    let mut last_laten = Instant::now();
     while let Some(frame) = stream.next().await {
         let frame = frame?;
         tracing::debug!("Received frame with code {:?}", frame.opcode);
         match frame.opcode {
             x if x == Op::Deliver as u16 => {
                 let d: Deliver = fibril_protocol::v1::helper::decode(&frame);
+                // latencies.push(unix_millis() - d.published);
                 tracing::debug!("CLIENT got DELIVER offset={}", d.offset);
                 let _ = vis_tx
                     .send(VisualEvent::Deliver {
@@ -801,9 +804,57 @@ pub async fn visual_client(
             }
             _ => {}
         }
+
+        // let elapsed = last_laten.elapsed();
+
+        // if elapsed.as_secs() >= 2 {
+        //     last_laten = Instant::now();
+
+        //     latencies.sort();
+
+        //     compute_stats(latencies.clone());
+
+        //     latencies.clear();
+        // }
     }
 
     Ok(())
+}
+
+fn compute_stats(mut data: Vec<u64>) {
+    assert!(!data.is_empty(), "data cannot be empty");
+
+    let n = data.len();
+
+    // Sort ascending
+    data.sort_unstable();
+
+    // Mean
+    let sum: u128 = data.iter().map(|&x| x as u128).sum();
+    let mean = sum as f64 / n as f64;
+
+    // Median (p50)
+    let median = if n % 2 == 0 {
+        (data[n / 2 - 1] + data[n / 2]) as f64 / 2.0
+    } else {
+        data[n / 2] as f64
+    };
+
+    // Percentile helper
+    let percentile = |p: f64| -> u64 {
+        let rank = (p * (n as f64 - 1.0)).round() as usize;
+        data[rank]
+    };
+
+    let p50 = percentile(0.50);
+    let p95 = percentile(0.95);
+    let p99 = percentile(0.99);
+
+    println!("mean: {:.2}", mean);
+    println!("median: {:.2}", median);
+    println!("p50: {}", p50);
+    println!("p95: {}", p95);
+    println!("p99: {}", p99);
 }
 
 async fn connect_to_server() -> anyhow::Result<Conn> {

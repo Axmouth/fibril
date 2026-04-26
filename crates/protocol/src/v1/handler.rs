@@ -605,6 +605,8 @@ pub async fn handle_connection(
                             partition: msg.message.partition,
                             offset: msg.message.offset,
                             delivery_tag: msg.delivery_tag,
+                            published: msg.message.published,
+                            publish_received: msg.message.publish_received,
                             payload: msg.message.payload.clone(),
                         };
 
@@ -754,7 +756,6 @@ pub async fn handle_connection(
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
                 tokio::spawn(async move {
-                    // let _permit = permit;
                     let published: Result<
                         tokio::sync::oneshot::Receiver<
                             Result<u64, fibril_broker::broker::BrokerError>,
@@ -764,8 +765,8 @@ pub async fn handle_connection(
                         publisher
                             .publish(
                                 &pubreq.payload,
-                                Some(pubreq.published),
-                                Some(publish_received),
+                                pubreq.published,
+                                publish_received,
                                 HashMap::new(),
                             )
                             .await
@@ -773,8 +774,8 @@ pub async fn handle_connection(
                         publisher
                             .publish_no_confirm(
                                 &pubreq.payload,
-                                Some(pubreq.published),
-                                Some(publish_received),
+                                pubreq.published,
+                                publish_received,
                                 HashMap::new(),
                             )
                             .await
