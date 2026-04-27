@@ -1,3 +1,7 @@
+opportunistic batching (do not wait if the socket is writable now, but if you would block, accumulate)
+
+more lazy init queues
+
 run instructions:
 cargo run --bin fibril
 

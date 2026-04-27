@@ -5,7 +5,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, get_service},
 };
-use fibril_broker::queue_engine::QueueEngine;
+use fibril_broker::{StromaMetrics, queue_engine::QueueEngine};
 use fibril_storage::{AppendReceiptExt, Offset};
 use fibril_util::StaticAuthHandler;
 use http::{Response, Uri, header};
@@ -26,6 +26,7 @@ pub struct AdminConfig {
 
 pub struct AdminServer {
     pub metrics: Metrics,
+    pub stroma_metrics: Arc<StromaMetrics>,
     pub config: AdminConfig,
     pub storage: Arc<dyn QueueEngine + Send + Sync>,
 }
@@ -43,11 +44,13 @@ fn render<T: Template>(tpl: T) -> Html<String> {
 impl AdminServer {
     pub fn new(
         metrics: Metrics,
+        stroma_metrics: Arc<StromaMetrics>,
         config: AdminConfig,
         storage: Arc<dyn QueueEngine + Send + Sync>,
     ) -> Self {
         Self {
             metrics,
+            stroma_metrics,
             config,
             storage,
         }

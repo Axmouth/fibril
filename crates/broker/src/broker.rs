@@ -21,7 +21,7 @@ use fibril_util::unix_millis;
 use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
 use stroma_core::{
     AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
-    MessageHeaders, StromaError,
+    MessageHeaders, StromaError, StromaMetrics,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -425,6 +425,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 }
             })));
         }
+
         let this = Arc::new(Self {
             cfg,
             engine,
@@ -448,6 +449,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         Self::spawn_expiry_worker(this.clone());
 
         this
+    }
+
+    pub fn stroma_metrics(&self) -> Arc<StromaMetrics> {
+        self.engine.metrics()
     }
 
     pub async fn shutdown(&self) {
@@ -1008,6 +1013,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     fn spawn_expiry_worker(broker: Arc<Self>) {
         let broker_clone = broker.clone();
         broker_clone.task_group.spawn("expiry_worker", async move {
+            let mut expiry_hint = Some(0);
             loop {
                 tokio::select! {
                     biased;
@@ -1015,8 +1021,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     _ = broker.shutdown_expiry.cancelled() => break,
 
                     _ = async {
-                        let hint = broker.engine.next_expiry_hint().await.unwrap_or(None);
-                        match hint {
+                        match expiry_hint {
                             Some(ts) => {
                                 let now = unix_millis();
                                 if ts > now {
@@ -1035,6 +1040,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     } => {}
                 }
 
+                expiry_hint = broker.engine.next_expiry_hint().await.unwrap_or(None);
                 tracing::info!("Expiry worker running..");
 
                 // Requeue expired inside Stroma (durable)

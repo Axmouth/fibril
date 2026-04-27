@@ -5,7 +5,7 @@ use fibril_metrics::QueuesStateSnapshot;
 use fibril_storage::Offset;
 use fibril_util::UnixMillis;
 use std::collections::HashSet;
-use stroma_core::MessageHeaders;
+use stroma_core::{MessageHeaders, StromaMetrics};
 pub use stroma_core::{
     AppendCompletion, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
 };
@@ -94,6 +94,8 @@ pub trait QueueEngine {
     async fn list_queues(&self) -> Result<Vec<(String, Option<String>)>, StromaError>;
 
     async fn queue_stats_snapshot(&self) -> Result<QueuesStateSnapshot, StromaError>;
+
+    fn metrics(&self) -> Arc<StromaMetrics>;
 }
 
 #[derive(Debug, Clone)]
@@ -269,5 +271,9 @@ impl QueueEngine for StromaEngine {
         }
 
         Ok(snapshot)
+    }
+
+    fn metrics(&self) -> Arc<StromaMetrics> {
+        self.inner.metrics()
     }
 }

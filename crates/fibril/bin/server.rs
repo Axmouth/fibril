@@ -40,6 +40,8 @@ async fn main() -> anyhow::Result<()> {
 
     let auth_handler = StaticAuthHandler::new("fibril".to_string(), "fibril".to_string());
 
+    let stroma_metrics = broker.stroma_metrics();
+
     let broker_server_fut = run_server(
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([0, 0, 0, 0]), 9876)),
         broker,
@@ -50,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
     let admin = AdminServer::new(
         metrics.clone(),
+        stroma_metrics,
         AdminConfig {
             bind: "0.0.0.0:8080".into(),
             // auth: Some(auth_handler),
