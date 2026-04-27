@@ -81,6 +81,7 @@ pub struct Publish {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishOk {
+    // TODO: use delivery tag?
     pub offset: u64,
 }
 

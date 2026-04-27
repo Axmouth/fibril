@@ -20,8 +20,8 @@ use fibril_util::unix_millis;
 
 use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
 use stroma_core::{
-    AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
-    MessageHeaders, StromaError, StromaMetrics,
+    AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
+    MessageHeaders, NackEventMeta, StromaError, StromaMetrics,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -44,6 +44,13 @@ pub enum SettleType {
     Ack,
     Nack { requeue: Option<bool> },
     Reject { requeue: Option<bool> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SettleKindGroupKey {
+    Ack,
+    Nack { requeue: bool },
+    Reject { requeue: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -535,65 +542,92 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         )>(16384);
         let metrics = self.metrics.clone();
         let qs_clone = qs.clone();
-        let batch: Vec<PublishRequest> = Vec::new();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("publisher_sink", async move {
+            const MAX_BATCH: usize = 256;
+            const COALESCE_WINDOW: Duration = Duration::from_millis(1);
+            const SMALL_BATCH: usize = 32;
+
             loop {
-                tokio::select! {
+                let first = tokio::select! {
                     biased;
-
                     _ = shutdown.cancelled() => break,
+                    req = rx.recv() => req,
+                };
+                let Some(first) = first else {
+                    break;
+                };
 
-                    maybe = rx.recv() => {
-                        let Some(PublishRequest { payload, reply, require_confirm, published, publish_received, extra }) = maybe else { break; };
+                let mut batch = vec![first];
 
-                        let (completion, rx_completion) = KeratinAppendCompletion::pair();
-                        let headers = MessageHeaders {
-                            published,
-                            publish_received,
-                            extra,
-                        };
-
-                        let publish_res = engine.publish(
-                            &tp,
-                            part,
-                            group.as_deref(),
-                            &headers,
-                            &payload,
-                            completion,
-                        ).await;
-
-                        if let Err(err) = publish_res {
-                            let _ = reply.send(Err(err.into()));
-                            continue;
-                        }
-
-                        if let Some(metrics) = metrics.as_ref() {
-                            metrics.published();
-                        }
-
-                        if require_confirm
-                            && let Err(e) = confirm_sink_tx.send((rx_completion, reply)).await {
-                                tracing::error!("Failed to send completion receiver to confirm sink: {e:?}");
-                                // let _ = reply.send(Err(BrokerError::ChannelClosed));
-                                continue;
-                        } else {
-                            qs.wake();
-                        }
-
-                        // // Wait for durability
-                        // match rx_completion.await {
-                        //     Ok(Ok(append)) => {
-                        //         let offset = append.base_offset;
-                        //         let _ = reply.send(Ok(offset));
-                        //         let _ = confirm_tx.send(offset).await;
-                        //     }
-                        //     Ok(Err(_)) | Err(_) => {
-                        //         let _ = reply.send(Err(BrokerError::ChannelClosed));
-                        //     }
-                        // }
+                // Drain immediately available
+                while batch.len() < MAX_BATCH {
+                    match rx.try_recv() {
+                        Ok(req) => batch.push(req),
+                        Err(_) => break,
                     }
                 }
+
+                // Brief wait if small
+                if batch.len() < SMALL_BATCH {
+                    let deadline = tokio::time::Instant::now() + COALESCE_WINDOW;
+                    while batch.len() < MAX_BATCH {
+                        tokio::select! {
+                            biased;
+                            _ = shutdown.cancelled() => break,
+                            res = tokio::time::timeout_at(deadline, rx.recv()) => {
+                                match res {
+                                    Ok(Some(req)) => batch.push(req),
+                                    _ => break,
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Build items
+                let mut items = Vec::with_capacity(batch.len());
+                for PublishRequest {
+                    payload,
+                    reply,
+                    require_confirm: _,
+                    published,
+                    publish_received,
+                    extra,
+                } in batch
+                {
+                    let headers = MessageHeaders {
+                        published,
+                        publish_received,
+                        extra,
+                    };
+                    let (completion, rx_completion) = KeratinAppendCompletion::pair();
+
+                    // Always go through confirm sink (uniform handling)
+                    if let Err(e) = confirm_sink_tx.send((rx_completion, reply)).await {
+                        tracing::error!("Failed to forward to confirm sink: {e:?}");
+                        continue;
+                    }
+                    items.push((headers, payload, completion));
+                }
+
+                if items.is_empty() {
+                    continue;
+                }
+
+                let batch_size = items.len();
+                if let Err(err) = engine
+                    .publish_batch(&tp, part, group.as_deref(), items)
+                    .await
+                {
+                    tracing::error!("publish_batch failed: {err:?}");
+                    continue;
+                }
+
+                if let Some(metrics) = metrics.as_ref() {
+                    metrics.published_many(batch_size as u64);
+                }
+                qs.wake();
             }
         });
 
@@ -707,35 +741,58 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         mut settle_rx: mpsc::Receiver<SettleRequest>,
     ) {
         let broker = self.clone();
-        // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("settle_loop", async move {
-            const MAX_BATCH: usize = 32;
-            // let mut batch: Vec<_> = Vec::with_capacity(MAX_BATCH);
-            let poll = Duration::from_micros(750);
-            let mut tick = tokio::time::interval(poll);
-            tick.tick().await;
-            loop {
-                tokio::select! {
-                    biased;
+            const MAX_BATCH: usize = 64;
+            const COALESCE_WINDOW: Duration = Duration::from_micros(500);
+            const SMALL_BATCH: usize = 8;
 
+            loop {
+                let first = tokio::select! {
+                    biased;
                     _ = broker.shutdown_settle.cancelled() => break,
-                    req = settle_rx.recv() => {
-                        let Some(req) = req else {
-                            tracing::debug!("Settle channel closed for consumer {}", consumer.id);
-                            break;
-                        };
-                        tracing::debug!("Received settle request from consumer {}: {:?}", consumer.id, req);
-                        broker.handle_settle(&consumer, req).await;
+                    req = settle_rx.recv() => req,
+                };
+                let Some(first) = first else {
+                    break;
+                };
+
+                let mut batch = vec![first];
+
+                while batch.len() < MAX_BATCH {
+                    match settle_rx.try_recv() {
+                        Ok(req) => batch.push(req),
+                        Err(_) => break,
                     }
                 }
+
+                if batch.len() < SMALL_BATCH {
+                    let deadline = tokio::time::Instant::now() + COALESCE_WINDOW;
+                    while batch.len() < MAX_BATCH {
+                        tokio::select! {
+                            biased;
+                            _ = broker.shutdown_settle.cancelled() => break,
+                            res = tokio::time::timeout_at(deadline, settle_rx.recv()) => {
+                                match res {
+                                    Ok(Some(req)) => batch.push(req),
+                                    _ => break,
+                                }
+                            }
+                        }
+                    }
+                }
+
+                broker.handle_settle_batch(&consumer, batch).await;
             }
+
+            // Drain
             settle_rx.close();
-            tracing::debug!("Settle loop exiting for consumer {}", consumer.id);
+            let mut remaining = Vec::new();
             while let Some(req) = settle_rx.recv().await {
-                tracing::debug!("Draining settle request from consumer {}: {:?}", consumer.id, req);
-                broker.handle_settle(&consumer, req).await;
+                remaining.push(req);
             }
-            tracing::debug!("Settle loop fully exited for consumer {}", consumer.id);
+            if !remaining.is_empty() {
+                broker.handle_settle_batch(&consumer, remaining).await;
+            }
         });
     }
 
@@ -843,6 +900,135 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 completion,
             )
             .await;
+    }
+
+    async fn handle_settle_batch(&self, consumer: &Arc<ConsumerState>, reqs: Vec<SettleRequest>) {
+        // Group by (queue_key, ack-or-nack-with-requeue)
+        // Acks all go to one bucket per queue.
+        // Nacks vary by (offset, requeue), so they group per queue but accumulate (offset, requeue) tuples.
+
+        let mut acks_by_queue: HashMap<QueueKey, Vec<Offset>> = HashMap::new();
+        let mut nacks_by_queue: HashMap<QueueKey, Vec<(Offset, bool)>> = HashMap::new();
+
+        for req in reqs {
+            let Some(tag_rec) = self
+                .records_by_tags
+                .remove(&req.delivery_tag)
+                .map(|kv| kv.1)
+            else {
+                tracing::warn!("Settle for unknown tag {:?}", req.delivery_tag);
+                continue;
+            };
+            self.tags_by_key_offset
+                .remove(&(tag_rec.key.clone(), tag_rec.offset));
+
+            if tag_rec.consumer_id != consumer.id {
+                tracing::warn!("Settle from wrong consumer");
+                continue;
+            }
+
+            match req.settle_type {
+                SettleType::Ack => {
+                    acks_by_queue
+                        .entry(tag_rec.key)
+                        .or_default()
+                        .push(tag_rec.offset);
+                }
+                SettleType::Nack { requeue } => {
+                    let r = requeue.unwrap_or(true);
+                    nacks_by_queue
+                        .entry(tag_rec.key)
+                        .or_default()
+                        .push((tag_rec.offset, r));
+                }
+                SettleType::Reject { .. } => {
+                    // Treat as nack with requeue=false (until you remove Reject)
+                    nacks_by_queue
+                        .entry(tag_rec.key)
+                        .or_default()
+                        .push((tag_rec.offset, false));
+                }
+            }
+        }
+
+        // Issue one engine call per (queue, kind) group
+        for (key, offsets) in acks_by_queue {
+            let count = offsets.len();
+            let consumer_clone = consumer.clone();
+            let qs = self.queues.get(&key).map(|e| e.value().clone());
+            let pending_settles = self.pending_settles.clone();
+            let settle_drained = self.settle_drained.clone();
+            let metrics = self.metrics.clone();
+
+            let done = move |ok: bool| {
+                if ok {
+                    for _ in 0..count {
+                        consumer_clone.dec_inflight();
+                    }
+                    if let Some(m) = metrics {
+                        m.acked_many(count as u64);
+                    }
+                    if let Some(qs) = &qs {
+                        qs.wake();
+                    }
+                } else if let Some(qs) = &qs {
+                    qs.wake();
+                }
+
+                let pending = pending_settles.fetch_sub(count, Ordering::AcqRel);
+                if pending <= count {
+                    settle_drained.notify_waiters();
+                }
+            };
+
+            let completion: Box<dyn AppendCompletion<IoError>> =
+                Box::new(SimpleCompletion::new(done));
+            let reqs = offsets
+                .into_iter()
+                .map(|off| AckEventMeta { off })
+                .collect();
+            let _ = self
+                .engine
+                .ack_batch(&key.tp, key.part, key.group.as_deref(), reqs, completion)
+                .await;
+        }
+
+        for (key, items) in nacks_by_queue {
+            let count = items.len();
+            let consumer_clone = consumer.clone();
+            let qs = self.queues.get(&key).map(|e| e.value().clone());
+            let pending_settles = self.pending_settles.clone();
+            let settle_drained = self.settle_drained.clone();
+
+            let done = move |ok: bool| {
+                if ok {
+                    for _ in 0..count {
+                        consumer_clone.dec_inflight();
+                    }
+                    if let Some(qs) = &qs {
+                        qs.wake();
+                    }
+                } else if let Some(qs) = &qs {
+                    qs.wake();
+                }
+
+                let pending = pending_settles.fetch_sub(count, Ordering::AcqRel);
+                if pending <= count {
+                    settle_drained.notify_waiters();
+                }
+            };
+
+            let completion: Box<dyn AppendCompletion<IoError>> =
+                Box::new(SimpleCompletion::new(done));
+            let reqs = items
+                .into_iter()
+                .map(|(off, requeue)| NackEventMeta { off, requeue })
+                .collect();
+            let _ = self
+                .engine
+                .nack_batch(&key.tp, key.part, key.group.as_deref(), reqs, completion)
+                .await;
+        }
     }
 
     fn spawn_delivery_loop(self: &Arc<Self>, key: QueueKey, qs: Arc<QueueLoopState>) {

@@ -746,10 +746,25 @@ pub async fn handle_connection(
                 let publisher = if let Some(pubh) = publishers.get(key) {
                     pubh.clone()
                 } else {
-                    let (pubh, _conf) = broker
+                    let (pubh, mut conf_stream) = broker
                         .get_publisher(&pubreq.topic, &pubreq.group)
                         .await
                         .context("get publisher failed")?;
+
+                    // let conf_sink = frame_tx_low_prio.clone();
+                    // let req_id_gen_clone = req_id_gen.clone();
+                    tokio::spawn(async move {
+                        while let Some(offset) = conf_stream.recv().await {
+                            // let res = conf_sink.send(encode(Op::PublishOk, req_id_gen_clone.next_id(), &PublishOk {offset})).await;
+
+                            // if let Err(_) = res {
+                            //     tracing::warn!("Error sending confirm for offset {offset}");
+                            // }
+
+                            // TODO: confirms are handled elsewhere, see if there's a cleaner way than this
+                            let _ = offset;
+                        }
+                    });
                     publishers.insert(key.clone(), pubh.clone());
                     pubh
                 };

@@ -317,6 +317,7 @@ impl Client {
 }
 
 impl Publisher {
+    // TODO: return a confirmer handle?
     /// Publish a message with manual confirmation
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_unconfirmed<T: serde::Serialize>(&self, payload: &T) -> FibrilResult<()> {
@@ -680,6 +681,7 @@ where
 
                             match waiters.remove(&frame.request_id) {
                                 Some(Waiter::Publish(tx)) => {
+                                    // TODO: use delivery tag?
                                     let _ = tx.send(Ok(ok.offset));
                                 }
                                 Some(_other) => {

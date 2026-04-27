@@ -5,7 +5,7 @@ use fibril_metrics::QueuesStateSnapshot;
 use fibril_storage::Offset;
 use fibril_util::UnixMillis;
 use std::collections::HashSet;
-use stroma_core::{MessageHeaders, StromaMetrics};
+use stroma_core::{AckEventMeta, MessageHeaders, NackEventMeta, StromaMetrics};
 pub use stroma_core::{
     AppendCompletion, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
 };
@@ -50,6 +50,15 @@ pub trait QueueEngine {
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError>;
 
+    async fn ack_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<AckEventMeta>,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError>;
+
     async fn nack(
         &self,
         tp: &str,
@@ -57,6 +66,15 @@ pub trait QueueEngine {
         group: Option<&str>,
         offset: Offset,
         requeue: bool,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError>;
+
+    async fn nack_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<NackEventMeta>,
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError>;
 
@@ -77,6 +95,14 @@ pub trait QueueEngine {
         headers: &MessageHeaders,
         payload: &[u8],
         completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError>;
+
+    async fn publish_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<(MessageHeaders, Vec<u8>, Box<dyn AppendCompletion<IoError>>)>,
     ) -> Result<(), StromaError>;
 
     async fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError>;
@@ -165,6 +191,19 @@ impl QueueEngine for StromaEngine {
             .await
     }
 
+    async fn ack_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<AckEventMeta>,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .ack_enqueue_many(tp.into(), part, group, items, completion)
+            .await
+    }
+
     async fn nack(
         &self,
         tp: &str,
@@ -178,6 +217,19 @@ impl QueueEngine for StromaEngine {
             .nack_enqueue(tp, part, group, offset, requeue, completion)
             .await?;
         Ok(())
+    }
+
+    async fn nack_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<NackEventMeta>,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .nack_enqueue_many(tp.into(), part, group, items, completion)
+            .await
     }
 
     async fn settle(
@@ -217,6 +269,18 @@ impl QueueEngine for StromaEngine {
             .await?;
 
         Ok(())
+    }
+
+    async fn publish_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<(MessageHeaders, Vec<u8>, Box<dyn AppendCompletion<IoError>>)>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .append_message_batch(tp, part, group, items)
+            .await
     }
 
     async fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError> {

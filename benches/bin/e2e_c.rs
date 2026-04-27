@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, time::Duration};
 
 use clap::Parser;
 use fibril_client::{InflightMessage, ClientOptions};
@@ -26,6 +26,7 @@ async fn run_load_test(
                 .unwrap();
 
             let (tx_acker, mut rx_acker) = tokio::sync::mpsc::unbounded_channel::<InflightMessage>();
+            let (tx_confirmer, mut rx_confirmer) = tokio::sync::mpsc::unbounded_channel::<InflightMessage>();
             let client_reader = client.clone();
             let reader = tokio::spawn(async move {
                 if !start_reader {
@@ -89,7 +90,13 @@ async fn run_load_test(
                 }
             });
 
-            tokio::join!(reader, pubber, acker);
+            let confirmer = tokio::spawn(async move {
+                while let Some(msg) = rx_confirmer.recv().await {
+                    msg.complete().await.unwrap();
+                }
+            });
+
+            tokio::join!(reader, pubber, acker, confirmer);
         }));
     }
 
@@ -140,4 +147,6 @@ async fn main() {
     });
 
     rxb.await.unwrap();
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
 }
