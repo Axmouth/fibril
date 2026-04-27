@@ -23,7 +23,7 @@ serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 tokio = { version = "1", features = ["full", "tracing"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-tracing = "0.1"
+tracing = { version = "0.1", features = ["release_max_level_info"] }
 
 [build-dependencies]
 winres = "0.1"

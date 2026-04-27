@@ -537,7 +537,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let qs_clone = qs.clone();
         let batch: Vec<PublishRequest> = Vec::new();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
-        self.task_group.spawn("publisher__sink", async move {
+        self.task_group.spawn("publisher_sink", async move {
             loop {
                 tokio::select! {
                     biased;
@@ -709,6 +709,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let broker = self.clone();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("settle_loop", async move {
+            const MAX_BATCH: usize = 32;
+            // let mut batch: Vec<_> = Vec::with_capacity(MAX_BATCH);
+            let poll = Duration::from_micros(750);
+            let mut tick = tokio::time::interval(poll);
+            tick.tick().await;
             loop {
                 tokio::select! {
                     biased;
@@ -987,8 +992,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                         delivered += 1;
 
+                        // TODO: eval
                         if delivered % 1024 == 0 {
-                            tokio::task::yield_now().await;
+                            // tokio::task::yield_now().await;
                         }
                     }
 

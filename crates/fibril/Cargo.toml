@@ -20,7 +20,7 @@ fastrand = "2"
 futures = "0.3"
 mimalloc = { version = "0.1" }
 tokio = { version = "1", features = ["full"] }
-tracing = "0.1"
+tracing = { version = "0.1", features = ["release_max_level_info"] }
 tracing-error = "0.2"
 tracing-opentelemetry = "0.32"
 opentelemetry = "0.31"
