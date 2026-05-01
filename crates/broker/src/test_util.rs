@@ -121,9 +121,9 @@ impl TestState {
             .get_publisher(topic, &group.map(|s| s.into()))
             .await?;
 
-        let off = pubh
+        let _off = pubh
             .publish(
-                payload,
+                payload.to_vec(),
                 Default::default(),
                 Default::default(),
                 Default::default(),
@@ -154,7 +154,7 @@ impl TestState {
         for _ in 0..n {
             offsets.push(
                 pubh.publish(
-                    payload,
+                    payload.to_vec(),
                     Default::default(),
                     Default::default(),
                     Default::default(),

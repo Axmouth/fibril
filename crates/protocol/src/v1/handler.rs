@@ -83,6 +83,7 @@ pub async fn run_server(
 
     loop {
         let (socket, peer) = listener.accept().await?;
+        socket.set_nodelay(true)?;
         tcp_stats.connection_opened();
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         let broker = broker.clone();
@@ -147,7 +148,7 @@ pub async fn handle_connection(
     heartbeat.tick().await; // consume first tick
     // ---- Framed socket -----------------------------------------------------
     let peer_addr = socket.peer_addr().ok();
-    let framed = Framed::new(socket, ProtoCodec);
+    let framed = Framed::with_capacity(socket, ProtoCodec, 64 * 1024);
     let (mut writer, mut reader) = framed.split();
 
     // ---- Write fan-in channel ---------------------------------------------
@@ -671,7 +672,7 @@ pub async fn handle_connection(
                     && !sub.auto_ack
                 {
                     let state_settler = sub.state_settler.clone();
-                    tokio::spawn(async move {
+                    // tokio::spawn(async move {
                         for tag in ack.tags {
                             let req = SettleRequest {
                                 delivery_tag: tag,
@@ -679,7 +680,7 @@ pub async fn handle_connection(
                             };
                             let _ = state_settler.send(req).await;
                         }
-                    });
+                    // });
                 }
                 // Unknown subscription: ignore (idempotent)
             }
@@ -695,7 +696,7 @@ pub async fn handle_connection(
                     && !sub.auto_ack
                 {
                     let state_settler = sub.state_settler.clone();
-                    tokio::spawn(async move {
+                    // tokio::spawn(async move {
                         for tag in nack.tags {
                             let req = SettleRequest {
                                 delivery_tag: tag,
@@ -705,33 +706,7 @@ pub async fn handle_connection(
                             };
                             let _ = state_settler.send(req).await;
                         }
-                    });
-                }
-                // Unknown subscription: ignore (idempotent)
-            }
-
-            // -------- REJECT ----------------------------------------------------
-            x if x == Op::Reject as u16 => {
-                // TODO: Decline ack when auto ack? Log?
-                let reject: Reject = decode(&frame);
-
-                let key: SubKey = (reject.topic.clone(), reject.group.clone());
-
-                if let Some(sub) = state.subs.get(&key)
-                    && !sub.auto_ack
-                {
-                    let state_settler = sub.state_settler.clone();
-                    tokio::spawn(async move {
-                        for tag in reject.tags {
-                            let req = SettleRequest {
-                                delivery_tag: tag,
-                                settle_type: SettleType::Reject {
-                                    requeue: Some(reject.requeue),
-                                },
-                            };
-                            let _ = state_settler.send(req).await;
-                        }
-                    });
+                    // });
                 }
                 // Unknown subscription: ignore (idempotent)
             }
@@ -770,7 +745,7 @@ pub async fn handle_connection(
                 };
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
-                tokio::spawn(async move {
+                // tokio::spawn(async move {
                     let published: Result<
                         tokio::sync::oneshot::Receiver<
                             Result<u64, fibril_broker::broker::BrokerError>,
@@ -779,7 +754,7 @@ pub async fn handle_connection(
                     > = if pubreq.require_confirm {
                         publisher
                             .publish(
-                                &pubreq.payload,
+                                pubreq.payload,
                                 pubreq.published,
                                 publish_received,
                                 HashMap::new(),
@@ -788,7 +763,7 @@ pub async fn handle_connection(
                     } else {
                         publisher
                             .publish_no_confirm(
-                                &pubreq.payload,
+                                pubreq.payload,
                                 pubreq.published,
                                 publish_received,
                                 HashMap::new(),
@@ -811,7 +786,7 @@ pub async fn handle_connection(
                             .await;
                         tracing::error!("Error sending published to queue");
                     }
-                });
+                // });
             }
 
             // -------- PING ---------------------------------------------------

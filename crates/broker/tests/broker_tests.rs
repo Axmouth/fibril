@@ -37,7 +37,7 @@ async fn broker_delivers_messages_in_order() {
 
     for _ in 0..5 {
         pubh.publish(
-            b"x",
+            b"x".to_vec(),
             Default::default(),
             Default::default(),
             Default::default(),
@@ -73,7 +73,7 @@ async fn broker_respects_prefetch() {
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for i in 0..10 {
         pubh.publish(
-            b"x",
+            b"x".to_vec(),
             Default::default(),
             Default::default(),
             Default::default(),
@@ -112,7 +112,7 @@ async fn ack_releases_prefetch_slot() {
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for i in 0..5 {
         pubh.publish(
-            format!("x{i}").as_bytes(),
+            format!("x{i}").as_bytes().to_vec(),
             Default::default(),
             Default::default(),
             Default::default(),
@@ -188,7 +188,7 @@ async fn ack_releases_prefetch_slot2() {
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for i in 0..5 {
         pubh.publish(
-            format!("x{i}").as_bytes(),
+            format!("x{i}").as_bytes().to_vec(),
             Default::default(),
             Default::default(),
             Default::default(),
@@ -258,7 +258,7 @@ async fn broker_redelivers_after_expiry() {
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     pubh.publish(
-        b"x",
+        b"x".to_vec(),
         Default::default(),
         Default::default(),
         Default::default(),
@@ -296,7 +296,7 @@ async fn broker_distributes_across_consumers() {
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for _ in 0..10 {
         pubh.publish(
-            b"x",
+            b"x".to_vec(),
             Default::default(),
             Default::default(),
             Default::default(),
@@ -327,7 +327,7 @@ async fn slow_consumer_does_not_starve_fast_one() {
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for _ in 0..5 {
         pubh.publish(
-            b"x",
+            b"x".to_vec(),
             Default::default(),
             Default::default(),
             Default::default(),
@@ -824,7 +824,7 @@ async fn stress_single_consumer(total: usize) {
 
     for (i, to_publish) in to_publish_list.iter().enumerate() {
         pubh.publish(
-            to_publish,
+            to_publish.to_vec(),
             Default::default(),
             Default::default(),
             Default::default(),

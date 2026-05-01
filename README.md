@@ -212,8 +212,10 @@ Any performance numbers mentioned are subject to change(but the trend is general
 ## Core areas to expand on:
 
 * **Removal of inefficiencies in command dispatch**
-  - Potential microbatching incoming publish events, settle events and append together, clogging the command queue and other inputs much less on high load
+  ~~- Potential microbatching incoming publish events, settle events and append together, clogging the command queue and other inputs much less on high load~~
   - Create Queue handles at Query Engine and Stroma level that do not need to seek the relevant Queue handle on every command, plus related checks
+  
+  Update: Microbatching implemented, optimizations in calling queue handles less often are ongoing.
 
 * **Faster state loading utilizing snapshots**
 
@@ -262,7 +264,8 @@ Any performance numbers mentioned are subject to change(but the trend is general
   Exploring strategies for applying backpressure to producers and consumers based on the broker's current load and capacity. (Note: Backpressure exists to some extent thanks to bounded channels in key parts of the broker)
 
 * **Memory/storage limits and message capacity limits**
-  Throttle(asymptotically?) publishers based on getting near a memory or undelivered message limit
+
+  Throttle(asymptotically?) publishers based on getting near a memory or undelivered message limit (finding an efficient way to keep track of memory, or the right parts of memory, pending)
 
 * **Transition from primitive types to newtype wrappers**
 
@@ -298,15 +301,16 @@ Any performance numbers mentioned are subject to change(but the trend is general
 * **Message lease extension while it is being processed**
   Especially some manner for the client side to keep the lease alive as long as connection is intact
 
+* **Delayed messages and scheduling**
+
+  Support for scheduling messages to be delivered at a later time, and handling of delayed messages.
+
 ### The following features may be explored under a separate advanced routing layer on top of the core broker, to keep the core focused on durability and delivery semantics:
+(Note: the above is not the guaranteed direction, but a possibility)
 
 * **Message prioritization**
 
   Allowing messages to be prioritized in the queue, and exploring different strategies for handling priorities.
-
-* **Delayed messages and scheduling**
-
-  Support for scheduling messages to be delivered at a later time, and handling of delayed messages.
 
 * **Routing and topic-based messaging**
 

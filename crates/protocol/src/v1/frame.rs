@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::io;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -8,7 +8,7 @@ pub struct Frame {
     pub opcode: u16,
     pub flags: u32,
     pub request_id: u64,
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +39,7 @@ impl Decoder for ProtoCodec {
         let flags = src.get_u32();
         let request_id = src.get_u64();
 
-        let payload = src.split_to(payload_len).to_vec();
+        let payload = src.split_to(payload_len).freeze();
 
         Ok(Some(Frame {
             version,

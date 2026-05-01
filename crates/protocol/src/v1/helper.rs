@@ -11,7 +11,7 @@ pub type Conn = Framed<TcpStream, ProtoCodec>;
 
 // TODO: Error handling :x
 pub fn encode<T: Serialize>(op: Op, req_id: u64, msg: &T) -> Frame {
-    let payload = rmp_serde::to_vec_named(msg).expect("serialize");
+    let payload = rmp_serde::to_vec_named(msg).expect("serialize").into();
     Frame {
         version: PROTOCOL_V1,
         opcode: op as u16,

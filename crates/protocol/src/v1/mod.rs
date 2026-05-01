@@ -41,7 +41,6 @@ pub enum Op {
     Deliver = 40,
     Ack = 41,
     Nack = 42,
-    Reject = 43,
 
     Ping = 50,
     Pong = 51,
@@ -125,15 +124,6 @@ pub struct Ack {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Nack {
-    pub topic: String,
-    pub group: Option<String>,
-    pub partition: u32,
-    pub tags: Vec<DeliveryTag>, // batch
-    pub requeue: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Reject {
     pub topic: String,
     pub group: Option<String>,
     pub partition: u32,

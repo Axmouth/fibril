@@ -10,6 +10,7 @@ async fn run_load_test(
     start_reader: bool,
     start_writer: bool,
     txb: oneshot::Sender<()>,
+    payload_size: usize,
 ) {
     let start = Instant::now();
 
@@ -17,7 +18,7 @@ async fn run_load_test(
 
     for j in 0..num_clients {
         handles.push(tokio::spawn(async move {
-            let payload = vec![8u8; 1024];
+            let payload = vec![8u8; payload_size];
             let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([127, 0, 0, 1]), 9876));
             let client = ClientOptions::new()
                 .auth("fibril", "fibril")
@@ -34,7 +35,7 @@ async fn run_load_test(
                 }
                 let mut sub = client_reader
                     .subscribe("Topic1")
-                    .prefetch(1024 * 8)
+                    .prefetch(1024 * 8 * 2)
                     .sub_manual_ack()
                     .await
                     .unwrap();
@@ -44,7 +45,7 @@ async fn run_load_test(
                 while let Some(msg) = sub.recv().await {
                     // just drain
                     i += 1;
-                    if i.is_multiple_of(1000) {
+                    if i.is_multiple_of(5000) {
                         let elapsed = start_inner.elapsed();
                         println!(
                             "Client {j}: received {i}, after {:.5} secs",
@@ -74,7 +75,7 @@ async fn run_load_test(
                 for i in 1..=msgs_per_client {
                     publisher.publish_unconfirmed(&payload).await.unwrap();
 
-                    if i.is_multiple_of(1000) {
+                    if i.is_multiple_of(5000) {
                         let elapsed = start_inner.elapsed();
                         println!(
                             "Client {j}: sent {i}, after {:.5} secs",
@@ -91,6 +92,7 @@ async fn run_load_test(
             });
 
             let confirmer = tokio::spawn(async move {
+                return;
                 while let Some(msg) = rx_confirmer.recv().await {
                     msg.complete().await.unwrap();
                 }
@@ -132,6 +134,10 @@ struct Args {
     /// Enable writer
     #[arg(long, default_value_t = false)]
     writer: bool,
+    
+    /// Size of each payload
+    #[arg(short, long, default_value_t = 1024)]
+    size: usize,
 }
 
 #[tokio::main]
@@ -143,7 +149,7 @@ async fn main() {
     let (txb, rxb) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
-        run_load_test(args.clients, args.messages, args.reader, args.writer, txb).await;
+        run_load_test(args.clients, args.messages, args.reader, args.writer, txb, args.size).await;
     });
 
     rxb.await.unwrap();

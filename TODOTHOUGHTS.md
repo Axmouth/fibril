@@ -1,3 +1,13 @@
+Maybe find way to better linearly read from Keratin, faster
+
+More pipelining in Keratin writer: Batch -> encode and stage buffer -> write file -> fsync -> notify awaiters (estimated possible 40%-60% gain in throughput from not waiting encoding and fsync for large payloads)
+
+explore a cache trying to keep in memory x mb of next deliverable messages(we always know which messages are next with ready set)
+
+try to nest main loop in tcp client and server and put more generous reconnect logic there, trying to keep the state and not redo, have a handshake that shows it was reconnected with same id to differentiate from connection dying on other side. also immediately mark ready again once connection(cause messages are stuck in prefetch inflight etc)
+
+keep track off consumer id per message and extend lease for alive consumers instead of expiring
+
 opportunistic batching (do not wait if the socket is writable now, but if you would block, accumulate)
 
 more lazy init queues
@@ -17,21 +27,11 @@ direct delivery/express lane (enqueue and inflight immediately whole also sendin
 
 deny topic etc names beyond simple fs compatible setups
 
-stroma/keratin graceful shutdown
-
-actor like system, instead of needing to lock dashmaps, we could have simple map maybe or such, each queuestate contained in a thread receiving messages, sending reply back through a one shot channel, fully async, no locking overheads, but potentially less parallelism
 
 Add display names to topics/groups for logging/ui
 
-ack/nack/reject confirms (opt in?)
-
 add events for changing queue settings (ttl, max inflight, etc)
 add global event log for stroma setting changes
-Investigate need for Requeued event?
-Use enqueued map to fetch available(event log is now source of truth and atomicity)
-append message must now add enqueued event too and make sure both succeed before returning ok(maybe add a custom completion type that can add the event if event possible? or find another efficvient way)
-
-Make all broker side channels bounder(to avoid OOM on slow consumers by creating backpressure upstream)
 
 Finish dead letter queue implementation, untangle any fallible/storage bits to outside state methods and on event log application
 Perhaps use completions to apply the events in memory only after persisting them
@@ -51,25 +51,15 @@ Also: redelivery queue should remain bounded by inflight cap (it mostly is alrea
 
 consider interning topics etc to save some memory
 
-Redelivery not counted as inflight(not added to set)? Consider how to handle
-
-play with having code return dummy responses and see max broker throughput and bottlenecks
-
 ui login
 
 reorganize for structs/models in a common crate, to avoid circles between metrics and storage too
 
-more cleanup tests
-
 cleanup leftover inflight without message (or better figure why it happens)
-
-Make sure cleanup reclaims space
 
 config
 
 Handshake two way
-
-proper connection handling(heartbeat, ping pong, early dc detection)
 
 ack correct matching(sub id?), in tcp layer
 
@@ -95,16 +85,7 @@ multiple brokers on same storage tests (must fail)
 
 shutdown stops publishing immediately, tries to drain inflight, ensure no late ack flushes race, ensure batchers drain once
 
-define a formal delivery state machine (very useful later)?
-
 Eval persisting inflight map, or delivery tags for inflight, so inflight state can be recovered on startup after crash
-
-reeval:
-Persist a delivery cursor
-Instead of inferring:
-store next_offset durably per (topic, group)
-advance it only after mark_inflight_batch succeeds
-on restart, read it directly
 
 clusters (leader through shared networked storage initially, raft replication later?)
 
@@ -118,8 +99,6 @@ routing layer? (in order to keep invariants stable, maybe we'd need a separate l
 
 dead letter queue? (expired, nacked too much, etc) (part of routing?)
 
-nack/reject
-
 queues with ttl to discard(not just resend)
 
 define ops/infra story for easy convenient deployments and handling(not error prone by default, don't assume user does things right)
@@ -131,5 +110,3 @@ rabbitmq compatible endpoint?
 replace epoch in delivery tag with gen and seq. Seq is simple monotonic counter, gen is increased per instance(process? task?) created
 
 dls or embedded language to script transformations, routing, etc?
-
-recovered_cursors, topics, etc, cleanup after inactivity? (when empty, occasional cleanup)

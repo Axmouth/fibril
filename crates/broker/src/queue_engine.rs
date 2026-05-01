@@ -5,7 +5,7 @@ use fibril_metrics::QueuesStateSnapshot;
 use fibril_storage::Offset;
 use fibril_util::UnixMillis;
 use std::collections::HashSet;
-use stroma_core::{AckEventMeta, MessageHeaders, NackEventMeta, StromaMetrics};
+use stroma_core::{AckEventMeta, MessageHeaders, NackEventMeta, StromaDebugSnapshot, StromaMetrics};
 pub use stroma_core::{
     AppendCompletion, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
 };
@@ -93,7 +93,7 @@ pub trait QueueEngine {
         part: u32,
         group: Option<&str>,
         headers: &MessageHeaders,
-        payload: &[u8],
+        payload: Vec<u8>,
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError>;
 
@@ -120,6 +120,8 @@ pub trait QueueEngine {
     async fn list_queues(&self) -> Result<Vec<(String, Option<String>)>, StromaError>;
 
     async fn queue_stats_snapshot(&self) -> Result<QueuesStateSnapshot, StromaError>;
+
+    async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError>;
 
     fn metrics(&self) -> Arc<StromaMetrics>;
 }
@@ -200,7 +202,7 @@ impl QueueEngine for StromaEngine {
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError> {
         self.inner
-            .ack_enqueue_many(tp.into(), part, group, items, completion)
+            .ack_enqueue_many(tp, part, group, items, completion)
             .await
     }
 
@@ -228,7 +230,7 @@ impl QueueEngine for StromaEngine {
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError> {
         self.inner
-            .nack_enqueue_many(tp.into(), part, group, items, completion)
+            .nack_enqueue_many(tp, part, group, items, completion)
             .await
     }
 
@@ -261,7 +263,7 @@ impl QueueEngine for StromaEngine {
         part: u32,
         group: Option<&str>,
         headers: &MessageHeaders,
-        payload: &[u8],
+        payload: Vec<u8>,
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError> {
         self.inner
@@ -335,6 +337,10 @@ impl QueueEngine for StromaEngine {
         }
 
         Ok(snapshot)
+    }
+
+    async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError> {
+        self.inner.debug_snapshot().await
     }
 
     fn metrics(&self) -> Arc<StromaMetrics> {

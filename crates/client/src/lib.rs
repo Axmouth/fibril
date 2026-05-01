@@ -80,7 +80,6 @@ impl Message {
 pub enum SettleRequest {
     Ack { tag: DeliveryTag, request_id: u64, response: oneshot::Sender<Result<(), FibrilError>> },
     Nack { tag: DeliveryTag, requeue: bool, request_id: u64, response: oneshot::Sender<Result<(), FibrilError>> },
-    Reject { tag: DeliveryTag, requeue: bool, request_id: u64, response: oneshot::Sender<Result<(), FibrilError>> },
 }
 
 #[must_use]
@@ -410,12 +409,6 @@ enum Command {
         requeue: bool,
         request_id: u64,
     },
-    Reject {
-        sub_id: u64,
-        delivery_tag: DeliveryTag,
-        requeue: bool,
-        request_id: u64,
-    },
 }
 
 #[derive(Debug)]
@@ -651,18 +644,6 @@ where
                            send_or_die!(framed, encode(Op::Nack, request_id, &nack), fatal_error)
                         }
                     }
-                    Command::Reject { sub_id, delivery_tag, requeue, request_id } => {
-                        if let Some(sub) = subs.get(&sub_id) {
-                            let rej = Reject {
-                                topic: sub.topic.clone(),
-                                group: sub.group.clone(),
-                                partition: sub.partition,
-                                tags: vec![delivery_tag],
-                                requeue,
-                            };
-                            send_or_die!(framed, encode(Op::Reject, request_id, &rej), fatal_error)
-                        }
-                    }
                 },
                 Some(frame) = framed.next() => {
                     let frame = match frame {
@@ -738,19 +719,6 @@ where
                                                             }
                                                             SettleRequest::Nack { tag, requeue, request_id, response } => {
                                                                 let res = cmd_tx.send(Command::Nack {
-                                                                    sub_id,
-                                                                    delivery_tag: tag,
-                                                                    requeue,
-                                                                    request_id,
-                                                                }).await;
-                                                                if let Err(_err) = res {
-                                                                    let _ = response.send(Err(FibrilError::BrokenPipe));
-                                                                } else {
-                                                                    let _ = response.send(Ok(()));
-                                                                }
-                                                            }
-                                                            SettleRequest::Reject { tag, requeue, request_id, response } => {
-                                                                let res = cmd_tx.send(Command::Reject {
                                                                     sub_id,
                                                                     delivery_tag: tag,
                                                                     requeue,

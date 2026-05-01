@@ -57,10 +57,28 @@ pub async fn queues(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     check_basic_auth(&headers, &server.config.auth).await?;
 
-    let queues = server.metrics.broker().call_queue_state_callback().await;
+    let queues = server.storage.queue_stats_snapshot().await;
 
-    if let Some(queues) = queues {
+    if let Ok(queues) = queues {
         Ok(Json(serde_json::to_value(queues).unwrap_or_default()))
+    } else {
+        Ok(Json(serde_json::json!({})))
+    }
+}
+
+pub async fn queues_debug(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_basic_auth(&headers, &server.config.auth).await?;
+
+    let queues = server.storage.debug_snapshot().await;
+
+    if let Ok(queues) = queues {
+        Ok(Json(serde_json::to_value(queues).unwrap_or_default()))
+    } else if let Err(_err) = queues {
+        tracing::error!("Error fetching queue debug info: {_err}");
+        Err(StatusCode::INTERNAL_SERVER_ERROR)
     } else {
         Ok(Json(serde_json::json!({})))
     }

@@ -181,12 +181,12 @@ async fn producer_task(
         if msg_id >= total {
             break;
         }
-        let size = 1024 * 1;
+        let size = 1024 * 64;
         let payload = make_payload(msg_id, producer_id, size);
 
         let published = unix_millis();
         let recv = publisher
-            .publish(&payload, published, published, HashMap::new())
+            .publish(payload, published, published, HashMap::new())
             .await
             .unwrap();
         recvs.push(recv);

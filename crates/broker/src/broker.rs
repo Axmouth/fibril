@@ -145,7 +145,7 @@ pub struct PublisherHandle {
 impl PublisherHandle {
     pub async fn publish(
         &self,
-        payload: &[u8],
+        payload: Vec<u8>,
         published: u64,
         publish_received: u64,
         extra: HashMap<String, String>,
@@ -154,7 +154,7 @@ impl PublisherHandle {
 
         self.publisher
             .send(PublishRequest {
-                payload: payload.to_vec(),
+                payload,
                 reply: tx,
                 require_confirm: true,
                 published,
@@ -176,7 +176,7 @@ impl PublisherHandle {
 
     pub async fn publish_no_confirm(
         &self,
-        payload: &[u8],
+        payload: Vec<u8>,
         published: u64,
         publish_received: u64,
         extra: HashMap<String, String>,
@@ -185,7 +185,7 @@ impl PublisherHandle {
 
         self.publisher
             .send(PublishRequest {
-                payload: payload.to_vec(),
+                payload,
                 reply: tx,
                 require_confirm: false,
                 publish_received,
@@ -1093,6 +1093,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                     let lease_deadline = unix_millis() + ttl_ms;
 
+                    // TODO: Also limit each poll batch based on size of aggreated messages
                     let deliverables = match broker
                         .engine
                         .poll_ready(
