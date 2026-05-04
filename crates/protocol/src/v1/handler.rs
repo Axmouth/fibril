@@ -159,6 +159,68 @@ pub async fn handle_connection(
     // ---- Writer task -------------------------------------------------------
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let req_id_gen_clone = req_id_gen.clone();
+    let client_id: Uuid;
+
+    // ---- HELLO handshake ---------------------------------------------------
+    let frame = reader
+        .next()
+        .await
+        .context("connection closed before HELLO")??;
+
+    if frame.opcode != Op::Hello as u16 {
+        frame_tx_high_prio
+            .send(encode(
+                Op::Error,
+                frame.request_id,
+                &ErrorMsg {
+                    code: 400,
+                    message: "expected HELLO".into(),
+                },
+            ))
+            .await
+            .ok();
+        tcp_stats.error();
+        return Ok(());
+    }
+
+    let hello: Hello = decode(&frame);
+
+    if hello.protocol_version != PROTOCOL_V1 {
+        frame_tx_high_prio
+            .send(encode(
+                Op::HelloErr,
+                frame.request_id,
+                &ErrorMsg {
+                    code: 1,
+                    message: "unsupported protocol version".into(),
+                },
+            ))
+            .await
+            .ok();
+        tcp_stats.error();
+        return Ok(());
+    }
+
+    client_id = Uuid::now_v7();
+    let hello_ok = &HelloOk {
+        protocol_version: PROTOCOL_V1,
+        client_id,
+        server_name: "rust-broker".into(),
+        compliance: "v=1;license=MIT;ai_train=disallowed;policy=AI_POLICY.md".to_owned(),
+    };
+
+    // TODO: Two ways handshake?
+    if hello_ok.compliance != COMPLIANCE_STRING {
+        tracing::warn!(
+            id = "NF-SOVEREIGN-2025-GN-OPT-OUT-TDM",
+            expected = COMPLIANCE_STRING,
+            got = %hello_ok.compliance,
+            "Invariant violated: compliance marker altered or missing"
+        );
+        anyhow::bail!("Protocol compliance marker mismatch");
+    }
+
+    
     let writer_task = tokio::spawn(async move {
         tracing::debug!("[writer] START");
 
@@ -259,63 +321,6 @@ pub async fn handle_connection(
         authenticated: false,
         subs: HashMap::new(),
     };
-
-    // ---- HELLO handshake ---------------------------------------------------
-    let frame = reader
-        .next()
-        .await
-        .context("connection closed before HELLO")??;
-
-    if frame.opcode != Op::Hello as u16 {
-        frame_tx_high_prio
-            .send(encode(
-                Op::Error,
-                frame.request_id,
-                &ErrorMsg {
-                    code: 400,
-                    message: "expected HELLO".into(),
-                },
-            ))
-            .await
-            .ok();
-        tcp_stats.error();
-        return Ok(());
-    }
-
-    let hello: Hello = decode(&frame);
-
-    if hello.protocol_version != PROTOCOL_V1 {
-        frame_tx_high_prio
-            .send(encode(
-                Op::HelloErr,
-                frame.request_id,
-                &ErrorMsg {
-                    code: 1,
-                    message: "unsupported protocol version".into(),
-                },
-            ))
-            .await
-            .ok();
-        tcp_stats.error();
-        return Ok(());
-    }
-
-    let hello_ok = &HelloOk {
-        protocol_version: PROTOCOL_V1,
-        server_name: "rust-broker".into(),
-        compliance: "v=1;license=MIT;ai_train=disallowed;policy=AI_POLICY.md".to_owned(),
-    };
-
-    // TODO: Two ways handshake?
-    if hello_ok.compliance != COMPLIANCE_STRING {
-        tracing::warn!(
-            id = "NF-SOVEREIGN-2025-GN-OPT-OUT-TDM",
-            expected = COMPLIANCE_STRING,
-            got = %hello_ok.compliance,
-            "Invariant violated: compliance marker altered or missing"
-        );
-        anyhow::bail!("Protocol compliance marker mismatch");
-    }
 
     frame_tx_high_prio
         .send(encode(Op::HelloOk, frame.request_id, &hello_ok))
@@ -568,6 +573,7 @@ pub async fn handle_connection(
                     .subscribe(
                         &sub.topic,
                         sub.group.as_deref(),
+                        client_id,
                         ConsumerConfig {
                             prefetch: sub.prefetch as usize,
                         },

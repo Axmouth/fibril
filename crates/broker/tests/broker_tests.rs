@@ -7,6 +7,7 @@ use fibril_broker::{
 };
 use hashbrown::HashSet;
 use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, test_dir};
+use uuid::Uuid;
 
 async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
     let dir = test_dir!("broker_test");
@@ -34,6 +35,7 @@ async fn broker_delivers_messages_in_order() {
     let (broker, _dir) = open_test_broker().await;
 
     let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let client_id = Uuid::now_v7();
 
     for _ in 0..5 {
         pubh.publish(
@@ -47,7 +49,7 @@ async fn broker_delivers_messages_in_order() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 10 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 10 })
         .await
         .unwrap();
 
@@ -71,6 +73,8 @@ async fn broker_respects_prefetch() {
     let (broker, _dir) = open_test_broker().await;
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let client_id = Uuid::now_v7();
+
     for i in 0..10 {
         pubh.publish(
             b"x".to_vec(),
@@ -84,7 +88,7 @@ async fn broker_respects_prefetch() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 3 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
         .await
         .unwrap();
 
@@ -108,6 +112,7 @@ async fn broker_respects_prefetch() {
 #[tokio::test]
 async fn ack_releases_prefetch_slot() {
     let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for i in 0..5 {
@@ -122,7 +127,7 @@ async fn ack_releases_prefetch_slot() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 2 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 2 })
         .await
         .unwrap();
 
@@ -184,6 +189,7 @@ async fn ack_releases_prefetch_slot() {
 #[tokio::test]
 async fn ack_releases_prefetch_slot2() {
     let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for i in 0..5 {
@@ -198,7 +204,7 @@ async fn ack_releases_prefetch_slot2() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 2 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 2 })
         .await
         .unwrap();
 
@@ -255,6 +261,7 @@ async fn ack_releases_prefetch_slot2() {
 async fn broker_redelivers_after_expiry() {
     // fibril_util::init_tracing_dbg();
     let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     pubh.publish(
@@ -268,7 +275,7 @@ async fn broker_redelivers_after_expiry() {
     println!("Published message with offset 0");
 
     let mut sub = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
     println!("Receiving first message");
@@ -292,6 +299,7 @@ async fn broker_redelivers_after_expiry() {
 #[tokio::test]
 async fn broker_distributes_across_consumers() {
     let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for _ in 0..10 {
@@ -306,11 +314,11 @@ async fn broker_distributes_across_consumers() {
     }
 
     let mut c1 = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
     let mut c2 = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
 
@@ -323,6 +331,7 @@ async fn broker_distributes_across_consumers() {
 #[tokio::test]
 async fn slow_consumer_does_not_starve_fast_one() {
     let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
 
     let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
     for _ in 0..5 {
@@ -337,11 +346,11 @@ async fn slow_consumer_does_not_starve_fast_one() {
     }
 
     let mut slow = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
     let mut fast = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 5 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 5 })
         .await
         .unwrap();
 
@@ -806,6 +815,7 @@ async fn stress_single_consumer_1m() {
 
 async fn stress_single_consumer(total: usize) {
     let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
 
     let (pubh, mut confirmer) = broker.get_publisher("t", &None).await.unwrap();
 
@@ -843,7 +853,7 @@ async fn stress_single_consumer(total: usize) {
     println!("Confirmed {} messages", total);
 
     let mut sub = broker
-        .subscribe("t", None, ConsumerConfig { prefetch: 1000 })
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1000 })
         .await
         .unwrap();
 

@@ -2,6 +2,7 @@ use fibril_storage::DeliveryTag;
 use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
+use uuid::Uuid;
 use std::{
     collections::HashMap,
     fmt,
@@ -447,6 +448,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let shutdown = Arc::new(Notify::new());
+    let client_id;
     // handshake
     framed
         .send(encode(
@@ -469,6 +471,7 @@ where
     match frame.opcode {
         x if x == Op::HelloOk as u16 => {
             let ho: HelloOk = decode(&frame);
+            client_id = ho.client_id;
             if ho.compliance != COMPLIANCE_STRING {
                 tracing::warn!(
                     id = "NF-SOVEREIGN-2025-GN-OPT-OUT-TDM",

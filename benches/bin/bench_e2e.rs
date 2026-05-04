@@ -20,6 +20,7 @@ use fibril_storage::{DeliveryTag, Offset};
 
 use clap::{Parser, ValueEnum};
 use fibril_util::{init_tracing, unix_millis};
+use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(name = "fibril")]
@@ -181,7 +182,7 @@ async fn producer_task(
         if msg_id >= total {
             break;
         }
-        let size = 1024 * 64;
+        let size = 1024 / 2;
         let payload = make_payload(msg_id, producer_id, size);
 
         let published = unix_millis();
@@ -353,6 +354,7 @@ async fn run_e2e_bench(cmd: E2EBench) {
     let mut c_handles = Vec::new();
     let (res_tx, mut res_rx) =
         tokio::sync::mpsc::unbounded_channel::<(Offset, DeliveryTag, Vec<u8>)>();
+    let client_id = Uuid::now_v7();
     for _ in 0..cmd.consumers {
         // let topic = format!("{}_{}", topic, i);
         let res_tx = res_tx.clone();
@@ -360,6 +362,7 @@ async fn run_e2e_bench(cmd: E2EBench) {
             .subscribe(
                 &topic,
                 None,
+                client_id,
                 ConsumerConfig::default().with_prefetch_count(8192 * 8),
             )
             .await
@@ -377,12 +380,13 @@ async fn run_e2e_bench(cmd: E2EBench) {
     // Producers
     let produce_counter = Arc::new(AtomicU64::new(0));
 
+    let mut p_handles = Vec::new();
     let (prod_id_tx, mut prod_id_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, u32)>();
     for p in 0..cmd.producers {
         let prod_id_tx = prod_id_tx.clone();
         let produce_counter = produce_counter.clone();
         // let topic = format!("{}_{}", topic, p);
-        tokio::spawn(producer_task(
+        let p_handle = tokio::spawn(producer_task(
             broker.clone(),
             topic.clone(),
             p as u32,
@@ -392,6 +396,7 @@ async fn run_e2e_bench(cmd: E2EBench) {
             prod_id_tx,
             metrics.clone(),
         ));
+        p_handles.push(p_handle);
     }
 
     drop(prod_id_tx);
@@ -440,19 +445,21 @@ async fn run_e2e_bench(cmd: E2EBench) {
 
     // broker.flush_storage().await.unwrap();
     let partition = 0;
-    // broker
-    //     .forced_cleanup(&topic, partition, &None)
-    //     .await
-    //     .unwrap();
 
     // broker_clone.dump_meta_keys().await;
     // return;
     // broker.shutdown_graceful().await;
+    broker.shutdown().await;
 
     drop(res_tx);
     // let mut received = vec![];
     for c_handle in c_handles {
-        c_handle.await.unwrap();
+        c_handle.abort();
+        // c_handle.await.unwrap();
+    }
+    for p_handle in p_handles {
+        p_handle.abort();
+        // p_handle.await.unwrap();
     }
 
     // let mut received: Vec<(u64, DeliveryTag, Vec<u8>)> = vec![];
@@ -585,7 +592,7 @@ async fn run_e2e_bench(cmd: E2EBench) {
     // drop(received_prod_ids);
 
     tracing::info!("Bench complete.");
-    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    // tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 }
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
@@ -613,5 +620,5 @@ async fn main() {
         },
     }
 
-    h.await.unwrap();
+    // h.await.unwrap();
 }

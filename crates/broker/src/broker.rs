@@ -17,6 +17,7 @@ use fibril_storage::{
     DeliverableMessage, DeliveryTag, Group, LogId, Offset, StorageError, StoredMessage, Topic,
 };
 use fibril_util::unix_millis;
+use uuid::Uuid;
 
 use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
 use stroma_core::{
@@ -93,6 +94,7 @@ impl ConsumerConfig {
 
 pub struct ConsumerHandle {
     pub sub_id: u64,
+    pub client_id: Uuid,
     pub config: ConsumerConfig,
     pub group: Option<Box<str>>,
     pub topic: Box<str>,
@@ -220,6 +222,7 @@ impl ConfirmStream {
     }
 }
 
+// TODO: Replace with Stroma version and make cleaner?
 #[derive(Debug)]
 struct TaskGroup {
     handles: SegQueue<tokio::task::JoinHandle<()>>,
@@ -301,7 +304,7 @@ type ConsumerId = u64;
 
 #[derive(Debug)]
 struct ConsumerState {
-    id: ConsumerId,
+    sub_id: ConsumerId,
     tx: mpsc::Sender<DeliverableMessage>,
     // flow control
     prefetch: AtomicUsize,
@@ -393,7 +396,6 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     shutdown_expiry: CancellationToken,
 
     next_sub_id: AtomicU64,
-    next_consumer_id: AtomicU64,
     next_tag_epoch: AtomicU64,
 
     queues: DashMap<QueueKey, Arc<QueueLoopState>>,
@@ -441,7 +443,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             shutdown_settle: CancellationToken::new(),
             shutdown_expiry: CancellationToken::new(),
             next_sub_id: AtomicU64::new(1),
-            next_consumer_id: AtomicU64::new(1),
             next_tag_epoch: AtomicU64::new(1),
             queues: DashMap::new(),
             records_by_tags: DashMap::new(),
@@ -676,6 +677,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self: &Arc<Self>,
         topic: &str,
         group: Option<&str>,
+        client_id: Uuid,
         cfg: ConsumerConfig,
     ) -> Result<ConsumerHandle, BrokerError> {
         let tp: Topic = topic.to_string();
@@ -683,7 +685,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let group: Option<Group> = group.map(|s| s.to_string());
 
         let sub_id = self.next_sub_id.fetch_add(1, Ordering::SeqCst);
-        let consumer_id = self.next_consumer_id.fetch_add(1, Ordering::SeqCst);
 
         let prefetch = cfg.prefetch.max(1);
 
@@ -691,7 +692,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let (settle_tx, settle_rx) = mpsc::channel::<SettleRequest>(prefetch * 8);
 
         let consumer = Arc::new(ConsumerState {
-            id: consumer_id,
+            sub_id,
             tx: msg_tx.clone(),
             prefetch: AtomicUsize::new(prefetch),
             inflight: AtomicUsize::new(0),
@@ -705,7 +706,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         let qs = self.queue(&key).await;
 
-        qs.consumers.insert(consumer_id, consumer.clone());
+        qs.consumers.insert(sub_id, consumer.clone());
 
         // spawn settle loop for this consumer
         self.spawn_settle_loop(consumer.clone(), settle_rx);
@@ -725,6 +726,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         Ok(ConsumerHandle {
             sub_id,
+            client_id,
             config: cfg,
             group: group.map(|g| g.into()),
             topic: tp.into(),
@@ -806,7 +808,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             tracing::warn!(
                 "Received settle for unknown delivery tag {:?} from consumer {}",
                 req.delivery_tag,
-                consumer.id
+                consumer.sub_id
             );
             return;
         };
@@ -814,12 +816,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .remove(&(tag_rec.key.clone(), tag_rec.offset));
 
         // validate consumer
-        if tag_rec.consumer_id != consumer.id {
+        if tag_rec.consumer_id != consumer.sub_id {
             // wrong consumer: ignore (or warn)
             tracing::warn!(
                 "Received settle for delivery tag {:?} from consumer {}, but tag belongs to consumer {}",
                 req.delivery_tag,
-                consumer.id,
+                consumer.sub_id,
                 tag_rec.consumer_id
             );
             return;
@@ -827,7 +829,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         tracing::debug!(
             "Handling settle for consumer {}: {:?} (tag {:?}) (offset {})",
-            consumer.id,
+            consumer.sub_id,
             req.settle_type,
             req.delivery_tag,
             tag_rec.offset
@@ -881,7 +883,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             }
             tracing::debug!(
                 "Settle completed for consumer {}, pending settles now {}",
-                consumer2.id,
+                consumer2.sub_id,
                 pending - 1
             );
         };
@@ -922,7 +924,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             self.tags_by_key_offset
                 .remove(&(tag_rec.key.clone(), tag_rec.offset));
 
-            if tag_rec.consumer_id != consumer.id {
+            if tag_rec.consumer_id != consumer.sub_id {
                 tracing::warn!("Settle from wrong consumer");
                 continue;
             }
@@ -1137,7 +1139,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             TagRecord {
                                 key: key.clone(),
                                 offset: d.offset,
-                                consumer_id: c.id,
+                                consumer_id: c.sub_id,
                             },
                         );
                         broker
@@ -1168,7 +1170,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         if c.tx.send(msg).await.is_err() {
                             // TODO: Currently handled by expiry (since we keep inflight until completion),
                             //          but you could also immediately decrement inflight and requeue here.
-                            qs.consumers.remove(&c.id);
+                            qs.consumers.remove(&c.sub_id);
                         } else {
                             if let Some(metrics) = &broker.metrics {
                                 metrics.delivered();

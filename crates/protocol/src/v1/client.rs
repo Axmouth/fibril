@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fibril_storage::DeliveryTag;
 use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
+use uuid::Uuid;
 
 use crate::v1::{
     Ack, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Publish, PublishOk, Subscribe,

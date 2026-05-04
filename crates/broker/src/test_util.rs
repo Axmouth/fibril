@@ -4,6 +4,7 @@ use fibril_storage::{DeliveryTag, Offset};
 use fibril_util::{init_tracing, init_tracing_dbg};
 use hashbrown::HashMap;
 use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, test_dir};
+use uuid::Uuid;
 
 use crate::{broker::*, queue_engine::StromaEngine};
 
@@ -195,11 +196,13 @@ impl SubBuilder<'_> {
     pub async fn wait(self) -> Result<TestConsumer, BrokerError> {
         let id = format!("c{}", self.state.next_consumer_id);
         self.state.next_consumer_id += 1;
+        let client_id = Uuid::now_v7();
 
         let handle = self.state.brokers[&self.broker]
             .subscribe(
                 &self.topic,
                 self.group.as_deref(),
+                client_id,
                 ConsumerConfig {
                     prefetch: self.prefetch,
                 },
@@ -224,11 +227,14 @@ impl<'a> SubBuilder<'a> {
             .brokers
             .get(&self.broker)
             .expect("broker not started");
+        
+        let client_id = Uuid::now_v7();
 
         let handle = broker
             .subscribe(
                 &self.topic,
                 self.group.as_deref(),
+                client_id,
                 ConsumerConfig {
                     prefetch: self.prefetch,
                 },

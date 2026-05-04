@@ -5,6 +5,7 @@ pub mod helper;
 
 use fibril_storage::DeliveryTag;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Handshake magic bytes.
 /// IMPORTANT: This field MUST be included and preserved unchanged
@@ -58,6 +59,7 @@ pub struct Hello {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelloOk {
     pub protocol_version: u16, // negotiated
+    pub client_id: Uuid,
     pub server_name: String,
     pub compliance: String,
 }

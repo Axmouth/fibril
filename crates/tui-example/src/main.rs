@@ -17,6 +17,7 @@ use ratatui::{
     style::Color,
     widgets::{Block, Borders, Paragraph},
 };
+use uuid::Uuid;
 use std::{collections::HashMap, io::stdout};
 use std::{
     sync::atomic::{AtomicU64, Ordering},

@@ -1,3 +1,6 @@
+Small grace period and simple reconciliation handshake after restart. "listening for old friends". Broker takes a moment to let clients reclaim inflight state and submit late settle requests, before starting delivery as usual.
+Might need to save client id AND sub id for this. Restoring sub ids for inflight state also mean we likely need to set next sub id var to the max of the sub ids we have too, to be safe. or ignore sub ids and rely only on client id.
+
 Maybe find way to better linearly read from Keratin, faster
 
 More pipelining in Keratin writer: Batch -> encode and stage buffer -> write file -> fsync -> notify awaiters (estimated possible 40%-60% gain in throughput from not waiting encoding and fsync for large payloads)

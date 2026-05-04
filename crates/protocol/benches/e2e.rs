@@ -10,6 +10,7 @@ use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant};
 use tokio_util::codec::Framed;
+use uuid::Uuid;
 
 async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot::Sender<()>) {
     let start = Instant::now();
