@@ -14,6 +14,7 @@ fastrand = "2"
 futures = "0.3"
 rmp-serde = "1.3"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }

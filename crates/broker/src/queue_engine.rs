@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use fibril_metrics::QueuesStateSnapshot;
 use fibril_storage::Offset;
 use fibril_util::UnixMillis;
+use tokio::sync::Notify;
 use std::collections::HashSet;
-use stroma_core::{AckEventMeta, MessageHeaders, NackEventMeta, StromaDebugSnapshot, StromaMetrics};
+use stroma_core::{AckEventMeta, MessageHeaders, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics};
 pub use stroma_core::{
     AppendCompletion, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
 };
@@ -102,7 +103,7 @@ pub trait QueueEngine {
         tp: &str,
         part: u32,
         group: Option<&str>,
-        items: Vec<(MessageHeaders, Vec<u8>, Box<dyn AppendCompletion<IoError>>)>,
+        items: Vec<PublishItem>,
     ) -> Result<(), StromaError>;
 
     async fn next_expiry_hint(&self) -> Result<Option<UnixMillis>, StromaError>;
@@ -124,6 +125,8 @@ pub trait QueueEngine {
     async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError>;
 
     fn metrics(&self) -> Arc<StromaMetrics>;
+
+    fn deadline_awaker(&self) -> Arc<Notify>;
 }
 
 #[derive(Debug, Clone)]
@@ -278,7 +281,7 @@ impl QueueEngine for StromaEngine {
         tp: &str,
         part: u32,
         group: Option<&str>,
-        items: Vec<(MessageHeaders, Vec<u8>, Box<dyn AppendCompletion<IoError>>)>,
+        items: Vec<PublishItem>,
     ) -> Result<(), StromaError> {
         self.inner
             .append_message_batch(tp, part, group, items)
@@ -345,5 +348,9 @@ impl QueueEngine for StromaEngine {
 
     fn metrics(&self) -> Arc<StromaMetrics> {
         self.inner.metrics()
+    }
+
+    fn deadline_awaker(&self) -> Arc<Notify> {
+        self.inner.deadline_waker()
     }
 }

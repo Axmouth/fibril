@@ -33,7 +33,8 @@ pub enum Op {
     AuthErr = 12,
 
     Publish = 20,
-    PublishOk = 21,
+    PublishDelayed = 21,
+    PublishOk = 25,
 
     Subscribe = 30,
     SubscribeOk = 31,
@@ -76,6 +77,17 @@ pub struct Publish {
     pub partition: u32, // keep for later, default 0
     pub group: Option<String>,
     pub require_confirm: bool,
+    pub payload: Vec<u8>,
+    pub published: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishDelayed {
+    pub topic: String,
+    pub partition: u32,
+    pub group: Option<String>,
+    pub require_confirm: bool,
+    pub not_before: u64,
     pub payload: Vec<u8>,
     pub published: u64,
 }

@@ -1,14 +1,53 @@
-<p align="center">
-  <img src="./bannerlogo.png" width="640em">
-</p>
+<div align="center">
 
 # Fibril
+**The connective tissue of distributed systems.**
+
+<img src="./bannerlogo.png" width="600" alt="Fibril Logo">
+
+*Simple. Durable. Built from first principles.*
+
+---
+
+</div>
+
+### Intent
 
 Fibril is an experimental message broker built to explore queue semantics, durability, and distributed coordination from first principles.
 
 This project is intentionally small and evolving. It is not production-ready, and it does not (yet) aim to compete with existing systems. The goal is to understand the problem space by building and using the pieces directly.
 
 Every layer and component is meant to be reusable, if desired, and the broker layer embeddable, effectively a channel factory with durability and delivery semantics. While I do not expect this to be a common use case, it is an interesting possibility that the core broker logic could be used as a library for building custom brokers or even embedded directly in service instances.
+
+### The shape of the API
+
+Messaging should not feel like bureaucracy. In Fibril, the message itself can carry the intent of the system, allowing for a natural, asynchronous flow:
+
+```rust
+while let Some(msg) = sub.recv().await? {
+    process(msg.content()).await?;
+
+    msg.complete()?;    // Acknowledge successful processing
+}
+```
+
+Messages can also be retried or failed explicitly:
+
+```rust
+    msg.retry()?;           // Requeue immediately
+    msg.retry_after(45)?;   // Requeue after a delay
+    msg.fail()?;            // Mark failed without requeueing
+```
+
+Common access patterns:
+```rust
+    let value: MyType = msg.json()?;
+```
+
+> Messages are `#[must_use]` (in Rust). So forgotten lifecycle handling is warned about.
+
+> Fibril is still evolving, and some APIs shown here may change or may not yet
+> be fully implemented end to end.
 
 ## What's here
 
@@ -251,7 +290,9 @@ Any performance numbers mentioned are subject to change(but the trend is general
 
 * **Dead letter queue and retry mechanisms**
 
-  Implementing a dead letter queue for messages that cannot be delivered after a certain number of attempts, and exploring different retry strategies.
+  ~~Implementing a dead letter queue for messages that cannot be delivered after a certain number of attempts, and exploring different retry strategies.~~
+
+  Update: Retry is implemented, deadletter logic is implemented with different policies(global dlq, custom set dlq, just discard). Works when maxxing out retries as well.
 
 * **Compaction and cleanup**
 
@@ -299,6 +340,7 @@ Any performance numbers mentioned are subject to change(but the trend is general
   Potential implementation details: Semaphore to open lane slots, when we know ready state empty and no pending publishes. confirm on disk fsync as usual. Explore if better to directly set to inflight together with enqueue.
 
 * **Message lease extension while it is being processed**
+
   Especially some manner for the client side to keep the lease alive as long as connection is intact
 
 * **Delayed messages and scheduling**

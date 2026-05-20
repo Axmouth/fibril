@@ -794,6 +794,82 @@ pub async fn handle_connection(
                     }
                 // });
             }
+            x if x == Op::PublishDelayed as u16 => {
+                let publish_received = unix_millis();
+                let pubreq: PublishDelayed = decode(&frame);
+
+                // TODO: Handle confirm stream properly
+                let key = &(pubreq.topic.clone(), pubreq.group.clone());
+                let publisher = if let Some(pubh) = publishers.get(key) {
+                    pubh.clone()
+                } else {
+                    let (pubh, mut conf_stream) = broker
+                        .get_publisher(&pubreq.topic, &pubreq.group)
+                        .await
+                        .context("get publisher failed")?;
+
+                    // let conf_sink = frame_tx_low_prio.clone();
+                    // let req_id_gen_clone = req_id_gen.clone();
+                    tokio::spawn(async move {
+                        while let Some(offset) = conf_stream.recv().await {
+                            // let res = conf_sink.send(encode(Op::PublishOk, req_id_gen_clone.next_id(), &PublishOk {offset})).await;
+
+                            // if let Err(_) = res {
+                            //     tracing::warn!("Error sending confirm for offset {offset}");
+                            // }
+
+                            // TODO: confirms are handled elsewhere, see if there's a cleaner way than this
+                            let _ = offset;
+                        }
+                    });
+                    publishers.insert(key.clone(), pubh.clone());
+                    pubh
+                };
+                let pub_tx = pub_tx.clone();
+                let frame_tx_pub = frame_tx_low_prio.clone();
+                // tokio::spawn(async move {
+                    let published: Result<
+                        tokio::sync::oneshot::Receiver<
+                            Result<u64, fibril_broker::broker::BrokerError>,
+                        >,
+                        fibril_broker::broker::BrokerError,
+                    > = if pubreq.require_confirm {
+                        publisher
+                            .publish(
+                                pubreq.payload,
+                                pubreq.published,
+                                publish_received,
+                                HashMap::new(),
+                            )
+                            .await
+                    } else {
+                        publisher
+                            .publish_no_confirm(
+                                pubreq.payload,
+                                pubreq.published,
+                                publish_received,
+                                HashMap::new(),
+                            )
+                            .await
+                    };
+                    let res = pub_tx
+                        .send((published, pubreq.require_confirm, frame.request_id))
+                        .await;
+                    if let Err(_err) = res {
+                        let _ = frame_tx_pub
+                            .send(encode(
+                                Op::Error,
+                                frame.request_id,
+                                &ErrorMsg {
+                                    code: 500,
+                                    message: "Broken pipe".into(),
+                                },
+                            ))
+                            .await;
+                        tracing::error!("Error sending published to queue");
+                    }
+                // });
+            }
 
             // -------- PING ---------------------------------------------------
             x if x == Op::Ping as u16 => {

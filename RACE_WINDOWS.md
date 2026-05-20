@@ -6,7 +6,7 @@ What remains are **subtle but real**.
 
 ---
 
-### 🚨 Race 1: Duplicate redelivery under load (you just fixed this)
+### 🚨 Race 1: Duplicate redelivery under load (we fixed this)
 
 Root cause (now fixed):
 
@@ -14,9 +14,9 @@ Root cause (now fixed):
 * redelivery enqueued
 * delivery loop also fetched it again
 
-Fix you applied:
+Fix we applied:
 
-* don’t reinsert offsets ≥ next_offset
+* do not reinsert offsets ≥ next_offset
 * avoid touching next_offset on redelivery
 
 ✅ Correct.
@@ -65,7 +65,7 @@ This makes redelivery *idempotent*.
 
 ### ⚠️ Race 3: Restart + in-memory next_offset
 
-You already added:
+We already added:
 
 ```rust
 next_offset = lowest_unacked_offset()
@@ -83,7 +83,7 @@ Right now:
 * they *will* expire via TTL
 * that’s acceptable behavior
 
-Document this as:
+Let's document this as:
 
 > After restart, in-flight messages may be redelivered.
 
@@ -93,7 +93,7 @@ That’s industry standard.
 
 ### ⚠️ Race 4: Multiple consumers joining simultaneously
 
-You do:
+We do:
 
 ```rust
 delivery_task_started.swap(true)

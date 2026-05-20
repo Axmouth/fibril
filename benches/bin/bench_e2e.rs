@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use fibril_broker::broker::SettleType;
+use fibril_broker::{broker::SettleType, queue_engine::KeratinConfig};
 use fibril_broker::broker::{ConsumerConfig, SettleRequest};
 use fibril_broker::{
     broker::{Broker, BrokerConfig, ConsumerHandle},
@@ -182,7 +182,7 @@ async fn producer_task(
         if msg_id >= total {
             break;
         }
-        let size = 1024 / 2;
+        let size = 1024 * 4;
         let payload = make_payload(msg_id, producer_id, size);
 
         let published = unix_millis();
@@ -324,7 +324,12 @@ async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
     // let store = Arc::new(ObservableStorage::new(store, metrics.storage()));
     // let coord = NoopCoordination {};
 
-    let engine = StromaEngine::open(&storage_path, Default::default(), Default::default())
+    let keratin_cfg = KeratinConfig {
+        batch_linger_ms: 0,
+        ..Default::default()
+    };
+
+    let engine = StromaEngine::open(&storage_path, keratin_cfg, Default::default())
         .await
         .unwrap();
 

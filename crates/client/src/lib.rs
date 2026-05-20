@@ -1,11 +1,10 @@
 use fibril_storage::DeliveryTag;
-use fibril_util::unix_millis;
+use fibril_util::{UnixMillis, unix_millis};
 use futures::{SinkExt, StreamExt};
-use serde::de::DeserializeOwned;
-use uuid::Uuid;
+use serde::{Serialize, de::DeserializeOwned};
 use std::{
     collections::HashMap,
-    fmt,
+    fmt::{self, Debug},
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
 };
@@ -16,6 +15,7 @@ use tokio::{
     sync::{Notify, mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
+use uuid::Uuid;
 
 use fibril_protocol::v1::{frame::ProtoCodec, helper::*, *};
 
@@ -72,16 +72,120 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn deserialize<T: DeserializeOwned>(&self) -> FibrilResult<T> {
+    pub fn msg_pack<T: DeserializeOwned>(&self) -> FibrilResult<T> {
         rmp_serde::from_slice(&self.payload)
+            .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
+    }
+
+    pub fn json<T: DeserializeOwned>(&self) -> FibrilResult<T> {
+        serde_json::from_slice(&self.payload)
+            .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
+    }
+
+    pub fn raw(&self) -> &[u8] {
+        &self.payload
+    }
+
+    pub fn content(&self) -> Result<&str, FibrilError> {
+        std::str::from_utf8(&self.payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
     }
 }
 
-pub enum SettleRequest {
-    Ack { tag: DeliveryTag, request_id: u64, response: oneshot::Sender<Result<(), FibrilError>> },
-    Nack { tag: DeliveryTag, requeue: bool, request_id: u64, response: oneshot::Sender<Result<(), FibrilError>> },
+pub struct NewMessage {
+    pub payload: Vec<u8>,
 }
+
+impl NewMessage {
+    pub fn msg_pack<T: serde::Serialize>(payload: &T) -> FibrilResult<Self> {
+        rmp_serde::to_vec(payload)
+            .map(|payload| NewMessage { payload })
+            .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })
+    }
+
+    pub fn json<T: serde::Serialize>(payload: &T) -> FibrilResult<Self> {
+        serde_json::to_vec(payload)
+            .map(|payload| NewMessage { payload })
+            .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })
+    }
+
+    pub fn raw(payload: Vec<u8>) -> Self {
+        NewMessage { payload }
+    }
+
+    pub fn content(payload: impl Into<Vec<u8>>) -> Self {
+        NewMessage { payload: payload.into() }
+    }
+}
+
+pub trait Publishable {
+    fn into_message(self) -> FibrilResult<NewMessage>;
+}
+
+impl Publishable for NewMessage {
+    fn into_message(self) -> FibrilResult<NewMessage> {
+        Ok(self)
+    }
+}
+
+impl<T: Serialize> Publishable for T {
+    fn into_message(self) -> FibrilResult<NewMessage> {
+        NewMessage::msg_pack(&self)
+    }
+}
+
+pub enum SettleRequest {
+    Ack {
+        tag: DeliveryTag,
+        request_id: u64,
+        response: oneshot::Sender<Result<(), FibrilError>>,
+    },
+    Nack {
+        tag: DeliveryTag,
+        requeue: bool,
+        request_id: u64,
+        response: oneshot::Sender<Result<(), FibrilError>>,
+    },
+}
+
+pub trait Delayable {
+    fn with_delay(&self) -> std::time::Duration;
+
+    fn deadline(&self) -> UnixMillis {
+        unix_millis() + self.with_delay().as_millis() as u64
+    }
+}
+
+impl Delayable for u64 {
+    fn with_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(*self)
+    }
+}
+
+impl Delayable for u32 {
+    fn with_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs((*self).into())
+    }
+}
+
+impl Delayable for u16 {
+    fn with_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs((*self).into())
+    }
+}
+
+impl Delayable for u8 {
+    fn with_delay(&self) -> std::time::Duration {
+        std::time::Duration::from_secs((*self).into())
+    }
+}
+
+impl Delayable for std::time::Duration {
+    fn with_delay(&self) -> std::time::Duration {
+        *self
+    }
+}
+
 
 #[must_use]
 pub struct InflightMessage {
@@ -141,6 +245,11 @@ impl InflightMessage {
             delivery_tag: self.delivery_tag,
             payload: self.payload,
         })
+    }
+
+    pub async fn retry_after(self, delay: impl Delayable) -> FibrilResult<Message> {
+        let deadline = delay.deadline();
+        todo!()
     }
 
     pub fn deserialize<T: DeserializeOwned>(&self) -> FibrilResult<T> {
@@ -316,29 +425,49 @@ impl Client {
     }
 }
 
+// TODO: Replace serializeable with NewMessage struct, so the user can easily choose form of serialization
+// TODO: perhaps use generics so that it defaults to message pack and can be used transparently
 impl Publisher {
     // TODO: return a confirmer handle?
     /// Publish a message with manual confirmation
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
-    pub async fn publish_unconfirmed<T: serde::Serialize>(&self, payload: &T) -> FibrilResult<()> {
-        let bytes = rmp_serde::to_vec(payload)
-            .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })?;
+    pub async fn publish_unconfirmed<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
+        let message = payload.into_message()?;
         self.engine
-            .publish_unconfirmed(self.topic.clone(), self.group.clone(), bytes)
+            .publish_unconfirmed(self.topic.clone(), self.group.clone(), message.payload)
             .await
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
     /// Publish a message with automatic confirmation (only returns once the server's publish confirm is received)
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
-    pub async fn publish<T: serde::Serialize>(&self, payload: &T) -> FibrilResult<u64> {
-        let bytes = rmp_serde::to_vec(payload)
-            .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })?;
+    pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
+        let message = payload.into_message()?;
         self.engine
-            .publish(self.topic.clone(), self.group.clone(), bytes)
+            .publish(self.topic.clone(), self.group.clone(), message.payload)
             .await
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
         // TODO: Or return a notifier you can await? As like async fn PublishResult::confirmed()
+    }
+
+    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    pub async fn publish_unconfirmed_delayed<T: Publishable, D: Delayable + Debug>(
+        &self,
+        payload: T,
+        delay: D,
+    ) -> FibrilResult<()> {
+        let deadline = delay.deadline();
+        todo!()
+    }
+
+    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    pub async fn publish_with_delayed<T: Publishable, D: Delayable + Debug>(
+        &self,
+        payload: T,
+        delay: D,
+    ) -> FibrilResult<u64> {
+        let deadline = delay.deadline();
+        todo!()
     }
 }
 
@@ -880,7 +1009,11 @@ where
         for (_, waiter) in waiters.drain() {
             fail_waiter(
                 waiter,
-                fatal_error.clone().unwrap_or_else(|| FibrilError::Disconnection { msg: "engine shutdown".into() }),
+                fatal_error
+                    .clone()
+                    .unwrap_or_else(|| FibrilError::Disconnection {
+                        msg: "engine shutdown".into(),
+                    }),
             );
         }
 

@@ -1,3 +1,9 @@
+Ensure periodic snapshot tasks start when queue is newly created too(but waits for recovery to finish if there is one). Currently it only starts on recovery, so if you start with an empty storage, it won't start until you restart again after the first recovery is done, which is not wrong and means no snapshots unless we restart first.
+
+Wire in more debug stats
+
+Figure keratin head offset discrepancy.
+
 Small grace period and simple reconciliation handshake after restart. "listening for old friends". Broker takes a moment to let clients reclaim inflight state and submit late settle requests, before starting delivery as usual.
 Might need to save client id AND sub id for this. Restoring sub ids for inflight state also mean we likely need to set next sub id var to the max of the sub ids we have too, to be safe. or ignore sub ids and rely only on client id.
 
@@ -7,7 +13,7 @@ More pipelining in Keratin writer: Batch -> encode and stage buffer -> write fil
 
 explore a cache trying to keep in memory x mb of next deliverable messages(we always know which messages are next with ready set)
 
-try to nest main loop in tcp client and server and put more generous reconnect logic there, trying to keep the state and not redo, have a handshake that shows it was reconnected with same id to differentiate from connection dying on other side. also immediately mark ready again once connection(cause messages are stuck in prefetch inflight etc)
+try to nest main loop in tcp client and server and put more generous reconnect logic there, trying to keep the state and not redo, have a handshake that shows it was reconnected with same id to differentiate from connection dying on other side. also immediately mark ready again once connection(cause messages are stuck in prefetch inflight etc). add map of client to inflights in state? for easier reconciliation
 
 keep track off consumer id per message and extend lease for alive consumers instead of expiring
 
@@ -33,11 +39,7 @@ deny topic etc names beyond simple fs compatible setups
 
 Add display names to topics/groups for logging/ui
 
-add events for changing queue settings (ttl, max inflight, etc)
 add global event log for stroma setting changes
-
-Finish dead letter queue implementation, untangle any fallible/storage bits to outside state methods and on event log application
-Perhaps use completions to apply the events in memory only after persisting them
 
 clean up group related tests
 
@@ -82,7 +84,7 @@ better handling of batching slowdown when confirms not drained
 
 better error handling(return louder errors when failing to publish)
 
-diagnostics queue/channel to allow sending up non fatal issues and tallying/observing them better?
+diagnostics queue/channel/mmesage type to allow sending up non fatal issues and tallying/observing them better?
 
 multiple brokers on same storage tests (must fail)
 
@@ -92,17 +94,13 @@ Eval persisting inflight map, or delivery tags for inflight, so inflight state c
 
 clusters (leader through shared networked storage initially, raft replication later?)
 
-cli
-
-metadata(content type, redelivered, etc)
+metadata(content type, redelivered, etc), common ones like content type as client methods?
 
 RabidMQ easter egg(--version during April 1st? rabbitmq compatibility layer?)
 
 routing layer? (in order to keep invariants stable, maybe we'd need a separate layer, broker delivers to itself, runs script, acks onces derived message completes, effectively)
 
-dead letter queue? (expired, nacked too much, etc) (part of routing?)
-
-queues with ttl to discard(not just resend)
+queues with ttl to discard(not just resend) (or ttl just per message?)
 
 define ops/infra story for easy convenient deployments and handling(not error prone by default, don't assume user does things right)
 

@@ -10,6 +10,7 @@ use std::{
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 use fibril_metrics::{BrokerStats, QueuesStateSnapshot};
+use futures::FutureExt;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -22,7 +23,7 @@ use uuid::Uuid;
 use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
-    MessageHeaders, NackEventMeta, StromaError, StromaMetrics,
+    MessageHeaders, NackEventMeta, StromaError, StromaMetrics, UnixMillis,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -133,6 +134,7 @@ impl ConsumerHandle {
 pub struct PublishRequest {
     pub payload: Vec<u8>,
     pub reply: oneshot::Sender<Result<Offset, BrokerError>>,
+    pub not_before: Option<UnixMillis>,
     pub require_confirm: bool,
     pub published: u64,
     pub publish_received: u64,
@@ -159,6 +161,7 @@ impl PublisherHandle {
                 payload,
                 reply: tx,
                 require_confirm: true,
+                not_before: None,
                 published,
                 publish_received,
                 extra,
@@ -190,6 +193,7 @@ impl PublisherHandle {
                 payload,
                 reply: tx,
                 require_confirm: false,
+                not_before: None,
                 publish_received,
                 published,
                 extra,
@@ -204,6 +208,56 @@ impl PublisherHandle {
         //     }
         // });
 
+        Ok(rx)
+    }
+
+    pub async fn publish_delayed(
+        &self,
+        payload: Vec<u8>,
+        published: u64,
+        publish_received: u64,
+        extra: HashMap<String, String>,
+        not_before: u64,
+    ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.publisher
+            .send(PublishRequest {
+                payload,
+                reply: tx,
+                require_confirm: false, // TODO: support confirm for delayed?
+                not_before: Some(not_before),
+                published,
+                publish_received,
+                extra,
+            })
+            .await
+            .map_err(|_| BrokerError::ChannelClosed)?;
+        Ok(rx)
+    }
+
+    pub async fn publish_no_confirm_delayed(
+        &self,
+        payload: Vec<u8>,
+        published: u64,
+        publish_received: u64,
+        extra: HashMap<String, String>,
+        not_before: u64,
+    ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
+        let (tx, rx) = oneshot::channel();
+
+        self.publisher
+            .send(PublishRequest {
+                payload,
+                reply: tx,
+                require_confirm: false,
+                not_before: Some(not_before),
+                published,
+                publish_received,
+                extra,
+            })
+            .await
+            .map_err(|_| BrokerError::ChannelClosed)?;
         Ok(rx)
     }
 }
@@ -591,6 +645,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 for PublishRequest {
                     payload,
                     reply,
+                    not_before,
                     require_confirm: _,
                     published,
                     publish_received,
@@ -609,7 +664,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         tracing::error!("Failed to forward to confirm sink: {e:?}");
                         continue;
                     }
-                    items.push((headers, payload, completion));
+                    items.push(stroma_core::PublishItem {
+                        headers,
+                        payload,
+                        not_before,
+                        completion,
+                    });
                 }
 
                 if items.is_empty() {
@@ -1207,13 +1267,28 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     fn spawn_expiry_worker(broker: Arc<Self>) {
         let broker_clone = broker.clone();
+        let deadline_awaker = broker.engine.deadline_awaker();
         broker_clone.task_group.spawn("expiry_worker", async move {
             let mut expiry_hint = Some(0);
             loop {
+                let deadline_awaker = deadline_awaker.notified();
+                tokio::pin!(deadline_awaker);
                 tokio::select! {
                     biased;
 
                     _ = broker.shutdown_expiry.cancelled() => break,
+
+                    // TODO: Add branch to be notified when to recheck for hint(retry or enqueue with delay?)
+                    _ = &mut deadline_awaker => {
+                        // Wait for potential burst to settle
+                        // TODO: Config as broker.cfg.expiry_wake_debounce_ms ?
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        // Drain any accumulated permit so we don't immediately re-fire next iteration
+                        let _ = broker.engine.deadline_awaker().notified().now_or_never();
+                        // earlier deadline arrived, recompute and loop
+                        expiry_hint = broker.engine.next_expiry_hint().await.unwrap_or(None);
+                        continue;
+                    }
 
                     _ = async {
                         match expiry_hint {
@@ -1265,6 +1340,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     metrics.expired_many(expired.len() as u64);
                 }
 
+                // TODO: windowed iterator and spawn more at a time? perhaps parallelism / 2
                 for (tp, part, group, offset) in expired.iter().cloned() {
                     let key = QueueKey { tp, part, group };
 
