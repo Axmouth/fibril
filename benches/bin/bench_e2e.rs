@@ -182,7 +182,7 @@ async fn producer_task(
         if msg_id >= total {
             break;
         }
-        let size = 1024 * 4;
+        let size = 1024 * 2;
         let payload = make_payload(msg_id, producer_id, size);
 
         let published = unix_millis();
