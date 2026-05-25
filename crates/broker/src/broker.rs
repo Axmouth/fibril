@@ -22,8 +22,7 @@ use uuid::Uuid;
 
 use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
 use stroma_core::{
-    AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
-    MessageHeaders, NackEventMeta, StromaError, StromaMetrics, UnixMillis,
+    AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion, MessageHeaders, NackEventMeta, StromaError, StromaMetrics, TaskGroup, UnixMillis
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -273,64 +272,6 @@ impl ConfirmStream {
 
     pub fn is_empty(&self) -> bool {
         self.rx.is_empty()
-    }
-}
-
-// TODO: Replace with Stroma version and make cleaner?
-#[derive(Debug)]
-struct TaskGroup {
-    handles: SegQueue<tokio::task::JoinHandle<()>>,
-    shutdown: AtomicBool,
-}
-
-impl TaskGroup {
-    fn new() -> Self {
-        Self {
-            handles: SegQueue::new(),
-            shutdown: AtomicBool::new(false),
-        }
-    }
-
-    fn spawn<F>(&self, _name: &'static str, fut: F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        // Hard gate: no tasks after shutdown
-        if self.shutdown.load(Ordering::Acquire) {
-            return;
-        }
-
-        #[cfg(tokio_unstable)]
-        let handle = tokio::task::Builder::new().name(_name).spawn(fut).unwrap();
-
-        #[cfg(not(tokio_unstable))]
-        let handle = tokio::spawn(fut);
-
-        // Push only if still open
-        if self.shutdown.load(Ordering::Acquire) {
-            handle.abort(); // defensive, extremely rare
-        } else {
-            self.handles.push(handle);
-            let mut handles = Vec::new();
-            while let Some(handle) = self.handles.pop() {
-                if !handle.is_finished() {
-                    handles.push(handle);
-                }
-            }
-            for handle in handles {
-                self.handles.push(handle);
-            }
-        }
-    }
-
-    async fn shutdown(&self) {
-        // Close the gate
-        self.shutdown.store(true, Ordering::Release);
-
-        // Drain deterministically
-        while let Some(h) = self.handles.pop() {
-            h.abort();
-        }
     }
 }
 
