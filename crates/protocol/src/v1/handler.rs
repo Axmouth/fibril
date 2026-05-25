@@ -148,7 +148,7 @@ pub async fn handle_connection(
     heartbeat.tick().await; // consume first tick
     // ---- Framed socket -----------------------------------------------------
     let peer_addr = socket.peer_addr().ok();
-    let framed = Framed::with_capacity(socket, ProtoCodec, 64 * 1024);
+    let framed = Framed::with_capacity(socket, ProtoCodec, 128 * 1024);
     let (mut writer, mut reader) = framed.split();
 
     // ---- Write fan-in channel ---------------------------------------------
@@ -902,6 +902,7 @@ pub async fn handle_connection(
 
     // ---- Connection closing ------------------------------------------------
     // closes writer channel
+    drop(pub_tx);
     drop(frame_tx_high_prio);
     drop(frame_tx_low_prio);
 
