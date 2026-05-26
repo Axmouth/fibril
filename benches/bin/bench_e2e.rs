@@ -21,6 +21,11 @@ use fibril_storage::{DeliveryTag, Offset};
 use clap::{Parser, ValueEnum};
 use fibril_util::{init_tracing, unix_millis};
 use uuid::Uuid;
+// use mimalloc::MiMalloc;
+
+
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
 
 #[derive(Parser, Debug)]
 #[command(name = "fibril")]

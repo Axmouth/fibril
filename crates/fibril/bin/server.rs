@@ -13,7 +13,6 @@ use fibril_protocol::v1::handler::run_server;
 use fibril_util::{StaticAuthHandler, init_tracing};
 use mimalloc::MiMalloc;
 
-#[cfg(windows)]
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -54,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         metrics.clone(),
         stroma_metrics,
         AdminConfig {
-            bind: "0.0.0.0:8080".into(),
+            bind: "0.0.0.0:8081".into(),
             // auth: Some(auth_handler),
             auth: None,
         },

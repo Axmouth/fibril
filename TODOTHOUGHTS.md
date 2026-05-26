@@ -2,6 +2,8 @@ Add content type to header fields, enum for common ones like json, msg pack, etc
 
 Ensure periodic snapshot tasks start when queue is newly created too(but waits for recovery to finish if there is one). Currently it only starts on recovery, so if you start with an empty storage, it won't start until you restart again after the first recovery is done, which is not wrong and means no snapshots unless we restart first.
 
+test required changes for pre allocating segments so we skip metadata edits etc on every write.
+
 Wire in more debug stats
 
 Figure keratin head offset discrepancy.

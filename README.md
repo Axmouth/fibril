@@ -13,11 +13,21 @@
 
 ### Intent
 
-Fibril is an experimental message broker built to explore queue semantics, durability, and distributed coordination from first principles.
+Fibril is a message broker focused on durable delivery, retries, leasing, and asynchronous workflow coordination, built from first principles in Rust.
 
-This project is intentionally small and evolving. It is not production-ready, and it does not (yet) aim to compete with existing systems. The goal is to understand the problem space by building and using the pieces directly.
+The project is currently in a pre-alpha stage and under active development. APIs, persistence formats, and operational behavior may still change significantly as the system evolves.
 
-Every layer and component is meant to be reusable, if desired, and the broker layer embeddable, effectively a channel factory with durability and delivery semantics. While I do not expect this to be a common use case, it is an interesting possibility that the core broker logic could be used as a library for building custom brokers or even embedded directly in service instances.
+Fibril aims to provide a simpler and more ergonomic messaging model, where the message itself carries the lifecycle of processing:
+
+```rust
+msg.complete()?;
+msg.retry_after(45)?;
+msg.fail()?;
+```
+
+The architecture is intentionally modular. The broker, durability layer, and state-management components are designed to remain reusable independently, and the broker core may also be embedded directly into applications or custom systems where lightweight durable messaging semantics are useful.
+
+The long-term direction is not to replicate every feature or abstraction of existing brokers, but to provide a practical, observable, and operationally simple system that covers the majority of real-world messaging workflows.
 
 ### The shape of the API
 
@@ -93,6 +103,11 @@ The naming follows a loose biological analogy:
 
 The mapping is not strict, but serves as a guiding theme.
 
+In short:
+- Keratin handles durability
+- Stroma handles queue state and coordination
+- Fibril handles broker and transport behavior
+
 ## Status
 
 Early and incomplete. Expect rough edges, missing features, and frequent changes.
@@ -128,7 +143,7 @@ The current implementation provides a minimal but working set of broker semantic
 * **Negative acknowledgements**
 
   * `Nack { requeue=true }` → message returns to **ready** with retry increment
-  * `Nack { requeue=false }` / `Reject` → terminal (treated as acked)
+  * `Nack { requeue=false }` → terminal (treated as acked)
   * Retry tracking exists but is still evolving
 
 * **At-least-once delivery (best effort)**
@@ -221,32 +236,34 @@ This represents the current working baseline. Some areas (DLQ, retries, protocol
 
 ## Performance (early observations)
 
-Informal internal benchmarks under preferential settings (broker level, skipping the TCP layer) show that the current implementation has been observed to sustain:
+Informal internal benchmarks using the current TCP transport and durable path on a single Ubuntu 26.04 node have observed throughput in the range of:
 
-* ~100k messages/sec (for both publish and consume, each)
+* ~250k+ messages/sec ingress
+* ~250k+ messages/sec egress
 * 1KB payloads
-* durable path enabled, with delivery verified under these conditions
+* durable delivery path enabled
 
-Tested on a single node (Ryzen 5950X).
+Measured on a Ryzen 5950X system.
 
-Observed memory usage during these runs ranged from a few hundred MB at low load up to ~1–2GB at peak throughput, depending on queue depth and in-flight state. Memory is not yet optimized and may retain capacity after load.
+Observed memory usage during these runs ranged from a few hundred MB at lower load up to roughly ~1–2GB at peak throughput, depending on queue depth, batching behavior, and inflight state. Memory behavior is still being optimized, and allocator retention may cause RSS usage to remain elevated after load subsides.
 
-Memory usage increases as expected with larger payloads, and throughout decreases, at first less than linearly to the payload size increase, but after a point in the curve (around 32kb) the decrease becomes more pronounced, likely due to hitting memory limits.
+Throughput decreases as payload sizes increase, as expected. Larger payloads eventually become increasingly constrained by memory pressure, copying overhead, storage throughput, and network I/O characteristics.
 
-These numbers are intended as a rough sanity check of the current design, not as a representative benchmark.
+These numbers are intended primarily as a sanity check of the current architecture rather than a rigorous benchmark suite.
 
-Current performance tuning is aimed at architectural efficiency. Further micro-optimizations (zero-copy paths or Arc<str> for topic names, etc) are considered but not yet necessary or the main point of contention.
+Current optimization work is focused mostly on architectural efficiency and correctness rather than aggressive micro-optimizations. Areas such as zero-copy delivery paths, allocation reduction, string interning, and further batching improvements are still open for exploration.
 
 Real-world performance will vary significantly depending on:
 
-* network overhead (TCP layer is still basic)
+* storage hardware and durability settings
 * batching and client behavior
 * workload characteristics
+* queue depth and inflight pressure
+* network conditions and protocol overhead
 
-For a more regular usecase, ~400 rps of ~48kb size messages, running over around 5 hours, a 150mb peak memory working set was observed, with the memory usage falling back to the 40-70mb range. (Test using a full networked client/server setup)
-This kind of workload likely matches a lot more real world use cases.
+For a more typical workload scenario, a sustained run of approximately ~400 messages/sec with ~48KB payloads over roughly 5 hours showed a peak working set around ~150MB, with memory usage later falling back toward the ~40–70MB range during lower activity periods.
 
-Any performance numbers mentioned are subject to change(but the trend is generally positive for performance and efficiency).
+Performance characteristics are expected to evolve significantly as the system matures.
 
 ## Core areas to expand on:
 

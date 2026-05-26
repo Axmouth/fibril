@@ -902,7 +902,7 @@ pub async fn handle_connection(
 
     // ---- Connection closing ------------------------------------------------
     // closes writer channel
-    drop(pub_tx);
+        drop(pub_tx);
     drop(frame_tx_high_prio);
     drop(frame_tx_low_prio);
 

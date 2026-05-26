@@ -1025,6 +1025,7 @@ dependencies = [
  "fibril-metrics",
  "fibril-storage",
  "fibril-util",
+ "mimalloc",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
