@@ -268,7 +268,8 @@ Performance characteristics are expected to evolve significantly as the system m
 ## Core areas to expand on:
 
 * **Removal of inefficiencies in command dispatch**
-  ~~- Potential microbatching incoming publish events, settle events and append together, clogging the command queue and other inputs much less on high load~~
+
+  - ~~Potential microbatching incoming publish events, settle events and append together, clogging the command queue and other inputs much less on high load~~
   - Create Queue handles at Query Engine and Stroma level that do not need to seek the relevant Queue handle on every command, plus related checks
   
   Update: Microbatching implemented, optimizations in calling queue handles less often are ongoing.

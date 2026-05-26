@@ -1,6 +1,16 @@
 Add content type to header fields, enum for common ones like json, msg pack, etc. Custom/Other/Whatever variant for rest, containining actual string. Can use this to decode too. Enum with common types hardcoded should be much more disk and network efficient for the common cases, considering how often it will be transfered, and we can still support arbitrary content types with the custom variant.
 
-Ensure periodic snapshot tasks start when queue is newly created too(but waits for recovery to finish if there is one). Currently it only starts on recovery, so if you start with an empty storage, it won't start until you restart again after the first recovery is done, which is not wrong and means no snapshots unless we restart first.
+more lazy init queues. ability to only do the relevant processes to initialize when accessed, providing better support for arbitrarily large amount of not often used queues.
+
+keep track off consumer id per message and extend lease for alive consumers instead of expiring. Or simply otherwise no expiry(configurable, depending on TTL there or not?) while client is still connected, bit instant expiry once client deemed lost
+
+add global event log for stroma setting changes
+
+deny topic etc names beyond simple fs compatible setups
+
+Add display names to topics/groups for logging/ui
+
+unwrap/expect cleanup
 
 test required changes for pre allocating segments so we skip metadata edits etc on every write.
 
@@ -19,11 +29,7 @@ explore a cache trying to keep in memory x mb of next deliverable messages(we al
 
 try to nest main loop in tcp client and server and put more generous reconnect logic there, trying to keep the state and not redo, have a handshake that shows it was reconnected with same id to differentiate from connection dying on other side. also immediately mark ready again once connection(cause messages are stuck in prefetch inflight etc). add map of client to inflights in state? for easier reconciliation
 
-keep track off consumer id per message and extend lease for alive consumers instead of expiring
-
 opportunistic batching (do not wait if the socket is writable now, but if you would block, accumulate)
-
-more lazy init queues
 
 run instructions:
 cargo run --bin fibril
@@ -38,17 +44,6 @@ fibril-cli sub topic
 direct delivery/express lane (enqueue and inflight immediately whole also sending to delivery loop shortcut)
 "Fibril utilizes speculative delivery: messages are streamed to available consumers immediately upon receipt, while persistence to Keratin happens in parallel. Producer acknowledgments are strictly deferred until disk synchronization is confirmed, ensuring zero-compromise durability with sub-millisecond egress."
 
-deny topic etc names beyond simple fs compatible setups
-
-
-Add display names to topics/groups for logging/ui
-
-add global event log for stroma setting changes
-
-clean up group related tests
-
-test big payloads
-
 Investigate single log(storage message log only used for messages beyond a certain size?) for stroma topic state? Message Offsets are now enqueue offsets, requeue event to avoid payload duplication
 
 TODO:
@@ -58,7 +53,7 @@ Instead:
 start = stroma.next_deliverable(tp,g, current_cursor, upper)
 Also: redelivery queue should remain bounded by inflight cap (it mostly is already), but don’t let it accumulate unbounded offsets from repeated failures—Stroma can own "expired offsets" listing.
 
-consider interning topics etc to save some memory
+consider interning topics etc to save some memory. or somehow using box/arc str
 
 ui login
 
@@ -66,7 +61,7 @@ reorganize for structs/models in a common crate, to avoid circles between metric
 
 cleanup leftover inflight without message (or better figure why it happens)
 
-config
+establish config framework/files/priorities. some stuff should be on the fly, but then how does it interact with file having the same? are some ui only? does it edit file too?
 
 Handshake two way
 
@@ -79,8 +74,6 @@ delivery not just with roundrobin bout account for prefetch capacity etc
 max unconfirmed per publisher
 
 slow ingress on memory/storage pressure
-
-unwrap/expect cleanup
 
 experiment with spreading delivered messages by making some consumers slower and see what happens
 
@@ -115,3 +108,5 @@ rabbitmq compatible endpoint?
 replace epoch in delivery tag with gen and seq. Seq is simple monotonic counter, gen is increased per instance(process? task?) created
 
 dls or embedded language to script transformations, routing, etc?
+
+in memory queues(no durability)? would need to make keratin pluggable or its write target able to take file or memory buffer(like a trait where flush etc becomes noop). Might be more worth doing it on Kerating level, though keeping the same semantics and only changing the storage is more reliably same behavior
