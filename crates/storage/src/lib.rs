@@ -85,7 +85,7 @@ pub struct BrokerCompletionPair;
 impl CompletionPair<IoError> for BrokerCompletionPair {
     type Receiver = tokio::sync::oneshot::Receiver<Result<AppendResult, IoError>>;
 
-    fn pair() -> (Box<dyn AppendCompletion<IoError>>, Self::Receiver) {
+    fn pair() -> (Box<dyn AppendCompletion<IoError> + Send>, Self::Receiver) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         (Box::new(BrokerCompletion { tx }), rx)
     }

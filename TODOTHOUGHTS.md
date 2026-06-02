@@ -1,3 +1,5 @@
+Copy Keratin file lock on Stroma too
+
 Add content type to header fields, enum for common ones like json, msg pack, etc. Custom/Other/Whatever variant for rest, containining actual string. Can use this to decode too. Enum with common types hardcoded should be much more disk and network efficient for the common cases, considering how often it will be transfered, and we can still support arbitrary content types with the custom variant.
 
 more lazy init queues. ability to only do the relevant processes to initialize when accessed, providing better support for arbitrarily large amount of not often used queues.
@@ -5,6 +7,10 @@ more lazy init queues. ability to only do the relevant processes to initialize w
 keep track off consumer id per message and extend lease for alive consumers instead of expiring. Or simply otherwise no expiry(configurable, depending on TTL there or not?) while client is still connected, bit instant expiry once client deemed lost
 
 add global event log for stroma setting changes
+
+Investigate circular Arc<..> dependencies to ensure no leaks happen, use Weak<..> where apt
+
+add express version of shutdown that preempts everything immediately, for emergency use
 
 deny topic etc names beyond simple fs compatible setups
 
