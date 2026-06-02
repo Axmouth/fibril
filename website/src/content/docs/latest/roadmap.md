@@ -1,0 +1,33 @@
+---
+title: Roadmap
+description: Near-term work for Fibril.
+---
+
+Fibril is still early. The near-term roadmap is about making the existing semantics complete and user-facing before adding larger distributed-system features.
+
+## Near term
+
+- Wire public delayed publish through the Rust client.
+- Wire `msg.retry_after(..)` through client, protocol, broker, and Stroma.
+- Expose dead-letter policy configuration through the broker.
+- Add broker-level tests for DLQ and delayed retry public paths.
+- Make server configuration production-friendly instead of hard-coded development defaults.
+- Improve TCP protocol ergonomics and error behavior.
+
+## Medium term
+
+- Package runnable broker images or binaries.
+- Add deployment guidance for the broker itself.
+- Improve admin interface observability.
+- Produce repeatable benchmark reports.
+- Tighten memory behavior under large queue depth and high inflight load.
+
+## Longer term
+
+- Replication design and implementation.
+- Clustering and partition ownership.
+- More complete client ecosystem.
+
+## Not initially planned
+
+Transactions are not an initial goal. Fibril is aiming for clear durable messaging semantics, not a clone of every broker feature.

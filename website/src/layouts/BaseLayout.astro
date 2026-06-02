@@ -1,0 +1,46 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  description: string;
+}
+
+const { title, description } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="description" content={description} />
+    <meta name="viewport" content="width=device-width" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <script is:inline src="/theme-init.js"></script>
+    <title>{title}</title>
+  </head>
+  <body>
+    <slot />
+    <script is:inline>
+      const root = document.documentElement;
+      const toggle = document.querySelector("[data-theme-toggle]");
+
+      function syncThemeToggle() {
+        if (!toggle) return;
+        const isDark = root.dataset.theme === "dark";
+        toggle.textContent = isDark ? "☀️" : "🌙";
+        toggle.setAttribute("aria-label", isDark ? "Use light theme" : "Use dark theme");
+        toggle.setAttribute("title", isDark ? "Use light theme" : "Use dark theme");
+      }
+
+      toggle?.addEventListener("click", () => {
+        const next = root.dataset.theme === "dark" ? "light" : "dark";
+        root.dataset.theme = next;
+        localStorage.setItem("starlight-theme", next);
+        syncThemeToggle();
+      });
+
+      syncThemeToggle();
+    </script>
+  </body>
+</html>

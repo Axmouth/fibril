@@ -1,0 +1,35 @@
+name: Verify website
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - ".github/workflows/website-ci.yaml"
+      - "website/**"
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: website
+
+      - name: Build static site
+        run: npm run build
+        working-directory: website
+        env:
+          ASTRO_TELEMETRY_DISABLED: "1"

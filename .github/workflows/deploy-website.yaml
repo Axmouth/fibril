@@ -1,0 +1,94 @@
+name: Publish and deploy website
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".dockerignore"
+      - ".github/workflows/deploy-website.yaml"
+      - ".github/workflows/website-ci.yaml"
+      - "compose.website.deploy.yaml"
+      - "website/**"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: fibril-site-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/website-ci.yaml
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.value }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set image name
+        id: image
+        run: |
+          echo "value=ghcr.io/${GITHUB_REPOSITORY,,}/site:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "latest=ghcr.io/${GITHUB_REPOSITORY,,}/site:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: website/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.value }}
+            ${{ steps.image.outputs.latest }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    environment: Deploy
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install SSH key
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Create remote directory
+        run: ssh -p "${{ secrets.DEPLOY_SSH_PORT }}" "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" "mkdir -p '${{ vars.DEPLOY_PATH }}'"
+
+      - name: Upload Compose file
+        run: scp -P "${{ secrets.DEPLOY_SSH_PORT }}" compose.website.deploy.yaml "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}:${{ vars.DEPLOY_PATH }}/"
+
+      - name: Deploy image
+        env:
+          IMAGE: ${{ needs.publish.outputs.image }}
+        run: |
+          ssh -p "${{ secrets.DEPLOY_SSH_PORT }}" \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
+            "cd '${{ vars.DEPLOY_PATH }}' && SITE_IMAGE='${IMAGE}' docker compose -f compose.website.deploy.yaml pull && SITE_IMAGE='${IMAGE}' docker compose -f compose.website.deploy.yaml up -d --remove-orphans"
+
+      - name: Check deployed site
+        run: curl --fail --silent --show-error --retry 20 --retry-delay 5 --retry-all-errors "${{ vars.DEPLOY_HEALTH_URL }}/healthz"

@@ -1,0 +1,7 @@
+.git
+target
+test_data
+bench_data
+server_data
+website/node_modules
+website/dist

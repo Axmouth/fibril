@@ -1,0 +1,9 @@
+---
+interface Props {
+  kind: "ready" | "partial" | "planned" | "no";
+}
+
+const { kind } = Astro.props;
+---
+
+<span class:list={["status-badge", `status-${kind}`]}><slot /></span>

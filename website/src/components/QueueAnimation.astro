@@ -1,0 +1,22 @@
+<div class="queue-visual" aria-label="Message queue lifecycle: a message is leased by a worker, then acknowledged or delayed before retrying">
+  <div class="visual-grid"></div>
+  <div class="queue-node">
+    <span class="node-label">queue</span>
+    <strong>email.send</strong>
+  </div>
+  <div class="worker-node">
+    <span class="worker-led"></span>
+    <span class="node-label">worker</span>
+    <strong>leased</strong>
+  </div>
+  <div class="ack-node"><span class="ack-mark">✓</span><span>ack</span></div>
+  <div class="retry-node"><span>delay 30s</span></div>
+  <span class="flow-line line-to-worker"></span>
+  <span class="flow-line line-to-ack"></span>
+  <span class="flow-line line-to-retry"></span>
+  <span class="flow-line line-back"></span>
+  <span class="packet packet-main"></span>
+  <span class="packet packet-ack"></span>
+  <span class="packet packet-retry"></span>
+  <div class="visual-caption"><span>queue lifecycle</span><span>traffic: active</span></div>
+</div>

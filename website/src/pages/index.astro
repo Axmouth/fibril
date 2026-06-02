@@ -1,0 +1,90 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+import Button from "../components/Button.astro";
+import CodePanel from "../components/CodePanel.astro";
+import FeatureCard from "../components/FeatureCard.astro";
+import FeatureMatrix from "../components/FeatureMatrix.astro";
+import QueueAnimation from "../components/QueueAnimation.astro";
+
+const github = "https://github.com/Axmouth/fibril";
+---
+
+<BaseLayout
+  title="Fibril | Durable messaging without broker ceremony"
+  description="Fibril is a lightweight Rust message broker with durable queues, explicit acknowledgements, leasing, retries, and predictable operational behavior."
+>
+  <header class="site-header">
+    <nav class="nav shell" aria-label="Main navigation">
+      <a class="brand" href="/">
+        <span class="mark"><span></span><span></span></span>
+        <span>fibril</span>
+      </a>
+      <div class="nav-links">
+        <a href="/latest/">Docs</a>
+        <a href="/latest/concepts/core-model/">Concepts</a>
+        <a href="#benchmarks">Benchmarks</a>
+        <a href={github}>GitHub</a>
+        <span class="release-tag">pre-alpha</span>
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme"></button>
+      </div>
+    </nav>
+  </header>
+
+  <main class="shell">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">broker / queue / rust</p>
+        <h1>Useful messaging without broker ceremony.</h1>
+        <p class="lead">
+          Fibril is a lightweight Rust message broker focused on durable queues,
+          explicit delivery semantics, leasing, retries, and predictable operational behavior.
+          Still early. The missing pieces are named, not hidden.
+        </p>
+        <div class="actions">
+          <Button href="/latest/quickstart/" variant="primary">Start running</Button>
+          <Button href="/latest/">Read docs</Button>
+          <Button href={github}>GitHub</Button>
+        </div>
+        <p class="note">Durability is core and tested. Production readiness is still earned, not claimed.</p>
+      </div>
+      <QueueAnimation />
+    </section>
+
+    <CodePanel />
+
+    <section class="feature-grid" aria-label="Core capabilities">
+      <FeatureCard number="01" title="Durable by default">Append-only logs, snapshot, and replay are part of the model.</FeatureCard>
+      <FeatureCard number="02" title="Settle explicitly">Complete, retry, or fail a message with APIs that read like intent.</FeatureCard>
+      <FeatureCard number="03" title="Lease under load">Pull-based delivery and bounded prefetch make pressure visible.</FeatureCard>
+    </section>
+
+    <section class="section-split">
+      <div class="section-intro">
+        <p class="eyebrow">current shape</p>
+        <h2>Working parts, plainly stated.</h2>
+        <p>The broker has a useful baseline today. Some reliability features are still being wired through the full stack.</p>
+        <a class="inline-link" href="/latest/status/">Read project status <span>→</span></a>
+      </div>
+      <FeatureMatrix />
+    </section>
+
+    <section class="section-split benchmark" id="benchmarks">
+      <div class="section-intro">
+        <p class="eyebrow">early observation</p>
+        <h2>A durable path with room to sharpen.</h2>
+      </div>
+      <div class="benchmark-panel">
+        <div><strong>250k+</strong><span>messages/sec ingress</span></div>
+        <div><strong>250k+</strong><span>messages/sec egress</span></div>
+        <p>Informal internal measurements with 1KB payloads on a Ryzen 5950X. These are architectural sanity checks, not a polished benchmark suite.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="shell footer-inner">
+      <span>Fibril is pre-alpha infrastructure.</span>
+      <div><a href="/latest/">Docs</a><a href={github}>Source</a></div>
+    </div>
+  </footer>
+</BaseLayout>
