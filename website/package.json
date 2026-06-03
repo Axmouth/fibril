@@ -6,7 +6,9 @@
     "dev": "astro dev",
     "build": "astro check && astro build",
     "preview": "astro preview",
-    "check": "astro check"
+    "check": "astro check",
+    "smoke:dist": "node scripts/smoke-dist.mjs",
+    "verify": "npm run build && npm run smoke:dist"
   },
   "dependencies": {
     "@astrojs/starlight": "^0.39.3",

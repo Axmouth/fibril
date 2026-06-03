@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/website-ci.yaml"
+      - "compose.website.deploy.yaml"
       - "website/**"
 
 permissions:
@@ -28,8 +29,14 @@ jobs:
         run: npm ci
         working-directory: website
 
-      - name: Build static site
-        run: npm run build
+      - name: Verify static site
+        run: npm run verify
         working-directory: website
         env:
           ASTRO_TELEMETRY_DISABLED: "1"
+
+      - name: Validate deploy Compose file
+        run: docker compose -f compose.website.deploy.yaml config --quiet
+        env:
+          SITE_IMAGE: ghcr.io/axmouth/fibril/site:test
+          SITE_DOMAIN: fibril.sh
