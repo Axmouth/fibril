@@ -630,8 +630,8 @@ h3 {
 @keyframes move-retry {
   0%, 18% { opacity: 0; transform: translate(0, 0); }
   22% { opacity: 1; }
-  42% { opacity: 1; transform: translate(-198px, 110px); }
-  52% { opacity: 1; transform: translate(-254px, 110px); }
+  42% { opacity: 1; transform: translate(-198px, 106px); }
+  52% { opacity: 1; transform: translate(-254px, 106px); }
   72% { opacity: 1; transform: translate(-254px, 3px); }
   78%, 100% { opacity: 0; transform: translate(-254px, 3px); }
 }
@@ -694,7 +694,7 @@ h3 {
   }
   .packet-retry {
     top: 131px;
-    left: calc(100% - 78px);
+    left: calc(100% - 82px);
     animation: mobile-move-retry 7.4s linear infinite 2.8s;
   }
   .feature-grid { grid-template-columns: 1fr; }
@@ -719,10 +719,10 @@ h3 {
 @keyframes mobile-move-retry {
   0%, 18% { opacity: 0; transform: translate(0, 0); }
   22% { opacity: 1; }
-  42% { opacity: 1; transform: translate(calc(226px - 100vw), 102px); }
-  52% { opacity: 1; transform: translate(calc(176px - 100vw), 102px); }
-  72% { opacity: 1; transform: translate(calc(176px - 100vw), 3px); }
-  78%, 100% { opacity: 0; transform: translate(calc(176px - 100vw), 3px); }
+  42% { opacity: 1; transform: translate(calc(226px - 100vw), 110px); }
+  52% { opacity: 1; transform: translate(calc(180px - 100vw), 110px); }
+  72% { opacity: 1; transform: translate(calc(180px - 100vw), 3px); }
+  78%, 100% { opacity: 0; transform: translate(calc(180px - 100vw), 3px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
