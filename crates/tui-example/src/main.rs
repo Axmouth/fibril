@@ -17,7 +17,6 @@ use ratatui::{
     style::Color,
     widgets::{Block, Borders, Paragraph},
 };
-use uuid::Uuid;
 use std::{collections::HashMap, io::stdout};
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -25,6 +24,7 @@ use std::{
 };
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::codec::Framed;
+use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum VisualEvent {

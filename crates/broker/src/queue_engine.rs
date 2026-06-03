@@ -4,12 +4,14 @@ use async_trait::async_trait;
 use fibril_metrics::QueuesStateSnapshot;
 use fibril_storage::Offset;
 use fibril_util::UnixMillis;
-use tokio::sync::Notify;
 use std::collections::HashSet;
-use stroma_core::{AckEventMeta, MessageHeaders, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics};
+use stroma_core::{
+    AckEventMeta, MessageHeaders, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics,
+};
 pub use stroma_core::{
     AppendCompletion, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
 };
+use tokio::sync::Notify;
 
 pub struct Deliverable {
     pub published: u64,

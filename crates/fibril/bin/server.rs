@@ -23,12 +23,8 @@ async fn main() -> anyhow::Result<()> {
     // TODO configurable stuff
     let root = "server_data";
     let metrics = Metrics::new(3 * 60 * 60); // 3 hours
-    let engine = StromaEngine::open(
-        &root,
-        KeratinConfig::default(),
-        SnapshotConfig::default(),
-    )
-    .await?;
+    let engine =
+        StromaEngine::open(&root, KeratinConfig::default(), SnapshotConfig::default()).await?;
     let broker_cfg = BrokerConfig {
         inflight_ttl_ms: 30_000,
         expiry_poll_min_ms: 15_000,

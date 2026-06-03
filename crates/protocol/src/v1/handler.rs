@@ -220,7 +220,6 @@ pub async fn handle_connection(
         anyhow::bail!("Protocol compliance marker mismatch");
     }
 
-    
     let writer_task = tokio::spawn(async move {
         tracing::debug!("[writer] START");
 
@@ -679,13 +678,13 @@ pub async fn handle_connection(
                 {
                     let state_settler = sub.state_settler.clone();
                     // tokio::spawn(async move {
-                        for tag in ack.tags {
-                            let req = SettleRequest {
-                                delivery_tag: tag,
-                                settle_type: SettleType::Ack,
-                            };
-                            let _ = state_settler.send(req).await;
-                        }
+                    for tag in ack.tags {
+                        let req = SettleRequest {
+                            delivery_tag: tag,
+                            settle_type: SettleType::Ack,
+                        };
+                        let _ = state_settler.send(req).await;
+                    }
                     // });
                 }
                 // Unknown subscription: ignore (idempotent)
@@ -703,15 +702,15 @@ pub async fn handle_connection(
                 {
                     let state_settler = sub.state_settler.clone();
                     // tokio::spawn(async move {
-                        for tag in nack.tags {
-                            let req = SettleRequest {
-                                delivery_tag: tag,
-                                settle_type: SettleType::Nack {
-                                    requeue: Some(nack.requeue),
-                                },
-                            };
-                            let _ = state_settler.send(req).await;
-                        }
+                    for tag in nack.tags {
+                        let req = SettleRequest {
+                            delivery_tag: tag,
+                            settle_type: SettleType::Nack {
+                                requeue: Some(nack.requeue),
+                            },
+                        };
+                        let _ = state_settler.send(req).await;
+                    }
                     // });
                 }
                 // Unknown subscription: ignore (idempotent)
@@ -752,46 +751,44 @@ pub async fn handle_connection(
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
                 // tokio::spawn(async move {
-                    let published: Result<
-                        tokio::sync::oneshot::Receiver<
-                            Result<u64, fibril_broker::broker::BrokerError>,
-                        >,
-                        fibril_broker::broker::BrokerError,
-                    > = if pubreq.require_confirm {
-                        publisher
-                            .publish(
-                                pubreq.payload,
-                                pubreq.published,
-                                publish_received,
-                                HashMap::new(),
-                            )
-                            .await
-                    } else {
-                        publisher
-                            .publish_no_confirm(
-                                pubreq.payload,
-                                pubreq.published,
-                                publish_received,
-                                HashMap::new(),
-                            )
-                            .await
-                    };
-                    let res = pub_tx
-                        .send((published, pubreq.require_confirm, frame.request_id))
+                let published: Result<
+                    tokio::sync::oneshot::Receiver<Result<u64, fibril_broker::broker::BrokerError>>,
+                    fibril_broker::broker::BrokerError,
+                > = if pubreq.require_confirm {
+                    publisher
+                        .publish(
+                            pubreq.payload,
+                            pubreq.published,
+                            publish_received,
+                            HashMap::new(),
+                        )
+                        .await
+                } else {
+                    publisher
+                        .publish_no_confirm(
+                            pubreq.payload,
+                            pubreq.published,
+                            publish_received,
+                            HashMap::new(),
+                        )
+                        .await
+                };
+                let res = pub_tx
+                    .send((published, pubreq.require_confirm, frame.request_id))
+                    .await;
+                if let Err(_err) = res {
+                    let _ = frame_tx_pub
+                        .send(encode(
+                            Op::Error,
+                            frame.request_id,
+                            &ErrorMsg {
+                                code: 500,
+                                message: "Broken pipe".into(),
+                            },
+                        ))
                         .await;
-                    if let Err(_err) = res {
-                        let _ = frame_tx_pub
-                            .send(encode(
-                                Op::Error,
-                                frame.request_id,
-                                &ErrorMsg {
-                                    code: 500,
-                                    message: "Broken pipe".into(),
-                                },
-                            ))
-                            .await;
-                        tracing::error!("Error sending published to queue");
-                    }
+                    tracing::error!("Error sending published to queue");
+                }
                 // });
             }
             x if x == Op::PublishDelayed as u16 => {
@@ -828,46 +825,44 @@ pub async fn handle_connection(
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
                 // tokio::spawn(async move {
-                    let published: Result<
-                        tokio::sync::oneshot::Receiver<
-                            Result<u64, fibril_broker::broker::BrokerError>,
-                        >,
-                        fibril_broker::broker::BrokerError,
-                    > = if pubreq.require_confirm {
-                        publisher
-                            .publish(
-                                pubreq.payload,
-                                pubreq.published,
-                                publish_received,
-                                HashMap::new(),
-                            )
-                            .await
-                    } else {
-                        publisher
-                            .publish_no_confirm(
-                                pubreq.payload,
-                                pubreq.published,
-                                publish_received,
-                                HashMap::new(),
-                            )
-                            .await
-                    };
-                    let res = pub_tx
-                        .send((published, pubreq.require_confirm, frame.request_id))
+                let published: Result<
+                    tokio::sync::oneshot::Receiver<Result<u64, fibril_broker::broker::BrokerError>>,
+                    fibril_broker::broker::BrokerError,
+                > = if pubreq.require_confirm {
+                    publisher
+                        .publish(
+                            pubreq.payload,
+                            pubreq.published,
+                            publish_received,
+                            HashMap::new(),
+                        )
+                        .await
+                } else {
+                    publisher
+                        .publish_no_confirm(
+                            pubreq.payload,
+                            pubreq.published,
+                            publish_received,
+                            HashMap::new(),
+                        )
+                        .await
+                };
+                let res = pub_tx
+                    .send((published, pubreq.require_confirm, frame.request_id))
+                    .await;
+                if let Err(_err) = res {
+                    let _ = frame_tx_pub
+                        .send(encode(
+                            Op::Error,
+                            frame.request_id,
+                            &ErrorMsg {
+                                code: 500,
+                                message: "Broken pipe".into(),
+                            },
+                        ))
                         .await;
-                    if let Err(_err) = res {
-                        let _ = frame_tx_pub
-                            .send(encode(
-                                Op::Error,
-                                frame.request_id,
-                                &ErrorMsg {
-                                    code: 500,
-                                    message: "Broken pipe".into(),
-                                },
-                            ))
-                            .await;
-                        tracing::error!("Error sending published to queue");
-                    }
+                    tracing::error!("Error sending published to queue");
+                }
                 // });
             }
 
@@ -902,7 +897,7 @@ pub async fn handle_connection(
 
     // ---- Connection closing ------------------------------------------------
     // closes writer channel
-        drop(pub_tx);
+    drop(pub_tx);
     drop(frame_tx_high_prio);
     drop(frame_tx_low_prio);
 

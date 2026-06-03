@@ -114,7 +114,9 @@ impl NewMessage {
     }
 
     pub fn content(payload: impl Into<Vec<u8>>) -> Self {
-        NewMessage { payload: payload.into() }
+        NewMessage {
+            payload: payload.into(),
+        }
     }
 }
 
@@ -185,7 +187,6 @@ impl Delayable for std::time::Duration {
         *self
     }
 }
-
 
 #[must_use]
 pub struct InflightMessage {

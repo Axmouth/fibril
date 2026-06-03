@@ -1,12 +1,26 @@
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use fibril_storage::{DeliveryTag, Offset};
-use fibril_util::{init_tracing, init_tracing_dbg};
 use hashbrown::HashMap;
-use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, test_dir};
+use stroma_core::{KeratinConfig, SnapshotConfig, TempDir};
 use uuid::Uuid;
 
 use crate::{broker::*, queue_engine::StromaEngine};
+
+fn test_dir(prefix: &str) -> TempDir {
+    let base = std::env::var("CARGO_WORKSPACE_DIR")
+        .map(PathBuf::from)
+        .or_else(|_| {
+            std::env::var("CARGO_MANIFEST_DIR").map(|dir| PathBuf::from(dir).join("../.."))
+        })
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()));
+    let root = base
+        .join("test_data")
+        .join(format!("{}-{}", prefix, fastrand::u64(..)));
+
+    std::fs::create_dir_all(&root).unwrap();
+    TempDir { root }
+}
 
 pub struct TestState {
     broker_cfg: BrokerConfig,
@@ -67,7 +81,7 @@ impl TestState {
     pub async fn start_broker(&mut self, id: &str) -> Result<(), BrokerError> {
         let dir = self.broker_dirs.entry(id.to_string()).or_insert_with(|| {
             println!("Creating test dir for broker {id}");
-            test_dir!(id)
+            test_dir(id)
         });
 
         if let Some(_b) = self.brokers.get(id) {
@@ -227,7 +241,7 @@ impl<'a> SubBuilder<'a> {
             .brokers
             .get(&self.broker)
             .expect("broker not started");
-        
+
         let client_id = Uuid::now_v7();
 
         let handle = broker

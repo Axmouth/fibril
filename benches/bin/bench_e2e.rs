@@ -8,8 +8,8 @@ use std::{
     time::Instant,
 };
 
-use fibril_broker::{broker::SettleType, queue_engine::KeratinConfig};
 use fibril_broker::broker::{ConsumerConfig, SettleRequest};
+use fibril_broker::{broker::SettleType, queue_engine::KeratinConfig};
 use fibril_broker::{
     broker::{Broker, BrokerConfig, ConsumerHandle},
     coordination::NoopCoordination,
@@ -22,7 +22,6 @@ use clap::{Parser, ValueEnum};
 use fibril_util::{init_tracing, unix_millis};
 use uuid::Uuid;
 // use mimalloc::MiMalloc;
-
 
 // #[global_allocator]
 // static GLOBAL: MiMalloc = MiMalloc;
@@ -320,7 +319,11 @@ async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
         expiry_poll_min_ms: 10000,
     };
 
-    let storage_path = format!("{}/bench_data/{}", env!("CARGO_WORKSPACE_DIR"), fastrand::u64(..)); // stable path for E2E
+    let storage_path = format!(
+        "{}/bench_data/{}",
+        env!("CARGO_WORKSPACE_DIR"),
+        fastrand::u64(..)
+    ); // stable path for E2E
     let _ = std::fs::remove_dir_all(&storage_path);
     std::fs::create_dir_all(&storage_path).unwrap();
 

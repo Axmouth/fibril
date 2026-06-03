@@ -1,7 +1,10 @@
-use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    time::Duration,
+};
 
 use clap::Parser;
-use fibril_client::{InflightMessage, ClientOptions};
+use fibril_client::{ClientOptions, InflightMessage};
 use tokio::{sync::oneshot, time::Instant};
 
 async fn run_load_test(
@@ -26,8 +29,10 @@ async fn run_load_test(
                 .await
                 .unwrap();
 
-            let (tx_acker, mut rx_acker) = tokio::sync::mpsc::unbounded_channel::<InflightMessage>();
-            let (tx_confirmer, mut rx_confirmer) = tokio::sync::mpsc::unbounded_channel::<InflightMessage>();
+            let (tx_acker, mut rx_acker) =
+                tokio::sync::mpsc::unbounded_channel::<InflightMessage>();
+            let (tx_confirmer, mut rx_confirmer) =
+                tokio::sync::mpsc::unbounded_channel::<InflightMessage>();
             let client_reader = client.clone();
             let reader = tokio::spawn(async move {
                 if !start_reader {
@@ -134,7 +139,7 @@ struct Args {
     /// Enable writer
     #[arg(long, default_value_t = false)]
     writer: bool,
-    
+
     /// Size of each payload
     #[arg(short, long, default_value_t = 1024)]
     size: usize,
@@ -149,7 +154,15 @@ async fn main() {
     let (txb, rxb) = oneshot::channel::<()>();
 
     tokio::spawn(async move {
-        run_load_test(args.clients, args.messages, args.reader, args.writer, txb, args.size).await;
+        run_load_test(
+            args.clients,
+            args.messages,
+            args.reader,
+            args.writer,
+            txb,
+            args.size,
+        )
+        .await;
     });
 
     rxb.await.unwrap();

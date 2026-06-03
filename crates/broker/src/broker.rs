@@ -22,7 +22,8 @@ use uuid::Uuid;
 
 use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
 use stroma_core::{
-    AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion, MessageHeaders, NackEventMeta, StromaError, StromaMetrics, TaskGroup, UnixMillis
+    AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
+    MessageHeaders, NackEventMeta, StromaError, StromaMetrics, TaskGroup, UnixMillis,
 };
 
 #[derive(thiserror::Error, Debug)]

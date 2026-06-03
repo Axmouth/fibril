@@ -1,0 +1,74 @@
+name: Verify Rust
+
+on:
+  workflow_call:
+  pull_request:
+    paths:
+      - ".github/workflows/rust-ci.yaml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - "benches/**"
+      - "crates/**"
+      - "scripts/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/rust-ci.yaml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Dockerfile"
+      - "benches/**"
+      - "crates/**"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: |
+          if ! cargo fmt --all --check; then
+            echo "::warning::cargo fmt --all --check failed. Formatting drift is currently non-blocking."
+          fi
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+      - name: Build server release binary
+        run: cargo build --release --locked -p fibril --bin fibril-server
+
+      - name: Write server binary checksum
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: sha256sum target/release/fibril-server > target/release/fibril-server.sha256
+
+      - name: Upload latest main server binary
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fibril-server-linux-x86_64-main
+          path: |
+            target/release/fibril-server
+            target/release/fibril-server.sha256
+          if-no-files-found: error
+
+      - name: Build server Docker image
+        run: docker build -f Dockerfile -t fibril-server:ci .

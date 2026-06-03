@@ -3,6 +3,10 @@
 # Fibril
 **The connective tissue of distributed systems.**
 
+[![Verify Rust](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml)
+[![Verify website](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml)
+[![Deploy website](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml)
+
 <img src="./bannerlogo.png" width="600" alt="Fibril Logo">
 
 *Simple. Durable. Built from first principles.*
@@ -81,6 +85,30 @@ Common access patterns:
   The intention is to keep it simple and reusable, independent of broker-specific logic.
 
   https://github.com/Axmouth/keratin
+
+### Local Keratin development
+
+CI and release builds use `stroma-core` from the Keratin git repository:
+
+```txt
+https://github.com/Axmouth/keratin.git
+```
+
+For local sibling-checkout development, switch the Fibril manifests to the
+local `stroma-core` path:
+
+```sh
+scripts/stroma-source.sh local
+```
+
+Switch back before CI-style checks, Docker builds, or commits intended for
+main:
+
+```sh
+scripts/stroma-source.sh git
+```
+
+The local path currently expects the Keratin checkout at `../keratin`.
 
 ## Direction
 
