@@ -1,22 +1,95 @@
 ---
-title: Deployment from source
-description: Current development deployment guidance for Fibril.
+title: Running Fibril
+description: Current options for running the pre-alpha Fibril broker.
 ---
 
-The broker does not have a production-ready packaged deployment yet. Run it from source while the configuration surface is being built.
+Fibril does not have a stable packaged release yet. For now, treat deployments
+as experimental and run the broker from the `main` Docker image, a locally built
+Docker image, a source checkout, or the latest `main` branch binary produced by
+CI.
+
+Do not expose the development server directly to the public internet without
+reviewing the current defaults and putting it behind appropriate network
+controls.
+
+## Current server defaults
+
+The current server binary:
+
+- listens for broker TCP traffic on `0.0.0.0:9876`
+- serves the early admin interface on `0.0.0.0:8081`
+- stores durable state under `server_data/`
+- uses development authentication defaults in the server binary
+
+These defaults are expected to change as configuration and packaging mature.
+
+## Run with Docker
+
+The easiest current runtime path is the `main` image from GitHub Container
+Registry:
 
 ```sh
+docker pull ghcr.io/axmouth/fibril-server:main
+docker run --rm \
+  -p 9876:9876 \
+  -p 8081:8081 \
+  -v fibril-server-data:/app/server_data \
+  ghcr.io/axmouth/fibril-server:main
+```
+
+The `main` tag is a moving pre-release image. CI also publishes immutable
+`sha-<commit>` tags for exact builds.
+
+The image exposes:
+
+- `9876` for broker TCP traffic
+- `8081` for the admin surface
+
+Persistent data lives under `/app/server_data` in the container.
+
+## Build a local Docker image
+
+Build an image from the repository:
+
+```sh
+docker build -f Dockerfile -t fibril-server:ci .
+```
+
+Run it with persistent server data:
+
+```sh
+docker run --rm \
+  -p 9876:9876 \
+  -p 8081:8081 \
+  -v fibril-server-data:/app/server_data \
+  fibril-server:ci
+```
+
+## Run from a source checkout
+
+Use this when you want the simplest path from the current repository state:
+
+```sh
+git clone https://github.com/Axmouth/fibril.git
+cd fibril
 cargo run --release --bin fibril-server
 ```
 
-The server binary currently uses development defaults in source for:
+## Latest binary artifact
 
-- bind addresses
-- data directory
-- broker authentication
-- metrics behavior
+On pushes to `main`, CI also uploads the latest Linux server binary and checksum
+as the `fibril-server-linux-x86_64-main` GitHub Actions artifact.
 
-Do not expose it publicly without reviewing those defaults and placing it behind appropriate network controls.
+Use this only as a moving pre-release build. It tracks the current `main`
+branch, so it can change without compatibility guarantees.
+
+After downloading the artifact, verify the checksum before running it:
+
+```sh
+sha256sum -c fibril-server.sha256
+chmod +x fibril-server
+./fibril-server
+```
 
 ## Website deployment
 

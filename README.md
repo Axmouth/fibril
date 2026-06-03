@@ -3,7 +3,7 @@
 # Fibril
 **The connective tissue of distributed systems.**
 
-[![Verify Rust](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml)
+[![Server CI](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml)
 [![Verify website](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml)
 [![Deploy website](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml)
 

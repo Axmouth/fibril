@@ -1,4 +1,4 @@
-name: Verify Rust
+name: Server CI
 
 on:
   workflow_call:
@@ -25,12 +25,14 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  verify:
+  formatting-advisory:
+    name: Formatting advisory
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -50,8 +52,34 @@ jobs:
             echo "::warning::cargo fmt --all --check failed. Formatting drift is currently non-blocking."
           fi
 
+  workspace-tests:
+    name: Workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
       - name: Run tests
         run: cargo test --workspace --locked
+
+  server-binary:
+    name: Server release binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Build server release binary
         run: cargo build --release --locked -p fibril --bin fibril-server
@@ -70,5 +98,32 @@ jobs:
             target/release/fibril-server.sha256
           if-no-files-found: error
 
+  server-docker-image:
+    name: Server Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
       - name: Build server Docker image
         run: docker build -f Dockerfile -t fibril-server:ci .
+
+      - name: Tag server Docker image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fibril-server"
+          short_sha="${GITHUB_SHA::12}"
+          docker tag fibril-server:ci "$image:main"
+          docker tag fibril-server:ci "$image:sha-$short_sha"
+
+      - name: Push server Docker image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fibril-server"
+          short_sha="${GITHUB_SHA::12}"
+          docker push "$image:main"
+          docker push "$image:sha-$short_sha"
