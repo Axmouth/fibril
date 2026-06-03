@@ -40,3 +40,11 @@ jobs:
         env:
           SITE_IMAGE: ghcr.io/axmouth/fibril/site:test
           SITE_DOMAIN: fibril.sh
+
+      - name: Check Traefik host rule
+        run: |
+          rule="$(docker compose -f compose.website.deploy.yaml config | sed -n 's/.*traefik.http.routers.fibril-site.rule: //p')"
+          test "$rule" = 'Host(`fibril.sh`) || Host(`www.fibril.sh`)'
+        env:
+          SITE_IMAGE: ghcr.io/axmouth/fibril/site:test
+          SITE_DOMAIN: fibril.sh

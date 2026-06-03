@@ -9,7 +9,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.fibril-site.rule=Host(`${SITE_DOMAIN:?Set SITE_DOMAIN in .env}`, `www.${SITE_DOMAIN}`)"
+      - "traefik.http.routers.fibril-site.rule=Host(`${SITE_DOMAIN:?Set SITE_DOMAIN in .env}`) || Host(`www.${SITE_DOMAIN}`)"
       - "traefik.http.routers.fibril-site.entrypoints=websecure"
       - "traefik.http.routers.fibril-site.tls.certresolver=letsencrypt"
       - "traefik.http.routers.fibril-site.middlewares=fibril-site-compress"
