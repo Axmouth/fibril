@@ -83,6 +83,7 @@ impl AdminServer {
             .route("/admin/api/subscriptions", get(routes::subscriptions))
             .route("/admin/api/queues", get(routes::queues))
             .route("/admin/api/queues_debug", get(routes::queues_debug))
+            .route("/healthz", get(|| async { "ok" }))
             .fallback(not_found)
             .with_state(state.clone());
 

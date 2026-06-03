@@ -37,3 +37,31 @@ The project still needs:
 - latency histograms, not only throughput
 - restart/replay timing
 - multi-consumer fairness and backpressure scenarios
+
+## Current manual TCP benchmark
+
+The current TCP-layer benchmark helper is `e2e_c`. It is useful for quick
+throughput checks, but it is not yet a repeatable benchmark suite.
+
+Start the server in one terminal:
+
+```sh
+cargo run --release --bin fibril-server
+```
+
+Start the writer in another terminal:
+
+```sh
+cargo run --release --bin e2e_c -- -m 500000 -c 10 --writer --size 1024
+```
+
+Start the reader in a third terminal, as close to the writer start time as
+practical:
+
+```sh
+cargo run --release --bin e2e_c -- -m 500000 -c 10 --reader
+```
+
+The current helper reports throughput only. Latency histograms, configurable
+prefetch, structured output, and repeatable scenario tables are still future
+work.

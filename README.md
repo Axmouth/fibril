@@ -7,6 +7,8 @@
 [![Verify website](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml)
 [![Deploy website](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml)
 
+[Docs](https://fibril.sh/latest/) · [Run Fibril](https://fibril.sh/latest/deployment/source/)
+
 <img src="./bannerlogo.png" width="600" alt="Fibril Logo">
 
 *Simple. Durable. Built from first principles.*

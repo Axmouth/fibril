@@ -9,6 +9,7 @@ on:
       - "Cargo.lock"
       - "Dockerfile"
       - "benches/**"
+      - "compose.server.example.yaml"
       - "crates/**"
       - "scripts/**"
   push:
@@ -20,6 +21,7 @@ on:
       - "Cargo.lock"
       - "Dockerfile"
       - "benches/**"
+      - "compose.server.example.yaml"
       - "crates/**"
       - "scripts/**"
 
@@ -110,7 +112,7 @@ jobs:
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Build server Docker image
-        run: docker build -f Dockerfile -t fibril-server:ci .
+        run: docker build -f Dockerfile --build-arg VCS_REF="$GITHUB_SHA" -t fibril-server:ci .
 
       - name: Tag server Docker image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

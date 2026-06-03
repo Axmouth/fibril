@@ -47,12 +47,24 @@ The image exposes:
 
 Persistent data lives under `/app/server_data` in the container.
 
+### Docker Compose
+
+The repository includes a small Compose example using the published image:
+
+```sh
+docker compose -f compose.server.example.yaml up -d
+docker compose -f compose.server.example.yaml ps
+```
+
+The Compose example maps the same ports, keeps data in a named volume, and uses
+the admin `/healthz` endpoint for container health checks.
+
 ## Build a local Docker image
 
 Build an image from the repository:
 
 ```sh
-docker build -f Dockerfile -t fibril-server:ci .
+docker build -f Dockerfile -t fibril-server:local .
 ```
 
 Run it with persistent server data:
@@ -62,7 +74,7 @@ docker run --rm \
   -p 9876:9876 \
   -p 8081:8081 \
   -v fibril-server-data:/app/server_data \
-  fibril-server:ci
+  fibril-server:local
 ```
 
 ## Run from a source checkout
@@ -90,6 +102,16 @@ sha256sum -c fibril-server.sha256
 chmod +x fibril-server
 ./fibril-server
 ```
+
+## Health check
+
+The admin surface exposes a lightweight health endpoint:
+
+```sh
+curl http://127.0.0.1:8081/healthz
+```
+
+Healthy servers return `ok`.
 
 ## Website deployment
 

@@ -1,0 +1,19 @@
+services:
+  fibril-server:
+    image: ghcr.io/axmouth/fibril-server:main
+    container_name: fibril-server
+    restart: unless-stopped
+    ports:
+      - "9876:9876"
+      - "8081:8081"
+    volumes:
+      - fibril-server-data:/app/server_data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8081/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  fibril-server-data:
