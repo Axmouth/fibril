@@ -1,13 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
-use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 use fibril_metrics::{BrokerStats, QueuesStateSnapshot};
 use futures::FutureExt;
@@ -103,6 +102,7 @@ pub struct ConsumerHandle {
     pub messages: mpsc::Receiver<DeliverableMessage>,
     pub settler: mpsc::Sender<SettleRequest>,
     pub pending_settles: Arc<AtomicUsize>,
+    pub activity_lease: ConsumerLease,
 }
 
 impl ConsumerHandle {
@@ -141,9 +141,19 @@ pub struct PublishRequest {
     pub extra: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PublisherHandle {
     pub publisher: mpsc::Sender<PublishRequest>,
+    activity_lease: PublisherLease,
+}
+
+impl Clone for PublisherHandle {
+    fn clone(&self) -> Self {
+        Self {
+            publisher: self.publisher.clone(),
+            activity_lease: self.activity_lease.clone(),
+        }
+    }
 }
 
 impl PublisherHandle {
@@ -319,6 +329,106 @@ impl ConsumerState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueActivitySnapshot {
+    pub active_publishers: usize,
+    pub active_subscribers: usize,
+    pub idle_since_ms: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct QueueActivityState {
+    active_publishers: usize,
+    active_subscribers: usize,
+    idle_since_ms: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct QueueActivity {
+    state: Mutex<QueueActivityState>,
+}
+
+impl QueueActivity {
+    fn snapshot(&self) -> QueueActivitySnapshot {
+        let state = self.state.lock().expect("queue activity lock poisoned");
+        QueueActivitySnapshot {
+            active_publishers: state.active_publishers,
+            active_subscribers: state.active_subscribers,
+            idle_since_ms: state.idle_since_ms,
+        }
+    }
+
+    fn add_publisher(self: &Arc<Self>) -> PublisherLease {
+        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        state.active_publishers += 1;
+        state.idle_since_ms = None;
+        drop(state);
+
+        PublisherLease {
+            activity: self.clone(),
+        }
+    }
+
+    fn drop_publisher(&self) {
+        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        debug_assert!(state.active_publishers > 0);
+        state.active_publishers = state.active_publishers.saturating_sub(1);
+        Self::mark_idle_if_empty(&mut state);
+    }
+
+    fn add_subscriber(self: &Arc<Self>) -> ConsumerLease {
+        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        state.active_subscribers += 1;
+        state.idle_since_ms = None;
+        drop(state);
+
+        ConsumerLease {
+            activity: self.clone(),
+        }
+    }
+
+    fn drop_subscriber(&self) {
+        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        debug_assert!(state.active_subscribers > 0);
+        state.active_subscribers = state.active_subscribers.saturating_sub(1);
+        Self::mark_idle_if_empty(&mut state);
+    }
+
+    fn mark_idle_if_empty(state: &mut QueueActivityState) {
+        if state.active_publishers == 0 && state.active_subscribers == 0 {
+            state.idle_since_ms.get_or_insert_with(unix_millis);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PublisherLease {
+    activity: Arc<QueueActivity>,
+}
+
+impl Clone for PublisherLease {
+    fn clone(&self) -> Self {
+        self.activity.add_publisher()
+    }
+}
+
+impl Drop for PublisherLease {
+    fn drop(&mut self) {
+        self.activity.drop_publisher();
+    }
+}
+
+#[derive(Debug)]
+pub struct ConsumerLease {
+    activity: Arc<QueueActivity>,
+}
+
+impl Drop for ConsumerLease {
+    fn drop(&mut self) {
+        self.activity.drop_subscriber();
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct QueueKey {
     tp: Topic,
@@ -340,6 +450,7 @@ struct QueueLoopState {
     started: AtomicBool,
     rr: AtomicU64,
     consumers: DashMap<ConsumerId, Arc<ConsumerState>>,
+    activity: Arc<QueueActivity>,
     // used to wake the delivery loop
     notify: tokio::sync::Notify,
     epoch: AtomicU64,
@@ -351,6 +462,7 @@ impl QueueLoopState {
             started: AtomicBool::new(false),
             rr: AtomicU64::new(0),
             consumers: DashMap::new(),
+            activity: Arc::new(QueueActivity::default()),
             notify: tokio::sync::Notify::new(),
             epoch: AtomicU64::new(1),
         }
@@ -548,6 +660,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             oneshot::Sender<Result<u64, BrokerError>>,
         )>(16384);
         let metrics = self.metrics.clone();
+        let activity_lease = qs.activity.add_publisher();
+        let qs_publish = qs.clone();
         let qs_clone = qs.clone();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("publisher_sink", async move {
@@ -640,7 +754,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 if let Some(metrics) = metrics.as_ref() {
                     metrics.published_many(batch_size as u64);
                 }
-                qs.wake();
+                qs_publish.wake();
             }
         });
 
@@ -672,7 +786,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         });
 
         Ok((
-            PublisherHandle { publisher: tx },
+            PublisherHandle {
+                publisher: tx,
+                activity_lease,
+            },
             ConfirmStream { rx: confirm_rx },
         ))
     }
@@ -683,6 +800,19 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .or_insert_with(|| Arc::new(QueueLoopState::new()))
             .value()
             .clone()
+    }
+
+    pub fn queue_activity_snapshot(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+    ) -> Option<QueueActivitySnapshot> {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: 0,
+            group: group.map(str::to_string),
+        };
+        self.queues.get(&key).map(|qs| qs.activity.snapshot())
     }
 
     pub async fn subscribe(
@@ -746,6 +876,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             messages: msg_rx,
             settler: settle_tx,
             pending_settles: self.pending_settles.clone(),
+            activity_lease: qs.activity.add_subscriber(),
         })
     }
 

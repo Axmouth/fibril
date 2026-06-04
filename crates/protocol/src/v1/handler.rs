@@ -16,8 +16,8 @@ use crate::v1::{
 use anyhow::Context;
 use fibril_broker::{
     broker::{
-        Broker, BrokerError, ConsumerConfig, ConsumerHandle, PublisherHandle, SettleRequest,
-        SettleType,
+        Broker, BrokerError, ConsumerConfig, ConsumerHandle, ConsumerLease, PublisherHandle,
+        SettleRequest, SettleType,
     },
     queue_engine::StromaEngine,
 };
@@ -56,6 +56,19 @@ async fn send_error_response(
     Ok(())
 }
 
+async fn send_error_response_and_count(
+    tx: &mpsc::Sender<Frame>,
+    metrics: &TcpStats,
+    request_id: u64,
+    code: u16,
+    message: impl Into<String>,
+) {
+    if let Err(err) = send_error_response(tx, request_id, code, message).await {
+        tracing::error!("failed to send error response: {err}");
+    }
+    metrics.error();
+}
+
 struct SubState {
     sub_id: u64,
     partition: u32,
@@ -63,6 +76,7 @@ struct SubState {
     state_settler: tokio::sync::mpsc::Sender<SettleRequest>,
     pending_settles: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
+    _activity_lease: ConsumerLease,
 }
 
 pub struct ConnectionSettings {
@@ -621,6 +635,7 @@ pub async fn handle_connection(
                     settler,
                     sub_id,
                     pending_settles,
+                    activity_lease,
                     ..
                 } = consumer;
 
@@ -705,6 +720,7 @@ pub async fn handle_connection(
                         auto_ack: sub.auto_ack,
                         state_settler: settler_clone,
                         pending_settles,
+                        _activity_lease: activity_lease,
                     },
                 );
 
@@ -796,11 +812,8 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                // TODO: Handle confirm stream properly
-                let key = &(pubreq.topic.clone(), pubreq.group.clone());
-                let publisher = if let Some(pubh) = publishers.get(key) {
-                    pubh.clone()
-                } else {
+                let key = (pubreq.topic.clone(), pubreq.group.clone());
+                if !publishers.contains_key(&key) {
                     let (pubh, mut conf_stream) = broker
                         .get_publisher(&pubreq.topic, &pubreq.group)
                         .await
@@ -820,8 +833,18 @@ pub async fn handle_connection(
                             let _ = offset;
                         }
                     });
-                    publishers.insert(key.clone(), pubh.clone());
-                    pubh
+                    publishers.insert(key.clone(), pubh);
+                }
+                let Some(publisher) = publishers.get(&key) else {
+                    send_error_response_and_count(
+                        &frame_tx_low_prio,
+                        &metrics,
+                        frame.request_id,
+                        500,
+                        "publisher cache unavailable",
+                    )
+                    .await;
+                    continue;
                 };
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
@@ -874,11 +897,8 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                // TODO: Handle confirm stream properly
-                let key = &(pubreq.topic.clone(), pubreq.group.clone());
-                let publisher = if let Some(pubh) = publishers.get(key) {
-                    pubh.clone()
-                } else {
+                let key = (pubreq.topic.clone(), pubreq.group.clone());
+                if !publishers.contains_key(&key) {
                     let (pubh, mut conf_stream) = broker
                         .get_publisher(&pubreq.topic, &pubreq.group)
                         .await
@@ -898,8 +918,18 @@ pub async fn handle_connection(
                             let _ = offset;
                         }
                     });
-                    publishers.insert(key.clone(), pubh.clone());
-                    pubh
+                    publishers.insert(key.clone(), pubh);
+                }
+                let Some(publisher) = publishers.get(&key) else {
+                    send_error_response_and_count(
+                        &frame_tx_low_prio,
+                        &metrics,
+                        frame.request_id,
+                        500,
+                        "publisher cache unavailable",
+                    )
+                    .await;
+                    continue;
                 };
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();

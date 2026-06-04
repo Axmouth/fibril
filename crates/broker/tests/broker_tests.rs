@@ -32,6 +32,74 @@ async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
 }
 
 #[tokio::test]
+async fn queue_activity_tracks_publisher_clones_until_last_drop() {
+    let (broker, _dir) = open_test_broker().await;
+
+    assert!(broker.queue_activity_snapshot("t", None).is_none());
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
+    assert_eq!(snapshot.active_publishers, 1);
+    assert_eq!(snapshot.active_subscribers, 0);
+    assert_eq!(snapshot.idle_since_ms, None);
+
+    let pubh2 = pubh.clone();
+    let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
+    assert_eq!(snapshot.active_publishers, 2);
+    assert_eq!(snapshot.idle_since_ms, None);
+
+    drop(pubh2);
+    let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
+    assert_eq!(snapshot.active_publishers, 1);
+    assert_eq!(snapshot.idle_since_ms, None);
+
+    let before_idle = unix_millis();
+    drop(pubh);
+    let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
+    assert_eq!(snapshot.active_publishers, 0);
+    assert_eq!(snapshot.active_subscribers, 0);
+    assert!(snapshot.idle_since_ms.is_some_and(|ts| ts >= before_idle));
+}
+
+#[tokio::test]
+async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
+    let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let sub = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .await
+        .unwrap();
+
+    let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
+    assert_eq!(snapshot.active_publishers, 1);
+    assert_eq!(snapshot.active_subscribers, 1);
+    assert_eq!(snapshot.idle_since_ms, None);
+
+    drop(pubh);
+    let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
+    assert_eq!(snapshot.active_publishers, 0);
+    assert_eq!(snapshot.active_subscribers, 1);
+    assert_eq!(snapshot.idle_since_ms, None);
+
+    let before_idle = unix_millis();
+    drop(sub);
+    let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
+    assert_eq!(snapshot.active_publishers, 0);
+    assert_eq!(snapshot.active_subscribers, 0);
+    assert!(snapshot.idle_since_ms.is_some_and(|ts| ts >= before_idle));
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
+    assert_eq!(snapshot.active_publishers, 1);
+    assert_eq!(snapshot.active_subscribers, 0);
+    assert_eq!(snapshot.idle_since_ms, None);
+
+    drop(pubh);
+}
+
+#[tokio::test]
 async fn broker_delivers_messages_in_order() {
     let (broker, _dir) = open_test_broker().await;
 

@@ -5,6 +5,16 @@ description: How Fibril should treat unused queue resources.
 
 Fibril queue data is durable. Resource eviction should only remove cached in-memory broker state, not message history, event logs, snapshots, or queue configuration.
 
+The reason this matters is sparse queues. Some systems naturally create a large number of queues, but only a small fraction are active at once. Fibril should make that shape practical: storage aside, defining or touching many queues should not require keeping all of them fully live in memory forever.
+
+Idle eviction pairs with lazy loading:
+
+- lazy loading materializes a queue when publish, subscribe, admin inspection, expiry, or configuration work needs it
+- idle eviction unmaterializes a queue after it has been inactive long enough
+- the durable slot remains known, so the next operation can materialize it again
+
+Together, those two behaviors make often-unused queues cheap without changing delivery semantics.
+
 The intended behavior is:
 
 - idle in-memory queue state can be dropped after a configurable inactivity window
@@ -32,6 +42,21 @@ The broker should track queue activity at the broker or queue-loop boundary:
 
 A queue should only be an eviction candidate when it has been idle for the configured window and has no active work.
 
+The broker-side sweep can also own publisher cache expiry. A sparse worker that wakes occasionally is enough; publisher and queue eviction do not need to run on every operation.
+
+Storage should expose explicit materialization controls rather than making the broker guess:
+
+```txt
+materialize(queue)      # load or recover the queue handle
+unmaterialize(queue)    # snapshot or drain as needed, then drop the handle
+is_materialized(queue)  # observe current memory state
+has_inflight(queue)     # guard broker-side eviction decisions
+```
+
+Eviction should use an atomic slot transition so a queue is not reopened while its old logs and background tasks are shutting down. During that window, new materialization should wait for eviction to finish or return a retryable error.
+
+If eviction loses a race to new work, it should simply report that and leave the queue alone.
+
 ## Publishers
 
 For now, connection-lifetime publisher caching is the safer default. It avoids explicit create/destroy publisher protocol messages that can desync if a client creates and drops publisher objects frequently.
@@ -51,3 +76,15 @@ publisher_idle_evict_after_ms = null  # optional server-side publisher cache exp
 ```
 
 When enabled, eviction should be best-effort. It should reduce memory and background work, but it should not change delivery semantics.
+
+## Storage-side guardrails
+
+The storage layer should only unmaterialize a queue when it can do so cleanly:
+
+- no inflight messages that require live lease tracking
+- no active command loop work that must complete before shutdown
+- no periodic snapshot task still able to touch the old handle
+- dirty state snapshotted when configured before the handle is dropped
+- logs closed after the queue actor has drained and exited
+
+If a stale handle receives a command after eviction has begun, returning an error is acceptable. The normal broker path should prevent this by only evicting queues with no active publishers, subscribers, pending confirms, or pending settlements.

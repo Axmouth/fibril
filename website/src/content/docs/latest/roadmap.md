@@ -11,7 +11,7 @@ Fibril is still early. The near-term roadmap is about making the existing semant
 - Expose dead-letter policy configuration through the broker.
 - Add broker-level tests for DLQ and delayed retry public paths.
 - Make server configuration production-friendly instead of hard-coded development defaults.
-- Add configurable idle eviction for cached queue and publisher resources.
+- Add lazy queue materialization plus configurable idle eviction for cached queue and publisher resources.
 - Improve TCP protocol ergonomics and error behavior.
 
 ## Medium term
