@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub use stroma_core::{AppendCompletion, AppendResult, CompletionPair, IoError};
 
@@ -17,6 +18,7 @@ pub struct StoredMessage {
     pub published: u64,
     pub publish_received: u64,
     pub retried: u32,
+    pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
 }
 

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use fibril_protocol::v1::{
@@ -26,6 +27,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                 payload: payload.clone(),
                 partition: 1,
                 require_confirm: true,
+                headers: HashMap::new(),
                 published: unix_millis(),
             };
             let stream = TcpStream::connect(SocketAddr::V4(SocketAddrV4::new(
@@ -78,7 +80,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                             .await
                             .unwrap();
                     }
-                    if i >= msgs_per_client - 1 {
+                    if i >= msgs_per_client {
                         break;
                     }
                 }

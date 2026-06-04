@@ -509,6 +509,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
     }
 
+    pub async fn wait_for_pending_settles(&self) {
+        loop {
+            let notified = self.settle_drained.notified();
+            if self.pending_settles.load(Ordering::Acquire) == 0 {
+                break;
+            }
+            notified.await;
+        }
+    }
+
     pub async fn get_publisher(
         self: &Arc<Self>,
         topic: &str,
@@ -737,6 +747,87 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             settler: settle_tx,
             pending_settles: self.pending_settles.clone(),
         })
+    }
+
+    pub async fn unsubscribe(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        partition: LogId,
+        sub_id: ConsumerId,
+    ) -> Result<(), BrokerError> {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+
+        if let Some(qs) = self.queues.get(&key).map(|e| e.value().clone()) {
+            qs.consumers.remove(&sub_id);
+            qs.wake();
+        }
+
+        let mut tagged_offsets = Vec::new();
+        for entry in self.records_by_tags.iter() {
+            let tag = *entry.key();
+            let rec = entry.value();
+            if rec.consumer_id == sub_id && rec.key == key {
+                tagged_offsets.push((tag, rec.offset));
+            }
+        }
+
+        if tagged_offsets.is_empty() {
+            return Ok(());
+        }
+
+        let mut offsets = Vec::with_capacity(tagged_offsets.len());
+        for (tag, offset) in tagged_offsets {
+            self.records_by_tags.remove(&tag);
+            self.tags_by_key_offset.remove(&(key.clone(), offset));
+            offsets.push(offset);
+        }
+
+        let count = offsets.len();
+        let qs = self.queues.get(&key).map(|e| e.value().clone());
+        let (done_tx, done_rx) = oneshot::channel::<bool>();
+        let mut done_tx = Some(done_tx);
+        let done = move |ok: bool| {
+            if let Some(qs) = &qs {
+                qs.wake();
+            }
+            if let Some(done_tx) = done_tx.take() {
+                let _ = done_tx.send(ok);
+            }
+        };
+
+        let reqs = offsets
+            .into_iter()
+            .map(|off| NackEventMeta { off, requeue: true })
+            .collect();
+        let completion: Box<dyn AppendCompletion<IoError>> = Box::new(SimpleCompletion::new(done));
+        self.engine
+            .nack_batch(&key.tp, key.part, key.group.as_deref(), reqs, completion)
+            .await?;
+
+        match done_rx.await {
+            Ok(true) => {
+                tracing::debug!(
+                    "Unsubscribed consumer {sub_id}, requeued {count} inflight messages"
+                );
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    "Unsubscribed consumer {sub_id}, but requeue completion failed for {count} messages"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Unsubscribed consumer {sub_id}, but requeue completion channel closed for {count} messages"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     fn spawn_settle_loop(
@@ -1159,6 +1250,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                                 published: d.published,
                                 publish_received: d.publish_received,
                                 retried: d.retries,
+                                headers: d.extra_headers,
                                 payload: d.payload,
                             },
                             delivery_tag: tag,

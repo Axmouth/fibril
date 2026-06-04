@@ -3,6 +3,7 @@ use fibril_protocol::v1::{
     Op, Publish,
     helper::{decode, encode},
 };
+use std::collections::HashMap;
 
 fn bench_encode_decode(c: &mut Criterion) {
     let payload = vec![1u8; 1024];
@@ -16,6 +17,7 @@ fn bench_encode_decode(c: &mut Criterion) {
             partition: 0,
             payload: payload.clone(),
             published: 1234567890,
+            headers: HashMap::new(),
             require_confirm: false,
         },
     );

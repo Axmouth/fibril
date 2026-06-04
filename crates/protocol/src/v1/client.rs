@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fibril_storage::DeliveryTag;
@@ -70,6 +71,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             group: None,
             partition: 0,
             require_confirm: true,
+            headers: HashMap::new(),
             published: unix_millis(),
             payload: b"hello".to_vec(),
         },

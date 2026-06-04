@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, atomic::AtomicU64},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
     time::Instant,
 };
 
@@ -30,16 +33,25 @@ use tokio_util::codec::Framed;
 use uuid::Uuid;
 
 type SubKey = (Topic, Option<Group>); // (topic, group)
+const RESERVED_HEADER_PREFIX: &str = "fibril.";
 
 struct ConnState {
     authenticated: bool,
     subs: HashMap<SubKey, SubState>,
 }
 
+fn has_reserved_headers(headers: &HashMap<String, String>) -> bool {
+    headers
+        .keys()
+        .any(|key| key.starts_with(RESERVED_HEADER_PREFIX))
+}
+
 struct SubState {
     sub_id: u64,
+    partition: u32,
     auto_ack: bool,
     state_settler: tokio::sync::mpsc::Sender<SettleRequest>,
+    pending_settles: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -584,6 +596,7 @@ pub async fn handle_connection(
                     messages,
                     settler,
                     sub_id,
+                    pending_settles,
                     ..
                 } = consumer;
 
@@ -599,11 +612,18 @@ pub async fn handle_connection(
                 );
 
                 let settler_clone = settler.clone();
+                let pending_settles_clone = pending_settles.clone();
                 let req_id_gen_clone = req_id_gen.clone();
                 let handle = tokio::spawn(async move {
                     let mut rx = messages;
 
                     while let Some(msg) = rx.recv().await {
+                        let mut headers = msg.message.headers.clone();
+                        if msg.message.retried > 0 {
+                            headers
+                                .insert("fibril.retries".into(), msg.message.retried.to_string());
+                        }
+
                         let deliver = Deliver {
                             sub_id,
                             topic: msg.message.topic.clone(),
@@ -613,6 +633,7 @@ pub async fn handle_connection(
                             delivery_tag: msg.delivery_tag,
                             published: msg.message.published,
                             publish_received: msg.message.publish_received,
+                            headers,
                             payload: msg.message.payload.clone(),
                         };
 
@@ -631,12 +652,16 @@ pub async fn handle_connection(
 
                         // 2. Auto-ack ONLY after successful send
                         if auto_ack {
+                            pending_settles_clone.fetch_add(1, Ordering::AcqRel);
                             let _ = settler
                                 .send(SettleRequest {
                                     settle_type: SettleType::Ack,
                                     delivery_tag: msg.delivery_tag,
                                 })
-                                .await;
+                                .await
+                                .inspect_err(|_| {
+                                    pending_settles_clone.fetch_sub(1, Ordering::AcqRel);
+                                });
                         }
                     }
                 });
@@ -645,9 +670,11 @@ pub async fn handle_connection(
                     sub_key,
                     SubState {
                         sub_id,
+                        partition: consumer.partition,
                         task: handle,
                         auto_ack: sub.auto_ack,
                         state_settler: settler_clone,
+                        pending_settles,
                     },
                 );
 
@@ -677,13 +704,17 @@ pub async fn handle_connection(
                     && !sub.auto_ack
                 {
                     let state_settler = sub.state_settler.clone();
+                    let pending_settles = sub.pending_settles.clone();
                     // tokio::spawn(async move {
                     for tag in ack.tags {
                         let req = SettleRequest {
                             delivery_tag: tag,
                             settle_type: SettleType::Ack,
                         };
-                        let _ = state_settler.send(req).await;
+                        pending_settles.fetch_add(1, Ordering::AcqRel);
+                        let _ = state_settler.send(req).await.inspect_err(|_| {
+                            pending_settles.fetch_sub(1, Ordering::AcqRel);
+                        });
                     }
                     // });
                 }
@@ -701,6 +732,7 @@ pub async fn handle_connection(
                     && !sub.auto_ack
                 {
                     let state_settler = sub.state_settler.clone();
+                    let pending_settles = sub.pending_settles.clone();
                     // tokio::spawn(async move {
                     for tag in nack.tags {
                         let req = SettleRequest {
@@ -709,7 +741,10 @@ pub async fn handle_connection(
                                 requeue: Some(nack.requeue),
                             },
                         };
-                        let _ = state_settler.send(req).await;
+                        pending_settles.fetch_add(1, Ordering::AcqRel);
+                        let _ = state_settler.send(req).await.inspect_err(|_| {
+                            pending_settles.fetch_sub(1, Ordering::AcqRel);
+                        });
                     }
                     // });
                 }
@@ -720,6 +755,19 @@ pub async fn handle_connection(
             x if x == Op::Publish as u16 => {
                 let publish_received = unix_millis();
                 let pubreq: Publish = decode(&frame);
+                if has_reserved_headers(&pubreq.headers) {
+                    let _ = frame_tx_low_prio
+                        .send(encode(
+                            Op::Error,
+                            frame.request_id,
+                            &ErrorMsg {
+                                code: 400,
+                                message: "headers with prefix `fibril.` are reserved".into(),
+                            },
+                        ))
+                        .await;
+                    continue;
+                }
 
                 // TODO: Handle confirm stream properly
                 let key = &(pubreq.topic.clone(), pubreq.group.clone());
@@ -760,7 +808,7 @@ pub async fn handle_connection(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
-                            HashMap::new(),
+                            pubreq.headers,
                         )
                         .await
                 } else {
@@ -769,7 +817,7 @@ pub async fn handle_connection(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
-                            HashMap::new(),
+                            pubreq.headers,
                         )
                         .await
                 };
@@ -794,6 +842,19 @@ pub async fn handle_connection(
             x if x == Op::PublishDelayed as u16 => {
                 let publish_received = unix_millis();
                 let pubreq: PublishDelayed = decode(&frame);
+                if has_reserved_headers(&pubreq.headers) {
+                    let _ = frame_tx_low_prio
+                        .send(encode(
+                            Op::Error,
+                            frame.request_id,
+                            &ErrorMsg {
+                                code: 400,
+                                message: "headers with prefix `fibril.` are reserved".into(),
+                            },
+                        ))
+                        .await;
+                    continue;
+                }
 
                 // TODO: Handle confirm stream properly
                 let key = &(pubreq.topic.clone(), pubreq.group.clone());
@@ -834,7 +895,7 @@ pub async fn handle_connection(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
-                            HashMap::new(),
+                            pubreq.headers,
                         )
                         .await
                 } else {
@@ -843,7 +904,7 @@ pub async fn handle_connection(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
-                            HashMap::new(),
+                            pubreq.headers,
                         )
                         .await
                 };
@@ -905,8 +966,16 @@ pub async fn handle_connection(
     writer_task.abort();
     pub_queue_handle.await?;
 
-    for (_, sub) in state.subs.drain() {
+    broker.wait_for_pending_settles().await;
+
+    for ((topic, group), sub) in state.subs.drain() {
         sub.task.abort();
+        if let Err(err) = broker
+            .unsubscribe(&topic, group.as_deref(), sub.partition, sub.sub_id)
+            .await
+        {
+            tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
+        }
     }
 
     tracing::debug!("[conn] EXIT handle_connection peer={:?}", peer_addr);

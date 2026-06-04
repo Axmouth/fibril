@@ -31,19 +31,44 @@ These numbers are useful mostly as a sanity check:
 
 The project still needs:
 
-- repeatable benchmark scripts with recorded configuration
 - payload-size sweeps
 - durability-setting comparisons
-- latency histograms, not only throughput
+- richer latency histograms and structured output
 - restart/replay timing
 - multi-consumer fairness and backpressure scenarios
 
-## Current manual TCP benchmark
+## Current TCP benchmark
 
-The current TCP-layer benchmark helper is `e2e_c`. It is useful for quick
-throughput checks, but it is not yet a repeatable benchmark suite.
+The current TCP-layer benchmark helper is `e2e_c`. It is still an early
+benchmark, but it now reports wall throughput, active receive throughput, sent
+and received counts, missing receive count, retry metadata observed on
+delivered messages, and latency percentiles from publish time to reader
+delivery.
 
-Start the server in one terminal:
+For a quick local run, use the benchmark script:
+
+```sh
+MESSAGES=500000 CLIENTS=10 SIZE=1024 PREFETCH=16384 scripts/bench-e2e-c.sh
+```
+
+The script builds the release server and benchmark binary, waits for
+`/healthz`, runs a small warmup so lazy queue setup is out of the main
+measurement path, then starts a reader and writer for the measured run.
+
+Useful knobs:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `MESSAGES` | `500000` | Messages per client in the measured run |
+| `CLIENTS` | `10` | Parallel reader and writer client count |
+| `SIZE` | `1024` | Raw payload size in bytes |
+| `PREFETCH` | `16384` | Reader subscription prefetch |
+| `WARMUP_MESSAGES` | `1000` | Warmup messages before the measured run |
+| `READY_SETTLE_SECONDS` | `0.5` | Pause after reader readiness before starting the writer |
+| `IDLE_TIMEOUT_MS` | `10000` | Reader idle timeout before reporting partial receive counts |
+| `CONFIRMED` | `0` | Set `1` to wait for publish confirmations for correctness/debug checks |
+
+The helper can also be run manually. Start the server in one terminal:
 
 ```sh
 cargo run --release --bin fibril-server
@@ -59,9 +84,13 @@ Start the reader in a third terminal, as close to the writer start time as
 practical:
 
 ```sh
-cargo run --release --bin e2e_c -- -m 500000 -c 10 --reader
+cargo run --release --bin e2e_c -- -m 500000 -c 10 --reader --prefetch 16384
 ```
 
-The current helper reports throughput only. Latency histograms, configurable
-prefetch, structured output, and repeatable scenario tables are still future
-work.
+The reader side prints latency percentiles when it receives messages. If the
+reader goes idle before receiving the target count, it reports the partial
+count and missing count instead of waiting indefinitely. The wall throughput
+includes any idle timeout tail, while active receive throughput uses the span
+between the first and last received message. Retry counts are read from
+Fibril's reserved delivery metadata headers when present. Structured benchmark
+output and scenario tables are still future work.

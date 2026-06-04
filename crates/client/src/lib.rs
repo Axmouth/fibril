@@ -68,6 +68,9 @@ pub struct AutoAckedSubscription {
 
 pub struct Message {
     pub delivery_tag: DeliveryTag,
+    pub published: UnixMillis,
+    pub publish_received: UnixMillis,
+    pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
 }
 
@@ -94,29 +97,37 @@ impl Message {
 
 pub struct NewMessage {
     pub payload: Vec<u8>,
+    headers: HashMap<String, String>,
 }
 
 impl NewMessage {
     pub fn msg_pack<T: serde::Serialize>(payload: &T) -> FibrilResult<Self> {
         rmp_serde::to_vec(payload)
-            .map(|payload| NewMessage { payload })
+            .map(|payload| NewMessage::with_content_type(payload, "application/msgpack"))
             .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })
     }
 
     pub fn json<T: serde::Serialize>(payload: &T) -> FibrilResult<Self> {
         serde_json::to_vec(payload)
-            .map(|payload| NewMessage { payload })
+            .map(|payload| NewMessage::with_content_type(payload, "application/json"))
             .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })
     }
 
     pub fn raw(payload: Vec<u8>) -> Self {
-        NewMessage { payload }
+        NewMessage {
+            payload,
+            headers: HashMap::new(),
+        }
     }
 
     pub fn content(payload: impl Into<Vec<u8>>) -> Self {
-        NewMessage {
-            payload: payload.into(),
-        }
+        NewMessage::with_content_type(payload.into(), "text/plain; charset=utf-8")
+    }
+
+    fn with_content_type(payload: Vec<u8>, content_type: &str) -> Self {
+        let mut headers = HashMap::new();
+        headers.insert("content-type".into(), content_type.into());
+        NewMessage { payload, headers }
     }
 }
 
@@ -191,6 +202,9 @@ impl Delayable for std::time::Duration {
 #[must_use]
 pub struct InflightMessage {
     pub delivery_tag: DeliveryTag,
+    pub published: UnixMillis,
+    pub publish_received: UnixMillis,
+    pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
     pub request_id: u64,
     settle: oneshot::Sender<SettleRequest>,
@@ -209,6 +223,9 @@ impl InflightMessage {
         rx.await.map_err(|_| FibrilError::BrokenPipe)??;
         Ok(Message {
             delivery_tag: self.delivery_tag,
+            published: self.published,
+            publish_received: self.publish_received,
+            headers: self.headers,
             payload: self.payload,
         })
     }
@@ -226,6 +243,9 @@ impl InflightMessage {
         rx.await.map_err(|_| FibrilError::BrokenPipe)??;
         Ok(Message {
             delivery_tag: self.delivery_tag,
+            published: self.published,
+            publish_received: self.publish_received,
+            headers: self.headers,
             payload: self.payload,
         })
     }
@@ -244,6 +264,9 @@ impl InflightMessage {
         rx.await.map_err(|_| FibrilError::BrokenPipe)??;
         Ok(Message {
             delivery_tag: self.delivery_tag,
+            published: self.published,
+            publish_received: self.publish_received,
+            headers: self.headers,
             payload: self.payload,
         })
     }
@@ -435,7 +458,12 @@ impl Publisher {
     pub async fn publish_unconfirmed<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;
         self.engine
-            .publish_unconfirmed(self.topic.clone(), self.group.clone(), message.payload)
+            .publish_unconfirmed(
+                self.topic.clone(),
+                self.group.clone(),
+                message.headers,
+                message.payload,
+            )
             .await
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
@@ -445,7 +473,12 @@ impl Publisher {
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
         let message = payload.into_message()?;
         self.engine
-            .publish(self.topic.clone(), self.group.clone(), message.payload)
+            .publish(
+                self.topic.clone(),
+                self.group.clone(),
+                message.headers,
+                message.payload,
+            )
             .await
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
         // TODO: Or return a notifier you can await? As like async fn PublishResult::confirmed()
@@ -511,12 +544,14 @@ enum Command {
     PublishUnconfirmed {
         topic: String,
         group: Option<String>,
+        headers: HashMap<String, String>,
         payload: Vec<u8>,
         published: u64,
     },
     PublishConfirmed {
         topic: String,
         group: Option<String>,
+        headers: HashMap<String, String>,
         payload: Vec<u8>,
         published: u64,
         reply: oneshot::Sender<FibrilResult<u64>>,
@@ -719,19 +754,20 @@ where
                 }
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    Command::PublishUnconfirmed { topic, group, payload, published } => {
+                    Command::PublishUnconfirmed { topic, group, headers, payload, published } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = Publish {
                             topic,
                             group,
                             partition: 0,
                             require_confirm: false,
+                            headers,
                             payload,
                             published,
                         };
                         send_or_die!(framed, encode(Op::Publish, req_id, &p) , fatal_error)
                     }
-                    Command::PublishConfirmed { topic, group, payload, published, reply } => {
+                    Command::PublishConfirmed { topic, group, headers, payload, published, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
@@ -739,6 +775,7 @@ where
                             group,
                             partition: 0,
                             require_confirm: true,
+                            headers,
                             payload,
                             published,
                         };
@@ -821,6 +858,9 @@ where
                                         let (ack_tx, ack_rx) = oneshot::channel();
                                         let msg = InflightMessage {
                                             delivery_tag: d.delivery_tag,
+                                            published: d.published,
+                                            publish_received: d.publish_received,
+                                            headers: d.headers,
                                             payload: d.payload,
                                             settle: ack_tx,
                                             request_id: frame.request_id,
@@ -876,6 +916,9 @@ where
                                     SubDelivery::Auto(tx) => {
                                         let res = tx.send(Message {
                                             delivery_tag: d.delivery_tag,
+                                            published: d.published,
+                                            publish_received: d.publish_received,
+                                            headers: d.headers,
                                             payload: d.payload,
                                         }).await;
 
@@ -1047,6 +1090,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        headers: HashMap<String, String>,
         payload: Vec<u8>,
     ) -> FibrilResult<()> {
         let published = unix_millis();
@@ -1054,6 +1098,7 @@ impl EngineHandle {
             .send(Command::PublishUnconfirmed {
                 topic,
                 group,
+                headers,
                 payload,
                 published,
             })
@@ -1066,6 +1111,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        headers: HashMap<String, String>,
         payload: Vec<u8>,
     ) -> FibrilResult<u64> {
         let (tx, rx) = oneshot::channel();
@@ -1074,6 +1120,7 @@ impl EngineHandle {
             .send(Command::PublishConfirmed {
                 topic,
                 group,
+                headers,
                 payload,
                 published,
                 reply: tx,

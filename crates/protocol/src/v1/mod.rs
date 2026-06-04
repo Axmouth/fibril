@@ -3,6 +3,8 @@ pub mod frame;
 pub mod handler;
 pub mod helper;
 
+use std::collections::HashMap;
+
 use fibril_storage::DeliveryTag;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -77,6 +79,7 @@ pub struct Publish {
     pub partition: u32, // keep for later, default 0
     pub group: Option<String>,
     pub require_confirm: bool,
+    pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
     pub published: u64,
 }
@@ -88,6 +91,7 @@ pub struct PublishDelayed {
     pub group: Option<String>,
     pub require_confirm: bool,
     pub not_before: u64,
+    pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
     pub published: u64,
 }
@@ -125,6 +129,7 @@ pub struct Deliver {
     pub delivery_tag: DeliveryTag,
     pub published: u64,
     pub publish_received: u64,
+    pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
 }
 

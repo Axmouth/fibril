@@ -716,6 +716,7 @@ pub async fn visual_client(
                         group: Some("g1".to_string()),
                         partition: 0,
                         require_confirm: false,
+                        headers: HashMap::new(),
                         published: unix_millis(),
                         payload: b"hello".repeat(10000).to_vec(),
                     })
