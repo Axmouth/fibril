@@ -15,9 +15,12 @@ use tokio::{
     sync::{Notify, mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
-use uuid::Uuid;
 
-use fibril_protocol::v1::{frame::ProtoCodec, helper::*, *};
+use fibril_protocol::v1::{
+    frame::{Frame, ProtoCodec},
+    helper::*,
+    *,
+};
 
 // ===== Public API ============================================================
 
@@ -75,6 +78,14 @@ pub struct Message {
 }
 
 impl Message {
+    pub fn content_type(&self) -> Option<&str> {
+        self.headers.get("content-type").map(String::as_str)
+    }
+
+    pub fn deserialize<T: DeserializeOwned>(&self) -> FibrilResult<T> {
+        deserialize_by_content_type(self.content_type(), &self.payload)
+    }
+
     pub fn msg_pack<T: DeserializeOwned>(&self) -> FibrilResult<T> {
         rmp_serde::from_slice(&self.payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
@@ -122,6 +133,19 @@ impl NewMessage {
 
     pub fn content(payload: impl Into<Vec<u8>>) -> Self {
         NewMessage::with_content_type(payload.into(), "text/plain; charset=utf-8")
+    }
+
+    pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn content_type(self, content_type: impl Into<String>) -> Self {
+        self.header("content-type", content_type)
+    }
+
+    pub fn headers(&self) -> &HashMap<String, String> {
+        &self.headers
     }
 
     fn with_content_type(payload: Vec<u8>, content_type: &str) -> Self {
@@ -212,74 +236,127 @@ pub struct InflightMessage {
 
 impl InflightMessage {
     pub async fn complete(self) -> FibrilResult<Message> {
+        let InflightMessage {
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            payload,
+            request_id,
+            settle,
+        } = self;
         let (tx, rx) = oneshot::channel();
-        self.settle
+        settle
             .send(SettleRequest::Ack {
-                tag: self.delivery_tag,
-                request_id: self.request_id,
+                tag: delivery_tag,
+                request_id,
                 response: tx,
             })
             .map_err(|_e| FibrilError::BrokenPipe)?;
         rx.await.map_err(|_| FibrilError::BrokenPipe)??;
         Ok(Message {
-            delivery_tag: self.delivery_tag,
-            published: self.published,
-            publish_received: self.publish_received,
-            headers: self.headers,
-            payload: self.payload,
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            payload,
         })
     }
 
     pub async fn fail(self) -> FibrilResult<Message> {
+        let InflightMessage {
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            payload,
+            request_id,
+            settle,
+        } = self;
         let (tx, rx) = oneshot::channel();
-        self.settle
+        settle
             .send(SettleRequest::Nack {
-                tag: self.delivery_tag,
+                tag: delivery_tag,
                 requeue: false,
-                request_id: self.request_id,
+                request_id,
                 response: tx,
             })
             .map_err(|_e| FibrilError::BrokenPipe)?;
         rx.await.map_err(|_| FibrilError::BrokenPipe)??;
         Ok(Message {
-            delivery_tag: self.delivery_tag,
-            published: self.published,
-            publish_received: self.publish_received,
-            headers: self.headers,
-            payload: self.payload,
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            payload,
         })
     }
 
-    // TODO: Implement timeout. Could just markinflight with now + timeout?
     pub async fn retry(self) -> FibrilResult<Message> {
+        let InflightMessage {
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            payload,
+            request_id,
+            settle,
+        } = self;
         let (tx, rx) = oneshot::channel();
-        self.settle
+        settle
             .send(SettleRequest::Nack {
-                tag: self.delivery_tag,
+                tag: delivery_tag,
                 requeue: true,
-                request_id: self.request_id,
+                request_id,
                 response: tx,
             })
             .map_err(|_e| FibrilError::BrokenPipe)?;
         rx.await.map_err(|_| FibrilError::BrokenPipe)??;
         Ok(Message {
-            delivery_tag: self.delivery_tag,
-            published: self.published,
-            publish_received: self.publish_received,
-            headers: self.headers,
-            payload: self.payload,
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            payload,
         })
     }
 
     pub async fn retry_after(self, delay: impl Delayable) -> FibrilResult<Message> {
-        let deadline = delay.deadline();
+        let _deadline = delay.deadline();
         todo!()
     }
 
-    pub fn deserialize<T: DeserializeOwned>(&self) -> FibrilResult<T> {
-        rmp_serde::from_slice(&self.payload)
-            .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
+    pub fn content_type(&self) -> Option<&str> {
+        self.headers.get("content-type").map(String::as_str)
     }
+
+    pub fn deserialize<T: DeserializeOwned>(&self) -> FibrilResult<T> {
+        deserialize_by_content_type(self.content_type(), &self.payload)
+    }
+}
+
+fn deserialize_by_content_type<T: DeserializeOwned>(
+    content_type: Option<&str>,
+    payload: &[u8],
+) -> FibrilResult<T> {
+    match content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+    {
+        Some("application/json") => serde_json::from_slice(payload)
+            .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() }),
+        Some("application/msgpack") | None | Some("") => rmp_serde::from_slice(payload)
+            .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() }),
+        Some(other) => Err(FibrilError::DeserializationFailure {
+            msg: format!("unsupported content-type `{other}`"),
+        }),
+    }
+}
+
+fn decode_protocol<T: for<'de> serde::Deserialize<'de>>(frame: &Frame) -> FibrilResult<T> {
+    try_decode(frame).map_err(|err| FibrilError::DeserializationFailure {
+        msg: err.to_string(),
+    })
 }
 
 enum Waiter {
@@ -491,7 +568,35 @@ impl Publisher {
         delay: D,
     ) -> FibrilResult<()> {
         let deadline = delay.deadline();
-        todo!()
+        let message = payload.into_message()?;
+        self.engine
+            .publish_unconfirmed_delayed(
+                self.topic.clone(),
+                self.group.clone(),
+                message.headers,
+                message.payload,
+                deadline,
+            )
+            .await
+    }
+
+    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    pub async fn publish_delayed<T: Publishable, D: Delayable + Debug>(
+        &self,
+        payload: T,
+        delay: D,
+    ) -> FibrilResult<u64> {
+        let deadline = delay.deadline();
+        let message = payload.into_message()?;
+        self.engine
+            .publish_delayed(
+                self.topic.clone(),
+                self.group.clone(),
+                message.headers,
+                message.payload,
+                deadline,
+            )
+            .await
     }
 
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
@@ -500,8 +605,7 @@ impl Publisher {
         payload: T,
         delay: D,
     ) -> FibrilResult<u64> {
-        let deadline = delay.deadline();
-        todo!()
+        self.publish_delayed(payload, delay).await
     }
 }
 
@@ -556,6 +660,23 @@ enum Command {
         published: u64,
         reply: oneshot::Sender<FibrilResult<u64>>,
     },
+    PublishDelayedUnconfirmed {
+        topic: String,
+        group: Option<String>,
+        headers: HashMap<String, String>,
+        payload: Vec<u8>,
+        published: u64,
+        not_before: u64,
+    },
+    PublishDelayedConfirmed {
+        topic: String,
+        group: Option<String>,
+        headers: HashMap<String, String>,
+        payload: Vec<u8>,
+        published: u64,
+        not_before: u64,
+        reply: oneshot::Sender<FibrilResult<u64>>,
+    },
     Subscribe {
         req: Subscribe,
         reply: oneshot::Sender<FibrilResult<AckableSubChannel>>,
@@ -603,6 +724,28 @@ struct SubState {
 
 const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
 
+async fn send_protocol_frame<S, T>(
+    framed: &mut Framed<S, ProtoCodec>,
+    op: Op,
+    request_id: u64,
+    msg: &T,
+) -> FibrilResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let frame = try_encode(op, request_id, msg).map_err(|err| FibrilError::Unexpected {
+        msg: err.to_string(),
+    })?;
+
+    framed
+        .send(frame)
+        .await
+        .map_err(|err| FibrilError::Disconnection {
+            msg: err.to_string(),
+        })
+}
+
 // TODO: Further reconnection attempts logic
 // TODO: Better handle `t _ = framed.send(...)` errors, which currently just get swallowed. These errors indicate a broken connection and should trigger cleanup and reconnection logic.
 async fn start_engine<S>(
@@ -613,20 +756,18 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let shutdown = Arc::new(Notify::new());
-    let client_id;
     // handshake
-    framed
-        .send(encode(
-            Op::Hello,
-            1,
-            &Hello {
-                client_name: opts.client_name.clone(),
-                client_version: opts.client_version.clone(),
-                protocol_version: PROTOCOL_V1,
-            },
-        ))
-        .await
-        .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+    send_protocol_frame(
+        &mut framed,
+        Op::Hello,
+        1,
+        &Hello {
+            client_name: opts.client_name.clone(),
+            client_version: opts.client_version.clone(),
+            protocol_version: PROTOCOL_V1,
+        },
+    )
+    .await?;
 
     let frame = framed
         .next()
@@ -635,8 +776,7 @@ where
         .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
     match frame.opcode {
         x if x == Op::HelloOk as u16 => {
-            let ho: HelloOk = decode(&frame);
-            client_id = ho.client_id;
+            let ho: HelloOk = decode_protocol(&frame)?;
             if ho.compliance != COMPLIANCE_STRING {
                 tracing::warn!(
                     id = "NF-SOVEREIGN-2025-GN-OPT-OUT-TDM",
@@ -655,7 +795,7 @@ where
             }
         }
         x if x == Op::HelloErr as u16 => {
-            let e: ErrorMsg = decode(&frame);
+            let e: ErrorMsg = decode_protocol(&frame)?;
             return Err(FibrilError::Failure {
                 code: e.code,
                 msg: e.message,
@@ -669,10 +809,7 @@ where
     }
 
     if let Some(auth) = opts.auth {
-        framed
-            .send(encode(Op::Auth, 2, &auth))
-            .await
-            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+        send_protocol_frame(&mut framed, Op::Auth, 2, &auth).await?;
         let frame = framed
             .next()
             .await
@@ -682,7 +819,7 @@ where
         match frame.opcode {
             x if x == Op::AuthOk as u16 => {}
             x if x == Op::AuthErr as u16 => {
-                let e: ErrorMsg = decode(&frame);
+                let e: ErrorMsg = decode_protocol(&frame)?;
                 return Err(FibrilError::Failure {
                     code: e.code,
                     msg: e.message,
@@ -728,9 +865,9 @@ where
 
         // Helper closure (or just an inline pattern):
         macro_rules! send_or_die {
-            ($framed:expr, $frame:expr, $err_slot:expr) => {
-                if let Err(e) = $framed.send($frame).await {
-                    $err_slot = Some(FibrilError::Disconnection { msg: e.to_string() });
+            ($framed:expr, $op:expr, $request_id:expr, $msg:expr, $err_slot:expr) => {
+                if let Err(e) = send_protocol_frame(&mut $framed, $op, $request_id, $msg).await {
+                    $err_slot = Some(e);
                     break;
                 }
             };
@@ -745,7 +882,7 @@ where
                         break;
                     }
                     let req_id = next_req; next_req = next_req.wrapping_add(1);
-                    send_or_die!(framed, encode(Op::Ping, req_id, &()), fatal_error)
+                    send_or_die!(framed, Op::Ping, req_id, &(), fatal_error)
                 }
 
                 _ = shutdown.notified() => {
@@ -765,7 +902,7 @@ where
                             payload,
                             published,
                         };
-                        send_or_die!(framed, encode(Op::Publish, req_id, &p) , fatal_error)
+                        send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
                     Command::PublishConfirmed { topic, group, headers, payload, published, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -779,17 +916,46 @@ where
                             payload,
                             published,
                         };
-                        send_or_die!(framed, encode(Op::Publish, req_id, &p), fatal_error)
+                        send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
+                    }
+                    Command::PublishDelayedUnconfirmed { topic, group, headers, payload, published, not_before } => {
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
+                        let p = PublishDelayed {
+                            topic,
+                            group,
+                            partition: 0,
+                            require_confirm: false,
+                            not_before,
+                            headers,
+                            payload,
+                            published,
+                        };
+                        send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
+                    }
+                    Command::PublishDelayedConfirmed { topic, group, headers, payload, published, not_before, reply } => {
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
+                        waiters.insert(req_id, Waiter::Publish(reply));
+                        let p = PublishDelayed {
+                            topic,
+                            group,
+                            partition: 0,
+                            require_confirm: true,
+                            not_before,
+                            headers,
+                            payload,
+                            published,
+                        };
+                        send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
                     }
                     Command::Subscribe { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::SubscribeManual(reply));
-                        send_or_die!(framed, encode(Op::Subscribe, req_id, &req), fatal_error)
+                        send_or_die!(framed, Op::Subscribe, req_id, &req, fatal_error)
                     }
                     Command::SubscribeAutoAcked { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::SubscribeAuto(reply));
-                        send_or_die!(framed, encode(Op::Subscribe, req_id, &req),fatal_error)
+                        send_or_die!(framed, Op::Subscribe, req_id, &req, fatal_error)
                     }
                     Command::Ack { sub_id, delivery_tag, request_id } => {
                         if let Some(sub) = subs.get(&sub_id) {
@@ -799,7 +965,7 @@ where
                                 partition: sub.partition,
                                 tags: vec![delivery_tag],
                             };
-                            send_or_die!(framed, encode(Op::Ack, request_id, &ack), fatal_error)
+                            send_or_die!(framed, Op::Ack, request_id, &ack, fatal_error)
                         }
                     }
                     Command::Nack { sub_id, delivery_tag, requeue, request_id } => {
@@ -811,7 +977,7 @@ where
                                 tags: vec![delivery_tag],
                                 requeue,
                             };
-                           send_or_die!(framed, encode(Op::Nack, request_id, &nack), fatal_error)
+                           send_or_die!(framed, Op::Nack, request_id, &nack, fatal_error)
                         }
                     }
                 },
@@ -828,7 +994,13 @@ where
 
                     match frame.opcode {
                         x if x == Op::PublishOk as u16 => {
-                            let ok: PublishOk = decode(&frame);
+                            let ok: PublishOk = match decode_protocol(&frame) {
+                                Ok(ok) => ok,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
 
                             match waiters.remove(&frame.request_id) {
                                 Some(Waiter::Publish(tx)) => {
@@ -851,7 +1023,13 @@ where
                             }
                         }
                         x if x == Op::Deliver as u16 => {
-                            let d: Deliver = decode(&frame);
+                            let d: Deliver = match decode_protocol(&frame) {
+                                Ok(deliver) => deliver,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
                             if let Some(sub) = subs.get(&d.sub_id) {
                                 match &sub.delivery {
                                     SubDelivery::Manual(tx) => {
@@ -930,7 +1108,13 @@ where
                             }
                         }
                         x if x == Op::SubscribeOk as u16 => {
-                            let ok: SubscribeOk = decode(&frame);
+                            let ok: SubscribeOk = match decode_protocol(&frame) {
+                                Ok(ok) => ok,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
 
                             if let Some(waiter) = waiters.remove(&frame.request_id) {
                                 match waiter {
@@ -977,7 +1161,7 @@ where
                             }
                         }
                         x if x == Op::Ping as u16 => {
-                            let res = framed.send(encode(Op::Pong, frame.request_id, &())).await.map_err(|e| FibrilError::Disconnection { msg: e.to_string() });
+                            let res = send_protocol_frame(&mut framed, Op::Pong, frame.request_id, &()).await;
 
                             if let Err(err) = res {
                                 tracing::warn!("Broken pipe");
@@ -989,7 +1173,13 @@ where
                             // pass
                         }
                         x if x == Op::Error as u16 => {
-                            let err: ErrorMsg = decode(&frame);
+                            let err: ErrorMsg = match decode_protocol(&frame) {
+                                Ok(err) => err,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
 
                             if let Some(waiter) = waiters.remove(&frame.request_id) {
                                 match waiter {
@@ -1130,6 +1320,54 @@ impl EngineHandle {
         rx.await.map_err(|_e| FibrilError::BrokenPipe)?
     }
 
+    async fn publish_unconfirmed_delayed(
+        &self,
+        topic: String,
+        group: Option<String>,
+        headers: HashMap<String, String>,
+        payload: Vec<u8>,
+        not_before: u64,
+    ) -> FibrilResult<()> {
+        let published = unix_millis();
+        self.tx
+            .send(Command::PublishDelayedUnconfirmed {
+                topic,
+                group,
+                headers,
+                payload,
+                published,
+                not_before,
+            })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        Ok(())
+    }
+
+    async fn publish_delayed(
+        &self,
+        topic: String,
+        group: Option<String>,
+        headers: HashMap<String, String>,
+        payload: Vec<u8>,
+        not_before: u64,
+    ) -> FibrilResult<u64> {
+        let (tx, rx) = oneshot::channel();
+        let published = unix_millis();
+        self.tx
+            .send(Command::PublishDelayedConfirmed {
+                topic,
+                group,
+                headers,
+                payload,
+                published,
+                not_before,
+                reply: tx,
+            })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_e| FibrilError::BrokenPipe)?
+    }
+
     async fn subscribe(&self, req: Subscribe) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -1200,5 +1438,66 @@ impl ClientOptions {
 impl Default for ClientOptions {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct TestPayload {
+        value: u32,
+    }
+
+    #[test]
+    fn new_message_exposes_headers_and_content_type() {
+        let message = NewMessage::content("hello")
+            .header("x-trace", "abc")
+            .content_type("text/plain");
+
+        assert_eq!(
+            message.headers().get("x-trace").map(String::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            message.headers().get("content-type").map(String::as_str),
+            Some("text/plain")
+        );
+    }
+
+    #[test]
+    fn deserialize_uses_json_content_type() {
+        let message = NewMessage::json(&TestPayload { value: 42 }).unwrap();
+        let message = Message {
+            delivery_tag: DeliveryTag { epoch: 1 },
+            published: 0,
+            publish_received: 0,
+            headers: message.headers,
+            payload: message.payload,
+        };
+
+        assert_eq!(
+            message.deserialize::<TestPayload>().unwrap(),
+            TestPayload { value: 42 }
+        );
+    }
+
+    #[test]
+    fn deserialize_defaults_to_msgpack() {
+        let message = NewMessage::msg_pack(&TestPayload { value: 7 }).unwrap();
+        let message = Message {
+            delivery_tag: DeliveryTag { epoch: 1 },
+            published: 0,
+            publish_received: 0,
+            headers: HashMap::new(),
+            payload: message.payload,
+        };
+
+        assert_eq!(
+            message.deserialize::<TestPayload>().unwrap(),
+            TestPayload { value: 7 }
+        );
     }
 }

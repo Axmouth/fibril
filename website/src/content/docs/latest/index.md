@@ -34,6 +34,10 @@ msg.fail().await?;
 
 Delayed retries have a client API, but the end-to-end path is still under development. See [project status](/latest/status/).
 
+The protocol and storage model intentionally lean toward small common-case records. Always-present message metadata is stored as positional metadata, not repeated header-map keys, and uncommon operations use distinct frames or events instead of adding optional fields to hot paths. For example, delayed publish uses a delayed-publish frame rather than adding a delay field to every publish frame.
+
+This is not a rule against richer commands. Infrequent configuration commands can carry complete settings when that makes atomic updates clearer, such as declaring a queue with all of its settings in one command.
+
 ## Current documentation
 
 These docs track the active pre-1.0 codebase at `/latest/`. Milestone snapshots can be added when behavior is stable enough to preserve.

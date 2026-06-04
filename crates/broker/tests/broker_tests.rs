@@ -5,6 +5,7 @@ use fibril_broker::{
     queue_engine::StromaEngine,
     test_util::TestState,
 };
+use fibril_util::unix_millis;
 use hashbrown::HashSet;
 use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, test_dir};
 use uuid::Uuid;
@@ -66,6 +67,46 @@ async fn broker_delivers_messages_in_order() {
     }
 
     assert_eq!(offs, vec![0, 1, 2, 3, 4]);
+}
+
+#[tokio::test]
+async fn delayed_publish_waits_until_deadline() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let client_id = Uuid::now_v7();
+
+    let mut sub = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .await
+        .unwrap();
+
+    let not_before = unix_millis() + 120;
+    pubh.publish_delayed(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        not_before,
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(40), sub.recv())
+            .await
+            .is_err()
+    );
+
+    let msg = tokio::time::timeout(Duration::from_secs(2), sub.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(msg.message.offset, 0);
+    assert!(unix_millis() >= not_before);
 }
 
 #[tokio::test]

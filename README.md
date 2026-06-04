@@ -154,6 +154,7 @@ The current implementation provides a minimal but working set of broker semantic
 ### Messaging
 
 * **Publish (pub)** over a custom TCP protocol
+* **Delayed publish** using a distinct delayed-publish protocol frame
 * **Subscribe (sub)** to topics and receive messages
 * **Topic + partition addressing** (partition currently mostly structural)
 * **Basic Rust client** for publishing and consuming
@@ -191,6 +192,7 @@ Each message offset moves through a strict state machine:
 Key transitions:
 
 * `Enqueue` → Ready
+* `EnqueueDelayed` → Ready after its `not_before` deadline
 * `PollReadyAndMark` / `MarkInflight` → Inflight
 * `Ack` → Acked (terminal)
 * `Nack(requeue=true)` → Ready
@@ -393,7 +395,7 @@ Performance characteristics are expected to evolve significantly as the system m
 
 * **Delayed messages and scheduling**
 
-  Support for scheduling messages to be delivered at a later time, and handling of delayed messages.
+  Delayed publish is wired through the broker protocol and Rust client. Delayed retry is still an active area.
 
 ### The following features may be explored under a separate advanced routing layer on top of the core broker, to keep the core focused on durability and delivery semantics:
 (Note: the above is not the guaranteed direction, but a possibility)

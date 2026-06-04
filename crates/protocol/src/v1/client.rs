@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fibril_storage::DeliveryTag;
 use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
-use uuid::Uuid;
 
 use crate::v1::{
     Ack, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Publish, PublishOk, Subscribe,
-    helper::{Conn, decode, encode},
+    helper::{Conn, try_decode, try_encode},
 };
 
 static REQ: AtomicU64 = AtomicU64::new(1);
@@ -20,7 +18,7 @@ fn next_req_id() -> u64 {
 pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
     // Hello
     let req = next_req_id();
-    conn.send(encode(
+    conn.send(try_encode(
         Op::Hello,
         req,
         &Hello {
@@ -28,7 +26,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             client_version: "0.1".into(),
             protocol_version: PROTOCOL_V1,
         },
-    ))
+    )?)
     .await?;
 
     // Wait for HelloOk/Err
@@ -38,7 +36,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("closed"))??;
     match frame.opcode {
         x if x == Op::HelloOk as u16 => {
-            let ok: HelloOk = decode(&frame);
+            let ok: HelloOk = try_decode(&frame)?;
             tracing::debug!("negotiated v{}", ok.protocol_version);
         }
         x if x == Op::HelloErr as u16 => {
@@ -49,7 +47,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
 
     // Subscribe
     let req = next_req_id();
-    conn.send(encode(
+    conn.send(try_encode(
         Op::Subscribe,
         req,
         &Subscribe {
@@ -58,12 +56,12 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             prefetch: 100,
             auto_ack: true,
         },
-    ))
+    )?)
     .await?;
 
     // Publish (require confirm)
     let req_pub = next_req_id();
-    conn.send(encode(
+    conn.send(try_encode(
         Op::Publish,
         req_pub,
         &Publish {
@@ -75,7 +73,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             published: unix_millis(),
             payload: b"hello".to_vec(),
         },
-    ))
+    )?)
     .await?;
 
     // Event loop
@@ -83,11 +81,11 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
         let frame = frame?;
         match frame.opcode {
             x if x == Op::Deliver as u16 => {
-                let d: Deliver = decode(&frame);
+                let d: Deliver = try_decode(&frame)?;
                 tracing::debug!("DELIVER off={} bytes={}", d.offset, d.payload.len());
 
                 // Ack single (or batch later)
-                conn.send(encode(
+                conn.send(try_encode(
                     Op::Ack,
                     next_req_id(),
                     &Ack {
@@ -96,15 +94,15 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
                         partition: d.partition,
                         tags: vec![d.delivery_tag],
                     },
-                ))
+                )?)
                 .await?;
             }
             x if x == Op::PublishOk as u16 => {
-                let ok: PublishOk = decode(&frame);
+                let ok: PublishOk = try_decode(&frame)?;
                 tracing::debug!("PUBLISH_OK offset={}", ok.offset);
             }
             x if x == Op::Error as u16 => {
-                let e: ErrorMsg = decode(&frame);
+                let e: ErrorMsg = try_decode(&frame)?;
                 tracing::error!("ERROR {}: {}", e.code, e.message);
             }
             _ => {}

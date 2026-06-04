@@ -12,7 +12,7 @@ Fibril is pre-alpha infrastructure. This table distinguishes the working baselin
 | Explicit acknowledgements | Available | ACK, immediate requeue, terminal failure |
 | Leasing | Available | Expired leases can return to ready |
 | Backpressure | Available | Pull-based delivery and bounded prefetch |
-| Delayed publish | Internal path exists | Broker/Stroma support exists; public client methods are still `todo!()` |
+| Delayed publish | Available | Broker/Stroma support exists; Rust client exposes delayed publish methods |
 | Delayed retry | Partial | Stroma state supports delayed retry; public client/broker path is not wired end to end |
 | Dead lettering | Partial | Stroma has custom/discard DLQ policy and tests; public broker configuration is not exposed yet |
 | TypeScript client | Early | Lives under `clients/typescript` |
@@ -28,4 +28,4 @@ These numbers are architecture sanity checks, not a rigorous benchmark suite. Ha
 
 ## What can move now
 
-The docs can describe the current state-layer semantics, deployment shape, and early benchmarks. Public delayed publish, `msg.retry_after(..)`, and configurable DLQ behavior should wait for broker/client wiring before the site presents them as supported user-facing behavior.
+The docs can describe the current state-layer semantics, delayed publish, deployment shape, and early benchmarks. Public `msg.retry_after(..)` and configurable DLQ behavior should wait for broker/client wiring before the site presents them as supported user-facing behavior.

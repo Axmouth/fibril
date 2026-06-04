@@ -6,7 +6,9 @@ use crossterm::{
 };
 use fibril_protocol::v1::{
     Auth, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Pong, Publish, Subscribe,
-    SubscribeOk, frame::ProtoCodec, helper::Conn,
+    SubscribeOk,
+    frame::ProtoCodec,
+    helper::{Conn, try_decode, try_encode},
 };
 use fibril_util::{init_tracing, unix_millis};
 use futures::{SinkExt, StreamExt};
@@ -24,7 +26,6 @@ use std::{
 };
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::codec::Framed;
-use uuid::Uuid;
 
 #[derive(Debug)]
 pub enum VisualEvent {
@@ -533,7 +534,7 @@ pub async fn visual_client(
     let (ping_tx, mut ping_rx) = mpsc::channel::<u64>(64);
 
     // Send HELLO
-    conn.send(fibril_protocol::v1::helper::encode(
+    conn.send(try_encode(
         Op::Hello,
         next_req_id(),
         &Hello {
@@ -541,7 +542,7 @@ pub async fn visual_client(
             client_version: "0.1".into(),
             protocol_version: PROTOCOL_V1,
         },
-    ))
+    )?)
     .await?;
     let _ = vis_tx.send(VisualEvent::Hello { pub_id }).await;
 
@@ -556,14 +557,14 @@ pub async fn visual_client(
     loop {
         match frame.opcode {
             x if x == Op::HelloOk as u16 => {
-                let ok: HelloOk = fibril_protocol::v1::helper::decode(&frame);
+                let ok: HelloOk = try_decode(&frame)?;
                 tracing::debug!("HELLO OK, negotiated protocol {}", ok.protocol_version);
 
                 let _ = vis_tx.send(VisualEvent::HelloOk { sub_id }).await;
                 break;
             }
             x if x == Op::HelloErr as u16 => {
-                let err: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
+                let err: ErrorMsg = try_decode(&frame)?;
                 let _ = vis_tx
                     .send(VisualEvent::ErrorMsg {
                         sub_id,
@@ -588,14 +589,14 @@ pub async fn visual_client(
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
     // Send AUTH
-    conn.send(fibril_protocol::v1::helper::encode(
+    conn.send(try_encode(
         Op::Auth,
         next_req_id(),
         &Auth {
             username: "fibril".to_string(),
             password: "fibril".to_string(),
         },
-    ))
+    )?)
     .await?;
     let _ = vis_tx.send(VisualEvent::Auth { pub_id }).await;
 
@@ -620,7 +621,7 @@ pub async fn visual_client(
                 // pass
             }
             x if x == Op::AuthErr as u16 => {
-                let err: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
+                let err: ErrorMsg = try_decode(&frame)?;
                 let _ = vis_tx
                     .send(VisualEvent::ErrorMsg {
                         sub_id,
@@ -637,7 +638,7 @@ pub async fn visual_client(
     }
 
     // ---- SUBSCRIBE -------------------------------------------------------
-    conn.send(fibril_protocol::v1::helper::encode(
+    conn.send(try_encode(
         Op::Subscribe,
         next_req_id(),
         &Subscribe {
@@ -646,7 +647,7 @@ pub async fn visual_client(
             prefetch: 100,
             auto_ack: true,
         },
-    ))
+    )?)
     .await?;
     let _ = vis_tx.send(VisualEvent::Subscribe { sub_id }).await;
 
@@ -661,7 +662,7 @@ pub async fn visual_client(
     loop {
         match frame.opcode {
             x if x == Op::SubscribeOk as u16 => {
-                let _ok: SubscribeOk = fibril_protocol::v1::helper::decode(&frame);
+                let _ok: SubscribeOk = try_decode(&frame)?;
 
                 let _ = vis_tx.send(VisualEvent::SubscribeOk { sub_id }).await;
                 break;
@@ -674,7 +675,7 @@ pub async fn visual_client(
             }
 
             x if x == Op::Error as u16 => {
-                let err: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
+                let err: ErrorMsg = try_decode(&frame)?;
                 anyhow::bail!(
                     "SUBSCRIBE rejected: code={} msg='{}'",
                     err.code,
@@ -738,26 +739,28 @@ pub async fn visual_client(
 
                 // ---- PING -> PONG --------------------------------------------
                 Some(req_id) = ping_rx.recv() => {
-                    if let Err(err) = sink.send(
-                        fibril_protocol::v1::helper::encode(
-                            Op::Pong,
-                            req_id,
-                            &Pong,
-                        )
-                    ).await {
+                    let frame = match try_encode(Op::Pong, req_id, &Pong) {
+                        Ok(frame) => frame,
+                        Err(err) => {
+                            tracing::error!("pong encode failed: {err}");
+                            break;
+                        }
+                    };
+                    if let Err(err) = sink.send(frame).await {
                         tracing::error!("pong send failed: {err}");
                         break;
                     }
                 }
                 // ---- PUBLISH --------------------------------------------------
                 Some(p) = pub_rx.recv() => {
-                    if let Err(err) = sink.send(
-                        fibril_protocol::v1::helper::encode(
-                            Op::Publish,
-                            next_req_id(),
-                            &p,
-                        )
-                    ).await {
+                    let frame = match try_encode(Op::Publish, next_req_id(), &p) {
+                        Ok(frame) => frame,
+                        Err(err) => {
+                            tracing::error!("publish encode failed: {err}");
+                            break;
+                        }
+                    };
+                    if let Err(err) = sink.send(frame).await {
                         tracing::error!("publish send failed: {err}");
                         break;
                     }
@@ -778,7 +781,7 @@ pub async fn visual_client(
         tracing::debug!("Received frame with code {:?}", frame.opcode);
         match frame.opcode {
             x if x == Op::Deliver as u16 => {
-                let d: Deliver = fibril_protocol::v1::helper::decode(&frame);
+                let d: Deliver = try_decode(&frame)?;
                 // latencies.push(unix_millis() - d.published);
                 tracing::debug!("CLIENT got DELIVER offset={}", d.offset);
                 let _ = vis_tx
@@ -795,7 +798,7 @@ pub async fn visual_client(
                 // pass
             }
             x if x == Op::Error as u16 => {
-                let e: ErrorMsg = fibril_protocol::v1::helper::decode(&frame);
+                let e: ErrorMsg = try_decode(&frame)?;
                 tracing::debug!("CLIENT got ErrorMsg code={} msg='{}'", e.code, e.message);
                 let _ = vis_tx
                     .send(VisualEvent::ErrorMsg {

@@ -7,7 +7,6 @@ Fibril is still early. The near-term roadmap is about making the existing semant
 
 ## Near term
 
-- Wire public delayed publish through the Rust client.
 - Wire `msg.retry_after(..)` through client, protocol, broker, and Stroma.
 - Expose dead-letter policy configuration through the broker.
 - Add broker-level tests for DLQ and delayed retry public paths.

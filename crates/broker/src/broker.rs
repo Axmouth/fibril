@@ -225,7 +225,7 @@ impl PublisherHandle {
             .send(PublishRequest {
                 payload,
                 reply: tx,
-                require_confirm: false, // TODO: support confirm for delayed?
+                require_confirm: true,
                 not_before: Some(not_before),
                 published,
                 publish_received,
@@ -1344,6 +1344,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     } => {}
                 }
 
+                let ran_for_deadline = expiry_hint.is_some();
                 expiry_hint = broker.engine.next_expiry_hint().await.unwrap_or(None);
                 tracing::info!("Expiry worker running..");
 
@@ -1365,6 +1366,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     "Expiry worker woke up, requeued {} expired messages",
                     expired.len()
                 );
+
+                if ran_for_deadline {
+                    for qs in broker.queues.iter().map(|entry| entry.value().clone()) {
+                        qs.wake();
+                    }
+                }
 
                 if expired.is_empty() {
                     continue;

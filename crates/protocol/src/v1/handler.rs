@@ -10,7 +10,7 @@ use std::{
 
 use crate::v1::{
     frame::{Frame, ProtoCodec},
-    helper::{decode, encode},
+    helper::{error_frame, try_decode, try_encode},
     *,
 };
 use anyhow::Context;
@@ -44,6 +44,16 @@ fn has_reserved_headers(headers: &HashMap<String, String>) -> bool {
     headers
         .keys()
         .any(|key| key.starts_with(RESERVED_HEADER_PREFIX))
+}
+
+async fn send_error_response(
+    tx: &mpsc::Sender<Frame>,
+    request_id: u64,
+    code: u16,
+    message: impl Into<String>,
+) -> anyhow::Result<()> {
+    tx.send(error_frame(request_id, code, message)?).await?;
+    Ok(())
 }
 
 struct SubState {
@@ -180,33 +190,40 @@ pub async fn handle_connection(
         .context("connection closed before HELLO")??;
 
     if frame.opcode != Op::Hello as u16 {
-        frame_tx_high_prio
-            .send(encode(
-                Op::Error,
-                frame.request_id,
-                &ErrorMsg {
-                    code: 400,
-                    message: "expected HELLO".into(),
-                },
-            ))
+        writer
+            .send(error_frame(frame.request_id, 400, "expected HELLO")?)
             .await
             .ok();
         tcp_stats.error();
         return Ok(());
     }
 
-    let hello: Hello = decode(&frame);
+    let hello: Hello = match try_decode(&frame) {
+        Ok(hello) => hello,
+        Err(err) => {
+            writer
+                .send(error_frame(
+                    frame.request_id,
+                    400,
+                    format!("malformed HELLO: {err}"),
+                )?)
+                .await
+                .ok();
+            tcp_stats.error();
+            return Ok(());
+        }
+    };
 
     if hello.protocol_version != PROTOCOL_V1 {
-        frame_tx_high_prio
-            .send(encode(
+        writer
+            .send(try_encode(
                 Op::HelloErr,
                 frame.request_id,
                 &ErrorMsg {
                     code: 1,
                     message: "unsupported protocol version".into(),
                 },
-            ))
+            )?)
             .await
             .ok();
         tcp_stats.error();
@@ -334,7 +351,7 @@ pub async fn handle_connection(
     };
 
     frame_tx_high_prio
-        .send(encode(Op::HelloOk, frame.request_id, &hello_ok))
+        .send(try_encode(Op::HelloOk, frame.request_id, &hello_ok)?)
         .await?;
 
     let (pub_tx, mut pub_rx) = tokio::sync::mpsc::channel::<(
@@ -354,16 +371,13 @@ pub async fn handle_connection(
                         Ok(Ok(offset)) => offset,
                         Ok(Err(err)) => {
                             if require_confirm {
-                                let send_res = frame_tx_pub
-                                    .send(encode(
-                                        Op::Error,
-                                        request_id,
-                                        &ErrorMsg {
-                                            code: 500,
-                                            message: err.to_string(),
-                                        },
-                                    ))
-                                    .await;
+                                let send_res = send_error_response(
+                                    &frame_tx_pub,
+                                    request_id,
+                                    500,
+                                    err.to_string(),
+                                )
+                                .await;
 
                                 if let Err(err) = send_res {
                                     tracing::error!("Error sending Publish Confirm: {err}");
@@ -374,16 +388,13 @@ pub async fn handle_connection(
                         }
                         Err(_err) => {
                             if require_confirm {
-                                let send_res = frame_tx_pub
-                                    .send(encode(
-                                        Op::Error,
-                                        request_id,
-                                        &ErrorMsg {
-                                            code: 500,
-                                            message: "Channel closed".into(),
-                                        },
-                                    ))
-                                    .await;
+                                let send_res = send_error_response(
+                                    &frame_tx_pub,
+                                    request_id,
+                                    500,
+                                    "Channel closed",
+                                )
+                                .await;
 
                                 if let Err(err) = send_res {
                                     tracing::error!("Error sending Publish Confirm: {err}");
@@ -394,9 +405,13 @@ pub async fn handle_connection(
                         }
                     };
                     if require_confirm {
-                        let send_res = frame_tx_pub
-                            .send(encode(Op::PublishOk, request_id, &PublishOk { offset }))
-                            .await;
+                        let send_res =
+                            match try_encode(Op::PublishOk, request_id, &PublishOk { offset }) {
+                                Ok(frame) => {
+                                    frame_tx_pub.send(frame).await.map_err(anyhow::Error::from)
+                                }
+                                Err(err) => Err(anyhow::Error::from(err)),
+                            };
 
                         if let Err(err) = send_res {
                             tracing::error!("Error sending Publish Confirm: {err}");
@@ -404,16 +419,8 @@ pub async fn handle_connection(
                     }
                 }
                 Err(err) => {
-                    let send_res = frame_tx_pub
-                        .send(encode(
-                            Op::Error,
-                            request_id,
-                            &ErrorMsg {
-                                code: 500,
-                                message: err.to_string(),
-                            },
-                        ))
-                        .await;
+                    let send_res =
+                        send_error_response(&frame_tx_pub, request_id, 500, err.to_string()).await;
 
                     if let Err(err) = send_res {
                         tracing::error!("Error sending Publish Confirm: {err}");
@@ -428,6 +435,25 @@ pub async fn handle_connection(
 
     // ---- Main reader loop --------------------------------------------------
     // TODO: Make handling more async? Spawn task per frame, or have a task pool
+    macro_rules! decode_or_400 {
+        ($frame:expr, $tx:expr, $metrics:expr, $ty:ty) => {
+            match try_decode::<$ty>(&$frame) {
+                Ok(value) => value,
+                Err(err) => {
+                    send_error_response(
+                        &$tx,
+                        $frame.request_id,
+                        400,
+                        format!("malformed frame: {err}"),
+                    )
+                    .await?;
+                    $metrics.error();
+                    continue;
+                }
+            }
+        };
+    }
+
     loop {
         let loop_event = tokio::select! {
             // ---- Heartbeat tick ----
@@ -436,7 +462,7 @@ pub async fn handle_connection(
                     tracing::warn!("Heartbeat timeout, closing connection");
                     LoopEvent::Timeout
                 }
-                else if frame_tx_high_prio.send(encode(Op::Ping, req_id_gen_clone.next_id(), &())).await.is_err() {
+                else if frame_tx_high_prio.send(try_encode(Op::Ping, req_id_gen_clone.next_id(), &())?).await.is_err() {
                     // channel full or closed -> treat as disconnect
                     tracing::error!("Failed to send heartbeat ping, closing connection");
                     LoopEvent::Timeout
@@ -483,16 +509,13 @@ pub async fn handle_connection(
         let is_pong = frame.opcode == Op::Pong as u16;
 
         if auth_required && !state.authenticated && !(is_auth || is_ping || is_pong) {
-            frame_tx_high_prio
-                .send(encode(
-                    Op::Error,
-                    frame.request_id,
-                    &ErrorMsg {
-                        code: 401,
-                        message: "authentication required".into(),
-                    },
-                ))
-                .await?;
+            send_error_response(
+                &frame_tx_high_prio,
+                frame.request_id,
+                401,
+                "authentication required",
+            )
+            .await?;
             metrics.error();
 
             break; // close connection
@@ -503,32 +526,33 @@ pub async fn handle_connection(
             x if x == Op::Auth as u16 => {
                 if state.authenticated {
                     frame_tx_high_prio
-                        .send(encode(
+                        .send(try_encode(
                             Op::AuthErr,
                             frame.request_id,
                             &ErrorMsg {
                                 code: 401,
                                 message: "already authenticated".into(),
                             },
-                        ))
+                        )?)
                         .await?;
                     metrics.error();
                 } else if auth_handler.is_none() {
                     frame_tx_high_prio
-                        .send(encode(
+                        .send(try_encode(
                             Op::AuthErr,
                             frame.request_id,
                             &ErrorMsg {
                                 code: 400,
                                 message: "authentication not applicable".into(),
                             },
-                        ))
+                        )?)
                         .await?;
                     metrics.error();
                 } else {
                     // ---- AUTH handshake -------------------------------------
                     if let Some(auth_handler) = &auth_handler {
-                        let auth_frame: Auth = decode(&frame);
+                        let auth_frame: Auth =
+                            decode_or_400!(frame, frame_tx_high_prio, metrics, Auth);
 
                         let verified = auth_handler
                             .verify(&auth_frame.username, &auth_frame.password)
@@ -537,19 +561,19 @@ pub async fn handle_connection(
                         if verified {
                             state.authenticated = true;
                             frame_tx_high_prio
-                                .send(encode(Op::AuthOk, frame.request_id, &()))
+                                .send(try_encode(Op::AuthOk, frame.request_id, &())?)
                                 .await?;
                             connection_stats.set_connection_auth(&conn_id, true);
                         } else {
                             frame_tx_high_prio
-                                .send(encode(
+                                .send(try_encode(
                                     Op::AuthErr,
                                     frame.request_id,
                                     &ErrorMsg {
                                         code: 401,
                                         message: "invalid credentials".into(),
                                     },
-                                ))
+                                )?)
                                 .await?;
                             metrics.error();
 
@@ -561,20 +585,20 @@ pub async fn handle_connection(
 
             // -------- SUBSCRIBE ---------------------------------------------
             x if x == Op::Subscribe as u16 => {
-                let sub: Subscribe = decode(&frame);
+                let sub: Subscribe = decode_or_400!(frame, frame_tx_high_prio, metrics, Subscribe);
 
                 let sub_key: SubKey = (sub.topic.clone(), sub.group.clone());
 
                 if state.subs.contains_key(&sub_key) {
                     frame_tx_high_prio
-                        .send(encode(
+                        .send(try_encode(
                             Op::SubscribeErr,
                             frame.request_id,
                             &ErrorMsg {
                                 code: 409,
                                 message: "already subscribed".into(),
                             },
-                        ))
+                        )?)
                         .await?;
                     metrics.error();
                     continue;
@@ -640,10 +664,16 @@ pub async fn handle_connection(
                         tracing::debug!("Sending Deliver");
 
                         // 1. Try to write to socket
-                        if let Err(err) = frame_tx_clone
-                            .send(encode(Op::Deliver, req_id_gen_clone.next_id(), &deliver))
-                            .await
-                        {
+                        let frame =
+                            match try_encode(Op::Deliver, req_id_gen_clone.next_id(), &deliver) {
+                                Ok(frame) => frame,
+                                Err(err) => {
+                                    tracing::error!("Failed to encode Deliver frame: {err}");
+                                    metrics.error();
+                                    break;
+                                }
+                            };
+                        if let Err(err) = frame_tx_clone.send(frame).await {
                             // Socket dead -> do NOT auto-ack
                             tracing::warn!("Failed to send to socket writer : {err}");
                             metrics.error();
@@ -679,7 +709,7 @@ pub async fn handle_connection(
                 );
 
                 frame_tx_high_prio
-                    .send(encode(
+                    .send(try_encode(
                         Op::SubscribeOk,
                         frame.request_id,
                         &SubscribeOk {
@@ -689,14 +719,14 @@ pub async fn handle_connection(
                             partition: consumer.partition,
                             prefetch: sub.prefetch,
                         },
-                    ))
+                    )?)
                     .await?;
             }
 
             // -------- ACK ----------------------------------------------------
             x if x == Op::Ack as u16 => {
                 // TODO: Decline ack when auto ack? Log?
-                let ack: Ack = decode(&frame);
+                let ack: Ack = decode_or_400!(frame, frame_tx_high_prio, metrics, Ack);
 
                 let key: SubKey = (ack.topic.clone(), ack.group.clone());
 
@@ -724,7 +754,7 @@ pub async fn handle_connection(
             // -------- NACK ----------------------------------------------------
             x if x == Op::Nack as u16 => {
                 // TODO: Decline ack when auto ack? Log?
-                let nack: Nack = decode(&frame);
+                let nack: Nack = decode_or_400!(frame, frame_tx_high_prio, metrics, Nack);
 
                 let key: SubKey = (nack.topic.clone(), nack.group.clone());
 
@@ -754,18 +784,15 @@ pub async fn handle_connection(
             // -------- PUBLISH ------------------------------------------------
             x if x == Op::Publish as u16 => {
                 let publish_received = unix_millis();
-                let pubreq: Publish = decode(&frame);
+                let pubreq: Publish = decode_or_400!(frame, frame_tx_low_prio, metrics, Publish);
                 if has_reserved_headers(&pubreq.headers) {
-                    let _ = frame_tx_low_prio
-                        .send(encode(
-                            Op::Error,
-                            frame.request_id,
-                            &ErrorMsg {
-                                code: 400,
-                                message: "headers with prefix `fibril.` are reserved".into(),
-                            },
-                        ))
-                        .await;
+                    let _ = send_error_response(
+                        &frame_tx_low_prio,
+                        frame.request_id,
+                        400,
+                        "headers with prefix `fibril.` are reserved",
+                    )
+                    .await;
                     continue;
                 }
 
@@ -825,34 +852,25 @@ pub async fn handle_connection(
                     .send((published, pubreq.require_confirm, frame.request_id))
                     .await;
                 if let Err(_err) = res {
-                    let _ = frame_tx_pub
-                        .send(encode(
-                            Op::Error,
-                            frame.request_id,
-                            &ErrorMsg {
-                                code: 500,
-                                message: "Broken pipe".into(),
-                            },
-                        ))
-                        .await;
+                    let _ =
+                        send_error_response(&frame_tx_pub, frame.request_id, 500, "Broken pipe")
+                            .await;
                     tracing::error!("Error sending published to queue");
                 }
                 // });
             }
             x if x == Op::PublishDelayed as u16 => {
                 let publish_received = unix_millis();
-                let pubreq: PublishDelayed = decode(&frame);
+                let pubreq: PublishDelayed =
+                    decode_or_400!(frame, frame_tx_low_prio, metrics, PublishDelayed);
                 if has_reserved_headers(&pubreq.headers) {
-                    let _ = frame_tx_low_prio
-                        .send(encode(
-                            Op::Error,
-                            frame.request_id,
-                            &ErrorMsg {
-                                code: 400,
-                                message: "headers with prefix `fibril.` are reserved".into(),
-                            },
-                        ))
-                        .await;
+                    let _ = send_error_response(
+                        &frame_tx_low_prio,
+                        frame.request_id,
+                        400,
+                        "headers with prefix `fibril.` are reserved",
+                    )
+                    .await;
                     continue;
                 }
 
@@ -891,20 +909,22 @@ pub async fn handle_connection(
                     fibril_broker::broker::BrokerError,
                 > = if pubreq.require_confirm {
                     publisher
-                        .publish(
+                        .publish_delayed(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
                             pubreq.headers,
+                            pubreq.not_before,
                         )
                         .await
                 } else {
                     publisher
-                        .publish_no_confirm(
+                        .publish_no_confirm_delayed(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
                             pubreq.headers,
+                            pubreq.not_before,
                         )
                         .await
                 };
@@ -912,16 +932,9 @@ pub async fn handle_connection(
                     .send((published, pubreq.require_confirm, frame.request_id))
                     .await;
                 if let Err(_err) = res {
-                    let _ = frame_tx_pub
-                        .send(encode(
-                            Op::Error,
-                            frame.request_id,
-                            &ErrorMsg {
-                                code: 500,
-                                message: "Broken pipe".into(),
-                            },
-                        ))
-                        .await;
+                    let _ =
+                        send_error_response(&frame_tx_pub, frame.request_id, 500, "Broken pipe")
+                            .await;
                     tracing::error!("Error sending published to queue");
                 }
                 // });
@@ -930,7 +943,7 @@ pub async fn handle_connection(
             // -------- PING ---------------------------------------------------
             x if x == Op::Ping as u16 => {
                 frame_tx_high_prio
-                    .send(encode(Op::Pong, frame.request_id, &()))
+                    .send(try_encode(Op::Pong, frame.request_id, &())?)
                     .await?;
             }
 
@@ -942,14 +955,7 @@ pub async fn handle_connection(
             // -------- UNKNOWN -----------------------------------------------
             _ => {
                 frame_tx_high_prio
-                    .send(encode(
-                        Op::Error,
-                        frame.request_id,
-                        &ErrorMsg {
-                            code: 400,
-                            message: "unknown opcode".into(),
-                        },
-                    ))
+                    .send(error_frame(frame.request_id, 400, "unknown opcode")?)
                     .await?;
                 metrics.error();
             }

@@ -4,14 +4,13 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use fibril_protocol::v1::{
     Ack, Auth, Deliver, Hello, Op, PROTOCOL_V1, Publish, Subscribe,
     frame::ProtoCodec,
-    helper::{decode, encode},
+    helper::{try_decode, try_encode},
 };
 use fibril_storage::DeliveryTag;
 use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant};
 use tokio_util::codec::Framed;
-use uuid::Uuid;
 
 async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot::Sender<()>) {
     let start = Instant::now();
@@ -47,7 +46,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
 
                 for i in 1..=msgs_per_client {
                     tx_writer
-                        .send(encode(Op::Publish, i as u64, &publ))
+                        .send(try_encode(Op::Publish, i as u64, &publ).unwrap())
                         .await
                         .unwrap();
 
@@ -74,7 +73,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                                 elapsed.as_secs_f64()
                             );
                         }
-                        let msg: Deliver = decode(&frame);
+                        let msg: Deliver = try_decode(&frame).unwrap();
                         tx_acker
                             .send((msg.delivery_tag, frame.request_id))
                             .await
@@ -88,7 +87,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
 
             let acker = tokio::spawn(async move {
                 while let Some((tag, req_id)) = rx_acker.recv().await {
-                    let ack_msg = encode(
+                    let ack_msg = try_encode(
                         Op::Ack,
                         req_id,
                         &Ack {
@@ -97,7 +96,8 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                             partition: 1,
                             tags: vec![tag],
                         },
-                    );
+                    )
+                    .unwrap();
 
                     tx_writer_clone.send(ack_msg).await.unwrap();
                 }
@@ -105,39 +105,48 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
 
             let sink_task = tokio::spawn(async move {
                 // initial handshake
-                sink.send(encode(
-                    Op::Hello,
-                    1,
-                    &Hello {
-                        client_name: "Client1".into(),
-                        client_version: "0.1".into(),
-                        protocol_version: PROTOCOL_V1,
-                    },
-                ))
+                sink.send(
+                    try_encode(
+                        Op::Hello,
+                        1,
+                        &Hello {
+                            client_name: "Client1".into(),
+                            client_version: "0.1".into(),
+                            protocol_version: PROTOCOL_V1,
+                        },
+                    )
+                    .unwrap(),
+                )
                 .await
                 .unwrap();
 
-                sink.send(encode(
-                    Op::Auth,
-                    2,
-                    &Auth {
-                        username: "fibril".to_string(),
-                        password: "fibril".to_string(),
-                    },
-                ))
+                sink.send(
+                    try_encode(
+                        Op::Auth,
+                        2,
+                        &Auth {
+                            username: "fibril".to_string(),
+                            password: "fibril".to_string(),
+                        },
+                    )
+                    .unwrap(),
+                )
                 .await
                 .unwrap();
 
-                sink.send(encode(
-                    Op::Subscribe,
-                    3,
-                    &Subscribe {
-                        auto_ack: false,
-                        group: None,
-                        topic: "Topic1".into(),
-                        prefetch: 1024,
-                    },
-                ))
+                sink.send(
+                    try_encode(
+                        Op::Subscribe,
+                        3,
+                        &Subscribe {
+                            auto_ack: false,
+                            group: None,
+                            topic: "Topic1".into(),
+                            prefetch: 1024,
+                        },
+                    )
+                    .unwrap(),
+                )
                 .await
                 .unwrap();
                 while let Some(msg) = rx_writer.recv().await {

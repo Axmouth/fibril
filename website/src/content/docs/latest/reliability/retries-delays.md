@@ -29,14 +29,14 @@ This is the core failure-recovery path for best-effort at-least-once delivery.
 
 Stroma has durable delayed-enqueue state. Offsets can be held until `not_before`, and delayed enqueue state is included in snapshots.
 
-The broker has an internal delayed publish request path, but the public Rust client methods are still `todo!()`:
+The Rust client exposes delayed publish methods:
 
 ```rust
 publisher.publish_unconfirmed_delayed(payload, delay).await?;
-publisher.publish_with_delayed(payload, delay).await?;
+publisher.publish_delayed(payload, delay).await?;
 ```
 
-Treat delayed publish as internal/incomplete until those public methods are wired and tested through the broker protocol.
+The delayed publish path uses a distinct protocol frame instead of adding an optional delay field to the common publish frame.
 
 ## Delayed retry
 
