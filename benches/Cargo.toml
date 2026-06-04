@@ -11,6 +11,10 @@ path = "bin/bench_e2e.rs"
 name = "e2e_c"
 path = "bin/e2e_c.rs"
 
+[[bin]]
+name = "steady_c"
+path = "bin/steady_c.rs"
+
 [dependencies]
 fibril-broker = { path = "../crates/broker" }
 fibril-client = { path = "../crates/client" }

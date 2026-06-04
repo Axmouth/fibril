@@ -2,6 +2,10 @@ use std::{
     fs,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -18,7 +22,8 @@ struct ClientStats {
     sent: usize,
     received: usize,
     retries_seen: u64,
-    latencies_ms: Vec<u64>,
+    publish_to_delivery_ms: Vec<u64>,
+    server_receive_to_delivery_ms: Vec<u64>,
     first_receive_ms: Option<u128>,
     last_receive_ms: Option<u128>,
 }
@@ -44,11 +49,18 @@ async fn run_load_test(
     confirmed: bool,
 ) {
     let start = Instant::now();
+    let expected_total = num_clients * msgs_per_client;
+    let shared_received = Arc::new(AtomicUsize::new(0));
+    let readers_done = Arc::new(AtomicBool::new(false));
+    let readers_done_notify = Arc::new(tokio::sync::Notify::new());
 
     let mut handles: Vec<tokio::task::JoinHandle<ClientStats>> = vec![];
 
     for j in 0..num_clients {
         let ready_dir = ready_dir.clone();
+        let shared_received = shared_received.clone();
+        let readers_done = readers_done.clone();
+        let readers_done_notify = readers_done_notify.clone();
         handles.push(tokio::spawn(async move {
             let payload = vec![8u8; payload_size];
             let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([127, 0, 0, 1]), 9876));
@@ -79,15 +91,27 @@ async fn run_load_test(
                 let mut i: usize = 0;
 
                 loop {
-                    let received = match timeout(Duration::from_millis(idle_timeout_ms), sub.recv())
-                        .await
-                    {
-                        Ok(msg) => msg,
-                        Err(_) => {
-                            println!(
-                                "Client {j}: idle timeout after {idle_timeout_ms} ms, received {i}"
-                            );
-                            break;
+                    if readers_done.load(Ordering::Acquire) {
+                        break;
+                    }
+
+                    let received = tokio::select! {
+                        _ = readers_done_notify.notified() => {
+                            if readers_done.load(Ordering::Acquire) {
+                                break;
+                            }
+                            continue;
+                        }
+                        received = timeout(Duration::from_millis(idle_timeout_ms), sub.recv()) => {
+                            match received {
+                                Ok(msg) => msg,
+                                Err(_) => {
+                                    println!(
+                                        "Client {j}: idle timeout after {idle_timeout_ms} ms, received {i}"
+                                    );
+                                    break;
+                                }
+                            }
                         }
                     };
                     let Some(msg) = received else {
@@ -98,8 +122,13 @@ async fn run_load_test(
                     let receive_elapsed = start_inner.elapsed().as_millis();
                     stats.first_receive_ms.get_or_insert(receive_elapsed);
                     stats.last_receive_ms = Some(receive_elapsed);
-                    let latency = unix_millis().saturating_sub(msg.published);
-                    stats.latencies_ms.push(latency);
+                    let now = unix_millis();
+                    stats
+                        .publish_to_delivery_ms
+                        .push(now.saturating_sub(msg.published));
+                    stats
+                        .server_receive_to_delivery_ms
+                        .push(now.saturating_sub(msg.publish_received));
                     if let Some(retries) = msg.headers.get("fibril.retries") {
                         stats.retries_seen += retries.parse::<u64>().unwrap_or(1);
                     }
@@ -111,7 +140,10 @@ async fn run_load_test(
                         );
                     }
                     tx_acker.send(msg).unwrap();
-                    if i >= msgs_per_client {
+                    let total_received = shared_received.fetch_add(1, Ordering::AcqRel) + 1;
+                    if total_received >= expected_total {
+                        readers_done.store(true, Ordering::Release);
+                        readers_done_notify.notify_waiters();
                         break;
                     }
                 }
@@ -176,7 +208,8 @@ async fn run_load_test(
     let mut total_sent = 0usize;
     let mut total_received = 0usize;
     let mut total_retries_seen = 0u64;
-    let mut latencies_ms = Vec::new();
+    let mut publish_to_delivery_ms = Vec::new();
+    let mut server_receive_to_delivery_ms = Vec::new();
     let mut first_receive_ms: Option<u128> = None;
     let mut last_receive_ms: Option<u128> = None;
 
@@ -185,7 +218,8 @@ async fn run_load_test(
         total_sent += stats.sent;
         total_received += stats.received;
         total_retries_seen += stats.retries_seen;
-        latencies_ms.append(&mut stats.latencies_ms);
+        publish_to_delivery_ms.append(&mut stats.publish_to_delivery_ms);
+        server_receive_to_delivery_ms.append(&mut stats.server_receive_to_delivery_ms);
         if let Some(first) = stats.first_receive_ms {
             first_receive_ms = Some(first_receive_ms.map_or(first, |current| current.min(first)));
         }
@@ -196,11 +230,19 @@ async fn run_load_test(
 
     let elapsed = start.elapsed();
 
+    let mode = match (start_reader, start_writer) {
+        (true, true) => "reader+writer",
+        (true, false) => "reader",
+        (false, true) => "writer",
+        (false, false) => "idle",
+    };
+
     let measured = if total_received > 0 {
         total_received
     } else {
         total_sent
     };
+    println!("Run mode: {mode}, clients: {num_clients}");
     println!(
         "Wall throughput: {} msgs/sec",
         measured as f64 / elapsed.as_secs_f64()
@@ -227,14 +269,28 @@ async fn run_load_test(
         );
     }
 
-    if !latencies_ms.is_empty() {
-        latencies_ms.sort_unstable();
+    if !publish_to_delivery_ms.is_empty() {
+        publish_to_delivery_ms.sort_unstable();
         println!(
-            "Latency ms: p50={}, p95={}, p99={}, max={}",
-            percentile(&latencies_ms, 0.50),
-            percentile(&latencies_ms, 0.95),
-            percentile(&latencies_ms, 0.99),
-            latencies_ms.last().copied().unwrap_or_default(),
+            "Latency publish->deliver ms: p50={}, p95={}, p99={}, max={}",
+            percentile(&publish_to_delivery_ms, 0.50),
+            percentile(&publish_to_delivery_ms, 0.95),
+            percentile(&publish_to_delivery_ms, 0.99),
+            publish_to_delivery_ms.last().copied().unwrap_or_default(),
+        );
+    }
+
+    if !server_receive_to_delivery_ms.is_empty() {
+        server_receive_to_delivery_ms.sort_unstable();
+        println!(
+            "Latency server-receive->deliver ms: p50={}, p95={}, p99={}, max={}",
+            percentile(&server_receive_to_delivery_ms, 0.50),
+            percentile(&server_receive_to_delivery_ms, 0.95),
+            percentile(&server_receive_to_delivery_ms, 0.99),
+            server_receive_to_delivery_ms
+                .last()
+                .copied()
+                .unwrap_or_default(),
         );
     }
 

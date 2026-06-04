@@ -372,6 +372,119 @@ async fn slow_consumer_does_not_starve_fast_one() {
 }
 
 #[tokio::test]
+async fn unsubscribe_requeues_prefetched_unacked_messages() {
+    let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
+
+    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    for i in 0..3 {
+        pubh.publish(
+            format!("x{i}").as_bytes().to_vec(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut sub = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .await
+        .unwrap();
+
+    let mut leased = Vec::new();
+    for _ in 0..3 {
+        leased.push(sub.recv().await.unwrap().message.offset);
+    }
+    assert_eq!(leased, vec![0, 1, 2]);
+
+    broker
+        .unsubscribe(&sub.topic, sub.group.as_deref(), sub.partition, sub.sub_id)
+        .await
+        .unwrap();
+
+    let mut replacement = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .await
+        .unwrap();
+
+    let mut redelivered = Vec::new();
+    for _ in 0..3 {
+        let msg = replacement.recv().await.unwrap();
+        redelivered.push(msg.message.offset);
+        replacement
+            .settle(SettleRequest {
+                settle_type: SettleType::Ack,
+                delivery_tag: msg.delivery_tag,
+            })
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(redelivered, vec![0, 1, 2]);
+}
+
+#[tokio::test]
+async fn unsubscribe_does_not_requeue_acked_messages_after_settles_drain() {
+    let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
+
+    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    for i in 0..3 {
+        pubh.publish(
+            format!("x{i}").as_bytes().to_vec(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut sub = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .await
+        .unwrap();
+
+    let acked = sub.recv().await.unwrap();
+    let first_unacked = sub.recv().await.unwrap();
+    let second_unacked = sub.recv().await.unwrap();
+
+    sub.settle(SettleRequest {
+        settle_type: SettleType::Ack,
+        delivery_tag: acked.delivery_tag,
+    })
+    .await
+    .unwrap();
+    broker.wait_for_pending_settles().await;
+
+    broker
+        .unsubscribe(&sub.topic, sub.group.as_deref(), sub.partition, sub.sub_id)
+        .await
+        .unwrap();
+
+    let mut replacement = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .await
+        .unwrap();
+
+    let first = replacement.recv().await.unwrap();
+    let second = replacement.recv().await.unwrap();
+
+    assert_eq!(acked.message.offset, 0);
+    assert_eq!(first_unacked.message.offset, 1);
+    assert_eq!(second_unacked.message.offset, 2);
+    assert_eq!(first.message.offset, 1);
+    assert_eq!(second.message.offset, 2);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), replacement.recv())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn nack_requeue_redelivers() -> Result<(), Box<dyn std::error::Error>> {
     let mut t = TestState::new();
     t.start_broker("b1").await?;
