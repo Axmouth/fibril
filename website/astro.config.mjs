@@ -34,6 +34,7 @@ export default defineConfig({
             { label: "Retries and delays", slug: "latest/reliability/retries-delays" },
             { label: "Dead lettering", slug: "latest/reliability/dead-lettering" },
             { label: "Backpressure", slug: "latest/concepts/backpressure" },
+            { label: "Inactivity and eviction", slug: "latest/concepts/inactivity-eviction" },
             { label: "Benchmarks", slug: "latest/benchmarks" },
             { label: "Roadmap", slug: "latest/roadmap" },
             { label: "Deployment", slug: "latest/deployment/source" },
