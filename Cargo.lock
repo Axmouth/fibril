@@ -1122,6 +1122,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "serde_json",
+ "stroma-core",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util",
