@@ -19,7 +19,9 @@ use fibril_storage::{
 use fibril_util::unix_millis;
 use uuid::Uuid;
 
-use crate::queue_engine::{QueueEngine, SettleKind, SettleRequest as EngineSettleRequest};
+use crate::queue_engine::{
+    EvictOutcome, QueueEngine, SettleKind, SettleRequest as EngineSettleRequest,
+};
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
     MessageHeaders, NackEventMeta, StromaError, StromaMetrics, TaskGroup, UnixMillis,
@@ -77,6 +79,22 @@ impl SettleRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConsumerConfig {
     pub prefetch: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueEvictionSkip {
+    NotTracked,
+    Active,
+    NotIdleEnough,
+    PendingSettles,
+    HasBrokerDeliveries,
+    HasInflight,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueEvictionAttempt {
+    Skipped(QueueEvictionSkip),
+    Storage(EvictOutcome),
 }
 
 impl Default for ConsumerConfig {
@@ -813,6 +831,69 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             group: group.map(str::to_string),
         };
         self.queues.get(&key).map(|qs| qs.activity.snapshot())
+    }
+
+    pub async fn try_evict_inactive_queue(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        idle_for_ms: u64,
+    ) -> Result<QueueEvictionAttempt, BrokerError> {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: 0,
+            group: group.map(str::to_string),
+        };
+
+        let Some(qs) = self.queues.get(&key).map(|entry| entry.value().clone()) else {
+            return Ok(QueueEvictionAttempt::Skipped(QueueEvictionSkip::NotTracked));
+        };
+
+        let activity = qs.activity.snapshot();
+        if activity.active_publishers > 0 || activity.active_subscribers > 0 {
+            return Ok(QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active));
+        }
+
+        let Some(idle_since_ms) = activity.idle_since_ms else {
+            return Ok(QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active));
+        };
+        if unix_millis().saturating_sub(idle_since_ms) < idle_for_ms {
+            return Ok(QueueEvictionAttempt::Skipped(
+                QueueEvictionSkip::NotIdleEnough,
+            ));
+        }
+
+        if self.pending_settles.load(Ordering::Acquire) > 0 {
+            return Ok(QueueEvictionAttempt::Skipped(
+                QueueEvictionSkip::PendingSettles,
+            ));
+        }
+
+        if self
+            .records_by_tags
+            .iter()
+            .any(|entry| entry.value().key == key)
+        {
+            return Ok(QueueEvictionAttempt::Skipped(
+                QueueEvictionSkip::HasBrokerDeliveries,
+            ));
+        }
+
+        if self
+            .engine
+            .has_inflight(&key.tp, key.part, key.group.as_deref())
+            .await?
+        {
+            return Ok(QueueEvictionAttempt::Skipped(
+                QueueEvictionSkip::HasInflight,
+            ));
+        }
+
+        let outcome = self
+            .engine
+            .unmaterialize(&key.tp, key.part, key.group.as_deref())
+            .await?;
+        Ok(QueueEvictionAttempt::Storage(outcome))
     }
 
     pub async fn subscribe(

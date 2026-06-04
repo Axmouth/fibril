@@ -1,8 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
 use fibril_broker::{
-    broker::{Broker, BrokerConfig, ConsumerConfig, SettleRequest, SettleType},
-    queue_engine::StromaEngine,
+    broker::{
+        Broker, BrokerConfig, ConsumerConfig, QueueEvictionAttempt, QueueEvictionSkip,
+        SettleRequest, SettleType,
+    },
+    queue_engine::{EvictOutcome, StromaEngine},
     test_util::TestState,
 };
 use fibril_util::unix_millis;
@@ -97,6 +100,93 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
     assert_eq!(snapshot.idle_since_ms, None);
 
     drop(pubh);
+}
+
+#[tokio::test]
+async fn queue_eviction_skips_active_publishers() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (_pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let attempt = loop {
+        let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
+        // Creating the first publisher can still be materializing/recovering the
+        // queue, which makes the storage-side inflight guard briefly win the
+        // race. The behavior this test cares about is that an established
+        // publisher lease prevents inactivity eviction.
+        if attempt != QueueEvictionAttempt::Skipped(QueueEvictionSkip::HasInflight)
+            || tokio::time::Instant::now() >= deadline
+        {
+            break attempt;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+
+    assert_eq!(
+        attempt,
+        QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active)
+    );
+}
+
+#[tokio::test]
+async fn queue_eviction_skips_broker_delivery_tags() {
+    let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    drop(pubh);
+
+    let mut sub = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .await
+        .unwrap();
+    let _msg = sub.recv().await.unwrap();
+    drop(sub);
+
+    let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
+
+    assert_eq!(
+        attempt,
+        QueueEvictionAttempt::Skipped(QueueEvictionSkip::HasBrokerDeliveries)
+    );
+}
+
+#[tokio::test]
+async fn queue_eviction_unmaterializes_idle_materialized_queue() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    drop(pubh);
+
+    let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
+
+    assert_eq!(
+        attempt,
+        QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
+    );
 }
 
 #[tokio::test]

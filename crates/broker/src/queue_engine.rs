@@ -9,7 +9,7 @@ use stroma_core::{
     AckEventMeta, MessageHeaders, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics,
 };
 pub use stroma_core::{
-    AppendCompletion, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
+    AppendCompletion, EvictOutcome, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
 };
 use tokio::sync::Notify;
 
@@ -125,6 +125,29 @@ pub trait QueueEngine {
     async fn queue_stats_snapshot(&self) -> Result<QueuesStateSnapshot, StromaError>;
 
     async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError>;
+
+    async fn materialize(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError>;
+
+    async fn unmaterialize(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<EvictOutcome, StromaError>;
+
+    fn is_materialized(&self, tp: &str, part: u32, group: Option<&str>) -> bool;
+
+    async fn has_inflight(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<bool, StromaError>;
 
     fn metrics(&self) -> Arc<StromaMetrics>;
 
@@ -346,6 +369,37 @@ impl QueueEngine for StromaEngine {
 
     async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError> {
         self.inner.debug_snapshot().await
+    }
+
+    async fn materialize(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner.materialize(tp, part, group).await
+    }
+
+    async fn unmaterialize(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<EvictOutcome, StromaError> {
+        self.inner.unmaterialize(tp, part, group).await
+    }
+
+    fn is_materialized(&self, tp: &str, part: u32, group: Option<&str>) -> bool {
+        self.inner.is_materialized(tp, part, group)
+    }
+
+    async fn has_inflight(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<bool, StromaError> {
+        self.inner.has_inflight(tp, part, group).await
     }
 
     fn metrics(&self) -> Arc<StromaMetrics> {
