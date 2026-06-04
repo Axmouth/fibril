@@ -5,7 +5,6 @@
 
 [![Server CI](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml)
 [![TypeScript client CI](https://github.com/Axmouth/fibril/actions/workflows/typescript-client-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/typescript-client-ci.yaml)
-[![Verify website](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml)
 [![Deploy website](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml)
 
 [Docs](https://fibril.sh/latest/) · [Run Fibril](https://fibril.sh/latest/deployment/source/)
