@@ -30,6 +30,8 @@ async fn main() -> anyhow::Result<()> {
         expiry_poll_min_ms: 15_000,
         expiry_batch_max: 8192,
         delivery_poll_max_ms: 5_000, // Make tests timeout if they rely on polling to pass, to indicate the issue
+        queue_idle_evict_after_ms: None,
+        queue_idle_sweep_interval_ms: 60_000,
     };
     let broker = Broker::new(engine.clone(), broker_cfg, Some(metrics.broker()));
 

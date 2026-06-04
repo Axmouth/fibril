@@ -5,8 +5,8 @@ usage() {
   cat <<'EOF'
 Usage: scripts/stroma-source.sh <git|local>
 
-Switch the stroma-core dependency source used by crates/broker and
-crates/storage.
+Switch the stroma-core dependency source used by crates/broker,
+crates/storage, and protocol tests.
 
   git    Use https://github.com/Axmouth/keratin.git branch main.
          This is the CI/release/Docker mode.
@@ -34,7 +34,7 @@ case "$1" in
     ;;
 esac
 
-python3 - "$replacement" crates/broker/Cargo.toml crates/storage/Cargo.toml <<'PY'
+python3 - "$replacement" crates/broker/Cargo.toml crates/storage/Cargo.toml crates/protocol/Cargo.toml <<'PY'
 from pathlib import Path
 import sys
 

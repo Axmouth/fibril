@@ -25,6 +25,14 @@ Each delivered message occupies an inflight slot. A slot is released when the me
 
 This keeps slow consumers from accepting unlimited work and gives the broker a concrete signal for who can receive more messages.
 
+## Unsubscribe and Prefetched Messages
+
+When a subscription is dropped or unsubscribed, messages that were prefetched but not acknowledged are not considered lost. The broker requeues those unacked deliveries so other active subscribers can receive them.
+
+This matters for high-prefetch consumers. A reader can hold many messages locally before processing them. If that reader goes away, Fibril should redistribute the outstanding work instead of waiting for every lease to expire one by one.
+
+The behavior is still at-least-once. A message may be delivered again after unsubscribe, so handlers should remain idempotent.
+
 ## What this is not
 
 This is not a full adaptive flow-control system yet. There is no production tuning guide, no automatic per-topic policy, and no cluster-level balancing.

@@ -41,6 +41,8 @@ async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
             expiry_poll_min_ms: 50,
             expiry_batch_max: 100,
             delivery_poll_max_ms: 50,
+            queue_idle_evict_after_ms: None,
+            queue_idle_sweep_interval_ms: 60_000,
         },
         None,
     );

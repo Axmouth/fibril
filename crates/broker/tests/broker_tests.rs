@@ -14,6 +14,18 @@ use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, test_dir};
 use uuid::Uuid;
 
 async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
+    let broker_cfg = BrokerConfig {
+        inflight_ttl_ms: 2000,
+        expiry_poll_min_ms: 100,
+        expiry_batch_max: 100,
+        delivery_poll_max_ms: 100000, // Make tests timeout if they rely on polling to pass, to indicate the issue
+        queue_idle_evict_after_ms: None,
+        queue_idle_sweep_interval_ms: 60_000,
+    };
+    open_test_broker_with_cfg(broker_cfg).await
+}
+
+async fn open_test_broker_with_cfg(cfg: BrokerConfig) -> (Arc<Broker<StromaEngine>>, TempDir) {
     let dir = test_dir!("broker_test");
 
     let engine = StromaEngine::open(
@@ -23,13 +35,7 @@ async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
     )
     .await
     .unwrap();
-    let broker_cfg = BrokerConfig {
-        inflight_ttl_ms: 2000,
-        expiry_poll_min_ms: 100,
-        expiry_batch_max: 100,
-        delivery_poll_max_ms: 100000, // Make tests timeout if they rely on polling to pass, to indicate the issue
-    };
-    let broker = Broker::new(engine, broker_cfg, None);
+    let broker = Broker::new(engine, cfg, None);
 
     (broker, dir)
 }
@@ -130,6 +136,57 @@ async fn queue_eviction_skips_active_publishers() {
 }
 
 #[tokio::test]
+async fn queue_eviction_skips_untracked_queue() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let attempt = broker
+        .try_evict_inactive_queue("missing", None, 0)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        attempt,
+        QueueEvictionAttempt::Skipped(QueueEvictionSkip::NotTracked)
+    );
+}
+
+#[tokio::test]
+async fn queue_eviction_skips_active_subscribers() {
+    let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
+
+    let _sub = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .await
+        .unwrap();
+
+    let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
+
+    assert_eq!(
+        attempt,
+        QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active)
+    );
+}
+
+#[tokio::test]
+async fn queue_eviction_skips_when_idle_threshold_not_met() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    drop(pubh);
+
+    let attempt = broker
+        .try_evict_inactive_queue("t", None, 60_000)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        attempt,
+        QueueEvictionAttempt::Skipped(QueueEvictionSkip::NotIdleEnough)
+    );
+}
+
+#[tokio::test]
 async fn queue_eviction_skips_broker_delivery_tags() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
@@ -164,6 +221,21 @@ async fn queue_eviction_skips_broker_delivery_tags() {
 }
 
 #[tokio::test]
+async fn queue_eviction_reports_not_present_when_idle_queue_has_no_storage_handle() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    drop(pubh);
+
+    let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
+
+    assert_eq!(
+        attempt,
+        QueueEvictionAttempt::Storage(EvictOutcome::NotPresent)
+    );
+}
+
+#[tokio::test]
 async fn queue_eviction_unmaterializes_idle_materialized_queue() {
     let (broker, _dir) = open_test_broker().await;
 
@@ -187,6 +259,214 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
         attempt,
         QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
     );
+}
+
+#[tokio::test]
+async fn queue_eviction_reports_not_materialized_after_previous_unmaterialize() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    drop(pubh);
+
+    let first = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
+    let second = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
+
+    assert_eq!(first, QueueEvictionAttempt::Storage(EvictOutcome::Evicted));
+    assert_eq!(
+        second,
+        QueueEvictionAttempt::Storage(EvictOutcome::NotMaterialized)
+    );
+}
+
+#[tokio::test]
+async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
+    let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
+
+    let (_active_pubh, _confirms) = broker.get_publisher("active", &None).await.unwrap();
+    let idle_group = Some("g".to_string());
+    let (idle_pubh, _confirms) = broker.get_publisher("idle", &idle_group).await.unwrap();
+    idle_pubh
+        .publish(
+            b"x".to_vec(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    drop(idle_pubh);
+
+    let sub = broker
+        .subscribe("sub", None, client_id, ConsumerConfig { prefetch: 1 })
+        .await
+        .unwrap();
+
+    let mut attempts = broker.evict_inactive_queues(0).await.unwrap();
+    attempts.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    assert_eq!(
+        attempts,
+        vec![
+            (
+                "active".to_string(),
+                None,
+                QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active)
+            ),
+            (
+                "idle".to_string(),
+                idle_group,
+                QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
+            ),
+            (
+                "sub".to_string(),
+                None,
+                QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active)
+            ),
+        ]
+    );
+
+    drop(sub);
+}
+
+#[tokio::test]
+async fn queue_eviction_sweep_unmaterializes_idle_materialized_queue() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    drop(pubh);
+
+    let attempts = broker.evict_inactive_queues(0).await.unwrap();
+
+    assert_eq!(
+        attempts,
+        vec![(
+            "t".to_string(),
+            None,
+            QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
+        )]
+    );
+}
+
+#[tokio::test]
+async fn queue_eviction_worker_is_disabled_by_default() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    drop(pubh);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(broker.is_queue_materialized("t", None));
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn queue_eviction_worker_leaves_active_publisher_materialized() {
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        inflight_ttl_ms: 2000,
+        expiry_poll_min_ms: 100,
+        expiry_batch_max: 100,
+        delivery_poll_max_ms: 100000,
+        queue_idle_evict_after_ms: Some(0),
+        queue_idle_sweep_interval_ms: 10,
+    })
+    .await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(broker.is_queue_materialized("t", None));
+    drop(pubh);
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn queue_eviction_worker_unmaterializes_idle_materialized_queue() {
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        inflight_ttl_ms: 2000,
+        expiry_poll_min_ms: 100,
+        expiry_batch_max: 100,
+        delivery_poll_max_ms: 100000,
+        queue_idle_evict_after_ms: Some(0),
+        queue_idle_sweep_interval_ms: 10,
+    })
+    .await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert!(broker.is_queue_materialized("t", None));
+    drop(pubh);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while broker.is_queue_materialized("t", None) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert!(!broker.is_queue_materialized("t", None));
+    broker.shutdown().await;
 }
 
 #[tokio::test]
@@ -239,7 +519,7 @@ async fn delayed_publish_waits_until_deadline() {
         .await
         .unwrap();
 
-    let not_before = unix_millis() + 120;
+    let not_before = unix_millis() + 500;
     pubh.publish_delayed(
         b"x".to_vec(),
         Default::default(),
@@ -253,8 +533,11 @@ async fn delayed_publish_waits_until_deadline() {
     .unwrap()
     .unwrap();
 
+    // Leave a generous gap before the deadline. This verifies delayed messages
+    // are not immediately visible without making the test depend on tight
+    // scheduler timing around the exact not-before instant.
     assert!(
-        tokio::time::timeout(Duration::from_millis(40), sub.recv())
+        tokio::time::timeout(Duration::from_millis(100), sub.recv())
             .await
             .is_err()
     );
@@ -808,6 +1091,8 @@ async fn expired_after_consumer_drop() -> Result<(), Box<dyn std::error::Error>>
         expiry_poll_min_ms: 10,
         expiry_batch_max: 100,
         delivery_poll_max_ms: 100000,
+        queue_idle_evict_after_ms: None,
+        queue_idle_sweep_interval_ms: 60_000,
     });
 
     t.start_broker("b1").await?;
@@ -882,6 +1167,8 @@ async fn expiry_across_restart() -> Result<(), Box<dyn std::error::Error>> {
         expiry_poll_min_ms: 10,
         expiry_batch_max: 100,
         delivery_poll_max_ms: 100000,
+        queue_idle_evict_after_ms: None,
+        queue_idle_sweep_interval_ms: 60_000,
     });
 
     t.start_broker("b1").await?;
@@ -961,6 +1248,8 @@ async fn chaos_deterministic_restart_ack_nack() -> Result<(), Box<dyn std::error
         expiry_poll_min_ms: 50,
         expiry_batch_max: 100,
         delivery_poll_max_ms: 100000,
+        queue_idle_evict_after_ms: None,
+        queue_idle_sweep_interval_ms: 60_000,
     });
     t.start_broker("b1").await?;
 
@@ -1044,6 +1333,8 @@ async fn restart_race_with_ack() -> Result<(), Box<dyn std::error::Error>> {
         expiry_poll_min_ms: 100,
         expiry_batch_max: 100,
         delivery_poll_max_ms: 100000,
+        queue_idle_evict_after_ms: None,
+        queue_idle_sweep_interval_ms: 60_000,
     });
     t.start_broker("b1").await?;
 
@@ -1079,6 +1370,8 @@ async fn restart_race_with_ack2() -> Result<(), Box<dyn std::error::Error>> {
         expiry_poll_min_ms: 100,
         expiry_batch_max: 100,
         delivery_poll_max_ms: 100000,
+        queue_idle_evict_after_ms: None,
+        queue_idle_sweep_interval_ms: 60_000,
     });
     t.start_broker("b1").await?;
 

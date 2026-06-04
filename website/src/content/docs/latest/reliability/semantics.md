@@ -19,6 +19,8 @@ Commands are designed to be idempotent and replay-safe.
 
 Acknowledgements are explicit, idempotent, and final. A bounded ACK window tracks out-of-order acknowledgements near the monotonic `settled_until` frontier without requiring unbounded memory.
 
+If a subscription is dropped with prefetched but unacknowledged messages, those messages are returned for redelivery instead of being left behind until lease expiry. This keeps unsubscribe and consumer shutdown behavior aligned with at-least-once delivery.
+
 ## Retries
 
 Immediate requeue is implemented. Lease expiry can also move inflight messages back to ready.

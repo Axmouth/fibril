@@ -310,6 +310,8 @@ pub struct BrokerConfig {
     pub expiry_poll_min_ms: u64,
     pub expiry_batch_max: usize,
     pub delivery_poll_max_ms: u64,
+    pub queue_idle_evict_after_ms: Option<u64>,
+    pub queue_idle_sweep_interval_ms: u64,
 }
 impl Default for BrokerConfig {
     fn default() -> Self {
@@ -318,6 +320,8 @@ impl Default for BrokerConfig {
             expiry_poll_min_ms: 200,
             expiry_batch_max: 8192,
             delivery_poll_max_ms: 500,
+            queue_idle_evict_after_ms: None,
+            queue_idle_sweep_interval_ms: 60_000,
         }
     }
 }
@@ -520,6 +524,7 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     shutdown_consumers: CancellationToken,
     shutdown_settle: CancellationToken,
     shutdown_expiry: CancellationToken,
+    shutdown_queue_eviction: CancellationToken,
 
     next_sub_id: AtomicU64,
     next_tag_epoch: AtomicU64,
@@ -568,6 +573,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             shutdown_consumers: CancellationToken::new(),
             shutdown_settle: CancellationToken::new(),
             shutdown_expiry: CancellationToken::new(),
+            shutdown_queue_eviction: CancellationToken::new(),
             next_sub_id: AtomicU64::new(1),
             next_tag_epoch: AtomicU64::new(1),
             queues: DashMap::new(),
@@ -581,6 +587,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         // expiry worker: keeps Stroma turning inflight -> ready again
         Self::spawn_expiry_worker(this.clone());
+        Self::spawn_queue_eviction_worker(this.clone());
 
         this
     }
@@ -594,6 +601,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.shutdown_consumers.cancel();
         self.shutdown_settle.cancel();
         self.shutdown_expiry.cancel();
+        self.shutdown_queue_eviction.cancel();
         self.task_group.shutdown().await;
         self.engine
             .shutdown()
@@ -611,6 +619,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.shutdown_publishers.cancel();
         self.shutdown_consumers.cancel();
         self.shutdown_expiry.cancel();
+        self.shutdown_queue_eviction.cancel();
         tracing::debug!("Signaled shutdown to publishers, consumers, and expiry worker");
         self.shutdown_settle.cancel();
         tracing::debug!("Signaled shutdown to settle workers");
@@ -833,6 +842,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.queues.get(&key).map(|qs| qs.activity.snapshot())
     }
 
+    pub fn is_queue_materialized(&self, topic: &str, group: Option<&str>) -> bool {
+        self.engine.is_materialized(topic, 0, group)
+    }
+
     pub async fn try_evict_inactive_queue(
         &self,
         topic: &str,
@@ -894,6 +907,27 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .unmaterialize(&key.tp, key.part, key.group.as_deref())
             .await?;
         Ok(QueueEvictionAttempt::Storage(outcome))
+    }
+
+    pub async fn evict_inactive_queues(
+        &self,
+        idle_for_ms: u64,
+    ) -> Result<Vec<(Topic, Option<Group>, QueueEvictionAttempt)>, BrokerError> {
+        let keys: Vec<QueueKey> = self
+            .queues
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        let mut attempts = Vec::with_capacity(keys.len());
+        for key in keys {
+            let attempt = self
+                .try_evict_inactive_queue(&key.tp, key.group.as_deref(), idle_for_ms)
+                .await?;
+            attempts.push((key.tp, key.group, attempt));
+        }
+
+        Ok(attempts)
     }
 
     pub async fn subscribe(
@@ -1509,6 +1543,47 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 }
             }
         });
+    }
+
+    fn spawn_queue_eviction_worker(broker: Arc<Self>) {
+        let Some(idle_for_ms) = broker.cfg.queue_idle_evict_after_ms else {
+            return;
+        };
+        let interval_ms = broker.cfg.queue_idle_sweep_interval_ms.max(1);
+        let broker_clone = broker.clone();
+        broker_clone
+            .task_group
+            .spawn("queue_eviction_worker", async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = broker.shutdown_queue_eviction.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
+                    }
+
+                    match broker.evict_inactive_queues(idle_for_ms).await {
+                        Ok(attempts) => {
+                            let evicted = attempts
+                                .iter()
+                                .filter(|(_, _, attempt)| {
+                                    matches!(
+                                        attempt,
+                                        QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
+                                    )
+                                })
+                                .count();
+                            if evicted > 0 {
+                                tracing::debug!(
+                                    "Queue eviction worker unmaterialized {evicted} idle queues"
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            tracing::error!("Queue eviction worker error: {err}");
+                        }
+                    }
+                }
+            });
     }
 
     fn spawn_expiry_worker(broker: Arc<Self>) {
