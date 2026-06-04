@@ -3,7 +3,7 @@ title: Fibril documentation
 description: Start here for the current Fibril documentation.
 ---
 
-Fibril is a lightweight Rust message broker focused on durable delivery, explicit acknowledgements, leasing, retries, and asynchronous workflow coordination.
+Fibril is a lightweight message broker focused on durable delivery, explicit acknowledgements, leasing, retries, and asynchronous workflow coordination. The broker is implemented in Rust, but the user-facing model is about durable messaging rather than a Rust-only ecosystem.
 
 It is currently pre-alpha. The useful baseline is working, but APIs, persistence formats, protocol details, and operational behavior can still change.
 

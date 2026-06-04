@@ -7,7 +7,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "Fibril",
-      description: "A lightweight Rust message broker with durable queues and explicit delivery semantics.",
+      description: "A lightweight message broker with durable queues and explicit delivery semantics.",
       logo: {
         src: "./src/assets/fibril-mark.svg",
       },
