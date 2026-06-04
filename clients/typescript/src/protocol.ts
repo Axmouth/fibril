@@ -20,7 +20,8 @@ export enum Op {
   AuthErr = 12,
 
   Publish = 20,
-  PublishOk = 21,
+  PublishDelayed = 21,
+  PublishOk = 25,
 
   Subscribe = 30,
   SubscribeOk = 31,
@@ -29,7 +30,6 @@ export enum Op {
   Deliver = 40,
   Ack = 41,
   Nack = 42,
-  Reject = 43,
 
   Ping = 50,
   Pong = 51,
@@ -55,6 +55,7 @@ export interface Hello {
 
 export interface HelloOk {
   protocol_version: number;
+  client_id: unknown;
   server_name: string;
   compliance: string;
 }
@@ -69,8 +70,13 @@ export interface PublishMsg {
   partition: number;
   group: string | null;
   require_confirm: boolean;
+  headers: Record<string, string>;
   payload: Uint8Array;
   published: bigint;
+}
+
+export interface PublishDelayedMsg extends PublishMsg {
+  not_before: bigint;
 }
 
 export interface PublishOkMsg {
@@ -101,6 +107,7 @@ export interface DeliverMsg {
   delivery_tag: DeliveryTag;
   published: bigint;
   publish_received: bigint;
+  headers: Record<string, string>;
   payload: Uint8Array;
 }
 
@@ -112,14 +119,6 @@ export interface AckMsg {
 }
 
 export interface NackMsg {
-  topic: string;
-  group: string | null;
-  partition: number;
-  tags: DeliveryTag[];
-  requeue: boolean;
-}
-
-export interface RejectMsg {
   topic: string;
   group: string | null;
   partition: number;

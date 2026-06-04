@@ -29,7 +29,7 @@ Do not expose this development server directly to the public internet.
 
 ## Rust client shape
 
-The Rust client lives in `crates/client`. It supports publishers and manual-ack subscriptions:
+The Rust client lives in `crates/client`. It supports publishers, delayed publish, and manual-ack subscriptions:
 
 ```rust
 let client = ClientOptions::new()
@@ -39,6 +39,7 @@ let client = ClientOptions::new()
 
 let publisher = client.publisher("email.send");
 publisher.publish("hello").await?;
+publisher.publish_delayed("hello later", 30u64).await?;
 
 let mut sub = client
     .subscribe("email.send")
@@ -52,4 +53,33 @@ while let Some(msg) = sub.recv().await {
 }
 ```
 
+## TypeScript client shape
+
+The TypeScript client lives in `clients/typescript`. It mirrors the current Rust client shape where practical:
+
+```ts
+import { ClientOptions } from "@fibril/client";
+
+const client = await new ClientOptions()
+  .withAuth("fibril", "fibril")
+  .connect("127.0.0.1:9876");
+
+const publisher = client.publisher("email.send");
+await publisher.publish({ body: "hello" });
+await publisher.publishDelayed({ body: "hello later" }, 30_000);
+
+const sub = await client
+  .subscribe("email.send")
+  .prefetch(32)
+  .subManualAck();
+
+for await (const msg of sub) {
+  const body = msg.deserialize<{ body: string }>();
+  await process(body);
+  await msg.complete();
+}
+```
+
 The API is evolving. Treat examples as a guide to the current source tree rather than a stable package contract.
+
+For more publishing, subscription, delayed publish, and message encoding examples, see [client usage](/latest/clients/).

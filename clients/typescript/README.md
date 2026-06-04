@@ -15,7 +15,7 @@ Requires Node.js >= 20.
 ## Quick start
 
 ```ts
-import { ClientOptions } from "@fibril/client";
+import { ClientOptions, NewMessage } from "@fibril/client";
 
 const client = await new ClientOptions()
   .withAuth("user", "pass")
@@ -24,6 +24,7 @@ const client = await new ClientOptions()
 // Publish (with broker confirmation)
 const pub = client.publisher("orders");
 const offset = await pub.publish({ id: 42, item: "widget" });
+await pub.publishDelayed(NewMessage.json({ id: 43 }), 30_000);
 
 // Subscribe with manual ack
 const sub = await client
@@ -81,3 +82,4 @@ since the safe integer range covers millennia.
   Use `reconnect()` and re-create publishers/subscriptions.
 - No write timeouts; relies on heartbeat (3× interval) to detect dead
   half-open connections.
+- Delayed retry (`retryAfter`) is not exposed yet; use immediate `retry()`.

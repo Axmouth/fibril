@@ -17,7 +17,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "tsc --noEmit && node --test --import tsx test/*.test.ts",
+    "test": "tsc --noEmit && node --test --import tsx tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -11,10 +11,14 @@ Fibril separates three related behaviors:
 
 ## Immediate retry
 
-Manual-ack consumers can currently request immediate requeue through the public Rust client:
+Manual-ack consumers can currently request immediate requeue through the public Rust and TypeScript clients:
 
 ```rust
 msg.retry().await?;
+```
+
+```ts
+await msg.retry();
 ```
 
 At the state layer, this removes the offset from inflight, increments the retry count, and returns the offset to ready unless the retry policy is exhausted.
@@ -29,12 +33,19 @@ This is the core failure-recovery path for best-effort at-least-once delivery.
 
 Stroma has durable delayed-enqueue state. Offsets can be held until `not_before`, and delayed enqueue state is included in snapshots.
 
-The Rust client exposes delayed publish methods:
+The Rust and TypeScript clients expose delayed publish methods:
 
 ```rust
 publisher.publish_unconfirmed_delayed(payload, delay).await?;
 publisher.publish_delayed(payload, delay).await?;
 ```
+
+```ts
+await publisher.publishUnconfirmedDelayed(payload, 30_000);
+await publisher.publishDelayed(payload, 30_000);
+```
+
+Numeric TypeScript delays are milliseconds. Passing a `Date` uses that absolute Unix-millisecond deadline.
 
 The delayed publish path uses a distinct protocol frame instead of adding an optional delay field to the common publish frame.
 

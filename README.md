@@ -4,6 +4,7 @@
 **The connective tissue of distributed systems.**
 
 [![Server CI](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/rust-ci.yaml)
+[![TypeScript client CI](https://github.com/Axmouth/fibril/actions/workflows/typescript-client-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/typescript-client-ci.yaml)
 [![Verify website](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/website-ci.yaml)
 [![Deploy website](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml)
 
@@ -26,9 +27,9 @@ The project is currently in a pre-alpha stage and under active development. APIs
 Fibril aims to provide a simpler and more ergonomic messaging model, where the message itself carries the lifecycle of processing:
 
 ```rust
-msg.complete()?;
-msg.retry_after(45)?;
-msg.fail()?;
+msg.complete().await?;
+msg.retry().await?;
+msg.fail().await?;
 ```
 
 The architecture is intentionally modular. The broker, durability layer, and state-management components are designed to remain reusable independently, and the broker core may also be embedded directly into applications or custom systems where lightweight durable messaging semantics are useful.
@@ -41,23 +42,24 @@ Messaging should not feel like bureaucracy. In Fibril, the message itself can ca
 
 ```rust
 while let Some(msg) = sub.recv().await? {
-    process(msg.content()).await?;
+    process(msg.content()?).await?;
 
-    msg.complete()?;    // Acknowledge successful processing
+    msg.complete().await?;    // Acknowledge successful processing
 }
 ```
 
 Messages can also be retried or failed explicitly:
 
 ```rust
-    msg.retry()?;           // Requeue immediately
-    msg.retry_after(45)?;   // Requeue after a delay
-    msg.fail()?;            // Mark failed without requeueing
+    msg.retry().await?;  // Requeue immediately
+    msg.fail().await?;   // Mark failed without requeueing
 ```
+
+Delayed retry is still being wired through the public path. Delayed publish is available through `publisher.publish_delayed(..)`.
 
 Common access patterns:
 ```rust
-    let value: MyType = msg.json()?;
+    let value: MyType = msg.deserialize()?;
 ```
 
 > Messages are `#[must_use]` (in Rust). So forgotten lifecycle handling is warned about.
@@ -157,7 +159,7 @@ The current implementation provides a minimal but working set of broker semantic
 * **Delayed publish** using a distinct delayed-publish protocol frame
 * **Subscribe (sub)** to topics and receive messages
 * **Topic + partition addressing** (partition currently mostly structural)
-* **Basic Rust client** for publishing and consuming
+* **Basic Rust and TypeScript clients** for publishing and consuming
 
 ### Delivery model
 
@@ -317,7 +319,7 @@ Performance characteristics are expected to evolve significantly as the system m
   Building client libraries in various languages to make it easier to interact with the broker and test its
   features in real applications.
 
-  Rust client is currently in decent shape.
+  Rust client is currently in decent shape, and the TypeScript client covers the same core publish/subscribe surface including delayed publish.
   Considered languages: Typescript, Python, C#
 
 * **Admin interface**
@@ -332,7 +334,7 @@ Performance characteristics are expected to evolve significantly as the system m
 
   ~~-Implementing a heartbeat mechanism to detect and handle client disconnections more gracefully.~~
 
-  Update: Heartbeat plus timeout implemented on server side and Rust client.
+  Update: Heartbeat plus timeout implemented on server side plus Rust and TypeScript clients.
 
 * **Higher level test cases**
 
@@ -395,7 +397,7 @@ Performance characteristics are expected to evolve significantly as the system m
 
 * **Delayed messages and scheduling**
 
-  Delayed publish is wired through the broker protocol and Rust client. Delayed retry is still an active area.
+  Delayed publish is wired through the broker protocol plus Rust and TypeScript clients. Delayed retry is still an active area.
 
 ### The following features may be explored under a separate advanced routing layer on top of the core broker, to keep the core focused on durability and delivery semantics:
 (Note: the above is not the guaranteed direction, but a possibility)

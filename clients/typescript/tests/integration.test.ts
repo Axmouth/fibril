@@ -13,10 +13,12 @@ import {
   Op,
   PROTOCOL_V1,
   type Hello,
+  type PublishDelayedMsg,
   type PublishMsg,
   type SubscribeMsg,
 } from "../src/protocol.js";
 import { Client, ClientOptions } from "../src/client.js";
+import { NewMessage } from "../src/message.js";
 
 /**
  * A minimal in-process fake broker that handles HELLO, SUBSCRIBE, PUBLISH,
@@ -80,12 +82,14 @@ test("client connects, handshakes, publishes confirmed", async () => {
           s,
           buildFrame(Op.HelloOk, f.requestId, {
             protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
             server_name: "fake",
             compliance: COMPLIANCE_STRING,
           }),
         );
       } else if (f.opcode === Op.Publish) {
         const p = decodeFrameBody<PublishMsg>(f);
+        assert.equal(p.headers["content-type"], "application/msgpack");
         if (p.require_confirm) {
           broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 7n }));
         }
@@ -113,6 +117,7 @@ test("client subscribes and receives a delivery", async () => {
           s,
           buildFrame(Op.HelloOk, f.requestId, {
             protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
             server_name: "fake",
             compliance: COMPLIANCE_STRING,
           }),
@@ -142,6 +147,7 @@ test("client subscribes and receives a delivery", async () => {
             delivery_tag: { epoch: 42n },
             published: 1000n,
             publish_received: 1001n,
+            headers: { "content-type": "application/msgpack" },
             payload: new Uint8Array([0xa5, 0x68, 0x65, 0x6c, 0x6c, 0x6f]), // msgpack "hello"
           }),
         );
@@ -185,6 +191,7 @@ test("subscription throws on engine disconnection", async () => {
           s,
           buildFrame(Op.HelloOk, f.requestId, {
             protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
             server_name: "fake",
             compliance: COMPLIANCE_STRING,
           }),
@@ -238,6 +245,7 @@ test("publish without confirm does not block on reply", async () => {
           s,
           buildFrame(Op.HelloOk, f.requestId, {
             protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
             server_name: "fake",
             compliance: COMPLIANCE_STRING,
           }),
@@ -252,6 +260,104 @@ test("publish without confirm does not block on reply", async () => {
     // Wait briefly to ensure broker received it.
     await new Promise((r) => setTimeout(r, 20));
     assert.ok(broker.received.some((f) => f.opcode === Op.Publish));
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("client publishes delayed frame with headers and deadline", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let delayed: PublishDelayedMsg | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(
+          s,
+          buildFrame(Op.HelloOk, f.requestId, {
+            protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
+            server_name: "fake",
+            compliance: COMPLIANCE_STRING,
+          }),
+        );
+      } else if (f.opcode === Op.PublishDelayed) {
+        delayed = decodeFrameBody<PublishDelayedMsg>(f);
+        broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 11n }));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const deadline = new Date(Date.now() + 10_000);
+    const offset = await client
+      .publisher("t-delay")
+      .publishDelayed(NewMessage.json({ hello: "later" }), deadline);
+
+    assert.equal(offset, 11n);
+    assert.ok(delayed);
+    assert.equal(delayed.topic, "t-delay");
+    assert.equal(delayed.require_confirm, true);
+    assert.equal(delayed.headers["content-type"], "application/json");
+    assert.equal(delayed.not_before, BigInt(deadline.getTime()));
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("delivery deserializes json by content-type", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(
+          s,
+          buildFrame(Op.HelloOk, f.requestId, {
+            protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
+            server_name: "fake",
+            compliance: COMPLIANCE_STRING,
+          }),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 200n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: 200n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            offset: 2n,
+            delivery_tag: { epoch: 99n },
+            published: 1000n,
+            publish_received: 1001n,
+            headers: { "content-type": "application/json" },
+            payload: new TextEncoder().encode(JSON.stringify({ ok: true })),
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const sub = await client.subscribe("json").subAutoAck();
+    const msg = await sub.recv();
+    assert.ok(msg);
+    assert.deepEqual(msg.deserialize<{ ok: boolean }>(), { ok: true });
+    assert.equal(msg.contentType(), "application/json");
+    sub.close();
     await client.shutdown();
   } finally {
     await broker.stop();

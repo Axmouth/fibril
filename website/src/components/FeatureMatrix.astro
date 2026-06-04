@@ -10,12 +10,12 @@ import StatusBadge from "./StatusBadge.astro";
     <tbody>
       <tr><td>Durable queues</td><td><StatusBadge kind="ready">tested</StatusBadge></td><td>Append-only log, snapshot, and replay.</td></tr>
       <tr><td>Explicit acknowledgements</td><td><StatusBadge kind="ready">available</StatusBadge></td><td>ACK, requeue, and terminal failure paths.</td></tr>
-      <tr><td>Delayed publish</td><td><StatusBadge kind="partial">internal</StatusBadge></td><td>Broker/Stroma path exists; public client methods are TODO.</td></tr>
+      <tr><td>Delayed publish</td><td><StatusBadge kind="ready">available</StatusBadge></td><td>Broker path and Rust/TypeScript client methods are wired.</td></tr>
       <tr><td>Delayed retries</td><td><StatusBadge kind="partial">wiring</StatusBadge></td><td>State support exists; public path remains incomplete.</td></tr>
       <tr><td>Dead lettering</td><td><StatusBadge kind="partial">state-tested</StatusBadge></td><td>Stroma policy exists; public broker config is not exposed.</td></tr>
       <tr><td>Backpressure</td><td><StatusBadge kind="ready">available</StatusBadge></td><td>Pull-based delivery and bounded prefetch.</td></tr>
       <tr><td>Replication</td><td><StatusBadge kind="planned">planned</StatusBadge></td><td>Design work is in progress.</td></tr>
-      <tr><td>Transactions</td><td><StatusBadge kind="no">not planned</StatusBadge></td><td>Not an initial goal.</td></tr>
+      <tr><td>Transactions</td><td><StatusBadge kind="no">out of scope</StatusBadge></td><td>Not planned; transactional workflows are intentionally excluded.</td></tr>
     </tbody>
   </table>
 </div>

@@ -1,0 +1,316 @@
+---
+title: Client usage
+description: Use the Rust and TypeScript clients to publish, consume, and settle messages.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Fibril currently has Rust and TypeScript clients for the same core broker surface:
+
+- connect with optional auth
+- publish with or without confirmation
+- delayed publish
+- manual acknowledgements
+- client-side auto-ack convenience
+- message helpers for msgpack, JSON, raw bytes, and text payloads
+
+The examples below are source-tree examples for the current pre-alpha API. They are useful for building against this repository, but not yet a stable package contract.
+
+## Connect
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+use fibril_client::ClientOptions;
+
+let client = ClientOptions::new()
+    .auth("fibril", "fibril")
+    .connect("127.0.0.1:9876")
+    .await?;
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+import { ClientOptions } from "@fibril/client";
+
+const client = await new ClientOptions()
+  .withAuth("fibril", "fibril")
+  .connect("127.0.0.1:9876");
+```
+
+  </TabItem>
+</Tabs>
+
+## Publish
+
+Confirmed publish waits for the broker to acknowledge the stored message and returns the topic offset.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+let publisher = client.publisher("email.send");
+
+let offset = publisher
+    .publish("hello")
+    .await?;
+
+publisher
+    .publish_unconfirmed("fire and forget")
+    .await?;
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+const publisher = client.publisher("email.send");
+
+const offset = await publisher.publish("hello");
+
+await publisher.publishUnconfirmed("fire and forget");
+```
+
+  </TabItem>
+</Tabs>
+
+## Delayed Publish
+
+Delayed publish uses a distinct protocol frame and stores a `not_before` Unix-millisecond deadline. It does not add delay bytes to the common publish frame.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+use std::time::Duration;
+
+let offset = publisher
+    .publish_delayed("send later", Duration::from_secs(30))
+    .await?;
+
+publisher
+    .publish_unconfirmed_delayed("send later without confirm", 30u64)
+    .await?;
+```
+
+Rust numeric delay helpers are seconds. `std::time::Duration` is also accepted.
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+const offset = await publisher.publishDelayed("send later", 30_000);
+
+await publisher.publishUnconfirmedDelayed(
+  "send later without confirm",
+  new Date(Date.now() + 30_000),
+);
+```
+
+TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute deadline.
+
+  </TabItem>
+</Tabs>
+
+## Message Payloads
+
+Plain values are encoded as msgpack by default. Use explicit message helpers when you want JSON, raw bytes, text, or custom headers.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+use fibril_client::NewMessage;
+
+publisher
+    .publish(NewMessage::json(&serde_json::json!({
+        "id": 42,
+        "kind": "welcome",
+    }))?)
+    .await?;
+
+publisher
+    .publish(
+        NewMessage::content("plain text")
+            .header("x-trace-id", "abc123"),
+    )
+    .await?;
+
+publisher
+    .publish(NewMessage::raw(vec![1, 2, 3]))
+    .await?;
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+import { NewMessage } from "@fibril/client";
+
+await publisher.publish(
+  NewMessage.json({
+    id: 42,
+    kind: "welcome",
+  }),
+);
+
+await publisher.publish(
+  NewMessage.content("plain text")
+    .header("x-trace-id", "abc123"),
+);
+
+await publisher.publish(NewMessage.raw(new Uint8Array([1, 2, 3])));
+```
+
+  </TabItem>
+</Tabs>
+
+Fibril reserves `fibril.*` headers for broker-owned metadata. User code should not set headers with that prefix.
+
+## Manual Acknowledgements
+
+Manual acknowledgement is the primary processing model. Messages are leased while inflight. Consumers settle each message explicitly.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+let mut sub = client
+    .subscribe("email.send")
+    .group("workers")
+    .prefetch(32)
+    .sub_manual_ack()
+    .await?;
+
+while let Some(msg) = sub.recv().await {
+    let body = msg.content()?;
+
+    match send_email(body).await {
+        Ok(()) => {
+            msg.complete().await?;
+        }
+        Err(_) => {
+            msg.retry().await?;
+        }
+    }
+}
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+const sub = await client
+  .subscribe("email.send")
+  .group("workers")
+  .prefetch(32)
+  .subManualAck();
+
+for await (const msg of sub) {
+  const body = msg.content();
+
+  try {
+    await sendEmail(body);
+    await msg.complete();
+  } catch {
+    await msg.retry();
+  }
+}
+```
+
+  </TabItem>
+</Tabs>
+
+`retry()` requeues immediately. Delayed retry is still partial and should not be treated as supported user-facing behavior yet.
+
+## Decode Messages
+
+`deserialize()` chooses a decoder from `content-type`. Missing content type defaults to msgpack.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+#[derive(serde::Deserialize)]
+struct Job {
+    id: u64,
+}
+
+let job: Job = msg.deserialize()?;
+let raw: &[u8] = msg.raw();
+let text: &str = msg.content()?;
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+type Job = {
+  id: number;
+};
+
+const job = msg.deserialize<Job>();
+const raw = msg.raw();
+const text = msg.content();
+```
+
+  </TabItem>
+</Tabs>
+
+## Auto Ack
+
+Auto-ack subscriptions are a convenience mode. The current client behavior tracks acknowledgement client-side; use manual ack when processing correctness matters.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+let mut sub = client
+    .subscribe("metrics")
+    .prefetch(128)
+    .sub_auto_ack()
+    .await?;
+
+while let Some(msg) = sub.recv().await {
+    observe(msg.deserialize::<Metric>()?);
+}
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+const sub = await client
+  .subscribe("metrics")
+  .prefetch(128)
+  .subAutoAck();
+
+for await (const msg of sub) {
+  observe(msg.deserialize<Metric>());
+}
+```
+
+  </TabItem>
+</Tabs>
+
+## Shutdown
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+client.shutdown().await;
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+await client.shutdown();
+```
+
+  </TabItem>
+</Tabs>

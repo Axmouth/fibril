@@ -1500,4 +1500,44 @@ mod tests {
             TestPayload { value: 7 }
         );
     }
+
+    #[test]
+    fn raw_message_has_no_implicit_headers() {
+        let message = NewMessage::raw(b"raw".to_vec());
+
+        assert!(message.headers().is_empty());
+        assert_eq!(message.payload, b"raw".to_vec());
+    }
+
+    #[test]
+    fn content_message_sets_text_content_type() {
+        let message = NewMessage::content("hello");
+        let message = Message {
+            delivery_tag: DeliveryTag { epoch: 1 },
+            published: 0,
+            publish_received: 0,
+            headers: message.headers,
+            payload: message.payload,
+        };
+
+        assert_eq!(message.content_type(), Some("text/plain; charset=utf-8"));
+        assert_eq!(message.content().unwrap(), "hello");
+    }
+
+    #[test]
+    fn deserialize_rejects_unsupported_content_type() {
+        let message = NewMessage::raw(b"{}".to_vec()).content_type("application/custom");
+        let message = Message {
+            delivery_tag: DeliveryTag { epoch: 1 },
+            published: 0,
+            publish_received: 0,
+            headers: message.headers,
+            payload: message.payload,
+        };
+
+        assert!(matches!(
+            message.deserialize::<TestPayload>(),
+            Err(FibrilError::DeserializationFailure { .. })
+        ));
+    }
 }

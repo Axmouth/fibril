@@ -10,6 +10,7 @@ It is currently pre-alpha. The useful baseline is working, but APIs, persistence
 ## Where to start
 
 - Follow the [quickstart](/latest/quickstart/) to run the broker from source.
+- Use the [client guide](/latest/clients/) for Rust and TypeScript publishing and subscription examples.
 - Read the [core model](/latest/concepts/core-model/) for the queue lifecycle.
 - Read [retries and delays](/latest/reliability/retries-delays/) and [dead lettering](/latest/reliability/dead-lettering/) for the parts that are still being wired through the public API.
 - Check [project status](/latest/status/) before depending on a feature.

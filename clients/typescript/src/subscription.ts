@@ -1,9 +1,9 @@
-import { decodeMsgpack } from "./codec.js";
 import {
   BrokenPipeError,
   DeserializationError,
   FibrilError,
 } from "./errors.js";
+import { deserializeByContentType } from "./message.js";
 import type { DeliveryTag } from "./protocol.js";
 import type {
   Engine,
@@ -20,6 +20,7 @@ import type { Client } from "./client.js";
 export class Message {
   readonly deliveryTag: DeliveryTag;
   readonly payload: Uint8Array;
+  readonly headers: Record<string, string>;
   /** Unix milliseconds when the publisher claimed to have published. */
   readonly published: number;
   /** Unix milliseconds when the broker received the publish. */
@@ -30,21 +31,48 @@ export class Message {
   constructor(d: InternalDelivered) {
     this.deliveryTag = d.delivery_tag;
     this.payload = d.payload;
+    this.headers = d.headers;
     this.published = Number(d.published);
     this.publishReceived = Number(d.publish_received);
     this.offset = d.offset;
   }
 
   /**
-   * Decode the payload as msgpack.
-   * Throws `DeserializationError` if the payload is not valid msgpack.
+   * Decode by `content-type`. Missing content type defaults to msgpack.
    */
   deserialize<T>(): T {
     try {
-      return decodeMsgpack<T>(this.payload);
+      return deserializeByContentType<T>(this.contentType(), this.payload);
     } catch (err) {
+      if (err instanceof DeserializationError) throw err;
       throw new DeserializationError(
         `Failed to deserialize payload: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  contentType(): string | undefined {
+    return this.headers["content-type"];
+  }
+
+  msgpack<T>(): T {
+    return deserializeByContentType<T>("application/msgpack", this.payload);
+  }
+
+  json<T>(): T {
+    return deserializeByContentType<T>("application/json", this.payload);
+  }
+
+  raw(): Uint8Array {
+    return this.payload;
+  }
+
+  content(): string {
+    try {
+      return new TextDecoder().decode(this.payload);
+    } catch (err) {
+      throw new DeserializationError(
+        `Failed to decode text payload: ${(err as Error).message}`,
       );
     }
   }
@@ -61,6 +89,7 @@ type SettleState =
 export class InflightMessage {
   readonly deliveryTag: DeliveryTag;
   readonly payload: Uint8Array;
+  readonly headers: Record<string, string>;
   readonly published: number;
   readonly publishReceived: number;
   readonly offset: bigint;
@@ -73,6 +102,7 @@ export class InflightMessage {
   constructor(engine: Engine, d: InternalInflight) {
     this.deliveryTag = d.delivery_tag;
     this.payload = d.payload;
+    this.headers = d.headers;
     this.published = Number(d.published);
     this.publishReceived = Number(d.publish_received);
     this.offset = d.offset;
@@ -83,10 +113,37 @@ export class InflightMessage {
 
   deserialize<T>(): T {
     try {
-      return decodeMsgpack<T>(this.payload);
+      return deserializeByContentType<T>(this.contentType(), this.payload);
     } catch (err) {
+      if (err instanceof DeserializationError) throw err;
       throw new DeserializationError(
         `Failed to deserialize payload: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  contentType(): string | undefined {
+    return this.headers["content-type"];
+  }
+
+  msgpack<T>(): T {
+    return deserializeByContentType<T>("application/msgpack", this.payload);
+  }
+
+  json<T>(): T {
+    return deserializeByContentType<T>("application/json", this.payload);
+  }
+
+  raw(): Uint8Array {
+    return this.payload;
+  }
+
+  content(): string {
+    try {
+      return new TextDecoder().decode(this.payload);
+    } catch (err) {
+      throw new DeserializationError(
+        `Failed to decode text payload: ${(err as Error).message}`,
       );
     }
   }
@@ -151,6 +208,7 @@ export class InflightMessage {
     return new Message({
       delivery_tag: this.deliveryTag,
       payload: this.payload,
+      headers: this.headers,
       published: BigInt(this.published),
       publish_received: BigInt(this.publishReceived),
       offset: this.offset,

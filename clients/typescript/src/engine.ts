@@ -25,9 +25,9 @@ import {
   type Hello,
   type HelloOk,
   type NackMsg,
+  type PublishDelayedMsg,
   type PublishMsg,
   type PublishOkMsg,
-  type RejectMsg,
   type SubscribeMsg,
   type SubscribeOkMsg,
 } from "./protocol.js";
@@ -52,6 +52,7 @@ export interface SubState {
 export interface InternalDelivered {
   delivery_tag: DeliveryTag;
   payload: Uint8Array;
+  headers: Record<string, string>;
   published: bigint;
   publish_received: bigint;
   offset: bigint;
@@ -72,13 +73,14 @@ type Waiter =
 
 // Commands the public API submits to the engine.
 export type Command =
-  | { type: "publishUnconfirmed"; topic: string; group: string | null; payload: Uint8Array; published: bigint }
-  | { type: "publishConfirmed"; topic: string; group: string | null; payload: Uint8Array; published: bigint; reply: Deferred<bigint> }
+  | { type: "publishUnconfirmed"; topic: string; group: string | null; headers: Record<string, string>; payload: Uint8Array; published: bigint }
+  | { type: "publishConfirmed"; topic: string; group: string | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; reply: Deferred<bigint> }
+  | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
+  | { type: "publishDelayedConfirmed"; topic: string; group: string | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
   | { type: "subscribe"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalInflight>> }
   | { type: "subscribeAutoAck"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalDelivered>> }
   | { type: "ack"; sub_id: bigint; tag: DeliveryTag; request_id: bigint; reply: Deferred<void> }
-  | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; request_id: bigint; reply: Deferred<void> }
-  | { type: "reject"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; request_id: bigint; reply: Deferred<void> };
+  | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; request_id: bigint; reply: Deferred<void> };
 
 // ===== Constants =====
 
@@ -328,6 +330,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           group: cmd.group,
           partition: 0,
           require_confirm: false,
+          headers: cmd.headers,
           payload: cmd.payload,
           published: cmd.published,
         };
@@ -342,10 +345,44 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           group: cmd.group,
           partition: 0,
           require_confirm: true,
+          headers: cmd.headers,
           payload: cmd.payload,
           published: cmd.published,
         };
         if (!(await sendOrDie(buildFrame(Op.Publish, reqId, msg)))) {
+          waiters.delete(reqId);
+        }
+        return;
+      }
+      case "publishDelayedUnconfirmed": {
+        const reqId = nextReqId();
+        const msg: PublishDelayedMsg = {
+          topic: cmd.topic,
+          group: cmd.group,
+          partition: 0,
+          require_confirm: false,
+          not_before: cmd.not_before,
+          headers: cmd.headers,
+          payload: cmd.payload,
+          published: cmd.published,
+        };
+        await sendOrDie(buildFrame(Op.PublishDelayed, reqId, msg));
+        return;
+      }
+      case "publishDelayedConfirmed": {
+        const reqId = nextReqId();
+        waiters.set(reqId, { kind: "publish", deferred: cmd.reply });
+        const msg: PublishDelayedMsg = {
+          topic: cmd.topic,
+          group: cmd.group,
+          partition: 0,
+          require_confirm: true,
+          not_before: cmd.not_before,
+          headers: cmd.headers,
+          payload: cmd.payload,
+          published: cmd.published,
+        };
+        if (!(await sendOrDie(buildFrame(Op.PublishDelayed, reqId, msg)))) {
           waiters.delete(reqId);
         }
         return;
@@ -398,24 +435,6 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           requeue: cmd.requeue,
         };
         const ok = await sendOrDie(buildFrame(Op.Nack, cmd.request_id, msg));
-        if (ok) cmd.reply.resolve();
-        else cmd.reply.reject(new BrokenPipeError());
-        return;
-      }
-      case "reject": {
-        const sub = subs.get(cmd.sub_id);
-        if (!sub) {
-          cmd.reply.resolve();
-          return;
-        }
-        const msg: RejectMsg = {
-          topic: sub.topic,
-          group: sub.group,
-          partition: sub.partition,
-          tags: [cmd.tag],
-          requeue: cmd.requeue,
-        };
-        const ok = await sendOrDie(buildFrame(Op.Reject, cmd.request_id, msg));
         if (ok) cmd.reply.resolve();
         else cmd.reply.reject(new BrokenPipeError());
         return;
@@ -477,6 +496,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         const base: InternalDelivered = {
           delivery_tag: d.delivery_tag,
           payload: d.payload,
+          headers: d.headers,
           published: d.published,
           publish_received: d.publish_received,
           offset: d.offset,
@@ -578,6 +598,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
   for (const cmd of commandQueue.drain()) {
     switch (cmd.type) {
       case "publishConfirmed":
+      case "publishDelayedConfirmed":
         cmd.reply.reject(cleanupError);
         break;
       case "subscribe":
@@ -586,9 +607,9 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         break;
       case "ack":
       case "nack":
-      case "reject":
         cmd.reply.reject(cleanupError);
         break;
+      case "publishDelayedUnconfirmed":
       case "publishUnconfirmed":
         // No reply to fail.
         break;

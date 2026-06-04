@@ -8,17 +8,17 @@ Fibril is pre-alpha infrastructure. This table distinguishes the working baselin
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Durable queues | Tested baseline | Append-only message and event logs, snapshot, and replay |
-| Publish and subscribe | Available | Custom TCP protocol and Rust client |
+| Publish and subscribe | Available | Custom TCP protocol, Rust client, and TypeScript client |
 | Explicit acknowledgements | Available | ACK, immediate requeue, terminal failure |
 | Leasing | Available | Expired leases can return to ready |
 | Backpressure | Available | Pull-based delivery and bounded prefetch |
-| Delayed publish | Available | Broker/Stroma support exists; Rust client exposes delayed publish methods |
+| Delayed publish | Available | Broker/Stroma support exists; Rust and TypeScript clients expose delayed publish methods |
 | Delayed retry | Partial | Stroma state supports delayed retry; public client/broker path is not wired end to end |
 | Dead lettering | Partial | Stroma has custom/discard DLQ policy and tests; public broker configuration is not exposed yet |
 | TypeScript client | Early | Lives under `clients/typescript` |
 | Replication | Planned | Design work in progress |
 | Clustering | Planned | Not implemented |
-| Transactions | Not planned initially | Not the current focus |
+| Transactions | Out of scope | Not planned; transactional publish/consume workflows are intentionally excluded |
 
 ## Early performance observations
 

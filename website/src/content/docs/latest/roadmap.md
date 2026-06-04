@@ -27,6 +27,6 @@ Fibril is still early. The near-term roadmap is about making the existing semant
 - Clustering and partition ownership.
 - More complete client ecosystem.
 
-## Not initially planned
+## Out of scope
 
-Transactions are not an initial goal. Fibril is aiming for clear durable messaging semantics, not a clone of every broker feature.
+Transactions are not planned. Fibril is aiming for clear durable messaging semantics, not a clone of every broker feature, and transactional publish/consume workflows are intentionally out of scope.

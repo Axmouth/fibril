@@ -3,7 +3,7 @@
   <pre><code><span class="code-keyword">while let</span> Some(msg) = sub.<span class="code-function">recv</span>().await? &#123;
     <span class="code-keyword">match</span> send_email(msg.<span class="code-function">content</span>()?).await &#123;
         Ok(_) =&gt; msg.<span class="code-function">complete</span>().await?,
-        Err(_) =&gt; msg.<span class="code-function">retry_after</span>(<span class="code-number">30</span>).await?,
+        Err(_) =&gt; msg.<span class="code-function">retry</span>().await?,
     &#125;;
 &#125;
 
