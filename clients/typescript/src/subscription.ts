@@ -16,6 +16,9 @@ import type { Client } from "./client.js";
 
 /**
  * A delivered message in auto-ack mode (no settle action required).
+ *
+ * `deserialize()` chooses a decoder from `content-type`; missing content type
+ * defaults to msgpack.
  */
 export class Message {
   readonly deliveryTag: DeliveryTag;
@@ -39,6 +42,11 @@ export class Message {
 
   /**
    * Decode by `content-type`. Missing content type defaults to msgpack.
+   *
+   * @example
+   * ```ts
+   * const job = msg.deserialize<{ id: number }>();
+   * ```
    */
   deserialize<T>(): T {
     try {
@@ -51,22 +59,37 @@ export class Message {
     }
   }
 
+  /**
+   * Return the message `content-type` header, if present.
+   */
   contentType(): string | undefined {
     return this.headers["content-type"];
   }
 
+  /**
+   * Decode the payload as msgpack, ignoring `content-type`.
+   */
   msgpack<T>(): T {
     return deserializeByContentType<T>("application/msgpack", this.payload);
   }
 
+  /**
+   * Decode the payload as JSON, ignoring `content-type`.
+   */
   json<T>(): T {
     return deserializeByContentType<T>("application/json", this.payload);
   }
 
+  /**
+   * Return the raw payload bytes.
+   */
   raw(): Uint8Array {
     return this.payload;
   }
 
+  /**
+   * Decode the payload as UTF-8 text.
+   */
   content(): string {
     try {
       return new TextDecoder().decode(this.payload);
@@ -85,6 +108,9 @@ type SettleState =
 /**
  * A delivered message in manual-ack mode. Must be settled with one of
  * `complete()`, `fail()`, or `retry()`. Calling more than once throws.
+ *
+ * Dropping an `InflightMessage` without settling it does not acknowledge the
+ * message.
  */
 export class InflightMessage {
   readonly deliveryTag: DeliveryTag;
@@ -111,6 +137,9 @@ export class InflightMessage {
     this.#deliverRequestId = d.deliver_request_id;
   }
 
+  /**
+   * Decode by `content-type`. Missing content type defaults to msgpack.
+   */
   deserialize<T>(): T {
     try {
       return deserializeByContentType<T>(this.contentType(), this.payload);
@@ -122,22 +151,37 @@ export class InflightMessage {
     }
   }
 
+  /**
+   * Return the message `content-type` header, if present.
+   */
   contentType(): string | undefined {
     return this.headers["content-type"];
   }
 
+  /**
+   * Decode the payload as msgpack, ignoring `content-type`.
+   */
   msgpack<T>(): T {
     return deserializeByContentType<T>("application/msgpack", this.payload);
   }
 
+  /**
+   * Decode the payload as JSON, ignoring `content-type`.
+   */
   json<T>(): T {
     return deserializeByContentType<T>("application/json", this.payload);
   }
 
+  /**
+   * Return the raw payload bytes.
+   */
   raw(): Uint8Array {
     return this.payload;
   }
 
+  /**
+   * Decode the payload as UTF-8 text.
+   */
   content(): string {
     try {
       return new TextDecoder().decode(this.payload);
@@ -148,7 +192,11 @@ export class InflightMessage {
     }
   }
 
-  /** Acknowledge successful processing. */
+  /**
+   * Acknowledge successful processing.
+   *
+   * Resolves with a settled `Message` view of the same payload and metadata.
+   */
   async complete(): Promise<Message> {
     this.#assertOpen();
     this.#state = { kind: "settled" };
@@ -164,7 +212,12 @@ export class InflightMessage {
     return this.#asMessage();
   }
 
-  /** Negatively acknowledge without requeue (message is dropped/dead-lettered server-side). */
+  /**
+   * Negatively acknowledge without requeue.
+   *
+   * Depending on queue configuration, the broker may drop or dead-letter the
+   * message.
+   */
   async fail(): Promise<Message> {
     this.#assertOpen();
     this.#state = { kind: "settled" };
@@ -181,7 +234,11 @@ export class InflightMessage {
     return this.#asMessage();
   }
 
-  /** Negatively acknowledge with requeue (message will be redelivered). */
+  /**
+   * Negatively acknowledge with requeue.
+   *
+   * The message becomes eligible for redelivery.
+   */
   async retry(): Promise<Message> {
     this.#assertOpen();
     this.#state = { kind: "settled" };
@@ -224,6 +281,24 @@ export class InflightMessage {
  * Iteration ends cleanly when the subscription is closed by the user
  * (via `close()`); it throws `DisconnectionError` (or other `FibrilError`)
  * if the engine dies.
+ *
+ * @example
+ * ```ts
+ * const sub = await client
+ *   .subscribe("email.send")
+ *   .group("workers")
+ *   .prefetch(32)
+ *   .subManualAck();
+ *
+ * for await (const msg of sub) {
+ *   try {
+ *     await process(msg.deserialize<Job>());
+ *     await msg.complete();
+ *   } catch {
+ *     await msg.retry();
+ *   }
+ * }
+ * ```
  */
 export class Subscription implements AsyncIterable<InflightMessage> {
   readonly #engine: Engine;
@@ -243,7 +318,7 @@ export class Subscription implements AsyncIterable<InflightMessage> {
     return new InflightMessage(this.#engine, v);
   }
 
-  /** Close this subscription. The engine continues running. */
+  /** Close this subscription. The client engine continues running. */
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -262,6 +337,8 @@ export class Subscription implements AsyncIterable<InflightMessage> {
 /**
  * Subscription with automatic (client-side) acknowledgement. The user
  * receives `Message` directly with no settle action required.
+ *
+ * Prefer manual acknowledgements when processing correctness matters.
  */
 export class AutoAckedSubscription implements AsyncIterable<Message> {
   readonly #queue: BoundedQueue<InternalDelivered>;
@@ -272,12 +349,14 @@ export class AutoAckedSubscription implements AsyncIterable<Message> {
     this.#queue = queue;
   }
 
+  /** Receive the next message, or `null` if the subscription is closed cleanly. */
   async recv(): Promise<Message | null> {
     const v = await this.#queue.recv();
     if (v === null) return null;
     return new Message(v);
   }
 
+  /** Close this subscription. The client engine continues running. */
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -295,6 +374,9 @@ export class AutoAckedSubscription implements AsyncIterable<Message> {
 
 /**
  * Builder for subscription requests.
+ *
+ * Construct with `client.subscribe(topic)`, then call `subManualAck()` or
+ * `subAutoAck()`.
  */
 export class SubscriptionBuilder {
   readonly #client: Client;
@@ -308,11 +390,22 @@ export class SubscriptionBuilder {
     this.#topic = topic;
   }
 
+  /**
+   * Set the consumer group.
+   *
+   * Subscribers using the same topic and group share work.
+   */
   group(group: string): this {
     this.#group = group;
     return this;
   }
 
+  /**
+   * Set the maximum number of messages the broker may lease ahead.
+   *
+   * Higher values improve throughput but increase the number of messages that
+   * may need redelivery if the client disconnects before settling them.
+   */
   prefetch(prefetch: number): this {
     if (prefetch < 1 || !Number.isInteger(prefetch)) {
       throw new Error("prefetch must be a positive integer");
@@ -321,7 +414,11 @@ export class SubscriptionBuilder {
     return this;
   }
 
-  /** Subscribe with manual acknowledgement (must call complete/fail/retry). */
+  /**
+   * Subscribe with manual acknowledgement.
+   *
+   * Each received `InflightMessage` must be settled by the user.
+   */
   async subManualAck(): Promise<Subscription> {
     const reply = deferred<BoundedQueue<InternalInflight>>();
     const engine = this.#client._engine();
@@ -345,7 +442,9 @@ export class SubscriptionBuilder {
     return new Subscription(engine, queue);
   }
 
-  /** Subscribe with client-side automatic acknowledgement. */
+  /**
+   * Subscribe with client-side automatic acknowledgement.
+   */
   async subAutoAck(): Promise<AutoAckedSubscription> {
     const reply = deferred<BoundedQueue<InternalDelivered>>();
     const engine = this.#client._engine();

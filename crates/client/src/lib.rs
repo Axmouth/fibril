@@ -1,3 +1,34 @@
+//! Async Rust client for a Fibril broker.
+//!
+//! The client is built around a single connection, topic-scoped publishers, and
+//! subscriptions that either expose manual acknowledgements or client-side
+//! auto-ack convenience.
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! use fibril_client::{ClientOptions, NewMessage};
+//!
+//! # async fn example() -> fibril_client::FibrilResult<()> {
+//! let client = ClientOptions::new()
+//!     .auth("fibril", "fibril")
+//!     .connect("127.0.0.1:9876")
+//!     .await?;
+//!
+//! let publisher = client.publisher("email.send");
+//! let offset = publisher
+//!     .publish(NewMessage::json(&serde_json::json!({
+//!         "to": "user@example.com",
+//!         "template": "welcome",
+//!     }))?)
+//!     .await?;
+//!
+//! println!("published at offset {offset}");
+//! client.shutdown().await;
+//! # Ok(())
+//! # }
+//! ```
+
 use fibril_storage::DeliveryTag;
 use fibril_util::{UnixMillis, unix_millis};
 use futures::{SinkExt, StreamExt};
@@ -24,29 +55,60 @@ use fibril_protocol::v1::{
 
 // ===== Public API ============================================================
 
+/// Error type returned by the Fibril Rust client.
+///
+/// Most operations return [`FibrilResult`]. Connection and shutdown related
+/// failures are reported as [`FibrilError::Disconnection`] or
+/// [`FibrilError::BrokenPipe`]; server-side request failures use
+/// [`FibrilError::Failure`].
 #[derive(Debug, Clone, Error)]
 pub enum FibrilError {
+    /// The TCP connection could not be established or was lost.
     #[error("Client was disconnected: {msg}")]
     Disconnection { msg: String },
+    /// A payload or protocol message could not be decoded.
     #[error("Failed to deserialize data: {msg}")]
     DeserializationFailure { msg: String },
+    /// A user payload could not be encoded for publishing.
     #[error("Failed to serialize data: {msg}")]
     SerializationFailure { msg: String },
+    /// The user-facing handle can no longer reach the connection engine.
     #[error("Connection to the Client was severed, reconnection is advised")]
     BrokenPipe,
+    /// The broker rejected a request with a structured error response.
     #[error("Server returned error code {code}: {msg}")]
     Failure { code: u16, msg: String },
+    /// The connection ended before the expected protocol exchange completed.
     #[error("EOF")]
     Eof,
+    /// A protocol invariant or internal state expectation was violated.
     #[error("Unexpected error: {msg}")]
     Unexpected { msg: String },
 }
 
+/// Result alias used by the Fibril Rust client.
 pub type FibrilResult<T> = Result<T, FibrilError>;
 
 // TODO: Explore From<..> impls for relevant error types
 // TODO: Add opt in event per message sent/received
 
+/// A connected Fibril broker client.
+///
+/// Clone values share the same underlying connection engine. Use
+/// [`Client::publisher`] to create topic-scoped publishers and
+/// [`Client::subscribe`] to create subscriptions.
+///
+/// ```no_run
+/// use fibril_client::ClientOptions;
+///
+/// # async fn example() -> fibril_client::FibrilResult<()> {
+/// let client = ClientOptions::new().connect("127.0.0.1:9876").await?;
+/// let publisher = client.publisher("jobs");
+/// publisher.publish("hello").await?;
+/// client.shutdown().await;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Client {
     address: SocketAddr,
@@ -54,6 +116,11 @@ pub struct Client {
     engine: Arc<EngineHandle>,
 }
 
+/// Topic-scoped handle for publishing messages.
+///
+/// Create with [`Client::publisher`] or [`Client::publisher_grouped`]. Plain
+/// serializable values are encoded as msgpack by default; use [`NewMessage`]
+/// for JSON, text, raw bytes, or custom headers.
 #[derive(Debug, Clone)]
 pub struct Publisher {
     engine: Arc<EngineHandle>,
@@ -61,69 +128,119 @@ pub struct Publisher {
     group: Option<String>,
 }
 
+/// Manual-acknowledgement subscription.
+///
+/// Messages received from this subscription are [`InflightMessage`] values and
+/// must be settled with [`InflightMessage::complete`],
+/// [`InflightMessage::fail`], or [`InflightMessage::retry`].
 pub struct Subscription {
     rx: mpsc::Receiver<InflightMessage>,
 }
 
+/// Client-side auto-ack subscription.
+///
+/// This is a convenience mode that yields [`Message`] directly. Use manual ack
+/// when processing correctness depends on explicit success/failure handling.
 pub struct AutoAckedSubscription {
     rx: mpsc::Receiver<Message>,
 }
 
+/// Delivered message payload and metadata.
+///
+/// [`Message::deserialize`] chooses a decoder from the `content-type` header.
+/// Missing or empty content type defaults to msgpack.
 pub struct Message {
+    /// Broker delivery tag used internally for acknowledgement.
     pub delivery_tag: DeliveryTag,
+    /// Publisher-provided Unix timestamp in milliseconds.
     pub published: UnixMillis,
+    /// Broker receive timestamp in Unix milliseconds.
     pub publish_received: UnixMillis,
+    /// User headers plus any broker-provided headers.
     pub headers: HashMap<String, String>,
+    /// Raw message body bytes.
     pub payload: Vec<u8>,
 }
 
 impl Message {
+    /// Return the message `content-type` header, if present.
     pub fn content_type(&self) -> Option<&str> {
         self.headers.get("content-type").map(String::as_str)
     }
 
+    /// Deserialize using `content-type`.
+    ///
+    /// Supports `application/msgpack` (also the default when absent) and
+    /// `application/json`.
     pub fn deserialize<T: DeserializeOwned>(&self) -> FibrilResult<T> {
         deserialize_by_content_type(self.content_type(), &self.payload)
     }
 
+    /// Deserialize the payload as msgpack, ignoring `content-type`.
     pub fn msg_pack<T: DeserializeOwned>(&self) -> FibrilResult<T> {
         rmp_serde::from_slice(&self.payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
     }
 
+    /// Deserialize the payload as JSON, ignoring `content-type`.
     pub fn json<T: DeserializeOwned>(&self) -> FibrilResult<T> {
         serde_json::from_slice(&self.payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
     }
 
+    /// Borrow the raw payload bytes.
     pub fn raw(&self) -> &[u8] {
         &self.payload
     }
 
+    /// Decode the payload as UTF-8 text.
     pub fn content(&self) -> Result<&str, FibrilError> {
         std::str::from_utf8(&self.payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
     }
 }
 
+/// Message builder for explicit publish payload encoding and headers.
+///
+/// Plain values passed to [`Publisher::publish`] are msgpack encoded
+/// automatically. Use `NewMessage` when you want explicit encoding, raw bytes,
+/// text, or custom headers.
+///
+/// ```no_run
+/// use fibril_client::NewMessage;
+///
+/// # async fn example(publisher: fibril_client::Publisher) -> fibril_client::FibrilResult<()> {
+/// publisher
+///     .publish(
+///         NewMessage::content("hello")
+///             .header("x-trace-id", "abc123"),
+///     )
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct NewMessage {
+    /// Encoded payload bytes sent to the broker.
     pub payload: Vec<u8>,
     headers: HashMap<String, String>,
 }
 
 impl NewMessage {
+    /// Encode a serializable value as msgpack and set `application/msgpack`.
     pub fn msg_pack<T: serde::Serialize>(payload: &T) -> FibrilResult<Self> {
         rmp_serde::to_vec(payload)
             .map(|payload| NewMessage::with_content_type(payload, "application/msgpack"))
             .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })
     }
 
+    /// Encode a serializable value as JSON and set `application/json`.
     pub fn json<T: serde::Serialize>(payload: &T) -> FibrilResult<Self> {
         serde_json::to_vec(payload)
             .map(|payload| NewMessage::with_content_type(payload, "application/json"))
             .map_err(|e| FibrilError::SerializationFailure { msg: e.to_string() })
     }
 
+    /// Publish raw bytes without setting a content type.
     pub fn raw(payload: Vec<u8>) -> Self {
         NewMessage {
             payload,
@@ -131,19 +248,26 @@ impl NewMessage {
         }
     }
 
+    /// Publish UTF-8 text and set `text/plain; charset=utf-8`.
     pub fn content(payload: impl Into<Vec<u8>>) -> Self {
         NewMessage::with_content_type(payload.into(), "text/plain; charset=utf-8")
     }
 
+    /// Add or replace a header.
+    ///
+    /// Fibril reserves `fibril.*` headers for broker-owned metadata; user code
+    /// should avoid that prefix.
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(key.into(), value.into());
         self
     }
 
+    /// Set the `content-type` header.
     pub fn content_type(self, content_type: impl Into<String>) -> Self {
         self.header("content-type", content_type)
     }
 
+    /// Borrow the headers that will be sent with this message.
     pub fn headers(&self) -> &HashMap<String, String> {
         &self.headers
     }
@@ -155,7 +279,12 @@ impl NewMessage {
     }
 }
 
+/// Value that can be published by a [`Publisher`].
+///
+/// [`NewMessage`] preserves its explicit payload and headers. Other
+/// serializable values are encoded with [`NewMessage::msg_pack`].
 pub trait Publishable {
+    /// Convert into a publishable message.
     fn into_message(self) -> FibrilResult<NewMessage>;
 }
 
@@ -171,6 +300,7 @@ impl<T: Serialize> Publishable for T {
     }
 }
 
+#[doc(hidden)]
 pub enum SettleRequest {
     Ack {
         tag: DeliveryTag,
@@ -185,9 +315,15 @@ pub enum SettleRequest {
     },
 }
 
+/// Type accepted as a delayed publish interval.
+///
+/// Numeric implementations are interpreted as seconds in the Rust client.
+/// Use [`std::time::Duration`] when the unit should be explicit.
 pub trait Delayable {
+    /// Convert the value into a relative delay.
     fn with_delay(&self) -> std::time::Duration;
 
+    /// Convert the relative delay into a Unix-millisecond deadline.
     fn deadline(&self) -> UnixMillis {
         unix_millis() + self.with_delay().as_millis() as u64
     }
@@ -224,17 +360,32 @@ impl Delayable for std::time::Duration {
 }
 
 #[must_use]
+/// Delivered message that is leased to a manual-ack subscription.
+///
+/// Dropping an `InflightMessage` without settling it does not acknowledge the
+/// message. Settle it with [`complete`](Self::complete),
+/// [`fail`](Self::fail), or [`retry`](Self::retry).
 pub struct InflightMessage {
+    /// Broker delivery tag used for acknowledgement.
     pub delivery_tag: DeliveryTag,
+    /// Publisher-provided Unix timestamp in milliseconds.
     pub published: UnixMillis,
+    /// Broker receive timestamp in Unix milliseconds.
     pub publish_received: UnixMillis,
+    /// User headers plus any broker-provided headers.
     pub headers: HashMap<String, String>,
+    /// Raw message body bytes.
     pub payload: Vec<u8>,
+    #[doc(hidden)]
     pub request_id: u64,
     settle: oneshot::Sender<SettleRequest>,
 }
 
 impl InflightMessage {
+    /// Acknowledge successful processing and return the settled message.
+    ///
+    /// After this succeeds, the broker can advance the queue's settled
+    /// frontier when earlier messages are also settled.
     pub async fn complete(self) -> FibrilResult<Message> {
         let InflightMessage {
             delivery_tag,
@@ -263,6 +414,10 @@ impl InflightMessage {
         })
     }
 
+    /// Negatively acknowledge without requeueing.
+    ///
+    /// Depending on queue configuration, the broker may drop or dead-letter the
+    /// message.
     pub async fn fail(self) -> FibrilResult<Message> {
         let InflightMessage {
             delivery_tag,
@@ -292,6 +447,7 @@ impl InflightMessage {
         })
     }
 
+    /// Negatively acknowledge and make the message eligible for redelivery.
     pub async fn retry(self) -> FibrilResult<Message> {
         let InflightMessage {
             delivery_tag,
@@ -321,15 +477,24 @@ impl InflightMessage {
         })
     }
 
+    /// Negatively acknowledge and retry after a delay.
+    ///
+    /// This method is not wired yet and will panic. Use [`retry`](Self::retry)
+    /// for supported immediate retry behavior.
     pub async fn retry_after(self, delay: impl Delayable) -> FibrilResult<Message> {
         let _deadline = delay.deadline();
         todo!()
     }
 
+    /// Return the message `content-type` header, if present.
     pub fn content_type(&self) -> Option<&str> {
         self.headers.get("content-type").map(String::as_str)
     }
 
+    /// Deserialize using `content-type`.
+    ///
+    /// Supports `application/msgpack` (also the default when absent) and
+    /// `application/json`.
     pub fn deserialize<T: DeserializeOwned>(&self) -> FibrilResult<T> {
         deserialize_by_content_type(self.content_type(), &self.payload)
     }
@@ -366,6 +531,26 @@ enum Waiter {
 }
 
 #[derive(Debug, Clone)]
+/// Builder for subscription options.
+///
+/// Construct with [`Client::subscribe`], optionally set a group and prefetch,
+/// then choose manual or auto acknowledgement.
+///
+/// ```no_run
+/// # async fn example(client: fibril_client::Client) -> fibril_client::FibrilResult<()> {
+/// let mut sub = client
+///     .subscribe("email.send")
+///     .group("workers")
+///     .prefetch(32)
+///     .sub_manual_ack()
+///     .await?;
+///
+/// while let Some(msg) = sub.recv().await {
+///     msg.complete().await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct SubscriptionBuilder<'a> {
     client: &'a Client,
     topic: String,
@@ -374,17 +559,26 @@ pub struct SubscriptionBuilder<'a> {
 }
 
 impl<'a> SubscriptionBuilder<'a> {
+    /// Set the consumer group.
+    ///
+    /// Subscribers using the same topic and group share work.
     pub fn group(mut self, group: impl Into<String>) -> Self {
         self.group = Some(group.into());
         self
     }
 
+    /// Set the maximum number of messages the broker may lease ahead.
+    ///
+    /// Higher values improve throughput but increase the number of messages
+    /// that may need redelivery if the client disconnects before settling them.
     pub fn prefetch(mut self, prefetch: u32) -> Self {
         self.prefetch = prefetch;
         self
     }
 
-    /// Messages must be acked explicitly; otherwise they may be redelivered.
+    /// Subscribe with manual acknowledgements.
+    ///
+    /// Each received [`InflightMessage`] must be settled explicitly.
     #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
     pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
         let req = Subscribe {
@@ -398,7 +592,10 @@ impl<'a> SubscriptionBuilder<'a> {
         Ok(Subscription { rx })
     }
 
-    /// Messages that have been received by the client will not be redelivered..
+    /// Subscribe with client-side automatic acknowledgement.
+    ///
+    /// This yields [`Message`] directly. Prefer manual acknowledgement when
+    /// processing correctness matters.
     #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
     pub async fn sub_auto_ack(self) -> FibrilResult<AutoAckedSubscription> {
         let req = Subscribe {
@@ -416,7 +613,10 @@ impl<'a> SubscriptionBuilder<'a> {
 // ===== Client API =============================================================
 
 impl Client {
-    /// Connect to a server socket.
+    /// Connect to a broker TCP socket.
+    ///
+    /// The address must resolve to exactly one socket address. Use
+    /// [`ClientOptions::connect`] for the builder-style equivalent.
     #[tracing::instrument(fields(address = ?address, opts = ?opts))]
     pub async fn connect(
         address: impl ToSocketAddrs + fmt::Debug,
@@ -436,9 +636,11 @@ impl Client {
         })
     }
 
-    /// Replaces the internal engine with a new connection.
-    /// Existing Publishers/Subscriptions created from the old connection
-    /// will remain "broken" (returning BrokenPipe/None).
+    /// Replace the internal engine with a new connection.
+    ///
+    /// Existing [`Publisher`] and [`Subscription`] handles created from the old
+    /// connection remain attached to the old engine and will fail with
+    /// [`FibrilError::BrokenPipe`] or end their receive streams.
     #[tracing::instrument(fields(address = ?self.address, opts = ?self.opts))]
     pub async fn reconnect(&mut self) -> FibrilResult<()> {
         let address = self.address;
@@ -458,9 +660,10 @@ impl Client {
         Ok(())
     }
 
-    /// Replaces the internal engine with a new connection.
-    /// Will attempt to restore existing Publishers/Subscriptions created from the old connection
-    /// returning an error if it does not fully succeed. Could lead to duplicated messages.
+    /// Reconnect and restore existing handles.
+    ///
+    /// This is not implemented yet. Use [`reconnect`](Self::reconnect) and
+    /// recreate publishers/subscriptions explicitly.
     // TODO: try to handle inflight acks etc (resend?)
     #[tracing::instrument(fields(address = ?self.address, opts = ?self.opts))]
     pub async fn reconnect_restore(&mut self) -> FibrilResult<()> {
@@ -486,7 +689,7 @@ impl Client {
         Ok(first_address)
     }
 
-    /// Get a handle that you can use to publish messages to a specific topic.
+    /// Create a publisher for a topic without a group.
     #[tracing::instrument(fields(topic = %topic))]
     pub fn publisher(&self, topic: impl Into<String> + fmt::Display) -> Publisher {
         Publisher {
@@ -496,7 +699,10 @@ impl Client {
         }
     }
 
-    /// Get a handle that you can use to publish messages to a specific grouped topic.
+    /// Create a publisher for a grouped topic.
+    ///
+    /// Grouping is part of the queue identity and should match the consumer
+    /// group semantics you want for the topic.
     #[tracing::instrument(fields(topic = %topic, group = %group))]
     pub fn publisher_grouped(
         &self,
@@ -510,7 +716,7 @@ impl Client {
         }
     }
 
-    /// Subscribe to receive messages from a topic, with manual acknowledgements.
+    /// Start building a subscription to a topic.
     pub fn subscribe(&'_ self, topic: impl Into<String> + fmt::Display) -> SubscriptionBuilder<'_> {
         SubscriptionBuilder {
             client: self,
@@ -520,7 +726,9 @@ impl Client {
         }
     }
 
-    /// Gracefully shut down the client, closing the connection and all subscription channels.
+    /// Gracefully shut down the client.
+    ///
+    /// This closes the connection engine and wakes subscription receivers.
     pub async fn shutdown(&self) {
         self.engine.shutdown.notify_waiters();
     }
@@ -529,8 +737,10 @@ impl Client {
 // TODO: Replace serializeable with NewMessage struct, so the user can easily choose form of serialization
 // TODO: perhaps use generics so that it defaults to message pack and can be used transparently
 impl Publisher {
-    // TODO: return a confirmer handle?
-    /// Publish a message with manual confirmation
+    /// Publish without waiting for broker confirmation.
+    ///
+    /// This only waits for the command to be accepted by the local engine. Use
+    /// [`publish`](Self::publish) when you need the broker-assigned offset.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_unconfirmed<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;
@@ -545,7 +755,9 @@ impl Publisher {
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
-    /// Publish a message with automatic confirmation (only returns once the server's publish confirm is received)
+    /// Publish and wait for broker confirmation.
+    ///
+    /// Resolves with the broker-assigned topic offset.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
         let message = payload.into_message()?;
@@ -561,6 +773,10 @@ impl Publisher {
         // TODO: Or return a notifier you can await? As like async fn PublishResult::confirmed()
     }
 
+    /// Publish after a relative delay without waiting for broker confirmation.
+    ///
+    /// Numeric Rust delays are seconds; use [`std::time::Duration`] for
+    /// explicit units.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_unconfirmed_delayed<T: Publishable, D: Delayable + Debug>(
         &self,
@@ -580,6 +796,10 @@ impl Publisher {
             .await
     }
 
+    /// Publish after a relative delay and wait for broker confirmation.
+    ///
+    /// Resolves with the broker-assigned topic offset. Numeric Rust delays are
+    /// seconds; use [`std::time::Duration`] for explicit units.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_delayed<T: Publishable, D: Delayable + Debug>(
         &self,
@@ -599,6 +819,7 @@ impl Publisher {
             .await
     }
 
+    /// Alias for [`publish_delayed`](Self::publish_delayed).
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_with_delayed<T: Publishable, D: Delayable + Debug>(
         &self,
@@ -610,11 +831,14 @@ impl Publisher {
 }
 
 impl Subscription {
+    /// Receive the next manual-ack message.
+    ///
+    /// Returns `None` when the subscription channel closes.
     pub async fn recv(&mut self) -> Option<InflightMessage> {
         self.rx.recv().await
     }
 
-    // TODO: use tokio_stream::wrappers::ReceiverStream?
+    /// Convert this subscription into a stream of manual-ack messages.
     pub fn into_stream(self) -> impl futures::Stream<Item = InflightMessage> {
         futures::stream::unfold(self, |mut s| async move {
             s.rx.recv().await.map(|msg| (msg, s))
@@ -623,11 +847,14 @@ impl Subscription {
 }
 
 impl AutoAckedSubscription {
+    /// Receive the next auto-ack message.
+    ///
+    /// Returns `None` when the subscription channel closes.
     pub async fn recv(&mut self) -> Option<Message> {
         self.rx.recv().await
     }
 
-    // TODO: use tokio_stream::wrappers::ReceiverStream?
+    /// Convert this subscription into a stream of messages.
     pub fn into_stream(self) -> impl futures::Stream<Item = Message> {
         futures::stream::unfold(self, |mut s| async move {
             s.rx.recv().await.map(|msg| (msg, s))
@@ -1394,14 +1621,37 @@ impl EngineHandle {
 // ===== Options ===============================================================
 
 #[derive(Debug, Clone)]
+/// Connection options for [`Client`].
+///
+/// Use [`ClientOptions::new`] for defaults, then chain authentication and
+/// heartbeat settings before connecting.
+///
+/// ```no_run
+/// use fibril_client::ClientOptions;
+///
+/// # async fn example() -> fibril_client::FibrilResult<()> {
+/// let client = ClientOptions::new()
+///     .auth("fibril", "fibril")
+///     .heartbeat_interval(30)
+///     .connect("127.0.0.1:9876")
+///     .await?;
+/// client.shutdown().await;
+/// # Ok(())
+/// # }
+/// ```
 pub struct ClientOptions {
+    /// Name sent during the protocol handshake.
     pub client_name: String,
+    /// Version sent during the protocol handshake.
     pub client_version: String,
+    /// Optional username/password auth sent after handshake.
     pub auth: Option<Auth>,
+    /// Optional heartbeat interval in seconds. Server timeout is 3x this value.
     pub heartbeat_interval: Option<u64>,
 }
 
 impl ClientOptions {
+    /// Create default options for the Rust client.
     pub fn new() -> Self {
         let client_version = env!("CARGO_PKG_VERSION");
         let client_name = "Fibril Rust Client";
@@ -1413,6 +1663,7 @@ impl ClientOptions {
         }
     }
 
+    /// Return a copy with username/password authentication configured.
     pub fn auth(self, username: impl Into<String>, password: impl Into<String>) -> Self {
         Self {
             auth: Some(Auth {
@@ -1423,6 +1674,7 @@ impl ClientOptions {
         }
     }
 
+    /// Return a copy with a heartbeat interval in seconds.
     pub fn heartbeat_interval(self, interval: u64) -> Self {
         Self {
             heartbeat_interval: Some(interval),
@@ -1430,6 +1682,7 @@ impl ClientOptions {
         }
     }
 
+    /// Connect using these options.
     pub async fn connect(self, address: impl ToSocketAddrs + fmt::Debug) -> FibrilResult<Client> {
         Client::connect(address, self).await
     }

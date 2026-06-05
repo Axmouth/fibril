@@ -1,5 +1,16 @@
 /**
  * Base class for all errors thrown by the Fibril client.
+ *
+ * @example
+ * ```ts
+ * try {
+ *   await publisher.publish({ id: 1 });
+ * } catch (err) {
+ *   if (err instanceof FibrilError) {
+ *     console.error(err.name, err.message);
+ *   }
+ * }
+ * ```
  */
 export class FibrilError extends Error {
   override readonly name: string = "FibrilError";
@@ -46,6 +57,7 @@ export class BrokenPipeError extends FibrilError {
  */
 export class ServerError extends FibrilError {
   override readonly name = "ServerError";
+  /** Numeric broker error code. */
   readonly code: number;
   constructor(code: number, message: string) {
     super(`Server error ${code}: ${message}`);

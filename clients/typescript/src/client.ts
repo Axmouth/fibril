@@ -5,9 +5,22 @@ import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
 import type { AuthMsg } from "./protocol.js";
 
+/**
+ * Options used during client startup and protocol handshake.
+ *
+ * @example
+ * ```ts
+ * const opts = new ClientOptions({
+ *   clientName: "worker",
+ * }).withAuth("fibril", "fibril");
+ * ```
+ */
 export interface ClientOptionsInit {
+  /** Name sent to the broker during handshake. */
   clientName?: string;
+  /** Version sent to the broker during handshake. */
   clientVersion?: string;
+  /** Optional username/password authentication. */
   auth?: AuthMsg;
   /** Heartbeat interval in seconds. Server-side timeout is 3x this value. */
   heartbeatIntervalSeconds?: number;
@@ -16,6 +29,11 @@ export interface ClientOptionsInit {
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
 const DEFAULT_CLIENT_VERSION = "0.1.0";
 
+/**
+ * Immutable connection option builder.
+ *
+ * Use `new ClientOptions().withAuth(...).connect(...)` for the common path.
+ */
 export class ClientOptions {
   readonly clientName: string;
   readonly clientVersion: string;
@@ -29,6 +47,9 @@ export class ClientOptions {
     this.heartbeatIntervalSeconds = init.heartbeatIntervalSeconds;
   }
 
+  /**
+   * Return a copy with username/password authentication configured.
+   */
   withAuth(username: string, password: string): ClientOptions {
     return new ClientOptions({
       clientName: this.clientName,
@@ -38,6 +59,9 @@ export class ClientOptions {
     });
   }
 
+  /**
+   * Return a copy with heartbeat interval configured in seconds.
+   */
   withHeartbeatInterval(seconds: number): ClientOptions {
     return new ClientOptions({
       clientName: this.clientName,
@@ -47,6 +71,16 @@ export class ClientOptions {
     });
   }
 
+  /**
+   * Connect to a broker with these options.
+   *
+   * @example
+   * ```ts
+   * const client = await new ClientOptions()
+   *   .withAuth("fibril", "fibril")
+   *   .connect("127.0.0.1:9876");
+   * ```
+   */
   connect(address: string | { host: string; port: number }): Promise<Client> {
     return Client.connect(address, this);
   }
@@ -100,6 +134,14 @@ function openSocket(host: string, port: number): Promise<Socket> {
 /**
  * Fibril broker client. Manages a single connection and dispatches
  * publish/subscribe operations through an internal engine.
+ *
+ * @example
+ * ```ts
+ * const client = await Client.connect("127.0.0.1:9876");
+ * const publisher = client.publisher("jobs");
+ * await publisher.publish({ id: 1 });
+ * await client.shutdown();
+ * ```
  */
 export class Client {
   readonly #address: { host: string; port: number };
@@ -117,7 +159,10 @@ export class Client {
   }
 
   /**
-   * Connect to a broker. The address can be `"host:port"` or an object.
+   * Connect to a broker.
+   *
+   * The address can be `"host:port"`, `"[ipv6]:port"`, or an object with
+   * `{ host, port }`.
    */
   static async connect(
     address: string | { host: string; port: number },
@@ -159,17 +204,29 @@ export class Client {
     oldEngine.shutdown();
   }
 
-  /** Get a publisher handle for a topic with no group. */
+  /**
+   * Get a publisher handle for a topic with no group.
+   */
   publisher(topic: string): Publisher {
     return new Publisher(this.#engine, topic, null);
   }
 
-  /** Get a publisher handle for a grouped topic. */
+  /**
+   * Get a publisher handle for a grouped topic.
+   *
+   * Grouping is part of the queue identity and should match the consumer group
+   * semantics you want for the topic.
+   */
   publisherGrouped(topic: string, group: string): Publisher {
     return new Publisher(this.#engine, topic, group);
   }
 
-  /** Build a subscription request. */
+  /**
+   * Build a subscription request.
+   *
+   * Chain `.group(...)` and `.prefetch(...)`, then call `.subManualAck()` or
+   * `.subAutoAck()`.
+   */
   subscribe(topic: string): SubscriptionBuilder {
     return new SubscriptionBuilder(this, topic);
   }

@@ -1,5 +1,7 @@
 // Wire protocol definitions. Mirrors fibril_protocol::v1.
+// Most application code should use Client, Publisher, and Subscription instead.
 
+/** Current Fibril TCP protocol version. */
 export const PROTOCOL_V1 = 1;
 
 /**
@@ -10,6 +12,7 @@ export const PROTOCOL_V1 = 1;
 export const COMPLIANCE_STRING =
   "v=1;license=MIT;ai_train=disallowed;policy=AI_POLICY.md";
 
+/** Numeric operation codes used in protocol frames. */
 export enum Op {
   Hello = 1,
   HelloOk = 2,
@@ -37,9 +40,13 @@ export enum Op {
   Error = 255,
 }
 
-// `DeliveryTag` is a struct on the wire: `{ epoch: u64 }`.
-// Kept as an object to match wire format and allow future fields.
+/**
+ * Broker delivery tag used to acknowledge or negatively acknowledge a delivery.
+ *
+ * This is an object to match the wire format and leave room for future fields.
+ */
 export interface DeliveryTag {
+  /** Delivery epoch assigned by the broker. */
   epoch: bigint;
 }
 
@@ -47,12 +54,14 @@ export interface DeliveryTag {
 // Field names and types must match the Rust structs exactly so msgpack
 // (named/map encoding) round-trips correctly.
 
+/** Client handshake frame body. */
 export interface Hello {
   client_name: string;
   client_version: string;
   protocol_version: number;
 }
 
+/** Successful server handshake response. */
 export interface HelloOk {
   protocol_version: number;
   client_id: unknown;
@@ -60,11 +69,13 @@ export interface HelloOk {
   compliance: string;
 }
 
+/** Username/password authentication frame body. */
 export interface AuthMsg {
   username: string;
   password: string;
 }
 
+/** Immediate publish frame body. */
 export interface PublishMsg {
   topic: string;
   partition: number;
@@ -75,14 +86,17 @@ export interface PublishMsg {
   published: bigint;
 }
 
+/** Delayed publish frame body. */
 export interface PublishDelayedMsg extends PublishMsg {
   not_before: bigint;
 }
 
+/** Publish confirmation frame body. */
 export interface PublishOkMsg {
   offset: bigint;
 }
 
+/** Subscribe frame body. */
 export interface SubscribeMsg {
   topic: string;
   group: string | null;
@@ -90,6 +104,7 @@ export interface SubscribeMsg {
   auto_ack: boolean;
 }
 
+/** Successful subscribe response body. */
 export interface SubscribeOkMsg {
   sub_id: bigint;
   topic: string;
@@ -98,6 +113,7 @@ export interface SubscribeOkMsg {
   prefetch: number;
 }
 
+/** Broker delivery frame body. */
 export interface DeliverMsg {
   sub_id: bigint;
   topic: string;
@@ -111,6 +127,7 @@ export interface DeliverMsg {
   payload: Uint8Array;
 }
 
+/** Acknowledgement frame body. */
 export interface AckMsg {
   topic: string;
   group: string | null;
@@ -118,6 +135,7 @@ export interface AckMsg {
   tags: DeliveryTag[];
 }
 
+/** Negative acknowledgement frame body. */
 export interface NackMsg {
   topic: string;
   group: string | null;
@@ -126,6 +144,7 @@ export interface NackMsg {
   requeue: boolean;
 }
 
+/** Structured broker error frame body. */
 export interface ErrorMsg {
   code: number;
   message: string;

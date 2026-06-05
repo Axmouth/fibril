@@ -3,6 +3,12 @@ import type { Engine } from "./engine.js";
 import { deferred } from "./internal/deferred.js";
 import { intoMessage, type Publishable } from "./message.js";
 
+/**
+ * Delay accepted by delayed publish methods.
+ *
+ * A number is a relative delay in milliseconds. A `Date` is treated as an
+ * absolute Unix-millisecond deadline.
+ */
 export type DelayInput = number | Date;
 
 function deadlineFromDelay(delay: DelayInput): bigint {
@@ -17,6 +23,14 @@ function deadlineFromDelay(delay: DelayInput): bigint {
  * Publish messages to a specific topic (and optional group).
  *
  * Construct via `client.publisher(topic)` or `client.publisherGrouped(topic, group)`.
+ *
+ * @example
+ * ```ts
+ * const publisher = client.publisher("email.send");
+ *
+ * const offset = await publisher.publish({ to: "user@example.com" });
+ * await publisher.publishUnconfirmed("fire and forget");
+ * ```
  */
 export class Publisher {
   readonly #engine: Engine;
@@ -30,10 +44,16 @@ export class Publisher {
     this.#group = group;
   }
 
+  /**
+   * Topic this publisher writes to.
+   */
   get topic(): string {
     return this.#topic;
   }
 
+  /**
+   * Optional queue group this publisher writes to.
+   */
   get group(): string | null {
     return this.#group;
   }
@@ -41,6 +61,9 @@ export class Publisher {
   /**
    * Publish without waiting for server confirmation. Plain values are
    * msgpack-encoded and tagged as `application/msgpack`.
+   *
+   * This only waits for the command to be accepted by the local client engine.
+   * Use `publish` when you need the broker-assigned offset.
    */
   async publishUnconfirmed<T>(payload: Publishable<T>): Promise<void> {
     const message = intoMessage(payload);
@@ -95,6 +118,9 @@ export class Publisher {
     return reply.promise;
   }
 
+  /**
+   * Publish a raw byte payload without waiting for broker confirmation.
+   */
   async publishBytesUnconfirmed(payload: Uint8Array): Promise<void> {
     await this.#engine.submit({
       type: "publishUnconfirmed",
@@ -109,6 +135,11 @@ export class Publisher {
   /**
    * Publish after a delay without waiting for server confirmation.
    * Numeric delays are milliseconds; `Date` is treated as an absolute deadline.
+   *
+   * @example
+   * ```ts
+   * await publisher.publishUnconfirmedDelayed("retry later", 30_000);
+   * ```
    */
   async publishUnconfirmedDelayed<T>(
     payload: Publishable<T>,
@@ -129,6 +160,14 @@ export class Publisher {
   /**
    * Publish after a delay and wait for broker confirmation.
    * Numeric delays are milliseconds; `Date` is treated as an absolute deadline.
+   *
+   * @example
+   * ```ts
+   * const offset = await publisher.publishDelayed(
+   *   { id: 42 },
+   *   new Date(Date.now() + 30_000),
+   * );
+   * ```
    */
   async publishDelayed<T>(
     payload: Publishable<T>,
@@ -154,6 +193,9 @@ export class Publisher {
     }
   }
 
+  /**
+   * Alias for `publishDelayed`.
+   */
   async publishWithDelayed<T>(
     payload: Publishable<T>,
     delay: DelayInput,
