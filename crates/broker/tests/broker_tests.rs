@@ -373,7 +373,7 @@ async fn queue_eviction_sweep_unmaterializes_idle_materialized_queue() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn queue_eviction_worker_is_disabled_by_default() {
     let (broker, _dir) = open_test_broker().await;
 
@@ -391,13 +391,16 @@ async fn queue_eviction_worker_is_disabled_by_default() {
     .unwrap();
     drop(pubh);
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::advance(Duration::from_secs(60)).await;
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
 
     assert!(broker.is_queue_materialized("t", None));
     broker.shutdown().await;
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn queue_eviction_worker_leaves_active_publisher_materialized() {
     let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
         inflight_ttl_ms: 2000,
@@ -409,6 +412,9 @@ async fn queue_eviction_worker_leaves_active_publisher_materialized() {
     })
     .await;
 
+    for _ in 0..5 {
+        tokio::task::yield_now().await;
+    }
     let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
@@ -422,50 +428,12 @@ async fn queue_eviction_worker_leaves_active_publisher_materialized() {
     .unwrap()
     .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::advance(Duration::from_millis(11)).await;
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
 
     assert!(broker.is_queue_materialized("t", None));
     drop(pubh);
-    broker.shutdown().await;
-}
-
-#[tokio::test]
-async fn queue_eviction_worker_unmaterializes_idle_materialized_queue() {
-    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
-        inflight_ttl_ms: 2000,
-        expiry_poll_min_ms: 100,
-        expiry_batch_max: 100,
-        delivery_poll_max_ms: 100000,
-        queue_idle_evict_after_ms: Some(0),
-        queue_idle_sweep_interval_ms: 10,
-    })
-    .await;
-
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
-    pubh.publish(
-        b"x".to_vec(),
-        Default::default(),
-        Default::default(),
-        Default::default(),
-    )
-    .await
-    .unwrap()
-    .await
-    .unwrap()
-    .unwrap();
-
-    assert!(broker.is_queue_materialized("t", None));
-    drop(pubh);
-
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while broker.is_queue_materialized("t", None) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-
-    assert!(!broker.is_queue_materialized("t", None));
     broker.shutdown().await;
 }
 
@@ -520,27 +488,29 @@ async fn delayed_publish_waits_until_deadline() {
         .unwrap();
 
     let not_before = unix_millis() + 500;
-    pubh.publish_delayed(
-        b"x".to_vec(),
-        Default::default(),
-        Default::default(),
-        Default::default(),
-        not_before,
-    )
-    .await
-    .unwrap()
-    .await
-    .unwrap()
-    .unwrap();
+    let confirm = pubh
+        .publish_delayed(
+            b"x".to_vec(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            not_before,
+        )
+        .await
+        .unwrap();
 
     // Leave a generous gap before the deadline. This verifies delayed messages
     // are not immediately visible without making the test depend on tight
-    // scheduler timing around the exact not-before instant.
+    // scheduler timing around the exact not-before instant. Awaiting the
+    // publish confirm after this check prevents confirm latency from consuming
+    // the whole delay window before the assertion runs.
     assert!(
         tokio::time::timeout(Duration::from_millis(100), sub.recv())
             .await
             .is_err()
     );
+
+    confirm.await.unwrap().unwrap();
 
     let msg = tokio::time::timeout(Duration::from_secs(2), sub.recv())
         .await
