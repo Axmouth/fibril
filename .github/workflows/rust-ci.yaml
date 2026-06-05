@@ -40,6 +40,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Use git Stroma source
+        run: scripts/stroma-source.sh git
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -61,6 +64,9 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Use git Stroma source
+        run: scripts/stroma-source.sh git
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -76,6 +82,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Use git Stroma source
+        run: scripts/stroma-source.sh git
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -106,6 +115,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Use git Stroma source
+        run: scripts/stroma-source.sh git
 
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
