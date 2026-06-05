@@ -54,13 +54,13 @@ or unset optional values use the default.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS` | unset | Enables idle queue unmaterialization after this many idle milliseconds. |
-| `FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS` | `60000` | How often the sparse idle-queue eviction worker checks tracked queues. |
-| `FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS` | unset | Drops unused per-connection publisher cache entries after this many milliseconds. |
+| `FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS` | unset | Enables unloading idle queues after this many idle milliseconds. |
+| `FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS` | `60000` | How often the idle-queue cleanup worker checks queues. |
+| `FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS` | unset | Lets long-lived connections stop keeping unused queues active after this many milliseconds. |
 
-For sparse workloads, enable publisher cache expiry alongside queue eviction;
-otherwise a long-lived connection that published to a queue can keep that
-queue's publisher lease active until the connection closes.
+For sparse workloads, enable publisher idle expiry alongside queue cleanup;
+otherwise a long-lived connection that published to a queue can keep that queue
+active until the connection closes.
 
 ### Docker Compose
 

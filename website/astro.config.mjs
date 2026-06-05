@@ -34,10 +34,17 @@ export default defineConfig({
             { label: "Retries and delays", slug: "latest/reliability/retries-delays" },
             { label: "Dead lettering", slug: "latest/reliability/dead-lettering" },
             { label: "Backpressure", slug: "latest/concepts/backpressure" },
-            { label: "Inactivity and eviction", slug: "latest/concepts/inactivity-eviction" },
+            { label: "Many idle queues", slug: "latest/concepts/many-idle-queues" },
             { label: "Benchmarks", slug: "latest/benchmarks" },
             { label: "Roadmap", slug: "latest/roadmap" },
             { label: "Deployment", slug: "latest/deployment/source" },
+          ],
+        },
+        {
+          label: "Development Notes",
+          items: [
+            { label: "Documentation style", slug: "latest/development/docs-writing" },
+            { label: "Idle queue internals", slug: "latest/development/idle-queue-internals" },
           ],
         },
       ],
