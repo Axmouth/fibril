@@ -79,19 +79,45 @@ struct SubState {
     _activity_lease: ConsumerLease,
 }
 
+struct CachedPublisher {
+    handle: PublisherHandle,
+    last_used_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ConnectionSettings {
     pub heartbeat_interval: Option<u64>,
+    pub publisher_cache_idle_timeout_ms: Option<u64>,
 }
 
 impl ConnectionSettings {
     pub fn new(heartbeat_interval: Option<u64>) -> Self {
-        Self { heartbeat_interval }
+        Self {
+            heartbeat_interval,
+            publisher_cache_idle_timeout_ms: None,
+        }
+    }
+
+    pub fn with_publisher_cache_idle_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
+        self.publisher_cache_idle_timeout_ms = timeout_ms;
+        self
     }
 }
 
 #[derive(Debug)]
 struct ReqIdGenerator {
     current_id: AtomicU64,
+}
+
+fn expire_idle_publishers(
+    publishers: &mut HashMap<(Topic, Option<Group>), CachedPublisher>,
+    idle_timeout_ms: Option<u64>,
+) {
+    let Some(idle_timeout_ms) = idle_timeout_ms else {
+        return;
+    };
+    let now = unix_millis();
+    publishers.retain(|_, publisher| now.saturating_sub(publisher.last_used_ms) < idle_timeout_ms);
 }
 
 impl ReqIdGenerator {
@@ -113,6 +139,7 @@ pub async fn run_server(
     tcp_stats: Arc<TcpStats>,
     connection_stats: Arc<ConnectionStats>,
     auth: Option<impl AuthHandler + Send + Sync + Clone + 'static>,
+    connection_settings: ConnectionSettings,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     print_banner(&addr);
@@ -127,7 +154,6 @@ pub async fn run_server(
         let auth = auth.clone();
         let tcp_stats = tcp_stats.clone();
         let connection_stats = connection_stats.clone();
-        let connection_settings = ConnectionSettings::new(None);
         tokio::spawn(async move {
             tracing::info!("Connection {conn_id} opening..");
             if let Err(e) = handle_connection(
@@ -445,7 +471,7 @@ pub async fn handle_connection(
         }
     });
 
-    let mut publishers = HashMap::<(Topic, Option<Group>), PublisherHandle>::new();
+    let mut publishers = HashMap::<(Topic, Option<Group>), CachedPublisher>::new();
 
     // ---- Main reader loop --------------------------------------------------
     // TODO: Make handling more async? Spawn task per frame, or have a task pool
@@ -510,7 +536,13 @@ pub async fn handle_connection(
             LoopEvent::Frame(f) => f,
             LoopEvent::Timeout => break,
             LoopEvent::Disconnect => break,
-            LoopEvent::Heartbeat => continue,
+            LoopEvent::Heartbeat => {
+                expire_idle_publishers(
+                    &mut publishers,
+                    connection_settings.publisher_cache_idle_timeout_ms,
+                );
+                continue;
+            }
         };
 
         let metrics = tcp_stats.clone();
@@ -813,6 +845,7 @@ pub async fn handle_connection(
                 }
 
                 let key = (pubreq.topic.clone(), pubreq.group.clone());
+                let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
                     let (pubh, mut conf_stream) = broker
                         .get_publisher(&pubreq.topic, &pubreq.group)
@@ -833,9 +866,15 @@ pub async fn handle_connection(
                             let _ = offset;
                         }
                     });
-                    publishers.insert(key.clone(), pubh);
+                    publishers.insert(
+                        key.clone(),
+                        CachedPublisher {
+                            handle: pubh,
+                            last_used_ms: now_ms,
+                        },
+                    );
                 }
-                let Some(publisher) = publishers.get(&key) else {
+                let Some(cached_publisher) = publishers.get_mut(&key) else {
                     send_error_response_and_count(
                         &frame_tx_low_prio,
                         &metrics,
@@ -846,6 +885,8 @@ pub async fn handle_connection(
                     .await;
                     continue;
                 };
+                cached_publisher.last_used_ms = now_ms;
+                let publisher = cached_publisher.handle.clone();
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
                 // tokio::spawn(async move {
@@ -898,6 +939,7 @@ pub async fn handle_connection(
                 }
 
                 let key = (pubreq.topic.clone(), pubreq.group.clone());
+                let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
                     let (pubh, mut conf_stream) = broker
                         .get_publisher(&pubreq.topic, &pubreq.group)
@@ -918,9 +960,15 @@ pub async fn handle_connection(
                             let _ = offset;
                         }
                     });
-                    publishers.insert(key.clone(), pubh);
+                    publishers.insert(
+                        key.clone(),
+                        CachedPublisher {
+                            handle: pubh,
+                            last_used_ms: now_ms,
+                        },
+                    );
                 }
-                let Some(publisher) = publishers.get(&key) else {
+                let Some(cached_publisher) = publishers.get_mut(&key) else {
                     send_error_response_and_count(
                         &frame_tx_low_prio,
                         &metrics,
@@ -931,6 +979,8 @@ pub async fn handle_connection(
                     .await;
                     continue;
                 };
+                cached_publisher.last_used_ms = now_ms;
+                let publisher = cached_publisher.handle.clone();
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
                 // tokio::spawn(async move {

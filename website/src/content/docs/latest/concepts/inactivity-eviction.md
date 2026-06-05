@@ -47,9 +47,18 @@ Idle queue eviction is controlled by two broker settings:
 ```txt
 queue_idle_evict_after_ms = null
 queue_idle_sweep_interval_ms = 60000
+publisher_cache_idle_timeout_ms = null
 ```
 
 The default is disabled. When `queue_idle_evict_after_ms` is set, a sparse background worker wakes every `queue_idle_sweep_interval_ms` and checks tracked queues.
+
+In the server binary these map to environment variables:
+
+```txt
+FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS
+FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS
+FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS
+```
 
 A queue becomes an eviction candidate only after the last active publisher lease and subscriber lease for that queue are gone. At that moment, the broker records an idle timestamp. The queue must remain idle for at least `queue_idle_evict_after_ms`.
 
@@ -81,20 +90,20 @@ Implemented now:
 - Stroma materialize, unmaterialize, `is_materialized`, and `has_inflight` APIs
 - broker-side eviction gate using activity, delivery tags, pending settlements, and storage inflight checks
 - optional background sweep worker
+- optional per-connection publisher cache expiry
 - tests for active publishers, active subscribers, untracked queues, idle threshold, broker-held deliveries, already-unmaterialized queues, direct sweep, disabled worker behavior, and worker eviction
 
 Still early or not yet user-facing:
 
-- configuration is not surfaced as a polished runtime/server config
 - delayed-message eviction needs more end-to-end coverage before treating it as a documented guarantee
-- publisher cache expiry is not implemented separately from connection lifetime
+- configuration is currently environment-variable based, not a polished config file
 - the broker still keeps lightweight per-queue loop entries during the process lifetime
 
 ## Publisher Caches
 
-For now, connection-lifetime publisher caching is the safer default. It avoids create/destroy publisher protocol messages that can desync if a client creates and drops publisher objects frequently.
+Connection-lifetime publisher caching is the default. It avoids create/destroy publisher protocol messages that can desync if a client creates and drops publisher objects frequently.
 
-If publisher resource pressure becomes meaningful, the next step should be server-side publisher idle expiry. That can let unused cached publisher handles fall out after a timeout without requiring clients to perfectly report object lifetimes.
+If `FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS` is set, each TCP connection can drop cached publisher handles that have not been used for that duration. This is server-side and best-effort; clients do not need to report publisher object lifetimes.
 
 An explicit publisher destroy command can still be considered later, but it should use server-issued or otherwise unique-enough publisher ids and still have a timeout as a backstop.
 

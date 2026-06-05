@@ -159,19 +159,9 @@ pub struct PublishRequest {
     pub extra: HashMap<String, String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PublisherHandle {
     pub publisher: mpsc::Sender<PublishRequest>,
-    activity_lease: PublisherLease,
-}
-
-impl Clone for PublisherHandle {
-    fn clone(&self) -> Self {
-        Self {
-            publisher: self.publisher.clone(),
-            activity_lease: self.activity_lease.clone(),
-        }
-    }
 }
 
 impl PublisherHandle {
@@ -692,6 +682,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let qs_clone = qs.clone();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("publisher_sink", async move {
+            let _activity_lease = activity_lease;
             const MAX_BATCH: usize = 256;
             const COALESCE_WINDOW: Duration = Duration::from_millis(1);
             const SMALL_BATCH: usize = 32;
@@ -813,10 +804,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         });
 
         Ok((
-            PublisherHandle {
-                publisher: tx,
-                activity_lease,
-            },
+            PublisherHandle { publisher: tx },
             ConfirmStream { rx: confirm_rx },
         ))
     }

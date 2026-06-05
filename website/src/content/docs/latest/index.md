@@ -13,7 +13,7 @@ It is currently pre-alpha. The useful baseline is working, but APIs, persistence
 - Use the [client guide](/latest/clients/) for Rust and TypeScript publishing and subscription examples.
 - Read the [core model](/latest/concepts/core-model/) for the queue lifecycle.
 - Read [retries and delays](/latest/reliability/retries-delays/) and [dead lettering](/latest/reliability/dead-lettering/) for the parts that are still being wired through the public API.
-- Read [inactivity and eviction](/latest/concepts/inactivity-eviction/) for the planned lazy loading and idle resource cleanup behavior.
+- Read [inactivity and eviction](/latest/concepts/inactivity-eviction/) for lazy loading and idle resource cleanup behavior.
 - Check [project status](/latest/status/) before depending on a feature.
 
 ## Design intent

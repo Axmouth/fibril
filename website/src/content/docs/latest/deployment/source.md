@@ -47,6 +47,21 @@ The image exposes:
 
 Persistent data lives under `/app/server_data` in the container.
 
+## Runtime knobs
+
+The current server binary has only a small environment-variable surface. Empty
+or unset optional values use the default.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS` | unset | Enables idle queue unmaterialization after this many idle milliseconds. |
+| `FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS` | `60000` | How often the sparse idle-queue eviction worker checks tracked queues. |
+| `FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS` | unset | Drops unused per-connection publisher cache entries after this many milliseconds. |
+
+For sparse workloads, enable publisher cache expiry alongside queue eviction;
+otherwise a long-lived connection that published to a queue can keep that
+queue's publisher lease active until the connection closes.
+
 ### Docker Compose
 
 The repository includes a small Compose example using the published image:

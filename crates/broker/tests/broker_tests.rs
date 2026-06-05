@@ -40,8 +40,39 @@ async fn open_test_broker_with_cfg(cfg: BrokerConfig) -> (Arc<Broker<StromaEngin
     (broker, dir)
 }
 
+async fn wait_for_queue_activity(
+    broker: &Broker<StromaEngine>,
+    topic: &str,
+    group: Option<&str>,
+    active_publishers: usize,
+    active_subscribers: usize,
+    idle: bool,
+) {
+    for _ in 0..2_000 {
+        if broker
+            .queue_activity_snapshot(topic, group)
+            .is_some_and(|snapshot| {
+                snapshot.active_publishers == active_publishers
+                    && snapshot.active_subscribers == active_subscribers
+                    && (snapshot.idle_since_ms.is_some() == idle)
+            })
+        {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    panic!(
+        "queue activity for {topic}/{group:?} did not become publishers={active_publishers} subscribers={active_subscribers} idle={idle}"
+    );
+}
+
+async fn wait_for_queue_idle(broker: &Broker<StromaEngine>, topic: &str, group: Option<&str>) {
+    wait_for_queue_activity(broker, topic, group, 0, 0, true).await;
+}
+
 #[tokio::test]
-async fn queue_activity_tracks_publisher_clones_until_last_drop() {
+async fn queue_activity_tracks_publisher_sink_until_last_handle_drop() {
     let (broker, _dir) = open_test_broker().await;
 
     assert!(broker.queue_activity_snapshot("t", None).is_none());
@@ -54,7 +85,7 @@ async fn queue_activity_tracks_publisher_clones_until_last_drop() {
 
     let pubh2 = pubh.clone();
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
-    assert_eq!(snapshot.active_publishers, 2);
+    assert_eq!(snapshot.active_publishers, 1);
     assert_eq!(snapshot.idle_since_ms, None);
 
     drop(pubh2);
@@ -64,6 +95,7 @@ async fn queue_activity_tracks_publisher_clones_until_last_drop() {
 
     let before_idle = unix_millis();
     drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 0);
     assert_eq!(snapshot.active_subscribers, 0);
@@ -87,6 +119,7 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
     assert_eq!(snapshot.idle_since_ms, None);
 
     drop(pubh);
+    wait_for_queue_activity(&broker, "t", None, 0, 1, false).await;
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 0);
     assert_eq!(snapshot.active_subscribers, 1);
@@ -94,6 +127,7 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
 
     let before_idle = unix_millis();
     drop(sub);
+    wait_for_queue_idle(&broker, "t", None).await;
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 0);
     assert_eq!(snapshot.active_subscribers, 0);
@@ -174,6 +208,7 @@ async fn queue_eviction_skips_when_idle_threshold_not_met() {
 
     let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
     drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
 
     let attempt = broker
         .try_evict_inactive_queue("t", None, 60_000)
@@ -204,6 +239,7 @@ async fn queue_eviction_skips_broker_delivery_tags() {
     .unwrap()
     .unwrap();
     drop(pubh);
+    wait_for_queue_activity(&broker, "t", None, 0, 0, true).await;
 
     let mut sub = broker
         .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
@@ -211,6 +247,7 @@ async fn queue_eviction_skips_broker_delivery_tags() {
         .unwrap();
     let _msg = sub.recv().await.unwrap();
     drop(sub);
+    wait_for_queue_idle(&broker, "t", None).await;
 
     let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
 
@@ -226,6 +263,7 @@ async fn queue_eviction_reports_not_present_when_idle_queue_has_no_storage_handl
 
     let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
     drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
 
     let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
 
@@ -252,6 +290,7 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
     .unwrap()
     .unwrap();
     drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
 
     let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
 
@@ -278,6 +317,7 @@ async fn queue_eviction_reports_not_materialized_after_previous_unmaterialize() 
     .unwrap()
     .unwrap();
     drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
 
     let first = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
     let second = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
@@ -310,6 +350,7 @@ async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
         .unwrap()
         .unwrap();
     drop(idle_pubh);
+    wait_for_queue_idle(&broker, "idle", Some("g")).await;
 
     let sub = broker
         .subscribe("sub", None, client_id, ConsumerConfig { prefetch: 1 })
@@ -360,6 +401,7 @@ async fn queue_eviction_sweep_unmaterializes_idle_materialized_queue() {
     .unwrap()
     .unwrap();
     drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
 
     let attempts = broker.evict_inactive_queues(0).await.unwrap();
 
@@ -390,6 +432,7 @@ async fn queue_eviction_worker_is_disabled_by_default() {
     .unwrap()
     .unwrap();
     drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
 
     tokio::time::advance(Duration::from_secs(60)).await;
     for _ in 0..5 {
