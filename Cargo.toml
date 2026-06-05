@@ -3,6 +3,7 @@ members = [
     "crates/util",
     "crates/admin",
     "crates/client",
+    "crates/config",
     "crates/protocol",
     "crates/storage",
     "crates/broker",

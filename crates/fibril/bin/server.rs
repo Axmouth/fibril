@@ -1,13 +1,11 @@
-use std::{
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use fibril_admin::{AdminConfig, AdminServer};
 use fibril_broker::{
     broker::{Broker, BrokerConfig},
     queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine},
 };
+use fibril_config::ServerConfig;
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::{ConnectionSettings, run_server};
 use fibril_util::{StaticAuthHandler, init_tracing};
@@ -20,23 +18,24 @@ static GLOBAL: MiMalloc = MiMalloc;
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let queue_idle_evict_after_ms = optional_u64_env("FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS")?;
-    let queue_idle_sweep_interval_ms = u64_env("FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS", 60_000)?;
-    let publisher_cache_idle_timeout_ms =
-        optional_u64_env("FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS")?;
+    let config = ServerConfig::load()?;
+    let delivery = &config.runtime_seed.delivery;
+    let idle_cleanup = config.idle_queue_cleanup_internal();
 
-    // TODO configurable stuff
-    let root = "server_data";
     let metrics = Metrics::new(3 * 60 * 60); // 3 hours
-    let engine =
-        StromaEngine::open(&root, KeratinConfig::default(), SnapshotConfig::default()).await?;
+    let engine = StromaEngine::open(
+        &config.server.data_dir,
+        KeratinConfig::default(),
+        SnapshotConfig::default(),
+    )
+    .await?;
     let broker_cfg = BrokerConfig {
-        inflight_ttl_ms: 30_000,
-        expiry_poll_min_ms: 15_000,
-        expiry_batch_max: 8192,
-        delivery_poll_max_ms: 5_000, // Make tests timeout if they rely on polling to pass, to indicate the issue
-        queue_idle_evict_after_ms,
-        queue_idle_sweep_interval_ms,
+        inflight_ttl_ms: delivery.inflight_ttl_ms,
+        expiry_poll_min_ms: delivery.expiry_poll_min_ms,
+        expiry_batch_max: delivery.expiry_batch_max,
+        delivery_poll_max_ms: delivery.delivery_poll_max_ms,
+        queue_idle_evict_after_ms: idle_cleanup.queue_idle_evict_after_ms,
+        queue_idle_sweep_interval_ms: idle_cleanup.queue_idle_sweep_interval_ms,
     };
     let broker = Broker::new(engine.clone(), broker_cfg, Some(metrics.broker()));
 
@@ -45,20 +44,20 @@ async fn main() -> anyhow::Result<()> {
     let stroma_metrics = broker.stroma_metrics();
 
     let broker_server_fut = run_server(
-        SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([0, 0, 0, 0]), 9876)),
+        config.broker.listener.bind,
         broker,
         metrics.tcp(),
         metrics.connections(),
         Some(auth_handler.clone()),
         ConnectionSettings::new(None)
-            .with_publisher_cache_idle_timeout_ms(publisher_cache_idle_timeout_ms),
+            .with_publisher_cache_idle_timeout_ms(idle_cleanup.publisher_idle_timeout_ms),
     );
 
     let admin = AdminServer::new(
         metrics.clone(),
         stroma_metrics,
         AdminConfig {
-            bind: "0.0.0.0:8081".into(),
+            bind: config.admin.listener.bind.to_string(),
             // auth: Some(auth_handler),
             auth: None,
         },
@@ -81,23 +80,4 @@ async fn main() -> anyhow::Result<()> {
     admin_res?;
 
     Ok(())
-}
-
-fn optional_u64_env(name: &str) -> anyhow::Result<Option<u64>> {
-    match std::env::var(name) {
-        Ok(value) if value.trim().is_empty() => Ok(None),
-        Ok(value) => value
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|err| anyhow::anyhow!("{name} must be an unsigned integer: {err}")),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(err) => Err(anyhow::anyhow!("{name} is not valid unicode: {err}")),
-    }
-}
-
-fn u64_env(name: &str, default: u64) -> anyhow::Result<u64> {
-    match optional_u64_env(name)? {
-        Some(value) => Ok(value),
-        None => Ok(default),
-    }
 }

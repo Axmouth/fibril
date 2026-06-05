@@ -964,6 +964,7 @@ dependencies = [
  "fastrand",
  "fibril-admin",
  "fibril-broker",
+ "fibril-config",
  "fibril-metrics",
  "fibril-protocol",
  "fibril-storage",
@@ -1081,6 +1082,16 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "fibril-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "toml",
 ]
 
 [[package]]

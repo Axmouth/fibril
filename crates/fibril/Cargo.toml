@@ -10,6 +10,7 @@ path = "bin/server.rs"
 [dependencies]
 fibril-admin = { path = "../admin" }
 fibril-broker = { path = "../broker" }
+fibril-config = { path = "../config" }
 fibril-protocol = { path = "../protocol" }
 fibril-storage = { path = "../storage" }
 fibril-metrics = { path = "../metrics" }
