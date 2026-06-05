@@ -6,7 +6,8 @@ use fibril_storage::Offset;
 use fibril_util::UnixMillis;
 use std::collections::HashSet;
 use stroma_core::{
-    AckEventMeta, MessageHeaders, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics,
+    AckEventMeta, GlobalStore, MessageHeaders, NackEventMeta, PublishItem, StromaDebugSnapshot,
+    StromaMetrics,
 };
 pub use stroma_core::{
     AppendCompletion, EvictOutcome, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
@@ -169,6 +170,10 @@ impl StromaEngine {
         Ok(Self {
             inner: Arc::new(stroma),
         })
+    }
+
+    pub async fn global_store(&self) -> Result<Arc<GlobalStore>, StromaError> {
+        self.inner.global_store().await
     }
 }
 

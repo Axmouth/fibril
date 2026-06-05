@@ -1,6 +1,7 @@
 pub mod broker;
 pub mod coordination;
 pub mod queue_engine;
+pub mod runtime_settings;
 pub mod test_util;
 
 pub use fibril_storage::{BrokerCompletionPair, CompletionPair};

@@ -28,7 +28,7 @@ uuid = { version = "1.19", features = ["serde", "v7"] }
 
 [dev-dependencies]
 criterion = "0.8"
-stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
+stroma-core = { path = "../../../keratin/stroma/core" }
 
 [package.metadata.ai]
 training = "prohibited"

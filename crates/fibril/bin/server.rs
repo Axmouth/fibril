@@ -4,6 +4,10 @@ use fibril_admin::{AdminConfig, AdminServer};
 use fibril_broker::{
     broker::{Broker, BrokerConfig},
     queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine},
+    runtime_settings::{
+        DeliveryRuntimeSettings, IdleQueueCleanupRuntimeSettings, RuntimeSettings,
+        RuntimeSettingsLocks, RuntimeSettingsManager,
+    },
 };
 use fibril_config::ServerConfig;
 use fibril_metrics::{Metrics, MetricsConfig};
@@ -19,8 +23,6 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let config = ServerConfig::load()?;
-    let delivery = &config.runtime_seed.delivery;
-    let idle_cleanup = config.idle_queue_cleanup_internal();
 
     let metrics = Metrics::new(3 * 60 * 60); // 3 hours
     let engine = StromaEngine::open(
@@ -29,14 +31,34 @@ async fn main() -> anyhow::Result<()> {
         SnapshotConfig::default(),
     )
     .await?;
-    let broker_cfg = BrokerConfig {
-        inflight_ttl_ms: delivery.inflight_ttl_ms,
-        expiry_poll_min_ms: delivery.expiry_poll_min_ms,
-        expiry_batch_max: delivery.expiry_batch_max,
-        delivery_poll_max_ms: delivery.delivery_poll_max_ms,
-        queue_idle_evict_after_ms: idle_cleanup.queue_idle_evict_after_ms,
-        queue_idle_sweep_interval_ms: idle_cleanup.queue_idle_sweep_interval_ms,
+    let runtime_seed = RuntimeSettings {
+        delivery: DeliveryRuntimeSettings {
+            inflight_ttl_ms: config.runtime_seed.delivery.inflight_ttl_ms,
+            expiry_poll_min_ms: config.runtime_seed.delivery.expiry_poll_min_ms,
+            expiry_batch_max: config.runtime_seed.delivery.expiry_batch_max,
+            delivery_poll_max_ms: config.runtime_seed.delivery.delivery_poll_max_ms,
+        },
+        idle_queue_cleanup: IdleQueueCleanupRuntimeSettings {
+            enabled: config.runtime_seed.idle_queue_cleanup.enabled,
+            evict_after_ms: config.runtime_seed.idle_queue_cleanup.evict_after_ms,
+            sweep_interval_ms: config.runtime_seed.idle_queue_cleanup.sweep_interval_ms,
+            publisher_idle_timeout_ms: config
+                .runtime_seed
+                .idle_queue_cleanup
+                .publisher_idle_timeout_ms,
+        },
     };
+    let runtime_settings = RuntimeSettingsManager::load_from_stroma_engine(
+        &engine,
+        runtime_seed,
+        RuntimeSettingsLocks {
+            idle_queue_cleanup: config.runtime_locks.idle_queue_cleanup,
+        },
+    )
+    .await?;
+    let runtime_snapshot = runtime_settings.current();
+    let runtime = &runtime_snapshot.settings;
+    let broker_cfg = BrokerConfig::from_runtime_settings(runtime);
     let broker = Broker::new(engine.clone(), broker_cfg, Some(metrics.broker()));
 
     let auth_handler = StaticAuthHandler::new("fibril".to_string(), "fibril".to_string());
@@ -49,8 +71,9 @@ async fn main() -> anyhow::Result<()> {
         metrics.tcp(),
         metrics.connections(),
         Some(auth_handler.clone()),
-        ConnectionSettings::new(None)
-            .with_publisher_cache_idle_timeout_ms(idle_cleanup.publisher_idle_timeout_ms),
+        ConnectionSettings::new(None).with_publisher_cache_idle_timeout_ms(
+            runtime.idle_queue_cleanup.publisher_idle_timeout_ms,
+        ),
     );
 
     let admin = AdminServer::new(
