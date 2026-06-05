@@ -44,6 +44,7 @@ export default defineConfig({
           label: "Development Notes",
           items: [
             { label: "Documentation style", slug: "latest/development/docs-writing" },
+            { label: "Configuration policy", slug: "latest/development/config-policy" },
             { label: "Idle queue internals", slug: "latest/development/idle-queue-internals" },
           ],
         },
