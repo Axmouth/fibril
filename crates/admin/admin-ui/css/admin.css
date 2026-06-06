@@ -46,4 +46,67 @@ main {
   text-align: right;
 }
 
+.settings-panel {
+  max-width: 75%;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.settings-note {
+  opacity: .8;
+}
+
+.settings-section {
+  border-top: 1px solid rgba(255, 255, 255, .16);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.settings-section label {
+  display: block;
+  margin-bottom: .75rem;
+}
+
+.settings-section input[type="number"] {
+  display: block;
+  margin-top: .25rem;
+  max-width: 24rem;
+  width: 100%;
+}
+
+.checkbox-label {
+  align-items: center;
+  display: flex !important;
+  gap: .5rem;
+}
+
+.settings-lock {
+  color: #f6c177;
+  font-size: .65rem;
+  font-weight: 500;
+  margin-left: .5rem;
+}
+
+.settings-message {
+  border-radius: 4px;
+  margin: 1rem 0;
+  min-height: 1.5rem;
+  padding: .5rem .75rem;
+}
+
+.settings-message[data-kind="info"] {
+  background: rgba(77, 171, 247, .12);
+}
+
+.settings-message[data-kind="success"] {
+  background: rgba(81, 207, 102, .14);
+}
+
+.settings-message[data-kind="warning"] {
+  background: rgba(246, 193, 119, .16);
+}
+
+.settings-message[data-kind="error"] {
+  background: rgba(255, 107, 107, .16);
+}
 

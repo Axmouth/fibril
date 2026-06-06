@@ -117,11 +117,12 @@ Implemented now:
 - configurable publisher idle expiry for long-lived connections
 - live updates for idle cleanup and publisher idle expiry runtime settings
 - admin JSON API for reading and updating runtime settings
+- admin settings page for viewing locks, editing runtime settings, and handling version conflicts
 - tests for active publishers, active subscribers, idle threshold behavior, inflight guards, disabled cleanup, live enabling, direct cleanup, and worker-driven cleanup
 
 Still early:
 
-- runtime settings are persisted and versioned, but the admin editing UI is not wired yet
+- runtime settings are persisted and versioned, but the admin editing UI is still minimal
 - delayed-message cleanup behavior needs more end-to-end coverage before treating it as a documented guarantee
 - the broker may keep small in-process bookkeeping for a queue even after unloading the durable queue state
 

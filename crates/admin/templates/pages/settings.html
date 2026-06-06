@@ -1,0 +1,161 @@
+{% extends "layout.html" %}
+{% block content %}
+<h4 class="metrics-header">Runtime Settings</h4>
+
+<div class="settings-panel">
+  <p class="settings-note">
+    These settings are persisted and applied live where supported. Submit uses the version currently loaded on this page; if another update wins first, the page shows the latest values instead of overwriting them.
+  </p>
+
+  <div id="settings-message" class="settings-message"></div>
+
+  <form id="settings-form">
+    <input type="hidden" id="version">
+
+    <section class="settings-section">
+      <h5>Delivery</h5>
+      <label>
+        Inflight TTL (ms)
+        <input class="clr-input" id="delivery.inflight_ttl_ms" type="number" min="0" step="1">
+      </label>
+      <label>
+        Expiry poll minimum (ms)
+        <input class="clr-input" id="delivery.expiry_poll_min_ms" type="number" min="0" step="1">
+      </label>
+      <label>
+        Expiry batch max
+        <input class="clr-input" id="delivery.expiry_batch_max" type="number" min="1" step="1">
+      </label>
+      <label>
+        Delivery poll max (ms)
+        <input class="clr-input" id="delivery.delivery_poll_max_ms" type="number" min="0" step="1">
+      </label>
+    </section>
+
+    <section class="settings-section" id="idle-section">
+      <h5>Idle Queue Cleanup <span id="idle-lock" class="settings-lock"></span></h5>
+      <label class="checkbox-label">
+        <input id="idle_queue_cleanup.enabled" type="checkbox">
+        Enabled
+      </label>
+      <label>
+        Evict after (ms)
+        <input class="clr-input" id="idle_queue_cleanup.evict_after_ms" type="number" min="0" step="1">
+      </label>
+      <label>
+        Sweep interval (ms)
+        <input class="clr-input" id="idle_queue_cleanup.sweep_interval_ms" type="number" min="1" step="1">
+      </label>
+      <label>
+        Publisher idle timeout (ms, blank disables)
+        <input class="clr-input" id="idle_queue_cleanup.publisher_idle_timeout_ms" type="number" min="0" step="1">
+      </label>
+    </section>
+
+    <button class="btn btn-primary" type="submit">Save settings</button>
+    <button class="btn" type="button" id="reload-settings">Reload</button>
+  </form>
+</div>
+
+<script src="/static/js/api.js"></script>
+<script>
+let currentLocks = {};
+
+function field(id) {
+  return document.getElementById(id);
+}
+
+function numberValue(id) {
+  return Number(field(id).value);
+}
+
+function optionalNumberValue(id) {
+  const value = field(id).value.trim();
+  return value === "" ? null : Number(value);
+}
+
+function setMessage(text, kind = "info") {
+  const el = field("settings-message");
+  el.textContent = text;
+  el.dataset.kind = kind;
+}
+
+function setDisabledForLockedGroups() {
+  const idleLocked = !!currentLocks.idle_queue_cleanup;
+  field("idle-lock").textContent = idleLocked ? "locked by startup config" : "";
+  for (const input of document.querySelectorAll("#idle-section input")) {
+    input.disabled = idleLocked;
+  }
+}
+
+function renderSettings(data) {
+  field("version").value = data.version;
+  field("delivery.inflight_ttl_ms").value = data.settings.delivery.inflight_ttl_ms;
+  field("delivery.expiry_poll_min_ms").value = data.settings.delivery.expiry_poll_min_ms;
+  field("delivery.expiry_batch_max").value = data.settings.delivery.expiry_batch_max;
+  field("delivery.delivery_poll_max_ms").value = data.settings.delivery.delivery_poll_max_ms;
+
+  field("idle_queue_cleanup.enabled").checked = data.settings.idle_queue_cleanup.enabled;
+  field("idle_queue_cleanup.evict_after_ms").value = data.settings.idle_queue_cleanup.evict_after_ms;
+  field("idle_queue_cleanup.sweep_interval_ms").value = data.settings.idle_queue_cleanup.sweep_interval_ms;
+  field("idle_queue_cleanup.publisher_idle_timeout_ms").value =
+    data.settings.idle_queue_cleanup.publisher_idle_timeout_ms ?? "";
+
+  currentLocks = data.locks || {};
+  setDisabledForLockedGroups();
+}
+
+function collectSettings() {
+  return {
+    delivery: {
+      inflight_ttl_ms: numberValue("delivery.inflight_ttl_ms"),
+      expiry_poll_min_ms: numberValue("delivery.expiry_poll_min_ms"),
+      expiry_batch_max: numberValue("delivery.expiry_batch_max"),
+      delivery_poll_max_ms: numberValue("delivery.delivery_poll_max_ms"),
+    },
+    idle_queue_cleanup: {
+      enabled: field("idle_queue_cleanup.enabled").checked,
+      evict_after_ms: numberValue("idle_queue_cleanup.evict_after_ms"),
+      sweep_interval_ms: numberValue("idle_queue_cleanup.sweep_interval_ms"),
+      publisher_idle_timeout_ms: optionalNumberValue("idle_queue_cleanup.publisher_idle_timeout_ms"),
+    },
+  };
+}
+
+async function loadSettings(message = "Settings loaded.") {
+  const data = await api("/admin/api/runtime-settings");
+  renderSettings(data);
+  setMessage(`${message} Current version: ${data.version}.`, "info");
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const response = await fetch("/admin/api/runtime-settings", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expected_version: Number(field("version").value),
+      settings: collectSettings(),
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 409) {
+    renderSettings(data);
+    setMessage(`Settings changed before this save. Reloaded version ${data.version}; review and submit again.`, "warning");
+    return;
+  }
+  if (!response.ok) {
+    setMessage(data.error || "Settings update failed.", "error");
+    return;
+  }
+
+  renderSettings(data);
+  setMessage(`Settings saved. Current version: ${data.version}.`, "success");
+}
+
+field("settings-form").addEventListener("submit", saveSettings);
+field("reload-settings").addEventListener("click", () => loadSettings("Settings reloaded."));
+loadSettings();
+</script>
+{% endblock %}

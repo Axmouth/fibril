@@ -337,13 +337,14 @@ Done:
 - manager-level compare-and-swap update with conflict reporting
 - admin JSON API for reading runtime settings
 - admin JSON API for updating runtime settings with expected-version conflict handling
+- first admin UI for viewing/updating runtime settings, locked fields, and conflicts
 - live broker runtime config snapshots with settings-change wakeups
 - live publisher idle expiry updates for existing TCP connections
 
 Next implementation slices:
 
-1. Add admin UI for viewing/updating settings, locked fields, and conflict display.
-2. Expand docs with the final user-facing config file reference once names settle.
+1. Expand docs with the final user-facing config file reference once names settle.
+2. Add more focused admin route/UI tests once the admin test harness is less ad hoc.
 
 ## Open Questions
 

@@ -81,6 +81,7 @@ impl AdminServer {
             .route("/admin/connections", get(connections_page))
             .route("/admin/subscriptions", get(subscriptions_page))
             .route("/admin/queues", get(queues_page))
+            .route("/admin/settings", get(settings_page))
             .route("/admin/api/overview", get(routes::overview))
             .route("/admin/api/connections", get(routes::connections))
             .route("/admin/api/subscriptions", get(routes::subscriptions))
@@ -152,6 +153,13 @@ async fn queues_page() -> impl IntoResponse {
     })
 }
 
+async fn settings_page() -> impl IntoResponse {
+    render(Settings {
+        page: "settings",
+        title: "Settings",
+    })
+}
+
 #[derive(Template)]
 #[template(path = "pages/overview.html")]
 struct OverviewPage {
@@ -176,6 +184,13 @@ struct Subscriptions {
 #[derive(Template)]
 #[template(path = "pages/queues.html")]
 struct Queues {
+    page: &'static str,
+    title: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "pages/settings.html")]
+struct Settings {
     page: &'static str,
     title: &'static str,
 }
