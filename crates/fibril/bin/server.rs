@@ -48,14 +48,16 @@ async fn main() -> anyhow::Result<()> {
                 .publisher_idle_timeout_ms,
         },
     };
-    let runtime_settings = RuntimeSettingsManager::load_from_stroma_engine(
-        &engine,
-        runtime_seed,
-        RuntimeSettingsLocks {
-            idle_queue_cleanup: config.runtime_locks.idle_queue_cleanup,
-        },
-    )
-    .await?;
+    let runtime_settings = Arc::new(
+        RuntimeSettingsManager::load_from_stroma_engine(
+            &engine,
+            runtime_seed,
+            RuntimeSettingsLocks {
+                idle_queue_cleanup: config.runtime_locks.idle_queue_cleanup,
+            },
+        )
+        .await?,
+    );
     let runtime_snapshot = runtime_settings.current();
     let runtime = &runtime_snapshot.settings;
     let broker_cfg = BrokerConfig::from_runtime_settings(runtime);
@@ -102,6 +104,7 @@ async fn main() -> anyhow::Result<()> {
             auth: None,
         },
         Arc::new(engine.clone()),
+        Some(runtime_settings),
     );
 
     metrics.start(

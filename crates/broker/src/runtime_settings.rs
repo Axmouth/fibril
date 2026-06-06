@@ -101,7 +101,7 @@ pub struct RuntimeSettingsLocks {
 }
 
 /// Effective runtime settings plus the underlying Stroma global-store version.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeSettingsSnapshot {
     pub version: u64,
     pub settings: RuntimeSettings,

@@ -116,6 +116,7 @@ Implemented now:
 - configurable idle queue unloading
 - configurable publisher idle expiry for long-lived connections
 - live updates for idle cleanup and publisher idle expiry runtime settings
+- admin JSON API for reading and updating runtime settings
 - tests for active publishers, active subscribers, idle threshold behavior, inflight guards, disabled cleanup, live enabling, direct cleanup, and worker-driven cleanup
 
 Still early:

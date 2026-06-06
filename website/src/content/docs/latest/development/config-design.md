@@ -192,6 +192,79 @@ The broker runtime settings manager now has the CAS primitive for this. It accep
 
 Locked groups are handled before persistence. If a group is locked by boot config, updates that try to change it are rejected. Updates to other groups preserve the hidden persisted value for the locked group instead of overwriting it with the boot-owned effective value.
 
+## Admin API
+
+The first admin API exposes the complete runtime settings document.
+
+Read:
+
+```http
+GET /admin/api/runtime-settings
+```
+
+Response:
+
+```json
+{
+  "version": 12,
+  "settings": {
+    "delivery": {
+      "inflight_ttl_ms": 30000,
+      "expiry_poll_min_ms": 15000,
+      "expiry_batch_max": 8192,
+      "delivery_poll_max_ms": 5000
+    },
+    "idle_queue_cleanup": {
+      "enabled": false,
+      "evict_after_ms": 600000,
+      "sweep_interval_ms": 60000,
+      "publisher_idle_timeout_ms": null
+    }
+  },
+  "locks": {
+    "idle_queue_cleanup": false
+  }
+}
+```
+
+Update:
+
+```http
+PUT /admin/api/runtime-settings
+```
+
+Request:
+
+```json
+{
+  "expected_version": 12,
+  "settings": {
+    "delivery": {
+      "inflight_ttl_ms": 30000,
+      "expiry_poll_min_ms": 15000,
+      "expiry_batch_max": 8192,
+      "delivery_poll_max_ms": 5000
+    },
+    "idle_queue_cleanup": {
+      "enabled": true,
+      "evict_after_ms": 600000,
+      "sweep_interval_ms": 60000,
+      "publisher_idle_timeout_ms": 600000
+    }
+  }
+}
+```
+
+Outcomes:
+
+- `200 OK`: update stored and response contains the new effective settings.
+- `400 Bad Request`: validation failed or the request tried to change a locked setting group.
+- `409 Conflict`: `expected_version` is stale and the response contains the current effective settings.
+- `404 Not Found`: runtime settings are unavailable for this admin server instance.
+- `500 Internal Server Error`: storage, encoding, or unexpected update failure.
+
+The API currently accepts and returns the whole settings document. That keeps atomicity clear and avoids partial merge rules until the admin UI has a more deliberate editing model.
+
 ## Admin Conflict UX
 
 The first admin UI does not need a complex merge editor.
@@ -262,15 +335,15 @@ Done:
 - first-boot seeding into global state
 - boot-owned runtime locks
 - manager-level compare-and-swap update with conflict reporting
+- admin JSON API for reading runtime settings
+- admin JSON API for updating runtime settings with expected-version conflict handling
 - live broker runtime config snapshots with settings-change wakeups
 - live publisher idle expiry updates for existing TCP connections
 
 Next implementation slices:
 
-1. Add admin read endpoint for runtime settings.
-2. Add admin update endpoint with expected-version conflict handling.
-3. Add admin UI for viewing/updating settings, locked fields, and conflict display.
-4. Expand docs with the final user-facing config file reference once names settle.
+1. Add admin UI for viewing/updating settings, locked fields, and conflict display.
+2. Expand docs with the final user-facing config file reference once names settle.
 
 ## Open Questions
 

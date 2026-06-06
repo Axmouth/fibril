@@ -3,16 +3,16 @@ use axum::{
     Router,
     extract::Path,
     response::{Html, IntoResponse},
-    routing::{get, get_service},
+    routing::get,
 };
-use fibril_broker::{StromaMetrics, queue_engine::QueueEngine};
-use fibril_storage::{AppendReceiptExt, Offset};
+use fibril_broker::{
+    StromaMetrics, queue_engine::QueueEngine, runtime_settings::RuntimeSettingsManager,
+};
 use fibril_util::StaticAuthHandler;
-use http::{Response, Uri, header};
-use rust_embed::{Embed, RustEmbed};
+use http::header;
+use rust_embed::RustEmbed;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tower::util::ServiceExt;
 use tower_http::services::ServeDir;
 
 use crate::routes;
@@ -29,6 +29,7 @@ pub struct AdminServer {
     pub stroma_metrics: Arc<StromaMetrics>,
     pub config: AdminConfig,
     pub storage: Arc<dyn QueueEngine + Send + Sync>,
+    pub runtime_settings: Option<Arc<RuntimeSettingsManager>>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -47,12 +48,14 @@ impl AdminServer {
         stroma_metrics: Arc<StromaMetrics>,
         config: AdminConfig,
         storage: Arc<dyn QueueEngine + Send + Sync>,
+        runtime_settings: Option<Arc<RuntimeSettingsManager>>,
     ) -> Self {
         Self {
             metrics,
             stroma_metrics,
             config,
             storage,
+            runtime_settings,
         }
     }
 
@@ -83,6 +86,10 @@ impl AdminServer {
             .route("/admin/api/subscriptions", get(routes::subscriptions))
             .route("/admin/api/queues", get(routes::queues))
             .route("/admin/api/queues_debug", get(routes::queues_debug))
+            .route(
+                "/admin/api/runtime-settings",
+                get(routes::runtime_settings).put(routes::update_runtime_settings),
+            )
             .route("/healthz", get(|| async { "ok" }))
             .fallback(not_found)
             .with_state(state.clone());
