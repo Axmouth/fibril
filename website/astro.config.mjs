@@ -23,6 +23,7 @@ export default defineConfig({
             { label: "Overview", slug: "latest" },
             { label: "Quickstart", slug: "latest/quickstart" },
             { label: "Client usage", slug: "latest/clients" },
+            { label: "Configuration", slug: "latest/configuration" },
             { label: "Project status", slug: "latest/status" },
           ],
         },

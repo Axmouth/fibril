@@ -65,6 +65,8 @@ publisher_idle_timeout_ms = 600000
 
 `runtime_seed` values seed the persisted runtime settings document on first boot. Once runtime settings exist, persisted runtime settings own these values unless a setting group is explicitly locked by startup config.
 
+For the complete config reference, including env vars, CLI flags, and runtime locks, see [configuration](/latest/configuration/).
+
 When idle queue cleanup is enabled, a background worker wakes every `sweep_interval_ms` and checks tracked queues.
 
 The current server binary also accepts environment variables for compatibility:

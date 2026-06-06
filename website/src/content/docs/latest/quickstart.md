@@ -83,3 +83,5 @@ for await (const msg of sub) {
 The API is evolving. Treat examples as a guide to the current source tree rather than a stable package contract.
 
 For more publishing, subscription, delayed publish, and message encoding examples, see [client usage](/latest/clients/).
+
+For startup config, runtime settings, and idle queue cleanup options, see [configuration](/latest/configuration/).

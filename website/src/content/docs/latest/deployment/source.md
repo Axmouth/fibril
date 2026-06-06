@@ -72,29 +72,8 @@ Startup config precedence is:
 compiled defaults < TOML config file < environment variables < CLI arguments
 ```
 
-The current env vars are startup inputs and first-boot runtime seeds. They are
-not the final runtime settings model; persisted runtime settings are planned
-separately.
-
-### Startup Fields
-
-| TOML field | Env var | CLI flag | Default |
-| --- | --- | --- | --- |
-| `server.data_dir` | `FIBRIL_DATA_DIR` | `--data-dir` | `server_data` |
-| `broker.listener.bind` | `FIBRIL_BROKER_BIND` | `--broker-bind` | `0.0.0.0:9876` |
-| `admin.listener.bind` | `FIBRIL_ADMIN_BIND` | `--admin-bind` | `0.0.0.0:8081` |
-
-### Runtime Seeds
-
-These fields seed current runtime behavior. Later, persisted global runtime
-settings should own these values after first boot.
-
-| Variable | Default | Meaning |
-| --- | --- | --- |
-| `runtime_seed.idle_queue_cleanup.enabled` | `false` | Enables idle queue cleanup when true. |
-| `runtime_seed.idle_queue_cleanup.evict_after_ms` / `FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS` / `--queue-idle-evict-after-ms` | `600000` | Idle duration before a queue can be unloaded. The env/CLI value also enables cleanup for compatibility. |
-| `runtime_seed.idle_queue_cleanup.sweep_interval_ms` / `FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS` / `--queue-idle-sweep-interval-ms` | `60000` | How often the idle-queue cleanup worker checks queues. |
-| `runtime_seed.idle_queue_cleanup.publisher_idle_timeout_ms` / `FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS` / `--publisher-idle-timeout-ms` | unset | Lets long-lived connections stop keeping unused queues active after this many milliseconds. |
+For the complete field reference, environment variables, CLI flags, runtime
+seed behavior, and runtime locks, see [configuration](/latest/configuration/).
 
 For sparse workloads, enable publisher idle expiry alongside queue cleanup;
 otherwise a long-lived connection that published to a queue can keep that queue
