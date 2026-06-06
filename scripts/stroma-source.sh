@@ -8,8 +8,10 @@ Usage: scripts/stroma-source.sh <git|local>
 Switch the stroma-core dependency source used by crates/broker,
 crates/storage, and protocol tests.
 
-  git    Use https://github.com/Axmouth/keratin.git branch main.
-         This is the CI/release/Docker mode.
+  git    Use https://github.com/Axmouth/keratin.git.
+         This is the CI/release/Docker mode. Defaults to branch main.
+         Set STROMA_SOURCE_REF_KIND to branch, tag, or rev and
+         STROMA_SOURCE_REF to pin a specific source ref.
 
   local  Use ../../../keratin/stroma/core for sibling-checkout development.
          This expects a local Keratin checkout at ../keratin.
@@ -23,7 +25,16 @@ fi
 
 case "$1" in
   git)
-    replacement='stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }'
+    ref_kind="${STROMA_SOURCE_REF_KIND:-branch}"
+    ref="${STROMA_SOURCE_REF:-main}"
+    case "$ref_kind" in
+      branch | tag | rev) ;;
+      *)
+        echo "STROMA_SOURCE_REF_KIND must be branch, tag, or rev" >&2
+        exit 2
+        ;;
+    esac
+    replacement="stroma-core = { git = \"https://github.com/Axmouth/keratin.git\", ${ref_kind} = \"${ref}\" }"
     ;;
   local)
     replacement='stroma-core = { path = "../../../keratin/stroma/core" }'

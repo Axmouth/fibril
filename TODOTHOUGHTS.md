@@ -2,8 +2,6 @@ Copy Keratin file lock on Stroma too
 
 Add content type to header fields, enum for common ones like json, msg pack, etc. Custom/Other/Whatever variant for rest, containining actual string. Can use this to decode too. Enum with common types hardcoded should be much more disk and network efficient for the common cases, considering how often it will be transfered, and we can still support arbitrary content types with the custom variant.
 
-more lazy init queues. ability to only do the relevant processes to initialize when accessed, providing better support for arbitrarily large amount of not often used queues.
-
 keep track off consumer id per message and extend lease for alive consumers instead of expiring. Or simply otherwise no expiry(configurable, depending on TTL there or not?) while client is still connected, bit instant expiry once client deemed lost
 
 add global event log for stroma setting changes
@@ -24,16 +22,20 @@ Wire in more debug stats
 
 Figure keratin head offset discrepancy.
 
+unsub inflight redistribution, ensure works when target unsubs too(drain straight to delivery loop input with extra channel for it? then maybe drop leftovers if out of capacity to send? though it would get in the way of sending fetched.. maybe a grace period before leaving extras to be handled be expiration worker
+
+reconnection grace period + reconciliation frame + document behavior + relevant log
+
 Small grace period and simple reconciliation handshake after restart. "listening for old friends". Broker takes a moment to let clients reclaim inflight state and submit late settle requests, before starting delivery as usual.
 Might need to save client id AND sub id for this. Restoring sub ids for inflight state also mean we likely need to set next sub id var to the max of the sub ids we have too, to be safe. or ignore sub ids and rely only on client id.
+
+try to nest main loop in tcp client and server and put more generous reconnect logic there, trying to keep the state and not redo, have a handshake that shows it was reconnected with same id to differentiate from connection dying on other side. also immediately mark ready again once connection(cause messages are stuck in prefetch inflight etc). add map of client to inflights in state? for easier reconciliation
 
 Maybe find way to better linearly read from Keratin, faster
 
 More pipelining in Keratin writer: Batch -> encode and stage buffer -> write file -> fsync -> notify awaiters (estimated possible 40%-60% gain in throughput from not waiting encoding and fsync for large payloads)
 
 explore a cache trying to keep in memory x mb of next deliverable messages(we always know which messages are next with ready set)
-
-try to nest main loop in tcp client and server and put more generous reconnect logic there, trying to keep the state and not redo, have a handshake that shows it was reconnected with same id to differentiate from connection dying on other side. also immediately mark ready again once connection(cause messages are stuck in prefetch inflight etc). add map of client to inflights in state? for easier reconciliation
 
 opportunistic batching (do not wait if the socket is writable now, but if you would block, accumulate)
 
