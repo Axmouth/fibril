@@ -399,3 +399,56 @@ async fn publisher_cache_idle_timeout_allows_queue_eviction_while_connection_sta
     drop(framed);
     server_task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn publisher_cache_idle_timeout_updates_existing_connection() {
+    let settings = ConnectionSettings::new(Some(1));
+    let (mut framed, server_task, _dir, broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                2,
+                &Publish {
+                    topic: "publisher.cache.live".into(),
+                    partition: 0,
+                    group: None,
+                    require_confirm: true,
+                    headers: HashMap::new(),
+                    payload: b"payload".to_vec(),
+                    published: unix_millis(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::PublishOk as u16);
+    assert_eq!(frame.request_id, 2);
+    assert_eq!(
+        broker
+            .queue_activity_snapshot("publisher.cache.live", None)
+            .unwrap()
+            .active_publishers,
+        1
+    );
+
+    settings.update_runtime(fibril_protocol::v1::handler::ConnectionRuntimeSettings {
+        publisher_cache_idle_timeout_ms: Some(0),
+    });
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::Ping as u16);
+
+    wait_for_queue_idle(&broker, "publisher.cache.live", None).await;
+    assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}

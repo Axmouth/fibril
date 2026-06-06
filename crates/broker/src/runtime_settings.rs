@@ -112,6 +112,7 @@ pub struct RuntimeSettingsSnapshot {
 pub struct RuntimeSettingsManager {
     store: Arc<GlobalStore>,
     current: watch::Sender<RuntimeSettingsSnapshot>,
+    seed: RuntimeSettings,
     locks: RuntimeSettingsLocks,
 }
 
@@ -131,11 +132,12 @@ impl RuntimeSettingsManager {
         locks: RuntimeSettingsLocks,
     ) -> Result<Self, RuntimeSettingsError> {
         seed.validate()?;
-        let snapshot = load_or_seed_settings(&store, seed, &locks).await?;
+        let snapshot = load_or_seed_settings(&store, &seed, &locks).await?;
         let (current, _) = watch::channel(snapshot);
         Ok(Self {
             store,
             current,
+            seed,
             locks,
         })
     }
@@ -154,6 +156,64 @@ impl RuntimeSettingsManager {
 
     pub fn store(&self) -> Arc<GlobalStore> {
         self.store.clone()
+    }
+
+    pub async fn update(
+        &self,
+        expected_version: u64,
+        settings: RuntimeSettings,
+    ) -> Result<RuntimeSettingsUpdateOutcome, RuntimeSettingsError> {
+        settings.validate()?;
+
+        let key = runtime_settings_key()?;
+        let current_raw = match self.store.get(&key).await? {
+            Some(value) => decode_snapshot(value)?,
+            None => {
+                return Err(RuntimeSettingsError::StoreConflict(
+                    "runtime settings disappeared before update".into(),
+                ));
+            }
+        };
+        let current_effective = effective_snapshot(current_raw.clone(), &self.seed, &self.locks)?;
+        if expected_version != current_raw.version {
+            return Ok(RuntimeSettingsUpdateOutcome::Conflict(current_effective));
+        }
+
+        let mut persisted_settings = settings.clone();
+        if self.locks.idle_queue_cleanup {
+            if settings.idle_queue_cleanup != current_effective.settings.idle_queue_cleanup {
+                return Err(RuntimeSettingsError::Locked(
+                    "idle_queue_cleanup is locked by boot config".into(),
+                ));
+            }
+            persisted_settings.idle_queue_cleanup = current_raw.settings.idle_queue_cleanup;
+        }
+
+        let bytes = encode_settings(&persisted_settings)?;
+        match self.store.put(key, bytes, Some(expected_version)).await? {
+            PutOutcome::Stored { version } => {
+                let snapshot = effective_snapshot(
+                    RuntimeSettingsSnapshot {
+                        version,
+                        settings: persisted_settings,
+                    },
+                    &self.seed,
+                    &self.locks,
+                )?;
+                self.current.send_replace(snapshot.clone());
+                Ok(RuntimeSettingsUpdateOutcome::Stored(snapshot))
+            }
+            PutOutcome::Conflict {
+                current: Some(value),
+            } => {
+                let snapshot =
+                    effective_snapshot(decode_snapshot(value)?, &self.seed, &self.locks)?;
+                Ok(RuntimeSettingsUpdateOutcome::Conflict(snapshot))
+            }
+            PutOutcome::Conflict { current: None } => Err(RuntimeSettingsError::StoreConflict(
+                "runtime settings update conflicted but no current value exists".into(),
+            )),
+        }
     }
 }
 
@@ -176,6 +236,12 @@ struct RuntimeSettingsEnvelope {
     settings: RuntimeSettings,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSettingsUpdateOutcome {
+    Stored(RuntimeSettingsSnapshot),
+    Conflict(RuntimeSettingsSnapshot),
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum RuntimeSettingsError {
     #[error("stroma error: {0}")]
@@ -190,20 +256,23 @@ pub enum RuntimeSettingsError {
     #[error("invalid runtime settings: {0}")]
     Invalid(String),
 
+    #[error("locked runtime setting: {0}")]
+    Locked(String),
+
     #[error("runtime settings store conflict: {0}")]
     StoreConflict(String),
 }
 
 async fn load_or_seed_settings(
     store: &GlobalStore,
-    seed: RuntimeSettings,
+    seed: &RuntimeSettings,
     locks: &RuntimeSettingsLocks,
 ) -> Result<RuntimeSettingsSnapshot, RuntimeSettingsError> {
     let key = runtime_settings_key()?;
     let snapshot = match store.get(&key).await? {
         Some(value) => decode_snapshot(value)?,
         None => {
-            let bytes = encode_settings(&seed)?;
+            let bytes = encode_settings(seed)?;
             match store.put(key.clone(), bytes, Some(0)).await? {
                 PutOutcome::Stored { version } => RuntimeSettingsSnapshot {
                     version,
@@ -225,9 +294,16 @@ async fn load_or_seed_settings(
         }
     };
 
-    let mut snapshot = snapshot;
+    effective_snapshot(snapshot, &seed, locks)
+}
+
+fn effective_snapshot(
+    mut snapshot: RuntimeSettingsSnapshot,
+    seed: &RuntimeSettings,
+    locks: &RuntimeSettingsLocks,
+) -> Result<RuntimeSettingsSnapshot, RuntimeSettingsError> {
     snapshot.settings.validate()?;
-    snapshot.settings.apply_locks(&seed, locks);
+    snapshot.settings.apply_locks(seed, locks);
     snapshot.settings.validate()?;
     Ok(snapshot)
 }
@@ -418,5 +494,179 @@ mod tests {
             manager.current().settings.idle_queue_cleanup,
             seed.idle_queue_cleanup
         );
+    }
+
+    #[tokio::test]
+    async fn update_stores_settings_with_expected_version() {
+        let dir = test_dir!("runtime_settings_update");
+        let stroma = Stroma::open(
+            &dir.root,
+            KeratinConfig::test_default(),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let store = stroma.global_store().await.unwrap();
+        let manager = RuntimeSettingsManager::load_from_store(
+            store,
+            RuntimeSettings::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut updated = manager.current().settings;
+        updated.delivery.inflight_ttl_ms = 123;
+
+        let outcome = manager.update(1, updated.clone()).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            RuntimeSettingsUpdateOutcome::Stored(RuntimeSettingsSnapshot {
+                version: 2,
+                settings: updated.clone(),
+            })
+        );
+        assert_eq!(manager.current().version, 2);
+        assert_eq!(manager.current().settings, updated);
+    }
+
+    #[tokio::test]
+    async fn update_conflict_returns_current_effective_settings() {
+        let dir = test_dir!("runtime_settings_update_conflict");
+        let stroma = Stroma::open(
+            &dir.root,
+            KeratinConfig::test_default(),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let store = stroma.global_store().await.unwrap();
+        let manager = RuntimeSettingsManager::load_from_store(
+            store,
+            RuntimeSettings::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut first_update = manager.current().settings;
+        first_update.delivery.inflight_ttl_ms = 111;
+        manager.update(1, first_update.clone()).await.unwrap();
+
+        let mut stale_update = first_update.clone();
+        stale_update.delivery.inflight_ttl_ms = 222;
+        let outcome = manager.update(1, stale_update).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            RuntimeSettingsUpdateOutcome::Conflict(RuntimeSettingsSnapshot {
+                version: 2,
+                settings: first_update,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn update_preserves_locked_persisted_sections() {
+        let dir = test_dir!("runtime_settings_update_locks");
+        let stroma = Stroma::open(
+            &dir.root,
+            KeratinConfig::test_default(),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let store = stroma.global_store().await.unwrap();
+
+        let persisted = RuntimeSettings {
+            idle_queue_cleanup: IdleQueueCleanupRuntimeSettings {
+                enabled: true,
+                evict_after_ms: 1,
+                sweep_interval_ms: 2,
+                publisher_idle_timeout_ms: Some(3),
+            },
+            ..RuntimeSettings::default()
+        };
+        RuntimeSettingsManager::load_from_store(
+            store.clone(),
+            persisted.clone(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        let seed = RuntimeSettings {
+            idle_queue_cleanup: IdleQueueCleanupRuntimeSettings {
+                enabled: false,
+                evict_after_ms: 10,
+                sweep_interval_ms: 20,
+                publisher_idle_timeout_ms: None,
+            },
+            ..RuntimeSettings::default()
+        };
+        let manager = RuntimeSettingsManager::load_from_store(
+            store.clone(),
+            seed.clone(),
+            RuntimeSettingsLocks {
+                idle_queue_cleanup: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut update = manager.current().settings;
+        update.delivery.inflight_ttl_ms = 123;
+        let outcome = manager.update(1, update.clone()).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            RuntimeSettingsUpdateOutcome::Stored(RuntimeSettingsSnapshot {
+                version: 2,
+                settings: update,
+            })
+        );
+
+        let unlocked = RuntimeSettingsManager::load_from_store(
+            store,
+            RuntimeSettings::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            unlocked.current().settings.idle_queue_cleanup,
+            persisted.idle_queue_cleanup
+        );
+        assert_eq!(unlocked.current().settings.delivery.inflight_ttl_ms, 123);
+    }
+
+    #[tokio::test]
+    async fn update_rejects_locked_section_changes() {
+        let dir = test_dir!("runtime_settings_update_rejects_locks");
+        let stroma = Stroma::open(
+            &dir.root,
+            KeratinConfig::test_default(),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let store = stroma.global_store().await.unwrap();
+        let manager = RuntimeSettingsManager::load_from_store(
+            store,
+            RuntimeSettings::default(),
+            RuntimeSettingsLocks {
+                idle_queue_cleanup: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut update = manager.current().settings;
+        update.idle_queue_cleanup.enabled = true;
+
+        let err = manager.update(1, update).await.unwrap_err();
+
+        assert!(matches!(err, RuntimeSettingsError::Locked(_)));
     }
 }

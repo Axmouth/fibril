@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use fibril_metrics::{BrokerStats, QueuesStateSnapshot};
 use futures::FutureExt;
@@ -493,6 +494,7 @@ impl QueueLoopState {
 enum WakeReason {
     Notify,
     Timer,
+    SettingsChanged,
 }
 
 impl std::fmt::Display for WakeReason {
@@ -500,6 +502,7 @@ impl std::fmt::Display for WakeReason {
         match self {
             WakeReason::Notify => write!(f, "notify"),
             WakeReason::Timer => write!(f, "timer"),
+            WakeReason::SettingsChanged => write!(f, "settings_changed"),
         }
     }
 }
@@ -508,7 +511,7 @@ impl std::fmt::Display for WakeReason {
 
 // TODO cleanup old?
 pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
-    cfg: BrokerConfig,
+    cfg: ArcSwap<BrokerConfig>,
     engine: E,
     shutdown_publishers: CancellationToken,
     shutdown_consumers: CancellationToken,
@@ -525,6 +528,8 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
 
     pending_settles: Arc<AtomicUsize>,
     settle_drained: Arc<Notify>,
+    settings_changed: Arc<Notify>,
+    settings_epoch: AtomicU64,
 
     task_group: Arc<TaskGroup>,
 
@@ -557,7 +562,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
 
         let this = Arc::new(Self {
-            cfg,
+            cfg: ArcSwap::from_pointee(cfg),
             engine,
             shutdown_publishers: CancellationToken::new(),
             shutdown_consumers: CancellationToken::new(),
@@ -571,6 +576,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             tags_by_key_offset: DashMap::new(),
             pending_settles: Arc::new(AtomicUsize::new(0)),
             settle_drained: Arc::new(Notify::new()),
+            settings_changed: Arc::new(Notify::new()),
+            settings_epoch: AtomicU64::new(1),
             task_group: Arc::new(TaskGroup::new()),
             metrics,
         });
@@ -584,6 +591,23 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     pub fn stroma_metrics(&self) -> Arc<StromaMetrics> {
         self.engine.metrics()
+    }
+
+    pub fn config_snapshot(&self) -> Arc<BrokerConfig> {
+        self.cfg.load_full()
+    }
+
+    pub fn update_config(&self, cfg: BrokerConfig) {
+        self.cfg.store(Arc::new(cfg));
+        self.settings_epoch.fetch_add(1, Ordering::AcqRel);
+        self.settings_changed.notify_waiters();
+        for qs in self.queues.iter() {
+            qs.value().wake();
+        }
+    }
+
+    fn settings_epoch(&self) -> u64 {
+        self.settings_epoch.load(Ordering::Acquire)
     }
 
     pub async fn shutdown(&self) {
@@ -1366,17 +1390,17 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("delivery_loop", async move {
             let mut last_epoch_seen = qs.current_epoch();
-            let ttl_ms = broker.cfg.inflight_ttl_ms;
-            let poll = Duration::from_millis(broker.cfg.delivery_poll_max_ms.max(1));
-            let mut tick = tokio::time::interval(poll);
 
             loop {
+                let cfg = broker.config_snapshot();
+                let poll = Duration::from_millis(cfg.delivery_poll_max_ms.max(1));
                 let reason = tokio::select! {
                     biased;
 
                     _ = broker.shutdown_consumers.cancelled() => break,
                     _ = qs.notify.notified() => WakeReason::Notify,
-                    _ = tick.tick() => WakeReason::Timer,
+                    _ = broker.settings_changed.notified() => WakeReason::SettingsChanged,
+                    _ = tokio::time::sleep(poll) => WakeReason::Timer,
                 };
 
                 // if let WakeReason::Notify = reason {
@@ -1420,7 +1444,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         break;
                     }
 
-                    let lease_deadline = unix_millis() + ttl_ms;
+                    let cfg = broker.config_snapshot();
+                    let lease_deadline = unix_millis() + cfg.inflight_ttl_ms;
 
                     // TODO: Also limit each poll batch based on size of aggreated messages
                     let deliverables = match broker
@@ -1534,21 +1559,52 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 
     fn spawn_queue_eviction_worker(broker: Arc<Self>) {
-        let Some(idle_for_ms) = broker.cfg.queue_idle_evict_after_ms else {
-            return;
-        };
-        let interval_ms = broker.cfg.queue_idle_sweep_interval_ms.max(1);
         let broker_clone = broker.clone();
         broker_clone
             .task_group
             .spawn("queue_eviction_worker", async move {
+                let mut settings_epoch = broker.settings_epoch();
                 loop {
+                    let current_epoch = broker.settings_epoch();
+                    if current_epoch != settings_epoch {
+                        settings_epoch = current_epoch;
+                    }
+                    let cfg = broker.config_snapshot();
+                    let Some(_) = cfg.queue_idle_evict_after_ms else {
+                        let settings_changed = broker.settings_changed.notified();
+                        tokio::pin!(settings_changed);
+                        let current_epoch = broker.settings_epoch();
+                        if current_epoch != settings_epoch {
+                            settings_epoch = current_epoch;
+                            continue;
+                        }
+                        tokio::select! {
+                            biased;
+                            _ = broker.shutdown_queue_eviction.cancelled() => break,
+                            _ = &mut settings_changed => {
+                                settings_epoch = broker.settings_epoch();
+                                continue;
+                            }
+                        }
+                    };
+                    let interval_ms = cfg.queue_idle_sweep_interval_ms.max(1);
+
+                    let settings_changed = broker.settings_changed.notified();
+                    tokio::pin!(settings_changed);
                     tokio::select! {
                         biased;
                         _ = broker.shutdown_queue_eviction.cancelled() => break,
+                        _ = &mut settings_changed => {
+                            settings_epoch = broker.settings_epoch();
+                            continue;
+                        }
                         _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
                     }
 
+                    let Some(idle_for_ms) = broker.config_snapshot().queue_idle_evict_after_ms
+                    else {
+                        continue;
+                    };
                     match broker.evict_inactive_queues(idle_for_ms).await {
                         Ok(attempts) => {
                             let evicted = attempts
@@ -1586,6 +1642,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     biased;
 
                     _ = broker.shutdown_expiry.cancelled() => break,
+                    _ = broker.settings_changed.notified() => {
+                        expiry_hint = broker.engine.next_expiry_hint().await.unwrap_or(None);
+                        continue;
+                    }
 
                     // TODO: Add branch to be notified when to recheck for hint(retry or enqueue with delay?)
                     _ = &mut deadline_awaker => {
@@ -1610,9 +1670,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             }
                             None => {
                                 // TODO: move to timer?
-                                tracing::info!("Expiry worker sleeping for {} ms..", broker.cfg.expiry_poll_min_ms);
+                                let cfg = broker.config_snapshot();
+                                tracing::info!("Expiry worker sleeping for {} ms..", cfg.expiry_poll_min_ms);
                                 tokio::time::sleep(Duration::from_millis(
-                                    broker.cfg.expiry_poll_min_ms
+                                    cfg.expiry_poll_min_ms
                                 )).await;
                             }
                         }
@@ -1626,7 +1687,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 // Requeue expired inside Stroma (durable)
                 let expired = match broker
                     .engine
-                    .requeue_expired(unix_millis(), broker.cfg.expiry_batch_max)
+                    .requeue_expired(unix_millis(), broker.config_snapshot().expiry_batch_max)
                     .await
                 {
                     Ok(v) => v,

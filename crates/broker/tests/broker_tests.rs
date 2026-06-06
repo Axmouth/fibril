@@ -443,6 +443,42 @@ async fn queue_eviction_worker_is_disabled_by_default() {
     broker.shutdown().await;
 }
 
+#[tokio::test]
+async fn queue_eviction_worker_can_be_enabled_after_startup() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
+
+    assert!(broker.is_queue_materialized("t", None));
+
+    broker.update_config(BrokerConfig {
+        queue_idle_evict_after_ms: Some(0),
+        queue_idle_sweep_interval_ms: 10,
+        ..(*broker.config_snapshot()).clone()
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while broker.is_queue_materialized("t", None) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    assert!(!broker.is_queue_materialized("t", None));
+    broker.shutdown().await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn queue_eviction_worker_leaves_active_publisher_materialized() {
     let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {

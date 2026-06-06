@@ -9,6 +9,7 @@ fibril-metrics = { path = "../metrics" }
 fibril-util = { path = "../util" }
 stroma-core = { path = "../../../keratin/stroma/core" }
 anyhow = "1.0"
+arc-swap = "1.9"
 async-trait = "0.1"
 bytes = "1"
 crossbeam = "0.8"

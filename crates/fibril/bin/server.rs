@@ -11,7 +11,7 @@ use fibril_broker::{
 };
 use fibril_config::ServerConfig;
 use fibril_metrics::{Metrics, MetricsConfig};
-use fibril_protocol::v1::handler::{ConnectionSettings, run_server};
+use fibril_protocol::v1::handler::{ConnectionRuntimeSettings, ConnectionSettings, run_server};
 use fibril_util::{StaticAuthHandler, init_tracing};
 use mimalloc::MiMalloc;
 
@@ -60,6 +60,25 @@ async fn main() -> anyhow::Result<()> {
     let runtime = &runtime_snapshot.settings;
     let broker_cfg = BrokerConfig::from_runtime_settings(runtime);
     let broker = Broker::new(engine.clone(), broker_cfg, Some(metrics.broker()));
+    let connection_settings = ConnectionSettings::new(None)
+        .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms);
+    {
+        let broker = broker.clone();
+        let connection_settings = connection_settings.clone();
+        let mut runtime_updates = runtime_settings.subscribe();
+        tokio::spawn(async move {
+            while runtime_updates.changed().await.is_ok() {
+                let snapshot = runtime_updates.borrow().clone();
+                broker.update_config(BrokerConfig::from_runtime_settings(&snapshot.settings));
+                connection_settings.update_runtime(ConnectionRuntimeSettings {
+                    publisher_cache_idle_timeout_ms: snapshot
+                        .settings
+                        .idle_queue_cleanup
+                        .publisher_idle_timeout_ms,
+                });
+            }
+        });
+    }
 
     let auth_handler = StaticAuthHandler::new("fibril".to_string(), "fibril".to_string());
 
@@ -71,9 +90,7 @@ async fn main() -> anyhow::Result<()> {
         metrics.tcp(),
         metrics.connections(),
         Some(auth_handler.clone()),
-        ConnectionSettings::new(None).with_publisher_cache_idle_timeout_ms(
-            runtime.idle_queue_cleanup.publisher_idle_timeout_ms,
-        ),
+        connection_settings,
     );
 
     let admin = AdminServer::new(

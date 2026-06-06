@@ -55,15 +55,19 @@ Fibril will not unload a queue just because a consumer is slow. It also checks f
 
 Idle queue cleanup is disabled by default. Configure it with:
 
-```txt
-queue_idle_evict_after_ms = null
-queue_idle_sweep_interval_ms = 60000
-publisher_cache_idle_timeout_ms = null
+```toml
+[runtime_seed.idle_queue_cleanup]
+enabled = false
+evict_after_ms = 600000
+sweep_interval_ms = 60000
+publisher_idle_timeout_ms = 600000
 ```
 
-When `queue_idle_evict_after_ms` is set, a background worker wakes every `queue_idle_sweep_interval_ms` and checks tracked queues.
+`runtime_seed` values seed the persisted runtime settings document on first boot. Once runtime settings exist, persisted runtime settings own these values unless a setting group is explicitly locked by startup config.
 
-In the server binary these map to environment variables:
+When idle queue cleanup is enabled, a background worker wakes every `sweep_interval_ms` and checks tracked queues.
+
+The current server binary also accepts environment variables for compatibility:
 
 ```txt
 FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS
@@ -71,7 +75,7 @@ FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS
 FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS
 ```
 
-`queue_idle_evict_after_ms` controls how long a queue must stay idle before it can be unloaded. `queue_idle_sweep_interval_ms` controls how often the background cleanup worker checks for idle queues.
+`evict_after_ms` controls how long a queue must stay idle before it can be unloaded. `sweep_interval_ms` controls how often the background cleanup worker checks for idle queues.
 
 For sparse workloads with long-lived publishing connections, also set `publisher_cache_idle_timeout_ms`. Otherwise, a connection that published to a queue may keep that queue active until the connection closes.
 
@@ -111,11 +115,12 @@ Implemented now:
 - lazy loading of durable queues
 - configurable idle queue unloading
 - configurable publisher idle expiry for long-lived connections
-- tests for active publishers, active subscribers, idle threshold behavior, inflight guards, disabled cleanup, direct cleanup, and worker-driven cleanup
+- live updates for idle cleanup and publisher idle expiry runtime settings
+- tests for active publishers, active subscribers, idle threshold behavior, inflight guards, disabled cleanup, live enabling, direct cleanup, and worker-driven cleanup
 
 Still early:
 
-- configuration is currently environment-variable based, not a polished config file
+- runtime settings are persisted and versioned, but the admin editing UI is not wired yet
 - delayed-message cleanup behavior needs more end-to-end coverage before treating it as a documented guarantee
 - the broker may keep small in-process bookkeeping for a queue even after unloading the durable queue state
 

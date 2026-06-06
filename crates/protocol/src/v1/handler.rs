@@ -14,6 +14,7 @@ use crate::v1::{
     *,
 };
 use anyhow::Context;
+use arc_swap::ArcSwap;
 use fibril_broker::{
     broker::{
         Broker, BrokerError, ConsumerConfig, ConsumerHandle, ConsumerLease, PublisherHandle,
@@ -85,22 +86,52 @@ struct CachedPublisher {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct ConnectionRuntimeSettings {
+    pub publisher_cache_idle_timeout_ms: Option<u64>,
+}
+
+#[derive(Clone)]
 pub struct ConnectionSettings {
     pub heartbeat_interval: Option<u64>,
-    pub publisher_cache_idle_timeout_ms: Option<u64>,
+    runtime: Arc<ArcSwap<ConnectionRuntimeSettings>>,
 }
 
 impl ConnectionSettings {
     pub fn new(heartbeat_interval: Option<u64>) -> Self {
         Self {
             heartbeat_interval,
-            publisher_cache_idle_timeout_ms: None,
+            runtime: Arc::new(ArcSwap::from_pointee(ConnectionRuntimeSettings::default())),
         }
     }
 
-    pub fn with_publisher_cache_idle_timeout_ms(mut self, timeout_ms: Option<u64>) -> Self {
-        self.publisher_cache_idle_timeout_ms = timeout_ms;
+    pub fn with_publisher_cache_idle_timeout_ms(self, timeout_ms: Option<u64>) -> Self {
+        self.update_runtime(ConnectionRuntimeSettings {
+            publisher_cache_idle_timeout_ms: timeout_ms,
+        });
         self
+    }
+
+    pub fn update_runtime(&self, settings: ConnectionRuntimeSettings) {
+        self.runtime.store(Arc::new(settings));
+    }
+
+    pub fn runtime_snapshot(&self) -> Arc<ConnectionRuntimeSettings> {
+        self.runtime.load_full()
+    }
+}
+
+impl Default for ConnectionSettings {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl std::fmt::Debug for ConnectionSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionSettings")
+            .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("runtime", &self.runtime_snapshot())
+            .finish()
     }
 }
 
@@ -154,6 +185,7 @@ pub async fn run_server(
         let auth = auth.clone();
         let tcp_stats = tcp_stats.clone();
         let connection_stats = connection_stats.clone();
+        let connection_settings = connection_settings.clone();
         tokio::spawn(async move {
             tracing::info!("Connection {conn_id} opening..");
             if let Err(e) = handle_connection(
@@ -537,10 +569,8 @@ pub async fn handle_connection(
             LoopEvent::Timeout => break,
             LoopEvent::Disconnect => break,
             LoopEvent::Heartbeat => {
-                expire_idle_publishers(
-                    &mut publishers,
-                    connection_settings.publisher_cache_idle_timeout_ms,
-                );
+                let settings = connection_settings.runtime_snapshot();
+                expire_idle_publishers(&mut publishers, settings.publisher_cache_idle_timeout_ms);
                 continue;
             }
         };

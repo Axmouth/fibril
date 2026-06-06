@@ -3,7 +3,7 @@ title: Configuration design
 description: Planned implementation shape for startup config and persisted runtime settings.
 ---
 
-This is a design reference for implementing Fibril configuration. It builds on the [configuration policy](/latest/development/config-policy/).
+This is a design reference for Fibril configuration. It builds on the [configuration policy](/latest/development/config-policy/) and tracks both implemented pieces and planned follow-up work.
 
 ## Goals
 
@@ -41,7 +41,7 @@ Examples of bootstrap settings:
 
 ## Config Crate
 
-Add a dedicated config crate, likely `fibril-config`.
+Fibril has a dedicated `fibril-config` crate.
 
 Responsibilities:
 
@@ -57,7 +57,7 @@ The server binary should not keep hand-parsing env vars.
 
 The crate can depend on lower-level crates for config structs where that does not create cycles. Lower-level crates should not depend on the server binary or admin crate.
 
-Use `clap` for CLI parsing when CLI support is added. It is fine to implement TOML + env first, but the model should leave room for CLI overriding env.
+CLI parsing uses `clap`. TOML, environment, and CLI values are folded into one finished `ServerConfig`.
 
 ## Startup Config Sketch
 
@@ -116,11 +116,11 @@ The broker can convert this to internal `BrokerConfig`/`ConnectionSettings` shap
 
 ## Global Store
 
-Persisted runtime settings should live in Stroma or next to Stroma as a generic durable store.
+Persisted runtime settings live in Stroma's durable global store.
 
 Stroma should not learn broker-specific setting semantics. It should provide persistence, replay, snapshots, versioning, and compare-and-swap behavior for opaque values.
 
-Possible API shape:
+Current API shape:
 
 ```rust
 pub struct GlobalKey {
@@ -135,20 +135,20 @@ pub struct GlobalValue {
 
 pub enum PutOutcome {
     Stored { version: u64 },
-    Conflict { current: GlobalValue },
+    Conflict { current: Option<GlobalValue> },
 }
 
-pub trait GlobalStore {
-    async fn get(&self, key: &GlobalKey) -> Result<Option<GlobalValue>>;
+impl GlobalStore {
+    pub async fn get(&self, key: &GlobalKey) -> Result<Option<GlobalValue>>;
 
-    async fn put(
+    pub async fn put(
         &self,
-        key: &GlobalKey,
+        key: GlobalKey,
         value: Vec<u8>,
         expected_version: Option<u64>,
     ) -> Result<PutOutcome>;
 
-    fn watch(&self, key: &GlobalKey) -> watch::Receiver<Option<GlobalValue>>;
+    pub async fn watch(&self, key: GlobalKey) -> Result<watch::Receiver<Option<GlobalValue>>>;
 }
 ```
 
@@ -156,7 +156,7 @@ Namespacing keeps broker-owned settings separate from other future metadata:
 
 ```txt
 namespace = "fibril.runtime"
-key = "idle_queue_cleanup"
+key = "settings"
 ```
 
 ## Encoding
@@ -187,6 +187,10 @@ If the stored version is still 12, the update commits and produces version 13.
 If another change already produced version 13, the update returns a conflict instead of silently overwriting.
 
 This protects operators from clobbering each other's changes.
+
+The broker runtime settings manager now has the CAS primitive for this. It accepts an expected version and a complete `RuntimeSettings` document, validates it, writes through the global store, and returns either the stored effective settings or the current effective settings on conflict.
+
+Locked groups are handled before persistence. If a group is locked by boot config, updates that try to change it are rejected. Updates to other groups preserve the hidden persisted value for the locked group instead of overwriting it with the boot-owned effective value.
 
 ## Admin Conflict UX
 
@@ -224,6 +228,8 @@ admin request
 
 Settings that cannot be live-applied should be marked restart-required and should not pretend to take effect immediately.
 
+If a future runtime setting genuinely needs restart, the admin surface should label it as restart-required. The long-term direction is a controlled restart flow: drain or close connections gracefully, persist state, restart, then let clients reconnect cleanly. Until that exists, restart-required settings should be rare and explicit.
+
 ## Queue Defaults
 
 Global queue defaults apply to new queues.
@@ -245,21 +251,26 @@ If a setting group is locked:
 
 Do not make ordinary env vars hidden runtime overrides.
 
-## First Implementation Slice
+## Implementation Status
 
-Implement in this order:
+Done:
 
-1. Add `fibril-config` with typed startup config, TOML parsing, env overlay, validation, and tests.
-2. Wire `server.rs` through the finished config object while preserving current behavior.
-3. Add config docs for TOML and env compatibility.
-4. Add Stroma `GlobalStore` with MessagePack-ready byte values, versions, CAS, event log, snapshot, and tests.
-5. Add broker runtime settings model and first-boot seeding.
-6. Add live settings snapshots for idle queue cleanup.
-7. Add admin read endpoint.
-8. Add admin update endpoint with expected-version conflict handling.
-9. Add admin UI for viewing/updating settings and conflict display.
+- `fibril-config` typed startup config with TOML, env overlay, CLI overlay, validation, and tests
+- `server.rs` loads a finished config object
+- Stroma `GlobalStore` with opaque byte values, versions, CAS, watch support, and tests
+- broker runtime settings model with MessagePack encoding
+- first-boot seeding into global state
+- boot-owned runtime locks
+- manager-level compare-and-swap update with conflict reporting
+- live broker runtime config snapshots with settings-change wakeups
+- live publisher idle expiry updates for existing TCP connections
 
-The first slice should not change runtime behavior. It should make configuration explicit and ready for persisted runtime settings.
+Next implementation slices:
+
+1. Add admin read endpoint for runtime settings.
+2. Add admin update endpoint with expected-version conflict handling.
+3. Add admin UI for viewing/updating settings, locked fields, and conflict display.
+4. Expand docs with the final user-facing config file reference once names settle.
 
 ## Open Questions
 
