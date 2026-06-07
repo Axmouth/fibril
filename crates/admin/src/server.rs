@@ -431,9 +431,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.status().as_u16(), 423);
         let body = response_json(response).await;
-        assert!(body["error"].as_str().unwrap().contains("locked"));
+        assert_eq!(body["code"], "setting_locked");
+        assert!(body["message"].as_str().unwrap().contains("locked"));
     }
 
     #[tokio::test]

@@ -33,7 +33,8 @@ pub struct UpdateRuntimeSettingsRequest {
 
 #[derive(Serialize)]
 pub struct AdminErrorResponse {
-    pub error: String,
+    pub code: String,
+    pub message: String,
 }
 
 impl RuntimeSettingsResponse {
@@ -44,6 +45,21 @@ impl RuntimeSettingsResponse {
             locks,
         }
     }
+}
+
+fn admin_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
+    (
+        status,
+        Json(AdminErrorResponse {
+            code: code.into(),
+            message: message.into(),
+        }),
+    )
+        .into_response()
+}
+
+fn locked_status() -> StatusCode {
+    StatusCode::from_u16(423).unwrap_or(StatusCode::CONFLICT)
 }
 
 pub async fn overview(
@@ -157,22 +173,21 @@ pub async fn update_runtime_settings(
             Json(RuntimeSettingsResponse::new(snapshot, locks)),
         )
             .into_response()),
-        Err(err @ (RuntimeSettingsError::Invalid(_) | RuntimeSettingsError::Locked(_))) => Ok((
+        Err(RuntimeSettingsError::Invalid(err)) => Ok(admin_error(
             StatusCode::BAD_REQUEST,
-            Json(AdminErrorResponse {
-                error: err.to_string(),
-            }),
-        )
-            .into_response()),
+            "invalid_runtime_settings",
+            err,
+        )),
+        Err(RuntimeSettingsError::Locked(err)) => {
+            Ok(admin_error(locked_status(), "setting_locked", err))
+        }
         Err(err) => {
             tracing::error!("runtime settings update failed: {err}");
-            Ok((
+            Ok(admin_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AdminErrorResponse {
-                    error: "runtime settings update failed".into(),
-                }),
-            )
-                .into_response())
+                "runtime_settings_update_failed",
+                "runtime settings update failed",
+            ))
         }
     }
 }
