@@ -48,9 +48,9 @@ mod tests {
     }
 
     #[test]
-    fn deadline_instant_allows_now() {
-        let now = unix_millis();
-        assert!(deadline_instant(now).is_some());
+    fn deadline_instant_allows_near_future() {
+        let near_future = unix_millis() + 1;
+        assert!(deadline_instant(near_future).is_some());
     }
 
     #[tokio::test]

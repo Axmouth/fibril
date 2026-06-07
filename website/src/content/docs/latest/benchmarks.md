@@ -212,7 +212,9 @@ Recent local exploratory run, using `WRITERS=10`, `READERS=10`, `SIZE=1024`,
 | 250k/s | 249,591/s | 0 | 14 / 260 / 367 / 397 ms | 12 / 258 / 365 / 394 ms | ready=0, inflight=0 |
 | 300k/s | 298,528/s | 0 | 18 / 578 / 623 / 659 ms | 16 / 577 / 613 / 655 ms | ready=0, inflight=0 |
 
-These results suggest the current local setup can drain the tested rates without
-leaving ready or inflight messages behind, while latency tails start increasing
-noticeably above roughly 150-200k messages/sec. Treat the table as a reproducible
-development checkpoint, not a capacity promise.
+These older results remain useful as a development checkpoint, but the newer
+short sweeps above are a better current summary: the broker can drain
+substantially higher short-run rates, while the practical low-latency region
+depends heavily on payload size, durable storage bandwidth, and whether backlog
+is allowed to build. Treat all tables here as reproducible local checkpoints,
+not capacity promises.
