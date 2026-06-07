@@ -1066,6 +1066,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fibril-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fibril-client",
+ "fibril-config",
+ "tokio",
+]
+
+[[package]]
 name = "fibril-client"
 version = "0.1.0"
 dependencies = [

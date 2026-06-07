@@ -70,6 +70,20 @@ impl ServerConfig {
         Self::load_from_args(std::env::args_os())
     }
 
+    pub fn load_file_and_env(config_path: Option<PathBuf>) -> anyhow::Result<Self> {
+        let config_path = match config_path {
+            Some(path) => Some(path),
+            None => optional_path_env("FIBRIL_CONFIG")?,
+        };
+        let mut config = match config_path.as_deref() {
+            Some(path) => Self::from_toml_file(path)?,
+            None => Self::default(),
+        };
+        config.apply_env()?;
+        config.validate()?;
+        Ok(config)
+    }
+
     pub fn load_from_args<I, T>(args: I) -> anyhow::Result<Self>
     where
         I: IntoIterator<Item = T>,
@@ -597,6 +611,31 @@ mod tests {
                 .queue_idle_evict_after_ms,
             Some(123)
         );
+    }
+
+    #[test]
+    fn load_file_and_env_uses_explicit_config_without_server_cli_args() {
+        let dir = tempfile_path("fibril-config-tool.toml");
+        std::fs::write(
+            &dir,
+            r#"
+            [server]
+            data_dir = "from-tool-file"
+
+            [broker.listener]
+            bind = "127.0.0.1:9123"
+            "#,
+        )
+        .unwrap();
+
+        let config = ServerConfig::load_file_and_env(Some(dir.clone())).unwrap();
+
+        assert_eq!(config.server.data_dir, PathBuf::from("from-tool-file"));
+        assert_eq!(
+            config.broker.listener.bind,
+            "127.0.0.1:9123".parse().unwrap()
+        );
+        let _ = std::fs::remove_file(dir);
     }
 
     #[test]
