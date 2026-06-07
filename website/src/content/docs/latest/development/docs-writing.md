@@ -16,3 +16,7 @@ Most user-facing pages should follow this shape:
 Avoid making regular concept pages depend on internal names such as queue actors, cached handles, or storage materialization unless the name is also part of the user-facing model.
 
 Implementation detail is still useful, but it belongs in development notes. User-facing pages can link there with clear wording so readers know they are choosing a deeper design explanation, not the next required step.
+
+Keep the [roadmap](/latest/roadmap/) current as work lands. It should be the
+short checkpoint for what changed recently and what remains pending, even when
+the detailed docs for a feature live elsewhere.

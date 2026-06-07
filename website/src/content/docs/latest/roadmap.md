@@ -31,13 +31,16 @@ distributed-system features.
 - Add more production deployment guidance for the broker itself.
 - Improve admin interface observability.
 - Produce repeatable benchmark reports.
+- Add a detailed implemented-surface inventory, effectively a reverse roadmap
+  for checking whether a behavior is already wired.
 - Tighten memory behavior under large queue depth, high inflight load, and many idle queues.
 
 ## Longer term
 
 - Replication design and implementation.
 - Clustering and partition ownership.
-- More complete client ecosystem.
+- More complete client ecosystem. Priority order: Python, including a blocking
+  client, then C#, Go, and Java.
 
 ## Out of scope
 

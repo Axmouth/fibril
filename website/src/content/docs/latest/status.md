@@ -14,11 +14,11 @@ Fibril is pre-alpha infrastructure. This table distinguishes the working baselin
 | Backpressure | Available | Pull-based delivery and bounded prefetch |
 | Delayed publish | Available | Broker path and Rust/TypeScript client methods are wired |
 | Dead lettering | Available | Global and per-queue policy are configurable, replay tooling is still early |
-| Sparse queues | Available | Lazy loading and idle eviction are wired, observability is still growing |
+| Sparse queues | Available | Lazy loading and idle cleanup are wired, observability is still growing |
 | Message inspection | Available | Browse active queue messages from admin tooling, with optional settled offsets and payload previews |
 | Partition ownership | Planned | Future nodes can split active queue traffic by owning different partitions |
 | Replication | Planned | Future followers can keep partition copies for failover and recovery |
-| Transactions | Out of scope | Not planned; transactional publish/consume workflows are intentionally excluded |
+| Transactions | Out of scope | Not planned. Transactional publish/consume workflows are intentionally excluded |
 
 ## Early performance observations
 
