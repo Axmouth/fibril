@@ -18,11 +18,30 @@ select {
   padding: .25rem .45rem;
 }
 
+select {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - .85rem) 50%,
+    calc(100% - .55rem) 50%;
+  background-repeat: no-repeat;
+  background-size: .3rem .3rem, .3rem .3rem;
+  padding-right: 1.5rem;
+}
+
 input:focus,
 select:focus {
   border-color: #4dabf7;
   box-shadow: 0 0 0 2px rgba(77, 171, 247, .2);
   outline: none;
+}
+
+input:disabled,
+select:disabled {
+  cursor: not-allowed;
+  opacity: .55;
 }
 
 header {
@@ -74,14 +93,52 @@ main {
 }
 
 .settings-section {
+  background: rgba(255, 255, 255, .025);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 8px;
   border-top: 1px solid rgba(255, 255, 255, .16);
   margin-top: 1rem;
-  padding-top: 1rem;
+  padding: 1rem;
+}
+
+.settings-section-heading {
+  margin-bottom: 1rem;
+}
+
+.settings-section-heading h5,
+.settings-section-heading p {
+  margin: 0;
+}
+
+.settings-section-heading p {
+  opacity: .72;
+  padding-top: .25rem;
+}
+
+.settings-field {
+  display: grid !important;
+  gap: .25rem;
 }
 
 .settings-section label {
   display: block;
-  margin-bottom: .75rem;
+  margin-bottom: 1rem;
+}
+
+.settings-section label:last-child {
+  margin-bottom: 0;
+}
+
+.settings-label {
+  display: block;
+  font-weight: 600;
+}
+
+.settings-help {
+  display: block;
+  font-size: .65rem;
+  line-height: 1rem;
+  opacity: .68;
 }
 
 .settings-section input[type="number"] {
@@ -93,7 +150,6 @@ main {
   align-items: center;
   display: flex;
   gap: .5rem;
-  margin-top: .25rem;
   max-width: 34rem;
 }
 
@@ -106,9 +162,13 @@ main {
 }
 
 .checkbox-label {
-  align-items: center;
+  align-items: flex-start;
   display: flex !important;
   gap: .5rem;
+}
+
+.checkbox-label input {
+  margin-top: .2rem;
 }
 
 .settings-lock {
@@ -139,6 +199,12 @@ main {
 
 .settings-message[data-kind="error"] {
   background: rgba(255, 107, 107, .16);
+}
+
+.settings-actions {
+  display: flex;
+  gap: .5rem;
+  margin-top: 1rem;
 }
 
 .login-body {
@@ -180,4 +246,31 @@ main {
   display: block;
   margin-top: .25rem;
   width: 100%;
+}
+
+@media (max-width: 720px) {
+  main {
+    margin: 20px 12px;
+  }
+
+  .metrics-header,
+  .metric-table,
+  .settings-panel {
+    max-width: none;
+    margin-left: 0;
+    margin-right: 0;
+  }
+
+  .settings-duration {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-duration select {
+    flex-basis: auto;
+  }
+
+  .settings-actions {
+    flex-direction: column;
+  }
 }

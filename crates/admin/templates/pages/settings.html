@@ -13,9 +13,13 @@
     <input type="hidden" id="version">
 
     <section class="settings-section">
-      <h5>Delivery</h5>
-      <label>
-        Inflight TTL
+      <div class="settings-section-heading">
+        <h5>Delivery</h5>
+        <p>Controls how long messages can stay leased and how aggressively delayed or expired work is polled.</p>
+      </div>
+      <label class="settings-field">
+        <span class="settings-label">Inflight TTL</span>
+        <span class="settings-help">How long a delivered message can remain unacknowledged before it becomes eligible again.</span>
         <span class="settings-duration">
           <input class="clr-input" id="delivery.inflight_ttl_ms" type="number" min="0" step="1">
           <select class="clr-select duration-unit" id="delivery.inflight_ttl_ms.unit" data-for="delivery.inflight_ttl_ms">
@@ -24,8 +28,9 @@
           </select>
         </span>
       </label>
-      <label>
-        Expiry poll minimum
+      <label class="settings-field">
+        <span class="settings-label">Expiry poll minimum</span>
+        <span class="settings-help">Minimum wait between checks for delayed messages becoming ready.</span>
         <span class="settings-duration">
           <input class="clr-input" id="delivery.expiry_poll_min_ms" type="number" min="0" step="1">
           <select class="clr-select duration-unit" id="delivery.expiry_poll_min_ms.unit" data-for="delivery.expiry_poll_min_ms">
@@ -34,12 +39,14 @@
           </select>
         </span>
       </label>
-      <label>
-        Expiry batch max
+      <label class="settings-field">
+        <span class="settings-label">Expiry batch max</span>
+        <span class="settings-help">Maximum delayed or expired offsets processed in one pass.</span>
         <input class="clr-input" id="delivery.expiry_batch_max" type="number" min="1" step="1">
       </label>
-      <label>
-        Delivery poll max
+      <label class="settings-field">
+        <span class="settings-label">Delivery poll max</span>
+        <span class="settings-help">Maximum wait used by broker delivery polling when no message is immediately ready.</span>
         <span class="settings-duration">
           <input class="clr-input" id="delivery.delivery_poll_max_ms" type="number" min="0" step="1">
           <select class="clr-select duration-unit" id="delivery.delivery_poll_max_ms.unit" data-for="delivery.delivery_poll_max_ms">
@@ -51,13 +58,20 @@
     </section>
 
     <section class="settings-section" id="idle-section">
-      <h5>Idle Queue Cleanup <span id="idle-lock" class="settings-lock"></span></h5>
+      <div class="settings-section-heading">
+        <h5>Idle Queue Cleanup <span id="idle-lock" class="settings-lock"></span></h5>
+        <p>Lets unused queues leave memory after they have no active publishers or subscribers for long enough.</p>
+      </div>
       <label class="checkbox-label">
         <input id="idle_queue_cleanup.enabled" type="checkbox">
-        Enabled
+        <span>
+          <span class="settings-label">Enabled</span>
+          <span class="settings-help">When disabled, idle queues remain materialized after first use.</span>
+        </span>
       </label>
-      <label>
-        Evict after
+      <label class="settings-field">
+        <span class="settings-label">Evict after</span>
+        <span class="settings-help">How long a queue must have no publishers or subscribers before it can be removed from memory.</span>
         <span class="settings-duration">
           <input class="clr-input" id="idle_queue_cleanup.evict_after_ms" type="number" min="0" step="1">
           <select class="clr-select duration-unit" id="idle_queue_cleanup.evict_after_ms.unit" data-for="idle_queue_cleanup.evict_after_ms">
@@ -66,8 +80,9 @@
           </select>
         </span>
       </label>
-      <label>
-        Sweep interval
+      <label class="settings-field">
+        <span class="settings-label">Sweep interval</span>
+        <span class="settings-help">How often the broker checks for queues that have become idle.</span>
         <span class="settings-duration">
           <input class="clr-input" id="idle_queue_cleanup.sweep_interval_ms" type="number" min="1" step="1">
           <select class="clr-select duration-unit" id="idle_queue_cleanup.sweep_interval_ms.unit" data-for="idle_queue_cleanup.sweep_interval_ms">
@@ -76,10 +91,11 @@
           </select>
         </span>
       </label>
-      <label>
-        Publisher idle timeout (blank disables)
+      <label class="settings-field">
+        <span class="settings-label">Publisher idle timeout</span>
+        <span class="settings-help">Blank disables publisher idle expiry. Otherwise, unused publisher leases stop keeping the queue active after this long.</span>
         <span class="settings-duration">
-          <input class="clr-input" id="idle_queue_cleanup.publisher_idle_timeout_ms" type="number" min="0" step="1">
+          <input class="clr-input" id="idle_queue_cleanup.publisher_idle_timeout_ms" type="number" min="0" step="1" placeholder="disabled">
           <select class="clr-select duration-unit" id="idle_queue_cleanup.publisher_idle_timeout_ms.unit" data-for="idle_queue_cleanup.publisher_idle_timeout_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
@@ -88,8 +104,10 @@
       </label>
     </section>
 
-    <button class="btn btn-primary" type="submit">Save settings</button>
-    <button class="btn" type="button" id="reload-settings">Reload</button>
+    <div class="settings-actions">
+      <button class="btn btn-primary" type="submit">Save settings</button>
+      <button class="btn" type="button" id="reload-settings">Reload</button>
+    </div>
   </form>
 </div>
 
