@@ -8,6 +8,23 @@ a:hover {
   text-decoration: underline;
 }
 
+input,
+select {
+  background: rgba(15, 20, 26, .88);
+  border: 1px solid rgba(255, 255, 255, .18);
+  border-radius: 4px;
+  color: inherit;
+  min-height: 1.8rem;
+  padding: .25rem .45rem;
+}
+
+input:focus,
+select:focus {
+  border-color: #4dabf7;
+  box-shadow: 0 0 0 2px rgba(77, 171, 247, .2);
+  outline: none;
+}
+
 header {
   backdrop-filter: blur(6px);
   background: rgba(15,20,26,.85);
@@ -122,4 +139,45 @@ main {
 
 .settings-message[data-kind="error"] {
   background: rgba(255, 107, 107, .16);
+}
+
+.login-body {
+  min-height: 100vh;
+}
+
+.login-shell {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+.login-card {
+  background: rgba(15, 20, 26, .92);
+  border: 1px solid rgba(255, 255, 255, .14);
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .35);
+  max-width: 24rem;
+  padding: 2rem;
+  width: calc(100% - 2rem);
+}
+
+.login-brand {
+  align-items: center;
+  display: flex;
+  font-size: 1.1rem;
+  font-weight: 600;
+  gap: .5rem;
+  margin-bottom: 1rem;
+}
+
+.login-form label {
+  display: block;
+  margin-bottom: 1rem;
+}
+
+.login-form input {
+  display: block;
+  margin-top: .25rem;
+  width: 100%;
 }

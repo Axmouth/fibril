@@ -1,21 +1,28 @@
 use askama::Template;
 use axum::{
-    Router,
-    extract::Path,
-    response::{Html, IntoResponse},
+    Form, Router,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
 use fibril_broker::{
     StromaMetrics, queue_engine::QueueEngine, runtime_settings::RuntimeSettingsManager,
 };
 use fibril_util::StaticAuthHandler;
-use http::header;
 use rust_embed::RustEmbed;
+use serde::Deserialize;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
 
-use crate::routes;
+use crate::{
+    auth::{
+        AdminSessions, check_admin_auth, clear_session_cookie_header, session_cookie,
+        session_cookie_header, verify_credentials,
+    },
+    routes,
+};
 use fibril_metrics::Metrics;
 
 pub struct AdminConfig {
@@ -30,6 +37,7 @@ pub struct AdminServer {
     pub config: AdminConfig,
     pub storage: Arc<dyn QueueEngine + Send + Sync>,
     pub runtime_settings: Option<Arc<RuntimeSettingsManager>>,
+    pub sessions: AdminSessions,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -56,6 +64,7 @@ impl AdminServer {
             config,
             storage,
             runtime_settings,
+            sessions: AdminSessions::default(),
         }
     }
 
@@ -88,6 +97,8 @@ impl AdminServer {
 
         let app = app
             .route("/", get(overview_page))
+            .route("/login", get(login_page).post(login_submit))
+            .route("/logout", get(logout))
             .route("/admin/connections", get(connections_page))
             .route("/admin/subscriptions", get(subscriptions_page))
             .route("/admin/queues", get(queues_page))
@@ -134,39 +145,118 @@ async fn not_found() -> impl IntoResponse {
     })
 }
 
-async fn overview_page() -> impl IntoResponse {
-    render(OverviewPage {
+async fn page_auth(server: &AdminServer, headers: &HeaderMap) -> Result<(), Redirect> {
+    check_admin_auth(headers, &server.config.auth, &server.sessions)
+        .await
+        .map_err(|_| Redirect::to("/login"))
+}
+
+async fn overview_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(OverviewPage {
         page: "dashboard",
         title: "Overview",
-    })
+    }))
 }
 
-async fn connections_page() -> impl IntoResponse {
-    render(Connections {
+async fn connections_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(Connections {
         page: "connections",
         title: "Connections",
-    })
+    }))
 }
 
-async fn subscriptions_page() -> impl IntoResponse {
-    render(Subscriptions {
+async fn subscriptions_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(Subscriptions {
         page: "subscriptions",
         title: "Subscriptions",
-    })
+    }))
 }
 
-async fn queues_page() -> impl IntoResponse {
-    render(Queues {
+async fn queues_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(Queues {
         page: "queues",
         title: "Queues",
-    })
+    }))
 }
 
-async fn settings_page() -> impl IntoResponse {
-    render(Settings {
+async fn settings_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(Settings {
         page: "settings",
         title: "Settings",
+    }))
+}
+
+async fn login_page(State(server): State<Arc<AdminServer>>, headers: HeaderMap) -> Response {
+    if server.config.auth.is_none() || page_auth(&server, &headers).await.is_ok() {
+        return Redirect::to("/").into_response();
+    }
+    render(Login {
+        title: "Login",
+        error: None,
     })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct LoginForm {
+    username: String,
+    password: String,
+}
+
+async fn login_submit(
+    State(server): State<Arc<AdminServer>>,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    if verify_credentials(&server.config.auth, &form.username, &form.password).await {
+        let token = server.sessions.create();
+        return (
+            StatusCode::SEE_OTHER,
+            [(header::SET_COOKIE, session_cookie_header(&token))],
+            [(header::LOCATION, "/")],
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        render(Login {
+            title: "Login",
+            error: Some("Invalid username or password"),
+        }),
+    )
+        .into_response()
+}
+
+async fn logout(State(server): State<Arc<AdminServer>>, headers: HeaderMap) -> Response {
+    if let Some(token) = session_cookie(&headers) {
+        server.sessions.remove(token);
+    }
+    (
+        StatusCode::SEE_OTHER,
+        [(header::SET_COOKIE, clear_session_cookie_header())],
+        [(header::LOCATION, "/login")],
+    )
+        .into_response()
 }
 
 #[derive(Template)]
@@ -205,6 +295,13 @@ struct Settings {
 }
 
 #[derive(Template)]
+#[template(path = "pages/login.html")]
+struct Login {
+    title: &'static str,
+    error: Option<&'static str>,
+}
+
+#[derive(Template)]
 #[template(path = "pages/404.html")]
 struct NotFound {
     page: &'static str,
@@ -238,6 +335,7 @@ mod tests {
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
     };
+    use base64::Engine;
     use fibril_broker::{
         queue_engine::{
             KeratinConfig, QueueEngine, SnapshotConfig, StromaEngine, StromaKeratinConfig,
@@ -252,6 +350,13 @@ mod tests {
     use tower::ServiceExt;
 
     async fn test_server(locks: RuntimeSettingsLocks) -> Arc<AdminServer> {
+        test_server_with_auth(locks, None).await
+    }
+
+    async fn test_server_with_auth(
+        locks: RuntimeSettingsLocks,
+        auth: Option<StaticAuthHandler>,
+    ) -> Arc<AdminServer> {
         let root = std::env::temp_dir().join(format!("fibril-admin-{}", fastrand::u64(..)));
         std::fs::create_dir_all(&root).unwrap();
         let engine = StromaEngine::open(
@@ -273,7 +378,7 @@ mod tests {
             engine.metrics(),
             AdminConfig {
                 bind: "127.0.0.1:0".into(),
-                auth: None,
+                auth,
             },
             Arc::new(engine),
             Some(Arc::new(runtime_settings)),
@@ -283,6 +388,209 @@ mod tests {
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    fn test_auth() -> StaticAuthHandler {
+        StaticAuthHandler::new("fibril".into(), "secret".into())
+    }
+
+    fn basic_auth_header(username: &str, password: &str) -> String {
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        format!("Basic {encoded}")
+    }
+
+    fn session_cookie(response: &axum::response::Response) -> String {
+        response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn protected_pages_redirect_to_login_when_auth_enabled() {
+        let server =
+            test_server_with_auth(RuntimeSettingsLocks::default(), Some(test_auth())).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/login");
+    }
+
+    #[tokio::test]
+    async fn login_sets_session_cookie_and_allows_page_access() {
+        let server =
+            test_server_with_auth(RuntimeSettingsLocks::default(), Some(test_auth())).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("username=fibril&password=secret"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/");
+        let cookie = session_cookie(&response);
+        assert!(cookie.starts_with("fibril_admin_session="));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn login_rejects_bad_credentials() {
+        let server =
+            test_server_with_auth(RuntimeSettingsLocks::default(), Some(test_auth())).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("username=fibril&password=wrong"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+    }
+
+    #[tokio::test]
+    async fn api_accepts_basic_or_session_auth_when_enabled() {
+        let server =
+            test_server_with_auth(RuntimeSettingsLocks::default(), Some(test_auth())).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/runtime-settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/runtime-settings")
+                    .header(header::AUTHORIZATION, basic_auth_header("fibril", "secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("username=fibril&password=secret"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = session_cookie(&login);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/runtime-settings")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn logout_removes_session() {
+        let server =
+            test_server_with_auth(RuntimeSettingsLocks::default(), Some(test_auth())).await;
+        let app = AdminServer::router(server);
+
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from("username=fibril&password=secret"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = session_cookie(&login);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/logout")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/login");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
     }
 
     #[tokio::test]

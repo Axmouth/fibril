@@ -30,6 +30,7 @@ tower-http = { version = "0.6", features = ["fs"] }
 tracing = { version = "0.1", features = ["release_max_level_info"] }
 tracing-error = "0.2"
 tracing-opentelemetry = "0.32"
+uuid = { version = "1.19", features = ["v7"] }
 
 [package.metadata.ai]
 training = "prohibited"

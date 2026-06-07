@@ -10,7 +10,7 @@ use fibril_metrics::{BrokerStatsSnapshot, StorageStatsSnapshot, SystemSnapshot};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::auth::check_basic_auth;
+use crate::auth::check_admin_auth;
 use crate::server::AdminServer;
 
 #[derive(Serialize)]
@@ -71,11 +71,18 @@ fn locked_status() -> StatusCode {
     StatusCode::from_u16(423).unwrap_or(StatusCode::CONFLICT)
 }
 
+async fn check_auth(
+    server: &AdminServer,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), StatusCode> {
+    check_admin_auth(headers, &server.config.auth, &server.sessions).await
+}
+
 pub async fn overview(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<OverviewResponse>, StatusCode> {
-    check_basic_auth(&headers, &server.config.auth).await?;
+    check_auth(&server, &headers).await?;
 
     Ok(Json(OverviewResponse {
         broker: server.metrics.broker().snapshot(),
@@ -93,7 +100,7 @@ pub async fn connections(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    check_basic_auth(&headers, &server.config.auth).await?;
+    check_auth(&server, &headers).await?;
 
     Ok(Json(server.metrics.connections().snapshot()))
 }
@@ -102,7 +109,7 @@ pub async fn subscriptions(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    check_basic_auth(&headers, &server.config.auth).await?;
+    check_auth(&server, &headers).await?;
 
     Ok(Json(server.metrics.connections().snapshot_subs()))
 }
@@ -111,7 +118,7 @@ pub async fn queues(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    check_basic_auth(&headers, &server.config.auth).await?;
+    check_auth(&server, &headers).await?;
 
     let queues = server.storage.queue_stats_snapshot().await;
 
@@ -126,7 +133,7 @@ pub async fn queues_debug(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    check_basic_auth(&headers, &server.config.auth).await?;
+    check_auth(&server, &headers).await?;
 
     let queues = server.storage.debug_snapshot().await;
 
@@ -144,7 +151,7 @@ pub async fn runtime_settings(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<RuntimeSettingsResponse>, StatusCode> {
-    check_basic_auth(&headers, &server.config.auth).await?;
+    check_auth(&server, &headers).await?;
 
     let Some(runtime_settings) = &server.runtime_settings else {
         return Err(StatusCode::NOT_FOUND);
@@ -161,7 +168,7 @@ pub async fn update_runtime_settings(
     headers: axum::http::HeaderMap,
     Json(request): Json<UpdateRuntimeSettingsRequest>,
 ) -> Result<Response, StatusCode> {
-    check_basic_auth(&headers, &server.config.auth).await?;
+    check_auth(&server, &headers).await?;
 
     let Some(runtime_settings) = &server.runtime_settings else {
         return Err(StatusCode::NOT_FOUND);
@@ -205,7 +212,7 @@ pub async fn global_dlq(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<GlobalDlqSnapshot>, StatusCode> {
-    check_basic_auth(&headers, &server.config.auth).await?;
+    check_auth(&server, &headers).await?;
 
     server.storage.global_dlq().await.map(Json).map_err(|err| {
         tracing::error!("global dlq fetch failed: {err}");
@@ -218,7 +225,7 @@ pub async fn update_global_dlq(
     headers: axum::http::HeaderMap,
     Json(request): Json<UpdateGlobalDlqRequest>,
 ) -> Result<Response, StatusCode> {
-    check_basic_auth(&headers, &server.config.auth).await?;
+    check_auth(&server, &headers).await?;
 
     match server
         .storage
