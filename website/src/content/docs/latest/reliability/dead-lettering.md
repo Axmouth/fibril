@@ -113,7 +113,7 @@ Discard after retries are exhausted:
 
 Topics and groups use the same validation rules as normal Fibril topics and groups.
 
-Partitioning is currently an internal detail for dead-letter configuration. Admin API responses may include `part`, but request bodies can omit it. Once queue sharding is available, Fibril should choose an available partition for DLQ routing rather than asking operators to pick one here.
+Partitioning is currently an internal detail for dead-letter configuration. Admin API responses may include `part`, but request bodies can omit it. Once queue sharding is available, Fibril should choose an available partition for DLQ routing rather than asking operators to pick one here. See [partition routing](/latest/development/partition-routing/) for the development policy.
 
 ## Current Limits
 
