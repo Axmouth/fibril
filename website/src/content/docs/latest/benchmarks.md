@@ -116,6 +116,10 @@ prints both publish-to-delivery and server-receive-to-delivery latency. The
 wrapper also writes full server logs and full benchmark results to files, then
 prints a compact summary including publish and confirmation error counts.
 
+The wrapper starts a local `fibril-server` on the default broker and admin
+ports. Run one wrapper benchmark at a time; a second run will fail if those
+ports are already occupied.
+
 When `CONFIRMED=1`, writers still run with pipelined publish confirmations by
 default. Set `CONFIRM_WINDOW=1` if you specifically want the older serial
 "publish, wait, publish" shape.
@@ -136,6 +140,16 @@ Useful knobs:
 | `CONFIRM_WINDOW` | `1024` | In-flight confirmations per writer when `CONFIRMED=1` |
 | `LOG_FILE` | temporary file | Build, server, and noisy runtime logs |
 | `RESULTS_FILE` | temporary file | Deterministic benchmark summary and queue snapshots |
+
+Quick validation run from June 7, 2026, using `WRITERS=10`, `READERS=10`,
+`SIZE=1024`, `PREFETCH=16384`, `WARMUP_SECS=2`, and `DURATION_SECS=5`:
+
+| Mode | Target rate | Actual measured rate | Missing | publish→deliver p50/p95/p99/max | server-receive→deliver p50/p95/p99/max | Errors | End queue |
+| --- | ---: | ---: | ---: | --- | --- | ---: | --- |
+| unconfirmed | 50k/s | 50,010/s | 0 | 16 / 23 / 25 / 56 ms | 10 / 15 / 16 / 21 ms | 0 | ready=0, inflight=0 |
+| unconfirmed | 150k/s | 149,969/s | 0 | 11 / 15 / 16 / 55 ms | 9 / 12 / 14 / 16 ms | 0 | ready=0, inflight=0 |
+| confirmed, window=1024 | 50k/s | 50,000/s | 0 | 14 / 20 / 21 / 26 ms | 11 / 16 / 16 / 19 ms | 0 | ready=0, inflight=0 |
+| confirmed, window=1024 | 150k/s | 149,971/s | 0 | 12 / 16 / 17 / 21 ms | 10 / 13 / 15 / 17 ms | 0 | ready=0, inflight=0 |
 
 Recent local exploratory run, using `WRITERS=10`, `READERS=10`, `SIZE=1024`,
 `PREFETCH=16384`, `WARMUP_SECS=3`, and `DURATION_SECS=10`:

@@ -43,12 +43,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
+ready=0
 for _ in $(seq 1 60); do
+  if ! kill -0 "$server_pid" >/dev/null 2>&1; then
+    echo "Benchmark server exited before becoming healthy. Log tail:" >&2
+    tail -n 80 "$log_file" >&2 || true
+    exit 1
+  fi
   if curl --silent --show-error --fail http://127.0.0.1:8081/healthz >/dev/null 2>&1; then
+    ready=1
     break
   fi
   sleep 1
 done
+
+if [ "$ready" != "1" ]; then
+  echo "Benchmark server did not become healthy within 60 seconds. Log tail:" >&2
+  tail -n 80 "$log_file" >&2 || true
+  exit 1
+fi
 
 curl --silent --show-error --fail http://127.0.0.1:8081/healthz >>"$log_file" 2>&1
 
