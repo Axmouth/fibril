@@ -266,7 +266,20 @@ pub async fn queues_debug(
         if let Some(observability) = &server.broker_queue_observability
             && let Some(object) = value.as_object_mut()
         {
-            object.insert("broker_activity".into(), observability());
+            let observability = observability();
+            if let Some(queues) = observability.get("queues") {
+                object.insert("broker_activity".into(), queues.clone());
+            } else {
+                object.insert("broker_activity".into(), observability.clone());
+            }
+            if let Some(summary) = observability.get("summary") {
+                object.insert("broker_activity_summary".into(), summary.clone());
+            }
+            object.insert(
+                "broker_cleanup_metrics".into(),
+                serde_json::to_value(server.metrics.broker().snapshot().queue_cleanup)
+                    .unwrap_or_default(),
+            );
         }
         Ok(Json(value))
     } else if let Err(_err) = queues {

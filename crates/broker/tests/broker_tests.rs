@@ -12,6 +12,7 @@ use fibril_broker::{
     },
     test_util::TestState,
 };
+use fibril_metrics::Metrics;
 use fibril_storage::DeliverableMessage;
 use fibril_util::unix_millis;
 use hashbrown::HashSet;
@@ -44,6 +45,24 @@ async fn open_test_broker_with_cfg(cfg: BrokerConfig) -> (Arc<Broker<StromaEngin
     .await
     .unwrap();
     let broker = Broker::new(engine, cfg, None);
+
+    (broker, dir)
+}
+
+async fn open_test_broker_with_metrics(
+    cfg: BrokerConfig,
+    metrics: Metrics,
+) -> (Arc<Broker<StromaEngine>>, TempDir) {
+    let dir = test_dir!("broker_test");
+
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker = Broker::new(engine, cfg, Some(metrics.broker()));
 
     (broker, dir)
 }
@@ -349,7 +368,9 @@ async fn queue_eviction_reports_not_present_when_idle_queue_has_no_storage_handl
 
 #[tokio::test]
 async fn queue_eviction_unmaterializes_idle_materialized_queue() {
-    let (broker, _dir) = open_test_broker().await;
+    let metrics = Metrics::new(60);
+    let (broker, _dir) =
+        open_test_broker_with_metrics(BrokerConfig::default(), metrics.clone()).await;
 
     let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
     pubh.publish(
@@ -380,6 +401,9 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
     let cleanup = sparse[0].last_eviction_attempt.as_ref().unwrap();
     assert_eq!(cleanup.kind, "storage");
     assert_eq!(cleanup.outcome, "evicted");
+    let cleanup_metrics = metrics.broker().snapshot().queue_cleanup;
+    assert_eq!(cleanup_metrics.attempts_total, 1);
+    assert_eq!(cleanup_metrics.storage_evicted_total, 1);
 }
 
 #[tokio::test]

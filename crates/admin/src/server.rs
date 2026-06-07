@@ -1358,20 +1358,27 @@ mod tests {
             None,
             Arc::new(engine),
             Some(Arc::new(|| {
-                json!([{
-                    "topic": "orders.created",
-                    "group": null,
-                    "active_publishers": 0,
-                    "active_subscribers": 0,
-                    "idle_since_ms": 10,
-                    "idle_for_ms": 5,
-                    "last_active_ms": 10,
-                    "last_eviction_attempt": {
-                        "attempted_at_ms": 15,
-                        "kind": "storage",
-                        "outcome": "evicted"
-                    }
-                }])
+                json!({
+                    "summary": {
+                        "tracked_queue_count": 1,
+                        "active_queue_count": 0,
+                        "idle_queue_count": 1
+                    },
+                    "queues": [{
+                        "topic": "orders.created",
+                        "group": null,
+                        "active_publishers": 0,
+                        "active_subscribers": 0,
+                        "idle_since_ms": 10,
+                        "idle_for_ms": 5,
+                        "last_active_ms": 10,
+                        "last_eviction_attempt": {
+                            "attempted_at_ms": 15,
+                            "kind": "storage",
+                            "outcome": "evicted"
+                        }
+                    }]
+                })
             })),
             None,
         ));
@@ -1394,6 +1401,8 @@ mod tests {
             body["broker_activity"][0]["last_eviction_attempt"]["outcome"],
             "evicted"
         );
+        assert_eq!(body["broker_activity_summary"]["tracked_queue_count"], 1);
+        assert_eq!(body["broker_cleanup_metrics"]["attempts_total"], 0);
     }
 
     #[tokio::test]

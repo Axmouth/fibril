@@ -462,6 +462,19 @@ pub struct SparseQueueObservability {
     pub last_eviction_attempt: Option<SparseQueueEvictionObservation>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SparseQueueObservabilitySummary {
+    pub tracked_queue_count: usize,
+    pub active_queue_count: usize,
+    pub idle_queue_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SparseQueueObservabilitySnapshot {
+    pub queues: Vec<SparseQueueObservability>,
+    pub summary: SparseQueueObservabilitySummary,
+}
+
 fn eviction_attempt_summary(
     observation: &QueueEvictionObservation,
 ) -> SparseQueueEvictionObservation {
@@ -954,6 +967,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         key: &QueueKey,
         outcome: QueueEvictionAttempt,
     ) -> QueueEvictionAttempt {
+        if let Some(metrics) = &self.metrics {
+            match outcome {
+                QueueEvictionAttempt::Skipped(skip) => {
+                    metrics.queue_cleanup_skipped(eviction_skip_label(skip));
+                }
+                QueueEvictionAttempt::Storage(storage) => {
+                    metrics.queue_cleanup_storage_outcome(evict_outcome_label(storage));
+                }
+            }
+        }
         self.queue_eviction_observations.insert(
             key.clone(),
             QueueEvictionObservation {
@@ -964,14 +987,22 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         outcome
     }
 
-    pub fn sparse_queue_observability_snapshot(&self) -> Vec<SparseQueueObservability> {
+    pub fn sparse_queue_observability_report(&self) -> SparseQueueObservabilitySnapshot {
         let now = unix_millis();
+        let mut active_queue_count = 0;
+        let mut idle_queue_count = 0;
         let mut queues: Vec<_> = self
             .queues
             .iter()
             .map(|entry| {
                 let key = entry.key();
                 let activity = entry.value().activity.snapshot();
+                if activity.active_publishers > 0 || activity.active_subscribers > 0 {
+                    active_queue_count += 1;
+                }
+                if activity.idle_since_ms.is_some() {
+                    idle_queue_count += 1;
+                }
                 let last_eviction_attempt = self
                     .queue_eviction_observations
                     .get(key)
@@ -989,7 +1020,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             })
             .collect();
         queues.sort_by(|a, b| a.group.cmp(&b.group).then_with(|| a.topic.cmp(&b.topic)));
-        queues
+        let summary = SparseQueueObservabilitySummary {
+            tracked_queue_count: queues.len(),
+            active_queue_count,
+            idle_queue_count,
+        };
+        SparseQueueObservabilitySnapshot { queues, summary }
+    }
+
+    pub fn sparse_queue_observability_snapshot(&self) -> Vec<SparseQueueObservability> {
+        self.sparse_queue_observability_report().queues
     }
 
     pub async fn try_evict_inactive_queue(

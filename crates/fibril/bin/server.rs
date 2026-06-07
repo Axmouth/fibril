@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
     let broker_observability = {
         let broker = broker.clone();
         Arc::new(move || {
-            serde_json::to_value(broker.sparse_queue_observability_snapshot()).unwrap_or_default()
+            serde_json::to_value(broker.sparse_queue_observability_report()).unwrap_or_default()
         })
     };
 

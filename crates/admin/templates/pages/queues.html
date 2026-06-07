@@ -83,9 +83,11 @@ async function refresh() {
   const container = document.getElementById("queues");
   const activityByQueue = new Map((data.broker_activity || []).map(item => [queueKey(item), item]));
   const queues = data.queues || [];
+  const activitySummary = data.broker_activity_summary || {};
+  const cleanupMetrics = data.broker_cleanup_metrics || {};
   const loaded = queues.filter(item => item.materialized).length;
   const unloading = queues.filter(item => item.evicting).length;
-  const tracked = data.broker_activity?.length || 0;
+  const tracked = activitySummary.tracked_queue_count ?? data.broker_activity?.length ?? 0;
 
   const grouped = {};
   for (const item of queues) {
@@ -111,6 +113,22 @@ async function refresh() {
       <div class="queue-summary-card">
         <span>Seen by broker</span>
         <strong>${tracked}</strong>
+      </div>
+      <div class="queue-summary-card">
+        <span>Active now</span>
+        <strong>${activitySummary.active_queue_count ?? 0}</strong>
+      </div>
+      <div class="queue-summary-card">
+        <span>Idle now</span>
+        <strong>${activitySummary.idle_queue_count ?? 0}</strong>
+      </div>
+      <div class="queue-summary-card">
+        <span>Cleanup attempts</span>
+        <strong>${cleanupMetrics.attempts_total ?? 0}</strong>
+      </div>
+      <div class="queue-summary-card">
+        <span>Unloaded by cleanup</span>
+        <strong>${cleanupMetrics.storage_evicted_total ?? 0}</strong>
       </div>
     </div>
   `;

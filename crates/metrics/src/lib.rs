@@ -402,6 +402,19 @@ pub struct BrokerStats {
     pub publish_batches: BatchStats,
     pub ack_batches: BatchStats,
 
+    pub queue_cleanup_attempts: AtomicU64,
+    pub queue_cleanup_storage_evicted: AtomicU64,
+    pub queue_cleanup_storage_not_materialized: AtomicU64,
+    pub queue_cleanup_storage_not_present: AtomicU64,
+    pub queue_cleanup_storage_has_inflight: AtomicU64,
+    pub queue_cleanup_storage_race_lost: AtomicU64,
+    pub queue_cleanup_skipped_not_tracked: AtomicU64,
+    pub queue_cleanup_skipped_active: AtomicU64,
+    pub queue_cleanup_skipped_not_idle_enough: AtomicU64,
+    pub queue_cleanup_skipped_pending_settles: AtomicU64,
+    pub queue_cleanup_skipped_has_broker_deliveries: AtomicU64,
+    pub queue_cleanup_skipped_has_inflight: AtomicU64,
+
     pub queue_state_callback: ArcSwapOption<Arc<QueueStateCallback>>,
 }
 
@@ -415,6 +428,18 @@ impl BrokerStats {
             expired: OpStats::new(buckets),
             publish_batches: BatchStats::new(buckets),
             ack_batches: BatchStats::new(buckets),
+            queue_cleanup_attempts: AtomicU64::new(0),
+            queue_cleanup_storage_evicted: AtomicU64::new(0),
+            queue_cleanup_storage_not_materialized: AtomicU64::new(0),
+            queue_cleanup_storage_not_present: AtomicU64::new(0),
+            queue_cleanup_storage_has_inflight: AtomicU64::new(0),
+            queue_cleanup_storage_race_lost: AtomicU64::new(0),
+            queue_cleanup_skipped_not_tracked: AtomicU64::new(0),
+            queue_cleanup_skipped_active: AtomicU64::new(0),
+            queue_cleanup_skipped_not_idle_enough: AtomicU64::new(0),
+            queue_cleanup_skipped_pending_settles: AtomicU64::new(0),
+            queue_cleanup_skipped_has_broker_deliveries: AtomicU64::new(0),
+            queue_cleanup_skipped_has_inflight: AtomicU64::new(0),
             queue_state_callback: ArcSwapOption::from(None),
         })
     }
@@ -489,6 +514,66 @@ impl BrokerStats {
         self.publish_batches.observe(batch_size, bytes);
     }
 
+    #[inline]
+    pub fn queue_cleanup_skipped(&self, reason: &str) {
+        self.queue_cleanup_attempts.fetch_add(1, Ordering::Relaxed);
+        match reason {
+            "not_tracked" => {
+                self.queue_cleanup_skipped_not_tracked
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "active" => {
+                self.queue_cleanup_skipped_active
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "not_idle_enough" => {
+                self.queue_cleanup_skipped_not_idle_enough
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "pending_settles" => {
+                self.queue_cleanup_skipped_pending_settles
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "has_broker_deliveries" => {
+                self.queue_cleanup_skipped_has_broker_deliveries
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "has_inflight" => {
+                self.queue_cleanup_skipped_has_inflight
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    #[inline]
+    pub fn queue_cleanup_storage_outcome(&self, outcome: &str) {
+        self.queue_cleanup_attempts.fetch_add(1, Ordering::Relaxed);
+        match outcome {
+            "evicted" => {
+                self.queue_cleanup_storage_evicted
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "not_present" => {
+                self.queue_cleanup_storage_not_present
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "not_materialized" => {
+                self.queue_cleanup_storage_not_materialized
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "has_inflight" => {
+                self.queue_cleanup_storage_has_inflight
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "race_lost" => {
+                self.queue_cleanup_storage_race_lost
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
     pub fn snapshot(&self) -> BrokerStatsSnapshot {
         let window = 60;
 
@@ -530,8 +615,56 @@ impl BrokerStats {
             total_acked: self.acked.total.load(Ordering::Relaxed),
             total_redelivered: self.redelivered.total.load(Ordering::Relaxed),
             total_expired: self.expired.total.load(Ordering::Relaxed),
+            queue_cleanup: QueueCleanupStatsSnapshot {
+                attempts_total: self.queue_cleanup_attempts.load(Ordering::Relaxed),
+                storage_evicted_total: self.queue_cleanup_storage_evicted.load(Ordering::Relaxed),
+                storage_not_materialized_total: self
+                    .queue_cleanup_storage_not_materialized
+                    .load(Ordering::Relaxed),
+                storage_not_present_total: self
+                    .queue_cleanup_storage_not_present
+                    .load(Ordering::Relaxed),
+                storage_has_inflight_total: self
+                    .queue_cleanup_storage_has_inflight
+                    .load(Ordering::Relaxed),
+                storage_race_lost_total: self
+                    .queue_cleanup_storage_race_lost
+                    .load(Ordering::Relaxed),
+                skipped_not_tracked_total: self
+                    .queue_cleanup_skipped_not_tracked
+                    .load(Ordering::Relaxed),
+                skipped_active_total: self.queue_cleanup_skipped_active.load(Ordering::Relaxed),
+                skipped_not_idle_enough_total: self
+                    .queue_cleanup_skipped_not_idle_enough
+                    .load(Ordering::Relaxed),
+                skipped_pending_settles_total: self
+                    .queue_cleanup_skipped_pending_settles
+                    .load(Ordering::Relaxed),
+                skipped_has_broker_deliveries_total: self
+                    .queue_cleanup_skipped_has_broker_deliveries
+                    .load(Ordering::Relaxed),
+                skipped_has_inflight_total: self
+                    .queue_cleanup_skipped_has_inflight
+                    .load(Ordering::Relaxed),
+            },
         }
     }
+}
+
+#[derive(Serialize)]
+pub struct QueueCleanupStatsSnapshot {
+    pub attempts_total: u64,
+    pub storage_evicted_total: u64,
+    pub storage_not_materialized_total: u64,
+    pub storage_not_present_total: u64,
+    pub storage_has_inflight_total: u64,
+    pub storage_race_lost_total: u64,
+    pub skipped_not_tracked_total: u64,
+    pub skipped_active_total: u64,
+    pub skipped_not_idle_enough_total: u64,
+    pub skipped_pending_settles_total: u64,
+    pub skipped_has_broker_deliveries_total: u64,
+    pub skipped_has_inflight_total: u64,
 }
 
 #[derive(Serialize)]
@@ -550,6 +683,7 @@ pub struct BrokerStatsSnapshot {
     pub total_acked: u64,
     pub total_redelivered: u64,
     pub total_expired: u64,
+    pub queue_cleanup: QueueCleanupStatsSnapshot,
 }
 
 pub struct TcpStats {
