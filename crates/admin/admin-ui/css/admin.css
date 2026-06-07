@@ -61,19 +61,17 @@ header {
 }
 
 .content-area {
-  padding-bottom: 3rem;
+  padding-bottom: 1rem;
 }
 
 .main-container > .footer {
-  backdrop-filter: blur(8px);
-  background: rgba(15, 20, 26, .92);
-  border-top: 1px solid rgba(255, 255, 255, .14);
-  box-shadow: 0 -12px 24px rgba(0, 0, 0, .16);
+  background: rgba(15, 20, 26, .45);
+  border-top: 1px solid rgba(255, 255, 255, .16);
   font-size: .65rem;
   line-height: 1rem;
-  margin-top: 1.5rem;
+  margin-top: .75rem;
   min-height: 2rem;
-  opacity: .88;
+  opacity: .78;
   padding: .35rem 1rem;
   text-align: center;
 }

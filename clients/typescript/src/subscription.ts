@@ -391,9 +391,9 @@ export class SubscriptionBuilder {
   }
 
   /**
-   * Set the consumer group.
+   * Set the queue group.
    *
-   * Subscribers using the same topic and group share work.
+   * A group is part of the queue identity, alongside topic and partition.
    */
   group(group: string): this {
     this.#group = group;

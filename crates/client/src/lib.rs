@@ -145,7 +145,7 @@ impl FromStr for TopicName {
     }
 }
 
-/// Validated Fibril consumer group name.
+/// Validated Fibril queue group name.
 ///
 /// Group names use the same syntax as [`TopicName`].
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -701,9 +701,9 @@ pub struct SubscriptionBuilder<'a> {
 }
 
 impl<'a> SubscriptionBuilder<'a> {
-    /// Set the consumer group.
+    /// Set the queue group.
     ///
-    /// Subscribers using the same topic and group share work.
+    /// A group is part of the queue identity, alongside topic and partition.
     pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
         self.group = Some(GroupName::parse(group)?);
         Ok(self)
@@ -841,10 +841,9 @@ impl Client {
         })
     }
 
-    /// Create a publisher for a grouped topic.
+    /// Create a publisher for a grouped queue.
     ///
-    /// Grouping is part of the queue identity and should match the consumer
-    /// group semantics you want for the topic.
+    /// Grouping is part of the queue identity, alongside topic and partition.
     #[tracing::instrument(fields(topic = ?topic, group = ?group))]
     pub fn publisher_grouped(
         &self,

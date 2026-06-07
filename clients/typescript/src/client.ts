@@ -212,10 +212,9 @@ export class Client {
   }
 
   /**
-   * Get a publisher handle for a grouped topic.
+   * Get a publisher handle for a grouped queue.
    *
-   * Grouping is part of the queue identity and should match the consumer group
-   * semantics you want for the topic.
+   * Grouping is part of the queue identity, alongside topic and partition.
    */
   publisherGrouped(topic: string, group: string): Publisher {
     return new Publisher(this.#engine, topic, group);

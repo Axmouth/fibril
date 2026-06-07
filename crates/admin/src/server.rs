@@ -160,6 +160,7 @@ async fn not_found() -> impl IntoResponse {
     render(NotFound {
         page: "404",
         title: "Not Found",
+        auth_enabled: false,
     })
 }
 
@@ -177,6 +178,7 @@ async fn overview_page(
     Ok(render(OverviewPage {
         page: "dashboard",
         title: "Overview",
+        auth_enabled: server.config.auth.is_some(),
     }))
 }
 
@@ -188,6 +190,7 @@ async fn connections_page(
     Ok(render(Connections {
         page: "connections",
         title: "Connections",
+        auth_enabled: server.config.auth.is_some(),
     }))
 }
 
@@ -199,6 +202,7 @@ async fn subscriptions_page(
     Ok(render(Subscriptions {
         page: "subscriptions",
         title: "Subscriptions",
+        auth_enabled: server.config.auth.is_some(),
     }))
 }
 
@@ -210,6 +214,7 @@ async fn queues_page(
     Ok(render(Queues {
         page: "queues",
         title: "Queues",
+        auth_enabled: server.config.auth.is_some(),
     }))
 }
 
@@ -221,6 +226,7 @@ async fn settings_page(
     Ok(render(Settings {
         page: "settings",
         title: "Settings",
+        auth_enabled: server.config.auth.is_some(),
     }))
 }
 
@@ -282,6 +288,7 @@ async fn logout(State(server): State<Arc<AdminServer>>, headers: HeaderMap) -> R
 struct OverviewPage {
     page: &'static str,
     title: &'static str,
+    auth_enabled: bool,
 }
 
 #[derive(Template)]
@@ -289,6 +296,7 @@ struct OverviewPage {
 struct Connections {
     page: &'static str,
     title: &'static str,
+    auth_enabled: bool,
 }
 
 #[derive(Template)]
@@ -296,6 +304,7 @@ struct Connections {
 struct Subscriptions {
     page: &'static str,
     title: &'static str,
+    auth_enabled: bool,
 }
 
 #[derive(Template)]
@@ -303,6 +312,7 @@ struct Subscriptions {
 struct Queues {
     page: &'static str,
     title: &'static str,
+    auth_enabled: bool,
 }
 
 #[derive(Template)]
@@ -310,6 +320,7 @@ struct Queues {
 struct Settings {
     page: &'static str,
     title: &'static str,
+    auth_enabled: bool,
 }
 
 #[derive(Template)]
@@ -324,6 +335,7 @@ struct Login {
 struct NotFound {
     page: &'static str,
     title: &'static str,
+    auth_enabled: bool,
 }
 
 pub fn print_admin_banner(bind: &str, auth: bool) {
@@ -1084,5 +1096,31 @@ mod tests {
         assert!(body.contains("Global Dead Letter Queue"));
         assert!(body.contains("Queue Dead Letter Policy"));
         assert!(body.contains("Save settings"));
+        assert!(!body.contains("Log out"));
+        assert!(!body.contains("href=\"/logout\""));
+    }
+
+    #[tokio::test]
+    async fn settings_page_shows_logout_when_auth_enabled() {
+        let server =
+            test_server_with_auth(RuntimeSettingsLocks::default(), Some(test_auth())).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/settings")
+                    .header(header::AUTHORIZATION, basic_auth_header("fibril", "secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Log out"));
+        assert!(body.contains("href=\"/logout\""));
     }
 }

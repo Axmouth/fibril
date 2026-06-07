@@ -20,11 +20,13 @@
           <span class="title">Fibril Admin</span>
         </a>
       </div>
-      <div class="settings">
-        <a href="/logout" class="nav-link nav-icon" aria-label="logout" title="Log out">
-          <clr-icon shape="logout"></clr-icon>
-        </a>
-      </div>
+      {% if auth_enabled %}
+        <div class="settings">
+          <a href="/logout" class="nav-link nav-icon" aria-label="logout" title="Log out">
+            <clr-icon shape="logout"></clr-icon>
+          </a>
+        </div>
+      {% endif %}
     </header>
     <nav class="subnav">
       <ul class="nav">
