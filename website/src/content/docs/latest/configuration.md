@@ -24,6 +24,11 @@ bind = "0.0.0.0:9876"
 [admin.listener]
 bind = "0.0.0.0:8081"
 
+[admin.auth]
+enabled = false
+username = "fibril"
+# password = "change-me"
+
 [storage.keratin]
 fsync_interval_ms = 5
 
@@ -81,11 +86,17 @@ These fields are read on process start.
 | `server.data_dir` | `FIBRIL_DATA_DIR` | `--data-dir` | `server_data` |
 | `broker.listener.bind` | `FIBRIL_BROKER_BIND` | `--broker-bind` | `0.0.0.0:9876` |
 | `admin.listener.bind` | `FIBRIL_ADMIN_BIND` | `--admin-bind` | `0.0.0.0:8081` |
+| `admin.auth.enabled` | `FIBRIL_ADMIN_AUTH_ENABLED` | `--admin-auth-enabled` | `false` |
+| `admin.auth.username` | `FIBRIL_ADMIN_USERNAME` | `--admin-username` | `fibril` |
+| `admin.auth.password` | `FIBRIL_ADMIN_PASSWORD` | `--admin-password` | unset |
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.message_log.segment_max_bytes` | `FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES` | `--keratin-message-log-segment-max-bytes` | `268435456` |
 | `storage.keratin.event_log.segment_max_bytes` | `FIBRIL_KERATIN_EVENT_LOG_SEGMENT_MAX_BYTES` | `--keratin-event-log-segment-max-bytes` | `33554432` |
 
 Changing these generally requires restarting the server.
+
+`admin.auth.enabled = true` requires both `admin.auth.username` and `admin.auth.password`.
+The admin password is intentionally not shown in the dashboard startup summary.
 
 `storage.keratin.message_log.segment_max_bytes` and `storage.keratin.event_log.segment_max_bytes` are rollover thresholds. A segment rolls after an append crosses the configured size, so an individual segment can be slightly larger than this value.
 
@@ -181,6 +192,7 @@ shape and current limitations.
 Current validation rules:
 
 - `server.data_dir` must not be empty
+- when `admin.auth.enabled = true`, `admin.auth.username` and `admin.auth.password` must both be set
 - `storage.keratin.fsync_interval_ms` must be at least `1`
 - `storage.keratin.message_log.segment_max_bytes` must be at least `1`
 - `storage.keratin.event_log.segment_max_bytes` must be at least `1`

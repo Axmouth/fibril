@@ -38,6 +38,7 @@ pub struct StartupConfigSummary {
     pub data_dir: String,
     pub broker_bind: String,
     pub admin_bind: String,
+    pub admin_auth_enabled: bool,
     pub keratin_fsync_interval_ms: u64,
     pub keratin_message_log_segment_max_bytes: u64,
     pub keratin_event_log_segment_max_bytes: u64,
@@ -448,6 +449,7 @@ mod tests {
         )
         .await
         .unwrap();
+        let admin_auth_enabled = auth.is_some();
         Arc::new(AdminServer::new(
             Metrics::new(60),
             engine.metrics(),
@@ -459,6 +461,7 @@ mod tests {
                 data_dir: root.display().to_string(),
                 broker_bind: "127.0.0.1:9876".into(),
                 admin_bind: "127.0.0.1:0".into(),
+                admin_auth_enabled,
                 keratin_fsync_interval_ms: 5,
                 keratin_message_log_segment_max_bytes: 16 * 1024 * 1024,
                 keratin_event_log_segment_max_bytes: 16 * 1024 * 1024,
@@ -836,6 +839,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["broker_bind"], "127.0.0.1:9876");
+        assert_eq!(body["admin_auth_enabled"], false);
         assert_eq!(body["keratin_fsync_interval_ms"], 5);
     }
 

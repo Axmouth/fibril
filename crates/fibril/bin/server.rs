@@ -100,12 +100,23 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let auth_handler = StaticAuthHandler::new("fibril".to_string(), "fibril".to_string());
+    let admin_auth_handler = config.admin.auth.enabled.then(|| {
+        StaticAuthHandler::new(
+            config.admin.auth.username.clone(),
+            config
+                .admin
+                .auth
+                .password
+                .clone()
+                .expect("validated admin auth password"),
+        )
+    });
 
     let stroma_metrics = broker.stroma_metrics();
 
     let broker_server_fut = run_server(
         config.broker.listener.bind,
-        broker,
+        broker.clone(),
         metrics.tcp(),
         metrics.connections(),
         Some(auth_handler.clone()),
@@ -124,13 +135,13 @@ async fn main() -> anyhow::Result<()> {
         stroma_metrics,
         AdminConfig {
             bind: config.admin.listener.bind.to_string(),
-            // auth: Some(auth_handler),
-            auth: None,
+            auth: admin_auth_handler,
         },
         Some(StartupConfigSummary {
             data_dir: config.server.data_dir.display().to_string(),
             broker_bind: config.broker.listener.bind.to_string(),
             admin_bind: config.admin.listener.bind.to_string(),
+            admin_auth_enabled: config.admin.auth.enabled,
             keratin_fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
             keratin_message_log_segment_max_bytes: config
                 .storage

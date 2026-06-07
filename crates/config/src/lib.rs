@@ -23,6 +23,15 @@ struct CliArgs {
     admin_bind: Option<SocketAddr>,
 
     #[arg(long)]
+    admin_auth_enabled: Option<bool>,
+
+    #[arg(long)]
+    admin_username: Option<String>,
+
+    #[arg(long)]
+    admin_password: Option<String>,
+
+    #[arg(long)]
     keratin_fsync_interval_ms: Option<u64>,
 
     #[arg(long)]
@@ -131,6 +140,15 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_BIND")? {
             self.admin.listener.bind = parse_env("FIBRIL_ADMIN_BIND", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_AUTH_ENABLED")? {
+            self.admin.auth.enabled = parse_env("FIBRIL_ADMIN_AUTH_ENABLED", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_USERNAME")? {
+            self.admin.auth.username = value;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_PASSWORD")? {
+            self.admin.auth.password = Some(value);
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_FSYNC_INTERVAL_MS")? {
             self.storage.keratin.fsync_interval_ms =
                 parse_env("FIBRIL_KERATIN_FSYNC_INTERVAL_MS", &value)?;
@@ -192,6 +210,15 @@ impl ServerConfig {
         if let Some(bind) = args.admin_bind {
             self.admin.listener.bind = bind;
         }
+        if let Some(enabled) = args.admin_auth_enabled {
+            self.admin.auth.enabled = enabled;
+        }
+        if let Some(username) = args.admin_username {
+            self.admin.auth.username = username;
+        }
+        if let Some(password) = args.admin_password {
+            self.admin.auth.password = Some(password);
+        }
         if let Some(fsync_interval_ms) = args.keratin_fsync_interval_ms {
             self.storage.keratin.fsync_interval_ms = fsync_interval_ms;
         }
@@ -219,6 +246,22 @@ impl ServerConfig {
     fn validate(&mut self) -> anyhow::Result<()> {
         if self.server.data_dir.as_os_str().is_empty() {
             anyhow::bail!("server.data_dir must not be empty");
+        }
+        if self.admin.auth.enabled {
+            if self.admin.auth.username.trim().is_empty() {
+                anyhow::bail!("admin.auth.username must not be empty when admin auth is enabled");
+            }
+            if self
+                .admin
+                .auth
+                .password
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                anyhow::bail!("admin.auth.password must be set when admin auth is enabled");
+            }
         }
         if self.runtime_seed.delivery.expiry_batch_max == 0 {
             anyhow::bail!("runtime_seed.delivery.expiry_batch_max must be at least 1");
@@ -306,6 +349,7 @@ impl Default for BrokerSection {
 #[serde(default)]
 pub struct AdminSection {
     pub listener: ListenerSection,
+    pub auth: AdminAuthSection,
 }
 
 impl Default for AdminSection {
@@ -314,6 +358,25 @@ impl Default for AdminSection {
             listener: ListenerSection {
                 bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 8081)),
             },
+            auth: AdminAuthSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AdminAuthSection {
+    pub enabled: bool,
+    pub username: String,
+    pub password: Option<String>,
+}
+
+impl Default for AdminAuthSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            username: "fibril".into(),
+            password: None,
         }
     }
 }
@@ -461,6 +524,9 @@ mod tests {
             config.admin.listener.bind,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 8081))
         );
+        assert!(!config.admin.auth.enabled);
+        assert_eq!(config.admin.auth.username, "fibril");
+        assert_eq!(config.admin.auth.password, None);
         assert_eq!(config.storage.keratin.fsync_interval_ms, 5);
         assert_eq!(
             config.storage.keratin.message_log.segment_max_bytes,
@@ -496,6 +562,11 @@ mod tests {
 
             [admin.listener]
             bind = "127.0.0.1:9001"
+
+            [admin.auth]
+            enabled = true
+            username = "admin"
+            password = "secret"
 
             [storage.keratin]
             fsync_interval_ms = 20
@@ -533,6 +604,9 @@ mod tests {
             config.admin.listener.bind,
             "127.0.0.1:9001".parse().unwrap()
         );
+        assert!(config.admin.auth.enabled);
+        assert_eq!(config.admin.auth.username, "admin");
+        assert_eq!(config.admin.auth.password.as_deref(), Some("secret"));
         assert_eq!(config.storage.keratin.fsync_interval_ms, 20);
         assert_eq!(
             config.storage.keratin.message_log.segment_max_bytes,
@@ -580,6 +654,12 @@ mod tests {
             OsString::from("from-cli"),
             OsString::from("--broker-bind"),
             OsString::from("127.0.0.1:7777"),
+            OsString::from("--admin-auth-enabled"),
+            OsString::from("true"),
+            OsString::from("--admin-username"),
+            OsString::from("cli-admin"),
+            OsString::from("--admin-password"),
+            OsString::from("cli-secret"),
             OsString::from("--keratin-fsync-interval-ms"),
             OsString::from("25"),
             OsString::from("--keratin-message-log-segment-max-bytes"),
@@ -596,6 +676,9 @@ mod tests {
             config.broker.listener.bind,
             "127.0.0.1:7777".parse().unwrap()
         );
+        assert!(config.admin.auth.enabled);
+        assert_eq!(config.admin.auth.username, "cli-admin");
+        assert_eq!(config.admin.auth.password.as_deref(), Some("cli-secret"));
         assert_eq!(config.storage.keratin.fsync_interval_ms, 25);
         assert_eq!(
             config.storage.keratin.message_log.segment_max_bytes,
@@ -659,6 +742,9 @@ mod tests {
                 "FIBRIL_KERATIN_FSYNC_INTERVAL_MS" => Some(Ok("30".to_string())),
                 "FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES" => Some(Ok("33554432".to_string())),
                 "FIBRIL_KERATIN_EVENT_LOG_SEGMENT_MAX_BYTES" => Some(Ok("4194304".to_string())),
+                "FIBRIL_ADMIN_AUTH_ENABLED" => Some(Ok("true".to_string())),
+                "FIBRIL_ADMIN_USERNAME" => Some(Ok("env-admin".to_string())),
+                "FIBRIL_ADMIN_PASSWORD" => Some(Ok("env-secret".to_string())),
                 "FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS" => Some(Ok("123".to_string())),
                 "FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS" => Some(Ok("".to_string())),
                 _ => None,
@@ -666,6 +752,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.server.data_dir, PathBuf::from("from-env"));
+        assert!(config.admin.auth.enabled);
+        assert_eq!(config.admin.auth.username, "env-admin");
+        assert_eq!(config.admin.auth.password.as_deref(), Some("env-secret"));
         assert_eq!(config.storage.keratin.fsync_interval_ms, 30);
         assert_eq!(
             config.storage.keratin.message_log.segment_max_bytes,
@@ -741,6 +830,32 @@ mod tests {
             err.to_string()
                 .contains("storage.keratin.event_log.segment_max_bytes")
         );
+    }
+
+    #[test]
+    fn rejects_enabled_admin_auth_without_credentials() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [admin.auth]
+            enabled = true
+            username = ""
+            password = "secret"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("admin.auth.username"));
+
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [admin.auth]
+            enabled = true
+            username = "admin"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("admin.auth.password"));
     }
 
     fn tempfile_path(name: &str) -> PathBuf {

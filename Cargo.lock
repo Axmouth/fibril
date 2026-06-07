@@ -984,6 +984,7 @@ dependencies = [
  "mimalloc",
  "opentelemetry",
  "opentelemetry_sdk",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-error",

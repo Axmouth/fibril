@@ -7,6 +7,11 @@ bind = "0.0.0.0:9876"
 [admin.listener]
 bind = "0.0.0.0:8081"
 
+[admin.auth]
+enabled = false
+username = "fibril"
+# password = "change-me"
+
 [storage.keratin]
 fsync_interval_ms = 5
 
