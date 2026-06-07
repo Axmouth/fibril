@@ -31,7 +31,7 @@ These numbers are useful mostly as a sanity check:
 
 The project still needs:
 
-- payload-size sweeps
+- broader payload-size sweeps across more hardware
 - durability-setting comparisons
 - richer latency histograms and structured output
 - restart/replay timing
@@ -139,12 +139,54 @@ Useful knobs:
 | `PREFETCH` | `16384` | Reader subscription prefetch |
 | `CONFIRMED` | `0` | Set `1` to require broker publish confirmations |
 | `CONFIRM_WINDOW` | `1024` | In-flight confirmations per writer when `CONFIRMED=1` |
+| `BUILD` | `1` | Set `0` to skip rebuilding release binaries |
 | `LOG_FILE` | temporary file | Build, server, and noisy runtime logs |
 | `RESULTS_FILE` | temporary file | Deterministic benchmark summary and queue snapshots |
 
 Memory numbers are sampled from the local `fibril-server` process RSS once per
 second during the wrapper benchmark. The average is over the sampled run period,
 not precisely only the warmup-excluded steady window.
+
+For repeatable local sweeps, use the matrix helper:
+
+```sh
+scripts/bench-matrix.sh smoke
+scripts/bench-matrix.sh baseline confirmed
+scripts/bench-matrix.sh throughput-1k payload
+```
+
+The matrix helper builds the release server and benchmark binary once, then
+runs named steady-state cases with one results file and one log file per case.
+Set `OUT_DIR=...` to choose where files go. Without arguments, it runs only the
+quick `smoke` scenario.
+
+Available scenarios:
+
+| Scenario | Purpose |
+| --- | --- |
+| `smoke` | Short low-rate sanity check |
+| `baseline` | 1KB 50k/s and 150k/s unconfirmed |
+| `confirmed` | 1KB 50k/s and 150k/s with pipelined confirmations |
+| `throughput-1k` | Higher-rate 1KB exploratory sweep |
+| `payload` | 8KB, 64KB, 512KB, and 1MB spot checks |
+| `large-backlog` | Large-payload cases expected to build backlog |
+| `all` | `baseline`, `confirmed`, `throughput-1k`, and `payload` |
+
+### How to read the numbers
+
+The offered rate is the requested publish rate, not a guarantee that the broker
+or machine can keep up without queueing. When actual measured rate reaches the
+target but latency climbs, the run is usually showing backlog, not low-latency
+capacity. When actual measured rate falls below target, writers or the machine
+could not sustain the requested input rate.
+
+`Measured missing` should usually be zero. Non-zero values mean the benchmark
+stopped before every measured message was delivered, commonly because the drain
+timeout expired or the run failed.
+
+RSS is sampled from the server process only. It excludes benchmark client
+memory and the operating system page cache, so it is useful for comparing local
+runs but not a full machine-memory budget.
 
 Quick validation run from June 7, 2026, using `WRITERS=10`, `READERS=10`,
 `SIZE=1024`, `PREFETCH=16384`, `WARMUP_SECS=2`, and `DURATION_SECS=5`:

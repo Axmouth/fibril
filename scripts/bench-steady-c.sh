@@ -12,6 +12,7 @@ size="${SIZE:-1024}"
 prefetch="${PREFETCH:-16384}"
 confirmed="${CONFIRMED:-0}"
 confirm_window="${CONFIRM_WINDOW:-1024}"
+build="${BUILD:-1}"
 data_dir="$(mktemp -d)"
 log_file="${LOG_FILE:-$data_dir/steady.log}"
 results_file="${RESULTS_FILE:-$data_dir/steady-results.txt}"
@@ -30,7 +31,9 @@ mkdir -p "$(dirname "$log_file")" "$(dirname "$results_file")"
 echo "Steady benchmark log: $log_file"
 echo "Steady benchmark results: $results_file"
 
-cargo build --manifest-path "$repo_root/Cargo.toml" --release --bin fibril-server --bin steady_c >>"$log_file" 2>&1
+if [ "$build" != "0" ]; then
+  cargo build --manifest-path "$repo_root/Cargo.toml" --release --bin fibril-server --bin steady_c >>"$log_file" 2>&1
+fi
 
 (
   cd "$data_dir"
