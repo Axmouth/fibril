@@ -54,6 +54,16 @@
         <input class="clr-input" id="message-payload-limit" type="number" min="1" max="1048576" step="1" value="4096">
       </label>
 
+      <fieldset class="message-status-filter">
+        <legend class="settings-label">Status filter</legend>
+        <span class="settings-help">Leave all unchecked to show every status returned by this inspection mode.</span>
+        <label><input class="message-status-filter-input" type="checkbox" value="ready"> Ready</label>
+        <label><input class="message-status-filter-input" type="checkbox" value="inflight"> Inflight</label>
+        <label><input class="message-status-filter-input" type="checkbox" value="delayed"> Delayed</label>
+        <label><input class="message-status-filter-input" type="checkbox" value="pending_dlq"> Pending DLQ</label>
+        <label><input class="message-status-filter-input" type="checkbox" value="settled"> Settled</label>
+      </fieldset>
+
       <div class="settings-actions">
         <button class="btn btn-primary" type="submit">Load messages</button>
         <button class="btn" type="button" id="message-previous" disabled>Previous page</button>
@@ -159,6 +169,9 @@ function buildQuery(fromOverride = null) {
     const payloadLimit = optionalNumber("message-payload-limit");
     if (payloadLimit !== null) params.set("payload_limit_bytes", String(payloadLimit));
   }
+  const statuses = Array.from(document.querySelectorAll(".message-status-filter-input:checked"))
+    .map(input => input.value);
+  if (statuses.length > 0) params.set("status", statuses.join(","));
 
   return params;
 }
@@ -220,7 +233,6 @@ function contentTypeLabel(contentType) {
 }
 
 function payloadPreviewText(item) {
-  if (item.missing_payload) return '<span class="message-bad">missing from log</span>';
   if (!item.payload_base64) return '<span class="message-muted">not requested</span>';
   const preview = decodePayloadPreview(item.payload_base64);
   const suffix = item.payload_truncated ? " (truncated)" : "";
@@ -228,7 +240,6 @@ function payloadPreviewText(item) {
 }
 
 function renderPayloadCell(item) {
-  if (item.missing_payload) return '<span class="message-bad">missing from log</span>';
   if (!item.payload_base64) return '<span class="message-muted">not requested</span>';
   const preview = payloadPreviewText(item);
   const short = preview.length > 96 ? `${preview.slice(0, 96)}...` : preview;
@@ -456,6 +467,10 @@ function applyInitialQuery() {
   field("message-include-settled").checked = params.get("include_settled") === "true";
   field("message-include-payload").checked = params.get("include_payload") === "true";
   field("message-payload-limit").value = params.get("payload_limit_bytes") || "4096";
+  const statuses = new Set((params.get("status") || "").split(",").filter(Boolean));
+  for (const input of document.querySelectorAll(".message-status-filter-input")) {
+    input.checked = statuses.has(input.value);
+  }
   payloadLimitRow.hidden = !field("message-include-payload").checked;
 }
 

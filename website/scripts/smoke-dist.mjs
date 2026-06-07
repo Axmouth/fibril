@@ -18,7 +18,7 @@ const checks = [
   },
   {
     path: "latest/status/index.html",
-    includes: ["<title>Project status | Fibril</title>", "Delayed retry", "Dead lettering"],
+    includes: ["<title>Project status | Fibril</title>", "Explicit settlement", "Dead lettering"],
   },
   {
     path: "latest/reliability/retries-delays/index.html",

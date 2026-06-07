@@ -80,6 +80,17 @@ header {
   background: rgba(15,20,26,.85);
 }
 
+.admin-auth-pill {
+  background: rgba(246, 193, 119, .14);
+  border: 1px solid rgba(246, 193, 119, .34);
+  border-radius: 999px;
+  color: #ffe8a3;
+  font-size: .6rem;
+  font-weight: 600;
+  line-height: 1rem;
+  padding: .1rem .5rem;
+}
+
 .main-container {
   min-height: 100vh;
 }
@@ -353,8 +364,34 @@ main {
 }
 
 .message-inspection-form .checkbox-label,
+.message-inspection-form .message-status-filter,
 .message-inspection-form .settings-actions {
   grid-column: 1 / -1;
+}
+
+.message-status-filter {
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: .65rem 1rem;
+  margin: 0;
+  padding: .75rem;
+}
+
+.message-status-filter legend {
+  padding: 0 .25rem;
+}
+
+.message-status-filter .settings-help {
+  flex: 1 0 100%;
+}
+
+.message-status-filter label {
+  align-items: center;
+  display: inline-flex;
+  gap: .35rem;
+  margin: 0;
 }
 
 .message-results {

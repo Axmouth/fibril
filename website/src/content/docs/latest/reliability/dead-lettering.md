@@ -160,6 +160,7 @@ Useful query flags:
 - `include_settled=true` also returns persisted records that are no longer active
 - `include_payload=true` includes base64 payload previews
 - `payload_limit_bytes=4096` caps each payload preview
+- `status=ready,pending_dlq` filters returned rows by status
 
 Message inspection reads persisted message data and queue state. Use it for
 debugging and operations, not as a live polling view.

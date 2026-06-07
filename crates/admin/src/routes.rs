@@ -8,7 +8,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fibril_broker::queue_engine::{
     DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
-    InspectMode, MessageHeaders, QueueInspectionState, StromaError,
+    InspectMode, MessageHeaders, MessageInspectionStatus, QueueInspectionState, StromaError,
 };
 use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLoadIssue, RuntimeSettingsLocks,
@@ -96,13 +96,13 @@ pub struct InspectMessagesQuery {
     #[serde(default)]
     pub include_payload: bool,
     pub payload_limit_bytes: Option<usize>,
+    pub status: Option<String>,
 }
 
 #[derive(Serialize)]
 pub struct InspectMessagesResponse {
     pub next_offset_hint: u64,
     pub limit: usize,
-    pub warning: &'static str,
     pub items: Vec<InspectMessageItemResponse>,
 }
 
@@ -113,7 +113,6 @@ pub struct InspectMessageItemResponse {
     pub payload_len: Option<usize>,
     pub payload_base64: Option<String>,
     pub payload_truncated: bool,
-    pub missing_payload: bool,
 }
 
 #[derive(Serialize)]
@@ -137,6 +136,33 @@ fn normalize_group(group: Option<String>) -> Option<String> {
             Some(group)
         }
     })
+}
+
+fn parse_status_filter(
+    status: Option<String>,
+) -> Result<Option<Vec<MessageInspectionStatus>>, String> {
+    let Some(status) = status else {
+        return Ok(None);
+    };
+    let mut filters = Vec::new();
+    for raw in status.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let status = match raw {
+            "ready" => MessageInspectionStatus::Ready,
+            "inflight" => MessageInspectionStatus::Inflight,
+            "delayed" => MessageInspectionStatus::Delayed,
+            "pending_dlq" => MessageInspectionStatus::PendingDlq,
+            "settled" => MessageInspectionStatus::Settled,
+            other => return Err(format!("unknown message status filter: {other}")),
+        };
+        if !filters.contains(&status) {
+            filters.push(status);
+        }
+    }
+    Ok((!filters.is_empty()).then_some(filters))
 }
 
 impl RuntimeSettingsResponse {
@@ -252,6 +278,16 @@ pub async fn inspect_messages(
 ) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
     let group = normalize_group(query.group);
+    let status_filter = match parse_status_filter(query.status) {
+        Ok(filter) => filter,
+        Err(err) => {
+            return Ok(admin_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_message_status_filter",
+                err,
+            ));
+        }
+    };
 
     let limit = query
         .limit
@@ -286,17 +322,20 @@ pub async fn inspect_messages(
             Json(InspectMessagesResponse {
                 next_offset_hint: page.next_offset_hint,
                 limit,
-                warning: "Message inspection reads persisted message data and queue state. Use it for debugging and operations, not as a live polling view.",
                 items: page
                     .items
                     .into_iter()
+                    .filter(|item| {
+                        status_filter
+                            .as_ref()
+                            .is_none_or(|filter| filter.contains(&item.state.status))
+                    })
                     .map(|item| InspectMessageItemResponse {
                         state: item.state,
                         headers: item.headers,
                         payload_len: item.payload_len,
                         payload_base64: item.payload.map(|payload| STANDARD.encode(payload)),
                         payload_truncated: item.payload_truncated,
-                        missing_payload: item.missing_payload,
                     })
                     .collect(),
             }),

@@ -12,8 +12,9 @@ use stroma_core::{
 pub use stroma_core::{
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KeratinAppendCompletion,
-    KeratinConfig, MessageContentType, MessageHeaders, MessageInspectionPage, QueueInspectionState,
-    SnapshotConfig, Stroma, StromaError, StromaKeratinConfig,
+    KeratinConfig, MessageContentType, MessageHeaders, MessageInspectionPage,
+    MessageInspectionStatus, QueueInspectionState, SnapshotConfig, Stroma, StromaError,
+    StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -57,7 +58,7 @@ pub struct ReplayDeadLetterItem {
     pub reason: Option<String>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReplayDeadLetterOutcome {
     Replayed,

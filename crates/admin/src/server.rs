@@ -642,6 +642,24 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("message-inspection-form"));
         assert!(body.contains("/admin/api/messages"));
+        assert!(body.contains("message-status-filter"));
+    }
+
+    #[tokio::test]
+    async fn auth_disabled_pages_show_status_without_logout() {
+        let server = test_server_with_auth(RuntimeSettingsLocks::default(), None).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Auth disabled"));
+        assert!(!body.contains("href=\"/logout\""));
     }
 
     #[tokio::test]
@@ -991,6 +1009,7 @@ mod tests {
 
         let app = AdminServer::router(server);
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/admin/api/messages?topic=inspect&include_payload=true&payload_limit_bytes=3")
@@ -1011,7 +1030,42 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(b"hel")
         );
         assert_eq!(body["items"][0]["payload_truncated"], true);
-        assert_eq!(body["items"][0]["missing_payload"], false);
+        assert!(body["items"][0].get("missing_payload").is_none());
+        assert!(body.get("warning").is_none());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/messages?topic=inspect&status=inflight")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["items"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn message_inspection_rejects_unknown_status_filter() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/messages?topic=inspect&status=unknown")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_message_status_filter");
     }
 
     #[tokio::test]
@@ -1041,6 +1095,36 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await;
         assert_eq!(body["code"], "missing_dlq_replay_offsets");
+    }
+
+    #[tokio::test]
+    async fn dlq_replay_rejects_too_many_offsets() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+        let offsets: Vec<u64> = (0..101).collect();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/dlq/replay")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "dlq_topic": "_dlq.source",
+                            "dlq_group": null,
+                            "offsets": offsets
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "too_many_dlq_replay_offsets");
     }
 
     #[tokio::test]

@@ -11,6 +11,7 @@ It is currently pre-alpha. The useful baseline is working, but APIs, persistence
 
 - Follow the [quickstart](/latest/quickstart/) to run the broker from source.
 - Use the [client guide](/latest/clients/) for Rust and TypeScript publishing and subscription examples.
+- Use the [admin dashboard guide](/latest/admin-dashboard/) for queues, settings, message inspection, and DLQ replay.
 - Read the [core model](/latest/concepts/core-model/) for the queue lifecycle.
 - Read [retries and delays](/latest/reliability/retries-delays/) and [dead lettering](/latest/reliability/dead-lettering/) for reliability features and their current limits.
 - Read [many idle queues](/latest/concepts/many-idle-queues/) if your workload defines many queues but only uses a few at once.

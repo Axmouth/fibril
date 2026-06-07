@@ -1,11 +1,15 @@
 use std::{sync::Arc, time::Duration};
 
 use fibril_broker::{
+    CompletionPair,
     broker::{
         Broker, BrokerConfig, ConsumerConfig, QueueEvictionAttempt, QueueEvictionSkip,
         SettleRequest, SettleType,
     },
-    queue_engine::{EvictOutcome, QueueEngine, StromaEngine},
+    queue_engine::{
+        EvictOutcome, KeratinAppendCompletion, MessageHeaders, QueueEngine,
+        ReplayDeadLetterOutcome, StromaEngine,
+    },
     test_util::TestState,
 };
 use fibril_storage::DeliverableMessage;
@@ -1505,6 +1509,58 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
     );
 
     broker.shutdown_graceful().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn dlq_replay_skips_messages_without_source_metadata() -> anyhow::Result<()> {
+    let (engine, _dir) = open_test_engine().await;
+    let headers = MessageHeaders {
+        published: unix_millis(),
+        publish_received: unix_millis(),
+        content_type: None,
+        extra: Default::default(),
+    };
+    let (completion, rx) = KeratinAppendCompletion::pair();
+    engine
+        .publish(
+            "_dlq.source",
+            0,
+            None,
+            &headers,
+            b"missing metadata".to_vec(),
+            completion,
+        )
+        .await?;
+    rx.await??;
+
+    let report = engine
+        .replay_dead_letters("_dlq.source", None, &[0, 42])
+        .await?;
+
+    assert_eq!(report.requested, 2);
+    assert_eq!(report.replayed, 0);
+    assert_eq!(report.items.len(), 2);
+    assert_eq!(report.items[0].offset, 0);
+    assert_eq!(report.items[0].outcome, ReplayDeadLetterOutcome::Skipped);
+    assert!(report.items[0].target_topic.is_none());
+    assert!(
+        report.items[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("stroma.dlq.source_topic")
+    );
+    assert_eq!(report.items[1].offset, 42);
+    assert_eq!(report.items[1].outcome, ReplayDeadLetterOutcome::Skipped);
+    assert!(
+        report.items[1]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("not active")
+    );
+
     Ok(())
 }
 
