@@ -86,7 +86,7 @@ export type Command =
   | { type: "subscribe"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalInflight>> }
   | { type: "subscribeAutoAck"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalDelivered>> }
   | { type: "ack"; sub_id: bigint; tag: DeliveryTag; request_id: bigint; reply: Deferred<void> }
-  | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; request_id: bigint; reply: Deferred<void> };
+  | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; not_before: bigint | null; request_id: bigint; reply: Deferred<void> };
 
 // ===== Constants =====
 
@@ -451,7 +451,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           partition: sub.partition,
           tags: [cmd.tag],
           requeue: cmd.requeue,
-          not_before: null,
+          not_before: cmd.not_before,
         };
         const ok = await sendOrDie(buildFrame(Op.Nack, cmd.request_id, msg));
         if (ok) cmd.reply.resolve();

@@ -11,7 +11,7 @@ import { intoMessage, type Publishable } from "./message.js";
  */
 export type DelayInput = number | Date;
 
-function deadlineFromDelay(delay: DelayInput): bigint {
+export function deadlineFromDelay(delay: DelayInput): bigint {
   if (delay instanceof Date) return BigInt(delay.getTime());
   if (!Number.isFinite(delay) || delay < 0) {
     throw new Error("delay must be a non-negative millisecond value");

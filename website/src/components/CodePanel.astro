@@ -3,9 +3,10 @@
   <pre><code><span class="code-keyword">while let</span> Some(msg) = sub.<span class="code-function">recv</span>().await? &#123;
     <span class="code-keyword">match</span> send_email(msg.<span class="code-function">content</span>()?).await &#123;
         Ok(_) =&gt; msg.<span class="code-function">complete</span>().await?,
-        Err(_) =&gt; msg.<span class="code-function">retry</span>().await?,
+        Err(err) <span class="code-keyword">if</span> err.<span class="code-function">is_temporary</span>() =&gt; msg.<span class="code-function">retry_after</span>(30).await?,
+        Err(_) =&gt; msg.<span class="code-function">fail</span>().await?,
     &#125;;
 &#125;
 
-<span class="code-comment">// retries are behavior, not ceremony</span></code></pre>
+<span class="code-comment">// settlement says what should happen next</span></code></pre>
 </div>

@@ -1,21 +1,90 @@
 ---
 import StatusBadge from "./StatusBadge.astro";
+
+const features = [
+  {
+    feature: "Durable queues",
+    status: { kind: "ready", label: "available" },
+    notes: "Append-only log, snapshot, and replay.",
+  },
+  {
+    feature: "Publish and subscribe",
+    status: { kind: "ready", label: "available" },
+    notes: "Custom TCP protocol with Rust and TypeScript clients.",
+  },
+  {
+    feature: "Explicit settlement",
+    status: { kind: "ready", label: "available" },
+    notes: "ACK, fail, immediate retry, and delayed retry paths.",
+  },
+  {
+    feature: "Delayed publish",
+    status: { kind: "ready", label: "available" },
+    notes: "Broker path and Rust/TypeScript client methods are wired.",
+  },
+  {
+    feature: "Dead lettering",
+    status: { kind: "ready", label: "available" },
+    notes: "Global and per-queue policy are configurable; replay tooling is still early.",
+  },
+  {
+    feature: "Backpressure",
+    status: { kind: "ready", label: "available" },
+    notes: "Pull-based delivery and bounded prefetch.",
+  },
+  {
+    feature: "Sparse queues",
+    status: { kind: "ready", label: "available" },
+    notes: "Lazy loading and idle eviction are wired; observability is still growing.",
+  },
+  {
+    feature: "Message inspection",
+    status: { kind: "planned", label: "planned" },
+    notes: "Browse queued, inflight, delayed, and dead-lettered messages from admin tooling.",
+  },
+  {
+    feature: "Partition ownership",
+    status: { kind: "planned", label: "planned" },
+    notes: "Future nodes can split active queue traffic by owning different partitions.",
+  },
+  {
+    feature: "Replication",
+    status: { kind: "planned", label: "planned" },
+    notes: "Future followers can keep partition copies for failover and recovery.",
+  },
+  {
+    feature: "Transactions",
+    status: { kind: "no", label: "out of scope" },
+    notes: "Not planned; transactional workflows are intentionally excluded.",
+  },
+] as const;
 ---
 
-<div class="matrix-wrap">
-  <table class="matrix">
+<div class="matrix-wrap" aria-label="Feature status matrix">
+  <table class="matrix desktop-matrix">
     <thead>
       <tr><th>Feature</th><th>Status</th><th>Notes</th></tr>
     </thead>
     <tbody>
-      <tr><td>Durable queues</td><td><StatusBadge kind="ready">tested</StatusBadge></td><td>Append-only log, snapshot, and replay.</td></tr>
-      <tr><td>Explicit acknowledgements</td><td><StatusBadge kind="ready">available</StatusBadge></td><td>ACK, requeue, and terminal failure paths.</td></tr>
-      <tr><td>Delayed publish</td><td><StatusBadge kind="ready">available</StatusBadge></td><td>Broker path and Rust/TypeScript client methods are wired.</td></tr>
-      <tr><td>Delayed retries</td><td><StatusBadge kind="partial">wiring</StatusBadge></td><td>State support exists; public path remains incomplete.</td></tr>
-      <tr><td>Dead lettering</td><td><StatusBadge kind="partial">configurable</StatusBadge></td><td>Global and per-queue policy are admin/API configurable; replay tooling is still early.</td></tr>
-      <tr><td>Backpressure</td><td><StatusBadge kind="ready">available</StatusBadge></td><td>Pull-based delivery and bounded prefetch.</td></tr>
-      <tr><td>Replication</td><td><StatusBadge kind="planned">planned</StatusBadge></td><td>Design work is in progress.</td></tr>
-      <tr><td>Transactions</td><td><StatusBadge kind="no">out of scope</StatusBadge></td><td>Not planned; transactional workflows are intentionally excluded.</td></tr>
+      {features.map((item) => (
+        <tr>
+          <td>{item.feature}</td>
+          <td><StatusBadge kind={item.status.kind}>{item.status.label}</StatusBadge></td>
+          <td>{item.notes}</td>
+        </tr>
+      ))}
     </tbody>
   </table>
+
+  <div class="mobile-matrix">
+    {features.map((item) => (
+      <article class="matrix-card">
+        <div>
+          <h3>{item.feature}</h3>
+          <StatusBadge kind={item.status.kind}>{item.status.label}</StatusBadge>
+        </div>
+        <p>{item.notes}</p>
+      </article>
+    ))}
+  </div>
 </div>

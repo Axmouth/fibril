@@ -31,10 +31,11 @@ Messages can also be retried or failed explicitly:
 
 ```rust
 msg.retry().await?;
+msg.retry_after(30).await?;
 msg.fail().await?;
 ```
 
-Delayed retries have a client API, but the end-to-end path is still under development. See [project status](/latest/status/).
+Delayed retry is wired through the broker, protocol, Rust client, and TypeScript client. See [project status](/latest/status/).
 
 The protocol and storage model intentionally lean toward small common-case records. Always-present message metadata is stored as positional metadata, not repeated header-map keys, and uncommon operations use distinct frames or events instead of adding optional fields to hot paths. For example, delayed publish uses a delayed-publish frame rather than adding a delay field to every publish frame.
 

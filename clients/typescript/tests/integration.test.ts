@@ -14,6 +14,7 @@ import {
   PROTOCOL_V1,
   type DeclareQueueMsg,
   type Hello,
+  type NackMsg,
   type PublishDelayedMsg,
   type PublishMsg,
   type SubscribeMsg,
@@ -449,6 +450,77 @@ test("delivery deserializes json by content-type", async () => {
     assert.ok(msg);
     assert.deepEqual(msg.deserialize<{ ok: boolean }>(), { ok: true });
     assert.equal(msg.contentType(), "application/json");
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("manual message retryAfter sends delayed nack", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let nack: NackMsg | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(
+          s,
+          buildFrame(Op.HelloOk, f.requestId, {
+            protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
+            server_name: "fake",
+            compliance: COMPLIANCE_STRING,
+          }),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 201n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 77n, {
+            sub_id: 201n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            offset: 3n,
+            delivery_tag: { epoch: 101n },
+            published: 1000n,
+            publish_received: 1001n,
+            content_type: null,
+            headers: {},
+            payload: new TextEncoder().encode("retry me"),
+          }),
+        );
+      } else if (f.opcode === Op.Nack) {
+        nack = decodeFrameBody<NackMsg>(f);
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const sub = await client.subscribe("manual-delay").subManualAck();
+    const msg = await sub.recv();
+    assert.ok(msg);
+    const deadline = new Date(Date.now() + 10_000);
+    await msg.retryAfter(deadline);
+    for (let i = 0; i < 20 && nack === null; i += 1) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+
+    assert.ok(nack);
+    assert.equal(nack.topic, "manual-delay");
+    assert.equal(nack.requeue, true);
+    assert.equal(nack.not_before, BigInt(deadline.getTime()));
+    assert.deepEqual(nack.tags, [{ epoch: 101n }]);
     sub.close();
     await client.shutdown();
   } finally {

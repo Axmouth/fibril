@@ -60,4 +60,9 @@ msg.retry_after(30).await?;
 msg.retry_after(std::time::Duration::from_millis(250)).await?;
 ```
 
-The TypeScript client does not expose a delayed retry helper yet. The wire format and broker path already support the deadline field, so TS parity is expected to be a small client-side follow-up.
+TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute retry deadline:
+
+```ts
+await msg.retryAfter(30_000);
+await msg.retryAfter(new Date(Date.now() + 30_000));
+```

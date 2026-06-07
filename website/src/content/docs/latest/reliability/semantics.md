@@ -25,10 +25,7 @@ If a subscription is dropped with prefetched but unacknowledged messages, those 
 
 Immediate requeue is implemented. Delayed retry can hold a nacked message until a `not_before` deadline before making it ready again. Lease expiry can also move inflight messages back to ready.
 
-Delayed retries and dead lettering are still evolving:
-
-- TypeScript delayed retry helper parity is still pending.
-- max-retry dead-letter routing is wired, but replay and inspection tooling is still early.
+Delayed retries are wired through the broker/protocol/client path. Max-retry dead-letter routing is also wired, but replay and inspection tooling is still early.
 
 ## Backpressure
 

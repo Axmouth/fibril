@@ -531,6 +531,37 @@ h3 {
 .matrix td:last-child { color: var(--muted); }
 .matrix tr:last-child td { border-bottom: 0; }
 
+.mobile-matrix {
+  display: none;
+}
+
+.matrix-card {
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.matrix-card:last-child {
+  border-bottom: 0;
+}
+
+.matrix-card div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.matrix-card h3 {
+  margin: 0;
+}
+
+.matrix-card p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .status-badge {
   font: 11px var(--mono);
   white-space: nowrap;
@@ -698,7 +729,8 @@ h3 {
     animation: mobile-move-retry 7.4s linear infinite 2.8s;
   }
   .feature-grid { grid-template-columns: 1fr; }
-  .matrix { min-width: 650px; }
+  .desktop-matrix { display: none; }
+  .mobile-matrix { display: block; }
   .footer-inner { align-items: start; flex-direction: column; justify-content: center; gap: 6px; }
 }
 

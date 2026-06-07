@@ -13,6 +13,7 @@ import type {
 import { deferred } from "./internal/deferred.js";
 import type { BoundedQueue } from "./internal/bounded-queue.js";
 import type { Client } from "./client.js";
+import { deadlineFromDelay, type DelayInput } from "./publisher.js";
 
 /**
  * A delivered message in auto-ack mode (no settle action required).
@@ -109,7 +110,8 @@ type SettleState =
 
 /**
  * A delivered message in manual-ack mode. Must be settled with one of
- * `complete()`, `fail()`, or `retry()`. Calling more than once throws.
+ * `complete()`, `fail()`, `retry()`, or `retryAfter()`. Calling more than
+ * once throws.
  *
  * Dropping an `InflightMessage` without settling it does not acknowledge the
  * message.
@@ -231,6 +233,7 @@ export class InflightMessage {
       sub_id: this.#subId,
       tag: this.deliveryTag,
       requeue: false,
+      not_before: null,
       request_id: this.#deliverRequestId,
       reply,
     });
@@ -252,6 +255,30 @@ export class InflightMessage {
       sub_id: this.#subId,
       tag: this.deliveryTag,
       requeue: true,
+      not_before: null,
+      request_id: this.#deliverRequestId,
+      reply,
+    });
+    await reply.promise;
+    return this.#asMessage();
+  }
+
+  /**
+   * Negatively acknowledge with delayed requeue.
+   *
+   * A number is a relative delay in milliseconds. A `Date` is treated as an
+   * absolute Unix-millisecond retry deadline.
+   */
+  async retryAfter(delay: DelayInput): Promise<Message> {
+    this.#assertOpen();
+    this.#state = { kind: "settled" };
+    const reply = deferred<void>();
+    await this.#engine.submit({
+      type: "nack",
+      sub_id: this.#subId,
+      tag: this.deliveryTag,
+      requeue: true,
+      not_before: deadlineFromDelay(delay),
       request_id: this.#deliverRequestId,
       reply,
     });
@@ -281,7 +308,8 @@ export class InflightMessage {
 /**
  * Subscription with manual acknowledgement. Iterate with `for await`.
  * Each delivered message must be settled by the user via
- * `complete()` / `fail()` / `retry()` on the `InflightMessage`.
+ * `complete()` / `fail()` / `retry()` / `retryAfter()` on the
+ * `InflightMessage`.
  *
  * Iteration ends cleanly when the subscription is closed by the user
  * (via `close()`); it throws `DisconnectionError` (or other `FibrilError`)

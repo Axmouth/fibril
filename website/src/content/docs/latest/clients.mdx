@@ -144,10 +144,10 @@ Rust numeric delay helpers are seconds, matching delayed publish.
 
 ```ts
 const msg = await sub.recv();
-await msg.retry();
+await msg.retryAfter(30_000);
 ```
 
-The TypeScript client currently exposes immediate retry. Delayed retry uses the same broker/protocol path and is pending a client helper.
+TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute retry deadline.
 
   </TabItem>
 </Tabs>
@@ -261,7 +261,7 @@ for await (const msg of sub) {
   </TabItem>
 </Tabs>
 
-`retry()` requeues immediately. Delayed retry is still partial and should not be treated as supported user-facing behavior yet.
+`retry()` requeues immediately. Use `retry_after(..)` in Rust or `retryAfter(..)` in TypeScript for delayed retry.
 
 ## Dead Letter Workflow
 
