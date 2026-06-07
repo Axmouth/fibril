@@ -27,8 +27,8 @@ Immediate requeue is implemented. Lease expiry can also move inflight messages b
 
 Delayed retries and dead lettering are still evolving:
 
-- `retry_after(..)` exists in the Rust client but is not implemented end to end.
-- basic max-retry dead-letter behavior exists below the public surface but is incomplete.
+- delayed retry is not implemented end to end through the public client/broker path.
+- max-retry dead-letter routing is wired, but replay and inspection tooling is still early.
 
 ## Backpressure
 

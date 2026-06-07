@@ -157,7 +157,7 @@ The current implementation provides a minimal but working set of broker semantic
 * **Publish (pub)** over a custom TCP protocol
 * **Delayed publish** using a distinct delayed-publish protocol frame
 * **Subscribe (sub)** to topics and receive messages
-* **Topic + partition addressing** (partition currently mostly structural)
+* **Topic plus optional group addressing** (partition selection is internal)
 * **Basic Rust and TypeScript clients** for publishing and consuming
 
 ### Delivery model
@@ -238,7 +238,7 @@ Key invariants:
 * **Retry tracking**
 
   * Per-offset retry count
-  * Basic max-retry → dead-letter behavior exists but is not fully implemented
+  * Max-retry dead-letter routing is wired; replay and inspection tooling is still early
 
 ### Persistence
 
