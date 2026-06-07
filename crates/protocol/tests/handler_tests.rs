@@ -14,7 +14,7 @@ use fibril_protocol::v1::{
 };
 use fibril_util::{StaticAuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
-use stroma_core::{KeratinConfig, SnapshotConfig, TempDir};
+use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::Framed;
 use uuid::Uuid;
@@ -29,7 +29,7 @@ async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
     std::fs::create_dir_all(&dir.root).unwrap();
     let engine = StromaEngine::open(
         &dir.root,
-        KeratinConfig::test_default(),
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
         SnapshotConfig::default(),
     )
     .await

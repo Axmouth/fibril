@@ -23,6 +23,15 @@ struct CliArgs {
     admin_bind: Option<SocketAddr>,
 
     #[arg(long)]
+    keratin_fsync_interval_ms: Option<u64>,
+
+    #[arg(long)]
+    keratin_message_log_segment_max_bytes: Option<u64>,
+
+    #[arg(long)]
+    keratin_event_log_segment_max_bytes: Option<u64>,
+
+    #[arg(long)]
     queue_idle_evict_after_ms: Option<u64>,
 
     #[arg(long)]
@@ -38,6 +47,7 @@ pub struct ServerConfig {
     pub server: ServerSection,
     pub broker: BrokerSection,
     pub admin: AdminSection,
+    pub storage: StorageSection,
     pub runtime_seed: RuntimeSeedSection,
     pub runtime_locks: RuntimeLocksSection,
 }
@@ -48,6 +58,7 @@ impl Default for ServerConfig {
             server: ServerSection::default(),
             broker: BrokerSection::default(),
             admin: AdminSection::default(),
+            storage: StorageSection::default(),
             runtime_seed: RuntimeSeedSection::default(),
             runtime_locks: RuntimeLocksSection::default(),
         }
@@ -106,6 +117,18 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_BIND")? {
             self.admin.listener.bind = parse_env("FIBRIL_ADMIN_BIND", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_FSYNC_INTERVAL_MS")? {
+            self.storage.keratin.fsync_interval_ms =
+                parse_env("FIBRIL_KERATIN_FSYNC_INTERVAL_MS", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES")? {
+            self.storage.keratin.message_log.segment_max_bytes =
+                parse_env("FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_EVENT_LOG_SEGMENT_MAX_BYTES")? {
+            self.storage.keratin.event_log.segment_max_bytes =
+                parse_env("FIBRIL_KERATIN_EVENT_LOG_SEGMENT_MAX_BYTES", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS")? {
             let idle = &mut self.runtime_seed.idle_queue_cleanup;
             idle.enabled = true;
@@ -155,6 +178,15 @@ impl ServerConfig {
         if let Some(bind) = args.admin_bind {
             self.admin.listener.bind = bind;
         }
+        if let Some(fsync_interval_ms) = args.keratin_fsync_interval_ms {
+            self.storage.keratin.fsync_interval_ms = fsync_interval_ms;
+        }
+        if let Some(segment_max_bytes) = args.keratin_message_log_segment_max_bytes {
+            self.storage.keratin.message_log.segment_max_bytes = segment_max_bytes;
+        }
+        if let Some(segment_max_bytes) = args.keratin_event_log_segment_max_bytes {
+            self.storage.keratin.event_log.segment_max_bytes = segment_max_bytes;
+        }
         if let Some(evict_after_ms) = args.queue_idle_evict_after_ms {
             let idle = &mut self.runtime_seed.idle_queue_cleanup;
             idle.enabled = true;
@@ -176,6 +208,15 @@ impl ServerConfig {
         }
         if self.runtime_seed.delivery.expiry_batch_max == 0 {
             anyhow::bail!("runtime_seed.delivery.expiry_batch_max must be at least 1");
+        }
+        if self.storage.keratin.fsync_interval_ms == 0 {
+            anyhow::bail!("storage.keratin.fsync_interval_ms must be at least 1");
+        }
+        if self.storage.keratin.message_log.segment_max_bytes == 0 {
+            anyhow::bail!("storage.keratin.message_log.segment_max_bytes must be at least 1");
+        }
+        if self.storage.keratin.event_log.segment_max_bytes == 0 {
+            anyhow::bail!("storage.keratin.event_log.segment_max_bytes must be at least 1");
         }
         if self.runtime_seed.idle_queue_cleanup.sweep_interval_ms == 0 {
             anyhow::bail!("runtime_seed.idle_queue_cleanup.sweep_interval_ms must be at least 1");
@@ -261,6 +302,58 @@ impl Default for AdminSection {
             },
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct StorageSection {
+    pub keratin: KeratinStorageSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KeratinStorageSection {
+    pub fsync_interval_ms: u64,
+    #[serde(default = "default_message_log_section")]
+    pub message_log: KeratinLogSection,
+    #[serde(default = "default_event_log_section")]
+    pub event_log: KeratinLogSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KeratinLogSection {
+    pub segment_max_bytes: u64,
+}
+
+impl KeratinLogSection {
+    const fn new(segment_max_bytes: u64) -> Self {
+        Self { segment_max_bytes }
+    }
+}
+
+impl Default for KeratinStorageSection {
+    fn default() -> Self {
+        Self {
+            fsync_interval_ms: 5,
+            message_log: default_message_log_section(),
+            event_log: default_event_log_section(),
+        }
+    }
+}
+
+impl Default for KeratinLogSection {
+    fn default() -> Self {
+        Self::new(256 * 1024 * 1024)
+    }
+}
+
+fn default_message_log_section() -> KeratinLogSection {
+    KeratinLogSection::new(256 * 1024 * 1024)
+}
+
+fn default_event_log_section() -> KeratinLogSection {
+    KeratinLogSection::new(32 * 1024 * 1024)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -354,6 +447,15 @@ mod tests {
             config.admin.listener.bind,
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 8081))
         );
+        assert_eq!(config.storage.keratin.fsync_interval_ms, 5);
+        assert_eq!(
+            config.storage.keratin.message_log.segment_max_bytes,
+            256 * 1024 * 1024
+        );
+        assert_eq!(
+            config.storage.keratin.event_log.segment_max_bytes,
+            32 * 1024 * 1024
+        );
         assert_eq!(config.runtime_seed.delivery.inflight_ttl_ms, 30_000);
         assert_eq!(config.runtime_seed.delivery.expiry_poll_min_ms, 15_000);
         assert_eq!(config.runtime_seed.delivery.expiry_batch_max, 8192);
@@ -381,6 +483,15 @@ mod tests {
             [admin.listener]
             bind = "127.0.0.1:9001"
 
+            [storage.keratin]
+            fsync_interval_ms = 20
+
+            [storage.keratin.message_log]
+            segment_max_bytes = 134217728
+
+            [storage.keratin.event_log]
+            segment_max_bytes = 16777216
+
             [runtime_seed.delivery]
             inflight_ttl_ms = 10
             expiry_poll_min_ms = 11
@@ -407,6 +518,15 @@ mod tests {
         assert_eq!(
             config.admin.listener.bind,
             "127.0.0.1:9001".parse().unwrap()
+        );
+        assert_eq!(config.storage.keratin.fsync_interval_ms, 20);
+        assert_eq!(
+            config.storage.keratin.message_log.segment_max_bytes,
+            134_217_728
+        );
+        assert_eq!(
+            config.storage.keratin.event_log.segment_max_bytes,
+            16_777_216
         );
         assert_eq!(config.runtime_seed.delivery.inflight_ttl_ms, 10);
         assert_eq!(config.runtime_seed.delivery.expiry_poll_min_ms, 11);
@@ -446,6 +566,12 @@ mod tests {
             OsString::from("from-cli"),
             OsString::from("--broker-bind"),
             OsString::from("127.0.0.1:7777"),
+            OsString::from("--keratin-fsync-interval-ms"),
+            OsString::from("25"),
+            OsString::from("--keratin-message-log-segment-max-bytes"),
+            OsString::from("67108864"),
+            OsString::from("--keratin-event-log-segment-max-bytes"),
+            OsString::from("8388608"),
             OsString::from("--queue-idle-evict-after-ms"),
             OsString::from("123"),
         ])
@@ -455,6 +581,15 @@ mod tests {
         assert_eq!(
             config.broker.listener.bind,
             "127.0.0.1:7777".parse().unwrap()
+        );
+        assert_eq!(config.storage.keratin.fsync_interval_ms, 25);
+        assert_eq!(
+            config.storage.keratin.message_log.segment_max_bytes,
+            67_108_864
+        );
+        assert_eq!(
+            config.storage.keratin.event_log.segment_max_bytes,
+            8_388_608
         );
         assert_eq!(
             config
@@ -482,6 +617,9 @@ mod tests {
         config
             .apply_env_from(|name| match name {
                 "FIBRIL_DATA_DIR" => Some(Ok("from-env".to_string())),
+                "FIBRIL_KERATIN_FSYNC_INTERVAL_MS" => Some(Ok("30".to_string())),
+                "FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES" => Some(Ok("33554432".to_string())),
+                "FIBRIL_KERATIN_EVENT_LOG_SEGMENT_MAX_BYTES" => Some(Ok("4194304".to_string())),
                 "FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS" => Some(Ok("123".to_string())),
                 "FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS" => Some(Ok("".to_string())),
                 _ => None,
@@ -489,6 +627,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(config.server.data_dir, PathBuf::from("from-env"));
+        assert_eq!(config.storage.keratin.fsync_interval_ms, 30);
+        assert_eq!(
+            config.storage.keratin.message_log.segment_max_bytes,
+            33_554_432
+        );
+        assert_eq!(
+            config.storage.keratin.event_log.segment_max_bytes,
+            4_194_304
+        );
         assert_eq!(
             config.idle_queue_cleanup_internal(),
             InternalIdleQueueCleanup {
@@ -512,6 +659,48 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("runtime_seed.idle_queue_cleanup.sweep_interval_ms")
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_storage_values() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [storage.keratin]
+            fsync_interval_ms = 0
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("storage.keratin.fsync_interval_ms")
+        );
+
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [storage.keratin.message_log]
+            segment_max_bytes = 0
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("storage.keratin.message_log.segment_max_bytes")
+        );
+
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [storage.keratin.event_log]
+            segment_max_bytes = 0
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("storage.keratin.event_log.segment_max_bytes")
         );
     }
 

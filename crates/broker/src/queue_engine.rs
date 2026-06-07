@@ -10,7 +10,8 @@ use stroma_core::{
     StromaMetrics,
 };
 pub use stroma_core::{
-    AppendCompletion, EvictOutcome, IoError, KeratinConfig, SnapshotConfig, Stroma, StromaError,
+    AppendCompletion, EvictOutcome, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome, IoError,
+    KeratinConfig, SnapshotConfig, Stroma, StromaError, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -127,6 +128,14 @@ pub trait QueueEngine {
 
     async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError>;
 
+    async fn global_dlq(&self) -> Result<GlobalDlqSnapshot, StromaError>;
+
+    async fn set_global_dlq(
+        &self,
+        target: Option<GlobalDLQ>,
+        expected_version: u64,
+    ) -> Result<GlobalDlqUpdateOutcome, StromaError>;
+
     async fn materialize(
         &self,
         tp: &str,
@@ -163,7 +172,7 @@ pub struct StromaEngine {
 impl StromaEngine {
     pub async fn open(
         root: impl AsRef<Path>,
-        keratin_cfg: KeratinConfig,
+        keratin_cfg: StromaKeratinConfig,
         snap_cfg: SnapshotConfig,
     ) -> Result<Self, StromaError> {
         let stroma = Stroma::open(root, keratin_cfg, snap_cfg).await?;
@@ -374,6 +383,18 @@ impl QueueEngine for StromaEngine {
 
     async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError> {
         self.inner.debug_snapshot().await
+    }
+
+    async fn global_dlq(&self) -> Result<GlobalDlqSnapshot, StromaError> {
+        self.inner.global_dlq().await
+    }
+
+    async fn set_global_dlq(
+        &self,
+        target: Option<GlobalDLQ>,
+        expected_version: u64,
+    ) -> Result<GlobalDlqUpdateOutcome, StromaError> {
+        self.inner.set_global_dlq(target, expected_version).await
     }
 
     async fn materialize(

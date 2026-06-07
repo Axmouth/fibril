@@ -1,4 +1,7 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse, response::Response};
+use fibril_broker::queue_engine::{
+    GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome, StromaError,
+};
 use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLocks, RuntimeSettingsSnapshot,
     RuntimeSettingsUpdateOutcome,
@@ -29,6 +32,12 @@ pub struct RuntimeSettingsResponse {
 pub struct UpdateRuntimeSettingsRequest {
     pub expected_version: u64,
     pub settings: RuntimeSettings,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateGlobalDlqRequest {
+    pub expected_version: u64,
+    pub target: Option<GlobalDLQ>,
 }
 
 #[derive(Serialize)]
@@ -187,6 +196,52 @@ pub async fn update_runtime_settings(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "runtime_settings_update_failed",
                 "runtime settings update failed",
+            ))
+        }
+    }
+}
+
+pub async fn global_dlq(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<GlobalDlqSnapshot>, StatusCode> {
+    check_basic_auth(&headers, &server.config.auth).await?;
+
+    server.storage.global_dlq().await.map(Json).map_err(|err| {
+        tracing::error!("global dlq fetch failed: {err}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+pub async fn update_global_dlq(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<UpdateGlobalDlqRequest>,
+) -> Result<Response, StatusCode> {
+    check_basic_auth(&headers, &server.config.auth).await?;
+
+    match server
+        .storage
+        .set_global_dlq(request.target, request.expected_version)
+        .await
+    {
+        Ok(GlobalDlqUpdateOutcome::Stored(snapshot)) => {
+            Ok((StatusCode::OK, Json(snapshot)).into_response())
+        }
+        Ok(GlobalDlqUpdateOutcome::Conflict(snapshot)) => {
+            Ok((StatusCode::CONFLICT, Json(snapshot)).into_response())
+        }
+        Err(err @ StromaError::InvalidArgument(_)) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_global_dlq",
+            err.to_string(),
+        )),
+        Err(err) => {
+            tracing::error!("global dlq update failed: {err}");
+            Ok(admin_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "global_dlq_update_failed",
+                "global dlq update failed",
             ))
         }
     }

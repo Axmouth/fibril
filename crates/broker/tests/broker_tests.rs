@@ -10,7 +10,7 @@ use fibril_broker::{
 };
 use fibril_util::unix_millis;
 use hashbrown::HashSet;
-use stroma_core::{KeratinConfig, SnapshotConfig, TempDir, test_dir};
+use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir, test_dir};
 use uuid::Uuid;
 
 async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
@@ -30,7 +30,7 @@ async fn open_test_broker_with_cfg(cfg: BrokerConfig) -> (Arc<Broker<StromaEngin
 
     let engine = StromaEngine::open(
         &dir.root,
-        KeratinConfig::test_default(),
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
         SnapshotConfig::default(),
     )
     .await

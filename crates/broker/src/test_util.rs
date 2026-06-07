@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use fibril_storage::{DeliveryTag, Offset};
 use hashbrown::HashMap;
-use stroma_core::{KeratinConfig, SnapshotConfig, TempDir};
+use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir};
 use uuid::Uuid;
 
 use crate::{broker::*, queue_engine::StromaEngine};
@@ -95,7 +95,7 @@ impl TestState {
 
         let engine = StromaEngine::open(
             &dir.root,
-            KeratinConfig::test_default(),
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
         .await?;

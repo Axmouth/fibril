@@ -340,7 +340,7 @@ fn decode_snapshot(value: GlobalValue) -> Result<RuntimeSettingsSnapshot, Runtim
 
 #[cfg(test)]
 mod tests {
-    use stroma_core::{KeratinConfig, SnapshotConfig, Stroma, test_dir};
+    use stroma_core::{KeratinConfig, SnapshotConfig, Stroma, StromaKeratinConfig, test_dir};
 
     use super::*;
 
@@ -408,7 +408,7 @@ mod tests {
         let dir = test_dir!("runtime_settings_seed");
         let stroma = Stroma::open(
             &dir.root,
-            KeratinConfig::test_default(),
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
         .await
@@ -451,7 +451,7 @@ mod tests {
         let dir = test_dir!("runtime_settings_locks");
         let stroma = Stroma::open(
             &dir.root,
-            KeratinConfig::test_default(),
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
         .await
@@ -501,7 +501,7 @@ mod tests {
         let dir = test_dir!("runtime_settings_update");
         let stroma = Stroma::open(
             &dir.root,
-            KeratinConfig::test_default(),
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
         .await
@@ -536,7 +536,7 @@ mod tests {
         let dir = test_dir!("runtime_settings_update_conflict");
         let stroma = Stroma::open(
             &dir.root,
-            KeratinConfig::test_default(),
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
         .await
@@ -572,7 +572,7 @@ mod tests {
         let dir = test_dir!("runtime_settings_update_locks");
         let stroma = Stroma::open(
             &dir.root,
-            KeratinConfig::test_default(),
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
         .await
@@ -646,7 +646,7 @@ mod tests {
         let dir = test_dir!("runtime_settings_update_rejects_locks");
         let stroma = Stroma::open(
             &dir.root,
-            KeratinConfig::test_default(),
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
         .await

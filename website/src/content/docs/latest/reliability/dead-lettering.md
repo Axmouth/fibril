@@ -1,38 +1,68 @@
 ---
-title: Dead lettering
-description: How Fibril's dead-letter behavior is modeled today.
+title: Dead Lettering
+description: Configure where failed messages should go.
 ---
 
-Dead lettering exists in the Stroma state layer, but it is not yet exposed as a polished public broker configuration surface.
+Dead lettering gives failed messages somewhere explicit to go after retry handling is exhausted. It is useful when you want to inspect, replay, or separately process messages that could not be handled normally.
 
-## Current state-layer behavior
+## What You Can Configure
 
-Stroma can model:
+Fibril currently exposes a global dead-letter queue target through the admin API. The global target is the default destination for queues configured to use the global DLQ policy.
 
-- retry counts per offset
-- max-retry exhaustion
-- pending dead-letter state
-- discard policy
-- custom DLQ target topic, partition, and optional group
-- durable snapshot and replay of DLQ policy and pending DLQ state
+The global target is persisted and survives restart.
 
-When a message reaches the retry limit, Stroma moves it to pending DLQ rather than immediately pretending it is settled. A second phase commits the DLQ action or discards the pending entry according to policy.
+## Admin API
 
-## Custom target
+```http
+GET /admin/api/global-dlq
+PUT /admin/api/global-dlq
+```
 
-The state layer can route a dead-lettered message to a custom target. DLQ copies include source metadata such as source topic and source offset in message headers.
+`GET` returns the current version and target:
 
-## Discard policy
+```json
+{
+  "version": 1,
+  "target": {
+    "tp": "_dlq.orders",
+    "part": 0,
+    "group": null
+  }
+}
+```
 
-For discard policy, a rejected or exhausted message is locally settled without writing a DLQ message.
+`PUT` updates the target. Include the version you last read as `expected_version`:
 
-## Public status
+```json
+{
+  "expected_version": 1,
+  "target": {
+    "tp": "_dlq.orders",
+    "part": 0,
+    "group": null
+  }
+}
+```
 
-The important caveat: this behavior is not yet a stable public Fibril feature.
+If another operator changed the setting first, Fibril returns `409 Conflict` with the current setting. Set `target` to `null` to clear the global target.
 
-Before the site should call dead lettering “available,” the broker needs:
+## Target Fields
 
-- user-facing DLQ declaration or configuration
+| Field | Meaning |
+| --- | --- |
+| `tp` | Topic to write dead-lettered messages to. |
+| `part` | Partition number. |
+| `group` | Optional group. Use `null` for an ungrouped target. |
+
+Topics and groups use the same validation rules as normal Fibril topics and groups.
+
+## Current Limits
+
+The global DLQ target is configurable, but queue-level DLQ policy is not yet a complete user-facing feature.
+
+Still in progress:
+
+- queue-level DLQ declaration or configuration
 - clear retry-limit configuration
 - protocol/client support where needed
-- broker-level integration tests that exercise the public path
+- broader broker integration tests for the full public workflow

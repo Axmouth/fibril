@@ -741,6 +741,7 @@ impl Publisher {
     ///
     /// This only waits for the command to be accepted by the local engine. Use
     /// [`publish`](Self::publish) when you need the broker-assigned offset.
+    // TODO: return a handle that we can await for confirmation
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_unconfirmed<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;

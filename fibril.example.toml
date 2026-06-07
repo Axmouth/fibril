@@ -7,6 +7,15 @@ bind = "0.0.0.0:9876"
 [admin.listener]
 bind = "0.0.0.0:8081"
 
+[storage.keratin]
+fsync_interval_ms = 5
+
+[storage.keratin.message_log]
+segment_max_bytes = 268435456
+
+[storage.keratin.event_log]
+segment_max_bytes = 33554432
+
 [runtime_seed.delivery]
 inflight_ttl_ms = 30000
 expiry_poll_min_ms = 15000

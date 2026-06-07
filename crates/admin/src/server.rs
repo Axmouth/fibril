@@ -101,6 +101,10 @@ impl AdminServer {
                 "/admin/api/runtime-settings",
                 get(routes::runtime_settings).put(routes::update_runtime_settings),
             )
+            .route(
+                "/admin/api/global-dlq",
+                get(routes::global_dlq).put(routes::update_global_dlq),
+            )
             .route("/healthz", get(|| async { "ok" }))
             .fallback(not_found)
             .with_state(state);
@@ -235,7 +239,9 @@ mod tests {
         http::{Request, StatusCode, header},
     };
     use fibril_broker::{
-        queue_engine::{KeratinConfig, QueueEngine, SnapshotConfig, StromaEngine},
+        queue_engine::{
+            KeratinConfig, QueueEngine, SnapshotConfig, StromaEngine, StromaKeratinConfig,
+        },
         runtime_settings::{
             RuntimeSettings, RuntimeSettingsLocks, RuntimeSettingsManager,
             RuntimeSettingsUpdateOutcome,
@@ -250,7 +256,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let engine = StromaEngine::open(
             &root,
-            KeratinConfig::test_default(),
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
             SnapshotConfig::default(),
         )
         .await
@@ -435,6 +441,174 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["code"], "setting_locked");
         assert!(body["message"].as_str().unwrap().contains("locked"));
+    }
+
+    #[tokio::test]
+    async fn global_dlq_get_returns_current_setting() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/global-dlq")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 0);
+        assert!(body["target"].is_null());
+    }
+
+    #[tokio::test]
+    async fn global_dlq_put_updates_and_clears_setting() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/global-dlq")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 0,
+                            "target": {
+                                "tp": "_dlq.orders",
+                                "part": 0,
+                                "group": "failed"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["target"]["tp"], "_dlq.orders");
+        assert_eq!(body["target"]["group"], "failed");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/global-dlq")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 1,
+                            "target": null
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 2);
+        assert!(body["target"].is_null());
+    }
+
+    #[tokio::test]
+    async fn global_dlq_put_returns_conflict_for_stale_version() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/global-dlq")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 0,
+                            "target": {
+                                "tp": "_dlq.orders",
+                                "part": 0,
+                                "group": null
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/global-dlq")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 0,
+                            "target": {
+                                "tp": "_dlq.other",
+                                "part": 0,
+                                "group": null
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["target"]["tp"], "_dlq.orders");
+    }
+
+    #[tokio::test]
+    async fn global_dlq_put_rejects_invalid_target() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/global-dlq")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 0,
+                            "target": {
+                                "tp": "BadTopic",
+                                "part": 0,
+                                "group": null
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_global_dlq");
     }
 
     #[tokio::test]

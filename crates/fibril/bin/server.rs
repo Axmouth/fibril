@@ -25,9 +25,26 @@ async fn main() -> anyhow::Result<()> {
     let config = ServerConfig::load()?;
 
     let metrics = Metrics::new(3 * 60 * 60); // 3 hours
+    let keratin_default = KeratinConfig::default();
+    let keratin_message_cfg = KeratinConfig {
+        fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
+        segment_max_bytes: config.storage.keratin.message_log.segment_max_bytes,
+        ..keratin_default
+    };
+    let keratin_event_cfg = KeratinConfig {
+        fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
+        segment_max_bytes: config.storage.keratin.event_log.segment_max_bytes,
+        flush_target_bytes: keratin_default.flush_target_bytes / 8,
+        max_batch_bytes: keratin_default.max_batch_bytes / 8,
+        index_stride_bytes: keratin_default.index_stride_bytes / 8,
+        ..keratin_default
+    };
     let engine = StromaEngine::open(
         &config.server.data_dir,
-        KeratinConfig::default(),
+        fibril_broker::queue_engine::StromaKeratinConfig {
+            message_log: keratin_message_cfg,
+            event_log: keratin_event_cfg,
+        },
         SnapshotConfig::default(),
     )
     .await?;

@@ -9,7 +9,10 @@ use std::{
 };
 
 use fibril_broker::broker::{ConsumerConfig, SettleRequest};
-use fibril_broker::{broker::SettleType, queue_engine::KeratinConfig};
+use fibril_broker::{
+    broker::SettleType,
+    queue_engine::{KeratinConfig, StromaKeratinConfig},
+};
 use fibril_broker::{
     broker::{Broker, BrokerConfig, ConsumerHandle},
     coordination::NoopCoordination,
@@ -339,9 +342,13 @@ async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
         ..Default::default()
     };
 
-    let engine = StromaEngine::open(&storage_path, keratin_cfg, Default::default())
-        .await
-        .unwrap();
+    let engine = StromaEngine::open(
+        &storage_path,
+        StromaKeratinConfig::from_message_log(keratin_cfg),
+        Default::default(),
+    )
+    .await
+    .unwrap();
 
     let broker = Broker::new(engine, cfg, Some(metrics.broker()));
 
