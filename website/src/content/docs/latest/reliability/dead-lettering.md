@@ -7,9 +7,10 @@ Dead lettering gives failed messages somewhere explicit to go after retry handli
 
 ## What You Can Configure
 
-Fibril currently exposes a global dead-letter queue target through the admin API. The global target is the default destination for queues configured to use the global DLQ policy.
+Fibril currently exposes a global dead-letter queue target through the admin UI and admin API. The global target is the default destination for queues configured to use the global DLQ policy.
 
-The global target is persisted and survives restart.
+The global target is a live storage-owned runtime setting. It is persisted,
+survives restart, and is not controlled by the startup TOML/env/CLI config.
 
 ## Admin API
 
@@ -44,7 +45,8 @@ PUT /admin/api/global-dlq
 }
 ```
 
-If another operator changed the setting first, Fibril returns `409 Conflict` with the current setting. Set `target` to `null` to clear the global target.
+If another operator changed the setting first, Fibril returns `409 Conflict`
+with the current setting. Set `target` to `null` to clear the global target.
 
 ## Target Fields
 

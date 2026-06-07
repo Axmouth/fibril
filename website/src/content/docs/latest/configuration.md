@@ -152,6 +152,30 @@ PUT /admin/api/runtime-settings
 
 Update requests include an `expected_version`. If another operator changed settings first, the API returns `409 Conflict` with the current settings instead of overwriting them.
 
+## Other Persisted Runtime Settings
+
+Some live settings are owned by storage-level state rather than the broker
+runtime settings document. The global dead-letter queue target is the current
+example.
+
+The admin settings page also exposes:
+
+```http
+GET /admin/api/global-dlq
+PUT /admin/api/global-dlq
+```
+
+This setting:
+
+- applies live
+- is persisted in Fibril's storage state
+- survives restart
+- uses `expected_version` and returns `409 Conflict` if another update wins
+- is not seeded or overridden by TOML, environment variables, or CLI flags
+
+See [dead lettering](/latest/reliability/dead-lettering/) for the setting
+shape and current limitations.
+
 ## Validation
 
 Current validation rules:

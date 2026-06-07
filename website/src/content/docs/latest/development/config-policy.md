@@ -43,10 +43,15 @@ Examples:
 - idle queue cleanup timeout
 - idle queue cleanup sweep interval
 - publisher idle expiry
-- future global dead-letter defaults
 - future queue declaration defaults
 
 These are candidates for persisted global state. The admin UI can edit them, and the broker can apply them without restart where the implementation supports it.
+
+Some persisted runtime settings are not broker defaults. For example, the
+current global dead-letter queue target is owned by storage-level state because
+Stroma resolves the target when messages exhaust retries. It still follows the
+same operator-facing rules: live update, persisted value after restart, and
+explicit version checks for admin changes.
 
 ### Queue Settings
 
