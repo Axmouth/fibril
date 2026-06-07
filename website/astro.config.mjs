@@ -47,6 +47,7 @@ export default defineConfig({
             { label: "Documentation style", slug: "latest/development/docs-writing" },
             { label: "Configuration policy", slug: "latest/development/config-policy" },
             { label: "Configuration design", slug: "latest/development/config-design" },
+            { label: "Metadata policy", slug: "latest/development/metadata-policy" },
             { label: "Partition routing", slug: "latest/development/partition-routing" },
             { label: "Idle queue internals", slug: "latest/development/idle-queue-internals" },
           ],
