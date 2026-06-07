@@ -1,0 +1,226 @@
+{% extends "layout.html" %}
+{% block content %}
+<main class="messages-panel">
+  <h4>Messages</h4>
+  <p class="settings-note">
+    Inspect persisted queue messages for operations and debugging. This reads queue state and message data on demand; do not use it as a live polling view.
+  </p>
+
+  <section class="settings-section">
+    <form id="message-inspection-form" class="message-inspection-form">
+      <label class="settings-field">
+        <span class="settings-label">Topic</span>
+        <span class="settings-help">Queue topic to inspect.</span>
+        <input class="clr-input" id="message-topic" required placeholder="orders.created">
+      </label>
+
+      <label class="settings-field">
+        <span class="settings-label">Group</span>
+        <span class="settings-help">Optional queue group. Leave blank for the default group.</span>
+        <input class="clr-input" id="message-group" placeholder="default">
+      </label>
+
+      <label class="settings-field">
+        <span class="settings-label">From offset</span>
+        <span class="settings-help">First offset to inspect.</span>
+        <input class="clr-input" id="message-from" type="number" min="0" step="1" value="0">
+      </label>
+
+      <label class="settings-field">
+        <span class="settings-label">Limit</span>
+        <span class="settings-help">Maximum rows to request. The server applies a hard cap.</span>
+        <input class="clr-input" id="message-limit" type="number" min="1" max="500" step="1" value="50">
+      </label>
+
+      <label class="checkbox-label">
+        <input id="message-include-settled" type="checkbox">
+        <span>
+          <span class="settings-label">Include settled offsets</span>
+          <span class="settings-help">By default, inspection only shows messages still active in queue state.</span>
+        </span>
+      </label>
+
+      <label class="checkbox-label">
+        <input id="message-include-payload" type="checkbox">
+        <span>
+          <span class="settings-label">Include payload preview</span>
+          <span class="settings-help">Payload previews are base64 from the persisted message log and may be truncated.</span>
+        </span>
+      </label>
+
+      <label class="settings-field" id="payload-limit-row" hidden>
+        <span class="settings-label">Payload preview bytes</span>
+        <span class="settings-help">Maximum bytes returned per message preview.</span>
+        <input class="clr-input" id="message-payload-limit" type="number" min="1" max="65536" step="1" value="4096">
+      </label>
+
+      <div class="settings-actions">
+        <button class="btn btn-primary" type="submit">Load messages</button>
+        <button class="btn" type="button" id="message-next" disabled>Next page</button>
+      </div>
+    </form>
+  </section>
+
+  <div id="message-inspection-message" class="settings-message"></div>
+  <div id="message-results" class="message-results"></div>
+</main>
+
+<script src="/static/js/api.js"></script>
+<script>
+const form = document.getElementById("message-inspection-form");
+const results = document.getElementById("message-results");
+const message = document.getElementById("message-inspection-message");
+const nextButton = document.getElementById("message-next");
+const includePayload = document.getElementById("message-include-payload");
+const payloadLimitRow = document.getElementById("payload-limit-row");
+
+let lastQuery = null;
+let nextOffsetHint = null;
+
+function field(id) {
+  return document.getElementById(id);
+}
+
+function setMessage(kind, text) {
+  message.dataset.kind = kind;
+  message.textContent = text;
+}
+
+function clearMessage() {
+  message.removeAttribute("data-kind");
+  message.textContent = "";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function decodePayloadPreview(payloadBase64) {
+  if (!payloadBase64) return "";
+  const bytes = Uint8Array.from(atob(payloadBase64), char => char.charCodeAt(0));
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return payloadBase64;
+  }
+}
+
+function optionalNumber(id) {
+  const raw = field(id).value.trim();
+  return raw === "" ? null : Number(raw);
+}
+
+function buildQuery(fromOverride = null) {
+  const topic = field("message-topic").value.trim();
+  if (!topic) throw new Error("Topic is required.");
+
+  const params = new URLSearchParams();
+  params.set("topic", topic);
+  const group = field("message-group").value.trim();
+  if (group) params.set("group", group);
+  params.set("from", String(fromOverride ?? optionalNumber("message-from") ?? 0));
+
+  const limit = optionalNumber("message-limit");
+  if (limit !== null) params.set("limit", String(limit));
+  if (field("message-include-settled").checked) params.set("include_settled", "true");
+  if (field("message-include-payload").checked) {
+    params.set("include_payload", "true");
+    const payloadLimit = optionalNumber("message-payload-limit");
+    if (payloadLimit !== null) params.set("payload_limit_bytes", String(payloadLimit));
+  }
+
+  return params;
+}
+
+function renderHeaders(headers) {
+  if (!headers || headers.length === 0) return '<span class="message-muted">none</span>';
+  return headers
+    .map(([key, value]) => `<code>${escapeHtml(key)}=${escapeHtml(value)}</code>`)
+    .join(" ");
+}
+
+function renderPayload(item) {
+  if (item.missing_payload) return '<span class="message-bad">missing from log</span>';
+  if (!item.payload_base64) return '<span class="message-muted">not requested</span>';
+  const preview = decodePayloadPreview(item.payload_base64);
+  const suffix = item.payload_truncated ? " (truncated)" : "";
+  return `<pre>${escapeHtml(preview)}${escapeHtml(suffix)}</pre>`;
+}
+
+function renderItems(data) {
+  nextOffsetHint = data.next_offset_hint;
+  nextButton.disabled = nextOffsetHint === null || nextOffsetHint === undefined;
+
+  if (!data.items || data.items.length === 0) {
+    results.innerHTML = '<div class="message-empty">No messages matched this request.</div>';
+    return;
+  }
+
+  const rows = data.items.map(item => {
+    const state = item.state || {};
+    return `
+      <tr>
+        <td class="text-right">${escapeHtml(state.offset)}</td>
+        <td><span class="message-status message-status-${escapeHtml(state.status)}">${escapeHtml(state.status)}</span></td>
+        <td class="text-right">${escapeHtml(state.retry_count ?? 0)}</td>
+        <td class="text-right">${escapeHtml(item.payload_len ?? "")}</td>
+        <td>${renderHeaders(item.headers)}</td>
+        <td>${renderPayload(item)}</td>
+      </tr>
+    `;
+  }).join("");
+
+  results.innerHTML = `
+    <table class="table table-compact message-table">
+      <tr>
+        <th class="text-right">Offset</th>
+        <th>Status</th>
+        <th class="text-right">Retries</th>
+        <th class="text-right">Bytes</th>
+        <th>Headers</th>
+        <th>Payload preview</th>
+      </tr>
+      ${rows}
+    </table>
+  `;
+}
+
+async function loadMessages(fromOverride = null) {
+  clearMessage();
+  results.innerHTML = "";
+  const query = buildQuery(fromOverride);
+  lastQuery = query;
+  const data = await api(`/admin/api/messages?${query}`);
+  renderItems(data);
+  setMessage("info", data.warning || "Message inspection loaded.");
+}
+
+form.addEventListener("submit", async event => {
+  event.preventDefault();
+  try {
+    await loadMessages();
+  } catch (err) {
+    setMessage("error", err.message || String(err));
+  }
+});
+
+nextButton.addEventListener("click", async () => {
+  if (nextOffsetHint === null || nextOffsetHint === undefined) return;
+  field("message-from").value = String(nextOffsetHint);
+  try {
+    await loadMessages(nextOffsetHint);
+  } catch (err) {
+    setMessage("error", err.message || String(err));
+  }
+});
+
+includePayload.addEventListener("change", event => {
+  payloadLimitRow.hidden = !event.target.checked;
+});
+</script>
+{% endblock %}

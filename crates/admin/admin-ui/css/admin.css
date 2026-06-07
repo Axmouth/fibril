@@ -144,6 +144,12 @@ main {
   margin-right: auto;
 }
 
+.messages-panel {
+  max-width: min(96rem, calc(100vw - 3rem));
+  margin-left: auto;
+  margin-right: auto;
+}
+
 .settings-note {
   opacity: .8;
 }
@@ -329,6 +335,100 @@ main {
   margin-top: 1rem;
 }
 
+.message-inspection-form {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.message-inspection-form .checkbox-label,
+.message-inspection-form .settings-actions {
+  grid-column: 1 / -1;
+}
+
+.message-results {
+  margin-top: 1rem;
+  overflow-x: auto;
+}
+
+.message-empty {
+  background: rgba(255, 255, 255, .03);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 6px;
+  padding: 1rem;
+}
+
+.message-table {
+  min-width: 64rem;
+  width: 100%;
+}
+
+.message-table td {
+  vertical-align: top;
+}
+
+.message-table code {
+  background: rgba(255, 255, 255, .06);
+  border-radius: 4px;
+  display: inline-block;
+  margin: 0 .2rem .2rem 0;
+  padding: .1rem .25rem;
+}
+
+.message-table pre {
+  background: rgba(0, 0, 0, .25);
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 4px;
+  margin: 0;
+  max-height: 10rem;
+  overflow: auto;
+  padding: .4rem .5rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-status {
+  border-radius: 999px;
+  display: inline-block;
+  font-size: .6rem;
+  font-weight: 600;
+  line-height: 1rem;
+  padding: 0 .45rem;
+}
+
+.message-status-ready {
+  background: rgba(81, 207, 102, .16);
+  color: #8ce99a;
+}
+
+.message-status-inflight {
+  background: rgba(77, 171, 247, .16);
+  color: #74c0fc;
+}
+
+.message-status-delayed {
+  background: rgba(246, 193, 119, .16);
+  color: #ffd43b;
+}
+
+.message-status-pending_dlq {
+  background: rgba(255, 135, 135, .16);
+  color: #ffa8a8;
+}
+
+.message-status-settled {
+  background: rgba(255, 255, 255, .08);
+  color: rgba(255, 255, 255, .72);
+}
+
+.message-muted {
+  opacity: .62;
+}
+
+.message-bad {
+  color: #ffa8a8;
+}
+
 .login-body {
   min-height: 100vh;
 }
@@ -402,5 +502,9 @@ main {
 
   .settings-actions {
     flex-direction: column;
+  }
+
+  .message-inspection-form {
+    grid-template-columns: 1fr;
   }
 }

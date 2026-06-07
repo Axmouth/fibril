@@ -115,6 +115,7 @@ impl AdminServer {
             .route("/admin/connections", get(connections_page))
             .route("/admin/subscriptions", get(subscriptions_page))
             .route("/admin/queues", get(queues_page))
+            .route("/admin/messages", get(messages_page))
             .route("/admin/settings", get(settings_page))
             .route("/admin/api/overview", get(routes::overview))
             .route("/admin/api/connections", get(routes::connections))
@@ -219,6 +220,18 @@ async fn queues_page(
     }))
 }
 
+async fn messages_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(Messages {
+        page: "messages",
+        title: "Messages",
+        auth_enabled: server.config.auth.is_some(),
+    }))
+}
+
 async fn settings_page(
     State(server): State<Arc<AdminServer>>,
     headers: HeaderMap,
@@ -311,6 +324,14 @@ struct Subscriptions {
 #[derive(Template)]
 #[template(path = "pages/queues.html")]
 struct Queues {
+    page: &'static str,
+    title: &'static str,
+    auth_enabled: bool,
+}
+
+#[derive(Template)]
+#[template(path = "pages/messages.html")]
+struct Messages {
     page: &'static str,
     title: &'static str,
     auth_enabled: bool,
@@ -595,6 +616,28 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn messages_page_renders_inspection_form() {
+        let server = test_server_with_auth(RuntimeSettingsLocks::default(), None).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/messages")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("message-inspection-form"));
+        assert!(body.contains("/admin/api/messages"));
     }
 
     #[tokio::test]
