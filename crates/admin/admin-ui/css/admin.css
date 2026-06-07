@@ -123,6 +123,21 @@ main {
   opacity: .8;
 }
 
+.settings-group-heading {
+  margin-top: 1.25rem;
+}
+
+.settings-group-heading h5,
+.settings-group-heading p {
+  margin: 0;
+}
+
+.settings-group-heading p {
+  font-size: .7rem;
+  opacity: .68;
+  padding-top: .15rem;
+}
+
 .settings-section {
   background: rgba(255, 255, 255, .025);
   border: 1px solid rgba(255, 255, 255, .12);

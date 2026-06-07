@@ -1,16 +1,21 @@
 {% extends "layout.html" %}
 {% block content %}
-<h4 class="metrics-header">Runtime Settings</h4>
+<h4 class="metrics-header">Settings</h4>
 
 <div class="settings-panel">
   <p class="settings-note">
-    These settings are persisted and applied live where supported. Submit uses the version currently loaded on this page; if another update wins first, the page shows the latest values instead of overwriting them.
+    Persisted settings are applied live where supported. Submit uses the version currently loaded on this page; if another update wins first, the page shows the latest values instead of overwriting them.
   </p>
 
   <div id="settings-message" class="settings-message"></div>
 
   <form id="settings-form">
     <input type="hidden" id="version">
+
+    <div class="settings-group-heading">
+      <h5>Broker Runtime Settings</h5>
+      <p>Live broker behavior such as delivery timing and idle queue cleanup.</p>
+    </div>
 
     <section class="settings-section">
       <div class="settings-section-heading">
@@ -146,6 +151,11 @@
 
   <form id="global-dlq-form" class="settings-form-secondary">
     <input type="hidden" id="global-dlq.version">
+
+    <div class="settings-group-heading">
+      <h5>Storage Runtime Settings</h5>
+      <p>Live persisted settings owned by Fibril storage state.</p>
+    </div>
 
     <section class="settings-section">
       <div class="settings-section-heading">

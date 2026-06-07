@@ -1092,7 +1092,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("Runtime Settings"));
+        assert!(body.contains("Broker Runtime Settings"));
+        assert!(body.contains("Storage Runtime Settings"));
         assert!(body.contains("Startup Config"));
         assert!(body.contains("Global Dead Letter Queue"));
         assert!(body.contains("Queue Dead Letter Policy"));
