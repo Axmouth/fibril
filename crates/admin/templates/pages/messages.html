@@ -271,7 +271,7 @@ function renderItems(data) {
   results.innerHTML = `
     <table class="table table-compact message-table">
       <tr>
-        <th></th>
+        <th><input id="message-select-all" type="checkbox" aria-label="select all loaded offsets"></th>
         <th class="text-right">Offset</th>
         <th>Status</th>
         <th class="text-right">Retries</th>
@@ -286,6 +286,13 @@ function renderItems(data) {
   for (const checkbox of document.querySelectorAll(".message-select")) {
     checkbox.addEventListener("change", updateReplayButton);
   }
+  const selectAll = document.getElementById("message-select-all");
+  selectAll.addEventListener("change", () => {
+    for (const checkbox of document.querySelectorAll(".message-select")) {
+      checkbox.checked = selectAll.checked;
+    }
+    updateReplayButton();
+  });
   for (const button of document.querySelectorAll(".message-payload-open")) {
     button.addEventListener("click", () => openPayloadModal(button.dataset.offset));
   }
@@ -300,7 +307,7 @@ async function loadMessages(fromOverride = null) {
   const data = await api(`/admin/api/messages?${query}`);
   currentFrom = Number(query.get("from") || "0");
   renderItems(data);
-  setMessage("info", data.warning || "Message inspection loaded.");
+  setMessage("info", `Loaded ${data.items?.length ?? 0} message row(s).`);
   return true;
 }
 
@@ -311,7 +318,13 @@ function selectedOffsets() {
 }
 
 function updateReplayButton() {
-  replayButton.disabled = selectedOffsets().length === 0;
+  const selected = selectedOffsets().length;
+  replayButton.disabled = selected === 0;
+  const selectAll = document.getElementById("message-select-all");
+  if (!selectAll) return;
+  const checkboxes = Array.from(document.querySelectorAll(".message-select"));
+  selectAll.checked = checkboxes.length > 0 && selected === checkboxes.length;
+  selectAll.indeterminate = selected > 0 && selected < checkboxes.length;
 }
 
 async function replaySelected() {
