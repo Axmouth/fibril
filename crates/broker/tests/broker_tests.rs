@@ -5,12 +5,16 @@ use fibril_broker::{
         Broker, BrokerConfig, ConsumerConfig, QueueEvictionAttempt, QueueEvictionSkip,
         SettleRequest, SettleType,
     },
-    queue_engine::{EvictOutcome, StromaEngine},
+    queue_engine::{EvictOutcome, QueueEngine, StromaEngine},
     test_util::TestState,
 };
+use fibril_storage::DeliverableMessage;
 use fibril_util::unix_millis;
 use hashbrown::HashSet;
-use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir, test_dir};
+use stroma_core::{
+    DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
+    KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir, test_dir,
+};
 use uuid::Uuid;
 
 async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
@@ -38,6 +42,29 @@ async fn open_test_broker_with_cfg(cfg: BrokerConfig) -> (Arc<Broker<StromaEngin
     let broker = Broker::new(engine, cfg, None);
 
     (broker, dir)
+}
+
+async fn open_test_engine() -> (StromaEngine, TempDir) {
+    let dir = test_dir!("broker_test");
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    (engine, dir)
+}
+
+async fn recv_with_timeout(
+    sub: &mut fibril_broker::broker::ConsumerHandle,
+    timeout_ms: u64,
+) -> Option<DeliverableMessage> {
+    tokio::time::timeout(Duration::from_millis(timeout_ms), sub.recv())
+        .await
+        .ok()
+        .flatten()
 }
 
 async fn wait_for_queue_activity(
@@ -1201,6 +1228,150 @@ async fn nack_without_requeue_drops_message() -> Result<(), Box<dyn std::error::
 
     t.expect_no_message(&c, 50).await;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn global_dlq_policy_routes_exhausted_message_to_global_target()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (engine, _dir) = open_test_engine().await;
+    let target = GlobalDLQ::new("_dlq.source", 0, None).await?;
+
+    assert_eq!(
+        engine.set_global_dlq(Some(target), 0).await?,
+        GlobalDlqUpdateOutcome::Stored(GlobalDlqSnapshot {
+            version: 1,
+            target: Some(GlobalDLQ::new("_dlq.source", 0, None).await?),
+        })
+    );
+    engine
+        .declare_queue(
+            "source",
+            0,
+            None,
+            DeclareMeta {
+                dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
+                dlq_max_retries: Some(0),
+            },
+        )
+        .await?;
+
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+    let (publisher, _confirms) = broker.get_publisher("source", &None).await?;
+    publisher
+        .publish(
+            b"poison".to_vec(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await?
+        .await??;
+
+    let source_client = Uuid::now_v7();
+    let mut source = broker
+        .subscribe(
+            "source",
+            None,
+            source_client,
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await?;
+    let msg = source.recv().await.expect("source message delivered");
+    source
+        .settle(SettleRequest {
+            settle_type: SettleType::Nack {
+                requeue: Some(true),
+            },
+            delivery_tag: msg.delivery_tag,
+        })
+        .await?;
+
+    let dlq_client = Uuid::now_v7();
+    let mut dlq = broker
+        .subscribe(
+            "_dlq.source",
+            None,
+            dlq_client,
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await?;
+    let dlq_msg = recv_with_timeout(&mut dlq, 2_000)
+        .await
+        .expect("message should be copied to global DLQ target");
+    assert_eq!(dlq_msg.message.topic, "_dlq.source");
+    assert_eq!(dlq_msg.message.offset, 0);
+    assert_eq!(dlq_msg.message.payload, b"poison");
+
+    assert!(recv_with_timeout(&mut source, 100).await.is_none());
+
+    broker.shutdown_graceful().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (engine, _dir) = open_test_engine().await;
+    let target = GlobalDLQ::new("_dlq.source", 0, None).await?;
+    engine.set_global_dlq(Some(target), 0).await?;
+    engine.set_global_dlq(None, 1).await?;
+    engine
+        .declare_queue(
+            "source",
+            0,
+            None,
+            DeclareMeta {
+                dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
+                dlq_max_retries: Some(0),
+            },
+        )
+        .await?;
+
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+    let (publisher, _confirms) = broker.get_publisher("source", &None).await?;
+    publisher
+        .publish(
+            b"discard".to_vec(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await?
+        .await??;
+
+    let source_client = Uuid::now_v7();
+    let mut source = broker
+        .subscribe(
+            "source",
+            None,
+            source_client,
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await?;
+    let msg = source.recv().await.expect("source message delivered");
+    source
+        .settle(SettleRequest {
+            settle_type: SettleType::Nack {
+                requeue: Some(true),
+            },
+            delivery_tag: msg.delivery_tag,
+        })
+        .await?;
+
+    let dlq_client = Uuid::now_v7();
+    let mut dlq = broker
+        .subscribe(
+            "_dlq.source",
+            None,
+            dlq_client,
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await?;
+    assert!(recv_with_timeout(&mut dlq, 200).await.is_none());
+    assert!(recv_with_timeout(&mut source, 100).await.is_none());
+
+    broker.shutdown_graceful().await;
     Ok(())
 }
 
