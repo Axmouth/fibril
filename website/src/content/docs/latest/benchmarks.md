@@ -114,7 +114,8 @@ The steady helper runs readers and writers in one coordinated process. It marks
 warmup messages separately, measures only the configured steady window, and
 prints both publish-to-delivery and server-receive-to-delivery latency. The
 wrapper also writes full server logs and full benchmark results to files, then
-prints a compact summary including publish and confirmation error counts.
+prints a compact summary including publish and confirmation error counts plus
+server RSS average and peak sampled during the benchmark run.
 
 The wrapper starts a local `fibril-server` on the default broker and admin
 ports. Run one wrapper benchmark at a time; a second run will fail if those
@@ -140,6 +141,10 @@ Useful knobs:
 | `CONFIRM_WINDOW` | `1024` | In-flight confirmations per writer when `CONFIRMED=1` |
 | `LOG_FILE` | temporary file | Build, server, and noisy runtime logs |
 | `RESULTS_FILE` | temporary file | Deterministic benchmark summary and queue snapshots |
+
+Memory numbers are sampled from the local `fibril-server` process RSS once per
+second during the wrapper benchmark. The average is over the sampled run period,
+not precisely only the warmup-excluded steady window.
 
 Quick validation run from June 7, 2026, using `WRITERS=10`, `READERS=10`,
 `SIZE=1024`, `PREFETCH=16384`, `WARMUP_SECS=2`, and `DURATION_SECS=5`:
@@ -175,18 +180,25 @@ optimization.
 
 Payload-size spot checks on the same SATA SSD development machine:
 
-| Payload | Target rate | Actual measured rate | Missing | publish→deliver p50/p95/p99/max | Notes |
-| ---: | ---: | ---: | ---: | --- | --- |
-| 8KB | 50k/s | 50,010/s | 0 | 14 / 17 / 19 / 61 ms | Clean short run |
-| 8KB | 150k/s | 139,987/s | 0 | 2608 / 3117 / 3168 / 3245 ms | Could not reach target; backlog-driven |
-| 64KB | 10k/s | 10,000/s | 0 | 18 / 22 / 23 / 32 ms | Clean short run |
-| 64KB | 20k/s | 18,285/s | 0 | 1605 / 1891 / 2144 / 2277 ms | Could not reach target; likely storage-bandwidth bound |
+| Payload | Target rate | Actual measured rate | Missing | publish→deliver p50/p95/p99/max | Server RSS avg/peak | Notes |
+| ---: | ---: | ---: | ---: | --- | --- | --- |
+| 8KB | 50k/s | 50,010/s | 0 | 14 / 17 / 19 / 61 ms | not sampled | Clean short run |
+| 8KB | 150k/s | 139,987/s | 0 | 2608 / 3117 / 3168 / 3245 ms | not sampled | Could not reach target; backlog-driven |
+| 64KB | 10k/s | 10,000/s | 0 | 18 / 22 / 23 / 32 ms | not sampled | Clean short run |
+| 64KB | 20k/s | 18,285/s | 0 | 1605 / 1891 / 2144 / 2277 ms | not sampled | Could not reach target; likely storage-bandwidth bound |
+| 512KB | 1k/s | 999/s | 0 | 27 / 34 / 39 / 47 ms | 262.9 / 310.2 MiB | Clean short run |
+| 512KB | 2k/s | 2,000/s | 0 | 1165 / 1669 / 1756 / 1841 ms | 951.4 / 1538.0 MiB | Drains, but backlog-driven |
+| 1MB | 500/s | 498/s | 0 | 33 / 45 / 51 / 63 ms | ~290 / ~334 MiB | Clean short run; reruns varied slightly |
+| 1MB | 1k/s | 1,000/s | 0 | 1812 / 2539 / 2693 / 2801 ms | 847.0 / 1187.5 MiB | Drains, but backlog-driven |
 
 For larger payloads, the bottleneck shifts away from message scheduling and
 toward memory copying, TCP throughput, and especially durable storage
 bandwidth. On this SATA SSD machine, 64KB at 10k/s is already roughly 625 MiB/s
 of application payload before protocol, replication within the durable path,
 and filesystem overhead. Treat payload-size numbers as hardware-specific.
+The large-payload memory samples also show the expected split: clean runs can
+stay in the low hundreds of MiB, while backlog-driven runs retain much more
+payload data in-process and can exceed 1 GiB RSS.
 
 Recent local exploratory run, using `WRITERS=10`, `READERS=10`, `SIZE=1024`,
 `PREFETCH=16384`, `WARMUP_SECS=3`, and `DURATION_SECS=10`:
