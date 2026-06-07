@@ -8,14 +8,13 @@ Fibril is still early. The near-term roadmap is about making the existing semant
 ## Near term
 
 - Add richer DLQ replay and message inspection workflows.
-- Add TypeScript client parity for delayed retry.
 - Add the next storage-level runtime settings.
 - Add sparse-queue observability around lazy loading, idle cleanup, and eviction decisions.
 - Improve TCP protocol ergonomics and error behavior.
 
 ## Medium term
 
-- Package runnable broker images or binaries.
+- Package runnable broker images or binaries, including `fibrilctl` in the server image.
 - Add deployment guidance for the broker itself.
 - Improve admin interface observability.
 - Produce repeatable benchmark reports.

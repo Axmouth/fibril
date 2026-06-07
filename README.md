@@ -54,7 +54,7 @@ Messages can also be retried or failed explicitly:
     msg.fail().await?;   // Mark failed without requeueing
 ```
 
-Delayed retry is still being wired through the public path. Delayed publish is available through `publisher.publish_delayed(..)`.
+Delayed publish and delayed retry are available through the public client paths.
 
 Common access patterns:
 ```rust
@@ -396,7 +396,7 @@ Performance characteristics are expected to evolve significantly as the system m
 
 * **Delayed messages and scheduling**
 
-  Delayed publish is wired through the broker protocol plus Rust and TypeScript clients. Delayed retry is still an active area.
+  Delayed publish and delayed retry are wired through the broker protocol plus Rust and TypeScript clients.
 
 ### The following features may be explored under a separate advanced routing layer on top of the core broker, to keep the core focused on durability and delivery semantics:
 (Note: the above is not the guaranteed direction, but a possibility)

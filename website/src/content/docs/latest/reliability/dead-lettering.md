@@ -9,7 +9,7 @@ Dead lettering gives failed messages somewhere explicit to go after retry handli
 
 Fibril currently exposes two dead-lettering controls:
 
-- a global dead-letter queue target, configured by operators through the admin UI/API
+- a global dead-letter queue target, configured by operators through the admin UI/API or `fibrilctl`
 - a per-queue policy for what should happen after retries are exhausted, declared by applications through the client, `fibrilctl`, or the admin API
 
 The global target is the fallback destination for queues configured to use the global DLQ policy. It is a live storage-owned runtime setting: it is persisted, survives restart, and is not controlled by the startup TOML/env/CLI config.
@@ -72,6 +72,25 @@ fibrilctl queue declare orders.created \
   --max-retries 3
 ```
 
+Operators can also manage the global DLQ target through the CLI:
+
+```sh
+fibrilctl admin global-dlq get
+fibrilctl admin global-dlq set _dlq.orders
+fibrilctl admin global-dlq clear
+```
+
+To inspect active messages in a queue:
+
+```sh
+fibrilctl admin messages orders.created
+```
+
+By default this only returns messages that are still active in queue state, such
+as ready, inflight, delayed, or pending DLQ messages. Add
+`--include-settled` when you also need persisted log records that are no longer
+tracked as active. Add `--include-payload` to include base64 payload previews.
+
 ## Admin API
 
 Global target:
@@ -126,6 +145,21 @@ Use the global DLQ target for a queue:
   "max_retries": 3
 }
 ```
+
+Message inspection:
+
+```http
+GET /admin/api/messages?topic=orders.created&from=0&limit=50
+```
+
+Useful query flags:
+
+- `include_settled=true` also returns persisted records that are no longer active
+- `include_payload=true` includes base64 payload previews
+- `payload_limit_bytes=4096` caps each payload preview
+
+Message inspection reads persisted message data and queue state. Use it for
+debugging and operations, not as a live polling view.
 
 Use a queue-specific DLQ target:
 

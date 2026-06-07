@@ -121,6 +121,7 @@ impl AdminServer {
             .route("/admin/api/subscriptions", get(routes::subscriptions))
             .route("/admin/api/queues", get(routes::queues))
             .route("/admin/api/queues_debug", get(routes::queues_debug))
+            .route("/admin/api/messages", get(routes::inspect_messages))
             .route(
                 "/admin/api/runtime-settings",
                 get(routes::runtime_settings).put(routes::update_runtime_settings),
@@ -367,9 +368,11 @@ mod tests {
     };
     use base64::Engine;
     use fibril_broker::{
+        CompletionPair,
         broker::{Broker, BrokerConfig},
         queue_engine::{
-            KeratinConfig, QueueEngine, SnapshotConfig, StromaEngine, StromaKeratinConfig,
+            KeratinAppendCompletion, KeratinConfig, MessageContentType, MessageHeaders,
+            QueueEngine, SnapshotConfig, StromaEngine, StromaKeratinConfig,
         },
         runtime_settings::{
             RuntimeSettings, RuntimeSettingsLocks, RuntimeSettingsManager,
@@ -920,6 +923,48 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["version"], 0);
         assert!(body["target"].is_null());
+    }
+
+    #[tokio::test]
+    async fn message_inspection_returns_active_messages_with_payload_preview() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let headers = MessageHeaders {
+            published: 1,
+            publish_received: 2,
+            content_type: Some(MessageContentType::Text),
+            extra: Default::default(),
+        };
+        let (completion, rx) = KeratinAppendCompletion::pair();
+        server
+            .storage
+            .publish("inspect", 0, None, &headers, b"hello".to_vec(), completion)
+            .await
+            .unwrap();
+        rx.await.unwrap().unwrap();
+
+        let app = AdminServer::router(server);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/messages?topic=inspect&include_payload=true&payload_limit_bytes=3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["next_offset_hint"], 50);
+        assert_eq!(body["items"][0]["state"]["offset"], 0);
+        assert_eq!(body["items"][0]["state"]["status"], "ready");
+        assert_eq!(body["items"][0]["payload_len"], 5);
+        assert_eq!(
+            body["items"][0]["payload_base64"],
+            base64::engine::general_purpose::STANDARD.encode(b"hel")
+        );
+        assert_eq!(body["items"][0]["payload_truncated"], true);
+        assert_eq!(body["items"][0]["missing_payload"], false);
     }
 
     #[tokio::test]

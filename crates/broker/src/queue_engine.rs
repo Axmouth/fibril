@@ -6,12 +6,12 @@ use fibril_storage::Offset;
 use fibril_util::UnixMillis;
 use std::collections::HashSet;
 use stroma_core::{
-    AckEventMeta, GlobalStore, MessageHeaders, NackEventMeta, PublishItem, StromaDebugSnapshot,
-    StromaMetrics,
+    AckEventMeta, GlobalStore, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics,
 };
 pub use stroma_core::{
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
-    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, IoError, KeratinConfig, MessageContentType,
+    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KeratinAppendCompletion,
+    KeratinConfig, MessageContentType, MessageHeaders, MessageInspectionPage, QueueInspectionState,
     SnapshotConfig, Stroma, StromaError, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
@@ -132,6 +132,18 @@ pub trait QueueEngine {
     async fn queue_stats_snapshot(&self) -> Result<QueuesStateSnapshot, StromaError>;
 
     async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError>;
+
+    async fn inspect_messages(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        limit: usize,
+        mode: InspectMode,
+        include_payload: bool,
+        payload_limit_bytes: usize,
+    ) -> Result<MessageInspectionPage, StromaError>;
 
     async fn global_dlq(&self) -> Result<GlobalDlqSnapshot, StromaError>;
 
@@ -410,6 +422,31 @@ impl QueueEngine for StromaEngine {
 
     async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError> {
         self.inner.debug_snapshot().await
+    }
+
+    async fn inspect_messages(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        limit: usize,
+        mode: InspectMode,
+        include_payload: bool,
+        payload_limit_bytes: usize,
+    ) -> Result<MessageInspectionPage, StromaError> {
+        self.inner
+            .inspect_messages(
+                tp,
+                part,
+                group,
+                from,
+                limit,
+                mode,
+                include_payload,
+                payload_limit_bytes,
+            )
+            .await
     }
 
     async fn global_dlq(&self) -> Result<GlobalDlqSnapshot, StromaError> {

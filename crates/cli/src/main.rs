@@ -7,6 +7,7 @@ use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use fibril_client::{ClientOptions, QueueConfig};
 use fibril_config::ServerConfig;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Parser)]
 #[command(name = "fibrilctl", about = "Operate a Fibril broker")]
@@ -27,6 +28,10 @@ struct Cli {
     #[arg(long, global = true, default_value = "fibril")]
     password: String,
 
+    /// Admin HTTP address. Defaults to the configured admin bind.
+    #[arg(long, global = true)]
+    admin: Option<SocketAddr>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -38,12 +43,89 @@ enum Command {
         #[command(subcommand)]
         command: QueueCommand,
     },
+    /// Admin API operations.
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum QueueCommand {
     /// Declare or update queue settings.
     Declare(DeclareQueueArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum AdminCommand {
+    /// Global dead-letter queue target operations.
+    GlobalDlq {
+        #[command(subcommand)]
+        command: GlobalDlqCommand,
+    },
+    /// Inspect persisted queue messages through the admin API.
+    Messages(InspectMessagesArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum GlobalDlqCommand {
+    /// Show the current global DLQ target.
+    Get,
+    /// Set the global DLQ target.
+    Set(SetGlobalDlqArgs),
+    /// Clear the global DLQ target.
+    Clear(ClearGlobalDlqArgs),
+}
+
+#[derive(Debug, Parser)]
+struct SetGlobalDlqArgs {
+    /// Target DLQ topic.
+    topic: String,
+
+    /// Optional target DLQ group.
+    #[arg(long)]
+    group: Option<String>,
+
+    /// Expected global DLQ settings version. Defaults to the current version.
+    #[arg(long)]
+    expected_version: Option<u64>,
+}
+
+#[derive(Debug, Parser)]
+struct ClearGlobalDlqArgs {
+    /// Expected global DLQ settings version. Defaults to the current version.
+    #[arg(long)]
+    expected_version: Option<u64>,
+}
+
+#[derive(Debug, Parser)]
+struct InspectMessagesArgs {
+    /// Queue topic to inspect.
+    topic: String,
+
+    /// Optional queue group namespace.
+    #[arg(long)]
+    group: Option<String>,
+
+    /// First offset to inspect.
+    #[arg(long, default_value_t = 0)]
+    from: u64,
+
+    /// Maximum messages to inspect. The server applies its own hard cap.
+    #[arg(long)]
+    limit: Option<usize>,
+
+    /// Include settled log records that are no longer active in queue state.
+    #[arg(long)]
+    include_settled: bool,
+
+    /// Include base64 payload previews.
+    #[arg(long)]
+    include_payload: bool,
+
+    /// Maximum payload preview bytes per message.
+    #[arg(long)]
+    payload_limit_bytes: Option<usize>,
 }
 
 #[derive(Debug, Parser)]
@@ -87,22 +169,65 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     let config = ServerConfig::load_file_and_env(cli.config)?;
-    let broker_addr = cli
-        .broker
-        .unwrap_or_else(|| connect_addr_for_bind(config.broker.listener.bind));
-    let client = ClientOptions::new()
-        .auth(cli.username, cli.password)
-        .connect(broker_addr)
-        .await
-        .with_context(|| format!("failed to connect to broker at {broker_addr}"))?;
 
     match cli.command {
-        Command::Queue { command } => match command {
-            QueueCommand::Declare(args) => declare_queue(&client, args).await?,
-        },
+        Command::Queue { command } => {
+            let broker_addr = cli
+                .broker
+                .unwrap_or_else(|| connect_addr_for_bind(config.broker.listener.bind));
+            let client = ClientOptions::new()
+                .auth(cli.username, cli.password)
+                .connect(broker_addr)
+                .await
+                .with_context(|| format!("failed to connect to broker at {broker_addr}"))?;
+
+            match command {
+                QueueCommand::Declare(args) => declare_queue(&client, args).await?,
+            }
+
+            client.shutdown().await;
+        }
+        Command::Admin { command } => {
+            let admin_addr = cli
+                .admin
+                .unwrap_or_else(|| connect_addr_for_bind(config.admin.listener.bind));
+            let admin = AdminClient {
+                addr: admin_addr,
+                username: cli.username,
+                password: cli.password,
+                http: reqwest::Client::new(),
+            };
+
+            match command {
+                AdminCommand::GlobalDlq { command } => match command {
+                    GlobalDlqCommand::Get => print_global_dlq(admin.get_global_dlq().await?)?,
+                    GlobalDlqCommand::Set(args) => {
+                        let current = admin.get_global_dlq().await?;
+                        let version = args.expected_version.unwrap_or(current.version);
+                        let updated = admin
+                            .set_global_dlq(
+                                version,
+                                Some(GlobalDlqTarget {
+                                    tp: args.topic,
+                                    group: args.group,
+                                    part: None,
+                                }),
+                            )
+                            .await?;
+                        print_global_dlq(updated)?;
+                    }
+                    GlobalDlqCommand::Clear(args) => {
+                        let current = admin.get_global_dlq().await?;
+                        let version = args.expected_version.unwrap_or(current.version);
+                        let updated = admin.set_global_dlq(version, None).await?;
+                        print_global_dlq(updated)?;
+                    }
+                },
+                AdminCommand::Messages(args) => print_json(admin.inspect_messages(args).await?)?,
+            }
+        }
     }
 
-    client.shutdown().await;
     Ok(())
 }
 
@@ -171,6 +296,141 @@ fn connect_addr_for_bind(bind: SocketAddr) -> SocketAddr {
     }
 }
 
+#[derive(Debug, Clone)]
+struct AdminClient {
+    addr: SocketAddr,
+    username: String,
+    password: String,
+    http: reqwest::Client,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct GlobalDlqSnapshot {
+    version: u64,
+    target: Option<GlobalDlqTarget>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct GlobalDlqTarget {
+    tp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    part: Option<u32>,
+    group: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct UpdateGlobalDlqRequest {
+    expected_version: u64,
+    target: Option<GlobalDlqTarget>,
+}
+
+impl AdminClient {
+    async fn get_global_dlq(&self) -> anyhow::Result<GlobalDlqSnapshot> {
+        self.get_json("/admin/api/global-dlq", &[]).await
+    }
+
+    async fn set_global_dlq(
+        &self,
+        expected_version: u64,
+        target: Option<GlobalDlqTarget>,
+    ) -> anyhow::Result<GlobalDlqSnapshot> {
+        self.put_json(
+            "/admin/api/global-dlq",
+            &UpdateGlobalDlqRequest {
+                expected_version,
+                target,
+            },
+        )
+        .await
+    }
+
+    async fn inspect_messages(
+        &self,
+        args: InspectMessagesArgs,
+    ) -> anyhow::Result<serde_json::Value> {
+        let mut query = vec![
+            ("topic".to_string(), args.topic),
+            ("from".to_string(), args.from.to_string()),
+        ];
+        if let Some(group) = args.group {
+            query.push(("group".to_string(), group));
+        }
+        if let Some(limit) = args.limit {
+            query.push(("limit".to_string(), limit.to_string()));
+        }
+        if args.include_settled {
+            query.push(("include_settled".to_string(), "true".to_string()));
+        }
+        if args.include_payload {
+            query.push(("include_payload".to_string(), "true".to_string()));
+        }
+        if let Some(limit) = args.payload_limit_bytes {
+            query.push(("payload_limit_bytes".to_string(), limit.to_string()));
+        }
+
+        self.get_json("/admin/api/messages", &query).await
+    }
+
+    async fn get_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        query: &[(String, String)],
+    ) -> anyhow::Result<T> {
+        let response = self
+            .http
+            .get(self.url(path))
+            .basic_auth(&self.username, Some(&self.password))
+            .query(query)
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to admin API at {}", self.addr))?;
+        decode_admin_response(response).await
+    }
+
+    async fn put_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> anyhow::Result<T> {
+        let response = self
+            .http
+            .put(self.url(path))
+            .basic_auth(&self.username, Some(&self.password))
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to admin API at {}", self.addr))?;
+        decode_admin_response(response).await
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{}", self.addr, path)
+    }
+}
+
+async fn decode_admin_response<T: for<'de> Deserialize<'de>>(
+    response: reqwest::Response,
+) -> anyhow::Result<T> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .context("failed to read admin API response")?;
+    if !status.is_success() {
+        bail!("admin API returned HTTP {status}: {body}");
+    }
+    serde_json::from_str(&body).context("failed to decode admin API response")
+}
+
+fn print_global_dlq(snapshot: GlobalDlqSnapshot) -> anyhow::Result<()> {
+    print_json(snapshot)
+}
+
+fn print_json(value: impl Serialize) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(&value)?);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +459,20 @@ mod tests {
         };
 
         assert!(reject_custom_dlq_args(&args).is_err());
+    }
+
+    #[test]
+    fn admin_url_uses_configured_address() {
+        let admin = AdminClient {
+            addr: "127.0.0.1:9090".parse().unwrap(),
+            username: "fibril".to_string(),
+            password: "fibril".to_string(),
+            http: reqwest::Client::new(),
+        };
+
+        assert_eq!(
+            admin.url("/admin/api/messages"),
+            "http://127.0.0.1:9090/admin/api/messages"
+        );
     }
 }

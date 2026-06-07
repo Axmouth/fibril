@@ -1,7 +1,14 @@
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse, response::Response};
+use axum::{
+    Json,
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    response::Response,
+};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fibril_broker::queue_engine::{
     DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
-    StromaError,
+    InspectMode, MessageHeaders, QueueInspectionState, StromaError,
 };
 use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLoadIssue, RuntimeSettingsLocks,
@@ -70,11 +77,48 @@ pub struct QueueDlqResponse {
     pub status: &'static str,
 }
 
+#[derive(Deserialize)]
+pub struct InspectMessagesQuery {
+    pub topic: String,
+    pub group: Option<String>,
+    #[serde(default)]
+    pub from: u64,
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub include_settled: bool,
+    #[serde(default)]
+    pub include_payload: bool,
+    pub payload_limit_bytes: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub struct InspectMessagesResponse {
+    pub next_offset_hint: u64,
+    pub limit: usize,
+    pub warning: &'static str,
+    pub items: Vec<InspectMessageItemResponse>,
+}
+
+#[derive(Serialize)]
+pub struct InspectMessageItemResponse {
+    pub state: QueueInspectionState,
+    pub headers: Option<MessageHeaders>,
+    pub payload_len: Option<usize>,
+    pub payload_base64: Option<String>,
+    pub payload_truncated: bool,
+    pub missing_payload: bool,
+}
+
 #[derive(Serialize)]
 pub struct AdminErrorResponse {
     pub code: String,
     pub message: String,
 }
+
+const MESSAGE_INSPECTION_DEFAULT_LIMIT: usize = 50;
+const MESSAGE_INSPECTION_MAX_LIMIT: usize = 500;
+const MESSAGE_INSPECTION_DEFAULT_PAYLOAD_LIMIT_BYTES: usize = 4096;
+const MESSAGE_INSPECTION_MAX_PAYLOAD_LIMIT_BYTES: usize = 64 * 1024;
 
 impl RuntimeSettingsResponse {
     fn new(
@@ -179,6 +223,78 @@ pub async fn queues_debug(
         Err(StatusCode::INTERNAL_SERVER_ERROR)
     } else {
         Ok(Json(serde_json::json!({})))
+    }
+}
+
+pub async fn inspect_messages(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<InspectMessagesQuery>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let limit = query
+        .limit
+        .unwrap_or(MESSAGE_INSPECTION_DEFAULT_LIMIT)
+        .clamp(1, MESSAGE_INSPECTION_MAX_LIMIT);
+    let payload_limit_bytes = query
+        .payload_limit_bytes
+        .unwrap_or(MESSAGE_INSPECTION_DEFAULT_PAYLOAD_LIMIT_BYTES)
+        .min(MESSAGE_INSPECTION_MAX_PAYLOAD_LIMIT_BYTES);
+    let mode = if query.include_settled {
+        InspectMode::IncludeSettled
+    } else {
+        InspectMode::ActiveOnly
+    };
+
+    match server
+        .storage
+        .inspect_messages(
+            &query.topic,
+            0,
+            query.group.as_deref(),
+            query.from,
+            limit,
+            mode,
+            query.include_payload,
+            payload_limit_bytes,
+        )
+        .await
+    {
+        Ok(page) => Ok((
+            StatusCode::OK,
+            Json(InspectMessagesResponse {
+                next_offset_hint: page.next_offset_hint,
+                limit,
+                warning: "Message inspection reads persisted message data and queue state. Use it for debugging and operations, not as a live polling view.",
+                items: page
+                    .items
+                    .into_iter()
+                    .map(|item| InspectMessageItemResponse {
+                        state: item.state,
+                        headers: item.headers,
+                        payload_len: item.payload_len,
+                        payload_base64: item.payload.map(|payload| STANDARD.encode(payload)),
+                        payload_truncated: item.payload_truncated,
+                        missing_payload: item.missing_payload,
+                    })
+                    .collect(),
+            }),
+        )
+            .into_response()),
+        Err(err @ StromaError::InvalidArgument(_)) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_message_inspection_request",
+            err.to_string(),
+        )),
+        Err(err) => {
+            tracing::error!("message inspection failed: {err}");
+            Ok(admin_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "message_inspection_failed",
+                "message inspection failed",
+            ))
+        }
     }
 }
 

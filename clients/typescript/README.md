@@ -91,6 +91,7 @@ an entry in the custom header map.
   Use `reconnect()` and re-create publishers/subscriptions.
 - No write timeouts; relies on heartbeat (3× interval) to detect dead
   half-open connections.
-- Delayed retry (`retryAfter`) is not exposed yet; use immediate `retry()`.
-- Global DLQ target configuration is still admin UI/API only. Queue retry/DLQ
+- Delayed retry is exposed through `retryAfter(...)`.
+- Global DLQ target configuration is available through the admin UI/API and
+  `fibrilctl admin global-dlq`. Queue retry/DLQ
   policy can be declared with `QueueConfig`.
