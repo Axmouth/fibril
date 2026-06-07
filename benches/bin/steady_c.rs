@@ -30,6 +30,8 @@ struct WriterStats {
     sent_total: u64,
     measured_sent: u64,
     confirmed_total: u64,
+    publish_errors: u64,
+    confirm_errors: u64,
 }
 
 fn percentile(sorted: &[u64], percentile: f64) -> u64 {
@@ -260,24 +262,29 @@ async fn main() {
 
                 if confirmed {
                     while pending_confirms.len() >= confirm_window {
-                        pending_confirms
-                            .pop_front()
-                            .unwrap()
-                            .confirmed()
-                            .await
-                            .unwrap();
-                        stats.confirmed_total += 1;
+                        match pending_confirms.pop_front().unwrap().confirmed().await {
+                            Ok(_) => stats.confirmed_total += 1,
+                            Err(err) => {
+                                eprintln!("Writer {writer_id}: publish confirm failed: {err}");
+                                stats.confirm_errors += 1;
+                            }
+                        }
                     }
-                    let confirmation = publisher
+                    let Ok(confirmation) = publisher
                         .publish_with_confirmation(NewMessage::raw(payload.clone()))
                         .await
-                        .unwrap();
+                    else {
+                        eprintln!("Writer {writer_id}: publish failed");
+                        stats.publish_errors += 1;
+                        break;
+                    };
                     pending_confirms.push_back(confirmation);
                 } else {
-                    publisher
-                        .publish(NewMessage::raw(payload.clone()))
-                        .await
-                        .unwrap();
+                    if let Err(err) = publisher.publish(NewMessage::raw(payload.clone())).await {
+                        eprintln!("Writer {writer_id}: publish failed: {err}");
+                        stats.publish_errors += 1;
+                        break;
+                    }
                 }
 
                 stats.sent_total += 1;
@@ -288,8 +295,13 @@ async fn main() {
             }
 
             while let Some(confirmation) = pending_confirms.pop_front() {
-                confirmation.confirmed().await.unwrap();
-                stats.confirmed_total += 1;
+                match confirmation.confirmed().await {
+                    Ok(_) => stats.confirmed_total += 1,
+                    Err(err) => {
+                        eprintln!("Writer {writer_id}: publish confirm failed: {err}");
+                        stats.confirm_errors += 1;
+                    }
+                }
             }
 
             stats
@@ -302,6 +314,8 @@ async fn main() {
         writer_stats.sent_total += stats.sent_total;
         writer_stats.measured_sent += stats.measured_sent;
         writer_stats.confirmed_total += stats.confirmed_total;
+        writer_stats.publish_errors += stats.publish_errors;
+        writer_stats.confirm_errors += stats.confirm_errors;
     }
     writers_done.store(true, Ordering::Release);
 
@@ -324,6 +338,10 @@ async fn main() {
     println!("Sent total: {}", writer_stats.sent_total);
     if args.confirmed {
         println!("Confirmed total: {}", writer_stats.confirmed_total);
+    }
+    println!("Publish errors: {}", writer_stats.publish_errors);
+    if args.confirmed {
+        println!("Confirm errors: {}", writer_stats.confirm_errors);
     }
     println!("Received total: {}", reader_stats.received_total);
     println!("Measured sent: {}", writer_stats.measured_sent);

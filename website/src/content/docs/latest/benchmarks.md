@@ -114,7 +114,7 @@ The steady helper runs readers and writers in one coordinated process. It marks
 warmup messages separately, measures only the configured steady window, and
 prints both publish-to-delivery and server-receive-to-delivery latency. The
 wrapper also writes full server logs and full benchmark results to files, then
-prints a compact summary.
+prints a compact summary including publish and confirmation error counts.
 
 When `CONFIRMED=1`, writers still run with pipelined publish confirmations by
 default. Set `CONFIRM_WINDOW=1` if you specifically want the older serial

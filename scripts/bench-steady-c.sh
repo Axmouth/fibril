@@ -73,7 +73,7 @@ curl --silent --show-error --fail http://127.0.0.1:8081/healthz >>"$log_file" 2>
 } >>"$results_file"
 
 echo "Steady benchmark summary:"
-grep -E '^(Steady benchmark:|Sent total:|Confirmed total:|Received total:|Measured sent:|Measured received:|Measured missing:|Actual measured publish rate:|Measured receive rate:|Retries seen:|Latency .* ms|--- queue snapshot: after steady run ---|\{"queues")' "$results_file" || true
+grep -E '^(Steady benchmark:|Sent total:|Confirmed total:|Publish errors:|Confirm errors:|Received total:|Measured sent:|Measured received:|Measured missing:|Actual measured publish rate:|Measured receive rate:|Retries seen:|Latency .* ms|--- queue snapshot: after steady run ---|\{"queues")' "$results_file" || true
 echo "Full steady benchmark results: $results_file"
 echo "Full steady benchmark log: $log_file"
 echo "Runtime warnings/errors in log:"
