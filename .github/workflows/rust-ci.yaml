@@ -74,7 +74,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --workspace --locked
+        env:
+          RUSTFLAGS: -Awarnings
+        run: cargo test --quiet --workspace --locked
 
   server-binary:
     name: Server release binary

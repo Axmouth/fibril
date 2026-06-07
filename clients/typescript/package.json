@@ -18,6 +18,7 @@
   "scripts": {
     "build": "tsc",
     "test": "tsc --noEmit && node --test --import tsx tests/*.test.ts",
+    "test:quiet": "tsc --noEmit && node --test --test-reporter=dot --import tsx tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

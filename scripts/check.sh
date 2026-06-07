@@ -11,19 +11,23 @@ run() {
 
 run bash -n "$repo_root"/scripts/*.sh
 run cargo fmt --all -- --check
-run cargo test --workspace --locked
+rust_test_flags="${RUSTFLAGS:-}"
+if [[ " $rust_test_flags " != *" -Awarnings "* ]]; then
+  rust_test_flags="${rust_test_flags:+$rust_test_flags }-Awarnings"
+fi
+run env RUSTFLAGS="$rust_test_flags" cargo test --quiet --workspace --locked
 
 if [ -d "$repo_root/clients/typescript" ]; then
   (
     cd "$repo_root/clients/typescript"
-    run npm test
+    run npm --silent run test:quiet
   )
 fi
 
 if [ -d "$repo_root/website" ]; then
   (
     cd "$repo_root/website"
-    run npm run check
+    run npm --silent run check
   )
 fi
 

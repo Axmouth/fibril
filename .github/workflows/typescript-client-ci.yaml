@@ -36,5 +36,5 @@ jobs:
         working-directory: clients/typescript
 
       - name: Run tests
-        run: npm test
+        run: npm --silent test
         working-directory: clients/typescript
