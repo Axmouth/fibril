@@ -367,6 +367,7 @@ mod tests {
     };
     use base64::Engine;
     use fibril_broker::{
+        broker::{Broker, BrokerConfig},
         queue_engine::{
             KeratinConfig, QueueEngine, SnapshotConfig, StromaEngine, StromaKeratinConfig,
         },
@@ -375,8 +376,19 @@ mod tests {
             RuntimeSettingsUpdateOutcome,
         },
     };
-    use fibril_metrics::Metrics;
+    use fibril_metrics::{ConnectionStats, Metrics, TcpStats};
+    use fibril_protocol::v1::{
+        Deliver, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish, Subscribe,
+        frame::{Frame, ProtoCodec},
+        handler::{ConnectionSettings, handle_connection},
+        helper::{try_decode, try_encode},
+    };
+    use fibril_util::unix_millis;
+    use futures::{SinkExt, StreamExt};
     use serde_json::json;
+    use std::time::{Duration, Instant};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_util::codec::Framed;
     use tower::ServiceExt;
 
     async fn test_server(locks: RuntimeSettingsLocks) -> Arc<AdminServer> {
@@ -426,6 +438,84 @@ mod tests {
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn open_protocol_connection(
+        broker: Arc<Broker<StromaEngine>>,
+    ) -> (
+        Framed<TcpStream, ProtoCodec>,
+        tokio::task::JoinHandle<anyhow::Result<()>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, peer) = listener.accept().await.unwrap();
+        let tcp_stats = TcpStats::new(10);
+        let connection_stats = ConnectionStats::new();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+
+        let server_task = tokio::spawn(handle_connection(
+            server,
+            broker,
+            tcp_stats,
+            connection_stats,
+            conn_id,
+            None::<StaticAuthHandler>,
+            ConnectionSettings::new(Some(60)),
+        ));
+
+        (Framed::new(client, ProtoCodec), server_task)
+    }
+
+    async fn recv_frame(framed: &mut Framed<TcpStream, ProtoCodec>) -> Frame {
+        tokio::time::timeout(Duration::from_secs(2), framed.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    }
+
+    async fn handshake(framed: &mut Framed<TcpStream, ProtoCodec>) {
+        framed
+            .send(
+                try_encode(
+                    Op::Hello,
+                    1,
+                    &Hello {
+                        client_name: "admin-flow-test".into(),
+                        client_version: "0.1.0".into(),
+                        protocol_version: PROTOCOL_V1,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let frame = recv_frame(framed).await;
+        assert_eq!(frame.opcode, Op::HelloOk as u16);
+        let hello_ok: HelloOk = try_decode(&frame).unwrap();
+        assert_eq!(hello_ok.protocol_version, PROTOCOL_V1);
+    }
+
+    async fn recv_delivery_for_topic(
+        framed: &mut Framed<TcpStream, ProtoCodec>,
+        topic: &str,
+    ) -> Deliver {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let frame = recv_frame(framed).await;
+                if frame.opcode == Op::Deliver as u16 {
+                    let delivered: Deliver = try_decode(&frame).unwrap();
+                    if delivered.topic == topic {
+                        break delivered;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap()
     }
 
     fn test_auth() -> StaticAuthHandler {
@@ -1069,6 +1159,171 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await;
         assert_eq!(body["code"], "missing_queue_dlq_target");
+    }
+
+    #[tokio::test]
+    async fn admin_dlq_configuration_routes_failed_message_over_tcp() {
+        let root = std::env::temp_dir().join(format!("fibril-admin-flow-{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&root).unwrap();
+        let engine = StromaEngine::open(
+            &root,
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let server = Arc::new(AdminServer::new(
+            Metrics::new(60),
+            engine.metrics(),
+            AdminConfig {
+                bind: "127.0.0.1:0".into(),
+                auth: None,
+            },
+            None,
+            Arc::new(engine.clone()),
+            None,
+        ));
+        let app = AdminServer::router(server);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/global-dlq")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 0,
+                            "target": {
+                                "tp": "_dlq.source",
+                                "group": null
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/queue-dlq")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "tp": "source",
+                            "group": null,
+                            "policy": "global",
+                            "target": null,
+                            "max_retries": 0
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let broker = Broker::new(engine, BrokerConfig::default(), None);
+        let (mut framed, server_task) = open_protocol_connection(broker).await;
+        handshake(&mut framed).await;
+
+        framed
+            .send(
+                try_encode(
+                    Op::Subscribe,
+                    2,
+                    &Subscribe {
+                        topic: "source".into(),
+                        group: None,
+                        prefetch: 1,
+                        auto_ack: false,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recv_frame(&mut framed).await.opcode, Op::SubscribeOk as u16);
+
+        framed
+            .send(
+                try_encode(
+                    Op::Subscribe,
+                    3,
+                    &Subscribe {
+                        topic: "_dlq.source".into(),
+                        group: None,
+                        prefetch: 1,
+                        auto_ack: false,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recv_frame(&mut framed).await.opcode, Op::SubscribeOk as u16);
+
+        framed
+            .send(
+                try_encode(
+                    Op::Publish,
+                    4,
+                    &Publish {
+                        topic: "source".into(),
+                        partition: 0,
+                        group: None,
+                        require_confirm: true,
+                        headers: std::collections::HashMap::from([(
+                            "x-trace-id".into(),
+                            "admin-dlq-flow".into(),
+                        )]),
+                        payload: b"poison".to_vec(),
+                        published: unix_millis(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let source = recv_delivery_for_topic(&mut framed, "source").await;
+        assert_eq!(source.payload, b"poison".to_vec());
+
+        framed
+            .send(
+                try_encode(
+                    Op::Nack,
+                    5,
+                    &Nack {
+                        topic: "source".into(),
+                        group: None,
+                        partition: 0,
+                        tags: vec![source.delivery_tag],
+                        requeue: true,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let dlq = recv_delivery_for_topic(&mut framed, "_dlq.source").await;
+        assert_eq!(dlq.payload, b"poison".to_vec());
+        assert_eq!(
+            dlq.headers.get("x-trace-id").map(String::as_str),
+            Some("admin-dlq-flow")
+        );
+        assert!(!dlq.headers.contains_key("x-dlq-source-tp"));
+
+        drop(framed);
+        server_task.await.unwrap().unwrap();
     }
 
     #[tokio::test]
