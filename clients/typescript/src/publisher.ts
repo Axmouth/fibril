@@ -28,8 +28,8 @@ function deadlineFromDelay(delay: DelayInput): bigint {
  * ```ts
  * const publisher = client.publisher("email.send");
  *
- * const offset = await publisher.publish({ to: "user@example.com" });
- * await publisher.publishUnconfirmed("fire and forget");
+ * await publisher.publish({ to: "user@example.com" });
+ * const offset = await publisher.publishConfirmed("needs an offset");
  * ```
  */
 export class Publisher {
@@ -63,9 +63,9 @@ export class Publisher {
    * msgpack-encoded and tagged as `application/msgpack`.
    *
    * This only waits for the command to be accepted by the local client engine.
-   * Use `publish` when you need the broker-assigned offset.
+   * Use `publishConfirmed` when you need the broker-assigned offset.
    */
-  async publishUnconfirmed<T>(payload: Publishable<T>): Promise<void> {
+  async publish<T>(payload: Publishable<T>): Promise<void> {
     const message = intoMessage(payload);
     await this.#engine.submit({
       type: "publishUnconfirmed",
@@ -81,7 +81,7 @@ export class Publisher {
    * Publish and wait for the broker's confirmation. Resolves with the
    * topic offset assigned to the message.
    */
-  async publish<T>(payload: Publishable<T>): Promise<bigint> {
+  async publishConfirmed<T>(payload: Publishable<T>): Promise<bigint> {
     const message = intoMessage(payload);
     const reply = deferred<bigint>();
     await this.#engine.submit({
@@ -102,9 +102,23 @@ export class Publisher {
   }
 
   /**
-   * Publish a raw byte payload (no msgpack wrapping and no content-type).
+   * Publish a raw byte payload without msgpack wrapping or content-type.
    */
-  async publishBytes(payload: Uint8Array): Promise<bigint> {
+  async publishBytes(payload: Uint8Array): Promise<void> {
+    await this.#engine.submit({
+      type: "publishUnconfirmed",
+      topic: this.#topic,
+      group: this.#group,
+      headers: {},
+      payload,
+      published: BigInt(Date.now()),
+    });
+  }
+
+  /**
+   * Publish a raw byte payload and wait for broker confirmation.
+   */
+  async publishBytesConfirmed(payload: Uint8Array): Promise<bigint> {
     const reply = deferred<bigint>();
     await this.#engine.submit({
       type: "publishConfirmed",
@@ -119,29 +133,15 @@ export class Publisher {
   }
 
   /**
-   * Publish a raw byte payload without waiting for broker confirmation.
-   */
-  async publishBytesUnconfirmed(payload: Uint8Array): Promise<void> {
-    await this.#engine.submit({
-      type: "publishUnconfirmed",
-      topic: this.#topic,
-      group: this.#group,
-      headers: {},
-      payload,
-      published: BigInt(Date.now()),
-    });
-  }
-
-  /**
    * Publish after a delay without waiting for server confirmation.
    * Numeric delays are milliseconds; `Date` is treated as an absolute deadline.
    *
    * @example
    * ```ts
-   * await publisher.publishUnconfirmedDelayed("retry later", 30_000);
+   * await publisher.publishDelayed("retry later", 30_000);
    * ```
    */
-  async publishUnconfirmedDelayed<T>(
+  async publishDelayed<T>(
     payload: Publishable<T>,
     delay: DelayInput,
   ): Promise<void> {
@@ -163,13 +163,13 @@ export class Publisher {
    *
    * @example
    * ```ts
-   * const offset = await publisher.publishDelayed(
+   * const offset = await publisher.publishDelayedConfirmed(
    *   { id: 42 },
    *   new Date(Date.now() + 30_000),
    * );
    * ```
    */
-  async publishDelayed<T>(
+  async publishDelayedConfirmed<T>(
     payload: Publishable<T>,
     delay: DelayInput,
   ): Promise<bigint> {
@@ -193,13 +193,4 @@ export class Publisher {
     }
   }
 
-  /**
-   * Alias for `publishDelayed`.
-   */
-  async publishWithDelayed<T>(
-    payload: Publishable<T>,
-    delay: DelayInput,
-  ): Promise<bigint> {
-    return this.publishDelayed(payload, delay);
-  }
 }

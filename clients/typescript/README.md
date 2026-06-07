@@ -21,9 +21,9 @@ const client = await new ClientOptions()
   .withAuth("user", "pass")
   .connect("localhost:9876");
 
-// Publish (with broker confirmation)
+// Publish; use the confirmed variant when you need the broker offset.
 const pub = client.publisher("orders");
-const offset = await pub.publish({ id: 42, item: "widget" });
+const offset = await pub.publishConfirmed({ id: 42, item: "widget" });
 await pub.publishDelayed(NewMessage.json({ id: 43 }), 30_000);
 
 // Subscribe with manual ack
@@ -65,7 +65,7 @@ All errors are subclasses of `FibrilError`:
 - `EofError` — connection ended during handshake
 - `UnexpectedError` — protocol violation or unknown state
 
-When the engine dies, in-flight `publish()` calls reject with the
+When the engine dies, in-flight `publishConfirmed()` calls reject with the
 appropriate error and subscription iterators throw — they do not end
 silently.
 

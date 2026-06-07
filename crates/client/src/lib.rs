@@ -17,7 +17,7 @@
 //!
 //! let publisher = client.publisher("email.send")?;
 //! let offset = publisher
-//!     .publish(NewMessage::json(&serde_json::json!({
+//!     .publish_confirmed(NewMessage::json(&serde_json::json!({
 //!         "to": "user@example.com",
 //!         "template": "welcome",
 //!     }))?)
@@ -744,7 +744,7 @@ impl<'a> SubscriptionBuilder<'a> {
             topic: self.topic.into_string(),
             group: self.group.map(GroupName::into_string),
             prefetch: self.prefetch,
-            auto_ack: false,
+            auto_ack: true,
         };
 
         let rx = self.client.engine.subscribe_auto_ack(req).await?;
@@ -884,11 +884,11 @@ impl Client {
 impl Publisher {
     /// Publish without waiting for broker confirmation.
     ///
-    /// This only waits for the command to be accepted by the local engine. Use
-    /// [`publish`](Self::publish) when you need the broker-assigned offset.
-    // TODO: return a handle that we can await for confirmation
+    /// This is the common path. It only waits for the command to be accepted by
+    /// the local engine. Use [`publish_confirmed`](Self::publish_confirmed)
+    /// when you need the broker-assigned offset.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
-    pub async fn publish_unconfirmed<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
+    pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;
         self.engine
             .publish_unconfirmed(
@@ -905,10 +905,10 @@ impl Publisher {
     ///
     /// Resolves with the broker-assigned topic offset.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
-    pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
+    pub async fn publish_confirmed<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
         let message = payload.into_message()?;
         self.engine
-            .publish(
+            .publish_confirmed(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
                 message.headers,
@@ -924,7 +924,7 @@ impl Publisher {
     /// Numeric Rust delays are seconds; use [`std::time::Duration`] for
     /// explicit units.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
-    pub async fn publish_unconfirmed_delayed<T: Publishable, D: Delayable + Debug>(
+    pub async fn publish_delayed<T: Publishable, D: Delayable + Debug>(
         &self,
         payload: T,
         delay: D,
@@ -947,7 +947,7 @@ impl Publisher {
     /// Resolves with the broker-assigned topic offset. Numeric Rust delays are
     /// seconds; use [`std::time::Duration`] for explicit units.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
-    pub async fn publish_delayed<T: Publishable, D: Delayable + Debug>(
+    pub async fn publish_delayed_confirmed<T: Publishable, D: Delayable + Debug>(
         &self,
         payload: T,
         delay: D,
@@ -955,7 +955,7 @@ impl Publisher {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
         self.engine
-            .publish_delayed(
+            .publish_delayed_confirmed(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
                 message.headers,
@@ -963,16 +963,6 @@ impl Publisher {
                 deadline,
             )
             .await
-    }
-
-    /// Alias for [`publish_delayed`](Self::publish_delayed).
-    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
-    pub async fn publish_with_delayed<T: Publishable, D: Delayable + Debug>(
-        &self,
-        payload: T,
-        delay: D,
-    ) -> FibrilResult<u64> {
-        self.publish_delayed(payload, delay).await
     }
 }
 
@@ -1670,7 +1660,7 @@ impl EngineHandle {
         Ok(())
     }
 
-    async fn publish(
+    async fn publish_confirmed(
         &self,
         topic: String,
         group: Option<String>,
@@ -1716,7 +1706,7 @@ impl EngineHandle {
         Ok(())
     }
 
-    async fn publish_delayed(
+    async fn publish_delayed_confirmed(
         &self,
         topic: String,
         group: Option<String>,
@@ -1887,6 +1877,103 @@ mod tests {
             GroupName::parse("Workers"),
             Err(FibrilError::InvalidName { kind: "group", .. })
         ));
+    }
+
+    fn client_with_command_rx() -> (Client, mpsc::Receiver<Command>) {
+        let (tx, rx) = mpsc::channel(8);
+        (
+            Client {
+                address: "127.0.0.1:0".parse().unwrap(),
+                opts: ClientOptions::new(),
+                engine: Arc::new(EngineHandle {
+                    tx,
+                    shutdown: Arc::new(Notify::new()),
+                }),
+            },
+            rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn publish_uses_unconfirmed_command() {
+        let (client, mut rx) = client_with_command_rx();
+        let publisher = client.publisher("jobs").unwrap();
+
+        publisher.publish("hello").await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            Command::PublishUnconfirmed { topic, group, .. } => {
+                assert_eq!(topic, "jobs");
+                assert_eq!(group, None);
+            }
+            other => panic!("expected unconfirmed publish, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_confirmed_waits_for_offset() {
+        let (client, mut rx) = client_with_command_rx();
+        let publisher = client.publisher("jobs").unwrap();
+        let task = tokio::spawn(async move { publisher.publish_confirmed("hello").await });
+
+        match rx.recv().await.unwrap() {
+            Command::PublishConfirmed {
+                topic,
+                group,
+                reply,
+                ..
+            } => {
+                assert_eq!(topic, "jobs");
+                assert_eq!(group, None);
+                reply.send(Ok(42)).unwrap();
+            }
+            other => panic!("expected confirmed publish, got {other:?}"),
+        }
+
+        assert_eq!(task.await.unwrap().unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn subscribe_flags_match_ack_mode() {
+        let (client, mut rx) = client_with_command_rx();
+        let manual_client = client.clone();
+        let manual = tokio::spawn(async move {
+            manual_client
+                .subscribe("jobs")
+                .unwrap()
+                .sub_manual_ack()
+                .await
+        });
+
+        match rx.recv().await.unwrap() {
+            Command::Subscribe { req, reply } => {
+                assert!(!req.auto_ack);
+                let (_tx, manual_rx) = mpsc::channel(1);
+                reply
+                    .send(Ok(AckableSubChannel { manual: manual_rx }))
+                    .unwrap();
+            }
+            other => panic!("expected manual subscribe, got {other:?}"),
+        }
+        manual.await.unwrap().unwrap();
+
+        let auto_client = client.clone();
+        let auto =
+            tokio::spawn(
+                async move { auto_client.subscribe("jobs").unwrap().sub_auto_ack().await },
+            );
+
+        match rx.recv().await.unwrap() {
+            Command::SubscribeAutoAcked { req, reply } => {
+                assert!(req.auto_ack);
+                let (_tx, auto_rx) = mpsc::channel(1);
+                reply
+                    .send(Ok(AutoAckedSubChannel { auto: auto_rx }))
+                    .unwrap();
+            }
+            other => panic!("expected auto subscribe, got {other:?}"),
+        }
+        auto.await.unwrap().unwrap();
     }
 
     #[test]

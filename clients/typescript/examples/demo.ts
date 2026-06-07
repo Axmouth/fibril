@@ -84,7 +84,7 @@ async function produce(): Promise<void> {
       qty: 1 + (i % 5),
     };
     try {
-      const offset = await orderPub.publish(order);
+      const offset = await orderPub.publishConfirmed(order);
       console.log(`[producer] order #${order.id} -> offset ${offset}`);
     } catch (err) {
       if (err instanceof FibrilError) {
@@ -100,7 +100,7 @@ async function produce(): Promise<void> {
         text: `processed batch ${i / 3}`,
         ts: Date.now(),
       };
-      await noticePub.publishUnconfirmed(notice).catch(() => {});
+      await noticePub.publish(notice).catch(() => {});
     }
 
     await sleep(500, shutdownController.signal);

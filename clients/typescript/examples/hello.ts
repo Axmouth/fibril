@@ -22,7 +22,7 @@ const sub = await client.subscribe("hello").prefetch(1).subManualAck();
 
 // Publish in the background.
 const pub = client.publisher("hello");
-const offset = await pub.publish({ greeting: "world", at: Date.now() });
+const offset = await pub.publishConfirmed({ greeting: "world", at: Date.now() });
 console.log(`published at offset ${offset}`);
 
 // Receive one message.

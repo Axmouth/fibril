@@ -36,13 +36,13 @@ Stroma has durable delayed-enqueue state. Offsets can be held until `not_before`
 The Rust and TypeScript clients expose delayed publish methods:
 
 ```rust
-publisher.publish_unconfirmed_delayed(payload, delay).await?;
 publisher.publish_delayed(payload, delay).await?;
+publisher.publish_delayed_confirmed(payload, delay).await?;
 ```
 
 ```ts
-await publisher.publishUnconfirmedDelayed(payload, 30_000);
 await publisher.publishDelayed(payload, 30_000);
+await publisher.publishDelayedConfirmed(payload, 30_000);
 ```
 
 Numeric TypeScript delays are milliseconds. Passing a `Date` uses that absolute Unix-millisecond deadline.

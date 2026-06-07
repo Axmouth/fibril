@@ -247,12 +247,12 @@ async fn main() {
 
                 if confirmed {
                     publisher
-                        .publish(NewMessage::raw(payload.clone()))
+                        .publish_confirmed(NewMessage::raw(payload.clone()))
                         .await
                         .unwrap();
                 } else {
                     publisher
-                        .publish_unconfirmed(NewMessage::raw(payload.clone()))
+                        .publish(NewMessage::raw(payload.clone()))
                         .await
                         .unwrap();
                 }

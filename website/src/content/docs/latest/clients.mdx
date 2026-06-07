@@ -46,7 +46,7 @@ const client = await new ClientOptions()
 
 ## Publish
 
-Confirmed publish waits for the broker to acknowledge the stored message and returns the topic offset.
+Plain publish uses the common unconfirmed path. Confirmed publish waits for the broker to acknowledge the stored message and returns the topic offset.
 
 <Tabs syncKey="client-language">
   <TabItem label="Rust">
@@ -54,12 +54,12 @@ Confirmed publish waits for the broker to acknowledge the stored message and ret
 ```rust
 let publisher = client.publisher("email.send")?;
 
-let offset = publisher
+publisher
     .publish("hello")
     .await?;
 
-publisher
-    .publish_unconfirmed("fire and forget")
+let offset = publisher
+    .publish_confirmed("needs an offset")
     .await?;
 ```
 
@@ -69,9 +69,9 @@ publisher
 ```ts
 const publisher = client.publisher("email.send");
 
-const offset = await publisher.publish("hello");
+await publisher.publish("hello");
 
-await publisher.publishUnconfirmed("fire and forget");
+const offset = await publisher.publishConfirmed("needs an offset");
 ```
 
   </TabItem>
@@ -87,12 +87,12 @@ Delayed publish uses a distinct protocol frame and stores a `not_before` Unix-mi
 ```rust
 use std::time::Duration;
 
-let offset = publisher
+publisher
     .publish_delayed("send later", Duration::from_secs(30))
     .await?;
 
-publisher
-    .publish_unconfirmed_delayed("send later without confirm", 30u64)
+let offset = publisher
+    .publish_delayed_confirmed("send later and return offset", 30u64)
     .await?;
 ```
 
@@ -102,10 +102,10 @@ Rust numeric delay helpers are seconds. `std::time::Duration` is also accepted.
   <TabItem label="TypeScript">
 
 ```ts
-const offset = await publisher.publishDelayed("send later", 30_000);
+await publisher.publishDelayed("send later", 30_000);
 
-await publisher.publishUnconfirmedDelayed(
-  "send later without confirm",
+const offset = await publisher.publishDelayedConfirmed(
+  "send later and return offset",
   new Date(Date.now() + 30_000),
 );
 ```

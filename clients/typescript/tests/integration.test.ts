@@ -98,7 +98,7 @@ test("client connects, handshakes, publishes confirmed", async () => {
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
     const pub = client.publisher("t1");
-    const offset = await pub.publish({ hello: "world" });
+    const offset = await pub.publishConfirmed({ hello: "world" });
     assert.equal(offset, 7n);
     await client.shutdown();
   } finally {
@@ -256,7 +256,7 @@ test("publish without confirm does not block on reply", async () => {
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
     const pub = client.publisher("t1");
-    await pub.publishUnconfirmed({ x: 1 });
+    await pub.publish({ x: 1 });
     // Wait briefly to ensure broker received it.
     await new Promise((r) => setTimeout(r, 20));
     assert.ok(broker.received.some((f) => f.opcode === Op.Publish));
@@ -292,7 +292,7 @@ test("client publishes delayed frame with headers and deadline", async () => {
     const deadline = new Date(Date.now() + 10_000);
     const offset = await client
       .publisher("t-delay")
-      .publishDelayed(NewMessage.json({ hello: "later" }), deadline);
+      .publishDelayedConfirmed(NewMessage.json({ hello: "later" }), deadline);
 
     assert.equal(offset, 11n);
     assert.ok(delayed);
