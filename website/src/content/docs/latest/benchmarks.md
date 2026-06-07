@@ -151,6 +151,28 @@ Quick validation run from June 7, 2026, using `WRITERS=10`, `READERS=10`,
 | confirmed, window=1024 | 50k/s | 50,000/s | 0 | 14 / 20 / 21 / 26 ms | 11 / 16 / 16 / 19 ms | 0 | ready=0, inflight=0 |
 | confirmed, window=1024 | 150k/s | 149,971/s | 0 | 12 / 16 / 17 / 21 ms | 10 / 13 / 15 / 17 ms | 0 | ready=0, inflight=0 |
 
+Higher-rate exploratory sweep from the same run shape:
+
+| Mode | Target rate | Actual measured rate | Missing | publish→deliver p50/p95/p99/max | Notes |
+| --- | ---: | ---: | ---: | --- | --- |
+| unconfirmed | 250k/s | 250,017/s | 0 | 13 / 16 / 17 / 55 ms | Clean short run |
+| unconfirmed | 350k/s | 350,002/s | 0 | 79 / 114 / 122 / 130 ms | Latency knee starts showing |
+| unconfirmed | 400k/s | 400,000/s | 0 | 792 / 1060 / 1096 / 1107 ms | Drains, but backlog-driven |
+| unconfirmed | 450k/s | 449,953/s | 0 | 1807 / 2038 / 2055 / 2066 ms | Drains, high latency |
+| unconfirmed | 500k/s | 499,955/s | 0 | 2520 / 2783 / 2815 / 2833 ms | Drains, high latency |
+| unconfirmed | 600k/s | 599,916/s | 0 | 3806 / 4546 / 4579 / 4600 ms | Drains, very high latency |
+
+For this short local run, the practical low-latency region is below roughly
+350-400k/s for 1KB messages. Above that, the broker can still drain the run,
+but latency reflects backlog building during the measurement window.
+
+Pipelined confirmed publishes follow the same pattern. With
+`CONFIRM_WINDOW=1024`, a 400k/s target reached about 385k/s. Raising the window
+to `4096` reached the 400k/s target, and 450k/s also reached target, but latency
+rose into the 1-2 second range. Larger windows are useful for saturating the
+path while preserving publish confirmation correctness; they are not a latency
+optimization.
+
 Recent local exploratory run, using `WRITERS=10`, `READERS=10`, `SIZE=1024`,
 `PREFETCH=16384`, `WARMUP_SECS=3`, and `DURATION_SECS=10`:
 
