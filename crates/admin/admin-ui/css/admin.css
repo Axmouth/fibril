@@ -8,7 +8,7 @@ a:hover {
   text-decoration: underline;
 }
 
-input,
+input:not([type="checkbox"]),
 select {
   background: rgba(15, 20, 26, .88);
   border: 1px solid rgba(255, 255, 255, .18);
@@ -42,7 +42,7 @@ select {
   padding-right: 1.5rem;
 }
 
-input:focus,
+input:not([type="checkbox"]):focus,
 select:focus {
   border-color: #4dabf7;
   box-shadow: 0 0 0 2px rgba(77, 171, 247, .2);
@@ -55,25 +55,33 @@ select:disabled {
   opacity: .55;
 }
 
+input[type="checkbox"] {
+  accent-color: #4dabf7;
+  height: 1rem;
+  width: 1rem;
+}
+
 header {
   backdrop-filter: blur(6px);
   background: rgba(15,20,26,.85);
 }
 
 .content-area {
-  padding-bottom: 1rem;
+  padding-bottom: 3rem;
 }
 
 .main-container > .footer {
-  background: rgba(15, 20, 26, .45);
-  border-top: 1px solid rgba(255, 255, 255, .16);
+  background: linear-gradient(180deg, rgba(15, 20, 26, .78), rgba(15, 20, 26, .96));
+  border-top: 1px solid rgba(255, 255, 255, .2);
+  box-shadow: 0 -12px 28px rgba(0, 0, 0, .24);
   font-size: .65rem;
   line-height: 1rem;
-  margin-top: .75rem;
+  margin-top: 1rem;
   min-height: 2rem;
-  opacity: .78;
   padding: .35rem 1rem;
+  position: relative;
   text-align: center;
+  z-index: 1;
 }
 
 .main-container > .footer a {
@@ -107,6 +115,7 @@ main {
 .settings-panel {
   max-width: 75%;
   margin-left: auto;
+  margin-bottom: 2rem;
   margin-right: auto;
 }
 

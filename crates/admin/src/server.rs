@@ -1096,6 +1096,8 @@ mod tests {
         assert!(body.contains("Startup Config"));
         assert!(body.contains("Global Dead Letter Queue"));
         assert!(body.contains("Queue Dead Letter Policy"));
+        assert!(body.contains("Optional queue group for the target queue."));
+        assert!(!body.contains("consumer group"));
         assert!(body.contains("Save settings"));
         assert!(!body.contains("Log out"));
         assert!(!body.contains("href=\"/logout\""));
