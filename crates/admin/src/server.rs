@@ -938,6 +938,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("Runtime Settings"));
+        assert!(body.contains("Global Dead Letter Queue"));
         assert!(body.contains("Save settings"));
     }
 }

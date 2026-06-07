@@ -129,6 +129,16 @@ main {
   margin-bottom: 0;
 }
 
+.settings-form-secondary {
+  margin-top: 1rem;
+}
+
+.settings-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(0, 2fr) minmax(8rem, 1fr) minmax(0, 1.5fr);
+}
+
 .settings-label {
   display: block;
   font-weight: 600;
@@ -268,6 +278,10 @@ main {
 
   .settings-duration select {
     flex-basis: auto;
+  }
+
+  .settings-grid {
+    grid-template-columns: 1fr;
   }
 
   .settings-actions {

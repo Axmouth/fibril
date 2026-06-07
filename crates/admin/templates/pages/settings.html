@@ -109,6 +109,50 @@
       <button class="btn" type="button" id="reload-settings">Reload</button>
     </div>
   </form>
+
+  <form id="global-dlq-form" class="settings-form-secondary">
+    <input type="hidden" id="global-dlq.version">
+
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Global Dead Letter Queue</h5>
+        <p>Fallback destination for messages that exhaust retries when their queue does not define a more specific DLQ policy.</p>
+      </div>
+
+      <div id="global-dlq-message" class="settings-message"></div>
+
+      <label class="checkbox-label">
+        <input id="global-dlq.enabled" type="checkbox">
+        <span>
+          <span class="settings-label">Enabled</span>
+          <span class="settings-help">When disabled, messages without a queue-specific DLQ policy are discarded after retries are exhausted.</span>
+        </span>
+      </label>
+
+      <div id="global-dlq-fields" class="settings-grid">
+        <label class="settings-field">
+          <span class="settings-label">Target topic</span>
+          <span class="settings-help">Queue topic that receives dead-lettered messages.</span>
+          <input class="clr-input" id="global-dlq.tp" placeholder="_dlq.default">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Target partition</span>
+          <span class="settings-help">Partition for the target queue.</span>
+          <input class="clr-input" id="global-dlq.part" type="number" min="0" step="1" value="0">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Target group</span>
+          <span class="settings-help">Optional consumer group for the target queue.</span>
+          <input class="clr-input" id="global-dlq.group" placeholder="blank for default">
+        </label>
+      </div>
+
+      <div class="settings-actions">
+        <button class="btn btn-primary" type="submit">Save global DLQ</button>
+        <button class="btn" type="button" id="reload-global-dlq">Reload</button>
+      </div>
+    </section>
+  </form>
 </div>
 
 <script src="/static/js/api.js"></script>
@@ -121,6 +165,11 @@ function field(id) {
 
 function numberValue(id) {
   return Number(field(id).value);
+}
+
+function optionalTextValue(id) {
+  const value = field(id).value.trim();
+  return value === "" ? null : value;
 }
 
 function durationMsValue(id) {
@@ -159,6 +208,12 @@ function setMessage(text, kind = "info") {
   el.dataset.kind = kind;
 }
 
+function setGlobalDlqMessage(text, kind = "info") {
+  const el = field("global-dlq-message");
+  el.textContent = text;
+  el.dataset.kind = kind;
+}
+
 function setDisabledForLockedGroups() {
   const idleLocked = !!currentLocks.idle_queue_cleanup;
   field("idle-lock").textContent = idleLocked ? "locked by startup config" : "";
@@ -186,6 +241,16 @@ function renderSettings(data) {
   setDisabledForLockedGroups();
 }
 
+function renderGlobalDlq(data) {
+  field("global-dlq.version").value = data.version;
+  const enabled = !!data.target;
+  field("global-dlq.enabled").checked = enabled;
+  field("global-dlq.tp").value = data.target?.tp || "";
+  field("global-dlq.part").value = data.target?.part ?? 0;
+  field("global-dlq.group").value = data.target?.group || "";
+  setGlobalDlqFieldsEnabled(enabled);
+}
+
 function collectSettings() {
   return {
     delivery: {
@@ -201,6 +266,23 @@ function collectSettings() {
       publisher_idle_timeout_ms: optionalDurationMsValue("idle_queue_cleanup.publisher_idle_timeout_ms"),
     },
   };
+}
+
+function collectGlobalDlqTarget() {
+  if (!field("global-dlq.enabled").checked) {
+    return null;
+  }
+  return {
+    tp: field("global-dlq.tp").value.trim(),
+    part: numberValue("global-dlq.part"),
+    group: optionalTextValue("global-dlq.group"),
+  };
+}
+
+function setGlobalDlqFieldsEnabled(enabled) {
+  for (const input of document.querySelectorAll("#global-dlq-fields input")) {
+    input.disabled = !enabled;
+  }
 }
 
 for (const select of document.querySelectorAll(".duration-unit")) {
@@ -220,6 +302,12 @@ async function loadSettings(message = "Settings loaded.") {
   const data = await api("/admin/api/runtime-settings");
   renderSettings(data);
   setMessage(`${message} Current version: ${data.version}.`, "info");
+}
+
+async function loadGlobalDlq(message = "Global DLQ loaded.") {
+  const data = await api("/admin/api/global-dlq");
+  renderGlobalDlq(data);
+  setGlobalDlqMessage(`${message} Current version: ${data.version}.`, "info");
 }
 
 async function saveSettings(event) {
@@ -248,8 +336,38 @@ async function saveSettings(event) {
   setMessage(`Settings saved. Current version: ${data.version}.`, "success");
 }
 
+async function saveGlobalDlq(event) {
+  event.preventDefault();
+  const response = await fetch("/admin/api/global-dlq", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      expected_version: Number(field("global-dlq.version").value),
+      target: collectGlobalDlqTarget(),
+    }),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 409) {
+    renderGlobalDlq(data);
+    setGlobalDlqMessage(`Global DLQ changed before this save. Reloaded version ${data.version}; review and submit again.`, "warning");
+    return;
+  }
+  if (!response.ok) {
+    setGlobalDlqMessage(data.error || data.message || "Global DLQ update failed.", "error");
+    return;
+  }
+
+  renderGlobalDlq(data);
+  setGlobalDlqMessage(`Global DLQ saved. Current version: ${data.version}.`, "success");
+}
+
 field("settings-form").addEventListener("submit", saveSettings);
 field("reload-settings").addEventListener("click", () => loadSettings("Settings reloaded."));
+field("global-dlq-form").addEventListener("submit", saveGlobalDlq);
+field("reload-global-dlq").addEventListener("click", () => loadGlobalDlq("Global DLQ reloaded."));
+field("global-dlq.enabled").addEventListener("change", (event) => setGlobalDlqFieldsEnabled(event.target.checked));
 loadSettings();
+loadGlobalDlq();
 </script>
 {% endblock %}
