@@ -39,6 +39,19 @@ The wire/storage representation uses explicit common variants for msgpack, JSON,
 
 ## DLQ Metadata
 
-Dead-letter source details should not be added as ad-hoc user headers.
+Dead-letter source details are stored under the reserved `stroma.dlq.*`
+namespace when Stroma copies a message into a DLQ target.
 
-If replay or message inspection needs source information, add it under a reserved namespace after deciding the stable shape. Until then, DLQ copies should preserve user headers but avoid inventing public metadata fields accidentally.
+Current fields:
+
+- `stroma.dlq.source_topic`
+- `stroma.dlq.source_group`, only when the source queue has a group
+- `stroma.dlq.source_offset`
+- `stroma.dlq.retry_count`
+- `stroma.dlq.reason`
+- `stroma.dlq.dead_lettered_at_ms`
+
+These are sparse system annotations: normal messages do not pay for them, but
+DLQ messages carry enough context for inspection and future replay tooling.
+Reason is represented internally as an enum and converted to a stable header
+string at the message boundary.

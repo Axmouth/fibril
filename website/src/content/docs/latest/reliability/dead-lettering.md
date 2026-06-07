@@ -10,7 +10,7 @@ Dead lettering gives failed messages somewhere explicit to go after retry handli
 Fibril currently exposes two dead-lettering controls:
 
 - a global dead-letter queue target, configured by operators through the admin UI/API
-- a per-queue policy for what should happen after retries are exhausted, declared by applications through the client or configured through the admin API
+- a per-queue policy for what should happen after retries are exhausted, declared by applications through the client, `fibrilctl`, or the admin API
 
 The global target is the fallback destination for queues configured to use the global DLQ policy. It is a live storage-owned runtime setting: it is persisted, survives restart, and is not controlled by the startup TOML/env/CLI config.
 
@@ -52,6 +52,24 @@ await client.declareQueue(
     .useGlobalDeadLetterQueue()
     .maxRetries(3),
 );
+```
+
+CLI:
+
+```sh
+fibrilctl queue declare orders.created \
+  --group workers \
+  --dlq global \
+  --max-retries 3
+```
+
+For a queue-specific target:
+
+```sh
+fibrilctl queue declare orders.created \
+  --dlq custom \
+  --dlq-topic _dlq.orders \
+  --max-retries 3
 ```
 
 ## Admin API
@@ -147,13 +165,30 @@ Topics and groups use the same validation rules as normal Fibril topics and grou
 
 Partitioning is currently an internal detail for dead-letter configuration. Admin API responses may include `part`, but request bodies can omit it. Once queue sharding is available, Fibril should choose an available partition for DLQ routing rather than asking operators to pick one here. See [partition routing](/latest/development/partition-routing/) for the development policy.
 
+## Metadata on DLQ Messages
+
+When Fibril copies a message into a DLQ target, it preserves the original user
+headers and adds storage-owned metadata under the reserved `stroma.dlq.*`
+namespace:
+
+| Header | Meaning |
+| --- | --- |
+| `stroma.dlq.source_topic` | Source topic the message came from. |
+| `stroma.dlq.source_group` | Source group, only present when the source queue has a group. |
+| `stroma.dlq.source_offset` | Source offset. |
+| `stroma.dlq.retry_count` | Retry count when the message was dead-lettered. |
+| `stroma.dlq.reason` | Why the message was dead-lettered, such as `retries_exhausted`. |
+| `stroma.dlq.dead_lettered_at_ms` | Broker/storage timestamp in Unix milliseconds. |
+
+Application code should not publish headers starting with `fibril.` or
+`stroma.`. Those prefixes are reserved for system metadata and are rejected on
+publish.
+
 ## Current Limits
 
 Dead-letter routing is usable, but some surrounding workflow is still intentionally small.
 
 Still in progress:
 
-- CLI helpers for declaring DLQ policy
 - replay tooling and message inspection for DLQ queues
-- stable system metadata for recording where a dead-lettered message came from
-- broader end-to-end coverage around the full public workflow
+- richer end-to-end coverage around replay and inspection workflows
