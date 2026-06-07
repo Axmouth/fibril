@@ -13,7 +13,7 @@
     <input type="hidden" id="version">
 
     <div class="settings-group-heading">
-      <h5>Broker Runtime Settings</h5>
+      <h5>Broker Behavior</h5>
       <p>Live broker behavior such as delivery timing and idle queue cleanup.</p>
     </div>
 
@@ -153,8 +153,8 @@
     <input type="hidden" id="global-dlq.version">
 
     <div class="settings-group-heading">
-      <h5>Storage Runtime Settings</h5>
-      <p>Live persisted settings owned by Fibril storage state.</p>
+      <h5>Dead Letter Defaults</h5>
+      <p>Fallback behavior for queues that use the global dead-letter policy.</p>
     </div>
 
     <section class="settings-section">
@@ -228,7 +228,7 @@
         </label>
         <label class="settings-field">
           <span class="settings-label">Max retries</span>
-          <span class="settings-help">Blank keeps Stroma's current value for this queue.</span>
+          <span class="settings-help">Blank leaves the current value for this queue unchanged.</span>
           <input class="clr-input" id="queue-dlq.max_retries" type="number" min="0" step="1" placeholder="unchanged">
         </label>
       </div>
