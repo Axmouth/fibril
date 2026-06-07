@@ -18,6 +18,17 @@ select {
   padding: .25rem .45rem;
 }
 
+input[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 select {
   appearance: none;
   background-image:
@@ -49,13 +60,26 @@ header {
   background: rgba(15,20,26,.85);
 }
 
-footer {
-  opacity: .65;
-  margin-top: 40px;
-  padding: 32px;
+.content-area {
+  padding-bottom: 3rem;
+}
+
+.main-container > .footer {
+  backdrop-filter: blur(8px);
+  background: rgba(15, 20, 26, .92);
+  border-top: 1px solid rgba(255, 255, 255, .14);
+  box-shadow: 0 -12px 24px rgba(0, 0, 0, .16);
+  font-size: .65rem;
+  line-height: 1rem;
+  margin-top: 1.5rem;
+  min-height: 2rem;
+  opacity: .88;
+  padding: .35rem 1rem;
   text-align: center;
-  margin-right: 4px;
-  vertical-align: middle;
+}
+
+.main-container > .footer a {
+  white-space: nowrap;
 }
 
 main {

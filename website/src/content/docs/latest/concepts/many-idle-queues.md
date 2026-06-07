@@ -1,59 +1,66 @@
 ---
 title: Many idle queues
-description: How Fibril handles sparse workloads with many durable queues but few active ones.
+description: Running sparse workloads where many durable queues exist but only a few are active at once.
 ---
 
-Some workloads naturally create many queues while only using a small fraction at any one time. Examples include per-customer queues, per-tenant workflows, scheduled jobs, or rarely used routing keys.
+Some systems naturally create a lot of queues: per-customer work streams, per-tenant routing, scheduled jobs, rarely used webhooks, or low-traffic integrations.
 
-Fibril is designed to make that shape practical. A queue can remain durable on disk without staying fully loaded in memory forever.
+The operational goal is simple: it should be reasonable to keep those queues durable without paying full memory cost for every queue all the time.
 
-This page describes what users should expect when idle queue cleanup is enabled.
+## What This Solves
 
-## The Problem
+Without lazy loading and idle cleanup, every queue that has ever been touched can keep runtime state alive until the broker restarts. That is wasteful when most queues are quiet most of the time.
 
-It should be reasonable to define many queues even if most of them are quiet most of the time.
+Fibril addresses this in two steps:
 
-Without cleanup, every touched queue can keep runtime resources alive even after the last producer and consumer stop using it. That is wasteful for sparse workloads.
+- Queues are loaded lazily. Existing queues on disk do not need to be loaded into memory at startup.
+- Queues can be unloaded from memory after they have been unused for long enough.
 
-Idle queue cleanup is meant to reduce that always-on memory and background work. It is not message retention, queue deletion, TTL, or dead-lettering.
+Unloading is not deletion. Messages, queue state, snapshots, and logs stay on disk.
 
-## What Fibril Does
+## When a Queue Is in Memory
 
-Fibril uses two related behaviors:
+A queue is loaded into memory when the broker needs to operate on it. Common examples:
 
-- Queues are loaded lazily. A durable queue on disk does not have to be loaded into memory at process start.
-- Idle queues can be unloaded from memory after they have no active publishers, no active subscribers, and no inflight work for a configured amount of time.
+- a publisher writes to the queue
+- a subscriber subscribes to the queue
+- an admin or broker operation needs the queue state
+- delayed or delivery work touches the queue
 
-Unloading a queue from memory does not delete it.
+A queue may not be in memory when:
 
-The following remain durable:
+- the broker has just started and the queue only exists on disk
+- the queue was previously active, then became idle and was unloaded
+- no current broker operation needs that queue
 
-- message log
-- event log
-- snapshots
-- ready messages
-- settled history needed for replay
-- queue identity and persisted state
+If the queue is used again, Fibril reloads it from durable state and continues from there.
 
-When the queue is used again, Fibril loads it from those records and continues delivery.
+## When a Queue Becomes Idle
 
-## When a Queue Is Considered Idle
+A queue becomes eligible for idle cleanup only after all of these are true:
 
-A queue becomes idle after the last active publisher and subscriber for that queue are gone.
+- no active subscribers remain for the queue
+- no active publishers remain for the queue
+- no messages are currently leased to consumers
+- the configured idle window has elapsed
 
-For normal client usage:
+Subscribers stop keeping a queue active when they unsubscribe or their connection closes.
 
-- a subscriber stops being active when it unsubscribes or its connection closes
-- a publisher stops being active when its connection closes
-- if publisher idle expiry is enabled, an unused publisher can stop being active before the connection closes
+Publishers normally keep a queue active while the connection that used them is still open. If publisher idle expiry is enabled, an unused publisher can stop keeping the queue active before the connection closes.
 
-The idle timeout starts only after Fibril observes no active publishers or subscribers for that queue.
+The cleanup worker checks periodically. This means cleanup is intentionally approximate: a queue may unload on the first sweep after it qualifies, or on a later sweep.
 
-Fibril will not unload a queue just because a consumer is slow. It also checks for active delivery work before unloading.
+## What Happens to Messages
 
-## When Cleanup Can Run
+Ready messages remain durable while a queue is unloaded. If a subscriber comes back later, the queue is loaded again and those messages can be delivered.
 
-Idle queue cleanup is disabled by default. Configure it with:
+Inflight messages block unloading. Fibril should not unload a queue while messages are already handed to consumers and waiting to be completed, retried, failed, or recovered.
+
+When a subscription ends, prefetched but unsettled messages are returned for redelivery instead of being silently stranded behind the closed subscriber. This matters for sparse queues because it lets work move to another subscriber without waiting for the old prefetch window to drain naturally.
+
+## Settings
+
+Idle cleanup is controlled by runtime settings:
 
 ```toml
 [runtime_seed.idle_queue_cleanup]
@@ -63,69 +70,35 @@ sweep_interval_ms = 60000
 publisher_idle_timeout_ms = 600000
 ```
 
-`runtime_seed` values seed the persisted runtime settings document on first boot. Once runtime settings exist, persisted runtime settings own these values unless a setting group is explicitly locked by startup config.
+These values seed persisted runtime settings on first boot. After runtime settings exist, operators should edit them through the admin settings page or runtime settings API unless the setting group is locked by startup config.
 
-For the complete config reference, including env vars, CLI flags, and runtime locks, see [configuration](/latest/configuration/).
+For the full config reference, see [configuration](/latest/configuration/).
 
-When idle queue cleanup is enabled, a background worker wakes every `sweep_interval_ms` and checks tracked queues.
+## Operator Guidance
 
-The current server binary also accepts environment variables for compatibility:
+Use conservative idle windows in real deployments. Very small values are useful in tests, but they can make a busy sparse workload repeatedly unload and reload the same queues.
 
-```txt
-FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS
-FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS
-FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS
-```
+Enable publisher idle expiry when you have long-lived producer connections that only occasionally write to many different queues. Without it, a connection that has published to a queue can keep that queue active until the connection closes.
 
-`evict_after_ms` controls how long a queue must stay idle before it can be unloaded. `sweep_interval_ms` controls how often the background cleanup worker checks for idle queues.
+Treat idle cleanup as resource management, not as a correctness boundary. It reduces memory use for quiet queues; it does not change retention, acknowledgement semantics, retry policy, or dead-lettering.
 
-For sparse workloads with long-lived publishing connections, also set `publisher_cache_idle_timeout_ms`. Otherwise, a connection that published to a queue may keep that queue active until the connection closes.
+The tradeoff is that the first operation on a cold queue may pay the cost of loading the queue back into memory.
 
-## What Blocks Cleanup
+## Current Scope
 
-Fibril skips cleanup if it sees any of the following:
+Available now:
 
-- an active publisher for the queue
-- an active subscriber for the queue
-- messages already handed to consumers but not settled yet
-- pending acknowledgement or retry work
-- storage-reported inflight messages
-- the configured idle window has not elapsed yet
-
-This means ready messages can exist on disk while a queue is unloaded, but inflight messages keep the queue active until they are resolved.
-
-## Why This Works
-
-The common sparse-queue case has long periods where a queue has no producers, no consumers, and no inflight messages. In that state, keeping the queue loaded is not necessary for correctness.
-
-Ready messages are durable. If a subscriber returns later, Fibril reloads the queue and delivers them.
-
-The tradeoff is simple: idle queues use less runtime memory, while the next operation on a cold queue may pay the cost of loading it again.
-
-## Operational Guidance
-
-Use a conservative idle window. Very small windows are useful in tests, but a real deployment should avoid constantly unloading and reloading queues that are only briefly quiet.
-
-Treat cleanup as best-effort resource management, not as a correctness boundary. The broker may skip a queue during one sweep and unload it during a later sweep after the guards pass.
-
-If you care about exact builds or behavior, check the [project status](/latest/status/) and deployment settings before relying on this in production-like environments.
-
-## Current Status
-
-Implemented now:
-
-- lazy loading of durable queues
+- lazy loading for durable queues
 - configurable idle queue unloading
-- configurable publisher idle expiry for long-lived connections
-- live updates for idle cleanup and publisher idle expiry runtime settings
-- admin JSON API for reading and updating runtime settings
-- admin settings page for viewing locks, editing runtime settings, and handling version conflicts
-- tests for active publishers, active subscribers, idle threshold behavior, inflight guards, disabled cleanup, live enabling, direct cleanup, and worker-driven cleanup
+- configurable publisher idle expiry
+- live runtime updates through the admin settings page and API
 
-Still early:
+Not covered by this feature:
 
-- runtime settings are persisted and versioned, but the admin editing UI is still minimal
-- delayed-message cleanup behavior needs more end-to-end coverage before treating it as a documented guarantee
-- the broker may keep small in-process bookkeeping for a queue even after unloading the durable queue state
+- deleting queues
+- expiring messages by age
+- changing message retention
+- dead-letter policy
+- exact cleanup timing guarantees
 
 For implementation details, see [idle queue internals](/latest/development/idle-queue-internals/).
