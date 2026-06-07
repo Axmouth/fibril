@@ -31,10 +31,11 @@ Manual-ack consumers decide what happens after processing:
 ```rust
 msg.complete().await?; // terminal success
 msg.retry().await?;    // requeue immediately
+msg.retry_after(30).await?; // requeue after a delay
 msg.fail().await?;     // terminal failure
 ```
 
-`retry_after(..)` is represented in the client API but is not wired through the full path yet.
+Delayed retry keeps the message out of ready delivery until its retry deadline.
 
 ## Why leasing
 

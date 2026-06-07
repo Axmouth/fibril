@@ -51,12 +51,13 @@ The delayed publish path uses a distinct protocol frame instead of adding an opt
 
 ## Delayed retry
 
-The Stroma event model includes delayed retry forms such as `RetryLater` and `RequeueLater`, and queue state tracks delayed retry deadlines.
+Manual-ack consumers can ask the broker to retry a message after a delay. Fibril records a `not_before` Unix-millisecond deadline on the settlement event, keeps the offset out of ready delivery until that deadline, and then makes it eligible for redelivery.
 
-The public consumer API already points in the intended direction:
+Rust client numeric delays are seconds. Use `std::time::Duration` when the unit should be explicit:
 
 ```rust
 msg.retry_after(30).await?;
+msg.retry_after(std::time::Duration::from_millis(250)).await?;
 ```
 
-That method is currently not implemented end to end in the Rust client. The site should keep saying “planned/partial” until this path is wired through client, protocol, broker, state, and tests.
+The TypeScript client does not expose a delayed retry helper yet. The wire format and broker path already support the deadline field, so TS parity is expected to be a small client-side follow-up.

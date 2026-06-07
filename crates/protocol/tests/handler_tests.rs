@@ -438,6 +438,86 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
 }
 
 #[tokio::test]
+async fn delayed_retry_over_tcp_waits_until_not_before() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                2,
+                &Subscribe {
+                    topic: "delayed.retry.tcp".into(),
+                    group: None,
+                    prefetch: 1,
+                    auto_ack: false,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(&mut framed).await.opcode, Op::SubscribeOk as u16);
+
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                3,
+                &Publish {
+                    topic: "delayed.retry.tcp".into(),
+                    partition: 0,
+                    group: None,
+                    require_confirm: true,
+                    content_type: None,
+                    headers: HashMap::new(),
+                    payload: b"retry-later".to_vec(),
+                    published: unix_millis(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(&mut framed).await.opcode, Op::PublishOk as u16);
+
+    let delivered = recv_delivery_for_topic(&mut framed, "delayed.retry.tcp").await;
+    let not_before = unix_millis() + 150;
+    framed
+        .send(
+            try_encode(
+                Op::Nack,
+                4,
+                &Nack {
+                    topic: "delayed.retry.tcp".into(),
+                    group: None,
+                    partition: 0,
+                    tags: vec![delivered.delivery_tag],
+                    requeue: true,
+                    not_before: Some(not_before),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), framed.next())
+            .await
+            .is_err()
+    );
+
+    let redelivered = recv_delivery_for_topic(&mut framed, "delayed.retry.tcp").await;
+    assert_eq!(redelivered.payload, b"retry-later".to_vec());
+    assert!(unix_millis() >= not_before);
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn exhausted_message_routes_to_global_dlq_over_tcp() {
     let (engine, dir) = open_test_engine().await;
     engine
@@ -544,6 +624,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     partition: 0,
                     tags: vec![source.delivery_tag],
                     requeue: true,
+                    not_before: None,
                 },
             )
             .unwrap(),

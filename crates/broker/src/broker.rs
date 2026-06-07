@@ -47,8 +47,13 @@ pub enum BrokerError {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SettleType {
     Ack,
-    Nack { requeue: Option<bool> },
-    Reject { requeue: Option<bool> },
+    Nack {
+        requeue: Option<bool>,
+        not_before: Option<UnixMillis>,
+    },
+    Reject {
+        requeue: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1076,7 +1081,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         let reqs = offsets
             .into_iter()
-            .map(|off| NackEventMeta { off, requeue: true })
+            .map(|off| NackEventMeta {
+                off,
+                requeue: true,
+                not_before: None,
+            })
             .collect();
         let completion: Box<dyn AppendCompletion<IoError>> = Box::new(SimpleCompletion::new(done));
         self.engine
@@ -1204,10 +1213,17 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         let settle_kind = match req.settle_type {
             SettleType::Ack => SettleKind::Ack,
-            SettleType::Nack { requeue } => SettleKind::Nack {
+            SettleType::Nack {
+                requeue,
+                not_before,
+            } => SettleKind::Nack {
                 requeue: requeue.unwrap_or(true),
+                not_before,
             },
-            SettleType::Reject { .. } => SettleKind::Nack { requeue: false },
+            SettleType::Reject { .. } => SettleKind::Nack {
+                requeue: false,
+                not_before: None,
+            },
         };
 
         // IMPORTANT:
@@ -1272,12 +1288,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 
     async fn handle_settle_batch(&self, consumer: &Arc<ConsumerState>, reqs: Vec<SettleRequest>) {
-        // Group by (queue_key, ack-or-nack-with-requeue)
-        // Acks all go to one bucket per queue.
-        // Nacks vary by (offset, requeue), so they group per queue but accumulate (offset, requeue) tuples.
+        // Group by queue. Acks all go to one bucket per queue.
+        // Nacks carry per-offset settlement metadata, including optional retry deadlines.
 
         let mut acks_by_queue: HashMap<QueueKey, Vec<Offset>> = HashMap::new();
-        let mut nacks_by_queue: HashMap<QueueKey, Vec<(Offset, bool)>> = HashMap::new();
+        let mut nacks_by_queue: HashMap<QueueKey, Vec<NackEventMeta>> = HashMap::new();
 
         for req in reqs {
             let Some(tag_rec) = self
@@ -1303,19 +1318,30 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         .or_default()
                         .push(tag_rec.offset);
                 }
-                SettleType::Nack { requeue } => {
+                SettleType::Nack {
+                    requeue,
+                    not_before,
+                } => {
                     let r = requeue.unwrap_or(true);
                     nacks_by_queue
                         .entry(tag_rec.key)
                         .or_default()
-                        .push((tag_rec.offset, r));
+                        .push(NackEventMeta {
+                            off: tag_rec.offset,
+                            requeue: r,
+                            not_before,
+                        });
                 }
                 SettleType::Reject { .. } => {
                     // Treat as nack with requeue=false (until you remove Reject)
                     nacks_by_queue
                         .entry(tag_rec.key)
                         .or_default()
-                        .push((tag_rec.offset, false));
+                        .push(NackEventMeta {
+                            off: tag_rec.offset,
+                            requeue: false,
+                            not_before: None,
+                        });
                 }
             }
         }
@@ -1389,13 +1415,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
             let completion: Box<dyn AppendCompletion<IoError>> =
                 Box::new(SimpleCompletion::new(done));
-            let reqs = items
-                .into_iter()
-                .map(|(off, requeue)| NackEventMeta { off, requeue })
-                .collect();
             let _ = self
                 .engine
-                .nack_batch(&key.tp, key.part, key.group.as_deref(), reqs, completion)
+                .nack_batch(&key.tp, key.part, key.group.as_deref(), items, completion)
                 .await;
         }
     }

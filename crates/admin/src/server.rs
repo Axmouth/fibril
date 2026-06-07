@@ -1304,6 +1304,7 @@ mod tests {
                         partition: 0,
                         tags: vec![source.delivery_tag],
                         requeue: true,
+                        not_before: None,
                     },
                 )
                 .unwrap(),

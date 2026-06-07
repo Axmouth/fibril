@@ -170,6 +170,7 @@ export interface NackMsg {
   partition: number;
   tags: DeliveryTag[];
   requeue: boolean;
+  not_before: bigint | null;
 }
 
 /** Structured broker error frame body. */

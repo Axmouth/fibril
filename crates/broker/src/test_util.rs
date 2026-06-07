@@ -344,6 +344,7 @@ impl TestState {
         h.settle(SettleRequest {
             settle_type: SettleType::Nack {
                 requeue: Some(requeue),
+                not_before: None,
             },
             delivery_tag: m.tag,
         })

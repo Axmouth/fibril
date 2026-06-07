@@ -679,6 +679,49 @@ async fn delayed_publish_waits_until_deadline() {
 }
 
 #[tokio::test]
+async fn delayed_retry_waits_until_deadline() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+
+    let mut sub = broker
+        .subscribe("t", None, Uuid::now_v7(), ConsumerConfig { prefetch: 1 })
+        .await
+        .unwrap();
+    let msg = sub.recv().await.expect("initial delivery");
+    let not_before = unix_millis() + 500;
+    sub.settle(SettleRequest {
+        settle_type: SettleType::Nack {
+            requeue: Some(true),
+            not_before: Some(not_before),
+        },
+        delivery_tag: msg.delivery_tag,
+    })
+    .await
+    .unwrap();
+
+    assert!(recv_with_timeout(&mut sub, 100).await.is_none());
+
+    let redelivered = recv_with_timeout(&mut sub, 2_000)
+        .await
+        .expect("message should be redelivered after delayed retry deadline");
+    assert_eq!(redelivered.message.offset, msg.message.offset);
+    assert!(unix_millis() >= not_before);
+}
+
+#[tokio::test]
 async fn broker_respects_prefetch() {
     let (broker, _dir) = open_test_broker().await;
 
@@ -1345,6 +1388,7 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
         .settle(SettleRequest {
             settle_type: SettleType::Nack {
                 requeue: Some(true),
+                not_before: None,
             },
             delivery_tag: msg.delivery_tag,
         })
@@ -1422,6 +1466,7 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
             .settle(SettleRequest {
                 settle_type: SettleType::Nack {
                     requeue: Some(true),
+                    not_before: None,
                 },
                 delivery_tag: msg.delivery_tag,
             })
@@ -1494,6 +1539,7 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
         .settle(SettleRequest {
             settle_type: SettleType::Nack {
                 requeue: Some(true),
+                not_before: None,
             },
             delivery_tag: msg.delivery_tag,
         })

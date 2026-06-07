@@ -123,6 +123,35 @@ TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute 
   </TabItem>
 </Tabs>
 
+## Delayed Retry
+
+Manual-ack consumers can requeue a message after a delay instead of making it ready immediately.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+use std::time::Duration;
+
+let msg = sub.recv().await.expect("message");
+msg.retry_after(Duration::from_secs(30)).await?;
+```
+
+Rust numeric delay helpers are seconds, matching delayed publish.
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+const msg = await sub.recv();
+await msg.retry();
+```
+
+The TypeScript client currently exposes immediate retry. Delayed retry uses the same broker/protocol path and is pending a client helper.
+
+  </TabItem>
+</Tabs>
+
 ## Message Payloads
 
 Plain values are encoded as msgpack by default. Use explicit message helpers when you want JSON, raw bytes, text, or custom headers.

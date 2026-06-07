@@ -451,6 +451,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           partition: sub.partition,
           tags: [cmd.tag],
           requeue: cmd.requeue,
+          not_before: null,
         };
         const ok = await sendOrDie(buildFrame(Op.Nack, cmd.request_id, msg));
         if (ok) cmd.reply.resolve();

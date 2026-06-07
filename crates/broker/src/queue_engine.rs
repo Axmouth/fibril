@@ -29,7 +29,10 @@ pub struct Deliverable {
 #[derive(Debug, Clone, Copy)]
 pub enum SettleKind {
     Ack,
-    Nack { requeue: bool },
+    Nack {
+        requeue: bool,
+        not_before: Option<UnixMillis>,
+    },
 }
 
 pub struct SettleRequest {
@@ -301,9 +304,22 @@ impl QueueEngine for StromaEngine {
                     .ack_enqueue(tp, part, group, req.offset, completion)
                     .await?;
             }
-            SettleKind::Nack { requeue } => {
+            SettleKind::Nack {
+                requeue,
+                not_before,
+            } => {
                 self.inner
-                    .nack_enqueue(tp, part, group, req.offset, requeue, completion)
+                    .nack_enqueue_many(
+                        tp,
+                        part,
+                        group,
+                        vec![NackEventMeta {
+                            off: req.offset,
+                            requeue,
+                            not_before,
+                        }],
+                        completion,
+                    )
                     .await?;
             }
         }

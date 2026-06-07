@@ -948,6 +948,17 @@ pub async fn handle_connection(
             x if x == Op::Nack as u16 => {
                 // TODO: Decline ack when auto ack? Log?
                 let nack: Nack = decode_or_400!(frame, frame_tx_high_prio, metrics, Nack);
+                if nack.not_before.is_some() && !nack.requeue {
+                    send_error_response_and_count(
+                        &frame_tx_high_prio,
+                        &metrics,
+                        frame.request_id,
+                        400,
+                        "nack not_before requires requeue=true",
+                    )
+                    .await;
+                    continue;
+                }
 
                 let key: SubKey = (nack.topic.clone(), nack.group.clone());
 
@@ -962,6 +973,7 @@ pub async fn handle_connection(
                             delivery_tag: tag,
                             settle_type: SettleType::Nack {
                                 requeue: Some(nack.requeue),
+                                not_before: nack.not_before,
                             },
                         };
                         pending_settles.fetch_add(1, Ordering::AcqRel);

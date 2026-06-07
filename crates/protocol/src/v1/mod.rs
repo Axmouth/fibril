@@ -211,6 +211,8 @@ pub struct Nack {
     pub partition: u32,
     pub tags: Vec<DeliveryTag>, // batch
     pub requeue: bool,
+    #[serde(default)]
+    pub not_before: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

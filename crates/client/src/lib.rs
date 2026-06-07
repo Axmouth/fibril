@@ -487,6 +487,7 @@ pub enum SettleRequest {
     Nack {
         tag: DeliveryTag,
         requeue: bool,
+        not_before: Option<UnixMillis>,
         request_id: u64,
         response: oneshot::Sender<Result<(), FibrilError>>,
     },
@@ -616,6 +617,7 @@ impl InflightMessage {
             .send(SettleRequest::Nack {
                 tag: delivery_tag,
                 requeue: false,
+                not_before: None,
                 request_id,
                 response: tx,
             })
@@ -648,6 +650,7 @@ impl InflightMessage {
             .send(SettleRequest::Nack {
                 tag: delivery_tag,
                 requeue: true,
+                not_before: None,
                 request_id,
                 response: tx,
             })
@@ -665,11 +668,36 @@ impl InflightMessage {
 
     /// Negatively acknowledge and retry after a delay.
     ///
-    /// This method is not wired yet and will panic. Use [`retry`](Self::retry)
-    /// for supported immediate retry behavior.
     pub async fn retry_after(self, delay: impl Delayable) -> FibrilResult<Message> {
-        let _deadline = delay.deadline();
-        todo!()
+        let InflightMessage {
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            content_type,
+            payload,
+            request_id,
+            settle,
+        } = self;
+        let (tx, rx) = oneshot::channel();
+        settle
+            .send(SettleRequest::Nack {
+                tag: delivery_tag,
+                requeue: true,
+                not_before: Some(delay.deadline()),
+                request_id,
+                response: tx,
+            })
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_| FibrilError::BrokenPipe)??;
+        Ok(Message {
+            delivery_tag,
+            published,
+            publish_received,
+            headers,
+            content_type,
+            payload,
+        })
     }
 
     /// Return the message content type, if present.
@@ -1246,6 +1274,7 @@ enum Command {
         sub_id: u64,
         delivery_tag: DeliveryTag,
         requeue: bool,
+        not_before: Option<UnixMillis>,
         request_id: u64,
     },
 }
@@ -1529,7 +1558,7 @@ where
                             send_or_die!(framed, Op::Ack, request_id, &ack, fatal_error)
                         }
                     }
-                    Command::Nack { sub_id, delivery_tag, requeue, request_id } => {
+                    Command::Nack { sub_id, delivery_tag, requeue, not_before, request_id } => {
                         if let Some(sub) = subs.get(&sub_id) {
                             let nack = Nack {
                                 topic: sub.topic.clone(),
@@ -1537,6 +1566,7 @@ where
                                 partition: sub.partition,
                                 tags: vec![delivery_tag],
                                 requeue,
+                                not_before,
                             };
                            send_or_die!(framed, Op::Nack, request_id, &nack, fatal_error)
                         }
@@ -1630,11 +1660,12 @@ where
                                                                     let _ = response.send(Ok(()));
                                                                 }
                                                             }
-                                                            SettleRequest::Nack { tag, requeue, request_id, response } => {
+                                                            SettleRequest::Nack { tag, requeue, not_before, request_id, response } => {
                                                                 let res = cmd_tx.send(Command::Nack {
                                                                     sub_id,
                                                                     delivery_tag: tag,
                                                                     requeue,
+                                                                    not_before,
                                                                     request_id,
                                                                 }).await;
                                                                 if let Err(_err) = res {
@@ -2283,6 +2314,51 @@ mod tests {
             other => panic!("expected auto subscribe, got {other:?}"),
         }
         auto.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn retry_after_sends_delayed_nack() {
+        let (settle_tx, settle_rx) = oneshot::channel();
+        let msg = InflightMessage {
+            delivery_tag: DeliveryTag { epoch: 7 },
+            published: 1,
+            publish_received: 2,
+            headers: HashMap::new(),
+            content_type: None,
+            payload: b"later".to_vec(),
+            request_id: 42,
+            settle: settle_tx,
+        };
+
+        let before = unix_millis();
+        let task =
+            tokio::spawn(
+                async move { msg.retry_after(std::time::Duration::from_millis(250)).await },
+            );
+        let req = settle_rx.await.unwrap();
+        let after = unix_millis();
+
+        match req {
+            SettleRequest::Nack {
+                tag,
+                requeue,
+                not_before,
+                request_id,
+                response,
+            } => {
+                assert_eq!(tag, DeliveryTag { epoch: 7 });
+                assert!(requeue);
+                let not_before = not_before.expect("retry_after should set a deadline");
+                assert!(not_before >= before + 250);
+                assert!(not_before <= after + 250);
+                assert_eq!(request_id, 42);
+                response.send(Ok(())).unwrap();
+            }
+            SettleRequest::Ack { .. } => panic!("expected delayed nack, got ack"),
+        }
+
+        let settled = task.await.unwrap().unwrap();
+        assert_eq!(settled.payload, b"later".to_vec());
     }
 
     #[test]

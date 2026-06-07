@@ -7,9 +7,8 @@ Fibril is still early. The near-term roadmap is about making the existing semant
 
 ## Near term
 
-- Wire `msg.retry_after(..)` through client, protocol, broker, and Stroma.
-- Add broker-level tests for delayed retry public paths.
 - Add richer DLQ replay and message inspection workflows.
+- Add TypeScript client parity for delayed retry.
 - Add the next storage-level runtime settings.
 - Add sparse-queue observability around lazy loading, idle cleanup, and eviction decisions.
 - Improve TCP protocol ergonomics and error behavior.
