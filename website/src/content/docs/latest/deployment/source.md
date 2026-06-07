@@ -51,6 +51,8 @@ The image also includes `fibrilctl` for operational commands. With Compose:
 
 ```sh
 docker compose -f compose.server.example.yaml exec fibril-server fibrilctl admin global-dlq get
+docker compose -f compose.server.example.yaml exec fibril-server fibrilctl admin queues
+docker compose -f compose.server.example.yaml exec fibril-server fibrilctl admin dlq replay _dlq.orders --offset 12
 ```
 
 For a one-off container on the same Docker network as the broker, override the

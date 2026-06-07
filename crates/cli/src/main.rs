@@ -70,6 +70,8 @@ enum AdminCommand {
     },
     /// Inspect persisted queue messages through the admin API.
     Messages(InspectMessagesArgs),
+    /// Show queue state and sparse queue activity from the admin API.
+    Queues,
 }
 
 #[derive(Debug, Subcommand)]
@@ -253,6 +255,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     DlqCommand::Replay(args) => print_json(admin.replay_dlq(args).await?)?,
                 },
                 AdminCommand::Messages(args) => print_json(admin.inspect_messages(args).await?)?,
+                AdminCommand::Queues => print_json(admin.queues_debug().await?)?,
             }
         }
     }
@@ -430,6 +433,10 @@ impl AdminClient {
         .await
     }
 
+    async fn queues_debug(&self) -> anyhow::Result<serde_json::Value> {
+        self.get_json("/admin/api/queues_debug", &[]).await
+    }
+
     async fn get_json<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -586,5 +593,17 @@ mod tests {
 
         assert_eq!(args.dlq_topic, "_dlq.orders");
         assert_eq!(args.offset, vec![0, 3]);
+    }
+
+    #[test]
+    fn parses_admin_queues_command() {
+        let cli = Cli::try_parse_from(["fibrilctl", "admin", "queues"]).unwrap();
+
+        let Command::Admin {
+            command: AdminCommand::Queues,
+        } = cli.command
+        else {
+            panic!("expected admin queues command");
+        };
     }
 }
