@@ -47,6 +47,20 @@ The image exposes:
 
 Persistent data lives under `/app/server_data` in the container.
 
+The image also includes `fibrilctl` for operational commands. With Compose:
+
+```sh
+docker compose -f compose.server.example.yaml exec fibril-server fibrilctl admin global-dlq get
+```
+
+For a one-off container on the same Docker network as the broker, override the
+default server command:
+
+```sh
+docker run --rm --network container:fibril-server ghcr.io/axmouth/fibril-server:main \
+  fibrilctl admin messages orders.created --limit 10
+```
+
 ## Runtime knobs
 
 The server now loads a typed startup config. Without a config file it uses the

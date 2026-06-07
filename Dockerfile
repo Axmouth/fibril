@@ -4,7 +4,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY benches ./benches
 COPY crates ./crates
-RUN cargo build --release --locked -p fibril --bin fibril-server
+RUN cargo build --release --locked -p fibril --bin fibril-server -p fibril-cli --bin fibrilctl
 
 FROM debian:bookworm-slim
 
@@ -22,6 +22,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY --from=builder /app/target/release/fibril-server /usr/local/bin/fibril-server
+COPY --from=builder /app/target/release/fibrilctl /usr/local/bin/fibrilctl
 
 VOLUME ["/app/server_data"]
 EXPOSE 9876 8081
