@@ -1,6 +1,7 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse, response::Response};
 use fibril_broker::queue_engine::{
-    GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome, StromaError,
+    DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
+    StromaError,
 };
 use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLocks, RuntimeSettingsSnapshot,
@@ -38,6 +39,36 @@ pub struct UpdateRuntimeSettingsRequest {
 pub struct UpdateGlobalDlqRequest {
     pub expected_version: u64,
     pub target: Option<GlobalDLQ>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueDlqPolicyRequest {
+    Discard,
+    Global,
+    Custom,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QueueDlqTargetRequest {
+    pub tp: String,
+    pub part: u32,
+    pub group: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateQueueDlqRequest {
+    pub tp: String,
+    pub part: u32,
+    pub group: Option<String>,
+    pub policy: QueueDlqPolicyRequest,
+    pub target: Option<QueueDlqTargetRequest>,
+    pub max_retries: Option<u32>,
+}
+
+#[derive(Serialize)]
+pub struct QueueDlqResponse {
+    pub status: &'static str,
 }
 
 #[derive(Serialize)]
@@ -249,6 +280,70 @@ pub async fn update_global_dlq(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "global_dlq_update_failed",
                 "global dlq update failed",
+            ))
+        }
+    }
+}
+
+pub async fn update_queue_dlq(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<UpdateQueueDlqRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let policy = match request.policy {
+        QueueDlqPolicyRequest::Discard => DLQDiscardPolicyWire::Discard,
+        QueueDlqPolicyRequest::Global => DLQDiscardPolicyWire::GlobalDQL,
+        QueueDlqPolicyRequest::Custom => {
+            let Some(target) = request.target else {
+                return Ok(admin_error(
+                    StatusCode::BAD_REQUEST,
+                    "missing_queue_dlq_target",
+                    "custom queue DLQ policy requires a target",
+                ));
+            };
+            let target =
+                match GlobalDLQ::new(&target.tp, target.part, target.group.as_deref()).await {
+                    Ok(target) => target,
+                    Err(err) => {
+                        return Ok(admin_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_queue_dlq_target",
+                            err.to_string(),
+                        ));
+                    }
+                };
+            DLQDiscardPolicyWire::CustomDQL {
+                tp: target.tp.into_boxed_str(),
+                part: target.part,
+                group: target.group.map(String::into_boxed_str),
+            }
+        }
+    };
+
+    let meta = DeclareMeta {
+        dlq_policy: Some(policy),
+        dlq_max_retries: request.max_retries,
+    };
+
+    match server
+        .storage
+        .declare_queue(&request.tp, request.part, request.group.as_deref(), meta)
+        .await
+    {
+        Ok(()) => Ok((StatusCode::OK, Json(QueueDlqResponse { status: "stored" })).into_response()),
+        Err(err @ StromaError::InvalidArgument(_)) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_queue_dlq",
+            err.to_string(),
+        )),
+        Err(err) => {
+            tracing::error!("queue DLQ update failed: {err}");
+            Ok(admin_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "queue_dlq_update_failed",
+                "queue DLQ update failed",
             ))
         }
     }

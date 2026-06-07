@@ -153,6 +153,74 @@
       </div>
     </section>
   </form>
+
+  <form id="queue-dlq-form" class="settings-form-secondary">
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Queue Dead Letter Policy</h5>
+        <p>Declare how one queue handles messages that still fail after the retry limit.</p>
+      </div>
+
+      <div id="queue-dlq-message" class="settings-message"></div>
+
+      <div class="settings-grid">
+        <label class="settings-field">
+          <span class="settings-label">Queue topic</span>
+          <span class="settings-help">Source queue to configure.</span>
+          <input class="clr-input" id="queue-dlq.tp" required placeholder="orders.created">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Queue partition</span>
+          <span class="settings-help">Source partition.</span>
+          <input class="clr-input" id="queue-dlq.part" type="number" min="0" step="1" value="0" required>
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Queue group</span>
+          <span class="settings-help">Optional source consumer group.</span>
+          <input class="clr-input" id="queue-dlq.group" placeholder="blank for default">
+        </label>
+      </div>
+
+      <div class="settings-grid settings-grid-two">
+        <label class="settings-field">
+          <span class="settings-label">Policy</span>
+          <span class="settings-help">Discard, use the global DLQ, or route to a queue-specific target.</span>
+          <select class="clr-select" id="queue-dlq.policy">
+            <option value="discard">Discard</option>
+            <option value="global">Use global DLQ</option>
+            <option value="custom">Custom DLQ target</option>
+          </select>
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Max retries</span>
+          <span class="settings-help">Blank keeps Stroma's current value for this queue.</span>
+          <input class="clr-input" id="queue-dlq.max_retries" type="number" min="0" step="1" placeholder="unchanged">
+        </label>
+      </div>
+
+      <div id="queue-dlq-target-fields" class="settings-grid">
+        <label class="settings-field">
+          <span class="settings-label">Target topic</span>
+          <span class="settings-help">Queue topic that receives this queue's dead-lettered messages.</span>
+          <input class="clr-input" id="queue-dlq.target.tp" placeholder="_dlq.orders">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Target partition</span>
+          <span class="settings-help">Partition for the custom DLQ target.</span>
+          <input class="clr-input" id="queue-dlq.target.part" type="number" min="0" step="1" value="0">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Target group</span>
+          <span class="settings-help">Optional target consumer group.</span>
+          <input class="clr-input" id="queue-dlq.target.group" placeholder="blank for default">
+        </label>
+      </div>
+
+      <div class="settings-actions">
+        <button class="btn btn-primary" type="submit">Declare queue DLQ</button>
+      </div>
+    </section>
+  </form>
 </div>
 
 <script src="/static/js/api.js"></script>
@@ -210,6 +278,12 @@ function setMessage(text, kind = "info") {
 
 function setGlobalDlqMessage(text, kind = "info") {
   const el = field("global-dlq-message");
+  el.textContent = text;
+  el.dataset.kind = kind;
+}
+
+function setQueueDlqMessage(text, kind = "info") {
+  const el = field("queue-dlq-message");
   el.textContent = text;
   el.dataset.kind = kind;
 }
@@ -279,8 +353,34 @@ function collectGlobalDlqTarget() {
   };
 }
 
+function collectQueueDlqRequest() {
+  const policy = field("queue-dlq.policy").value;
+  const target = policy === "custom"
+    ? {
+        tp: field("queue-dlq.target.tp").value.trim(),
+        part: numberValue("queue-dlq.target.part"),
+        group: optionalTextValue("queue-dlq.target.group"),
+      }
+    : null;
+  const maxRetries = field("queue-dlq.max_retries").value.trim();
+  return {
+    tp: field("queue-dlq.tp").value.trim(),
+    part: numberValue("queue-dlq.part"),
+    group: optionalTextValue("queue-dlq.group"),
+    policy,
+    target,
+    max_retries: maxRetries === "" ? null : Number(maxRetries),
+  };
+}
+
 function setGlobalDlqFieldsEnabled(enabled) {
   for (const input of document.querySelectorAll("#global-dlq-fields input")) {
+    input.disabled = !enabled;
+  }
+}
+
+function setQueueDlqTargetFieldsEnabled(enabled) {
+  for (const input of document.querySelectorAll("#queue-dlq-target-fields input")) {
     input.disabled = !enabled;
   }
 }
@@ -362,12 +462,32 @@ async function saveGlobalDlq(event) {
   setGlobalDlqMessage(`Global DLQ saved. Current version: ${data.version}.`, "success");
 }
 
+async function saveQueueDlq(event) {
+  event.preventDefault();
+  const response = await fetch("/admin/api/queue-dlq", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(collectQueueDlqRequest()),
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    setQueueDlqMessage(data.error || data.message || "Queue DLQ update failed.", "error");
+    return;
+  }
+
+  setQueueDlqMessage("Queue DLQ policy declared.", "success");
+}
+
 field("settings-form").addEventListener("submit", saveSettings);
 field("reload-settings").addEventListener("click", () => loadSettings("Settings reloaded."));
 field("global-dlq-form").addEventListener("submit", saveGlobalDlq);
 field("reload-global-dlq").addEventListener("click", () => loadGlobalDlq("Global DLQ reloaded."));
 field("global-dlq.enabled").addEventListener("change", (event) => setGlobalDlqFieldsEnabled(event.target.checked));
+field("queue-dlq-form").addEventListener("submit", saveQueueDlq);
+field("queue-dlq.policy").addEventListener("change", (event) => setQueueDlqTargetFieldsEnabled(event.target.value === "custom"));
 loadSettings();
 loadGlobalDlq();
+setQueueDlqTargetFieldsEnabled(field("queue-dlq.policy").value === "custom");
 </script>
 {% endblock %}

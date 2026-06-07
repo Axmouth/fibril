@@ -10,8 +10,9 @@ use stroma_core::{
     StromaMetrics,
 };
 pub use stroma_core::{
-    AppendCompletion, EvictOutcome, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome, IoError,
-    KeratinConfig, SnapshotConfig, Stroma, StromaError, StromaKeratinConfig,
+    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
+    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, IoError, KeratinConfig, SnapshotConfig, Stroma,
+    StromaError, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -135,6 +136,14 @@ pub trait QueueEngine {
         target: Option<GlobalDLQ>,
         expected_version: u64,
     ) -> Result<GlobalDlqUpdateOutcome, StromaError>;
+
+    async fn declare_queue(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        meta: DeclareMeta,
+    ) -> Result<(), StromaError>;
 
     async fn materialize(
         &self,
@@ -395,6 +404,16 @@ impl QueueEngine for StromaEngine {
         expected_version: u64,
     ) -> Result<GlobalDlqUpdateOutcome, StromaError> {
         self.inner.set_global_dlq(target, expected_version).await
+    }
+
+    async fn declare_queue(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        meta: DeclareMeta,
+    ) -> Result<(), StromaError> {
+        self.inner.declare(tp, part, group, meta).await
     }
 
     async fn materialize(

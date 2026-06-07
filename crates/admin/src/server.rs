@@ -116,6 +116,10 @@ impl AdminServer {
                 "/admin/api/global-dlq",
                 get(routes::global_dlq).put(routes::update_global_dlq),
             )
+            .route(
+                "/admin/api/queue-dlq",
+                axum::routing::put(routes::update_queue_dlq),
+            )
             .route("/healthz", get(|| async { "ok" }))
             .fallback(not_found)
             .with_state(state);
@@ -920,6 +924,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_dlq_put_declares_custom_policy() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/queue-dlq")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "tp": "orders.created",
+                            "part": 0,
+                            "group": null,
+                            "policy": "custom",
+                            "target": {
+                                "tp": "_dlq.orders",
+                                "part": 0,
+                                "group": "failed"
+                            },
+                            "max_retries": 7
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["status"], "stored");
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/queues_debug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        let queue = body["queues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|queue| queue["topic"] == "orders.created")
+            .unwrap();
+        assert_eq!(queue["state"]["dlq_max_retries"], 7);
+        assert!(
+            queue["state"]["dlq_policy"]
+                .as_str()
+                .unwrap()
+                .contains("_dlq.orders")
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_dlq_put_requires_custom_target() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/queue-dlq")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "tp": "orders.created",
+                            "part": 0,
+                            "group": null,
+                            "policy": "custom",
+                            "target": null,
+                            "max_retries": 7
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "missing_queue_dlq_target");
+    }
+
+    #[tokio::test]
     async fn settings_page_renders() {
         let server = test_server(RuntimeSettingsLocks::default()).await;
         let app = AdminServer::router(server);
@@ -939,6 +1038,7 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("Runtime Settings"));
         assert!(body.contains("Global Dead Letter Queue"));
+        assert!(body.contains("Queue Dead Letter Policy"));
         assert!(body.contains("Save settings"));
     }
 }

@@ -139,6 +139,10 @@ main {
   grid-template-columns: minmax(0, 2fr) minmax(8rem, 1fr) minmax(0, 1.5fr);
 }
 
+.settings-grid-two {
+  grid-template-columns: minmax(0, 2fr) minmax(8rem, 1fr);
+}
+
 .settings-label {
   display: block;
   font-weight: 600;
