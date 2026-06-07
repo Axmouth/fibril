@@ -1323,6 +1323,44 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
     assert_eq!(dlq_msg.message.topic, "_dlq.source");
     assert_eq!(dlq_msg.message.offset, 0);
     assert_eq!(dlq_msg.message.payload, b"poison");
+    assert_eq!(
+        dlq_msg
+            .message
+            .headers
+            .get("stroma.dlq.source_topic")
+            .map(String::as_str),
+        Some("source")
+    );
+    assert_eq!(
+        dlq_msg
+            .message
+            .headers
+            .get("stroma.dlq.source_offset")
+            .map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        dlq_msg
+            .message
+            .headers
+            .get("stroma.dlq.retry_count")
+            .map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        dlq_msg
+            .message
+            .headers
+            .get("stroma.dlq.reason")
+            .map(String::as_str),
+        Some("retries_exhausted")
+    );
+    assert!(
+        dlq_msg
+            .message
+            .headers
+            .contains_key("stroma.dlq.dead_lettered_at_ms")
+    );
 
     assert!(recv_with_timeout(&mut source, 100).await.is_none());
 
