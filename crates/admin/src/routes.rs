@@ -262,7 +262,13 @@ pub async fn queues_debug(
     let queues = server.storage.debug_snapshot().await;
 
     if let Ok(queues) = queues {
-        Ok(Json(serde_json::to_value(queues).unwrap_or_default()))
+        let mut value = serde_json::to_value(queues).unwrap_or_default();
+        if let Some(observability) = &server.broker_queue_observability
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert("broker_activity".into(), observability());
+        }
+        Ok(Json(value))
     } else if let Err(_err) = queues {
         tracing::error!("Error fetching queue debug info: {_err}");
         Err(StatusCode::INTERNAL_SERVER_ERROR)

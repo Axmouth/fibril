@@ -139,6 +139,50 @@ main {
     margin-right: auto;
 }
 
+.queue-table {
+  max-width: min(96rem, calc(100vw - 3rem));
+}
+
+.queue-group-note {
+  color: rgba(255, 255, 255, .58);
+  font-size: .72rem;
+  margin: .1rem auto .45rem;
+  max-width: min(96rem, calc(100vw - 3rem));
+}
+
+.queue-row-unloaded {
+  background: rgba(159, 89, 60, .12);
+  color: rgba(255, 255, 255, .68);
+}
+
+.queue-row-unloading {
+  background: rgba(246, 193, 119, .12);
+}
+
+.queue-state-pill {
+  background: rgba(255, 255, 255, .08);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 999px;
+  display: inline-block;
+  font-size: .62rem;
+  font-weight: 600;
+  line-height: 1rem;
+  padding: .05rem .45rem;
+  white-space: nowrap;
+}
+
+.queue-row-unloaded .queue-state-pill {
+  background: rgba(159, 89, 60, .18);
+  border-color: rgba(214, 124, 88, .32);
+  color: #f0c0a6;
+}
+
+.queue-row-unloading .queue-state-pill {
+  background: rgba(246, 193, 119, .16);
+  border-color: rgba(246, 193, 119, .34);
+  color: #ffe8a3;
+}
+
 .metric-table td:first-child {
   opacity: .75;
 }

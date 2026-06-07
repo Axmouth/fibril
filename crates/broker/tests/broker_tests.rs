@@ -373,6 +373,13 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
         attempt,
         QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
     );
+    let sparse = broker.sparse_queue_observability_snapshot();
+    assert_eq!(sparse.len(), 1);
+    assert_eq!(sparse[0].topic, "t");
+    assert!(sparse[0].idle_for_ms.is_some());
+    let cleanup = sparse[0].last_eviction_attempt.as_ref().unwrap();
+    assert_eq!(cleanup.kind, "storage");
+    assert_eq!(cleanup.outcome, "evicted");
 }
 
 #[tokio::test]

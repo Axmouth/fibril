@@ -112,6 +112,13 @@ async fn main() -> anyhow::Result<()> {
         connection_settings,
     );
 
+    let broker_observability = {
+        let broker = broker.clone();
+        Arc::new(move || {
+            serde_json::to_value(broker.sparse_queue_observability_snapshot()).unwrap_or_default()
+        })
+    };
+
     let admin = AdminServer::new(
         metrics.clone(),
         stroma_metrics,
@@ -133,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
             keratin_event_log_segment_max_bytes: config.storage.keratin.event_log.segment_max_bytes,
         }),
         Arc::new(engine.clone()),
+        Some(broker_observability),
         Some(runtime_settings),
     );
 

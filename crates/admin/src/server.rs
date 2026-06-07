@@ -25,6 +25,8 @@ use crate::{
 };
 use fibril_metrics::Metrics;
 
+pub type BrokerQueueObservability = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
+
 pub struct AdminConfig {
     // TODO: better type, parse earlier
     pub bind: String,
@@ -47,6 +49,7 @@ pub struct AdminServer {
     pub config: AdminConfig,
     pub startup_config: Option<StartupConfigSummary>,
     pub storage: Arc<dyn QueueEngine + Send + Sync>,
+    pub broker_queue_observability: Option<Arc<BrokerQueueObservability>>,
     pub runtime_settings: Option<Arc<RuntimeSettingsManager>>,
     pub sessions: AdminSessions,
 }
@@ -68,6 +71,7 @@ impl AdminServer {
         config: AdminConfig,
         startup_config: Option<StartupConfigSummary>,
         storage: Arc<dyn QueueEngine + Send + Sync>,
+        broker_queue_observability: Option<Arc<BrokerQueueObservability>>,
         runtime_settings: Option<Arc<RuntimeSettingsManager>>,
     ) -> Self {
         Self {
@@ -76,6 +80,7 @@ impl AdminServer {
             config,
             startup_config,
             storage,
+            broker_queue_observability,
             runtime_settings,
             sessions: AdminSessions::default(),
         }
@@ -459,6 +464,7 @@ mod tests {
                 keratin_event_log_segment_max_bytes: 16 * 1024 * 1024,
             }),
             Arc::new(engine),
+            None,
             Some(Arc::new(runtime_settings)),
         ))
     }
@@ -1332,6 +1338,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queues_debug_includes_broker_activity_when_available() {
+        let root = std::env::temp_dir().join(format!("fibril-admin-{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&root).unwrap();
+        let engine = StromaEngine::open(
+            &root,
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let server = Arc::new(AdminServer::new(
+            Metrics::new(60),
+            engine.metrics(),
+            AdminConfig {
+                bind: "127.0.0.1:0".into(),
+                auth: None,
+            },
+            None,
+            Arc::new(engine),
+            Some(Arc::new(|| {
+                json!([{
+                    "topic": "orders.created",
+                    "group": null,
+                    "active_publishers": 0,
+                    "active_subscribers": 0,
+                    "idle_since_ms": 10,
+                    "idle_for_ms": 5,
+                    "last_active_ms": 10,
+                    "last_eviction_attempt": {
+                        "attempted_at_ms": 15,
+                        "kind": "storage",
+                        "outcome": "evicted"
+                    }
+                }])
+            })),
+            None,
+        ));
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/queues_debug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["broker_activity"][0]["topic"], "orders.created");
+        assert_eq!(
+            body["broker_activity"][0]["last_eviction_attempt"]["outcome"],
+            "evicted"
+        );
+    }
+
+    #[tokio::test]
     async fn queue_dlq_put_requires_custom_target() {
         let server = test_server(RuntimeSettingsLocks::default()).await;
         let app = AdminServer::router(server);
@@ -1382,6 +1447,7 @@ mod tests {
             },
             None,
             Arc::new(engine.clone()),
+            None,
             None,
         ));
         let app = AdminServer::router(server);

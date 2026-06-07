@@ -25,6 +25,11 @@ The queues page lists known queues with ready, inflight, and settled offset
 information. Use **Inspect messages** from a queue row when you want to inspect
 that specific queue.
 
+For sparse workloads, the page also shows whether each queue is currently loaded
+in memory, only indexed on disk, or recently unloaded after being idle. It shows
+active publisher/subscriber counts, idle time when known, last used time for the
+current process, and the most recent idle-cleanup result or skip reason.
+
 The message inspection link starts near the queue's settled offset by default so
 you do not begin at offset `0` on large queues unless you choose to.
 

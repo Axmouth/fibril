@@ -15,9 +15,67 @@ function inspectHref(item) {
   return `/admin/messages?${params}`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function queueKey(item) {
+  return `${item.topic}\u0000${item.group || ""}`;
+}
+
+function formatDuration(ms) {
+  if (ms === null || ms === undefined) return "N/A";
+  if (ms < 1000) return `${ms}ms`;
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function formatTime(ms) {
+  if (!ms) return "N/A";
+  return new Date(ms).toLocaleString();
+}
+
+function humanizeSnake(value) {
+  return String(value || "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function cleanupOutcomeLabel(observation) {
+  if (!observation) return "N/A";
+  return `${humanizeSnake(observation.kind)}: ${humanizeSnake(observation.outcome)}`;
+}
+
+function loadStateLabel(item, activity) {
+  if (item.evicting) return "Unloading";
+  if (item.materialized) return "Loaded";
+  if (
+    activity?.last_eviction_attempt?.kind === "storage" &&
+    activity?.last_eviction_attempt?.outcome === "evicted"
+  ) return "Unloaded after idle";
+  if (item.exists_on_disk) return "Indexed on disk";
+  return "Not loaded";
+}
+
+function rowClass(item) {
+  if (item.evicting) return "queue-row queue-row-unloading";
+  if (!item.materialized) return "queue-row queue-row-unloaded";
+  return "queue-row";
+}
+
 async function refresh() {
   const data = await api('/admin/api/queues_debug');
   const container = document.getElementById("queues");
+  const activityByQueue = new Map((data.broker_activity || []).map(item => [queueKey(item), item]));
 
   const grouped = {};
   for (const item of data.queues || []) {
@@ -31,21 +89,39 @@ async function refresh() {
     .map(([group, items]) => {
       const rows = items
         .sort((a, b) => a.topic.localeCompare(b.topic))
-        .map(item => `
-          <tr>
-            <td>${item.topic}</td>
+        .map(item => {
+          const activity = activityByQueue.get(queueKey(item));
+          return `
+          <tr class="${rowClass(item)}">
+            <td>${escapeHtml(item.topic)}</td>
+            <td><span class="queue-state-pill">${escapeHtml(loadStateLabel(item, activity))}</span></td>
+            <td class="text-right">${activity?.active_publishers ?? 0}</td>
+            <td class="text-right">${activity?.active_subscribers ?? 0}</td>
+            <td class="text-right">${escapeHtml(formatDuration(activity?.idle_for_ms))}</td>
+            <td>${escapeHtml(formatTime(activity?.last_active_ms))}</td>
+            <td>${escapeHtml(cleanupOutcomeLabel(activity?.last_eviction_attempt))}</td>
             <td class="text-right">${item.state.ready_count}</td>
             <td class="text-right">${item.state.inflight_count}</td>
             <td class="text-right">${item.state.settled_until}</td>
             <td><a href="${inspectHref(item)}">Inspect messages</a></td>
           </tr>
-        `).join('');
+        `;
+        }).join('');
 
       return `
-        <h5 class="metrics-header" style="margin-top: 1rem;">Group: ${group}</h5>
-        <table class="table table-compact narrow metric-table">
+        <h5 class="metrics-header" style="margin-top: 1rem;">Group: ${escapeHtml(group)}</h5>
+        <p class="queue-group-note">
+          ${items.filter(item => item.materialized).length} loaded / ${items.length} indexed queue(s)
+        </p>
+        <table class="table table-compact narrow metric-table queue-table">
           <tr>
             <th>Topic</th>
+            <th>Memory state</th>
+            <th class="text-right">Publishers</th>
+            <th class="text-right">Subscribers</th>
+            <th class="text-right">Idle for</th>
+            <th>Last used</th>
+            <th>Last cleanup</th>
             <th class="text-right">Ready</th>
             <th class="text-right">In-flight</th>
             <th class="text-right">Settled until</th>

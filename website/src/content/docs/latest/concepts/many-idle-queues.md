@@ -78,6 +78,11 @@ For the full config reference, see [configuration](/latest/configuration/).
 
 Use conservative idle windows in real deployments. Very small values are useful in tests, but they can make a busy sparse workload repeatedly unload and reload the same queues.
 
+Use the admin queues page to distinguish loaded queues from queues that are only
+indexed on disk. The same page shows active publisher/subscriber counts, idle
+time for queues seen in the current process, and the last idle-cleanup result or
+skip reason.
+
 Enable publisher idle expiry when you have long-lived producer connections that only occasionally write to many different queues. Without it, a connection that has published to a queue can keep that queue active until the connection closes.
 
 Treat idle cleanup as resource management, not as a correctness boundary. It reduces memory use for quiet queues; it does not change retention, acknowledgement semantics, retry policy, or dead-lettering.

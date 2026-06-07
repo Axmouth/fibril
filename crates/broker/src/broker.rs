@@ -362,6 +362,7 @@ pub struct QueueActivitySnapshot {
     pub active_publishers: usize,
     pub active_subscribers: usize,
     pub idle_since_ms: Option<u64>,
+    pub last_active_ms: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -369,6 +370,7 @@ struct QueueActivityState {
     active_publishers: usize,
     active_subscribers: usize,
     idle_since_ms: Option<u64>,
+    last_active_ms: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -383,6 +385,7 @@ impl QueueActivity {
             active_publishers: state.active_publishers,
             active_subscribers: state.active_subscribers,
             idle_since_ms: state.idle_since_ms,
+            last_active_ms: state.last_active_ms,
         }
     }
 
@@ -390,6 +393,7 @@ impl QueueActivity {
         let mut state = self.state.lock().expect("queue activity lock poisoned");
         state.active_publishers += 1;
         state.idle_since_ms = None;
+        state.last_active_ms = Some(unix_millis());
         drop(state);
 
         PublisherLease {
@@ -408,6 +412,7 @@ impl QueueActivity {
         let mut state = self.state.lock().expect("queue activity lock poisoned");
         state.active_subscribers += 1;
         state.idle_since_ms = None;
+        state.last_active_ms = Some(unix_millis());
         drop(state);
 
         ConsumerLease {
@@ -424,8 +429,71 @@ impl QueueActivity {
 
     fn mark_idle_if_empty(state: &mut QueueActivityState) {
         if state.active_publishers == 0 && state.active_subscribers == 0 {
-            state.idle_since_ms.get_or_insert_with(unix_millis);
+            let now = unix_millis();
+            state.idle_since_ms.get_or_insert(now);
+            state.last_active_ms = Some(now);
         }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QueueEvictionObservation {
+    pub attempted_at_ms: u64,
+    #[serde(skip_serializing)]
+    pub outcome: QueueEvictionAttempt,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SparseQueueEvictionObservation {
+    pub attempted_at_ms: u64,
+    pub kind: &'static str,
+    pub outcome: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SparseQueueObservability {
+    pub topic: String,
+    pub group: Option<String>,
+    pub active_publishers: usize,
+    pub active_subscribers: usize,
+    pub idle_since_ms: Option<u64>,
+    pub idle_for_ms: Option<u64>,
+    pub last_active_ms: Option<u64>,
+    pub last_eviction_attempt: Option<SparseQueueEvictionObservation>,
+}
+
+fn eviction_attempt_summary(
+    observation: &QueueEvictionObservation,
+) -> SparseQueueEvictionObservation {
+    let (kind, outcome) = match observation.outcome {
+        QueueEvictionAttempt::Skipped(skip) => ("skipped", eviction_skip_label(skip)),
+        QueueEvictionAttempt::Storage(outcome) => ("storage", evict_outcome_label(outcome)),
+    };
+    SparseQueueEvictionObservation {
+        attempted_at_ms: observation.attempted_at_ms,
+        kind,
+        outcome: outcome.into(),
+    }
+}
+
+fn eviction_skip_label(skip: QueueEvictionSkip) -> &'static str {
+    match skip {
+        QueueEvictionSkip::NotTracked => "not_tracked",
+        QueueEvictionSkip::Active => "active",
+        QueueEvictionSkip::NotIdleEnough => "not_idle_enough",
+        QueueEvictionSkip::PendingSettles => "pending_settles",
+        QueueEvictionSkip::HasBrokerDeliveries => "has_broker_deliveries",
+        QueueEvictionSkip::HasInflight => "has_inflight",
+    }
+}
+
+fn evict_outcome_label(outcome: EvictOutcome) -> &'static str {
+    match outcome {
+        EvictOutcome::Evicted => "evicted",
+        EvictOutcome::NotPresent => "not_present",
+        EvictOutcome::NotMaterialized => "not_materialized",
+        EvictOutcome::HasInflight => "has_inflight",
+        EvictOutcome::RaceLost => "race_lost",
     }
 }
 
@@ -540,6 +608,7 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     queues: DashMap<QueueKey, Arc<QueueLoopState>>,
     records_by_tags: DashMap<DeliveryTag, TagRecord>,
     tags_by_key_offset: DashMap<(QueueKey, Offset), DeliveryTag>,
+    queue_eviction_observations: DashMap<QueueKey, QueueEvictionObservation>,
 
     pending_settles: Arc<AtomicUsize>,
     settle_drained: Arc<Notify>,
@@ -589,6 +658,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             queues: DashMap::new(),
             records_by_tags: DashMap::new(),
             tags_by_key_offset: DashMap::new(),
+            queue_eviction_observations: DashMap::new(),
             pending_settles: Arc::new(AtomicUsize::new(0)),
             settle_drained: Arc::new(Notify::new()),
             settings_changed: Arc::new(Notify::new()),
@@ -879,6 +949,49 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.engine.is_materialized(topic, 0, group)
     }
 
+    fn record_queue_eviction_attempt(
+        &self,
+        key: &QueueKey,
+        outcome: QueueEvictionAttempt,
+    ) -> QueueEvictionAttempt {
+        self.queue_eviction_observations.insert(
+            key.clone(),
+            QueueEvictionObservation {
+                attempted_at_ms: unix_millis(),
+                outcome,
+            },
+        );
+        outcome
+    }
+
+    pub fn sparse_queue_observability_snapshot(&self) -> Vec<SparseQueueObservability> {
+        let now = unix_millis();
+        let mut queues: Vec<_> = self
+            .queues
+            .iter()
+            .map(|entry| {
+                let key = entry.key();
+                let activity = entry.value().activity.snapshot();
+                let last_eviction_attempt = self
+                    .queue_eviction_observations
+                    .get(key)
+                    .map(|entry| eviction_attempt_summary(entry.value()));
+                SparseQueueObservability {
+                    topic: key.tp.to_string(),
+                    group: key.group.as_ref().map(ToString::to_string),
+                    active_publishers: activity.active_publishers,
+                    active_subscribers: activity.active_subscribers,
+                    idle_since_ms: activity.idle_since_ms,
+                    idle_for_ms: activity.idle_since_ms.map(|idle| now.saturating_sub(idle)),
+                    last_active_ms: activity.last_active_ms,
+                    last_eviction_attempt,
+                }
+            })
+            .collect();
+        queues.sort_by(|a, b| a.group.cmp(&b.group).then_with(|| a.topic.cmp(&b.topic)));
+        queues
+    }
+
     pub async fn try_evict_inactive_queue(
         &self,
         topic: &str,
@@ -892,26 +1005,37 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         };
 
         let Some(qs) = self.queues.get(&key).map(|entry| entry.value().clone()) else {
-            return Ok(QueueEvictionAttempt::Skipped(QueueEvictionSkip::NotTracked));
+            return Ok(self.record_queue_eviction_attempt(
+                &key,
+                QueueEvictionAttempt::Skipped(QueueEvictionSkip::NotTracked),
+            ));
         };
 
         let activity = qs.activity.snapshot();
         if activity.active_publishers > 0 || activity.active_subscribers > 0 {
-            return Ok(QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active));
+            return Ok(self.record_queue_eviction_attempt(
+                &key,
+                QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active),
+            ));
         }
 
         let Some(idle_since_ms) = activity.idle_since_ms else {
-            return Ok(QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active));
+            return Ok(self.record_queue_eviction_attempt(
+                &key,
+                QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active),
+            ));
         };
         if unix_millis().saturating_sub(idle_since_ms) < idle_for_ms {
-            return Ok(QueueEvictionAttempt::Skipped(
-                QueueEvictionSkip::NotIdleEnough,
+            return Ok(self.record_queue_eviction_attempt(
+                &key,
+                QueueEvictionAttempt::Skipped(QueueEvictionSkip::NotIdleEnough),
             ));
         }
 
         if self.pending_settles.load(Ordering::Acquire) > 0 {
-            return Ok(QueueEvictionAttempt::Skipped(
-                QueueEvictionSkip::PendingSettles,
+            return Ok(self.record_queue_eviction_attempt(
+                &key,
+                QueueEvictionAttempt::Skipped(QueueEvictionSkip::PendingSettles),
             ));
         }
 
@@ -920,8 +1044,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .iter()
             .any(|entry| entry.value().key == key)
         {
-            return Ok(QueueEvictionAttempt::Skipped(
-                QueueEvictionSkip::HasBrokerDeliveries,
+            return Ok(self.record_queue_eviction_attempt(
+                &key,
+                QueueEvictionAttempt::Skipped(QueueEvictionSkip::HasBrokerDeliveries),
             ));
         }
 
@@ -930,8 +1055,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .has_inflight(&key.tp, key.part, key.group.as_deref())
             .await?
         {
-            return Ok(QueueEvictionAttempt::Skipped(
-                QueueEvictionSkip::HasInflight,
+            return Ok(self.record_queue_eviction_attempt(
+                &key,
+                QueueEvictionAttempt::Skipped(QueueEvictionSkip::HasInflight),
             ));
         }
 
@@ -939,7 +1065,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .engine
             .unmaterialize(&key.tp, key.part, key.group.as_deref())
             .await?;
-        Ok(QueueEvictionAttempt::Storage(outcome))
+        Ok(self.record_queue_eviction_attempt(&key, QueueEvictionAttempt::Storage(outcome)))
     }
 
     pub async fn evict_inactive_queues(
