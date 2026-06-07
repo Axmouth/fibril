@@ -14,7 +14,7 @@ Fibril is pre-alpha infrastructure. This table distinguishes the working baselin
 | Backpressure | Available | Pull-based delivery and bounded prefetch |
 | Delayed publish | Available | Broker/Stroma support exists; Rust and TypeScript clients expose delayed publish methods |
 | Delayed retry | Partial | Stroma state supports delayed retry; public client/broker path is not wired end to end |
-| Dead lettering | Partial | Global and per-queue policy are admin/API configurable; replay tooling is still early |
+| Dead lettering | Partial | Global target is admin/API configurable; per-queue policy is client/API configurable; replay tooling is still early |
 | TypeScript client | Early | Lives under `clients/typescript` |
 | Replication | Planned | Design work in progress |
 | Clustering | Planned | Not implemented |

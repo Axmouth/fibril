@@ -20,6 +20,8 @@ import {
   type AckMsg,
   type ContentType,
   type AuthMsg,
+  type DeclareQueueMsg,
+  type DeclareQueueOkMsg,
   type DeliverMsg,
   type DeliveryTag,
   type ErrorMsg,
@@ -70,6 +72,7 @@ export interface InternalInflight extends InternalDelivered {
 // Outstanding request waiters, keyed by request_id.
 type Waiter =
   | { kind: "publish"; deferred: Deferred<bigint> }
+  | { kind: "declareQueue"; deferred: Deferred<void> }
   | { kind: "subscribeManual"; deferred: Deferred<BoundedQueue<InternalInflight>> }
   | { kind: "subscribeAuto"; deferred: Deferred<BoundedQueue<InternalDelivered>> };
 
@@ -79,6 +82,7 @@ export type Command =
   | { type: "publishConfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; reply: Deferred<bigint> }
   | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
   | { type: "publishDelayedConfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
+  | { type: "declareQueue"; req: DeclareQueueMsg; reply: Deferred<void> }
   | { type: "subscribe"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalInflight>> }
   | { type: "subscribeAutoAck"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalDelivered>> }
   | { type: "ack"; sub_id: bigint; tag: DeliveryTag; request_id: bigint; reply: Deferred<void> }
@@ -409,6 +413,14 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         }
         return;
       }
+      case "declareQueue": {
+        const reqId = nextReqId();
+        waiters.set(reqId, { kind: "declareQueue", deferred: cmd.reply });
+        if (!(await sendOrDie(buildFrame(Op.DeclareQueue, reqId, cmd.req)))) {
+          waiters.delete(reqId);
+        }
+        return;
+      }
       case "ack": {
         const sub = subs.get(cmd.sub_id);
         if (!sub) {
@@ -490,6 +502,16 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           w.deferred.resolve(queue);
         } else {
           // wrong kind; nothing to do
+        }
+        return;
+      }
+
+      case Op.DeclareQueueOk: {
+        decodeFrameBody<DeclareQueueOkMsg>(frame);
+        const w = waiters.get(frame.requestId);
+        if (w?.kind === "declareQueue") {
+          waiters.delete(frame.requestId);
+          w.deferred.resolve();
         }
         return;
       }
@@ -608,6 +630,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       case "publishDelayedConfirmed":
         cmd.reply.reject(cleanupError);
         break;
+      case "declareQueue":
       case "subscribe":
       case "subscribeAutoAck":
         cmd.reply.reject(cleanupError);
@@ -634,6 +657,9 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
 function failWaiter(w: Waiter, err: FibrilError): void {
   switch (w.kind) {
     case "publish":
+      w.deferred.reject(err);
+      return;
+    case "declareQueue":
       w.deferred.reject(err);
       return;
     case "subscribeManual":

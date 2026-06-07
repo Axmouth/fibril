@@ -37,6 +37,9 @@ export enum Op {
   Ping = 50,
   Pong = 51,
 
+  DeclareQueue = 60,
+  DeclareQueueOk = 61,
+
   Error = 255,
 }
 
@@ -102,6 +105,22 @@ export interface PublishDelayedMsg extends PublishMsg {
 /** Publish confirmation frame body. */
 export interface PublishOkMsg {
   offset: bigint;
+}
+
+export type QueueDlqPolicy =
+  | { kind: "discard" }
+  | { kind: "global" }
+  | { kind: "custom"; topic: string; group: string | null };
+
+export interface DeclareQueueMsg {
+  topic: string;
+  group: string | null;
+  dlq_policy: QueueDlqPolicy | null;
+  dlq_max_retries: number | null;
+}
+
+export interface DeclareQueueOkMsg {
+  status: string;
 }
 
 /** Subscribe frame body. */

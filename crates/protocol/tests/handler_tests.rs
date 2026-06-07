@@ -3,14 +3,12 @@ use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
 use bytes::Bytes;
 use fibril_broker::{
     broker::{Broker, BrokerConfig, QueueEvictionAttempt},
-    queue_engine::{
-        DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ, QueueEngine, StromaEngine,
-    },
+    queue_engine::{EvictOutcome, GlobalDLQ, QueueEngine, StromaEngine},
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
-    ContentType, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed,
-    Subscribe,
+    ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish,
+    PublishDelayed, QueueDlqPolicy, Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
@@ -449,18 +447,6 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
         )
         .await
         .unwrap();
-    engine
-        .declare_queue(
-            "source",
-            0,
-            None,
-            DeclareMeta {
-                dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
-                dlq_max_retries: Some(0),
-            },
-        )
-        .await
-        .unwrap();
     let broker = Broker::new(engine, BrokerConfig::default(), None);
     let (mut framed, server_task, _dir, _broker) =
         open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
@@ -469,8 +455,29 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
     framed
         .send(
             try_encode(
-                Op::Subscribe,
+                Op::DeclareQueue,
                 2,
+                &DeclareQueue {
+                    topic: "source".into(),
+                    group: None,
+                    dlq_policy: Some(QueueDlqPolicy::Global),
+                    dlq_max_retries: Some(0),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recv_frame(&mut framed).await.opcode,
+        Op::DeclareQueueOk as u16
+    );
+
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                3,
                 &Subscribe {
                     topic: "source".into(),
                     group: None,
@@ -488,7 +495,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
         .send(
             try_encode(
                 Op::Subscribe,
-                3,
+                4,
                 &Subscribe {
                     topic: "_dlq.source".into(),
                     group: None,
@@ -506,7 +513,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
         .send(
             try_encode(
                 Op::Publish,
-                4,
+                5,
                 &Publish {
                     topic: "source".into(),
                     partition: 0,
@@ -530,7 +537,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
         .send(
             try_encode(
                 Op::Nack,
-                5,
+                6,
                 &Nack {
                     topic: "source".into(),
                     group: None,

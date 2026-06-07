@@ -12,12 +12,13 @@ import {
   COMPLIANCE_STRING,
   Op,
   PROTOCOL_V1,
+  type DeclareQueueMsg,
   type Hello,
   type PublishDelayedMsg,
   type PublishMsg,
   type SubscribeMsg,
 } from "../src/protocol.js";
-import { Client, ClientOptions } from "../src/client.js";
+import { Client, ClientOptions, QueueConfig } from "../src/client.js";
 import { NewMessage } from "../src/message.js";
 
 /**
@@ -143,6 +144,51 @@ test("publish confirmation handle can be awaited later", async () => {
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(resolved, false);
     assert.equal(await confirmed, 8n);
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("client declares queue policy", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let declare: DeclareQueueMsg | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(
+          s,
+          buildFrame(Op.HelloOk, f.requestId, {
+            protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
+            server_name: "fake",
+            compliance: COMPLIANCE_STRING,
+          }),
+        );
+      } else if (f.opcode === Op.DeclareQueue) {
+        declare = decodeFrameBody<DeclareQueueMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.DeclareQueueOk, f.requestId, { status: "stored" }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    await client.declareQueue(
+      new QueueConfig("jobs")
+        .group("workers")
+        .customDeadLetterQueue("_dlq.jobs")
+        .maxRetries(3),
+    );
+
+    assert.deepEqual(declare, {
+      topic: "jobs",
+      group: "workers",
+      dlq_policy: { kind: "custom", topic: "_dlq.jobs", group: null },
+      dlq_max_retries: 3,
+    });
     await client.shutdown();
   } finally {
     await broker.stop();

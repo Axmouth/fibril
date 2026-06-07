@@ -178,8 +178,6 @@ await publisher.publish(NewMessage.raw(new Uint8Array([1, 2, 3])));
 
 Fibril reserves `fibril.*` and `stroma.*` headers for system metadata. User code should not set headers with those prefixes. See [metadata policy](/latest/development/metadata-policy/) for the development note.
 
-Dead-letter policy is configured through the admin UI/API rather than the Rust or TypeScript client APIs today. Client code should publish, consume, and settle messages; operators configure where exhausted messages go.
-
 ## Manual Acknowledgements
 
 Manual acknowledgement is the primary processing model. Messages are leased while inflight. Consumers settle each message explicitly.
@@ -238,9 +236,12 @@ for await (const msg of sub) {
 
 ## Dead Letter Workflow
 
-Dead-letter routing is configured by an operator through the admin UI/API. Client code does not declare DLQ policy directly; it publishes and settles messages normally.
+Dead-letter routing has two parts:
 
-For example, configure a global DLQ target:
+- Operators configure the global DLQ target through the admin UI/API.
+- Applications may declare per-queue retry and DLQ policy through the client.
+
+For example, first configure a global DLQ target:
 
 ```http
 PUT /admin/api/global-dlq
@@ -258,19 +259,38 @@ PUT /admin/api/global-dlq
 
 Then configure a source queue to use that global target after retries are exhausted:
 
-```http
-PUT /admin/api/queue-dlq
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+use fibril_client::QueueConfig;
+
+client
+    .declare_queue(
+        QueueConfig::new("email.send")?
+            .group("workers")?
+            .use_global_dead_letter_queue()
+            .max_retries(3),
+    )
+    .await?;
 ```
 
-```json
-{
-  "tp": "email.send",
-  "group": "workers",
-  "policy": "global",
-  "target": null,
-  "max_retries": 3
-}
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+import { QueueConfig } from "@fibril/client";
+
+await client.declareQueue(
+  new QueueConfig("email.send")
+    .group("workers")
+    .useGlobalDeadLetterQueue()
+    .maxRetries(3),
+);
 ```
+
+  </TabItem>
+</Tabs>
 
 Application clients keep using normal publish/consume code:
 

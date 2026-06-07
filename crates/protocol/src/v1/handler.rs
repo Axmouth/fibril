@@ -20,7 +20,10 @@ use fibril_broker::{
         Broker, BrokerError, ConsumerConfig, ConsumerHandle, ConsumerLease, PublisherHandle,
         SettleRequest, SettleType,
     },
-    queue_engine::{MessageContentType, StromaEngine},
+    queue_engine::{
+        DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, MessageContentType, QueueEngine,
+        StromaEngine, StromaError,
+    },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_storage::{Group, Topic};
@@ -77,6 +80,29 @@ fn normalize_content_type(
         .cloned();
     let header = header_key.and_then(|key| headers.remove(&key));
     explicit.or_else(|| header.map(ContentType::from_header))
+}
+
+async fn to_declare_meta(declare: &DeclareQueue) -> Result<DeclareMeta, String> {
+    let dlq_policy = match &declare.dlq_policy {
+        None => None,
+        Some(QueueDlqPolicy::Discard) => Some(DLQDiscardPolicyWire::Discard),
+        Some(QueueDlqPolicy::Global) => Some(DLQDiscardPolicyWire::GlobalDQL),
+        Some(QueueDlqPolicy::Custom { topic, group }) => {
+            let target = GlobalDLQ::new(topic, 0, group.as_deref())
+                .await
+                .map_err(|err| err.to_string())?;
+            Some(DLQDiscardPolicyWire::CustomDQL {
+                tp: target.tp.into_boxed_str(),
+                part: target.part,
+                group: target.group.map(String::into_boxed_str),
+            })
+        }
+    };
+
+    Ok(DeclareMeta {
+        dlq_policy,
+        dlq_max_retries: declare.dlq_max_retries,
+    })
 }
 
 async fn send_error_response(
@@ -832,6 +858,62 @@ pub async fn handle_connection(
                         },
                     )?)
                     .await?;
+            }
+
+            // -------- DECLARE QUEUE -----------------------------------------
+            x if x == Op::DeclareQueue as u16 => {
+                let declare: DeclareQueue =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, DeclareQueue);
+                let meta = match to_declare_meta(&declare).await {
+                    Ok(meta) => meta,
+                    Err(message) => {
+                        let _ = send_error_response(
+                            &frame_tx_high_prio,
+                            frame.request_id,
+                            400,
+                            &message,
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
+                match broker
+                    .engine()
+                    .declare_queue(&declare.topic, 0, declare.group.as_deref(), meta)
+                    .await
+                {
+                    Ok(()) => {
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::DeclareQueueOk,
+                                frame.request_id,
+                                &DeclareQueueOk {
+                                    status: "stored".into(),
+                                },
+                            )?)
+                            .await?;
+                    }
+                    Err(err @ StromaError::InvalidArgument(_)) => {
+                        let _ = send_error_response(
+                            &frame_tx_high_prio,
+                            frame.request_id,
+                            400,
+                            &err.to_string(),
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        tracing::error!("Declare queue failed: {err}");
+                        let _ = send_error_response(
+                            &frame_tx_high_prio,
+                            frame.request_id,
+                            500,
+                            "declare queue failed",
+                        )
+                        .await;
+                    }
+                }
             }
 
             // -------- ACK ----------------------------------------------------

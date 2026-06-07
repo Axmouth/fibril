@@ -92,5 +92,5 @@ an entry in the custom header map.
 - No write timeouts; relies on heartbeat (3× interval) to detect dead
   half-open connections.
 - Delayed retry (`retryAfter`) is not exposed yet; use immediate `retry()`.
-- Dead-letter policy is configured through the admin UI/API for now. The
-  TypeScript client does not declare queue DLQ policy directly.
+- Global DLQ target configuration is still admin UI/API only. Queue retry/DLQ
+  policy can be declared with `QueueConfig`.

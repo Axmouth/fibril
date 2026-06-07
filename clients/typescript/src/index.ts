@@ -1,4 +1,9 @@
-export { Client, ClientOptions, type ClientOptionsInit } from "./client.js";
+export {
+  Client,
+  ClientOptions,
+  QueueConfig,
+  type ClientOptionsInit,
+} from "./client.js";
 export { NewMessage, type HeadersInit, type Publishable } from "./message.js";
 export { Publisher, PublishConfirmation, type DelayInput } from "./publisher.js";
 export {

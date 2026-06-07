@@ -49,6 +49,9 @@ pub enum Op {
     Ping = 50,
     Pong = 51,
 
+    DeclareQueue = 60,
+    DeclareQueueOk = 61,
+
     Error = 255,
 }
 
@@ -134,6 +137,30 @@ pub struct PublishDelayed {
 pub struct PublishOk {
     // TODO: use delivery tag?
     pub offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QueueDlqPolicy {
+    Discard,
+    Global,
+    Custom {
+        topic: String,
+        group: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeclareQueue {
+    pub topic: String,
+    pub group: Option<String>,
+    pub dlq_policy: Option<QueueDlqPolicy>,
+    pub dlq_max_retries: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeclareQueueOk {
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

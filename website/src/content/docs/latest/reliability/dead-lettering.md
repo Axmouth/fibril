@@ -7,10 +7,10 @@ Dead lettering gives failed messages somewhere explicit to go after retry handli
 
 ## What You Can Configure
 
-Fibril currently exposes two dead-lettering controls through the admin UI and admin API:
+Fibril currently exposes two dead-lettering controls:
 
-- a global dead-letter queue target
-- a per-queue policy for what should happen after retries are exhausted
+- a global dead-letter queue target, configured by operators through the admin UI/API
+- a per-queue policy for what should happen after retries are exhausted, declared by applications through the client or configured through the admin API
 
 The global target is the fallback destination for queues configured to use the global DLQ policy. It is a live storage-owned runtime setting: it is persisted, survives restart, and is not controlled by the startup TOML/env/CLI config.
 
@@ -21,6 +21,38 @@ Per-queue policy can:
 - send failed messages to a custom queue-specific DLQ target
 
 You can also set the queue retry limit when declaring the queue policy. Leave it blank in the admin UI when you only want to change the DLQ routing policy and keep the queue's current retry setting.
+
+## Client Setup
+
+Applications can declare retry and dead-letter policy when they start. This is usually the clearest place to put per-queue behavior, because the code that publishes or consumes a queue also documents what should happen when processing keeps failing.
+
+Rust:
+
+```rust
+use fibril_client::QueueConfig;
+
+client
+    .declare_queue(
+        QueueConfig::new("orders.created")?
+            .group("workers")?
+            .use_global_dead_letter_queue()
+            .max_retries(3),
+    )
+    .await?;
+```
+
+TypeScript:
+
+```ts
+import { QueueConfig } from "@fibril/client";
+
+await client.declareQueue(
+  new QueueConfig("orders.created")
+    .group("workers")
+    .useGlobalDeadLetterQueue()
+    .maxRetries(3),
+);
+```
 
 ## Admin API
 
@@ -121,7 +153,7 @@ Dead-letter routing is usable, but some surrounding workflow is still intentiona
 
 Still in progress:
 
-- friendlier client and CLI helpers for declaring DLQ policy
+- CLI helpers for declaring DLQ policy
 - replay tooling and message inspection for DLQ queues
 - stable system metadata for recording where a dead-lettered message came from
 - broader end-to-end coverage around the full public workflow

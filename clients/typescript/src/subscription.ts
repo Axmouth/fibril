@@ -398,7 +398,7 @@ export class SubscriptionBuilder {
   /**
    * Set the queue group.
    *
-   * A group is part of the queue identity, alongside topic and partition.
+   * A group is an optional queue namespace under the topic.
    */
   group(group: string): this {
     this.#group = group;

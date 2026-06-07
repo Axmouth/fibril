@@ -8,8 +8,8 @@ Fibril is still early. The near-term roadmap is about making the existing semant
 ## Near term
 
 - Wire `msg.retry_after(..)` through client, protocol, broker, and Stroma.
-- Expose dead-letter policy configuration through the broker.
-- Add broker-level tests for DLQ and delayed retry public paths.
+- Add CLI helpers and broader tests for dead-letter policy workflows.
+- Add broker-level tests for delayed retry public paths.
 - Make server configuration production-friendly instead of hard-coded development defaults.
 - Keep improving memory behavior for sparse workloads with many rarely used queues.
 - Improve TCP protocol ergonomics and error behavior.

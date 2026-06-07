@@ -1,9 +1,10 @@
 import { connect as netConnect, type Socket } from "node:net";
 import { Engine } from "./engine.js";
 import { DisconnectionError, FibrilError } from "./errors.js";
+import { deferred } from "./internal/deferred.js";
 import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
-import type { AuthMsg } from "./protocol.js";
+import type { AuthMsg, DeclareQueueMsg, QueueDlqPolicy } from "./protocol.js";
 
 /**
  * Options used during client startup and protocol handshake.
@@ -83,6 +84,85 @@ export class ClientOptions {
    */
   connect(address: string | { host: string; port: number }): Promise<Client> {
     return Client.connect(address, this);
+  }
+}
+
+/**
+ * Queue declaration for retry and dead-letter behavior.
+ *
+ * Declarations apply to a topic plus optional group. Partition selection is
+ * internal.
+ */
+export class QueueConfig {
+  readonly topic: string;
+  readonly groupName: string | null;
+  readonly dlqPolicy: QueueDlqPolicy | null;
+  readonly dlqMaxRetries: number | null;
+
+  constructor(
+    topic: string,
+    groupName: string | null = null,
+    dlqPolicy: QueueDlqPolicy | null = null,
+    dlqMaxRetries: number | null = null,
+  ) {
+    this.topic = topic;
+    this.groupName = groupName;
+    this.dlqPolicy = dlqPolicy;
+    this.dlqMaxRetries = dlqMaxRetries;
+  }
+
+  group(group: string): QueueConfig {
+    return new QueueConfig(
+      this.topic,
+      group,
+      this.dlqPolicy,
+      this.dlqMaxRetries,
+    );
+  }
+
+  maxRetries(maxRetries: number): QueueConfig {
+    return new QueueConfig(
+      this.topic,
+      this.groupName,
+      this.dlqPolicy,
+      maxRetries,
+    );
+  }
+
+  discardDeadLetters(): QueueConfig {
+    return new QueueConfig(
+      this.topic,
+      this.groupName,
+      { kind: "discard" },
+      this.dlqMaxRetries,
+    );
+  }
+
+  useGlobalDeadLetterQueue(): QueueConfig {
+    return new QueueConfig(
+      this.topic,
+      this.groupName,
+      { kind: "global" },
+      this.dlqMaxRetries,
+    );
+  }
+
+  customDeadLetterQueue(topic: string, group: string | null = null): QueueConfig {
+    return new QueueConfig(
+      this.topic,
+      this.groupName,
+      { kind: "custom", topic, group },
+      this.dlqMaxRetries,
+    );
+  }
+
+  toWire(): DeclareQueueMsg {
+    return {
+      topic: this.topic,
+      group: this.groupName,
+      dlq_policy: this.dlqPolicy,
+      dlq_max_retries: this.dlqMaxRetries,
+    };
   }
 }
 
@@ -214,7 +294,7 @@ export class Client {
   /**
    * Get a publisher handle for a grouped queue.
    *
-   * Grouping is part of the queue identity, alongside topic and partition.
+   * Grouping writes to an optional queue namespace under the topic.
    */
   publisherGrouped(topic: string, group: string): Publisher {
     return new Publisher(this.#engine, topic, group);
@@ -228,6 +308,19 @@ export class Client {
    */
   subscribe(topic: string): SubscriptionBuilder {
     return new SubscriptionBuilder(this, topic);
+  }
+
+  /**
+   * Declare queue retry and dead-letter behavior.
+   */
+  async declareQueue(config: QueueConfig): Promise<void> {
+    const reply = deferred<void>();
+    await this.#engine.submit({
+      type: "declareQueue",
+      req: config.toWire(),
+      reply,
+    });
+    await reply.promise;
   }
 
   /**

@@ -712,8 +712,103 @@ fn decode_protocol<T: for<'de> serde::Deserialize<'de>>(frame: &Frame) -> Fibril
 
 enum Waiter {
     Publish(oneshot::Sender<FibrilResult<u64>>),
+    DeclareQueue(oneshot::Sender<FibrilResult<()>>),
     SubscribeManual(oneshot::Sender<FibrilResult<AckableSubChannel>>),
     SubscribeAuto(oneshot::Sender<FibrilResult<AutoAckedSubChannel>>),
+}
+
+#[derive(Debug, Clone)]
+pub enum DeadLetterPolicy {
+    Discard,
+    Global,
+    Custom {
+        topic: TopicName,
+        group: Option<GroupName>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct QueueConfig {
+    topic: TopicName,
+    group: Option<GroupName>,
+    dlq_policy: Option<DeadLetterPolicy>,
+    dlq_max_retries: Option<u32>,
+}
+
+impl QueueConfig {
+    /// Start a queue declaration for a topic.
+    pub fn new(topic: impl AsRef<str>) -> FibrilResult<Self> {
+        Ok(Self {
+            topic: TopicName::parse(topic)?,
+            group: None,
+            dlq_policy: None,
+            dlq_max_retries: None,
+        })
+    }
+
+    /// Declare behavior for a grouped queue namespace.
+    pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
+        self.group = Some(GroupName::parse(group)?);
+        Ok(self)
+    }
+
+    /// Set the number of retries before the queue's dead-letter policy applies.
+    pub fn max_retries(mut self, max_retries: u32) -> Self {
+        self.dlq_max_retries = Some(max_retries);
+        self
+    }
+
+    /// Drop messages after retries are exhausted.
+    pub fn discard_dead_letters(mut self) -> Self {
+        self.dlq_policy = Some(DeadLetterPolicy::Discard);
+        self
+    }
+
+    /// Send messages to the configured global dead-letter queue after retries are exhausted.
+    pub fn use_global_dead_letter_queue(mut self) -> Self {
+        self.dlq_policy = Some(DeadLetterPolicy::Global);
+        self
+    }
+
+    /// Send messages to a custom ungrouped dead-letter queue after retries are exhausted.
+    pub fn custom_dead_letter_queue(mut self, topic: impl AsRef<str>) -> FibrilResult<Self> {
+        self.dlq_policy = Some(DeadLetterPolicy::Custom {
+            topic: TopicName::parse(topic)?,
+            group: None,
+        });
+        Ok(self)
+    }
+
+    /// Send messages to a custom grouped dead-letter queue after retries are exhausted.
+    pub fn custom_dead_letter_queue_grouped(
+        mut self,
+        topic: impl AsRef<str>,
+        group: impl AsRef<str>,
+    ) -> FibrilResult<Self> {
+        self.dlq_policy = Some(DeadLetterPolicy::Custom {
+            topic: TopicName::parse(topic)?,
+            group: Some(GroupName::parse(group)?),
+        });
+        Ok(self)
+    }
+
+    fn into_wire(self) -> DeclareQueue {
+        let dlq_policy = self.dlq_policy.map(|policy| match policy {
+            DeadLetterPolicy::Discard => QueueDlqPolicy::Discard,
+            DeadLetterPolicy::Global => QueueDlqPolicy::Global,
+            DeadLetterPolicy::Custom { topic, group } => QueueDlqPolicy::Custom {
+                topic: topic.into_string(),
+                group: group.map(GroupName::into_string),
+            },
+        });
+
+        DeclareQueue {
+            topic: self.topic.into_string(),
+            group: self.group.map(GroupName::into_string),
+            dlq_policy,
+            dlq_max_retries: self.dlq_max_retries,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -747,7 +842,7 @@ pub struct SubscriptionBuilder<'a> {
 impl<'a> SubscriptionBuilder<'a> {
     /// Set the queue group.
     ///
-    /// A group is part of the queue identity, alongside topic and partition.
+    /// A group is an optional queue namespace under the topic.
     pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
         self.group = Some(GroupName::parse(group)?);
         Ok(self)
@@ -887,7 +982,7 @@ impl Client {
 
     /// Create a publisher for a grouped queue.
     ///
-    /// Grouping is part of the queue identity, alongside topic and partition.
+    /// Grouping writes to an optional queue namespace under the topic.
     #[tracing::instrument(fields(topic = ?topic, group = ?group))]
     pub fn publisher_grouped(
         &self,
@@ -912,6 +1007,15 @@ impl Client {
             group: None,
             prefetch: 1, // sensible default
         })
+    }
+
+    /// Declare queue behavior such as retry and dead-letter policy.
+    ///
+    /// Queue declarations apply to the topic plus optional group. Partition
+    /// selection is internal.
+    #[tracing::instrument(skip(self), fields(topic = %config.topic, group = ?config.group))]
+    pub async fn declare_queue(&self, config: QueueConfig) -> FibrilResult<()> {
+        self.engine.declare_queue(config.into_wire()).await
     }
 
     /// Gracefully shut down the client.
@@ -1128,6 +1232,10 @@ enum Command {
     SubscribeAutoAcked {
         req: Subscribe,
         reply: oneshot::Sender<FibrilResult<AutoAckedSubChannel>>,
+    },
+    DeclareQueue {
+        req: DeclareQueue,
+        reply: oneshot::Sender<FibrilResult<()>>,
     },
     Ack {
         sub_id: u64,
@@ -1405,6 +1513,11 @@ where
                         waiters.insert(req_id, Waiter::SubscribeAuto(reply));
                         send_or_die!(framed, Op::Subscribe, req_id, &req, fatal_error)
                     }
+                    Command::DeclareQueue { req, reply } => {
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
+                        waiters.insert(req_id, Waiter::DeclareQueue(reply));
+                        send_or_die!(framed, Op::DeclareQueue, req_id, &req, fatal_error)
+                    }
                     Command::Ack { sub_id, delivery_tag, request_id } => {
                         if let Some(sub) = subs.get(&sub_id) {
                             let ack = Ack {
@@ -1610,6 +1723,27 @@ where
                                 }
                             }
                         }
+                        x if x == Op::DeclareQueueOk as u16 => {
+                            let _ok: DeclareQueueOk = match decode_protocol(&frame) {
+                                Ok(ok) => ok,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+
+                            match waiters.remove(&frame.request_id) {
+                                Some(Waiter::DeclareQueue(tx)) => {
+                                    let _ = tx.send(Ok(()));
+                                }
+                                Some(_other) => {
+                                    tracing::error!("Internal error: protocol violation: DeclareQueueOk for non-declare request_id")
+                                }
+                                None => {
+                                    tracing::error!("Internal error: unexpected DeclareQueueOk")
+                                }
+                            }
+                        }
                         x if x == Op::Ping as u16 => {
                             let res = send_protocol_frame(&mut framed, Op::Pong, frame.request_id, &()).await;
 
@@ -1635,6 +1769,13 @@ where
                                 match waiter {
                                     Waiter::Publish(tx) => {
                                         let res = tx.send(Err(FibrilError::Failure {code: err.code, msg: err.message }));
+
+                                        if res.is_err() {
+                                            tracing::warn!("Broken pipe");
+                                        }
+                                    }
+                                    Waiter::DeclareQueue(tx) => {
+                                        let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
 
                                         if res.is_err() {
                                             tracing::warn!("Broken pipe");
@@ -1714,6 +1855,9 @@ where
 fn fail_waiter(waiter: Waiter, err: FibrilError) {
     match waiter {
         Waiter::Publish(tx) => {
+            let _ = tx.send(Err(err));
+        }
+        Waiter::DeclareQueue(tx) => {
             let _ = tx.send(Err(err));
         }
         Waiter::SubscribeManual(tx) => {
@@ -1824,6 +1968,15 @@ impl EngineHandle {
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
         Ok(PublishConfirmation { rx })
+    }
+
+    async fn declare_queue(&self, req: DeclareQueue) -> FibrilResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::DeclareQueue { req, reply: tx })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_e| FibrilError::BrokenPipe)?
     }
 
     async fn subscribe(&self, req: Subscribe) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
@@ -2050,6 +2203,43 @@ mod tests {
         }
 
         assert_eq!(confirmation.confirmed().await.unwrap(), 43);
+    }
+
+    #[tokio::test]
+    async fn declare_queue_sends_retry_and_dlq_policy() {
+        let (client, mut rx) = client_with_command_rx();
+        let task = tokio::spawn(async move {
+            client
+                .declare_queue(
+                    QueueConfig::new("jobs")
+                        .unwrap()
+                        .group("workers")
+                        .unwrap()
+                        .custom_dead_letter_queue("_dlq.jobs")
+                        .unwrap()
+                        .max_retries(3),
+                )
+                .await
+        });
+
+        match rx.recv().await.unwrap() {
+            Command::DeclareQueue { req, reply } => {
+                assert_eq!(req.topic, "jobs");
+                assert_eq!(req.group.as_deref(), Some("workers"));
+                assert_eq!(req.dlq_max_retries, Some(3));
+                match req.dlq_policy {
+                    Some(QueueDlqPolicy::Custom { topic, group }) => {
+                        assert_eq!(topic, "_dlq.jobs");
+                        assert_eq!(group, None);
+                    }
+                    other => panic!("expected custom dlq policy, got {other:?}"),
+                }
+                reply.send(Ok(())).unwrap();
+            }
+            other => panic!("expected declare queue, got {other:?}"),
+        }
+
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

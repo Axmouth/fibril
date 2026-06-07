@@ -599,6 +599,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         this
     }
 
+    pub fn engine(&self) -> E {
+        self.engine.clone()
+    }
+
     pub fn stroma_metrics(&self) -> Arc<StromaMetrics> {
         self.engine.metrics()
     }
