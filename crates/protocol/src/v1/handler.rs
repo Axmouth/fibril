@@ -34,7 +34,7 @@ use tokio_util::codec::Framed;
 use uuid::Uuid;
 
 type SubKey = (Topic, Option<Group>); // (topic, group)
-const RESERVED_HEADER_PREFIX: &str = "fibril.";
+const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
 
 struct ConnState {
     authenticated: bool,
@@ -42,9 +42,11 @@ struct ConnState {
 }
 
 fn has_reserved_headers(headers: &HashMap<String, String>) -> bool {
-    headers
-        .keys()
-        .any(|key| key.starts_with(RESERVED_HEADER_PREFIX))
+    headers.keys().any(|key| {
+        RESERVED_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+    })
 }
 
 async fn send_error_response(
@@ -868,7 +870,7 @@ pub async fn handle_connection(
                         &frame_tx_low_prio,
                         frame.request_id,
                         400,
-                        "headers with prefix `fibril.` are reserved",
+                        "headers with reserved prefixes `fibril.` or `stroma.` are reserved",
                     )
                     .await;
                     continue;
@@ -962,7 +964,7 @@ pub async fn handle_connection(
                         &frame_tx_low_prio,
                         frame.request_id,
                         400,
-                        "headers with prefix `fibril.` are reserved",
+                        "headers with reserved prefixes `fibril.` or `stroma.` are reserved",
                     )
                     .await;
                     continue;

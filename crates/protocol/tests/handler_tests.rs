@@ -3,11 +3,13 @@ use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
 use bytes::Bytes;
 use fibril_broker::{
     broker::{Broker, BrokerConfig, QueueEvictionAttempt},
-    queue_engine::{EvictOutcome, StromaEngine},
+    queue_engine::{
+        DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ, QueueEngine, StromaEngine,
+    },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
-    Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Publish, PublishDelayed, Subscribe,
+    Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
@@ -19,7 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
-async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
+async fn open_test_engine() -> (StromaEngine, TempDir) {
     let dir = TempDir {
         root: std::env::current_dir()
             .unwrap()
@@ -34,6 +36,11 @@ async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
     )
     .await
     .unwrap();
+    (engine, dir)
+}
+
+async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
+    let (engine, dir) = open_test_engine().await;
     let broker = Broker::new(
         engine,
         BrokerConfig {
@@ -69,6 +76,19 @@ async fn open_protocol_connection_with_settings(
     Arc<Broker<StromaEngine>>,
 ) {
     let (broker, dir) = open_test_broker().await;
+    open_protocol_connection_for_broker(settings, broker, dir).await
+}
+
+async fn open_protocol_connection_for_broker(
+    settings: ConnectionSettings,
+    broker: Arc<Broker<StromaEngine>>,
+    dir: TempDir,
+) -> (
+    Framed<TcpStream, ProtoCodec>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    TempDir,
+    Arc<Broker<StromaEngine>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
 
@@ -143,6 +163,25 @@ async fn assert_connection_still_responds(framed: &mut Framed<TcpStream, ProtoCo
     let frame = recv_frame(framed).await;
     assert_eq!(frame.opcode, Op::Pong as u16);
     assert_eq!(frame.request_id, 99);
+}
+
+async fn recv_delivery_for_topic(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    topic: &str,
+) -> Deliver {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let frame = recv_frame(framed).await;
+            if frame.opcode == Op::Deliver as u16 {
+                let delivered: Deliver = try_decode(&frame).unwrap();
+                if delivered.topic == topic {
+                    break delivered;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap()
 }
 
 async fn wait_for_queue_idle(broker: &Broker<StromaEngine>, topic: &str, group: Option<&str>) {
@@ -256,7 +295,7 @@ async fn delayed_publish_with_reserved_header_returns_error_and_keeps_connection
                     group: None,
                     require_confirm: true,
                     not_before: unix_millis() + 150,
-                    headers: HashMap::from([("fibril.retries".into(), "1".into())]),
+                    headers: HashMap::from([("stroma.source_offset".into(), "1".into())]),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
                 },
@@ -334,6 +373,123 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
     let delivered: Deliver = try_decode(&frame).unwrap();
     assert_eq!(delivered.payload, b"delayed".to_vec());
     assert!(unix_millis() >= not_before);
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn exhausted_message_routes_to_global_dlq_over_tcp() {
+    let (engine, dir) = open_test_engine().await;
+    engine
+        .set_global_dlq(
+            Some(GlobalDLQ::new("_dlq.source", 0, None).await.unwrap()),
+            0,
+        )
+        .await
+        .unwrap();
+    engine
+        .declare_queue(
+            "source",
+            0,
+            None,
+            DeclareMeta {
+                dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
+                dlq_max_retries: Some(0),
+            },
+        )
+        .await
+        .unwrap();
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                2,
+                &Subscribe {
+                    topic: "source".into(),
+                    group: None,
+                    prefetch: 1,
+                    auto_ack: false,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(&mut framed).await.opcode, Op::SubscribeOk as u16);
+
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                3,
+                &Subscribe {
+                    topic: "_dlq.source".into(),
+                    group: None,
+                    prefetch: 1,
+                    auto_ack: false,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(&mut framed).await.opcode, Op::SubscribeOk as u16);
+
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                4,
+                &Publish {
+                    topic: "source".into(),
+                    partition: 0,
+                    group: None,
+                    require_confirm: true,
+                    headers: HashMap::from([("x-trace-id".into(), "dlq-flow".into())]),
+                    payload: b"poison".to_vec(),
+                    published: unix_millis(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let source = recv_delivery_for_topic(&mut framed, "source").await;
+    assert_eq!(source.payload, b"poison".to_vec());
+
+    framed
+        .send(
+            try_encode(
+                Op::Nack,
+                5,
+                &Nack {
+                    topic: "source".into(),
+                    group: None,
+                    partition: 0,
+                    tags: vec![source.delivery_tag],
+                    requeue: true,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let dlq = recv_delivery_for_topic(&mut framed, "_dlq.source").await;
+    assert_eq!(dlq.payload, b"poison".to_vec());
+    assert_eq!(
+        dlq.headers.get("x-trace-id").map(String::as_str),
+        Some("dlq-flow")
+    );
+
+    assert_connection_still_responds(&mut framed).await;
 
     drop(framed);
     server_task.await.unwrap().unwrap();

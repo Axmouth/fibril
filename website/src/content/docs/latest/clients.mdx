@@ -176,7 +176,7 @@ await publisher.publish(NewMessage.raw(new Uint8Array([1, 2, 3])));
   </TabItem>
 </Tabs>
 
-Fibril reserves `fibril.*` headers for broker-owned metadata. User code should not set headers with that prefix.
+Fibril reserves `fibril.*` and `stroma.*` headers for system metadata. User code should not set headers with those prefixes.
 
 Dead-letter policy is configured through the admin UI/API rather than the Rust or TypeScript client APIs today. Client code should publish, consume, and settle messages; operators configure where exhausted messages go.
 

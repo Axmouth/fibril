@@ -7,8 +7,8 @@ import {
 /**
  * Message headers sent to the broker.
  *
- * Fibril reserves `fibril.*` headers for broker-owned metadata. User code
- * should avoid that prefix.
+ * Fibril reserves `fibril.*` and `stroma.*` headers for system metadata. User
+ * code should avoid those prefixes.
  */
 export type HeadersInit = Record<string, string>;
 

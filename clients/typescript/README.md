@@ -78,8 +78,8 @@ exposed as `bigint`. Application-visible timestamps (`message.published`,
 `message.publishReceived`) are converted to `number` (ms since epoch)
 since the safe integer range covers millennia.
 
-Fibril reserves `fibril.*` headers for broker-owned metadata. Application
-messages should use another prefix for custom headers.
+Fibril reserves `fibril.*` and `stroma.*` headers for system metadata.
+Application messages should use another prefix for custom headers.
 
 ## Limitations
 

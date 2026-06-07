@@ -414,8 +414,8 @@ impl NewMessage {
 
     /// Add or replace a header.
     ///
-    /// Fibril reserves `fibril.*` headers for broker-owned metadata; user code
-    /// should avoid that prefix.
+    /// Fibril reserves `fibril.*` and `stroma.*` headers for system metadata;
+    /// user code should avoid those prefixes.
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.insert(key.into(), value.into());
         self
