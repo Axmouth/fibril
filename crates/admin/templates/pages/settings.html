@@ -179,7 +179,6 @@
           <span class="settings-help">Queue topic that receives dead-lettered messages.</span>
           <input class="clr-input" id="global-dlq.tp" placeholder="_dlq.default">
         </label>
-        <input id="global-dlq.part" type="hidden" value="0">
         <label class="settings-field">
           <span class="settings-label">Target group</span>
           <span class="settings-help">Optional queue group for the target queue.</span>
@@ -209,7 +208,6 @@
           <span class="settings-help">Source queue to configure.</span>
           <input class="clr-input" id="queue-dlq.tp" required placeholder="orders.created">
         </label>
-        <input id="queue-dlq.part" type="hidden" value="0">
         <label class="settings-field">
           <span class="settings-label">Queue group</span>
           <span class="settings-help">Optional group name for the source queue.</span>
@@ -241,7 +239,6 @@
           <span class="settings-help">Queue topic that receives this queue's dead-lettered messages.</span>
           <input class="clr-input" id="queue-dlq.target.tp" placeholder="_dlq.orders">
         </label>
-        <input id="queue-dlq.target.part" type="hidden" value="0">
         <label class="settings-field">
           <span class="settings-label">Target group</span>
           <span class="settings-help">Optional group name for the custom DLQ target.</span>
@@ -397,7 +394,6 @@ function renderGlobalDlq(data) {
   const enabled = !!data.target;
   field("global-dlq.enabled").checked = enabled;
   field("global-dlq.tp").value = data.target?.tp || "";
-  field("global-dlq.part").value = data.target?.part ?? 0;
   field("global-dlq.group").value = data.target?.group || "";
   setGlobalDlqFieldsEnabled(enabled);
   updateQueueDlqPolicyWarning();
@@ -426,7 +422,6 @@ function collectGlobalDlqTarget() {
   }
   return {
     tp: field("global-dlq.tp").value.trim(),
-    part: numberValue("global-dlq.part"),
     group: optionalTextValue("global-dlq.group"),
   };
 }
@@ -436,14 +431,12 @@ function collectQueueDlqRequest() {
   const target = policy === "custom"
     ? {
         tp: field("queue-dlq.target.tp").value.trim(),
-        part: numberValue("queue-dlq.target.part"),
         group: optionalTextValue("queue-dlq.target.group"),
       }
     : null;
   const maxRetries = field("queue-dlq.max_retries").value.trim();
   return {
     tp: field("queue-dlq.tp").value.trim(),
-    part: numberValue("queue-dlq.part"),
     group: optionalTextValue("queue-dlq.group"),
     policy,
     target,

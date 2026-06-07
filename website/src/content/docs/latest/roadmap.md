@@ -10,8 +10,8 @@ Fibril is still early. The near-term roadmap is about making the existing semant
 - Wire `msg.retry_after(..)` through client, protocol, broker, and Stroma.
 - Add CLI helpers and broader tests for dead-letter policy workflows.
 - Add broker-level tests for delayed retry public paths.
-- Make server configuration production-friendly instead of hard-coded development defaults.
-- Keep improving memory behavior for sparse workloads with many rarely used queues.
+- Polish runtime settings in the admin dashboard and add the next storage-level settings.
+- Add sparse-queue observability around lazy loading, idle cleanup, and eviction decisions.
 - Improve TCP protocol ergonomics and error behavior.
 
 ## Medium term
@@ -20,7 +20,7 @@ Fibril is still early. The near-term roadmap is about making the existing semant
 - Add deployment guidance for the broker itself.
 - Improve admin interface observability.
 - Produce repeatable benchmark reports.
-- Tighten memory behavior under large queue depth and high inflight load.
+- Tighten memory behavior under large queue depth, high inflight load, and many idle queues.
 
 ## Longer term
 

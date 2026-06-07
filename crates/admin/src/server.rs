@@ -996,7 +996,6 @@ mod tests {
                             "expected_version": 0,
                             "target": {
                                 "tp": "_dlq.orders",
-                                "part": 0,
                                 "group": null
                             }
                         })
@@ -1019,7 +1018,6 @@ mod tests {
                             "expected_version": 0,
                             "target": {
                                 "tp": "_dlq.other",
-                                "part": 0,
                                 "group": null
                             }
                         })
@@ -1052,7 +1050,6 @@ mod tests {
                             "expected_version": 0,
                             "target": {
                                 "tp": "BadTopic",
-                                "part": 0,
                                 "group": null
                             }
                         })
@@ -1143,7 +1140,6 @@ mod tests {
                     .body(Body::from(
                         json!({
                             "tp": "orders.created",
-                            "part": 0,
                             "group": null,
                             "policy": "custom",
                             "target": null,

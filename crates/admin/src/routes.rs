@@ -53,16 +53,12 @@ pub enum QueueDlqPolicyRequest {
 #[derive(Debug, Deserialize)]
 pub struct QueueDlqTargetRequest {
     pub tp: String,
-    #[serde(default = "default_queue_part")]
-    pub part: u32,
     pub group: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct UpdateQueueDlqRequest {
     pub tp: String,
-    #[serde(default = "default_queue_part")]
-    pub part: u32,
     pub group: Option<String>,
     pub policy: QueueDlqPolicyRequest,
     pub target: Option<QueueDlqTargetRequest>,
@@ -78,10 +74,6 @@ pub struct QueueDlqResponse {
 pub struct AdminErrorResponse {
     pub code: String,
     pub message: String,
-}
-
-fn default_queue_part() -> u32 {
-    0
 }
 
 impl RuntimeSettingsResponse {
@@ -293,18 +285,16 @@ pub async fn update_global_dlq(
     check_auth(&server, &headers).await?;
 
     let target = match request.target {
-        Some(target) => {
-            match GlobalDLQ::new(&target.tp, target.part, target.group.as_deref()).await {
-                Ok(target) => Some(target),
-                Err(err) => {
-                    return Ok(admin_error(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_global_dlq",
-                        err.to_string(),
-                    ));
-                }
+        Some(target) => match GlobalDLQ::new(&target.tp, 0, target.group.as_deref()).await {
+            Ok(target) => Some(target),
+            Err(err) => {
+                return Ok(admin_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_global_dlq",
+                    err.to_string(),
+                ));
             }
-        }
+        },
         None => None,
     };
 
@@ -353,17 +343,16 @@ pub async fn update_queue_dlq(
                     "custom queue DLQ policy requires a target",
                 ));
             };
-            let target =
-                match GlobalDLQ::new(&target.tp, target.part, target.group.as_deref()).await {
-                    Ok(target) => target,
-                    Err(err) => {
-                        return Ok(admin_error(
-                            StatusCode::BAD_REQUEST,
-                            "invalid_queue_dlq_target",
-                            err.to_string(),
-                        ));
-                    }
-                };
+            let target = match GlobalDLQ::new(&target.tp, 0, target.group.as_deref()).await {
+                Ok(target) => target,
+                Err(err) => {
+                    return Ok(admin_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_queue_dlq_target",
+                        err.to_string(),
+                    ));
+                }
+            };
             DLQDiscardPolicyWire::CustomDQL {
                 tp: target.tp.into_boxed_str(),
                 part: target.part,
@@ -379,7 +368,7 @@ pub async fn update_queue_dlq(
 
     match server
         .storage
-        .declare_queue(&request.tp, request.part, request.group.as_deref(), meta)
+        .declare_queue(&request.tp, 0, request.group.as_deref(), meta)
         .await
     {
         Ok(()) => Ok((StatusCode::OK, Json(QueueDlqResponse { status: "stored" })).into_response()),
