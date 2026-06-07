@@ -15,20 +15,38 @@
     <section class="settings-section">
       <h5>Delivery</h5>
       <label>
-        Inflight TTL (ms)
-        <input class="clr-input" id="delivery.inflight_ttl_ms" type="number" min="0" step="1">
+        Inflight TTL
+        <span class="settings-duration">
+          <input class="clr-input" id="delivery.inflight_ttl_ms" type="number" min="0" step="1">
+          <select class="clr-select duration-unit" id="delivery.inflight_ttl_ms.unit" data-for="delivery.inflight_ttl_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
       </label>
       <label>
-        Expiry poll minimum (ms)
-        <input class="clr-input" id="delivery.expiry_poll_min_ms" type="number" min="0" step="1">
+        Expiry poll minimum
+        <span class="settings-duration">
+          <input class="clr-input" id="delivery.expiry_poll_min_ms" type="number" min="0" step="1">
+          <select class="clr-select duration-unit" id="delivery.expiry_poll_min_ms.unit" data-for="delivery.expiry_poll_min_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
       </label>
       <label>
         Expiry batch max
         <input class="clr-input" id="delivery.expiry_batch_max" type="number" min="1" step="1">
       </label>
       <label>
-        Delivery poll max (ms)
-        <input class="clr-input" id="delivery.delivery_poll_max_ms" type="number" min="0" step="1">
+        Delivery poll max
+        <span class="settings-duration">
+          <input class="clr-input" id="delivery.delivery_poll_max_ms" type="number" min="0" step="1">
+          <select class="clr-select duration-unit" id="delivery.delivery_poll_max_ms.unit" data-for="delivery.delivery_poll_max_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
       </label>
     </section>
 
@@ -39,16 +57,34 @@
         Enabled
       </label>
       <label>
-        Evict after (ms)
-        <input class="clr-input" id="idle_queue_cleanup.evict_after_ms" type="number" min="0" step="1">
+        Evict after
+        <span class="settings-duration">
+          <input class="clr-input" id="idle_queue_cleanup.evict_after_ms" type="number" min="0" step="1">
+          <select class="clr-select duration-unit" id="idle_queue_cleanup.evict_after_ms.unit" data-for="idle_queue_cleanup.evict_after_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
       </label>
       <label>
-        Sweep interval (ms)
-        <input class="clr-input" id="idle_queue_cleanup.sweep_interval_ms" type="number" min="1" step="1">
+        Sweep interval
+        <span class="settings-duration">
+          <input class="clr-input" id="idle_queue_cleanup.sweep_interval_ms" type="number" min="1" step="1">
+          <select class="clr-select duration-unit" id="idle_queue_cleanup.sweep_interval_ms.unit" data-for="idle_queue_cleanup.sweep_interval_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
       </label>
       <label>
-        Publisher idle timeout (ms, blank disables)
-        <input class="clr-input" id="idle_queue_cleanup.publisher_idle_timeout_ms" type="number" min="0" step="1">
+        Publisher idle timeout (blank disables)
+        <span class="settings-duration">
+          <input class="clr-input" id="idle_queue_cleanup.publisher_idle_timeout_ms" type="number" min="0" step="1">
+          <select class="clr-select duration-unit" id="idle_queue_cleanup.publisher_idle_timeout_ms.unit" data-for="idle_queue_cleanup.publisher_idle_timeout_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
       </label>
     </section>
 
@@ -69,9 +105,34 @@ function numberValue(id) {
   return Number(field(id).value);
 }
 
-function optionalNumberValue(id) {
+function durationMsValue(id) {
+  return durationMsValueWithUnit(id, field(`${id}.unit`).value);
+}
+
+function optionalDurationMsValue(id) {
   const value = field(id).value.trim();
-  return value === "" ? null : Number(value);
+  return value === "" ? null : durationMsValue(id);
+}
+
+function durationMsValueWithUnit(id, unit) {
+  const value = Number(field(id).value);
+  return Math.round(value * (unit === "s" ? 1000 : 1));
+}
+
+function renderDuration(id, ms, preferredUnit = null) {
+  const input = field(id);
+  const select = field(`${id}.unit`);
+  if (ms === null || ms === undefined) {
+    input.value = "";
+    select.value = preferredUnit || "s";
+    select.dataset.prevUnit = select.value;
+    return;
+  }
+
+  const unit = preferredUnit || (ms % 1000 === 0 ? "s" : "ms");
+  input.value = unit === "s" ? ms / 1000 : ms;
+  select.value = unit;
+  select.dataset.prevUnit = unit;
 }
 
 function setMessage(text, kind = "info") {
@@ -83,23 +144,25 @@ function setMessage(text, kind = "info") {
 function setDisabledForLockedGroups() {
   const idleLocked = !!currentLocks.idle_queue_cleanup;
   field("idle-lock").textContent = idleLocked ? "locked by startup config" : "";
-  for (const input of document.querySelectorAll("#idle-section input")) {
+  for (const input of document.querySelectorAll("#idle-section input, #idle-section select")) {
     input.disabled = idleLocked;
   }
 }
 
 function renderSettings(data) {
   field("version").value = data.version;
-  field("delivery.inflight_ttl_ms").value = data.settings.delivery.inflight_ttl_ms;
-  field("delivery.expiry_poll_min_ms").value = data.settings.delivery.expiry_poll_min_ms;
+  renderDuration("delivery.inflight_ttl_ms", data.settings.delivery.inflight_ttl_ms);
+  renderDuration("delivery.expiry_poll_min_ms", data.settings.delivery.expiry_poll_min_ms);
   field("delivery.expiry_batch_max").value = data.settings.delivery.expiry_batch_max;
-  field("delivery.delivery_poll_max_ms").value = data.settings.delivery.delivery_poll_max_ms;
+  renderDuration("delivery.delivery_poll_max_ms", data.settings.delivery.delivery_poll_max_ms);
 
   field("idle_queue_cleanup.enabled").checked = data.settings.idle_queue_cleanup.enabled;
-  field("idle_queue_cleanup.evict_after_ms").value = data.settings.idle_queue_cleanup.evict_after_ms;
-  field("idle_queue_cleanup.sweep_interval_ms").value = data.settings.idle_queue_cleanup.sweep_interval_ms;
-  field("idle_queue_cleanup.publisher_idle_timeout_ms").value =
-    data.settings.idle_queue_cleanup.publisher_idle_timeout_ms ?? "";
+  renderDuration("idle_queue_cleanup.evict_after_ms", data.settings.idle_queue_cleanup.evict_after_ms);
+  renderDuration("idle_queue_cleanup.sweep_interval_ms", data.settings.idle_queue_cleanup.sweep_interval_ms);
+  renderDuration(
+    "idle_queue_cleanup.publisher_idle_timeout_ms",
+    data.settings.idle_queue_cleanup.publisher_idle_timeout_ms
+  );
 
   currentLocks = data.locks || {};
   setDisabledForLockedGroups();
@@ -108,18 +171,31 @@ function renderSettings(data) {
 function collectSettings() {
   return {
     delivery: {
-      inflight_ttl_ms: numberValue("delivery.inflight_ttl_ms"),
-      expiry_poll_min_ms: numberValue("delivery.expiry_poll_min_ms"),
+      inflight_ttl_ms: durationMsValue("delivery.inflight_ttl_ms"),
+      expiry_poll_min_ms: durationMsValue("delivery.expiry_poll_min_ms"),
       expiry_batch_max: numberValue("delivery.expiry_batch_max"),
-      delivery_poll_max_ms: numberValue("delivery.delivery_poll_max_ms"),
+      delivery_poll_max_ms: durationMsValue("delivery.delivery_poll_max_ms"),
     },
     idle_queue_cleanup: {
       enabled: field("idle_queue_cleanup.enabled").checked,
-      evict_after_ms: numberValue("idle_queue_cleanup.evict_after_ms"),
-      sweep_interval_ms: numberValue("idle_queue_cleanup.sweep_interval_ms"),
-      publisher_idle_timeout_ms: optionalNumberValue("idle_queue_cleanup.publisher_idle_timeout_ms"),
+      evict_after_ms: durationMsValue("idle_queue_cleanup.evict_after_ms"),
+      sweep_interval_ms: durationMsValue("idle_queue_cleanup.sweep_interval_ms"),
+      publisher_idle_timeout_ms: optionalDurationMsValue("idle_queue_cleanup.publisher_idle_timeout_ms"),
     },
   };
+}
+
+for (const select of document.querySelectorAll(".duration-unit")) {
+  select.addEventListener("change", (event) => {
+    const select = event.target;
+    const id = select.dataset.for;
+    const previousUnit = select.dataset.prevUnit || "s";
+    const value = field(id).value.trim();
+    if (value !== "") {
+      const ms = durationMsValueWithUnit(id, previousUnit);
+      renderDuration(id, ms, select.value);
+    }
+  });
 }
 
 async function loadSettings(message = "Settings loaded.") {

@@ -68,10 +68,24 @@ main {
 }
 
 .settings-section input[type="number"] {
-  display: block;
-  margin-top: .25rem;
   max-width: 24rem;
   width: 100%;
+}
+
+.settings-duration {
+  align-items: center;
+  display: flex;
+  gap: .5rem;
+  margin-top: .25rem;
+  max-width: 34rem;
+}
+
+.settings-duration input[type="number"] {
+  flex: 1 1 auto;
+}
+
+.settings-duration select {
+  flex: 0 0 9rem;
 }
 
 .checkbox-label {
@@ -109,4 +123,3 @@ main {
 .settings-message[data-kind="error"] {
   background: rgba(255, 107, 107, .16);
 }
-

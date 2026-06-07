@@ -62,6 +62,16 @@ impl AdminServer {
     pub async fn run(self) -> anyhow::Result<()> {
         let state = Arc::new(self);
 
+        let app = Self::router(state.clone());
+
+        let listener = TcpListener::bind(&state.config.bind).await?;
+        print_admin_banner(&state.config.bind, state.config.auth.is_some());
+        tracing::info!("listening on {}", state.config.bind);
+        axum::serve(listener, app).await?;
+        Ok(())
+    }
+
+    pub(crate) fn router(state: Arc<Self>) -> Router {
         let mut app = Router::new();
 
         #[cfg(debug_assertions)]
@@ -93,13 +103,8 @@ impl AdminServer {
             )
             .route("/healthz", get(|| async { "ok" }))
             .fallback(not_found)
-            .with_state(state.clone());
-
-        let listener = TcpListener::bind(&state.config.bind).await?;
-        print_admin_banner(&state.config.bind, state.config.auth.is_some());
-        tracing::info!("listening on {}", state.config.bind);
-        axum::serve(listener, app).await?;
-        Ok(())
+            .with_state(state);
+        app
     }
 }
 
@@ -219,4 +224,237 @@ pub fn print_admin_banner(bind: &str, auth: bool) {
 "#,
         bind = bind
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use fibril_broker::{
+        queue_engine::{KeratinConfig, QueueEngine, SnapshotConfig, StromaEngine},
+        runtime_settings::{
+            RuntimeSettings, RuntimeSettingsLocks, RuntimeSettingsManager,
+            RuntimeSettingsUpdateOutcome,
+        },
+    };
+    use fibril_metrics::Metrics;
+    use serde_json::json;
+    use tower::ServiceExt;
+
+    async fn test_server(locks: RuntimeSettingsLocks) -> Arc<AdminServer> {
+        let root = std::env::temp_dir().join(format!("fibril-admin-{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&root).unwrap();
+        let engine = StromaEngine::open(
+            &root,
+            KeratinConfig::test_default(),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let runtime_settings = RuntimeSettingsManager::load_from_stroma_engine(
+            &engine,
+            RuntimeSettings::default(),
+            locks,
+        )
+        .await
+        .unwrap();
+        Arc::new(AdminServer::new(
+            Metrics::new(60),
+            engine.metrics(),
+            AdminConfig {
+                bind: "127.0.0.1:0".into(),
+                auth: None,
+            },
+            Arc::new(engine),
+            Some(Arc::new(runtime_settings)),
+        ))
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn runtime_settings_get_returns_current_settings() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/runtime-settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 30_000);
+        assert_eq!(body["locks"]["idle_queue_cleanup"], false);
+    }
+
+    #[tokio::test]
+    async fn runtime_settings_put_updates_settings() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/runtime-settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 1,
+                            "settings": {
+                                "delivery": {
+                                    "inflight_ttl_ms": 12_000,
+                                    "expiry_poll_min_ms": 15_000,
+                                    "expiry_batch_max": 8192,
+                                    "delivery_poll_max_ms": 5_000
+                                },
+                                "idle_queue_cleanup": {
+                                    "enabled": false,
+                                    "evict_after_ms": 600_000,
+                                    "sweep_interval_ms": 60_000,
+                                    "publisher_idle_timeout_ms": null
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 2);
+        assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 12_000);
+    }
+
+    #[tokio::test]
+    async fn runtime_settings_put_returns_conflict_for_stale_version() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let runtime_settings = server.runtime_settings.as_ref().unwrap().clone();
+        let mut updated = runtime_settings.current().settings;
+        updated.delivery.inflight_ttl_ms = 11_000;
+        assert!(matches!(
+            runtime_settings.update(1, updated).await.unwrap(),
+            RuntimeSettingsUpdateOutcome::Stored(_)
+        ));
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/runtime-settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 1,
+                            "settings": {
+                                "delivery": {
+                                    "inflight_ttl_ms": 12_000,
+                                    "expiry_poll_min_ms": 15_000,
+                                    "expiry_batch_max": 8192,
+                                    "delivery_poll_max_ms": 5_000
+                                },
+                                "idle_queue_cleanup": {
+                                    "enabled": false,
+                                    "evict_after_ms": 600_000,
+                                    "sweep_interval_ms": 60_000,
+                                    "publisher_idle_timeout_ms": null
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 2);
+        assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 11_000);
+    }
+
+    #[tokio::test]
+    async fn runtime_settings_put_rejects_locked_idle_cleanup() {
+        let server = test_server(RuntimeSettingsLocks {
+            idle_queue_cleanup: true,
+        })
+        .await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/runtime-settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 1,
+                            "settings": {
+                                "delivery": {
+                                    "inflight_ttl_ms": 30_000,
+                                    "expiry_poll_min_ms": 15_000,
+                                    "expiry_batch_max": 8192,
+                                    "delivery_poll_max_ms": 5_000
+                                },
+                                "idle_queue_cleanup": {
+                                    "enabled": true,
+                                    "evict_after_ms": 600_000,
+                                    "sweep_interval_ms": 60_000,
+                                    "publisher_idle_timeout_ms": null
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert!(body["error"].as_str().unwrap().contains("locked"));
+    }
+
+    #[tokio::test]
+    async fn settings_page_renders() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Runtime Settings"));
+        assert!(body.contains("Save settings"));
+    }
 }
