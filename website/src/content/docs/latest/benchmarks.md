@@ -157,8 +157,9 @@ scripts/bench-matrix.sh throughput-1k payload
 
 The matrix helper builds the release server and benchmark binary once, then
 runs named steady-state cases with one results file and one log file per case.
-Set `OUT_DIR=...` to choose where files go. Without arguments, it runs only the
-quick `smoke` scenario.
+It also writes `summary.md`, a Markdown table generated from those result
+files. Set `OUT_DIR=...` to choose where files go. Without arguments, it runs
+only the quick `smoke` scenario.
 
 Available scenarios:
 
@@ -171,6 +172,12 @@ Available scenarios:
 | `payload` | 8KB, 64KB, 512KB, and 1MB spot checks |
 | `large-backlog` | Large-payload cases expected to build backlog |
 | `all` | `baseline`, `confirmed`, `throughput-1k`, and `payload` |
+
+To regenerate a table from existing result files:
+
+```sh
+scripts/bench-results-table.sh bench-results/steady-*/baseline-*.results.txt
+```
 
 ### How to read the numbers
 
@@ -193,10 +200,10 @@ Quick validation run from June 7, 2026, using `WRITERS=10`, `READERS=10`,
 
 | Mode | Target rate | Actual measured rate | Missing | publish→deliver p50/p95/p99/max | server-receive→deliver p50/p95/p99/max | Errors | End queue |
 | --- | ---: | ---: | ---: | --- | --- | ---: | --- |
-| unconfirmed | 50k/s | 50,010/s | 0 | 16 / 23 / 25 / 56 ms | 10 / 15 / 16 / 21 ms | 0 | ready=0, inflight=0 |
-| unconfirmed | 150k/s | 149,969/s | 0 | 11 / 15 / 16 / 55 ms | 9 / 12 / 14 / 16 ms | 0 | ready=0, inflight=0 |
-| confirmed, window=1024 | 50k/s | 50,000/s | 0 | 14 / 20 / 21 / 26 ms | 11 / 16 / 16 / 19 ms | 0 | ready=0, inflight=0 |
-| confirmed, window=1024 | 150k/s | 149,971/s | 0 | 12 / 16 / 17 / 21 ms | 10 / 13 / 15 / 17 ms | 0 | ready=0, inflight=0 |
+| unconfirmed | 50k/s | 50,000/s | 0 | 15 / 22 / 25 / 58 ms | 10 / 16 / 18 / 20 ms | 0 | ready=0, inflight=0 |
+| unconfirmed | 150k/s | 149,999/s | 0 | 11 / 15 / 17 / 56 ms | 9 / 13 / 14 / 17 ms | 0 | ready=0, inflight=0 |
+| confirmed, window=1024 | 50k/s | 50,010/s | 0 | 14 / 19 / 21 / 28 ms | 11 / 15 / 16 / 21 ms | 0 | ready=0, inflight=0 |
+| confirmed, window=1024 | 150k/s | 149,999/s | 0 | 12 / 16 / 17 / 21 ms | 10 / 13 / 15 / 18 ms | 0 | ready=0, inflight=0 |
 
 Higher-rate exploratory sweep from the same run shape:
 

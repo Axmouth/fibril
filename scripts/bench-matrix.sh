@@ -151,6 +151,12 @@ done
   echo "Finished: $(date --iso-8601=seconds)"
 } >>"$index_file"
 
+mapfile -t result_files < <(find "$out_dir" -maxdepth 1 -name '*.results.txt' | sort -V)
+if [ "${#result_files[@]}" -gt 0 ]; then
+  "$repo_root/scripts/bench-results-table.sh" "${result_files[@]}" >"$out_dir/summary.md"
+  echo "Summary table: $out_dir/summary.md"
+fi
+
 echo
 echo "Benchmark matrix complete."
 echo "Index: $index_file"
