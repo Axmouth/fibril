@@ -123,9 +123,9 @@ pub struct AdminErrorResponse {
 }
 
 const MESSAGE_INSPECTION_DEFAULT_LIMIT: usize = 50;
-const MESSAGE_INSPECTION_MAX_LIMIT: usize = 500;
+const MESSAGE_INSPECTION_MAX_LIMIT: usize = 5_000;
 const MESSAGE_INSPECTION_DEFAULT_PAYLOAD_LIMIT_BYTES: usize = 4096;
-const MESSAGE_INSPECTION_MAX_PAYLOAD_LIMIT_BYTES: usize = 64 * 1024;
+const MESSAGE_INSPECTION_MAX_PAYLOAD_LIMIT_BYTES: usize = 1024 * 1024;
 const DLQ_REPLAY_MAX_OFFSETS: usize = 100;
 
 fn normalize_group(group: Option<String>) -> Option<String> {

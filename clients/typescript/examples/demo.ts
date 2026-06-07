@@ -19,6 +19,7 @@
 import {
   ClientOptions,
   FibrilError,
+  NewMessage,
   type InflightMessage,
   type Subscription,
   type AutoAckedSubscription,
@@ -84,7 +85,7 @@ async function produce(): Promise<void> {
       qty: 1 + (i % 5),
     };
     try {
-      const offset = await orderPub.publishConfirmed(order);
+      const offset = await orderPub.publishConfirmed(NewMessage.json(order));
       console.log(`[producer] order #${order.id} -> offset ${offset}`);
     } catch (err) {
       if (err instanceof FibrilError) {
@@ -100,7 +101,7 @@ async function produce(): Promise<void> {
         text: `processed batch ${i / 3}`,
         ts: Date.now(),
       };
-      await noticePub.publish(notice).catch(() => {});
+      await noticePub.publish(NewMessage.json(notice)).catch(() => {});
     }
 
     await sleep(500, shutdownController.signal);
@@ -141,8 +142,8 @@ async function processOrder(msg: InflightMessage): Promise<void> {
   // Simulate flaky processing: 1 in 7 fails the first time.
   if (order.id % 7 === 0 && !retried.has(order.id)) {
     retried.add(order.id);
-    console.log(`[orders] order #${order.id} failed; requeuing`);
-    await msg.retry();
+    console.log(`[orders] order #${order.id} failed; retrying after 5s`);
+    await msg.retryAfter(5_000);
     return;
   }
 

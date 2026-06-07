@@ -150,6 +150,17 @@ main {
   margin-right: auto;
 }
 
+.message-warning-note {
+  background: rgba(246, 193, 119, .16);
+  border: 1px solid rgba(246, 193, 119, .42);
+  border-left: 4px solid #ffd43b;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px rgba(246, 193, 119, .06);
+  color: #ffe8a3;
+  margin: 1rem 0;
+  padding: .65rem .8rem;
+}
+
 .settings-note {
   opacity: .8;
 }
@@ -375,12 +386,95 @@ main {
   padding: .1rem .25rem;
 }
 
-.message-table pre {
+.message-payload-cell {
+  align-items: flex-start;
+  display: flex;
+  gap: .4rem;
+  max-width: 26rem;
+}
+
+.message-payload-cell code {
+  max-width: 20rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-replay-report {
+  background: rgba(255, 255, 255, .025);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 8px;
+  margin-top: 1rem;
+  padding: 1rem;
+}
+
+.message-replay-report h5 {
+  margin-top: 0;
+}
+
+.message-modal {
+  align-items: center;
+  background: rgba(0, 0, 0, .62);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 1rem;
+  position: fixed;
+  z-index: 1000;
+}
+
+.message-modal-card {
+  background: rgba(15, 20, 26, .98);
+  border: 1px solid rgba(255, 255, 255, .16);
+  border-radius: 8px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, .45);
+  max-height: min(80vh, 52rem);
+  max-width: min(72rem, calc(100vw - 2rem));
+  overflow: hidden;
+  padding: 1rem;
+  width: 100%;
+}
+
+.message-modal-header {
+  align-items: center;
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.message-modal-header h5 {
+  margin: 0;
+}
+
+.message-modal-meta {
+  display: grid;
+  gap: .5rem;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 1rem 0;
+}
+
+.message-modal-meta div {
+  background: rgba(255, 255, 255, .035);
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 6px;
+  padding: .5rem;
+}
+
+.message-modal-meta dt {
+  font-size: .6rem;
+  opacity: .65;
+}
+
+.message-modal-meta dd {
+  margin: .15rem 0 0;
+}
+
+.message-modal pre {
   background: rgba(0, 0, 0, .25);
   border: 1px solid rgba(255, 255, 255, .1);
   border-radius: 4px;
   margin: 0;
-  max-height: 10rem;
+  max-height: 52vh;
   overflow: auto;
   padding: .4rem .5rem;
   white-space: pre-wrap;
@@ -506,5 +600,13 @@ main {
 
   .message-inspection-form {
     grid-template-columns: 1fr;
+  }
+
+  .message-modal-meta {
+    grid-template-columns: 1fr;
+  }
+
+  .message-payload-cell {
+    flex-direction: column;
   }
 }

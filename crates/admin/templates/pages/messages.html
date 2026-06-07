@@ -2,7 +2,7 @@
 {% block content %}
 <main class="messages-panel">
   <h4>Messages</h4>
-  <p class="settings-note">
+  <p class="message-warning-note">
     Inspect persisted queue messages for operations and debugging. This reads queue state and message data on demand; do not use it as a live polling view.
   </p>
 
@@ -29,7 +29,7 @@
       <label class="settings-field">
         <span class="settings-label">Limit</span>
         <span class="settings-help">Maximum rows to request. The server applies a hard cap.</span>
-        <input class="clr-input" id="message-limit" type="number" min="1" max="500" step="1" value="50">
+        <input class="clr-input" id="message-limit" type="number" min="1" max="5000" step="1" value="50">
       </label>
 
       <label class="checkbox-label">
@@ -51,11 +51,12 @@
       <label class="settings-field" id="payload-limit-row" hidden>
         <span class="settings-label">Payload preview bytes</span>
         <span class="settings-help">Maximum bytes returned per message preview.</span>
-        <input class="clr-input" id="message-payload-limit" type="number" min="1" max="65536" step="1" value="4096">
+        <input class="clr-input" id="message-payload-limit" type="number" min="1" max="1048576" step="1" value="4096">
       </label>
 
       <div class="settings-actions">
         <button class="btn btn-primary" type="submit">Load messages</button>
+        <button class="btn" type="button" id="message-previous" disabled>Previous page</button>
         <button class="btn" type="button" id="message-next" disabled>Next page</button>
         <button class="btn btn-warning" type="button" id="message-replay" disabled>Replay selected to source</button>
       </div>
@@ -64,6 +65,21 @@
 
   <div id="message-inspection-message" class="settings-message"></div>
   <div id="message-results" class="message-results"></div>
+
+  <div id="payload-modal" class="message-modal" hidden>
+    <div class="message-modal-card" role="dialog" aria-modal="true" aria-labelledby="payload-modal-title">
+      <div class="message-modal-header">
+        <h5 id="payload-modal-title">Payload preview</h5>
+        <button class="btn btn-sm" type="button" id="payload-modal-close">Close</button>
+      </div>
+      <dl class="message-modal-meta">
+        <div><dt>Offset</dt><dd id="payload-modal-offset"></dd></div>
+        <div><dt>Bytes</dt><dd id="payload-modal-bytes"></dd></div>
+        <div><dt>Status</dt><dd id="payload-modal-status"></dd></div>
+      </dl>
+      <pre id="payload-modal-body"></pre>
+    </div>
+  </div>
 </main>
 
 <script src="/static/js/api.js"></script>
@@ -71,12 +87,21 @@
 const form = document.getElementById("message-inspection-form");
 const results = document.getElementById("message-results");
 const message = document.getElementById("message-inspection-message");
+const previousButton = document.getElementById("message-previous");
 const nextButton = document.getElementById("message-next");
 const replayButton = document.getElementById("message-replay");
 const includePayload = document.getElementById("message-include-payload");
 const payloadLimitRow = document.getElementById("payload-limit-row");
+const payloadModal = document.getElementById("payload-modal");
+const payloadModalClose = document.getElementById("payload-modal-close");
 
+const OLD_LIMIT_WARNING_THRESHOLD = 500;
+const OLD_PAYLOAD_WARNING_THRESHOLD = 65536;
+
+let currentFrom = 0;
 let nextOffsetHint = null;
+let previousOffsets = [];
+let lastItems = new Map();
 
 function field(id) {
   return document.getElementById(id);
@@ -138,6 +163,22 @@ function buildQuery(fromOverride = null) {
   return params;
 }
 
+function confirmLargeInspection(query) {
+  const limit = Number(query.get("limit") || "50");
+  const payloadLimit = Number(query.get("payload_limit_bytes") || "4096");
+  const reasons = [];
+  if (limit > OLD_LIMIT_WARNING_THRESHOLD) {
+    reasons.push(`page size ${limit}`);
+  }
+  if (query.get("include_payload") === "true" && payloadLimit > OLD_PAYLOAD_WARNING_THRESHOLD) {
+    reasons.push(`payload preview ${payloadLimit} bytes`);
+  }
+  if (reasons.length === 0) return true;
+  return window.confirm(
+    `Large message inspection requested (${reasons.join(", ")}). This can read a lot of persisted data. Continue?`
+  );
+}
+
 function normalizedGroupValue(id) {
   const value = field(id).value.trim();
   return value === "" || value === "default" ? null : value;
@@ -178,18 +219,34 @@ function contentTypeLabel(contentType) {
   return JSON.stringify(contentType);
 }
 
-function renderPayload(item) {
+function payloadPreviewText(item) {
   if (item.missing_payload) return '<span class="message-bad">missing from log</span>';
   if (!item.payload_base64) return '<span class="message-muted">not requested</span>';
   const preview = decodePayloadPreview(item.payload_base64);
   const suffix = item.payload_truncated ? " (truncated)" : "";
-  return `<pre>${escapeHtml(preview)}${escapeHtml(suffix)}</pre>`;
+  return `${preview}${suffix}`;
+}
+
+function renderPayloadCell(item) {
+  if (item.missing_payload) return '<span class="message-bad">missing from log</span>';
+  if (!item.payload_base64) return '<span class="message-muted">not requested</span>';
+  const preview = payloadPreviewText(item);
+  const short = preview.length > 96 ? `${preview.slice(0, 96)}...` : preview;
+  const offset = item.state?.offset;
+  return `
+    <div class="message-payload-cell">
+      <code>${escapeHtml(short)}</code>
+      <button class="btn btn-sm message-payload-open" type="button" data-offset="${escapeHtml(offset)}">View</button>
+    </div>
+  `;
 }
 
 function renderItems(data) {
   nextOffsetHint = data.next_offset_hint;
+  previousButton.disabled = previousOffsets.length === 0;
   nextButton.disabled = nextOffsetHint === null || nextOffsetHint === undefined;
   replayButton.disabled = true;
+  lastItems = new Map((data.items || []).map(item => [String(item.state?.offset), item]));
 
   if (!data.items || data.items.length === 0) {
     results.innerHTML = '<div class="message-empty">No messages matched this request.</div>';
@@ -206,7 +263,7 @@ function renderItems(data) {
         <td class="text-right">${escapeHtml(state.retry_count ?? 0)}</td>
         <td class="text-right">${escapeHtml(item.payload_len ?? "")}</td>
         <td>${renderHeaders(item.headers)}</td>
-        <td>${renderPayload(item)}</td>
+        <td>${renderPayloadCell(item)}</td>
       </tr>
     `;
   }).join("");
@@ -220,7 +277,7 @@ function renderItems(data) {
         <th class="text-right">Retries</th>
         <th class="text-right">Bytes</th>
         <th>Headers</th>
-        <th>Payload preview</th>
+        <th>Payload</th>
       </tr>
       ${rows}
     </table>
@@ -229,6 +286,9 @@ function renderItems(data) {
   for (const checkbox of document.querySelectorAll(".message-select")) {
     checkbox.addEventListener("change", updateReplayButton);
   }
+  for (const button of document.querySelectorAll(".message-payload-open")) {
+    button.addEventListener("click", () => openPayloadModal(button.dataset.offset));
+  }
   updateReplayButton();
 }
 
@@ -236,9 +296,12 @@ async function loadMessages(fromOverride = null) {
   clearMessage();
   results.innerHTML = "";
   const query = buildQuery(fromOverride);
+  if (!confirmLargeInspection(query)) return false;
   const data = await api(`/admin/api/messages?${query}`);
+  currentFrom = Number(query.get("from") || "0");
   renderItems(data);
   setMessage("info", data.warning || "Message inspection loaded.");
+  return true;
 }
 
 function selectedOffsets() {
@@ -254,6 +317,9 @@ function updateReplayButton() {
 async function replaySelected() {
   const offsets = selectedOffsets();
   if (offsets.length === 0) return;
+  if (!window.confirm(`Replay ${offsets.length} selected DLQ offset(s) back to their recorded source queues? The DLQ messages are not removed.`)) {
+    return;
+  }
   const dlqTopic = field("message-topic").value.trim();
   if (!dlqTopic) throw new Error("Topic is required.");
   const dlqGroup = normalizedGroupValue("message-group");
@@ -270,23 +336,82 @@ async function replaySelected() {
     throw new Error(await response.text() || `Replay failed: HTTP ${response.status}`);
   }
   const report = await response.json();
-  setMessage("success", `Replay requested for ${report.requested} offset(s); ${report.replayed} copied back to source.`);
+  const skipped = report.requested - report.replayed;
+  setMessage("success", `Replay requested for ${report.requested} offset(s); ${report.replayed} copied back to source; ${skipped} skipped.`);
+  renderReplayReport(report);
+}
+
+function renderReplayReport(report) {
+  if (!report.items || report.items.length === 0) return;
+  const rows = report.items.map(item => `
+    <tr>
+      <td class="text-right">${escapeHtml(item.offset)}</td>
+      <td>${escapeHtml(item.outcome)}</td>
+      <td>${escapeHtml(item.target_topic ?? "")}</td>
+      <td>${escapeHtml(item.target_group ?? "default")}</td>
+      <td>${escapeHtml(item.reason ?? "")}</td>
+    </tr>
+  `).join("");
+  results.insertAdjacentHTML("beforeend", `
+    <div class="message-replay-report">
+      <h5>Replay result</h5>
+      <table class="table table-compact">
+        <tr><th class="text-right">Offset</th><th>Outcome</th><th>Target topic</th><th>Target group</th><th>Reason</th></tr>
+        ${rows}
+      </table>
+    </div>
+  `);
+}
+
+function openPayloadModal(offset) {
+  const item = lastItems.get(String(offset));
+  if (!item) return;
+  field("payload-modal-offset").textContent = item.state?.offset ?? "";
+  field("payload-modal-bytes").textContent = item.payload_len ?? "";
+  field("payload-modal-status").textContent = item.state?.status ?? "";
+  field("payload-modal-body").textContent = payloadPreviewText(item);
+  payloadModal.hidden = false;
+}
+
+function closePayloadModal() {
+  payloadModal.hidden = true;
 }
 
 form.addEventListener("submit", async event => {
   event.preventDefault();
   try {
+    previousOffsets = [];
     await loadMessages();
   } catch (err) {
     setMessage("error", err.message || String(err));
   }
 });
 
+previousButton.addEventListener("click", async () => {
+  const previous = previousOffsets.pop();
+  if (previous === undefined) return;
+  field("message-from").value = String(previous);
+  try {
+    if (!await loadMessages(previous)) {
+      previousOffsets.push(previous);
+      previousButton.disabled = false;
+    }
+  } catch (err) {
+    previousOffsets.push(previous);
+    previousButton.disabled = false;
+    setMessage("error", err.message || String(err));
+  }
+});
+
 nextButton.addEventListener("click", async () => {
   if (nextOffsetHint === null || nextOffsetHint === undefined) return;
+  const previous = currentFrom;
   field("message-from").value = String(nextOffsetHint);
   try {
-    await loadMessages(nextOffsetHint);
+    if (await loadMessages(nextOffsetHint)) {
+      previousOffsets.push(previous);
+      previousButton.disabled = false;
+    }
   } catch (err) {
     setMessage("error", err.message || String(err));
   }
@@ -302,6 +427,11 @@ replayButton.addEventListener("click", async () => {
 
 includePayload.addEventListener("change", event => {
   payloadLimitRow.hidden = !event.target.checked;
+});
+
+payloadModalClose.addEventListener("click", closePayloadModal);
+payloadModal.addEventListener("click", event => {
+  if (event.target === payloadModal) closePayloadModal();
 });
 
 function applyInitialQuery() {

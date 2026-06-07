@@ -58,15 +58,15 @@ while let Some(msg) = sub.recv().await {
 The TypeScript client lives in `clients/typescript`. It mirrors the current Rust client shape where practical:
 
 ```ts
-import { ClientOptions } from "@fibril/client";
+import { ClientOptions, NewMessage } from "@fibril/client";
 
 const client = await new ClientOptions()
   .withAuth("fibril", "fibril")
   .connect("127.0.0.1:9876");
 
 const publisher = client.publisher("email.send");
-await publisher.publish({ body: "hello" });
-await publisher.publishDelayed({ body: "hello later" }, 30_000);
+await publisher.publish(NewMessage.json({ body: "hello" }));
+await publisher.publishDelayed(NewMessage.json({ body: "hello later" }), 30_000);
 
 const sub = await client
   .subscribe("email.send")

@@ -90,6 +90,9 @@ By default this only returns messages that are still active in queue state, such
 as ready, inflight, delayed, or pending DLQ messages. Add
 `--include-settled` when you also need persisted log records that are no longer
 tracked as active. Add `--include-payload` to include base64 payload previews.
+The admin dashboard exposes the same inspection path from the queues page. It
+starts near the queue's settled offset by default and lets you page backward or
+forward by offset.
 
 ## Admin API
 
@@ -161,6 +164,12 @@ Useful query flags:
 Message inspection reads persisted message data and queue state. Use it for
 debugging and operations, not as a live polling view.
 
+The default page size is `50`. The current hard cap is `5000` messages per
+request. Payload previews default to `4096` bytes per message and are capped at
+`1048576` bytes. The dashboard asks for confirmation when you go beyond the
+normal lightweight range, because large pages or large payload previews can
+touch a lot of persisted data.
+
 Replay selected active DLQ offsets back to their recorded source queue:
 
 ```http
@@ -179,6 +188,10 @@ The replay operation copies the stored payload and user headers back to the
 source topic recorded in `stroma.dlq.source_topic` and
 `stroma.dlq.source_group`. It strips system metadata from the replayed copy and
 does not remove or acknowledge the DLQ message.
+
+Replay is intentionally explicit. In the dashboard, select specific DLQ offsets
+from message inspection and confirm the replay. The result reports each offset
+as replayed or skipped with the target queue when available.
 
 The same operation is available from the CLI:
 

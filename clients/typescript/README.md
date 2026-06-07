@@ -48,13 +48,15 @@ for await (const msg of sub) {
 await client.shutdown();
 ```
 
+`group("default")` is treated the same as leaving the group unset.
+
 ## Subscription modes
 
 - `subManualAck()` — each `InflightMessage` must be settled with
   `complete()`, `fail()`, or `retry()`. Calling more than once throws.
 - `subAutoAck()` — receives `Message` directly with no settle action.
-  Acks are tracked client-side; the server still expects manual settles
-  matching the Rust client's behavior.
+  The subscribe request is marked auto-ack and the client exposes delivered
+  messages without a settlement handle.
 
 ## Error handling
 
@@ -84,6 +86,10 @@ Application messages should use another prefix for custom headers.
 Content type is exposed through `NewMessage.contentType(...)` and
 `message.contentType()`. It is sent as compact message metadata rather than as
 an entry in the custom header map.
+
+Use `NewMessage.json(...)`, `NewMessage.msgpack(...)`, `NewMessage.raw(...)`,
+or `NewMessage.content(...)` when you want to choose the payload encoding
+explicitly. Plain values passed to publish methods use msgpack.
 
 ## Limitations
 

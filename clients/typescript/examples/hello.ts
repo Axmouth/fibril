@@ -7,7 +7,7 @@
  *   FIBRIL_ADDR=127.0.0.1:9876 npx tsx examples/hello.ts
  */
 
-import { ClientOptions } from "@fibril/client";
+import { ClientOptions, NewMessage } from "@fibril/client";
 
 const addr = process.env.FIBRIL_ADDR ?? "127.0.0.1:9876";
 const user = process.env.FIBRIL_USER ?? "fibril";
@@ -22,7 +22,9 @@ const sub = await client.subscribe("hello").prefetch(1).subManualAck();
 
 // Publish in the background.
 const pub = client.publisher("hello");
-const offset = await pub.publishConfirmed({ greeting: "world", at: Date.now() });
+const offset = await pub.publishConfirmed(
+  NewMessage.json({ greeting: "world", at: Date.now() }),
+);
 console.log(`published at offset ${offset}`);
 
 // Receive one message.
