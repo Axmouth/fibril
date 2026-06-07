@@ -78,6 +78,9 @@ exposed as `bigint`. Application-visible timestamps (`message.published`,
 `message.publishReceived`) are converted to `number` (ms since epoch)
 since the safe integer range covers millennia.
 
+Fibril reserves `fibril.*` headers for broker-owned metadata. Application
+messages should use another prefix for custom headers.
+
 ## Limitations
 
 - `reconnect_restore` (resubscribing after reconnect) is not implemented.
@@ -85,3 +88,5 @@ since the safe integer range covers millennia.
 - No write timeouts; relies on heartbeat (3× interval) to detect dead
   half-open connections.
 - Delayed retry (`retryAfter`) is not exposed yet; use immediate `retry()`.
+- Dead-letter policy is configured through the admin UI/API for now. The
+  TypeScript client does not declare queue DLQ policy directly.

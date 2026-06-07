@@ -178,6 +178,8 @@ await publisher.publish(NewMessage.raw(new Uint8Array([1, 2, 3])));
 
 Fibril reserves `fibril.*` headers for broker-owned metadata. User code should not set headers with that prefix.
 
+Dead-letter policy is configured through the admin UI/API rather than the Rust or TypeScript client APIs today. Client code should publish, consume, and settle messages; operators configure where exhausted messages go.
+
 ## Manual Acknowledgements
 
 Manual acknowledgement is the primary processing model. Messages are leased while inflight. Consumers settle each message explicitly.
