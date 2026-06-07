@@ -512,6 +512,8 @@ test("manual message retryAfter sends delayed nack", async () => {
     assert.ok(msg);
     const deadline = new Date(Date.now() + 10_000);
     await msg.retryAfter(deadline);
+    // retryAfter resolves once the command is accepted locally. The fake
+    // broker callback can observe the socket frame on the next tick.
     for (let i = 0; i < 20 && nack === null; i += 1) {
       await new Promise((r) => setTimeout(r, 5));
     }
