@@ -128,6 +128,17 @@ const MESSAGE_INSPECTION_DEFAULT_PAYLOAD_LIMIT_BYTES: usize = 4096;
 const MESSAGE_INSPECTION_MAX_PAYLOAD_LIMIT_BYTES: usize = 64 * 1024;
 const DLQ_REPLAY_MAX_OFFSETS: usize = 100;
 
+fn normalize_group(group: Option<String>) -> Option<String> {
+    group.and_then(|group| {
+        let group = group.trim().to_string();
+        if group.is_empty() || group == "default" {
+            None
+        } else {
+            Some(group)
+        }
+    })
+}
+
 impl RuntimeSettingsResponse {
     fn new(
         snapshot: RuntimeSettingsSnapshot,
@@ -240,6 +251,7 @@ pub async fn inspect_messages(
     Query(query): Query<InspectMessagesQuery>,
 ) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
+    let group = normalize_group(query.group);
 
     let limit = query
         .limit
@@ -260,7 +272,7 @@ pub async fn inspect_messages(
         .inspect_messages(
             &query.topic,
             0,
-            query.group.as_deref(),
+            group.as_deref(),
             query.from,
             limit,
             mode,
@@ -409,16 +421,19 @@ pub async fn update_global_dlq(
     check_auth(&server, &headers).await?;
 
     let target = match request.target {
-        Some(target) => match GlobalDLQ::new(&target.tp, 0, target.group.as_deref()).await {
-            Ok(target) => Some(target),
-            Err(err) => {
-                return Ok(admin_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_global_dlq",
-                    err.to_string(),
-                ));
+        Some(target) => {
+            let group = normalize_group(target.group);
+            match GlobalDLQ::new(&target.tp, 0, group.as_deref()).await {
+                Ok(target) => Some(target),
+                Err(err) => {
+                    return Ok(admin_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_global_dlq",
+                        err.to_string(),
+                    ));
+                }
             }
-        },
+        }
         None => None,
     };
 
@@ -467,7 +482,8 @@ pub async fn update_queue_dlq(
                     "custom queue DLQ policy requires a target",
                 ));
             };
-            let target = match GlobalDLQ::new(&target.tp, 0, target.group.as_deref()).await {
+            let target_group = normalize_group(target.group);
+            let target = match GlobalDLQ::new(&target.tp, 0, target_group.as_deref()).await {
                 Ok(target) => target,
                 Err(err) => {
                     return Ok(admin_error(
@@ -490,9 +506,10 @@ pub async fn update_queue_dlq(
         dlq_max_retries: request.max_retries,
     };
 
+    let group = normalize_group(request.group);
     match server
         .storage
-        .declare_queue(&request.tp, 0, request.group.as_deref(), meta)
+        .declare_queue(&request.tp, 0, group.as_deref(), meta)
         .await
     {
         Ok(()) => Ok((StatusCode::OK, Json(QueueDlqResponse { status: "stored" })).into_response()),
@@ -534,13 +551,10 @@ pub async fn replay_dead_letters(
         ));
     }
 
+    let dlq_group = normalize_group(request.dlq_group);
     match server
         .storage
-        .replay_dead_letters(
-            &request.dlq_topic,
-            request.dlq_group.as_deref(),
-            &request.offsets,
-        )
+        .replay_dead_letters(&request.dlq_topic, dlq_group.as_deref(), &request.offsets)
         .await
     {
         Ok(report) => Ok((StatusCode::OK, Json(report)).into_response()),

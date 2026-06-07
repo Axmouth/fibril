@@ -268,7 +268,7 @@ function numberValue(id) {
 
 function optionalTextValue(id) {
   const value = field(id).value.trim();
-  return value === "" ? null : value;
+  return value === "" || value === "default" ? null : value;
 }
 
 function durationMsValue(id) {

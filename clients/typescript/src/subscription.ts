@@ -15,6 +15,10 @@ import type { BoundedQueue } from "./internal/bounded-queue.js";
 import type { Client } from "./client.js";
 import { deadlineFromDelay, type DelayInput } from "./publisher.js";
 
+function normalizeGroup(group: string | null): string | null {
+  return group === "default" ? null : group;
+}
+
 /**
  * A delivered message in auto-ack mode (no settle action required).
  *
@@ -429,7 +433,7 @@ export class SubscriptionBuilder {
    * A group is an optional queue namespace under the topic.
    */
   group(group: string): this {
-    this.#group = group;
+    this.#group = normalizeGroup(group);
     return this;
   }
 

@@ -196,6 +196,59 @@ test("client declares queue policy", async () => {
   }
 });
 
+test("default group normalizes to ungrouped declarations and subscriptions", async () => {
+  assert.deepEqual(new QueueConfig("jobs").group("default").toWire(), {
+    topic: "jobs",
+    group: null,
+    dlq_policy: null,
+    dlq_max_retries: null,
+  });
+
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let subscribe: SubscribeMsg | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(
+          s,
+          buildFrame(Op.HelloOk, f.requestId, {
+            protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
+            server_name: "fake",
+            compliance: COMPLIANCE_STRING,
+          }),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        subscribe = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 1n,
+            topic: "jobs",
+            group: null,
+            partition: 0,
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const sub = await client.subscribe("jobs").group("default").subManualAck();
+
+    assert.deepEqual(subscribe, {
+      topic: "jobs",
+      group: null,
+      prefetch: 1,
+      auto_ack: false,
+    });
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("client subscribes and receives a delivery", async () => {
   const broker = new FakeBroker();
   await broker.start();

@@ -7,40 +7,37 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
-function parseKey(k) {
-  const [topic, group] = k.split(":");
-  return { topic, group: group || "default" };
-}
-
-function groupQueues(queues) {
-  const grouped = {};
-
-  for (const [key, state] of Object.entries(queues || {})) {
-    const { topic, group } = parseKey(key);
-
-    if (!grouped[group]) grouped[group] = [];
-    grouped[group].push({ topic, state });
-  }
-
-  return grouped;
+function inspectHref(item) {
+  const params = new URLSearchParams();
+  params.set("topic", item.topic);
+  if (item.group) params.set("group", item.group);
+  params.set("from", String(item.state?.settled_until ?? 0));
+  return `/admin/messages?${params}`;
 }
 
 async function refresh() {
-  const data = await api('/admin/api/queues');
+  const data = await api('/admin/api/queues_debug');
   const container = document.getElementById("queues");
 
-  const grouped = groupQueues(data.queues);
+  const grouped = {};
+  for (const item of data.queues || []) {
+    const group = item.group || "default";
+    if (!grouped[group]) grouped[group] = [];
+    grouped[group].push(item);
+  }
 
   const html = Object.entries(grouped)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([group, items]) => {
       const rows = items
         .sort((a, b) => a.topic.localeCompare(b.topic))
-        .map(({ topic, state }) => `
+        .map(item => `
           <tr>
-            <td>${topic}</td>
-            <td class="text-right">${state.ready_count}</td>
-            <td class="text-right">${state.inflight_count}</td>
+            <td>${item.topic}</td>
+            <td class="text-right">${item.state.ready_count}</td>
+            <td class="text-right">${item.state.inflight_count}</td>
+            <td class="text-right">${item.state.settled_until}</td>
+            <td><a href="${inspectHref(item)}">Inspect messages</a></td>
           </tr>
         `).join('');
 
@@ -51,6 +48,8 @@ async function refresh() {
             <th>Topic</th>
             <th class="text-right">Ready</th>
             <th class="text-right">In-flight</th>
+            <th class="text-right">Settled until</th>
+            <th>Messages</th>
           </tr>
           ${rows}
         </table>

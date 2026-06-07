@@ -122,7 +122,7 @@ function buildQuery(fromOverride = null) {
 
   const params = new URLSearchParams();
   params.set("topic", topic);
-  const group = field("message-group").value.trim();
+  const group = normalizedGroupValue("message-group");
   if (group) params.set("group", group);
   params.set("from", String(fromOverride ?? optionalNumber("message-from") ?? 0));
 
@@ -138,11 +138,44 @@ function buildQuery(fromOverride = null) {
   return params;
 }
 
+function normalizedGroupValue(id) {
+  const value = field(id).value.trim();
+  return value === "" || value === "default" ? null : value;
+}
+
 function renderHeaders(headers) {
-  if (!headers || headers.length === 0) return '<span class="message-muted">none</span>';
-  return headers
+  if (!headers) return '<span class="message-muted">none</span>';
+
+  const parts = [];
+  if (headers.content_type) {
+    parts.push(["content_type", contentTypeLabel(headers.content_type)]);
+  }
+  if (headers.published !== undefined && headers.published !== null) {
+    parts.push(["published", headers.published]);
+  }
+  if (headers.publish_received !== undefined && headers.publish_received !== null) {
+    parts.push(["publish_received", headers.publish_received]);
+  }
+  for (const [key, value] of Object.entries(headers.extra || {})) {
+    parts.push([key, value]);
+  }
+
+  if (parts.length === 0) return '<span class="message-muted">none</span>';
+  return parts
     .map(([key, value]) => `<code>${escapeHtml(key)}=${escapeHtml(value)}</code>`)
     .join(" ");
+}
+
+function contentTypeLabel(contentType) {
+  if (contentType === "MsgPack") return "application/msgpack";
+  if (contentType === "Json") return "application/json";
+  if (contentType === "Text") return "text/plain; charset=utf-8";
+  if (typeof contentType === "string") return contentType;
+  if (contentType.MsgPack !== undefined) return "application/msgpack";
+  if (contentType.Json !== undefined) return "application/json";
+  if (contentType.Text !== undefined) return "text/plain; charset=utf-8";
+  if (contentType.Custom !== undefined) return contentType.Custom;
+  return JSON.stringify(contentType);
 }
 
 function renderPayload(item) {
@@ -223,13 +256,13 @@ async function replaySelected() {
   if (offsets.length === 0) return;
   const dlqTopic = field("message-topic").value.trim();
   if (!dlqTopic) throw new Error("Topic is required.");
-  const dlqGroup = field("message-group").value.trim();
+  const dlqGroup = normalizedGroupValue("message-group");
   const response = await fetch("/admin/api/dlq/replay", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       dlq_topic: dlqTopic,
-      dlq_group: dlqGroup || null,
+      dlq_group: dlqGroup,
       offsets,
     }),
   });
@@ -270,5 +303,22 @@ replayButton.addEventListener("click", async () => {
 includePayload.addEventListener("change", event => {
   payloadLimitRow.hidden = !event.target.checked;
 });
+
+function applyInitialQuery() {
+  const params = new URLSearchParams(window.location.search);
+  field("message-topic").value = params.get("topic") || "";
+  field("message-group").value = params.get("group") || "";
+  field("message-from").value = params.get("from") || "0";
+  field("message-limit").value = params.get("limit") || "50";
+  field("message-include-settled").checked = params.get("include_settled") === "true";
+  field("message-include-payload").checked = params.get("include_payload") === "true";
+  field("message-payload-limit").value = params.get("payload_limit_bytes") || "4096";
+  payloadLimitRow.hidden = !field("message-include-payload").checked;
+}
+
+applyInitialQuery();
+if (field("message-topic").value.trim()) {
+  loadMessages().catch(err => setMessage("error", err.message || String(err)));
+}
 </script>
 {% endblock %}

@@ -234,7 +234,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                                 version,
                                 Some(GlobalDlqTarget {
                                     tp: args.topic,
-                                    group: args.group,
+                                    group: normalize_group_arg(args.group.as_deref())
+                                        .map(str::to_string),
                                     part: None,
                                 }),
                             )
@@ -266,7 +267,7 @@ async fn declare_queue(
     let topic = args.topic.clone();
     let mut config = QueueConfig::new(&args.topic)?;
 
-    if let Some(group) = &args.group {
+    if let Some(group) = normalize_group_arg(args.group.as_deref()) {
         config = config.group(group)?;
     }
     if let Some(max_retries) = args.max_retries {
@@ -287,7 +288,7 @@ async fn declare_queue(
                 .dlq_topic
                 .as_deref()
                 .context("--dlq custom requires --dlq-topic")?;
-            match args.dlq_group.as_deref() {
+            match normalize_group_arg(args.dlq_group.as_deref()) {
                 Some(group) => config.custom_dead_letter_queue_grouped(dlq_topic, group)?,
                 None => config.custom_dead_letter_queue(dlq_topic)?,
             }
@@ -322,6 +323,17 @@ fn connect_addr_for_bind(bind: SocketAddr) -> SocketAddr {
         }
         other => other,
     }
+}
+
+fn normalize_group_arg(group: Option<&str>) -> Option<&str> {
+    group.and_then(|group| {
+        let group = group.trim();
+        if group.is_empty() || group == "default" {
+            None
+        } else {
+            Some(group)
+        }
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -387,8 +399,8 @@ impl AdminClient {
             ("topic".to_string(), args.topic),
             ("from".to_string(), args.from.to_string()),
         ];
-        if let Some(group) = args.group {
-            query.push(("group".to_string(), group));
+        if let Some(group) = normalize_group_arg(args.group.as_deref()) {
+            query.push(("group".to_string(), group.to_string()));
         }
         if let Some(limit) = args.limit {
             query.push(("limit".to_string(), limit.to_string()));
@@ -411,7 +423,7 @@ impl AdminClient {
             "/admin/api/dlq/replay",
             &ReplayDlqRequest {
                 dlq_topic: args.dlq_topic,
-                dlq_group: args.dlq_group,
+                dlq_group: normalize_group_arg(args.dlq_group.as_deref()).map(str::to_string),
                 offsets: args.offset,
             },
         )
@@ -522,6 +534,14 @@ mod tests {
         };
 
         assert!(reject_custom_dlq_args(&args).is_err());
+    }
+
+    #[test]
+    fn default_group_arg_normalizes_to_ungrouped() {
+        assert_eq!(normalize_group_arg(None), None);
+        assert_eq!(normalize_group_arg(Some("")), None);
+        assert_eq!(normalize_group_arg(Some("default")), None);
+        assert_eq!(normalize_group_arg(Some(" workers ")), Some("workers"));
     }
 
     #[test]

@@ -6,6 +6,10 @@ import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
 import type { AuthMsg, DeclareQueueMsg, QueueDlqPolicy } from "./protocol.js";
 
+function normalizeGroup(group: string | null): string | null {
+  return group === "default" ? null : group;
+}
+
 /**
  * Options used during client startup and protocol handshake.
  *
@@ -106,7 +110,7 @@ export class QueueConfig {
     dlqMaxRetries: number | null = null,
   ) {
     this.topic = topic;
-    this.groupName = groupName;
+    this.groupName = normalizeGroup(groupName);
     this.dlqPolicy = dlqPolicy;
     this.dlqMaxRetries = dlqMaxRetries;
   }
@@ -114,7 +118,7 @@ export class QueueConfig {
   group(group: string): QueueConfig {
     return new QueueConfig(
       this.topic,
-      group,
+      normalizeGroup(group),
       this.dlqPolicy,
       this.dlqMaxRetries,
     );
@@ -151,7 +155,7 @@ export class QueueConfig {
     return new QueueConfig(
       this.topic,
       this.groupName,
-      { kind: "custom", topic, group },
+      { kind: "custom", topic, group: normalizeGroup(group) },
       this.dlqMaxRetries,
     );
   }
@@ -297,7 +301,7 @@ export class Client {
    * Grouping writes to an optional queue namespace under the topic.
    */
   publisherGrouped(topic: string, group: string): Publisher {
-    return new Publisher(this.#engine, topic, group);
+    return new Publisher(this.#engine, topic, normalizeGroup(group));
   }
 
   /**

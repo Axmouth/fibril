@@ -159,6 +159,16 @@ impl GroupName {
         validate_name("group", value.as_ref()).map(|inner| Self { inner })
     }
 
+    /// Parse an optional group name, treating `default` as the ungrouped queue.
+    pub fn parse_optional(value: impl AsRef<str>) -> FibrilResult<Option<Self>> {
+        let value = value.as_ref();
+        if value == "default" {
+            Ok(None)
+        } else {
+            Self::parse(value).map(Some)
+        }
+    }
+
     /// Borrow the group as a string slice.
     pub fn as_str(&self) -> &str {
         &self.inner
@@ -776,7 +786,7 @@ impl QueueConfig {
 
     /// Declare behavior for a grouped queue namespace.
     pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
-        self.group = Some(GroupName::parse(group)?);
+        self.group = GroupName::parse_optional(group)?;
         Ok(self)
     }
 
@@ -815,7 +825,7 @@ impl QueueConfig {
     ) -> FibrilResult<Self> {
         self.dlq_policy = Some(DeadLetterPolicy::Custom {
             topic: TopicName::parse(topic)?,
-            group: Some(GroupName::parse(group)?),
+            group: GroupName::parse_optional(group)?,
         });
         Ok(self)
     }
@@ -872,7 +882,7 @@ impl<'a> SubscriptionBuilder<'a> {
     ///
     /// A group is an optional queue namespace under the topic.
     pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
-        self.group = Some(GroupName::parse(group)?);
+        self.group = GroupName::parse_optional(group)?;
         Ok(self)
     }
 
@@ -1020,7 +1030,7 @@ impl Client {
         Ok(Publisher {
             engine: self.engine.clone(),
             topic: TopicName::parse(topic)?,
-            group: Some(GroupName::parse(group)?),
+            group: GroupName::parse_optional(group)?,
         })
     }
 
@@ -2152,6 +2162,7 @@ mod tests {
     #[test]
     fn group_name_uses_same_rules() {
         assert_eq!(GroupName::parse("workers-a").unwrap().as_str(), "workers-a");
+        assert!(GroupName::parse_optional("default").unwrap().is_none());
         assert!(matches!(
             GroupName::parse("Workers"),
             Err(FibrilError::InvalidName { kind: "group", .. })
@@ -2271,6 +2282,43 @@ mod tests {
         }
 
         task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_group_declares_ungrouped_queue() {
+        let (client, mut rx) = client_with_command_rx();
+        let task = tokio::spawn(async move {
+            client
+                .declare_queue(QueueConfig::new("jobs").unwrap().group("default").unwrap())
+                .await
+        });
+
+        match rx.recv().await.unwrap() {
+            Command::DeclareQueue { req, reply } => {
+                assert_eq!(req.topic, "jobs");
+                assert_eq!(req.group, None);
+                reply.send(Ok(())).unwrap();
+            }
+            other => panic!("expected declare queue, got {other:?}"),
+        }
+
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_group_publisher_uses_ungrouped_queue() {
+        let (client, mut rx) = client_with_command_rx();
+        let publisher = client.publisher_grouped("jobs", "default").unwrap();
+
+        publisher.publish("hello").await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            Command::PublishUnconfirmed { topic, group, .. } => {
+                assert_eq!(topic, "jobs");
+                assert_eq!(group, None);
+            }
+            other => panic!("expected unconfirmed publish, got {other:?}"),
+        }
     }
 
     #[tokio::test]
