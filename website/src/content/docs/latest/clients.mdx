@@ -236,6 +236,94 @@ for await (const msg of sub) {
 
 `retry()` requeues immediately. Delayed retry is still partial and should not be treated as supported user-facing behavior yet.
 
+## Dead Letter Workflow
+
+Dead-letter routing is configured by an operator through the admin UI/API. Client code does not declare DLQ policy directly; it publishes and settles messages normally.
+
+For example, configure a global DLQ target:
+
+```http
+PUT /admin/api/global-dlq
+```
+
+```json
+{
+  "expected_version": 0,
+  "target": {
+    "tp": "_dlq.email",
+    "group": null
+  }
+}
+```
+
+Then configure a source queue to use that global target after retries are exhausted:
+
+```http
+PUT /admin/api/queue-dlq
+```
+
+```json
+{
+  "tp": "email.send",
+  "group": "workers",
+  "policy": "global",
+  "target": null,
+  "max_retries": 3
+}
+```
+
+Application clients keep using normal publish/consume code:
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+let publisher = client.publisher_grouped("email.send", "workers")?;
+publisher.publish_confirmed(NewMessage::json(&job)?).await?;
+
+let mut sub = client
+    .subscribe("email.send")?
+    .group("workers")?
+    .prefetch(32)
+    .sub_manual_ack()
+    .await?;
+
+while let Some(msg) = sub.recv().await {
+    if process(msg.deserialize()?).await.is_ok() {
+        msg.complete().await?;
+    } else {
+        msg.retry().await?;
+    }
+}
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+const publisher = client.publisherGrouped("email.send", "workers");
+await publisher.publishConfirmed(NewMessage.json(job));
+
+const sub = await client
+  .subscribe("email.send")
+  .group("workers")
+  .prefetch(32)
+  .subManualAck();
+
+for await (const msg of sub) {
+  if (await process(msg.deserialize())) {
+    await msg.complete();
+  } else {
+    await msg.retry();
+  }
+}
+```
+
+  </TabItem>
+</Tabs>
+
+Once the configured retry limit is exhausted, the broker routes the failed message to `_dlq.email`. Subscribe to that queue like any other queue when you want inspection or replay tooling.
+
 ## Decode Messages
 
 `deserialize()` chooses a decoder from `content-type`. Missing content type defaults to msgpack.
