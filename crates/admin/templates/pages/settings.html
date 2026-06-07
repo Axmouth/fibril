@@ -452,12 +452,14 @@ function collectQueueDlqRequest() {
 }
 
 function setGlobalDlqFieldsEnabled(enabled) {
+  field("global-dlq-fields").hidden = !enabled;
   for (const input of document.querySelectorAll("#global-dlq-fields input")) {
     input.disabled = !enabled;
   }
 }
 
 function setQueueDlqTargetFieldsEnabled(enabled) {
+  field("queue-dlq-target-fields").hidden = !enabled;
   for (const input of document.querySelectorAll("#queue-dlq-target-fields input")) {
     input.disabled = !enabled;
   }
