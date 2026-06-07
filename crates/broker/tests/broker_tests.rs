@@ -953,6 +953,158 @@ async fn unsubscribe_requeues_prefetched_unacked_messages() {
             .unwrap();
     }
 
+    redelivered.sort_unstable();
+    assert_eq!(redelivered, vec![0, 1, 2]);
+}
+
+#[tokio::test]
+async fn unsubscribe_redistributes_prefetched_messages_to_active_subscriber() {
+    let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
+
+    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    for i in 0..3 {
+        pubh.publish(
+            format!("x{i}").as_bytes().to_vec(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut first = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .await
+        .unwrap();
+
+    let mut leased = Vec::new();
+    for _ in 0..3 {
+        leased.push(first.recv().await.unwrap().message.offset);
+    }
+    leased.sort_unstable();
+    assert_eq!(leased, vec![0, 1, 2]);
+
+    let mut replacement = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .await
+        .unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), replacement.recv())
+            .await
+            .is_err()
+    );
+
+    broker
+        .unsubscribe(
+            &first.topic,
+            first.group.as_deref(),
+            first.partition,
+            first.sub_id,
+        )
+        .await
+        .unwrap();
+
+    let mut redelivered = Vec::new();
+    for _ in 0..3 {
+        let msg = replacement.recv().await.unwrap();
+        redelivered.push(msg.message.offset);
+        replacement
+            .settle(SettleRequest {
+                settle_type: SettleType::Ack,
+                delivery_tag: msg.delivery_tag,
+            })
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(redelivered, vec![0, 1, 2]);
+}
+
+#[tokio::test]
+async fn unsubscribe_redelivery_survives_if_active_replacement_has_no_capacity_then_unsubs() {
+    let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
+
+    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    for i in 0..3 {
+        pubh.publish(
+            format!("x{i}").as_bytes().to_vec(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    }
+
+    let mut first = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 2 })
+        .await
+        .unwrap();
+    let mut replacement = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .await
+        .unwrap();
+
+    let first_a = first.recv().await.unwrap();
+    let first_b = first.recv().await.unwrap();
+    let held_by_replacement = replacement.recv().await.unwrap();
+    let mut initially_leased = vec![
+        first_a.message.offset,
+        first_b.message.offset,
+        held_by_replacement.message.offset,
+    ];
+    initially_leased.sort_unstable();
+    assert_eq!(initially_leased, vec![0, 1, 2]);
+
+    broker
+        .unsubscribe(
+            &first.topic,
+            first.group.as_deref(),
+            first.partition,
+            first.sub_id,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), replacement.recv())
+            .await
+            .is_err()
+    );
+
+    broker
+        .unsubscribe(
+            &replacement.topic,
+            replacement.group.as_deref(),
+            replacement.partition,
+            replacement.sub_id,
+        )
+        .await
+        .unwrap();
+
+    let mut final_sub = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .await
+        .unwrap();
+
+    let mut redelivered = Vec::new();
+    for _ in 0..3 {
+        let msg = final_sub.recv().await.unwrap();
+        redelivered.push(msg.message.offset);
+        final_sub
+            .settle(SettleRequest {
+                settle_type: SettleType::Ack,
+                delivery_tag: msg.delivery_tag,
+            })
+            .await
+            .unwrap();
+    }
+
+    redelivered.sort_unstable();
     assert_eq!(redelivered, vec![0, 1, 2]);
 }
 
