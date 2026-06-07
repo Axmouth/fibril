@@ -161,6 +161,31 @@ Useful query flags:
 Message inspection reads persisted message data and queue state. Use it for
 debugging and operations, not as a live polling view.
 
+Replay selected active DLQ offsets back to their recorded source queue:
+
+```http
+POST /admin/api/dlq/replay
+```
+
+```json
+{
+  "dlq_topic": "_dlq.orders",
+  "dlq_group": null,
+  "offsets": [0, 3, 8]
+}
+```
+
+The replay operation copies the stored payload and user headers back to the
+source topic recorded in `stroma.dlq.source_topic` and
+`stroma.dlq.source_group`. It strips system metadata from the replayed copy and
+does not remove or acknowledge the DLQ message.
+
+The same operation is available from the CLI:
+
+```sh
+fibrilctl admin dlq replay _dlq.orders --offset 0 --offset 3
+```
+
 Use a queue-specific DLQ target:
 
 ```json
@@ -224,5 +249,5 @@ Dead-letter routing is usable, but some surrounding workflow is still intentiona
 
 Still in progress:
 
-- replay tooling and message inspection for DLQ queues
-- richer end-to-end coverage around replay and inspection workflows
+- richer replay workflows, such as bulk replay filters and explicit delete/ack controls
+- broader end-to-end coverage around replay and inspection workflows

@@ -72,6 +72,13 @@ pub struct UpdateQueueDlqRequest {
     pub max_retries: Option<u32>,
 }
 
+#[derive(Deserialize)]
+pub struct ReplayDeadLettersRequest {
+    pub dlq_topic: String,
+    pub dlq_group: Option<String>,
+    pub offsets: Vec<u64>,
+}
+
 #[derive(Serialize)]
 pub struct QueueDlqResponse {
     pub status: &'static str,
@@ -119,6 +126,7 @@ const MESSAGE_INSPECTION_DEFAULT_LIMIT: usize = 50;
 const MESSAGE_INSPECTION_MAX_LIMIT: usize = 500;
 const MESSAGE_INSPECTION_DEFAULT_PAYLOAD_LIMIT_BYTES: usize = 4096;
 const MESSAGE_INSPECTION_MAX_PAYLOAD_LIMIT_BYTES: usize = 64 * 1024;
+const DLQ_REPLAY_MAX_OFFSETS: usize = 100;
 
 impl RuntimeSettingsResponse {
     fn new(
@@ -499,6 +507,54 @@ pub async fn update_queue_dlq(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "queue_dlq_update_failed",
                 "queue DLQ update failed",
+            ))
+        }
+    }
+}
+
+pub async fn replay_dead_letters(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<ReplayDeadLettersRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    if request.offsets.is_empty() {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "missing_dlq_replay_offsets",
+            "provide at least one DLQ offset to replay",
+        ));
+    }
+    if request.offsets.len() > DLQ_REPLAY_MAX_OFFSETS {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "too_many_dlq_replay_offsets",
+            format!("DLQ replay accepts at most {DLQ_REPLAY_MAX_OFFSETS} offsets per request"),
+        ));
+    }
+
+    match server
+        .storage
+        .replay_dead_letters(
+            &request.dlq_topic,
+            request.dlq_group.as_deref(),
+            &request.offsets,
+        )
+        .await
+    {
+        Ok(report) => Ok((StatusCode::OK, Json(report)).into_response()),
+        Err(err @ StromaError::InvalidArgument(_)) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_dlq_replay_request",
+            err.to_string(),
+        )),
+        Err(err) => {
+            tracing::error!("DLQ replay failed: {err}");
+            Ok(admin_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "dlq_replay_failed",
+                "DLQ replay failed",
             ))
         }
     }

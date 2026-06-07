@@ -63,6 +63,11 @@ enum AdminCommand {
         #[command(subcommand)]
         command: GlobalDlqCommand,
     },
+    /// Dead-letter queue operations.
+    Dlq {
+        #[command(subcommand)]
+        command: DlqCommand,
+    },
     /// Inspect persisted queue messages through the admin API.
     Messages(InspectMessagesArgs),
 }
@@ -77,6 +82,12 @@ enum GlobalDlqCommand {
     Clear(ClearGlobalDlqArgs),
 }
 
+#[derive(Debug, Subcommand)]
+enum DlqCommand {
+    /// Replay active dead-letter messages to their recorded source queue.
+    Replay(ReplayDlqArgs),
+}
+
 #[derive(Debug, Parser)]
 struct SetGlobalDlqArgs {
     /// Target DLQ topic.
@@ -89,6 +100,20 @@ struct SetGlobalDlqArgs {
     /// Expected global DLQ settings version. Defaults to the current version.
     #[arg(long)]
     expected_version: Option<u64>,
+}
+
+#[derive(Debug, Parser)]
+struct ReplayDlqArgs {
+    /// DLQ topic to replay from.
+    dlq_topic: String,
+
+    /// Optional DLQ group.
+    #[arg(long)]
+    dlq_group: Option<String>,
+
+    /// DLQ offset to replay. Repeat for multiple offsets.
+    #[arg(long, required = true)]
+    offset: Vec<u64>,
 }
 
 #[derive(Debug, Parser)]
@@ -223,6 +248,9 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         print_global_dlq(updated)?;
                     }
                 },
+                AdminCommand::Dlq { command } => match command {
+                    DlqCommand::Replay(args) => print_json(admin.replay_dlq(args).await?)?,
+                },
                 AdminCommand::Messages(args) => print_json(admin.inspect_messages(args).await?)?,
             }
         }
@@ -324,6 +352,13 @@ struct UpdateGlobalDlqRequest {
     target: Option<GlobalDlqTarget>,
 }
 
+#[derive(Debug, Serialize)]
+struct ReplayDlqRequest {
+    dlq_topic: String,
+    dlq_group: Option<String>,
+    offsets: Vec<u64>,
+}
+
 impl AdminClient {
     async fn get_global_dlq(&self) -> anyhow::Result<GlobalDlqSnapshot> {
         self.get_json("/admin/api/global-dlq", &[]).await
@@ -371,6 +406,18 @@ impl AdminClient {
         self.get_json("/admin/api/messages", &query).await
     }
 
+    async fn replay_dlq(&self, args: ReplayDlqArgs) -> anyhow::Result<serde_json::Value> {
+        self.post_json(
+            "/admin/api/dlq/replay",
+            &ReplayDlqRequest {
+                dlq_topic: args.dlq_topic,
+                dlq_group: args.dlq_group,
+                offsets: args.offset,
+            },
+        )
+        .await
+    }
+
     async fn get_json<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -395,6 +442,22 @@ impl AdminClient {
         let response = self
             .http
             .put(self.url(path))
+            .basic_auth(&self.username, Some(&self.password))
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to admin API at {}", self.addr))?;
+        decode_admin_response(response).await
+    }
+
+    async fn post_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        path: &str,
+        body: &impl Serialize,
+    ) -> anyhow::Result<T> {
+        let response = self
+            .http
+            .post(self.url(path))
             .basic_auth(&self.username, Some(&self.password))
             .json(body)
             .send()
@@ -474,5 +537,34 @@ mod tests {
             admin.url("/admin/api/messages"),
             "http://127.0.0.1:9090/admin/api/messages"
         );
+    }
+
+    #[test]
+    fn parses_dlq_replay_offsets() {
+        let cli = Cli::try_parse_from([
+            "fibrilctl",
+            "admin",
+            "dlq",
+            "replay",
+            "_dlq.orders",
+            "--offset",
+            "0",
+            "--offset",
+            "3",
+        ])
+        .unwrap();
+
+        let Command::Admin {
+            command:
+                AdminCommand::Dlq {
+                    command: DlqCommand::Replay(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected dlq replay command");
+        };
+
+        assert_eq!(args.dlq_topic, "_dlq.orders");
+        assert_eq!(args.offset, vec![0, 3]);
     }
 }

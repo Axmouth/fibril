@@ -57,6 +57,7 @@
       <div class="settings-actions">
         <button class="btn btn-primary" type="submit">Load messages</button>
         <button class="btn" type="button" id="message-next" disabled>Next page</button>
+        <button class="btn btn-warning" type="button" id="message-replay" disabled>Replay selected to source</button>
       </div>
     </form>
   </section>
@@ -71,10 +72,10 @@ const form = document.getElementById("message-inspection-form");
 const results = document.getElementById("message-results");
 const message = document.getElementById("message-inspection-message");
 const nextButton = document.getElementById("message-next");
+const replayButton = document.getElementById("message-replay");
 const includePayload = document.getElementById("message-include-payload");
 const payloadLimitRow = document.getElementById("payload-limit-row");
 
-let lastQuery = null;
 let nextOffsetHint = null;
 
 function field(id) {
@@ -155,6 +156,7 @@ function renderPayload(item) {
 function renderItems(data) {
   nextOffsetHint = data.next_offset_hint;
   nextButton.disabled = nextOffsetHint === null || nextOffsetHint === undefined;
+  replayButton.disabled = true;
 
   if (!data.items || data.items.length === 0) {
     results.innerHTML = '<div class="message-empty">No messages matched this request.</div>';
@@ -165,6 +167,7 @@ function renderItems(data) {
     const state = item.state || {};
     return `
       <tr>
+        <td><input class="message-select" type="checkbox" value="${escapeHtml(state.offset)}" aria-label="select offset ${escapeHtml(state.offset)}"></td>
         <td class="text-right">${escapeHtml(state.offset)}</td>
         <td><span class="message-status message-status-${escapeHtml(state.status)}">${escapeHtml(state.status)}</span></td>
         <td class="text-right">${escapeHtml(state.retry_count ?? 0)}</td>
@@ -178,6 +181,7 @@ function renderItems(data) {
   results.innerHTML = `
     <table class="table table-compact message-table">
       <tr>
+        <th></th>
         <th class="text-right">Offset</th>
         <th>Status</th>
         <th class="text-right">Retries</th>
@@ -188,16 +192,52 @@ function renderItems(data) {
       ${rows}
     </table>
   `;
+
+  for (const checkbox of document.querySelectorAll(".message-select")) {
+    checkbox.addEventListener("change", updateReplayButton);
+  }
+  updateReplayButton();
 }
 
 async function loadMessages(fromOverride = null) {
   clearMessage();
   results.innerHTML = "";
   const query = buildQuery(fromOverride);
-  lastQuery = query;
   const data = await api(`/admin/api/messages?${query}`);
   renderItems(data);
   setMessage("info", data.warning || "Message inspection loaded.");
+}
+
+function selectedOffsets() {
+  return Array.from(document.querySelectorAll(".message-select:checked"))
+    .map(input => Number(input.value))
+    .filter(value => Number.isFinite(value));
+}
+
+function updateReplayButton() {
+  replayButton.disabled = selectedOffsets().length === 0;
+}
+
+async function replaySelected() {
+  const offsets = selectedOffsets();
+  if (offsets.length === 0) return;
+  const dlqTopic = field("message-topic").value.trim();
+  if (!dlqTopic) throw new Error("Topic is required.");
+  const dlqGroup = field("message-group").value.trim();
+  const response = await fetch("/admin/api/dlq/replay", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      dlq_topic: dlqTopic,
+      dlq_group: dlqGroup || null,
+      offsets,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text() || `Replay failed: HTTP ${response.status}`);
+  }
+  const report = await response.json();
+  setMessage("success", `Replay requested for ${report.requested} offset(s); ${report.replayed} copied back to source.`);
 }
 
 form.addEventListener("submit", async event => {
@@ -214,6 +254,14 @@ nextButton.addEventListener("click", async () => {
   field("message-from").value = String(nextOffsetHint);
   try {
     await loadMessages(nextOffsetHint);
+  } catch (err) {
+    setMessage("error", err.message || String(err));
+  }
+});
+
+replayButton.addEventListener("click", async () => {
+  try {
+    await replaySelected();
   } catch (err) {
     setMessage("error", err.message || String(err));
   }

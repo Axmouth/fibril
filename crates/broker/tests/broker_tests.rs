@@ -1418,6 +1418,97 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
 }
 
 #[tokio::test]
+async fn dlq_replay_copies_message_back_to_source_without_system_headers()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (engine, _dir) = open_test_engine().await;
+    let replay_engine = engine.clone();
+    engine
+        .set_global_dlq(Some(GlobalDLQ::new("_dlq.source", 0, None).await?), 0)
+        .await?;
+    engine
+        .declare_queue(
+            "source",
+            0,
+            None,
+            DeclareMeta {
+                dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
+                dlq_max_retries: Some(0),
+            },
+        )
+        .await?;
+
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+    let (publisher, _confirms) = broker.get_publisher("source", &None).await?;
+    publisher
+        .publish(
+            b"poison".to_vec(),
+            Default::default(),
+            Default::default(),
+            None,
+            Default::default(),
+        )
+        .await?
+        .await??;
+
+    let source_client = Uuid::now_v7();
+    let mut source = broker
+        .subscribe(
+            "source",
+            None,
+            source_client,
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await?;
+    let msg = source.recv().await.expect("source message delivered");
+    source
+        .settle(SettleRequest {
+            settle_type: SettleType::Nack {
+                requeue: Some(true),
+                not_before: None,
+            },
+            delivery_tag: msg.delivery_tag,
+        })
+        .await?;
+
+    let dlq_client = Uuid::now_v7();
+    let mut dlq = broker
+        .subscribe(
+            "_dlq.source",
+            None,
+            dlq_client,
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await?;
+    let dlq_msg = recv_with_timeout(&mut dlq, 2_000)
+        .await
+        .expect("message should be copied to global DLQ target");
+    assert_dlq_metadata(&dlq_msg, "source", "0", "0", "retries_exhausted");
+
+    let report = replay_engine
+        .replay_dead_letters("_dlq.source", None, &[dlq_msg.message.offset])
+        .await?;
+    assert_eq!(report.requested, 1);
+    assert_eq!(report.replayed, 1);
+    assert_eq!(report.items[0].target_topic.as_deref(), Some("source"));
+
+    let replayed = recv_with_timeout(&mut source, 2_000)
+        .await
+        .expect("replayed message should be delivered to source queue");
+    assert_eq!(replayed.message.topic, "source");
+    assert_eq!(replayed.message.payload, b"poison");
+    assert!(
+        !replayed
+            .message
+            .headers
+            .keys()
+            .any(|key| key.starts_with("stroma.") || key.starts_with("fibril."))
+    );
+
+    broker.shutdown_graceful().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn global_dlq_metadata_reports_retry_count_after_requeues()
 -> Result<(), Box<dyn std::error::Error>> {
     let (engine, _dir) = open_test_engine().await;

@@ -3,10 +3,11 @@ use std::{collections::HashMap, path::Path, sync::Arc};
 use async_trait::async_trait;
 use fibril_metrics::QueuesStateSnapshot;
 use fibril_storage::Offset;
-use fibril_util::UnixMillis;
+use fibril_util::{UnixMillis, unix_millis};
 use std::collections::HashSet;
 use stroma_core::{
-    AckEventMeta, GlobalStore, NackEventMeta, PublishItem, StromaDebugSnapshot, StromaMetrics,
+    AckEventMeta, CompletionPair, GlobalStore, NackEventMeta, PublishItem, StromaDebugSnapshot,
+    StromaMetrics,
 };
 pub use stroma_core::{
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
@@ -38,6 +39,29 @@ pub enum SettleKind {
 pub struct SettleRequest {
     pub offset: Offset,
     pub kind: SettleKind,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReplayDeadLettersReport {
+    pub requested: usize,
+    pub replayed: usize,
+    pub items: Vec<ReplayDeadLetterItem>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReplayDeadLetterItem {
+    pub offset: Offset,
+    pub outcome: ReplayDeadLetterOutcome,
+    pub target_topic: Option<String>,
+    pub target_group: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayDeadLetterOutcome {
+    Replayed,
+    Skipped,
 }
 
 #[async_trait]
@@ -145,6 +169,13 @@ pub trait QueueEngine {
         payload_limit_bytes: usize,
     ) -> Result<MessageInspectionPage, StromaError>;
 
+    async fn replay_dead_letters(
+        &self,
+        dlq_tp: &str,
+        dlq_group: Option<&str>,
+        offsets: &[Offset],
+    ) -> Result<ReplayDeadLettersReport, StromaError>;
+
     async fn global_dlq(&self) -> Result<GlobalDlqSnapshot, StromaError>;
 
     async fn set_global_dlq(
@@ -208,6 +239,108 @@ impl StromaEngine {
 
     pub async fn global_store(&self) -> Result<Arc<GlobalStore>, StromaError> {
         self.inner.global_store().await
+    }
+
+    async fn replay_dead_letter(
+        &self,
+        dlq_tp: &str,
+        dlq_group: Option<&str>,
+        offset: Offset,
+    ) -> Result<ReplayDeadLetterItem, StromaError> {
+        let page = self
+            .inner
+            .inspect_messages(
+                dlq_tp,
+                0,
+                dlq_group,
+                offset,
+                1,
+                InspectMode::ActiveOnly,
+                true,
+                usize::MAX,
+            )
+            .await?;
+        let Some(item) = page
+            .items
+            .into_iter()
+            .find(|item| item.state.offset == offset)
+        else {
+            return Ok(skipped_replay(
+                offset,
+                "offset is not active in the DLQ queue",
+            ));
+        };
+        let Some(mut headers) = item.headers else {
+            return Ok(skipped_replay(
+                offset,
+                "message headers are missing from the log",
+            ));
+        };
+        let Some(payload) = item.payload else {
+            return Ok(skipped_replay(
+                offset,
+                "message payload is missing from the log",
+            ));
+        };
+        if item.missing_payload {
+            return Ok(skipped_replay(
+                offset,
+                "message payload is missing from the log",
+            ));
+        }
+        if item.payload_truncated {
+            return Ok(skipped_replay(
+                offset,
+                "message payload was truncated during inspection",
+            ));
+        }
+
+        let Some(target_topic) = headers.extra.get("stroma.dlq.source_topic").cloned() else {
+            return Ok(skipped_replay(
+                offset,
+                "DLQ metadata is missing stroma.dlq.source_topic",
+            ));
+        };
+        let target_group = headers.extra.get("stroma.dlq.source_group").cloned();
+
+        headers.published = unix_millis();
+        headers.publish_received = headers.published;
+        headers
+            .extra
+            .retain(|key, _| !key.starts_with("stroma.") && !key.starts_with("fibril."));
+
+        let (completion, receiver) = KeratinAppendCompletion::pair();
+        self.inner
+            .append_message(
+                &target_topic,
+                0,
+                target_group.as_deref(),
+                &headers,
+                payload,
+                completion,
+            )
+            .await?;
+        match receiver.await {
+            Ok(Ok(_)) => Ok(ReplayDeadLetterItem {
+                offset,
+                outcome: ReplayDeadLetterOutcome::Replayed,
+                target_topic: Some(target_topic),
+                target_group,
+                reason: None,
+            }),
+            Ok(Err(err)) => Err(StromaError::Io(err.to_string())),
+            Err(_) => Err(StromaError::Io("replay append completion dropped".into())),
+        }
+    }
+}
+
+fn skipped_replay(offset: Offset, reason: impl Into<String>) -> ReplayDeadLetterItem {
+    ReplayDeadLetterItem {
+        offset,
+        outcome: ReplayDeadLetterOutcome::Skipped,
+        target_topic: None,
+        target_group: None,
+        reason: Some(reason.into()),
     }
 }
 
@@ -447,6 +580,30 @@ impl QueueEngine for StromaEngine {
                 payload_limit_bytes,
             )
             .await
+    }
+
+    async fn replay_dead_letters(
+        &self,
+        dlq_tp: &str,
+        dlq_group: Option<&str>,
+        offsets: &[Offset],
+    ) -> Result<ReplayDeadLettersReport, StromaError> {
+        let mut items = Vec::with_capacity(offsets.len());
+        let mut replayed = 0;
+
+        for &offset in offsets {
+            let result = self.replay_dead_letter(dlq_tp, dlq_group, offset).await?;
+            if matches!(result.outcome, ReplayDeadLetterOutcome::Replayed) {
+                replayed += 1;
+            }
+            items.push(result);
+        }
+
+        Ok(ReplayDeadLettersReport {
+            requested: offsets.len(),
+            replayed,
+            items,
+        })
     }
 
     async fn global_dlq(&self) -> Result<GlobalDlqSnapshot, StromaError> {

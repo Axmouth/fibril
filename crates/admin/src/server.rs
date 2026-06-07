@@ -136,6 +136,10 @@ impl AdminServer {
                 "/admin/api/queue-dlq",
                 axum::routing::put(routes::update_queue_dlq),
             )
+            .route(
+                "/admin/api/dlq/replay",
+                axum::routing::post(routes::replay_dead_letters),
+            )
             .route("/healthz", get(|| async { "ok" }))
             .fallback(not_found)
             .with_state(state);
@@ -1008,6 +1012,35 @@ mod tests {
         );
         assert_eq!(body["items"][0]["payload_truncated"], true);
         assert_eq!(body["items"][0]["missing_payload"], false);
+    }
+
+    #[tokio::test]
+    async fn dlq_replay_requires_offsets() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/dlq/replay")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "dlq_topic": "_dlq.source",
+                            "dlq_group": null,
+                            "offsets": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "missing_dlq_replay_offsets");
     }
 
     #[tokio::test]
