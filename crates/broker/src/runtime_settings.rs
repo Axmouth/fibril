@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use stroma_core::{GlobalKey, GlobalStore, GlobalValue, PutOutcome, StromaError};
@@ -107,6 +107,13 @@ pub struct RuntimeSettingsSnapshot {
     pub settings: RuntimeSettings,
 }
 
+/// Problem detected while loading persisted runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeSettingsLoadIssue {
+    pub version: u64,
+    pub message: String,
+}
+
 /// Loads, validates, and exposes the effective runtime settings document.
 #[derive(Debug)]
 pub struct RuntimeSettingsManager {
@@ -114,6 +121,7 @@ pub struct RuntimeSettingsManager {
     current: watch::Sender<RuntimeSettingsSnapshot>,
     seed: RuntimeSettings,
     locks: RuntimeSettingsLocks,
+    load_issue: Arc<Mutex<Option<RuntimeSettingsLoadIssue>>>,
 }
 
 impl RuntimeSettingsManager {
@@ -132,13 +140,22 @@ impl RuntimeSettingsManager {
         locks: RuntimeSettingsLocks,
     ) -> Result<Self, RuntimeSettingsError> {
         seed.validate()?;
-        let snapshot = load_or_seed_settings(&store, &seed, &locks).await?;
+        let loaded = load_or_seed_settings(&store, &seed, &locks).await?;
+        if let Some(issue) = &loaded.issue {
+            tracing::error!(
+                "runtime settings at version {} could not be decoded; using boot seed until replaced: {}",
+                issue.version,
+                issue.message
+            );
+        }
+        let snapshot = loaded.snapshot;
         let (current, _) = watch::channel(snapshot);
         Ok(Self {
             store,
             current,
             seed,
             locks,
+            load_issue: Arc::new(Mutex::new(loaded.issue)),
         })
     }
 
@@ -158,6 +175,10 @@ impl RuntimeSettingsManager {
         self.store.clone()
     }
 
+    pub fn load_issue(&self) -> Option<RuntimeSettingsLoadIssue> {
+        load_issue_guard(&self.load_issue).clone()
+    }
+
     pub async fn update(
         &self,
         expected_version: u64,
@@ -166,16 +187,33 @@ impl RuntimeSettingsManager {
         settings.validate()?;
 
         let key = runtime_settings_key()?;
-        let current_raw = match self.store.get(&key).await? {
-            Some(value) => decode_snapshot(value)?,
+        let current = match self.store.get(&key).await? {
+            Some(value) => match decode_snapshot(value.clone()) {
+                Ok(snapshot) => LoadedRuntimeSettings {
+                    snapshot,
+                    issue: None,
+                },
+                Err(err) if self.matches_load_issue(value.version) => LoadedRuntimeSettings {
+                    snapshot: RuntimeSettingsSnapshot {
+                        version: value.version,
+                        settings: self.seed.clone(),
+                    },
+                    issue: Some(RuntimeSettingsLoadIssue {
+                        version: value.version,
+                        message: err.to_string(),
+                    }),
+                },
+                Err(err) => return Err(err),
+            },
             None => {
                 return Err(RuntimeSettingsError::StoreConflict(
                     "runtime settings disappeared before update".into(),
                 ));
             }
         };
-        let current_effective = effective_snapshot(current_raw.clone(), &self.seed, &self.locks)?;
-        if expected_version != current_raw.version {
+        let current_effective =
+            effective_snapshot(current.snapshot.clone(), &self.seed, &self.locks)?;
+        if expected_version != current.snapshot.version {
             return Ok(RuntimeSettingsUpdateOutcome::Conflict(current_effective));
         }
 
@@ -186,7 +224,7 @@ impl RuntimeSettingsManager {
                     "idle_queue_cleanup is locked by boot config".into(),
                 ));
             }
-            persisted_settings.idle_queue_cleanup = current_raw.settings.idle_queue_cleanup;
+            persisted_settings.idle_queue_cleanup = current.snapshot.settings.idle_queue_cleanup;
         }
 
         let bytes = encode_settings(&persisted_settings)?;
@@ -201,6 +239,7 @@ impl RuntimeSettingsManager {
                     &self.locks,
                 )?;
                 self.current.send_replace(snapshot.clone());
+                *load_issue_guard(&self.load_issue) = None;
                 Ok(RuntimeSettingsUpdateOutcome::Stored(snapshot))
             }
             PutOutcome::Conflict {
@@ -228,6 +267,11 @@ impl BrokerConfig {
             queue_idle_sweep_interval_ms: settings.idle_queue_cleanup.sweep_interval_ms,
         }
     }
+}
+
+struct LoadedRuntimeSettings {
+    snapshot: RuntimeSettingsSnapshot,
+    issue: Option<RuntimeSettingsLoadIssue>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -267,22 +311,25 @@ async fn load_or_seed_settings(
     store: &GlobalStore,
     seed: &RuntimeSettings,
     locks: &RuntimeSettingsLocks,
-) -> Result<RuntimeSettingsSnapshot, RuntimeSettingsError> {
+) -> Result<LoadedRuntimeSettings, RuntimeSettingsError> {
     let key = runtime_settings_key()?;
-    let snapshot = match store.get(&key).await? {
-        Some(value) => decode_snapshot(value)?,
+    let loaded = match store.get(&key).await? {
+        Some(value) => decode_or_seed_snapshot(value, seed)?,
         None => {
             let bytes = encode_settings(seed)?;
             match store.put(key.clone(), bytes, Some(0)).await? {
-                PutOutcome::Stored { version } => RuntimeSettingsSnapshot {
-                    version,
-                    settings: seed.clone(),
+                PutOutcome::Stored { version } => LoadedRuntimeSettings {
+                    snapshot: RuntimeSettingsSnapshot {
+                        version,
+                        settings: seed.clone(),
+                    },
+                    issue: None,
                 },
                 PutOutcome::Conflict {
                     current: Some(value),
-                } => decode_snapshot(value)?,
+                } => decode_or_seed_snapshot(value, seed)?,
                 PutOutcome::Conflict { current: None } => match store.get(&key).await? {
-                    Some(value) => decode_snapshot(value)?,
+                    Some(value) => decode_or_seed_snapshot(value, seed)?,
                     None => {
                         return Err(RuntimeSettingsError::StoreConflict(
                             "seed write conflicted but no current runtime settings value exists"
@@ -294,7 +341,10 @@ async fn load_or_seed_settings(
         }
     };
 
-    effective_snapshot(snapshot, &seed, locks)
+    Ok(LoadedRuntimeSettings {
+        snapshot: effective_snapshot(loaded.snapshot, seed, locks)?,
+        issue: loaded.issue,
+    })
 }
 
 fn effective_snapshot(
@@ -306,6 +356,45 @@ fn effective_snapshot(
     snapshot.settings.apply_locks(seed, locks);
     snapshot.settings.validate()?;
     Ok(snapshot)
+}
+
+fn decode_or_seed_snapshot(
+    value: GlobalValue,
+    seed: &RuntimeSettings,
+) -> Result<LoadedRuntimeSettings, RuntimeSettingsError> {
+    let version = value.version;
+    match decode_snapshot(value) {
+        Ok(snapshot) => Ok(LoadedRuntimeSettings {
+            snapshot,
+            issue: None,
+        }),
+        Err(err) => Ok(LoadedRuntimeSettings {
+            snapshot: RuntimeSettingsSnapshot {
+                version,
+                settings: seed.clone(),
+            },
+            issue: Some(RuntimeSettingsLoadIssue {
+                version,
+                message: err.to_string(),
+            }),
+        }),
+    }
+}
+
+fn load_issue_guard(
+    load_issue: &Mutex<Option<RuntimeSettingsLoadIssue>>,
+) -> std::sync::MutexGuard<'_, Option<RuntimeSettingsLoadIssue>> {
+    load_issue
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl RuntimeSettingsManager {
+    fn matches_load_issue(&self, version: u64) -> bool {
+        load_issue_guard(&self.load_issue)
+            .as_ref()
+            .is_some_and(|issue| issue.version == version)
+    }
 }
 
 fn runtime_settings_key() -> Result<GlobalKey, RuntimeSettingsError> {
@@ -444,6 +533,90 @@ mod tests {
             .unwrap();
         assert_eq!(manager.current().version, 1);
         assert_eq!(manager.current().settings, first);
+    }
+
+    #[tokio::test]
+    async fn manager_uses_seed_when_persisted_settings_are_corrupt() {
+        let dir = test_dir!("runtime_settings_corrupt");
+        let stroma = Stroma::open(
+            &dir.root,
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let store = stroma.global_store().await.unwrap();
+        store
+            .put(runtime_settings_key().unwrap(), vec![0, 1, 2], Some(0))
+            .await
+            .unwrap();
+
+        let seed = RuntimeSettings {
+            delivery: DeliveryRuntimeSettings {
+                inflight_ttl_ms: 42,
+                ..DeliveryRuntimeSettings::default()
+            },
+            ..RuntimeSettings::default()
+        };
+        let manager =
+            RuntimeSettingsManager::load_from_store(store, seed.clone(), Default::default())
+                .await
+                .unwrap();
+
+        assert_eq!(manager.current().version, 1);
+        assert_eq!(manager.current().settings, seed);
+        let issue = manager.load_issue().expect("corrupt settings are reported");
+        assert_eq!(issue.version, 1);
+        assert!(issue.message.contains("decode runtime settings"));
+    }
+
+    #[tokio::test]
+    async fn update_replaces_corrupt_persisted_settings_at_reported_version() {
+        let dir = test_dir!("runtime_settings_corrupt_replace");
+        let stroma = Stroma::open(
+            &dir.root,
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let store = stroma.global_store().await.unwrap();
+        store
+            .put(runtime_settings_key().unwrap(), vec![0, 1, 2], Some(0))
+            .await
+            .unwrap();
+
+        let manager = RuntimeSettingsManager::load_from_store(
+            store.clone(),
+            RuntimeSettings::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let mut replacement = manager.current().settings;
+        replacement.delivery.inflight_ttl_ms = 12_345;
+
+        let outcome = manager.update(1, replacement.clone()).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            RuntimeSettingsUpdateOutcome::Stored(RuntimeSettingsSnapshot {
+                version: 2,
+                settings: replacement.clone(),
+            })
+        );
+        assert_eq!(manager.load_issue(), None);
+
+        let reloaded = RuntimeSettingsManager::load_from_store(
+            store,
+            RuntimeSettings::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reloaded.current().version, 2);
+        assert_eq!(reloaded.current().settings, replacement);
+        assert_eq!(reloaded.load_issue(), None);
     }
 
     #[tokio::test]

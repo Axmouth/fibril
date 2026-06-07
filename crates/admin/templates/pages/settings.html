@@ -322,6 +322,19 @@ function setQueueDlqMessage(text, kind = "info") {
   el.dataset.kind = kind;
 }
 
+function runtimeSettingsStatusMessage(data, message) {
+  if (data.load_issue) {
+    return {
+      kind: "warning",
+      text: `Persisted settings at version ${data.load_issue.version} could not be loaded. The broker is using the values shown from startup config; saving will replace the corrupted persisted settings.`,
+    };
+  }
+  return {
+    kind: "info",
+    text: `${message} Current version: ${data.version}.`,
+  };
+}
+
 function setDisabledForLockedGroups() {
   const idleLocked = !!currentLocks.idle_queue_cleanup;
   field("idle-lock").textContent = idleLocked ? "locked by startup config" : "";
@@ -455,7 +468,8 @@ for (const select of document.querySelectorAll(".duration-unit")) {
 async function loadSettings(message = "Settings loaded.") {
   const data = await api("/admin/api/runtime-settings");
   renderSettings(data);
-  setMessage(`${message} Current version: ${data.version}.`, "info");
+  const status = runtimeSettingsStatusMessage(data, message);
+  setMessage(status.text, status.kind);
 }
 
 async function loadStartupConfig() {
@@ -491,7 +505,7 @@ async function saveSettings(event) {
     return;
   }
   if (!response.ok) {
-    setMessage(data.error || "Settings update failed.", "error");
+    setMessage(data.message || data.error || "Settings update failed.", "error");
     return;
   }
 

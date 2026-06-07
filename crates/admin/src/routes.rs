@@ -4,8 +4,8 @@ use fibril_broker::queue_engine::{
     StromaError,
 };
 use fibril_broker::runtime_settings::{
-    RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLocks, RuntimeSettingsSnapshot,
-    RuntimeSettingsUpdateOutcome,
+    RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLoadIssue, RuntimeSettingsLocks,
+    RuntimeSettingsSnapshot, RuntimeSettingsUpdateOutcome,
 };
 use fibril_metrics::{BrokerStatsSnapshot, StorageStatsSnapshot, SystemSnapshot};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ pub struct RuntimeSettingsResponse {
     pub version: u64,
     pub settings: RuntimeSettings,
     pub locks: RuntimeSettingsLocks,
+    pub load_issue: Option<RuntimeSettingsLoadIssue>,
 }
 
 #[derive(Deserialize)]
@@ -78,11 +79,16 @@ pub struct AdminErrorResponse {
 }
 
 impl RuntimeSettingsResponse {
-    fn new(snapshot: RuntimeSettingsSnapshot, locks: RuntimeSettingsLocks) -> Self {
+    fn new(
+        snapshot: RuntimeSettingsSnapshot,
+        locks: RuntimeSettingsLocks,
+        load_issue: Option<RuntimeSettingsLoadIssue>,
+    ) -> Self {
         Self {
             version: snapshot.version,
             settings: snapshot.settings,
             locks,
+            load_issue,
         }
     }
 }
@@ -191,6 +197,7 @@ pub async fn runtime_settings(
     Ok(Json(RuntimeSettingsResponse::new(
         runtime_settings.current(),
         runtime_settings.locks().clone(),
+        runtime_settings.load_issue(),
     )))
 }
 
@@ -225,12 +232,20 @@ pub async fn update_runtime_settings(
     {
         Ok(RuntimeSettingsUpdateOutcome::Stored(snapshot)) => Ok((
             StatusCode::OK,
-            Json(RuntimeSettingsResponse::new(snapshot, locks)),
+            Json(RuntimeSettingsResponse::new(
+                snapshot,
+                locks,
+                runtime_settings.load_issue(),
+            )),
         )
             .into_response()),
         Ok(RuntimeSettingsUpdateOutcome::Conflict(snapshot)) => Ok((
             StatusCode::CONFLICT,
-            Json(RuntimeSettingsResponse::new(snapshot, locks)),
+            Json(RuntimeSettingsResponse::new(
+                snapshot,
+                locks,
+                runtime_settings.load_issue(),
+            )),
         )
             .into_response()),
         Err(RuntimeSettingsError::Invalid(err)) => Ok(admin_error(

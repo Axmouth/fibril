@@ -651,6 +651,7 @@ mod tests {
         assert_eq!(body["version"], 1);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 30_000);
         assert_eq!(body["locks"]["idle_queue_cleanup"], false);
+        assert!(body["load_issue"].is_null());
     }
 
     #[tokio::test]
