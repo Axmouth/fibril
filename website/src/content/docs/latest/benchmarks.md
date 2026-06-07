@@ -116,6 +116,10 @@ prints both publish-to-delivery and server-receive-to-delivery latency. The
 wrapper also writes full server logs and full benchmark results to files, then
 prints a compact summary.
 
+When `CONFIRMED=1`, writers still run with pipelined publish confirmations by
+default. Set `CONFIRM_WINDOW=1` if you specifically want the older serial
+"publish, wait, publish" shape.
+
 Useful knobs:
 
 | Variable | Default | Meaning |
@@ -128,7 +132,8 @@ Useful knobs:
 | `DRAIN_TIMEOUT_SECS` | `10` | Time allowed for measured messages to drain |
 | `SIZE` | `1024` | Raw payload size in bytes |
 | `PREFETCH` | `16384` | Reader subscription prefetch |
-| `CONFIRMED` | `0` | Set `1` to wait for publish confirmations |
+| `CONFIRMED` | `0` | Set `1` to require broker publish confirmations |
+| `CONFIRM_WINDOW` | `1024` | In-flight confirmations per writer when `CONFIRMED=1` |
 | `LOG_FILE` | temporary file | Build, server, and noisy runtime logs |
 | `RESULTS_FILE` | temporary file | Deterministic benchmark summary and queue snapshots |
 

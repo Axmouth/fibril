@@ -24,6 +24,8 @@ const client = await new ClientOptions()
 // Publish; use the confirmed variant when you need the broker offset.
 const pub = client.publisher("orders");
 const offset = await pub.publishConfirmed({ id: 42, item: "widget" });
+const confirmation = await pub.publishWithConfirmation({ id: 43, item: "bolt" });
+const pipelinedOffset = await confirmation.confirmed();
 await pub.publishDelayed(NewMessage.json({ id: 43 }), 30_000);
 
 // Subscribe with manual ack

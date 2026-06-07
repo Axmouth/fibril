@@ -20,6 +20,33 @@ function deadlineFromDelay(delay: DelayInput): bigint {
 }
 
 /**
+ * Broker confirmation for a publish request.
+ *
+ * Await `confirmed()` when you need the broker-assigned offset without
+ * serializing every publish on the confirmation round trip.
+ */
+export class PublishConfirmation {
+  readonly #promise: Promise<bigint>;
+
+  /** @internal */
+  constructor(promise: Promise<bigint>) {
+    this.#promise = promise;
+  }
+
+  /**
+   * Wait for the broker-assigned topic offset.
+   */
+  async confirmed(): Promise<bigint> {
+    try {
+      return await this.#promise;
+    } catch (err) {
+      if (err instanceof Error) throw err;
+      throw new BrokenPipeError();
+    }
+  }
+}
+
+/**
  * Publish messages to a specific topic (and optional group).
  *
  * Construct via `client.publisher(topic)` or `client.publisherGrouped(topic, group)`.
@@ -82,6 +109,18 @@ export class Publisher {
    * topic offset assigned to the message.
    */
   async publishConfirmed<T>(payload: Publishable<T>): Promise<bigint> {
+    return (await this.publishWithConfirmation(payload)).confirmed();
+  }
+
+  /**
+   * Publish and return a handle that can be awaited for broker confirmation.
+   *
+   * Use this to pipeline multiple confirmed publishes while still retaining
+   * each broker-assigned offset.
+   */
+  async publishWithConfirmation<T>(
+    payload: Publishable<T>,
+  ): Promise<PublishConfirmation> {
     const message = intoMessage(payload);
     const reply = deferred<bigint>();
     await this.#engine.submit({
@@ -93,12 +132,7 @@ export class Publisher {
       published: BigInt(Date.now()),
       reply,
     });
-    try {
-      return await reply.promise;
-    } catch (err) {
-      if (err instanceof Error) throw err;
-      throw new BrokenPipeError();
-    }
+    return new PublishConfirmation(reply.promise);
   }
 
   /**
@@ -119,6 +153,15 @@ export class Publisher {
    * Publish a raw byte payload and wait for broker confirmation.
    */
   async publishBytesConfirmed(payload: Uint8Array): Promise<bigint> {
+    return (await this.publishBytesWithConfirmation(payload)).confirmed();
+  }
+
+  /**
+   * Publish a raw byte payload and return a broker-confirmation handle.
+   */
+  async publishBytesWithConfirmation(
+    payload: Uint8Array,
+  ): Promise<PublishConfirmation> {
     const reply = deferred<bigint>();
     await this.#engine.submit({
       type: "publishConfirmed",
@@ -129,7 +172,7 @@ export class Publisher {
       published: BigInt(Date.now()),
       reply,
     });
-    return reply.promise;
+    return new PublishConfirmation(reply.promise);
   }
 
   /**
@@ -173,6 +216,17 @@ export class Publisher {
     payload: Publishable<T>,
     delay: DelayInput,
   ): Promise<bigint> {
+    return (await this.publishDelayedWithConfirmation(payload, delay)).confirmed();
+  }
+
+  /**
+   * Publish after a delay and return a broker-confirmation handle.
+   * Numeric delays are milliseconds; `Date` is treated as an absolute deadline.
+   */
+  async publishDelayedWithConfirmation<T>(
+    payload: Publishable<T>,
+    delay: DelayInput,
+  ): Promise<PublishConfirmation> {
     const message = intoMessage(payload);
     const reply = deferred<bigint>();
     await this.#engine.submit({
@@ -185,12 +239,6 @@ export class Publisher {
       not_before: deadlineFromDelay(delay),
       reply,
     });
-    try {
-      return await reply.promise;
-    } catch (err) {
-      if (err instanceof Error) throw err;
-      throw new BrokenPipeError();
-    }
+    return new PublishConfirmation(reply.promise);
   }
-
 }

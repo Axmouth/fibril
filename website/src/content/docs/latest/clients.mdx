@@ -46,7 +46,7 @@ const client = await new ClientOptions()
 
 ## Publish
 
-Plain publish uses the common unconfirmed path. Confirmed publish waits for the broker to acknowledge the stored message and returns the topic offset.
+Plain publish uses the common unconfirmed path. Confirmed publish waits for the broker to acknowledge the stored message and returns the topic offset. For pipelined confirmed publishing, send with a confirmation handle and await those handles later.
 
 <Tabs syncKey="client-language">
   <TabItem label="Rust">
@@ -61,6 +61,11 @@ publisher
 let offset = publisher
     .publish_confirmed("needs an offset")
     .await?;
+
+let confirmation = publisher
+    .publish_with_confirmation("pipeline me")
+    .await?;
+let pipelined_offset = confirmation.confirmed().await?;
 ```
 
   </TabItem>
@@ -72,6 +77,9 @@ const publisher = client.publisher("email.send");
 await publisher.publish("hello");
 
 const offset = await publisher.publishConfirmed("needs an offset");
+
+const confirmation = await publisher.publishWithConfirmation("pipeline me");
+const pipelinedOffset = await confirmation.confirmed();
 ```
 
   </TabItem>

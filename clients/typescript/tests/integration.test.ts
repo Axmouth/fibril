@@ -106,6 +106,48 @@ test("client connects, handshakes, publishes confirmed", async () => {
   }
 });
 
+test("publish confirmation handle can be awaited later", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(
+          s,
+          buildFrame(Op.HelloOk, f.requestId, {
+            protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
+            server_name: "fake",
+            compliance: COMPLIANCE_STRING,
+          }),
+        );
+      } else if (f.opcode === Op.Publish) {
+        const p = decodeFrameBody<PublishMsg>(f);
+        assert.equal(p.require_confirm, true);
+        setTimeout(() => {
+          broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 8n }));
+        }, 50);
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const pub = client.publisher("t1");
+    const confirmation = await pub.publishWithConfirmation({ hello: "world" });
+    let resolved = false;
+    const confirmed = confirmation.confirmed().then((offset) => {
+      resolved = true;
+      return offset;
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(resolved, false);
+    assert.equal(await confirmed, 8n);
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("client subscribes and receives a delivery", async () => {
   const broker = new FakeBroker();
   await broker.start();

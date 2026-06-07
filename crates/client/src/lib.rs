@@ -270,6 +270,23 @@ pub struct Publisher {
     group: Option<GroupName>,
 }
 
+/// Broker confirmation for a publish request.
+///
+/// Returned by [`Publisher::publish_with_confirmation`]. Await it when you need
+/// the broker-assigned offset without serializing every publish on the
+/// confirmation round trip.
+#[derive(Debug)]
+pub struct PublishConfirmation {
+    rx: oneshot::Receiver<FibrilResult<u64>>,
+}
+
+impl PublishConfirmation {
+    /// Wait for the broker-assigned topic offset.
+    pub async fn confirmed(self) -> FibrilResult<u64> {
+        self.rx.await.map_err(|_e| FibrilError::BrokenPipe)?
+    }
+}
+
 /// Manual-acknowledgement subscription.
 ///
 /// Messages received from this subscription are [`InflightMessage`] values and
@@ -905,17 +922,31 @@ impl Publisher {
     /// Resolves with the broker-assigned topic offset.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_confirmed<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
+        self.publish_with_confirmation(payload)
+            .await?
+            .confirmed()
+            .await
+    }
+
+    /// Publish and return a handle that can be awaited for broker confirmation.
+    ///
+    /// This sends a confirmed publish request but does not wait for the
+    /// confirmation before returning. Keep the returned handle and await
+    /// [`PublishConfirmation::confirmed`] later to pipeline multiple publishes.
+    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    pub async fn publish_with_confirmation<T: Publishable>(
+        &self,
+        payload: T,
+    ) -> FibrilResult<PublishConfirmation> {
         let message = payload.into_message()?;
         self.engine
-            .publish_confirmed(
+            .publish_with_confirmation(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
                 message.headers,
                 message.payload,
             )
             .await
-        // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
-        // TODO: Or return a notifier you can await? As like async fn PublishResult::confirmed()
     }
 
     /// Publish after a relative delay without waiting for broker confirmation.
@@ -951,10 +982,26 @@ impl Publisher {
         payload: T,
         delay: D,
     ) -> FibrilResult<u64> {
+        self.publish_delayed_with_confirmation(payload, delay)
+            .await?
+            .confirmed()
+            .await
+    }
+
+    /// Publish after a relative delay and return a broker-confirmation handle.
+    ///
+    /// Numeric Rust delays are seconds; use [`std::time::Duration`] for
+    /// explicit units.
+    #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
+    pub async fn publish_delayed_with_confirmation<T: Publishable, D: Delayable + Debug>(
+        &self,
+        payload: T,
+        delay: D,
+    ) -> FibrilResult<PublishConfirmation> {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
         self.engine
-            .publish_delayed_confirmed(
+            .publish_delayed_with_confirmation(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
                 message.headers,
@@ -1659,13 +1706,13 @@ impl EngineHandle {
         Ok(())
     }
 
-    async fn publish_confirmed(
+    async fn publish_with_confirmation(
         &self,
         topic: String,
         group: Option<String>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
-    ) -> FibrilResult<u64> {
+    ) -> FibrilResult<PublishConfirmation> {
         let (tx, rx) = oneshot::channel();
         let published = unix_millis();
         self.tx
@@ -1679,7 +1726,7 @@ impl EngineHandle {
             })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
-        rx.await.map_err(|_e| FibrilError::BrokenPipe)?
+        Ok(PublishConfirmation { rx })
     }
 
     async fn publish_unconfirmed_delayed(
@@ -1705,14 +1752,14 @@ impl EngineHandle {
         Ok(())
     }
 
-    async fn publish_delayed_confirmed(
+    async fn publish_delayed_with_confirmation(
         &self,
         topic: String,
         group: Option<String>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
         not_before: u64,
-    ) -> FibrilResult<u64> {
+    ) -> FibrilResult<PublishConfirmation> {
         let (tx, rx) = oneshot::channel();
         let published = unix_millis();
         self.tx
@@ -1727,7 +1774,7 @@ impl EngineHandle {
             })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
-        rx.await.map_err(|_e| FibrilError::BrokenPipe)?
+        Ok(PublishConfirmation { rx })
     }
 
     async fn subscribe(&self, req: Subscribe) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
@@ -1930,6 +1977,30 @@ mod tests {
         }
 
         assert_eq!(task.await.unwrap().unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn publish_with_confirmation_returns_handle_before_offset() {
+        let (client, mut rx) = client_with_command_rx();
+        let publisher = client.publisher("jobs").unwrap();
+
+        let confirmation = publisher.publish_with_confirmation("hello").await.unwrap();
+
+        match rx.recv().await.unwrap() {
+            Command::PublishConfirmed {
+                topic,
+                group,
+                reply,
+                ..
+            } => {
+                assert_eq!(topic, "jobs");
+                assert_eq!(group, None);
+                reply.send(Ok(43)).unwrap();
+            }
+            other => panic!("expected confirmed publish, got {other:?}"),
+        }
+
+        assert_eq!(confirmation.confirmed().await.unwrap(), 43);
     }
 
     #[tokio::test]

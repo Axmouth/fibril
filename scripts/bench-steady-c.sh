@@ -11,13 +11,14 @@ drain_timeout_secs="${DRAIN_TIMEOUT_SECS:-10}"
 size="${SIZE:-1024}"
 prefetch="${PREFETCH:-16384}"
 confirmed="${CONFIRMED:-0}"
+confirm_window="${CONFIRM_WINDOW:-1024}"
 data_dir="$(mktemp -d)"
 log_file="${LOG_FILE:-$data_dir/steady.log}"
 results_file="${RESULTS_FILE:-$data_dir/steady-results.txt}"
 bench_args=()
 
 if [ "$confirmed" != "0" ]; then
-  bench_args+=(--confirmed)
+  bench_args+=(--confirmed --confirm-window "$confirm_window")
 fi
 
 mkdir -p "$(dirname "$log_file")" "$(dirname "$results_file")"
@@ -72,7 +73,7 @@ curl --silent --show-error --fail http://127.0.0.1:8081/healthz >>"$log_file" 2>
 } >>"$results_file"
 
 echo "Steady benchmark summary:"
-grep -E '^(Steady benchmark:|Sent total:|Received total:|Measured sent:|Measured received:|Measured missing:|Actual measured publish rate:|Measured receive rate:|Retries seen:|Latency .* ms|--- queue snapshot: after steady run ---|\{"queues")' "$results_file" || true
+grep -E '^(Steady benchmark:|Sent total:|Confirmed total:|Received total:|Measured sent:|Measured received:|Measured missing:|Actual measured publish rate:|Measured receive rate:|Retries seen:|Latency .* ms|--- queue snapshot: after steady run ---|\{"queues")' "$results_file" || true
 echo "Full steady benchmark results: $results_file"
 echo "Full steady benchmark log: $log_file"
 echo "Runtime warnings/errors in log:"

@@ -1,6 +1,6 @@
 export { Client, ClientOptions, type ClientOptionsInit } from "./client.js";
 export { NewMessage, type HeadersInit, type Publishable } from "./message.js";
-export { Publisher, type DelayInput } from "./publisher.js";
+export { Publisher, PublishConfirmation, type DelayInput } from "./publisher.js";
 export {
   Subscription,
   AutoAckedSubscription,

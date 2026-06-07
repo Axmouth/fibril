@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::{
         Arc,
@@ -8,7 +9,7 @@ use std::{
 };
 
 use clap::Parser;
-use fibril_client::{ClientOptions, InflightMessage, NewMessage};
+use fibril_client::{ClientOptions, InflightMessage, NewMessage, PublishConfirmation};
 use fibril_util::unix_millis;
 use tokio::{
     sync::mpsc,
@@ -28,6 +29,7 @@ struct ReaderStats {
 struct WriterStats {
     sent_total: u64,
     measured_sent: u64,
+    confirmed_total: u64,
 }
 
 fn percentile(sorted: &[u64], percentile: f64) -> u64 {
@@ -92,6 +94,10 @@ struct Args {
     /// Wait for server publish confirmations
     #[arg(long, default_value_t = false)]
     confirmed: bool,
+
+    /// Maximum in-flight publish confirmations per writer when --confirmed is set
+    #[arg(long, default_value_t = 1024)]
+    confirm_window: usize,
 }
 
 #[tokio::main]
@@ -102,6 +108,10 @@ async fn main() {
     assert!(args.writers > 0, "writers must be > 0");
     assert!(args.readers > 0, "readers must be > 0");
     assert!(args.rate_per_sec > 0, "rate_per_sec must be > 0");
+    assert!(
+        !args.confirmed || args.confirm_window > 0,
+        "confirm_window must be > 0 when confirmed"
+    );
 
     let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([127, 0, 0, 1]), 9876));
     let run_started = Instant::now();
@@ -113,7 +123,7 @@ async fn main() {
     let drain_timeout_secs = args.drain_timeout_secs;
 
     println!(
-        "Steady benchmark: writers={}, readers={}, rate_per_sec={}, warmup_secs={}, duration_secs={}, size={}, prefetch={}, confirmed={}",
+        "Steady benchmark: writers={}, readers={}, rate_per_sec={}, warmup_secs={}, duration_secs={}, size={}, prefetch={}, confirmed={}, confirm_window={}",
         args.writers,
         args.readers,
         args.rate_per_sec,
@@ -122,6 +132,7 @@ async fn main() {
         args.size,
         args.prefetch,
         args.confirmed,
+        args.confirm_window,
     );
 
     let mut reader_handles = Vec::new();
@@ -216,6 +227,7 @@ async fn main() {
         let payload_size = args.size.max(1);
         let writer_rate = rate_for_writer(args.rate_per_sec, args.writers, writer_id);
         let confirmed = args.confirmed;
+        let confirm_window = args.confirm_window;
         if writer_rate == 0 {
             continue;
         }
@@ -227,6 +239,7 @@ async fn main() {
                 .unwrap();
             let publisher = client.publisher("topic1").unwrap();
             let mut stats = WriterStats::default();
+            let mut pending_confirms = VecDeque::<PublishConfirmation>::new();
 
             let period = Duration::from_secs_f64(1.0 / writer_rate as f64);
             let mut tick = tokio::time::interval(period);
@@ -246,10 +259,20 @@ async fn main() {
                 }
 
                 if confirmed {
-                    publisher
-                        .publish_confirmed(NewMessage::raw(payload.clone()))
+                    while pending_confirms.len() >= confirm_window {
+                        pending_confirms
+                            .pop_front()
+                            .unwrap()
+                            .confirmed()
+                            .await
+                            .unwrap();
+                        stats.confirmed_total += 1;
+                    }
+                    let confirmation = publisher
+                        .publish_with_confirmation(NewMessage::raw(payload.clone()))
                         .await
                         .unwrap();
+                    pending_confirms.push_back(confirmation);
                 } else {
                     publisher
                         .publish(NewMessage::raw(payload.clone()))
@@ -264,6 +287,11 @@ async fn main() {
                 }
             }
 
+            while let Some(confirmation) = pending_confirms.pop_front() {
+                confirmation.confirmed().await.unwrap();
+                stats.confirmed_total += 1;
+            }
+
             stats
         }));
     }
@@ -273,6 +301,7 @@ async fn main() {
         let stats = handle.await.unwrap();
         writer_stats.sent_total += stats.sent_total;
         writer_stats.measured_sent += stats.measured_sent;
+        writer_stats.confirmed_total += stats.confirmed_total;
     }
     writers_done.store(true, Ordering::Release);
 
@@ -293,6 +322,9 @@ async fn main() {
     let actual_rate = writer_stats.measured_sent as f64 / args.duration_secs as f64;
     let receive_rate = reader_stats.measured_received as f64 / args.duration_secs as f64;
     println!("Sent total: {}", writer_stats.sent_total);
+    if args.confirmed {
+        println!("Confirmed total: {}", writer_stats.confirmed_total);
+    }
     println!("Received total: {}", reader_stats.received_total);
     println!("Measured sent: {}", writer_stats.measured_sent);
     println!("Measured received: {}", reader_stats.measured_received);
