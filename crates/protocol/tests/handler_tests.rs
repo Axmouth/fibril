@@ -557,6 +557,29 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
         dlq.headers.get("x-trace-id").map(String::as_str),
         Some("dlq-flow")
     );
+    assert_eq!(
+        dlq.headers
+            .get("stroma.dlq.source_topic")
+            .map(String::as_str),
+        Some("source")
+    );
+    assert_eq!(
+        dlq.headers
+            .get("stroma.dlq.source_offset")
+            .map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        dlq.headers
+            .get("stroma.dlq.retry_count")
+            .map(String::as_str),
+        Some("0")
+    );
+    assert_eq!(
+        dlq.headers.get("stroma.dlq.reason").map(String::as_str),
+        Some("retries_exhausted")
+    );
+    assert!(dlq.headers.contains_key("stroma.dlq.dead_lettered_at_ms"));
 
     assert_connection_still_responds(&mut framed).await;
 

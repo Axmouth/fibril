@@ -67,6 +67,48 @@ async fn recv_with_timeout(
         .flatten()
 }
 
+fn assert_dlq_metadata(
+    msg: &DeliverableMessage,
+    source_topic: &str,
+    source_offset: &str,
+    retry_count: &str,
+    reason: &str,
+) {
+    assert_eq!(
+        msg.message
+            .headers
+            .get("stroma.dlq.source_topic")
+            .map(String::as_str),
+        Some(source_topic)
+    );
+    assert_eq!(
+        msg.message
+            .headers
+            .get("stroma.dlq.source_offset")
+            .map(String::as_str),
+        Some(source_offset)
+    );
+    assert_eq!(
+        msg.message
+            .headers
+            .get("stroma.dlq.retry_count")
+            .map(String::as_str),
+        Some(retry_count)
+    );
+    assert_eq!(
+        msg.message
+            .headers
+            .get("stroma.dlq.reason")
+            .map(String::as_str),
+        Some(reason)
+    );
+    assert!(
+        msg.message
+            .headers
+            .contains_key("stroma.dlq.dead_lettered_at_ms")
+    );
+}
+
 async fn wait_for_queue_activity(
     broker: &Broker<StromaEngine>,
     topic: &str,
@@ -1323,45 +1365,83 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
     assert_eq!(dlq_msg.message.topic, "_dlq.source");
     assert_eq!(dlq_msg.message.offset, 0);
     assert_eq!(dlq_msg.message.payload, b"poison");
-    assert_eq!(
-        dlq_msg
-            .message
-            .headers
-            .get("stroma.dlq.source_topic")
-            .map(String::as_str),
-        Some("source")
-    );
-    assert_eq!(
-        dlq_msg
-            .message
-            .headers
-            .get("stroma.dlq.source_offset")
-            .map(String::as_str),
-        Some("0")
-    );
-    assert_eq!(
-        dlq_msg
-            .message
-            .headers
-            .get("stroma.dlq.retry_count")
-            .map(String::as_str),
-        Some("0")
-    );
-    assert_eq!(
-        dlq_msg
-            .message
-            .headers
-            .get("stroma.dlq.reason")
-            .map(String::as_str),
-        Some("retries_exhausted")
-    );
-    assert!(
-        dlq_msg
-            .message
-            .headers
-            .contains_key("stroma.dlq.dead_lettered_at_ms")
-    );
+    assert_dlq_metadata(&dlq_msg, "source", "0", "0", "retries_exhausted");
 
+    assert!(recv_with_timeout(&mut source, 100).await.is_none());
+
+    broker.shutdown_graceful().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn global_dlq_metadata_reports_retry_count_after_requeues()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (engine, _dir) = open_test_engine().await;
+    engine
+        .set_global_dlq(Some(GlobalDLQ::new("_dlq.source", 0, None).await?), 0)
+        .await?;
+    engine
+        .declare_queue(
+            "source",
+            0,
+            None,
+            DeclareMeta {
+                dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
+                dlq_max_retries: Some(2),
+            },
+        )
+        .await?;
+
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+    let (publisher, _confirms) = broker.get_publisher("source", &None).await?;
+    publisher
+        .publish(
+            b"poison".to_vec(),
+            Default::default(),
+            Default::default(),
+            None,
+            Default::default(),
+        )
+        .await?
+        .await??;
+
+    let mut source = broker
+        .subscribe(
+            "source",
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await?;
+
+    for _ in 0..3 {
+        let msg = recv_with_timeout(&mut source, 2_000)
+            .await
+            .expect("source message should be delivered until retry exhaustion");
+        source
+            .settle(SettleRequest {
+                settle_type: SettleType::Nack {
+                    requeue: Some(true),
+                },
+                delivery_tag: msg.delivery_tag,
+            })
+            .await?;
+    }
+
+    let mut dlq = broker
+        .subscribe(
+            "_dlq.source",
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await?;
+    let dlq_msg = recv_with_timeout(&mut dlq, 2_000)
+        .await
+        .expect("message should be copied to global DLQ target");
+
+    assert_eq!(dlq_msg.message.payload, b"poison");
+    assert_dlq_metadata(&dlq_msg, "source", "0", "2", "retries_exhausted");
     assert!(recv_with_timeout(&mut source, 100).await.is_none());
 
     broker.shutdown_graceful().await;
