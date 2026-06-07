@@ -110,6 +110,40 @@
     </div>
   </form>
 
+  <section class="settings-section settings-form-secondary" id="startup-config-section" hidden>
+    <div class="settings-section-heading">
+      <h5>Startup Config</h5>
+      <p>Read-only process settings loaded from defaults, TOML, environment, and CLI before the broker starts.</p>
+    </div>
+
+    <dl class="settings-readonly-grid">
+      <div>
+        <dt>Data directory</dt>
+        <dd id="startup.data_dir"></dd>
+      </div>
+      <div>
+        <dt>Broker bind</dt>
+        <dd id="startup.broker_bind"></dd>
+      </div>
+      <div>
+        <dt>Admin bind</dt>
+        <dd id="startup.admin_bind"></dd>
+      </div>
+      <div>
+        <dt>Keratin fsync interval</dt>
+        <dd id="startup.keratin_fsync_interval_ms"></dd>
+      </div>
+      <div>
+        <dt>Message log segment size</dt>
+        <dd id="startup.keratin_message_log_segment_max_bytes"></dd>
+      </div>
+      <div>
+        <dt>Event log segment size</dt>
+        <dd id="startup.keratin_event_log_segment_max_bytes"></dd>
+      </div>
+    </dl>
+  </section>
+
   <form id="global-dlq-form" class="settings-form-secondary">
     <input type="hidden" id="global-dlq.version">
 
@@ -315,6 +349,26 @@ function renderSettings(data) {
   setDisabledForLockedGroups();
 }
 
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024 * 1024 && bytes % (1024 * 1024 * 1024) === 0) {
+    return `${bytes / (1024 * 1024 * 1024)} GiB`;
+  }
+  if (bytes >= 1024 * 1024 && bytes % (1024 * 1024) === 0) {
+    return `${bytes / (1024 * 1024)} MiB`;
+  }
+  return `${bytes} bytes`;
+}
+
+function renderStartupConfig(data) {
+  field("startup-config-section").hidden = false;
+  field("startup.data_dir").textContent = data.data_dir;
+  field("startup.broker_bind").textContent = data.broker_bind;
+  field("startup.admin_bind").textContent = data.admin_bind;
+  field("startup.keratin_fsync_interval_ms").textContent = `${data.keratin_fsync_interval_ms} ms`;
+  field("startup.keratin_message_log_segment_max_bytes").textContent = formatBytes(data.keratin_message_log_segment_max_bytes);
+  field("startup.keratin_event_log_segment_max_bytes").textContent = formatBytes(data.keratin_event_log_segment_max_bytes);
+}
+
 function renderGlobalDlq(data) {
   field("global-dlq.version").value = data.version;
   const enabled = !!data.target;
@@ -404,6 +458,15 @@ async function loadSettings(message = "Settings loaded.") {
   setMessage(`${message} Current version: ${data.version}.`, "info");
 }
 
+async function loadStartupConfig() {
+  try {
+    const data = await api("/admin/api/startup-config");
+    renderStartupConfig(data);
+  } catch (_err) {
+    field("startup-config-section").hidden = true;
+  }
+}
+
 async function loadGlobalDlq(message = "Global DLQ loaded.") {
   const data = await api("/admin/api/global-dlq");
   renderGlobalDlq(data);
@@ -487,6 +550,7 @@ field("global-dlq.enabled").addEventListener("change", (event) => setGlobalDlqFi
 field("queue-dlq-form").addEventListener("submit", saveQueueDlq);
 field("queue-dlq.policy").addEventListener("change", (event) => setQueueDlqTargetFieldsEnabled(event.target.value === "custom"));
 loadSettings();
+loadStartupConfig();
 loadGlobalDlq();
 setQueueDlqTargetFieldsEnabled(field("queue-dlq.policy").value === "custom");
 </script>

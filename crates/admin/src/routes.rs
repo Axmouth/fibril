@@ -194,6 +194,19 @@ pub async fn runtime_settings(
     )))
 }
 
+pub async fn startup_config(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<crate::server::StartupConfigSummary>, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    server
+        .startup_config
+        .clone()
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
 pub async fn update_runtime_settings(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,

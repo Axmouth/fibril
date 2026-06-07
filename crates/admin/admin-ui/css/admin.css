@@ -143,6 +143,30 @@ main {
   grid-template-columns: minmax(0, 2fr) minmax(8rem, 1fr);
 }
 
+.settings-readonly-grid {
+  display: grid;
+  gap: .75rem 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+}
+
+.settings-readonly-grid div {
+  background: rgba(255, 255, 255, .03);
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 6px;
+  padding: .65rem .75rem;
+}
+
+.settings-readonly-grid dt {
+  font-size: .65rem;
+  opacity: .65;
+}
+
+.settings-readonly-grid dd {
+  margin: .15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
 .settings-label {
   display: block;
   font-weight: 600;
@@ -285,6 +309,10 @@ main {
   }
 
   .settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-readonly-grid {
     grid-template-columns: 1fr;
   }
 

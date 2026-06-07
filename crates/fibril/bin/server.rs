@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use fibril_admin::{AdminConfig, AdminServer};
+use fibril_admin::{AdminConfig, AdminServer, StartupConfigSummary};
 use fibril_broker::{
     broker::{Broker, BrokerConfig},
     queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine},
@@ -120,6 +120,18 @@ async fn main() -> anyhow::Result<()> {
             // auth: Some(auth_handler),
             auth: None,
         },
+        Some(StartupConfigSummary {
+            data_dir: config.server.data_dir.display().to_string(),
+            broker_bind: config.broker.listener.bind.to_string(),
+            admin_bind: config.admin.listener.bind.to_string(),
+            keratin_fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
+            keratin_message_log_segment_max_bytes: config
+                .storage
+                .keratin
+                .message_log
+                .segment_max_bytes,
+            keratin_event_log_segment_max_bytes: config.storage.keratin.event_log.segment_max_bytes,
+        }),
         Arc::new(engine.clone()),
         Some(runtime_settings),
     );

@@ -31,10 +31,21 @@ pub struct AdminConfig {
     pub auth: Option<StaticAuthHandler>,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StartupConfigSummary {
+    pub data_dir: String,
+    pub broker_bind: String,
+    pub admin_bind: String,
+    pub keratin_fsync_interval_ms: u64,
+    pub keratin_message_log_segment_max_bytes: u64,
+    pub keratin_event_log_segment_max_bytes: u64,
+}
+
 pub struct AdminServer {
     pub metrics: Metrics,
     pub stroma_metrics: Arc<StromaMetrics>,
     pub config: AdminConfig,
+    pub startup_config: Option<StartupConfigSummary>,
     pub storage: Arc<dyn QueueEngine + Send + Sync>,
     pub runtime_settings: Option<Arc<RuntimeSettingsManager>>,
     pub sessions: AdminSessions,
@@ -55,6 +66,7 @@ impl AdminServer {
         metrics: Metrics,
         stroma_metrics: Arc<StromaMetrics>,
         config: AdminConfig,
+        startup_config: Option<StartupConfigSummary>,
         storage: Arc<dyn QueueEngine + Send + Sync>,
         runtime_settings: Option<Arc<RuntimeSettingsManager>>,
     ) -> Self {
@@ -62,6 +74,7 @@ impl AdminServer {
             metrics,
             stroma_metrics,
             config,
+            startup_config,
             storage,
             runtime_settings,
             sessions: AdminSessions::default(),
@@ -112,6 +125,7 @@ impl AdminServer {
                 "/admin/api/runtime-settings",
                 get(routes::runtime_settings).put(routes::update_runtime_settings),
             )
+            .route("/admin/api/startup-config", get(routes::startup_config))
             .route(
                 "/admin/api/global-dlq",
                 get(routes::global_dlq).put(routes::update_global_dlq),
@@ -384,6 +398,14 @@ mod tests {
                 bind: "127.0.0.1:0".into(),
                 auth,
             },
+            Some(StartupConfigSummary {
+                data_dir: root.display().to_string(),
+                broker_bind: "127.0.0.1:9876".into(),
+                admin_bind: "127.0.0.1:0".into(),
+                keratin_fsync_interval_ms: 5,
+                keratin_message_log_segment_max_bytes: 16 * 1024 * 1024,
+                keratin_event_log_segment_max_bytes: 16 * 1024 * 1024,
+            }),
             Arc::new(engine),
             Some(Arc::new(runtime_settings)),
         ))
@@ -617,6 +639,27 @@ mod tests {
         assert_eq!(body["version"], 1);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 30_000);
         assert_eq!(body["locks"]["idle_queue_cleanup"], false);
+    }
+
+    #[tokio::test]
+    async fn startup_config_get_returns_readonly_summary() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/startup-config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["broker_bind"], "127.0.0.1:9876");
+        assert_eq!(body["keratin_fsync_interval_ms"], 5);
     }
 
     #[tokio::test]
@@ -1037,6 +1080,7 @@ mod tests {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("Runtime Settings"));
+        assert!(body.contains("Startup Config"));
         assert!(body.contains("Global Dead Letter Queue"));
         assert!(body.contains("Queue Dead Letter Policy"));
         assert!(body.contains("Save settings"));
