@@ -27,7 +27,7 @@ fi
 if [ -d "$repo_root/website" ]; then
   (
     cd "$repo_root/website"
-    run npm --silent run check
+    run npm --silent run verify
   )
 fi
 

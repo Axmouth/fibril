@@ -26,7 +26,7 @@ const checks = [
   },
   {
     path: "latest/reliability/dead-lettering/index.html",
-    includes: ["<title>Dead lettering | Fibril</title>", "public broker configuration"],
+    includes: ["<title>Dead Lettering | Fibril</title>", "global dead-letter queue target"],
   },
   {
     path: "latest/concepts/backpressure/index.html",
