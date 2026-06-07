@@ -51,7 +51,7 @@ function humanizeSnake(value) {
 }
 
 function cleanupOutcomeLabel(observation) {
-  if (!observation) return "N/A";
+  if (!observation) return "No cleanup yet";
   return `${humanizeSnake(observation.kind)}: ${humanizeSnake(observation.outcome)}`;
 }
 
@@ -62,7 +62,7 @@ function loadStateLabel(item, activity) {
     activity?.last_eviction_attempt?.kind === "storage" &&
     activity?.last_eviction_attempt?.outcome === "evicted"
   ) return "Unloaded after idle";
-  if (item.exists_on_disk) return "Indexed on disk";
+  if (item.exists_on_disk) return "On disk";
   return "Not loaded";
 }
 
@@ -72,17 +72,48 @@ function rowClass(item) {
   return "queue-row";
 }
 
+function stateClass(item) {
+  if (item.evicting) return "queue-state-pill queue-state-unloading";
+  if (item.materialized) return "queue-state-pill queue-state-loaded";
+  return "queue-state-pill queue-state-unloaded";
+}
+
 async function refresh() {
   const data = await api('/admin/api/queues_debug');
   const container = document.getElementById("queues");
   const activityByQueue = new Map((data.broker_activity || []).map(item => [queueKey(item), item]));
+  const queues = data.queues || [];
+  const loaded = queues.filter(item => item.materialized).length;
+  const unloading = queues.filter(item => item.evicting).length;
+  const tracked = data.broker_activity?.length || 0;
 
   const grouped = {};
-  for (const item of data.queues || []) {
+  for (const item of queues) {
     const group = item.group || "default";
     if (!grouped[group]) grouped[group] = [];
     grouped[group].push(item);
   }
+
+  const summary = `
+    <div class="queue-summary-grid">
+      <div class="queue-summary-card">
+        <span>Indexed queues</span>
+        <strong>${queues.length}</strong>
+      </div>
+      <div class="queue-summary-card">
+        <span>Loaded in memory</span>
+        <strong>${loaded}</strong>
+      </div>
+      <div class="queue-summary-card">
+        <span>Unloading now</span>
+        <strong>${unloading}</strong>
+      </div>
+      <div class="queue-summary-card">
+        <span>Seen by broker</span>
+        <strong>${tracked}</strong>
+      </div>
+    </div>
+  `;
 
   const html = Object.entries(grouped)
     .sort(([a], [b]) => a.localeCompare(b))
@@ -94,7 +125,7 @@ async function refresh() {
           return `
           <tr class="${rowClass(item)}">
             <td>${escapeHtml(item.topic)}</td>
-            <td><span class="queue-state-pill">${escapeHtml(loadStateLabel(item, activity))}</span></td>
+            <td><span class="${stateClass(item)}">${escapeHtml(loadStateLabel(item, activity))}</span></td>
             <td class="text-right">${activity?.active_publishers ?? 0}</td>
             <td class="text-right">${activity?.active_subscribers ?? 0}</td>
             <td class="text-right">${escapeHtml(formatDuration(activity?.idle_for_ms))}</td>
@@ -109,30 +140,32 @@ async function refresh() {
         }).join('');
 
       return `
-        <h5 class="metrics-header" style="margin-top: 1rem;">Group: ${escapeHtml(group)}</h5>
+        <h5 class="metrics-header queue-group-heading">Group: ${escapeHtml(group)}</h5>
         <p class="queue-group-note">
           ${items.filter(item => item.materialized).length} loaded / ${items.length} indexed queue(s)
         </p>
-        <table class="table table-compact narrow metric-table queue-table">
-          <tr>
-            <th>Topic</th>
-            <th>Memory state</th>
-            <th class="text-right">Publishers</th>
-            <th class="text-right">Subscribers</th>
-            <th class="text-right">Idle for</th>
-            <th>Last used</th>
-            <th>Last cleanup</th>
-            <th class="text-right">Ready</th>
-            <th class="text-right">In-flight</th>
-            <th class="text-right">Settled until</th>
-            <th>Messages</th>
-          </tr>
-          ${rows}
-        </table>
+        <div class="queue-table-wrap">
+          <table class="table table-compact narrow metric-table queue-table">
+            <tr>
+              <th>Topic</th>
+              <th>Memory state</th>
+              <th class="text-right">Publishers</th>
+              <th class="text-right">Subscribers</th>
+              <th class="text-right">Idle for</th>
+              <th>Last used</th>
+              <th>Last cleanup</th>
+              <th class="text-right">Ready</th>
+              <th class="text-right">In-flight</th>
+              <th class="text-right">Settled until</th>
+              <th>Messages</th>
+            </tr>
+            ${rows}
+          </table>
+        </div>
       `;
     }).join('');
 
-  container.innerHTML = html;
+  container.innerHTML = summary + html;
 }
 
 setInterval(refresh, 2000);

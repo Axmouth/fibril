@@ -140,7 +140,46 @@ main {
 }
 
 .queue-table {
+  margin: 0;
+  max-width: none;
+  min-width: 62rem;
+  width: 100%;
+}
+
+.queue-table-wrap {
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 8px;
+  margin: 0 auto 1.25rem;
   max-width: min(96rem, calc(100vw - 3rem));
+  overflow-x: auto;
+}
+
+.queue-summary-grid {
+  display: grid;
+  gap: .75rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 1rem auto 1.25rem;
+  max-width: min(96rem, calc(100vw - 3rem));
+}
+
+.queue-summary-card {
+  background: rgba(255, 255, 255, .035);
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 8px;
+  padding: .75rem .85rem;
+}
+
+.queue-summary-card span {
+  color: rgba(255, 255, 255, .62);
+  display: block;
+  font-size: .65rem;
+}
+
+.queue-summary-card strong {
+  display: block;
+  font-size: 1.35rem;
+  line-height: 1.6rem;
+  padding-top: .2rem;
 }
 
 .queue-group-note {
@@ -148,6 +187,10 @@ main {
   font-size: .72rem;
   margin: .1rem auto .45rem;
   max-width: min(96rem, calc(100vw - 3rem));
+}
+
+.queue-group-heading {
+  margin-top: 1rem;
 }
 
 .queue-row-unloaded {
@@ -171,16 +214,28 @@ main {
   white-space: nowrap;
 }
 
-.queue-row-unloaded .queue-state-pill {
+.queue-state-loaded {
+  background: rgba(98, 217, 154, .12);
+  border-color: rgba(98, 217, 154, .26);
+  color: #b9f4ce;
+}
+
+.queue-state-unloaded {
   background: rgba(159, 89, 60, .18);
   border-color: rgba(214, 124, 88, .32);
   color: #f0c0a6;
 }
 
-.queue-row-unloading .queue-state-pill {
+.queue-state-unloading {
   background: rgba(246, 193, 119, .16);
   border-color: rgba(246, 193, 119, .34);
   color: #ffe8a3;
+}
+
+@media (max-width: 760px) {
+  .queue-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .metric-table td:first-child {
