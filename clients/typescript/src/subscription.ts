@@ -16,7 +16,9 @@ import type { Client } from "./client.js";
 import { deadlineFromDelay, type DelayInput } from "./publisher.js";
 
 function normalizeGroup(group: string | null): string | null {
-  return group === "default" ? null : group;
+  const trimmed = group?.trim();
+  if (!trimmed || trimmed === "default") return null;
+  return trimmed;
 }
 
 /**

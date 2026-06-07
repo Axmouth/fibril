@@ -7,7 +7,9 @@ import { SubscriptionBuilder } from "./subscription.js";
 import type { AuthMsg, DeclareQueueMsg, QueueDlqPolicy } from "./protocol.js";
 
 function normalizeGroup(group: string | null): string | null {
-  return group === "default" ? null : group;
+  const trimmed = group?.trim();
+  if (!trimmed || trimmed === "default") return null;
+  return trimmed;
 }
 
 /**

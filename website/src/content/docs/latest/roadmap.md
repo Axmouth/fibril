@@ -3,19 +3,32 @@ title: Roadmap
 description: Near-term work for Fibril.
 ---
 
-Fibril is still early. The near-term roadmap is about making the existing semantics complete and user-facing before adding larger distributed-system features.
+Fibril is still early. Treat this page as the current checkpoint for what has
+landed recently and what is still pending. The near-term focus is making the
+existing semantics complete, observable, and usable before adding larger
+distributed-system features.
+
+## Recently landed
+
+- Runtime broker settings can be read and updated through the admin surface.
+- The global DLQ target is stored as versioned Stroma state and can be edited at runtime.
+- Queue-specific retry and dead-letter policy can be declared from clients and `fibrilctl`.
+- Message inspection and DLQ replay are available from the admin API, dashboard, and CLI.
+- Sparse queues use lazy loading plus idle cleanup, with queue-state visibility in the admin dashboard and CLI.
+- The TypeScript client tracks the Rust client for delayed publish, confirmed publish pipelining, content-type metadata, queue declaration, and group-default behavior.
 
 ## Near term
 
-- Add richer DLQ replay and message inspection workflows.
-- Add the next storage-level runtime settings.
-- Add sparse-queue observability around lazy loading, idle cleanup, and eviction decisions.
+- Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
+- Add the next storage-level startup/runtime settings where they have clear operational value.
+- Expand sparse-queue observability with more explicit lazy-load, idle-cleanup, and skip-reason reporting.
 - Improve TCP protocol ergonomics and error behavior.
+- Keep Rust and TypeScript client APIs aligned as public-path behavior changes.
 
 ## Medium term
 
-- Package runnable broker images or binaries, including `fibrilctl` in the server image.
-- Add deployment guidance for the broker itself.
+- Continue improving runnable broker images and binaries, including `fibrilctl` in the server image.
+- Add more production deployment guidance for the broker itself.
 - Improve admin interface observability.
 - Produce repeatable benchmark reports.
 - Tighten memory behavior under large queue depth, high inflight load, and many idle queues.

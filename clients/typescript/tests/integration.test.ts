@@ -91,6 +91,7 @@ test("client connects, handshakes, publishes confirmed", async () => {
         );
       } else if (f.opcode === Op.Publish) {
         const p = decodeFrameBody<PublishMsg>(f);
+        assert.equal(p.group, null);
         assert.deepEqual(p.content_type, { kind: "msg_pack" });
         assert.equal(p.headers["content-type"], undefined);
         if (p.require_confirm) {
@@ -100,7 +101,7 @@ test("client connects, handshakes, publishes confirmed", async () => {
     };
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
-    const pub = client.publisher("t1");
+    const pub = client.publisherGrouped("t1", " default ");
     const offset = await pub.publishConfirmed({ hello: "world" });
     assert.equal(offset, 7n);
     await client.shutdown();
@@ -196,8 +197,14 @@ test("client declares queue policy", async () => {
   }
 });
 
-test("default group normalizes to ungrouped declarations and subscriptions", async () => {
-  assert.deepEqual(new QueueConfig("jobs").group("default").toWire(), {
+test("default and blank groups normalize to ungrouped declarations and subscriptions", async () => {
+  assert.deepEqual(new QueueConfig("jobs").group(" default ").toWire(), {
+    topic: "jobs",
+    group: null,
+    dlq_policy: null,
+    dlq_max_retries: null,
+  });
+  assert.deepEqual(new QueueConfig("jobs").group("   ").toWire(), {
     topic: "jobs",
     group: null,
     dlq_policy: null,
@@ -234,7 +241,7 @@ test("default group normalizes to ungrouped declarations and subscriptions", asy
     };
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
-    const sub = await client.subscribe("jobs").group("default").subManualAck();
+    const sub = await client.subscribe("jobs").group(" default ").subManualAck();
 
     assert.deepEqual(subscribe, {
       topic: "jobs",
