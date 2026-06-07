@@ -1622,8 +1622,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("Broker Behavior"));
-        assert!(body.contains("Dead Letter Defaults"));
+        assert!(body.contains("Broker Runtime Settings"));
+        assert!(body.contains("Stroma Dead Letter Defaults"));
         assert!(body.contains("Startup Config"));
         assert_eq!(body.matches("<h5>Startup Config</h5>").count(), 1);
         assert!(body.contains("Global Dead Letter Queue"));

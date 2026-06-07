@@ -4,7 +4,7 @@
 
 <div class="settings-panel">
   <p class="settings-note">
-    Persisted settings are applied live where supported. Submit uses the version currently loaded on this page; if another update wins first, the page shows the latest values instead of overwriting them.
+    Persisted settings are applied live where supported. Broker runtime settings and Stroma-owned dead-letter defaults are saved separately, each with its own version check.
   </p>
 
   <div id="settings-message" class="settings-message"></div>
@@ -13,7 +13,7 @@
     <input type="hidden" id="version">
 
     <div class="settings-group-heading">
-      <h5>Broker Behavior</h5>
+      <h5>Broker Runtime Settings</h5>
       <p>Live broker behavior such as delivery timing and idle queue cleanup.</p>
     </div>
 
@@ -153,8 +153,8 @@
     <input type="hidden" id="global-dlq.version">
 
     <div class="settings-group-heading">
-      <h5>Dead Letter Defaults</h5>
-      <p>Fallback behavior for queues that use the global dead-letter policy.</p>
+      <h5>Stroma Dead Letter Defaults</h5>
+      <p>Storage-owned fallback behavior for queues that use the global dead-letter policy.</p>
     </div>
 
     <section class="settings-section">
