@@ -79,7 +79,8 @@ async fn run_load_test(
                     return stats;
                 }
                 let mut sub = client_reader
-                    .subscribe("Topic1")
+                    .subscribe("topic1")
+                    .unwrap()
                     .prefetch(prefetch)
                     .sub_manual_ack()
                     .await
@@ -162,7 +163,7 @@ async fn run_load_test(
                     return;
                 }
                 let start_inner = Instant::now();
-                let publisher = client_pub.publisher("Topic1");
+                let publisher = client_pub.publisher("topic1").unwrap();
 
                 for i in 1..=msgs_per_client {
                     if confirmed {

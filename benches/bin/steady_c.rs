@@ -137,7 +137,8 @@ async fn main() {
                 .await
                 .unwrap();
             let mut sub = client
-                .subscribe("Topic1")
+                .subscribe("topic1")
+                .unwrap()
                 .prefetch(prefetch)
                 .sub_manual_ack()
                 .await
@@ -224,7 +225,7 @@ async fn main() {
                 .connect(address)
                 .await
                 .unwrap();
-            let publisher = client.publisher("Topic1");
+            let publisher = client.publisher("topic1").unwrap();
             let mut stats = WriterStats::default();
 
             let period = Duration::from_secs_f64(1.0 / writer_rate as f64);

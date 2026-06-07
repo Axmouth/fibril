@@ -52,7 +52,7 @@ Confirmed publish waits for the broker to acknowledge the stored message and ret
   <TabItem label="Rust">
 
 ```rust
-let publisher = client.publisher("email.send");
+let publisher = client.publisher("email.send")?;
 
 let offset = publisher
     .publish("hello")
@@ -179,8 +179,8 @@ Manual acknowledgement is the primary processing model. Messages are leased whil
 
 ```rust
 let mut sub = client
-    .subscribe("email.send")
-    .group("workers")
+    .subscribe("email.send")?
+    .group("workers")?
     .prefetch(32)
     .sub_manual_ack()
     .await?;
@@ -269,7 +269,7 @@ Auto-ack subscriptions are a convenience mode. The current client behavior track
 
 ```rust
 let mut sub = client
-    .subscribe("metrics")
+    .subscribe("metrics")?
     .prefetch(128)
     .sub_auto_ack()
     .await?;

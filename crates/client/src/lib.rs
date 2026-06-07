@@ -15,7 +15,7 @@
 //!     .connect("127.0.0.1:9876")
 //!     .await?;
 //!
-//! let publisher = client.publisher("email.send");
+//! let publisher = client.publisher("email.send")?;
 //! let offset = publisher
 //!     .publish(NewMessage::json(&serde_json::json!({
 //!         "to": "user@example.com",
@@ -37,6 +37,7 @@ use std::{
     collections::HashMap,
     fmt::{self, Debug},
     net::{SocketAddr, ToSocketAddrs},
+    str::FromStr,
     sync::Arc,
 };
 use thiserror::Error;
@@ -72,6 +73,13 @@ pub enum FibrilError {
     /// A user payload could not be encoded for publishing.
     #[error("Failed to serialize data: {msg}")]
     SerializationFailure { msg: String },
+    /// A topic or group name failed client-side validation.
+    #[error("Invalid {kind} name `{name}`: {msg}")]
+    InvalidName {
+        kind: &'static str,
+        name: String,
+        msg: String,
+    },
     /// The user-facing handle can no longer reach the connection engine.
     #[error("Connection to the Client was severed, reconnection is advised")]
     BrokenPipe,
@@ -92,6 +100,140 @@ pub type FibrilResult<T> = Result<T, FibrilError>;
 // TODO: Explore From<..> impls for relevant error types
 // TODO: Add opt in event per message sent/received
 
+/// Validated Fibril topic name.
+///
+/// Topic names must be 1-128 bytes, lowercase ASCII, and may contain digits,
+/// `.`, `_`, and `-`. They cannot start or end with `.`, or contain `..`.
+#[derive(Clone, Hash, Eq, PartialEq)]
+pub struct TopicName {
+    inner: Box<str>,
+}
+
+impl TopicName {
+    /// Parse and validate a topic name.
+    pub fn parse(value: impl AsRef<str>) -> FibrilResult<Self> {
+        validate_name("topic", value.as_ref()).map(|inner| Self { inner })
+    }
+
+    /// Borrow the topic as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.inner
+    }
+
+    fn into_string(self) -> String {
+        self.inner.into()
+    }
+}
+
+impl Debug for TopicName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("TopicName").field(&self.as_str()).finish()
+    }
+}
+
+impl fmt::Display for TopicName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TopicName {
+    type Err = FibrilError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+/// Validated Fibril consumer group name.
+///
+/// Group names use the same syntax as [`TopicName`].
+#[derive(Clone, Hash, Eq, PartialEq)]
+pub struct GroupName {
+    inner: Box<str>,
+}
+
+impl GroupName {
+    /// Parse and validate a group name.
+    pub fn parse(value: impl AsRef<str>) -> FibrilResult<Self> {
+        validate_name("group", value.as_ref()).map(|inner| Self { inner })
+    }
+
+    /// Borrow the group as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.inner
+    }
+
+    fn into_string(self) -> String {
+        self.inner.into()
+    }
+}
+
+impl Debug for GroupName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("GroupName").field(&self.as_str()).finish()
+    }
+}
+
+impl fmt::Display for GroupName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GroupName {
+    type Err = FibrilError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
+fn validate_name(kind: &'static str, value: &str) -> FibrilResult<Box<str>> {
+    let bytes = value.as_bytes();
+    let len = bytes.len();
+    if len == 0 || len > 128 {
+        return invalid_name(kind, value, "must be 1-128 bytes");
+    }
+    if bytes[0] == b'.' || bytes[len - 1] == b'.' {
+        return invalid_name(kind, value, "cannot start or end with '.'");
+    }
+
+    let mut prev_dot = false;
+    for &byte in bytes {
+        let ok = byte.is_ascii_lowercase()
+            || byte.is_ascii_digit()
+            || byte == b'.'
+            || byte == b'_'
+            || byte == b'-';
+        if !ok {
+            return invalid_name(
+                kind,
+                value,
+                "must contain only lowercase ASCII letters, digits, '.', '_', or '-'",
+            );
+        }
+        if byte == b'.' {
+            if prev_dot {
+                return invalid_name(kind, value, "cannot contain consecutive dots");
+            }
+            prev_dot = true;
+        } else {
+            prev_dot = false;
+        }
+    }
+
+    Ok(value.into())
+}
+
+fn invalid_name<T>(kind: &'static str, name: &str, msg: &str) -> FibrilResult<T> {
+    Err(FibrilError::InvalidName {
+        kind,
+        name: name.into(),
+        msg: msg.into(),
+    })
+}
+
 /// A connected Fibril broker client.
 ///
 /// Clone values share the same underlying connection engine. Use
@@ -103,7 +245,7 @@ pub type FibrilResult<T> = Result<T, FibrilError>;
 ///
 /// # async fn example() -> fibril_client::FibrilResult<()> {
 /// let client = ClientOptions::new().connect("127.0.0.1:9876").await?;
-/// let publisher = client.publisher("jobs");
+/// let publisher = client.publisher("jobs")?;
 /// publisher.publish("hello").await?;
 /// client.shutdown().await;
 /// # Ok(())
@@ -124,8 +266,8 @@ pub struct Client {
 #[derive(Debug, Clone)]
 pub struct Publisher {
     engine: Arc<EngineHandle>,
-    topic: String,
-    group: Option<String>,
+    topic: TopicName,
+    group: Option<GroupName>,
 }
 
 /// Manual-acknowledgement subscription.
@@ -539,8 +681,8 @@ enum Waiter {
 /// ```no_run
 /// # async fn example(client: fibril_client::Client) -> fibril_client::FibrilResult<()> {
 /// let mut sub = client
-///     .subscribe("email.send")
-///     .group("workers")
+///     .subscribe("email.send")?
+///     .group("workers")?
 ///     .prefetch(32)
 ///     .sub_manual_ack()
 ///     .await?;
@@ -553,8 +695,8 @@ enum Waiter {
 /// ```
 pub struct SubscriptionBuilder<'a> {
     client: &'a Client,
-    topic: String,
-    group: Option<String>,
+    topic: TopicName,
+    group: Option<GroupName>,
     prefetch: u32,
 }
 
@@ -562,9 +704,9 @@ impl<'a> SubscriptionBuilder<'a> {
     /// Set the consumer group.
     ///
     /// Subscribers using the same topic and group share work.
-    pub fn group(mut self, group: impl Into<String>) -> Self {
-        self.group = Some(group.into());
-        self
+    pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
+        self.group = Some(GroupName::parse(group)?);
+        Ok(self)
     }
 
     /// Set the maximum number of messages the broker may lease ahead.
@@ -582,8 +724,8 @@ impl<'a> SubscriptionBuilder<'a> {
     #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
     pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
         let req = Subscribe {
-            topic: self.topic,
-            group: self.group,
+            topic: self.topic.into_string(),
+            group: self.group.map(GroupName::into_string),
             prefetch: self.prefetch,
             auto_ack: false,
         };
@@ -599,8 +741,8 @@ impl<'a> SubscriptionBuilder<'a> {
     #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
     pub async fn sub_auto_ack(self) -> FibrilResult<AutoAckedSubscription> {
         let req = Subscribe {
-            topic: self.topic,
-            group: self.group,
+            topic: self.topic.into_string(),
+            group: self.group.map(GroupName::into_string),
             prefetch: self.prefetch,
             auto_ack: false,
         };
@@ -690,40 +832,43 @@ impl Client {
     }
 
     /// Create a publisher for a topic without a group.
-    #[tracing::instrument(fields(topic = %topic))]
-    pub fn publisher(&self, topic: impl Into<String> + fmt::Display) -> Publisher {
-        Publisher {
+    #[tracing::instrument(fields(topic = ?topic))]
+    pub fn publisher(&self, topic: impl AsRef<str> + fmt::Debug) -> FibrilResult<Publisher> {
+        Ok(Publisher {
             engine: self.engine.clone(),
-            topic: topic.into(),
+            topic: TopicName::parse(topic)?,
             group: None,
-        }
+        })
     }
 
     /// Create a publisher for a grouped topic.
     ///
     /// Grouping is part of the queue identity and should match the consumer
     /// group semantics you want for the topic.
-    #[tracing::instrument(fields(topic = %topic, group = %group))]
+    #[tracing::instrument(fields(topic = ?topic, group = ?group))]
     pub fn publisher_grouped(
         &self,
-        topic: impl Into<String> + fmt::Display,
-        group: impl Into<String> + fmt::Display,
-    ) -> Publisher {
-        Publisher {
+        topic: impl AsRef<str> + fmt::Debug,
+        group: impl AsRef<str> + fmt::Debug,
+    ) -> FibrilResult<Publisher> {
+        Ok(Publisher {
             engine: self.engine.clone(),
-            topic: topic.into(),
-            group: Some(group.into()),
-        }
+            topic: TopicName::parse(topic)?,
+            group: Some(GroupName::parse(group)?),
+        })
     }
 
     /// Start building a subscription to a topic.
-    pub fn subscribe(&'_ self, topic: impl Into<String> + fmt::Display) -> SubscriptionBuilder<'_> {
-        SubscriptionBuilder {
+    pub fn subscribe(
+        &'_ self,
+        topic: impl AsRef<str> + fmt::Debug,
+    ) -> FibrilResult<SubscriptionBuilder<'_>> {
+        Ok(SubscriptionBuilder {
             client: self,
-            topic: topic.into(),
+            topic: TopicName::parse(topic)?,
             group: None,
             prefetch: 1, // sensible default
-        }
+        })
     }
 
     /// Gracefully shut down the client.
@@ -747,8 +892,8 @@ impl Publisher {
         let message = payload.into_message()?;
         self.engine
             .publish_unconfirmed(
-                self.topic.clone(),
-                self.group.clone(),
+                self.topic.as_str().to_string(),
+                self.group.as_ref().map(|group| group.as_str().to_string()),
                 message.headers,
                 message.payload,
             )
@@ -764,8 +909,8 @@ impl Publisher {
         let message = payload.into_message()?;
         self.engine
             .publish(
-                self.topic.clone(),
-                self.group.clone(),
+                self.topic.as_str().to_string(),
+                self.group.as_ref().map(|group| group.as_str().to_string()),
                 message.headers,
                 message.payload,
             )
@@ -788,8 +933,8 @@ impl Publisher {
         let message = payload.into_message()?;
         self.engine
             .publish_unconfirmed_delayed(
-                self.topic.clone(),
-                self.group.clone(),
+                self.topic.as_str().to_string(),
+                self.group.as_ref().map(|group| group.as_str().to_string()),
                 message.headers,
                 message.payload,
                 deadline,
@@ -811,8 +956,8 @@ impl Publisher {
         let message = payload.into_message()?;
         self.engine
             .publish_delayed(
-                self.topic.clone(),
-                self.group.clone(),
+                self.topic.as_str().to_string(),
+                self.group.as_ref().map(|group| group.as_str().to_string()),
                 message.headers,
                 message.payload,
                 deadline,
@@ -1703,6 +1848,45 @@ mod tests {
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     struct TestPayload {
         value: u32,
+    }
+
+    #[test]
+    fn topic_name_accepts_valid_names() {
+        for name in [
+            "orders",
+            "orders.created",
+            "orders-v2",
+            "_dlq.orders",
+            "a1_b-2.c",
+        ] {
+            assert_eq!(TopicName::parse(name).unwrap().as_str(), name);
+        }
+    }
+
+    #[test]
+    fn topic_name_rejects_invalid_names() {
+        for name in [
+            "",
+            "Orders",
+            ".orders",
+            "orders.",
+            "orders..created",
+            "orders/created",
+        ] {
+            assert!(matches!(
+                TopicName::parse(name),
+                Err(FibrilError::InvalidName { kind: "topic", .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn group_name_uses_same_rules() {
+        assert_eq!(GroupName::parse("workers-a").unwrap().as_str(), "workers-a");
+        assert!(matches!(
+            GroupName::parse("Workers"),
+            Err(FibrilError::InvalidName { kind: "group", .. })
+        ));
     }
 
     #[test]

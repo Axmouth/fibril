@@ -11,7 +11,7 @@ Prefetch bounds the number of messages a consumer may have inflight at once.
 
 ```rust
 let mut sub = client
-    .subscribe("email.send")
+    .subscribe("email.send")?
     .prefetch(32)
     .sub_manual_ack()
     .await?;

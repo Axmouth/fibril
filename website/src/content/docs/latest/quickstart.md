@@ -37,12 +37,12 @@ let client = ClientOptions::new()
     .connect("127.0.0.1:9876")
     .await?;
 
-let publisher = client.publisher("email.send");
+let publisher = client.publisher("email.send")?;
 publisher.publish("hello").await?;
 publisher.publish_delayed("hello later", 30u64).await?;
 
 let mut sub = client
-    .subscribe("email.send")
+    .subscribe("email.send")?
     .prefetch(32)
     .sub_manual_ack()
     .await?;
