@@ -12,7 +12,7 @@ import StatusBadge from "./StatusBadge.astro";
       <tr><td>Explicit acknowledgements</td><td><StatusBadge kind="ready">available</StatusBadge></td><td>ACK, requeue, and terminal failure paths.</td></tr>
       <tr><td>Delayed publish</td><td><StatusBadge kind="ready">available</StatusBadge></td><td>Broker path and Rust/TypeScript client methods are wired.</td></tr>
       <tr><td>Delayed retries</td><td><StatusBadge kind="partial">wiring</StatusBadge></td><td>State support exists; public path remains incomplete.</td></tr>
-      <tr><td>Dead lettering</td><td><StatusBadge kind="partial">state-tested</StatusBadge></td><td>Stroma policy exists; public broker config is not exposed.</td></tr>
+      <tr><td>Dead lettering</td><td><StatusBadge kind="partial">configurable</StatusBadge></td><td>Global and per-queue policy are admin/API configurable; replay tooling is still early.</td></tr>
       <tr><td>Backpressure</td><td><StatusBadge kind="ready">available</StatusBadge></td><td>Pull-based delivery and bounded prefetch.</td></tr>
       <tr><td>Replication</td><td><StatusBadge kind="planned">planned</StatusBadge></td><td>Design work is in progress.</td></tr>
       <tr><td>Transactions</td><td><StatusBadge kind="no">out of scope</StatusBadge></td><td>Not planned; transactional workflows are intentionally excluded.</td></tr>

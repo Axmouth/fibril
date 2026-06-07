@@ -225,6 +225,14 @@ main {
   opacity: .68;
 }
 
+.settings-inline-warning {
+  color: #f6c177;
+  display: block;
+  font-size: .65rem;
+  line-height: 1rem;
+  margin-top: .25rem;
+}
+
 .settings-section input[type="number"] {
   max-width: 24rem;
   width: 100%;

@@ -39,7 +39,7 @@ pub struct UpdateRuntimeSettingsRequest {
 #[derive(Deserialize)]
 pub struct UpdateGlobalDlqRequest {
     pub expected_version: u64,
-    pub target: Option<GlobalDLQ>,
+    pub target: Option<QueueDlqTargetRequest>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +53,7 @@ pub enum QueueDlqPolicyRequest {
 #[derive(Debug, Deserialize)]
 pub struct QueueDlqTargetRequest {
     pub tp: String,
+    #[serde(default = "default_queue_part")]
     pub part: u32,
     pub group: Option<String>,
 }
@@ -60,6 +61,7 @@ pub struct QueueDlqTargetRequest {
 #[derive(Deserialize)]
 pub struct UpdateQueueDlqRequest {
     pub tp: String,
+    #[serde(default = "default_queue_part")]
     pub part: u32,
     pub group: Option<String>,
     pub policy: QueueDlqPolicyRequest,
@@ -76,6 +78,10 @@ pub struct QueueDlqResponse {
 pub struct AdminErrorResponse {
     pub code: String,
     pub message: String,
+}
+
+fn default_queue_part() -> u32 {
+    0
 }
 
 impl RuntimeSettingsResponse {
@@ -286,9 +292,25 @@ pub async fn update_global_dlq(
 ) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
 
+    let target = match request.target {
+        Some(target) => {
+            match GlobalDLQ::new(&target.tp, target.part, target.group.as_deref()).await {
+                Ok(target) => Some(target),
+                Err(err) => {
+                    return Ok(admin_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_global_dlq",
+                        err.to_string(),
+                    ));
+                }
+            }
+        }
+        None => None,
+    };
+
     match server
         .storage
-        .set_global_dlq(request.target, request.expected_version)
+        .set_global_dlq(target, request.expected_version)
         .await
     {
         Ok(GlobalDlqUpdateOutcome::Stored(snapshot)) => {

@@ -173,17 +173,13 @@
         </span>
       </label>
 
-      <div id="global-dlq-fields" class="settings-grid">
+      <div id="global-dlq-fields" class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Target topic</span>
           <span class="settings-help">Queue topic that receives dead-lettered messages.</span>
           <input class="clr-input" id="global-dlq.tp" placeholder="_dlq.default">
         </label>
-        <label class="settings-field">
-          <span class="settings-label">Target partition</span>
-          <span class="settings-help">Partition for the target queue.</span>
-          <input class="clr-input" id="global-dlq.part" type="number" min="0" step="1" value="0">
-        </label>
+        <input id="global-dlq.part" type="hidden" value="0">
         <label class="settings-field">
           <span class="settings-label">Target group</span>
           <span class="settings-help">Optional queue group for the target queue.</span>
@@ -207,17 +203,13 @@
 
       <div id="queue-dlq-message" class="settings-message"></div>
 
-      <div class="settings-grid">
+      <div class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Queue topic</span>
           <span class="settings-help">Source queue to configure.</span>
           <input class="clr-input" id="queue-dlq.tp" required placeholder="orders.created">
         </label>
-        <label class="settings-field">
-          <span class="settings-label">Queue partition</span>
-          <span class="settings-help">Source partition.</span>
-          <input class="clr-input" id="queue-dlq.part" type="number" min="0" step="1" value="0" required>
-        </label>
+        <input id="queue-dlq.part" type="hidden" value="0">
         <label class="settings-field">
           <span class="settings-label">Queue group</span>
           <span class="settings-help">Optional group name for the source queue.</span>
@@ -234,6 +226,7 @@
             <option value="global">Use global DLQ</option>
             <option value="custom">Custom DLQ target</option>
           </select>
+          <span id="queue-dlq-policy-warning" class="settings-inline-warning" hidden></span>
         </label>
         <label class="settings-field">
           <span class="settings-label">Max retries</span>
@@ -242,17 +235,13 @@
         </label>
       </div>
 
-      <div id="queue-dlq-target-fields" class="settings-grid">
+      <div id="queue-dlq-target-fields" class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Target topic</span>
           <span class="settings-help">Queue topic that receives this queue's dead-lettered messages.</span>
           <input class="clr-input" id="queue-dlq.target.tp" placeholder="_dlq.orders">
         </label>
-        <label class="settings-field">
-          <span class="settings-label">Target partition</span>
-          <span class="settings-help">Partition for the custom DLQ target.</span>
-          <input class="clr-input" id="queue-dlq.target.part" type="number" min="0" step="1" value="0">
-        </label>
+        <input id="queue-dlq.target.part" type="hidden" value="0">
         <label class="settings-field">
           <span class="settings-label">Target group</span>
           <span class="settings-help">Optional group name for the custom DLQ target.</span>
@@ -270,6 +259,7 @@
 <script src="/static/js/api.js"></script>
 <script>
 let currentLocks = {};
+let currentGlobalDlqTarget = null;
 
 function field(id) {
   return document.getElementById(id);
@@ -330,6 +320,15 @@ function setQueueDlqMessage(text, kind = "info") {
   const el = field("queue-dlq-message");
   el.textContent = text;
   el.dataset.kind = kind;
+}
+
+function updateQueueDlqPolicyWarning() {
+  const warning = field("queue-dlq-policy-warning");
+  const shouldWarn = field("queue-dlq.policy").value === "global" && !currentGlobalDlqTarget;
+  warning.hidden = !shouldWarn;
+  warning.textContent = shouldWarn
+    ? "No global DLQ target is currently configured; exhausted messages will be discarded until one is set."
+    : "";
 }
 
 function runtimeSettingsStatusMessage(data, message) {
@@ -394,12 +393,14 @@ function renderStartupConfig(data) {
 
 function renderGlobalDlq(data) {
   field("global-dlq.version").value = data.version;
+  currentGlobalDlqTarget = data.target || null;
   const enabled = !!data.target;
   field("global-dlq.enabled").checked = enabled;
   field("global-dlq.tp").value = data.target?.tp || "";
   field("global-dlq.part").value = data.target?.part ?? 0;
   field("global-dlq.group").value = data.target?.group || "";
   setGlobalDlqFieldsEnabled(enabled);
+  updateQueueDlqPolicyWarning();
 }
 
 function collectSettings() {
@@ -460,6 +461,7 @@ function setQueueDlqTargetFieldsEnabled(enabled) {
   for (const input of document.querySelectorAll("#queue-dlq-target-fields input")) {
     input.disabled = !enabled;
   }
+  updateQueueDlqPolicyWarning();
 }
 
 for (const select of document.querySelectorAll(".duration-unit")) {

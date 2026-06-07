@@ -849,7 +849,6 @@ mod tests {
                             "expected_version": 0,
                             "target": {
                                 "tp": "_dlq.orders",
-                                "part": 0,
                                 "group": "failed"
                             }
                         })
@@ -994,12 +993,10 @@ mod tests {
                     .body(Body::from(
                         json!({
                             "tp": "orders.created",
-                            "part": 0,
                             "group": null,
                             "policy": "custom",
                             "target": {
                                 "tp": "_dlq.orders",
-                                "part": 0,
                                 "group": "failed"
                             },
                             "max_retries": 7
@@ -1098,6 +1095,8 @@ mod tests {
         assert!(body.contains("Global Dead Letter Queue"));
         assert!(body.contains("Queue Dead Letter Policy"));
         assert!(body.contains("Optional queue group for the target queue."));
+        assert!(!body.contains("Queue partition"));
+        assert!(!body.contains("Target partition"));
         assert!(!body.contains("consumer group"));
         assert!(body.contains("Save settings"));
         assert!(!body.contains("Log out"));
