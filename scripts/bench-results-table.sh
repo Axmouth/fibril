@@ -34,14 +34,38 @@ format_rate() {
 }
 
 format_latency() {
-  local file="$1"
+  local label="$1"
+  local file="$2"
   local line
-  line="$(grep -m1 '^Latency publish->deliver ms:' "$file" || true)"
+  line="$(grep -m1 "^${label}:" "$file" || true)"
   if [ -z "$line" ]; then
     printf 'n/a'
     return
   fi
-  sed -E 's/^Latency publish->deliver ms: p50=([^,]+), p95=([^,]+), p99=([^,]+), max=([^,]+)$/\1 \/ \2 \/ \3 \/ \4 ms/' <<<"$line"
+  sed -E "s/^${label}: p50=([^,]+), p95=([^,]+), p99=([^,]+), max=([^,]+)$/\1 \/ \2 \/ \3 \/ \4 ms/" <<<"$line"
+}
+
+format_publish_latency() {
+  local file="$1"
+  format_latency "Latency publish->deliver ms" "$file"
+}
+
+format_server_latency() {
+  local file="$1"
+  format_latency "Latency server-receive->deliver ms" "$file"
+}
+
+format_mode() {
+  local file="$1"
+  local confirmed
+  local window
+  confirmed="$(extract_config "confirmed" "$file")"
+  if [ "$confirmed" = "true" ]; then
+    window="$(extract_config "confirm_window" "$file")"
+    printf 'confirmed, window=%s' "$window"
+  else
+    printf 'unconfirmed'
+  fi
 }
 
 format_errors() {
@@ -92,29 +116,23 @@ format_queue() {
   fi
 }
 
-printf '| Case | Mode | Target | Actual | Missing | publish→deliver p50/p95/p99/max | Errors | Server RSS avg/peak | End queue |\n'
-printf '| --- | --- | ---: | ---: | ---: | --- | ---: | --- | --- |\n'
+printf '| Case | Mode | Target | Actual | Missing | publish→deliver p50/p95/p99/max | server-receive→deliver p50/p95/p99/max | Errors | Server RSS avg/peak | End queue |\n'
+printf '| --- | --- | ---: | ---: | ---: | --- | --- | ---: | --- | --- |\n'
 
 for file in "$@"; do
   case_name="$(basename "$file" .results.txt)"
-  confirmed="$(extract_config "confirmed" "$file")"
   target="$(extract_config "rate_per_sec" "$file")"
   actual="$(extract_value "Actual measured publish rate" "$file")"
   missing="$(extract_value "Measured missing" "$file")"
 
-  if [ "$confirmed" = "true" ]; then
-    mode="confirmed"
-  else
-    mode="unconfirmed"
-  fi
-
-  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
     "$case_name" \
-    "$mode" \
+    "$(format_mode "$file")" \
     "$(format_rate "$target")" \
     "$(format_rate "$actual")" \
     "${missing:-n/a}" \
-    "$(format_latency "$file")" \
+    "$(format_publish_latency "$file")" \
+    "$(format_server_latency "$file")" \
     "$(format_errors "$file")" \
     "$(format_rss "$file")" \
     "$(format_queue "$file")"
