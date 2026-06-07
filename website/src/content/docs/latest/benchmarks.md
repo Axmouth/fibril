@@ -173,6 +173,21 @@ rose into the 1-2 second range. Larger windows are useful for saturating the
 path while preserving publish confirmation correctness; they are not a latency
 optimization.
 
+Payload-size spot checks on the same SATA SSD development machine:
+
+| Payload | Target rate | Actual measured rate | Missing | publish→deliver p50/p95/p99/max | Notes |
+| ---: | ---: | ---: | ---: | --- | --- |
+| 8KB | 50k/s | 50,010/s | 0 | 14 / 17 / 19 / 61 ms | Clean short run |
+| 8KB | 150k/s | 139,987/s | 0 | 2608 / 3117 / 3168 / 3245 ms | Could not reach target; backlog-driven |
+| 64KB | 10k/s | 10,000/s | 0 | 18 / 22 / 23 / 32 ms | Clean short run |
+| 64KB | 20k/s | 18,285/s | 0 | 1605 / 1891 / 2144 / 2277 ms | Could not reach target; likely storage-bandwidth bound |
+
+For larger payloads, the bottleneck shifts away from message scheduling and
+toward memory copying, TCP throughput, and especially durable storage
+bandwidth. On this SATA SSD machine, 64KB at 10k/s is already roughly 625 MiB/s
+of application payload before protocol, replication within the durable path,
+and filesystem overhead. Treat payload-size numbers as hardware-specific.
+
 Recent local exploratory run, using `WRITERS=10`, `READERS=10`, `SIZE=1024`,
 `PREFETCH=16384`, `WARMUP_SECS=3`, and `DURATION_SECS=10`:
 
