@@ -1280,6 +1280,7 @@ mod tests {
                         partition: 0,
                         group: None,
                         require_confirm: true,
+                        content_type: None,
                         headers: std::collections::HashMap::from([(
                             "x-trace-id".into(),
                             "admin-dlq-flow".into(),

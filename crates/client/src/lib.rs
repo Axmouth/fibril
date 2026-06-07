@@ -306,7 +306,7 @@ pub struct AutoAckedSubscription {
 
 /// Delivered message payload and metadata.
 ///
-/// [`Message::deserialize`] chooses a decoder from the `content-type` header.
+/// [`Message::deserialize`] chooses a decoder from content type metadata.
 /// Missing or empty content type defaults to msgpack.
 pub struct Message {
     /// Broker delivery tag used internally for acknowledgement.
@@ -315,19 +315,22 @@ pub struct Message {
     pub published: UnixMillis,
     /// Broker receive timestamp in Unix milliseconds.
     pub publish_received: UnixMillis,
-    /// User headers plus any broker-provided headers.
+    /// User headers plus any broker-provided headers. Content type is exposed
+    /// separately through [`Message::content_type`].
     pub headers: HashMap<String, String>,
+    /// Payload content type metadata, stored separately from user headers.
+    pub content_type: Option<ContentType>,
     /// Raw message body bytes.
     pub payload: Vec<u8>,
 }
 
 impl Message {
-    /// Return the message `content-type` header, if present.
+    /// Return the message content type, if present.
     pub fn content_type(&self) -> Option<&str> {
-        self.headers.get("content-type").map(String::as_str)
+        self.content_type.as_ref().map(ContentType::as_header)
     }
 
-    /// Deserialize using `content-type`.
+    /// Deserialize using content type metadata.
     ///
     /// Supports `application/msgpack` (also the default when absent) and
     /// `application/json`.
@@ -335,13 +338,13 @@ impl Message {
         deserialize_by_content_type(self.content_type(), &self.payload)
     }
 
-    /// Deserialize the payload as msgpack, ignoring `content-type`.
+    /// Deserialize the payload as msgpack, ignoring content type metadata.
     pub fn msg_pack<T: DeserializeOwned>(&self) -> FibrilResult<T> {
         rmp_serde::from_slice(&self.payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
     }
 
-    /// Deserialize the payload as JSON, ignoring `content-type`.
+    /// Deserialize the payload as JSON, ignoring content type metadata.
     pub fn json<T: DeserializeOwned>(&self) -> FibrilResult<T> {
         serde_json::from_slice(&self.payload)
             .map_err(|e| FibrilError::DeserializationFailure { msg: e.to_string() })
@@ -381,6 +384,7 @@ impl Message {
 pub struct NewMessage {
     /// Encoded payload bytes sent to the broker.
     pub payload: Vec<u8>,
+    content_type: Option<ContentType>,
     headers: HashMap<String, String>,
 }
 
@@ -403,6 +407,7 @@ impl NewMessage {
     pub fn raw(payload: Vec<u8>) -> Self {
         NewMessage {
             payload,
+            content_type: None,
             headers: HashMap::new(),
         }
     }
@@ -417,24 +422,37 @@ impl NewMessage {
     /// Fibril reserves `fibril.*` and `stroma.*` headers for system metadata;
     /// user code should avoid those prefixes.
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.insert(key.into(), value.into());
+        let key = key.into();
+        let value = value.into();
+        if key.eq_ignore_ascii_case("content-type") {
+            self.content_type = Some(ContentType::from_header(value));
+        } else {
+            self.headers.insert(key, value);
+        }
         self
     }
 
-    /// Set the `content-type` header.
+    /// Set content type metadata.
     pub fn content_type(self, content_type: impl Into<String>) -> Self {
         self.header("content-type", content_type)
     }
 
-    /// Borrow the headers that will be sent with this message.
+    /// Borrow the extra headers that will be sent with this message.
     pub fn headers(&self) -> &HashMap<String, String> {
         &self.headers
     }
 
+    /// Return the content type metadata that will be sent with this message.
+    pub fn content_type_value(&self) -> Option<&str> {
+        self.content_type.as_ref().map(ContentType::as_header)
+    }
+
     fn with_content_type(payload: Vec<u8>, content_type: &str) -> Self {
-        let mut headers = HashMap::new();
-        headers.insert("content-type".into(), content_type.into());
-        NewMessage { payload, headers }
+        NewMessage {
+            payload,
+            content_type: Some(ContentType::from_header(content_type)),
+            headers: HashMap::new(),
+        }
     }
 }
 
@@ -531,8 +549,11 @@ pub struct InflightMessage {
     pub published: UnixMillis,
     /// Broker receive timestamp in Unix milliseconds.
     pub publish_received: UnixMillis,
-    /// User headers plus any broker-provided headers.
+    /// User headers plus any broker-provided headers. Content type is exposed
+    /// separately through [`InflightMessage::content_type`].
     pub headers: HashMap<String, String>,
+    /// Payload content type metadata, stored separately from user headers.
+    pub content_type: Option<ContentType>,
     /// Raw message body bytes.
     pub payload: Vec<u8>,
     #[doc(hidden)]
@@ -551,6 +572,7 @@ impl InflightMessage {
             published,
             publish_received,
             headers,
+            content_type,
             payload,
             request_id,
             settle,
@@ -569,6 +591,7 @@ impl InflightMessage {
             published,
             publish_received,
             headers,
+            content_type,
             payload,
         })
     }
@@ -583,6 +606,7 @@ impl InflightMessage {
             published,
             publish_received,
             headers,
+            content_type,
             payload,
             request_id,
             settle,
@@ -602,6 +626,7 @@ impl InflightMessage {
             published,
             publish_received,
             headers,
+            content_type,
             payload,
         })
     }
@@ -613,6 +638,7 @@ impl InflightMessage {
             published,
             publish_received,
             headers,
+            content_type,
             payload,
             request_id,
             settle,
@@ -632,6 +658,7 @@ impl InflightMessage {
             published,
             publish_received,
             headers,
+            content_type,
             payload,
         })
     }
@@ -645,12 +672,12 @@ impl InflightMessage {
         todo!()
     }
 
-    /// Return the message `content-type` header, if present.
+    /// Return the message content type, if present.
     pub fn content_type(&self) -> Option<&str> {
-        self.headers.get("content-type").map(String::as_str)
+        self.content_type.as_ref().map(ContentType::as_header)
     }
 
-    /// Deserialize using `content-type`.
+    /// Deserialize using content type metadata.
     ///
     /// Supports `application/msgpack` (also the default when absent) and
     /// `application/json`.
@@ -910,6 +937,7 @@ impl Publisher {
             .publish_unconfirmed(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
+                message.content_type,
                 message.headers,
                 message.payload,
             )
@@ -943,6 +971,7 @@ impl Publisher {
             .publish_with_confirmation(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
+                message.content_type,
                 message.headers,
                 message.payload,
             )
@@ -965,6 +994,7 @@ impl Publisher {
             .publish_unconfirmed_delayed(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
+                message.content_type,
                 message.headers,
                 message.payload,
                 deadline,
@@ -1004,6 +1034,7 @@ impl Publisher {
             .publish_delayed_with_confirmation(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
+                message.content_type,
                 message.headers,
                 message.payload,
                 deadline,
@@ -1057,6 +1088,7 @@ enum Command {
     PublishUnconfirmed {
         topic: String,
         group: Option<String>,
+        content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
         published: u64,
@@ -1064,6 +1096,7 @@ enum Command {
     PublishConfirmed {
         topic: String,
         group: Option<String>,
+        content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
         published: u64,
@@ -1072,6 +1105,7 @@ enum Command {
     PublishDelayedUnconfirmed {
         topic: String,
         group: Option<String>,
+        content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
         published: u64,
@@ -1080,6 +1114,7 @@ enum Command {
     PublishDelayedConfirmed {
         topic: String,
         group: Option<String>,
+        content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
         published: u64,
@@ -1300,20 +1335,21 @@ where
                 }
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    Command::PublishUnconfirmed { topic, group, headers, payload, published } => {
+                    Command::PublishUnconfirmed { topic, group, content_type, headers, payload, published } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = Publish {
                             topic,
                             group,
                             partition: 0,
                             require_confirm: false,
+                            content_type,
                             headers,
                             payload,
                             published,
                         };
                         send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
-                    Command::PublishConfirmed { topic, group, headers, payload, published, reply } => {
+                    Command::PublishConfirmed { topic, group, content_type, headers, payload, published, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
@@ -1321,13 +1357,14 @@ where
                             group,
                             partition: 0,
                             require_confirm: true,
+                            content_type,
                             headers,
                             payload,
                             published,
                         };
                         send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
-                    Command::PublishDelayedUnconfirmed { topic, group, headers, payload, published, not_before } => {
+                    Command::PublishDelayedUnconfirmed { topic, group, content_type, headers, payload, published, not_before } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = PublishDelayed {
                             topic,
@@ -1335,13 +1372,14 @@ where
                             partition: 0,
                             require_confirm: false,
                             not_before,
+                            content_type,
                             headers,
                             payload,
                             published,
                         };
                         send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
                     }
-                    Command::PublishDelayedConfirmed { topic, group, headers, payload, published, not_before, reply } => {
+                    Command::PublishDelayedConfirmed { topic, group, content_type, headers, payload, published, not_before, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = PublishDelayed {
@@ -1350,6 +1388,7 @@ where
                             partition: 0,
                             require_confirm: true,
                             not_before,
+                            content_type,
                             headers,
                             payload,
                             published,
@@ -1447,6 +1486,7 @@ where
                                             delivery_tag: d.delivery_tag,
                                             published: d.published,
                                             publish_received: d.publish_received,
+                                            content_type: d.content_type,
                                             headers: d.headers,
                                             payload: d.payload,
                                             settle: ack_tx,
@@ -1505,6 +1545,7 @@ where
                                             delivery_tag: d.delivery_tag,
                                             published: d.published,
                                             publish_received: d.publish_received,
+                                            content_type: d.content_type,
                                             headers: d.headers,
                                             payload: d.payload,
                                         }).await;
@@ -1689,6 +1730,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
     ) -> FibrilResult<()> {
@@ -1697,6 +1739,7 @@ impl EngineHandle {
             .send(Command::PublishUnconfirmed {
                 topic,
                 group,
+                content_type,
                 headers,
                 payload,
                 published,
@@ -1710,6 +1753,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
     ) -> FibrilResult<PublishConfirmation> {
@@ -1719,6 +1763,7 @@ impl EngineHandle {
             .send(Command::PublishConfirmed {
                 topic,
                 group,
+                content_type,
                 headers,
                 payload,
                 published,
@@ -1733,6 +1778,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
         not_before: u64,
@@ -1742,6 +1788,7 @@ impl EngineHandle {
             .send(Command::PublishDelayedUnconfirmed {
                 topic,
                 group,
+                content_type,
                 headers,
                 payload,
                 published,
@@ -1756,6 +1803,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
         not_before: u64,
@@ -1766,6 +1814,7 @@ impl EngineHandle {
             .send(Command::PublishDelayedConfirmed {
                 topic,
                 group,
+                content_type,
                 headers,
                 payload,
                 published,
@@ -2056,10 +2105,8 @@ mod tests {
             message.headers().get("x-trace").map(String::as_str),
             Some("abc")
         );
-        assert_eq!(
-            message.headers().get("content-type").map(String::as_str),
-            Some("text/plain")
-        );
+        assert!(!message.headers().contains_key("content-type"));
+        assert_eq!(message.content_type_value(), Some("text/plain"));
     }
 
     #[test]
@@ -2069,6 +2116,7 @@ mod tests {
             delivery_tag: DeliveryTag { epoch: 1 },
             published: 0,
             publish_received: 0,
+            content_type: message.content_type,
             headers: message.headers,
             payload: message.payload,
         };
@@ -2086,6 +2134,7 @@ mod tests {
             delivery_tag: DeliveryTag { epoch: 1 },
             published: 0,
             publish_received: 0,
+            content_type: message.content_type,
             headers: HashMap::new(),
             payload: message.payload,
         };
@@ -2111,6 +2160,7 @@ mod tests {
             delivery_tag: DeliveryTag { epoch: 1 },
             published: 0,
             publish_received: 0,
+            content_type: message.content_type,
             headers: message.headers,
             payload: message.payload,
         };
@@ -2126,6 +2176,7 @@ mod tests {
             delivery_tag: DeliveryTag { epoch: 1 },
             published: 0,
             publish_received: 0,
+            content_type: message.content_type,
             headers: message.headers,
             payload: message.payload,
         };

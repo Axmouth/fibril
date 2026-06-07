@@ -26,6 +26,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                 payload: payload.clone(),
                 partition: 1,
                 require_confirm: true,
+                content_type: None,
                 headers: HashMap::new(),
                 published: unix_millis(),
             };

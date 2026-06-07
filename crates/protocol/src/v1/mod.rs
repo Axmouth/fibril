@@ -74,11 +74,43 @@ pub struct Auth {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum ContentType {
+    MsgPack,
+    Json,
+    Text,
+    Custom(String),
+}
+
+impl ContentType {
+    pub fn from_header(value: impl Into<String>) -> Self {
+        let value = value.into();
+        match value.split(';').next().map(str::trim) {
+            Some("application/msgpack") => ContentType::MsgPack,
+            Some("application/json") => ContentType::Json,
+            Some("text/plain") if value == "text/plain; charset=utf-8" => ContentType::Text,
+            _ => ContentType::Custom(value),
+        }
+    }
+
+    pub fn as_header(&self) -> &str {
+        match self {
+            ContentType::MsgPack => "application/msgpack",
+            ContentType::Json => "application/json",
+            ContentType::Text => "text/plain; charset=utf-8",
+            ContentType::Custom(value) => value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publish {
     pub topic: String,
     pub partition: u32, // keep for later, default 0
     pub group: Option<String>,
     pub require_confirm: bool,
+    #[serde(default)]
+    pub content_type: Option<ContentType>,
     pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
     pub published: u64,
@@ -91,6 +123,8 @@ pub struct PublishDelayed {
     pub group: Option<String>,
     pub require_confirm: bool,
     pub not_before: u64,
+    #[serde(default)]
+    pub content_type: Option<ContentType>,
     pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
     pub published: u64,
@@ -129,6 +163,8 @@ pub struct Deliver {
     pub delivery_tag: DeliveryTag,
     pub published: u64,
     pub publish_received: u64,
+    #[serde(default)]
+    pub content_type: Option<ContentType>,
     pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
 }

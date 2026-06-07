@@ -9,7 +9,8 @@ use fibril_broker::{
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
-    Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, Subscribe,
+    ContentType, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed,
+    Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
@@ -248,6 +249,63 @@ async fn malformed_publish_returns_error_and_keeps_connection_open() {
 }
 
 #[tokio::test]
+async fn publish_content_type_header_is_delivered_as_metadata() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                2,
+                &Subscribe {
+                    topic: "content.type".into(),
+                    group: None,
+                    prefetch: 1,
+                    auto_ack: true,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::SubscribeOk as u16);
+
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                3,
+                &Publish {
+                    topic: "content.type".into(),
+                    partition: 0,
+                    group: None,
+                    require_confirm: true,
+                    content_type: None,
+                    headers: HashMap::from([("Content-Type".into(), "application/json".into())]),
+                    payload: br#"{"ok":true}"#.to_vec(),
+                    published: unix_millis(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::PublishOk as u16);
+    assert_eq!(frame.request_id, 3);
+
+    let delivered = recv_delivery_for_topic(&mut framed, "content.type").await;
+    assert!(matches!(delivered.content_type, Some(ContentType::Json)));
+    assert!(!delivered.headers.contains_key("content-type"));
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn publish_with_reserved_header_returns_error_and_keeps_connection_open() {
     let (mut framed, server_task, _dir) = open_protocol_connection().await;
     handshake(&mut framed).await;
@@ -262,6 +320,7 @@ async fn publish_with_reserved_header_returns_error_and_keeps_connection_open() 
                     partition: 0,
                     group: None,
                     require_confirm: true,
+                    content_type: None,
                     headers: HashMap::from([("fibril.retries".into(), "1".into())]),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
@@ -294,6 +353,7 @@ async fn delayed_publish_with_reserved_header_returns_error_and_keeps_connection
                     partition: 0,
                     group: None,
                     require_confirm: true,
+                    content_type: None,
                     not_before: unix_millis() + 150,
                     headers: HashMap::from([("stroma.source_offset".into(), "1".into())]),
                     payload: b"payload".to_vec(),
@@ -348,6 +408,7 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
                     group: None,
                     require_confirm: true,
                     not_before,
+                    content_type: None,
                     headers: HashMap::new(),
                     payload: b"delayed".to_vec(),
                     published: unix_millis(),
@@ -451,6 +512,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     partition: 0,
                     group: None,
                     require_confirm: true,
+                    content_type: None,
                     headers: HashMap::from([("x-trace-id".into(), "dlq-flow".into())]),
                     payload: b"poison".to_vec(),
                     published: unix_millis(),
@@ -513,6 +575,7 @@ async fn publisher_cache_idle_timeout_allows_queue_eviction_while_connection_sta
                     partition: 0,
                     group: None,
                     require_confirm: true,
+                    content_type: None,
                     headers: HashMap::new(),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
@@ -573,6 +636,7 @@ async fn publisher_cache_idle_timeout_updates_existing_connection() {
                     partition: 0,
                     group: None,
                     require_confirm: true,
+                    content_type: None,
                     headers: HashMap::new(),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),

@@ -75,12 +75,20 @@ export interface AuthMsg {
   password: string;
 }
 
+/** Payload content type metadata carried outside the extra header map. */
+export type ContentType =
+  | { kind: "msg_pack" }
+  | { kind: "json" }
+  | { kind: "text" }
+  | { kind: "custom"; value: string };
+
 /** Immediate publish frame body. */
 export interface PublishMsg {
   topic: string;
   partition: number;
   group: string | null;
   require_confirm: boolean;
+  content_type: ContentType | null;
   headers: Record<string, string>;
   payload: Uint8Array;
   published: bigint;
@@ -123,6 +131,7 @@ export interface DeliverMsg {
   delivery_tag: DeliveryTag;
   published: bigint;
   publish_received: bigint;
+  content_type: ContentType | null;
   headers: Record<string, string>;
   payload: Uint8Array;
 }

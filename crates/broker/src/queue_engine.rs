@@ -11,14 +11,15 @@ use stroma_core::{
 };
 pub use stroma_core::{
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
-    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, IoError, KeratinConfig, SnapshotConfig, Stroma,
-    StromaError, StromaKeratinConfig,
+    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, IoError, KeratinConfig, MessageContentType,
+    SnapshotConfig, Stroma, StromaError, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
 pub struct Deliverable {
     pub published: u64,
     pub publish_received: u64,
+    pub content_type: Option<MessageContentType>,
     pub extra_headers: HashMap<String, String>,
     pub retries: u32,
     pub offset: Offset,
@@ -224,6 +225,7 @@ impl QueueEngine for StromaEngine {
                 offset,
                 payload,
                 retries,
+                content_type: headers.content_type,
                 extra_headers: headers.extra,
                 publish_received: headers.publish_received,
                 published: headers.published,

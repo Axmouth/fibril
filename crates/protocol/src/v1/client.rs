@@ -69,6 +69,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             group: None,
             partition: 0,
             require_confirm: true,
+            content_type: None,
             headers: HashMap::new(),
             published: unix_millis(),
             payload: b"hello".to_vec(),

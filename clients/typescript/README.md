@@ -81,6 +81,10 @@ since the safe integer range covers millennia.
 Fibril reserves `fibril.*` and `stroma.*` headers for system metadata.
 Application messages should use another prefix for custom headers.
 
+Content type is exposed through `NewMessage.contentType(...)` and
+`message.contentType()`. It is sent as compact message metadata rather than as
+an entry in the custom header map.
+
 ## Limitations
 
 - `reconnect_restore` (resubscribing after reconnect) is not implemented.

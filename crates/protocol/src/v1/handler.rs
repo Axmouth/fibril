@@ -20,7 +20,7 @@ use fibril_broker::{
         Broker, BrokerError, ConsumerConfig, ConsumerHandle, ConsumerLease, PublisherHandle,
         SettleRequest, SettleType,
     },
-    queue_engine::StromaEngine,
+    queue_engine::{MessageContentType, StromaEngine},
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_storage::{Group, Topic};
@@ -47,6 +47,36 @@ fn has_reserved_headers(headers: &HashMap<String, String>) -> bool {
             .iter()
             .any(|prefix| key.starts_with(prefix))
     })
+}
+
+fn to_storage_content_type(content_type: Option<ContentType>) -> Option<MessageContentType> {
+    content_type.map(|content_type| match content_type {
+        ContentType::MsgPack => MessageContentType::MsgPack,
+        ContentType::Json => MessageContentType::Json,
+        ContentType::Text => MessageContentType::Text,
+        ContentType::Custom(value) => MessageContentType::Custom(value.into_boxed_str()),
+    })
+}
+
+fn to_protocol_content_type(content_type: Option<MessageContentType>) -> Option<ContentType> {
+    content_type.map(|content_type| match content_type {
+        MessageContentType::MsgPack => ContentType::MsgPack,
+        MessageContentType::Json => ContentType::Json,
+        MessageContentType::Text => ContentType::Text,
+        MessageContentType::Custom(value) => ContentType::Custom(value.into_string()),
+    })
+}
+
+fn normalize_content_type(
+    explicit: Option<ContentType>,
+    headers: &mut HashMap<String, String>,
+) -> Option<ContentType> {
+    let header_key = headers
+        .keys()
+        .find(|key| key.eq_ignore_ascii_case("content-type"))
+        .cloned();
+    let header = header_key.and_then(|key| headers.remove(&key));
+    explicit.or_else(|| header.map(ContentType::from_header))
 }
 
 async fn send_error_response(
@@ -736,6 +766,7 @@ pub async fn handle_connection(
                             delivery_tag: msg.delivery_tag,
                             published: msg.message.published,
                             publish_received: msg.message.publish_received,
+                            content_type: to_protocol_content_type(msg.message.content_type),
                             headers,
                             payload: msg.message.payload.clone(),
                         };
@@ -865,7 +896,9 @@ pub async fn handle_connection(
             x if x == Op::Publish as u16 => {
                 let publish_received = unix_millis();
                 let pubreq: Publish = decode_or_400!(frame, frame_tx_low_prio, metrics, Publish);
-                if has_reserved_headers(&pubreq.headers) {
+                let mut headers = pubreq.headers;
+                let content_type = normalize_content_type(pubreq.content_type, &mut headers);
+                if has_reserved_headers(&headers) {
                     let _ = send_error_response(
                         &frame_tx_low_prio,
                         frame.request_id,
@@ -931,7 +964,8 @@ pub async fn handle_connection(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
-                            pubreq.headers,
+                            to_storage_content_type(content_type),
+                            headers,
                         )
                         .await
                 } else {
@@ -940,7 +974,8 @@ pub async fn handle_connection(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
-                            pubreq.headers,
+                            to_storage_content_type(content_type),
+                            headers,
                         )
                         .await
                 };
@@ -959,7 +994,9 @@ pub async fn handle_connection(
                 let publish_received = unix_millis();
                 let pubreq: PublishDelayed =
                     decode_or_400!(frame, frame_tx_low_prio, metrics, PublishDelayed);
-                if has_reserved_headers(&pubreq.headers) {
+                let mut headers = pubreq.headers;
+                let content_type = normalize_content_type(pubreq.content_type, &mut headers);
+                if has_reserved_headers(&headers) {
                     let _ = send_error_response(
                         &frame_tx_low_prio,
                         frame.request_id,
@@ -1025,7 +1062,8 @@ pub async fn handle_connection(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
-                            pubreq.headers,
+                            to_storage_content_type(content_type),
+                            headers,
                             pubreq.not_before,
                         )
                         .await
@@ -1035,7 +1073,8 @@ pub async fn handle_connection(
                             pubreq.payload,
                             pubreq.published,
                             publish_received,
-                            pubreq.headers,
+                            to_storage_content_type(content_type),
+                            headers,
                             pubreq.not_before,
                         )
                         .await

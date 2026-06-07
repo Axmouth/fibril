@@ -22,8 +22,6 @@ Wire in more debug stats
 
 Figure keratin head offset discrepancy.
 
-unsub inflight redistribution, ensure works when target unsubs too(drain straight to delivery loop input with extra channel for it? then maybe drop leftovers if out of capacity to send? though it would get in the way of sending fetched.. maybe a grace period before leaving extras to be handled be expiration worker
-
 reconnection grace period + reconciliation frame + document behavior + relevant log
 
 Small grace period and simple reconciliation handshake after restart. "listening for old friends". Broker takes a moment to let clients reclaim inflight state and submit late settle requests, before starting delivery as usual.

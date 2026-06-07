@@ -18,6 +18,7 @@ import {
   Op,
   PROTOCOL_V1,
   type AckMsg,
+  type ContentType,
   type AuthMsg,
   type DeliverMsg,
   type DeliveryTag,
@@ -52,6 +53,7 @@ export interface SubState {
 export interface InternalDelivered {
   delivery_tag: DeliveryTag;
   payload: Uint8Array;
+  content_type: ContentType | null;
   headers: Record<string, string>;
   published: bigint;
   publish_received: bigint;
@@ -73,10 +75,10 @@ type Waiter =
 
 // Commands the public API submits to the engine.
 export type Command =
-  | { type: "publishUnconfirmed"; topic: string; group: string | null; headers: Record<string, string>; payload: Uint8Array; published: bigint }
-  | { type: "publishConfirmed"; topic: string; group: string | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; reply: Deferred<bigint> }
-  | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
-  | { type: "publishDelayedConfirmed"; topic: string; group: string | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
+  | { type: "publishUnconfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint }
+  | { type: "publishConfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; reply: Deferred<bigint> }
+  | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
+  | { type: "publishDelayedConfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
   | { type: "subscribe"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalInflight>> }
   | { type: "subscribeAutoAck"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalDelivered>> }
   | { type: "ack"; sub_id: bigint; tag: DeliveryTag; request_id: bigint; reply: Deferred<void> }
@@ -330,6 +332,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           group: cmd.group,
           partition: 0,
           require_confirm: false,
+          content_type: cmd.content_type,
           headers: cmd.headers,
           payload: cmd.payload,
           published: cmd.published,
@@ -345,6 +348,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           group: cmd.group,
           partition: 0,
           require_confirm: true,
+          content_type: cmd.content_type,
           headers: cmd.headers,
           payload: cmd.payload,
           published: cmd.published,
@@ -362,6 +366,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           partition: 0,
           require_confirm: false,
           not_before: cmd.not_before,
+          content_type: cmd.content_type,
           headers: cmd.headers,
           payload: cmd.payload,
           published: cmd.published,
@@ -378,6 +383,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           partition: 0,
           require_confirm: true,
           not_before: cmd.not_before,
+          content_type: cmd.content_type,
           headers: cmd.headers,
           payload: cmd.payload,
           published: cmd.published,
@@ -496,6 +502,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         const base: InternalDelivered = {
           delivery_tag: d.delivery_tag,
           payload: d.payload,
+          content_type: d.content_type,
           headers: d.headers,
           published: d.published,
           publish_received: d.publish_received,

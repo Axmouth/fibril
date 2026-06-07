@@ -258,6 +258,7 @@ async fn queue_eviction_skips_broker_delivery_tags() {
         b"x".to_vec(),
         Default::default(),
         Default::default(),
+        None,
         Default::default(),
     )
     .await
@@ -309,6 +310,7 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
         b"x".to_vec(),
         Default::default(),
         Default::default(),
+        None,
         Default::default(),
     )
     .await
@@ -336,6 +338,7 @@ async fn queue_eviction_reports_not_materialized_after_previous_unmaterialize() 
         b"x".to_vec(),
         Default::default(),
         Default::default(),
+        None,
         Default::default(),
     )
     .await
@@ -369,6 +372,7 @@ async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
             b"x".to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -420,6 +424,7 @@ async fn queue_eviction_sweep_unmaterializes_idle_materialized_queue() {
         b"x".to_vec(),
         Default::default(),
         Default::default(),
+        None,
         Default::default(),
     )
     .await
@@ -451,6 +456,7 @@ async fn queue_eviction_worker_is_disabled_by_default() {
         b"x".to_vec(),
         Default::default(),
         Default::default(),
+        None,
         Default::default(),
     )
     .await
@@ -479,6 +485,7 @@ async fn queue_eviction_worker_can_be_enabled_after_startup() {
         b"x".to_vec(),
         Default::default(),
         Default::default(),
+        None,
         Default::default(),
     )
     .await
@@ -526,6 +533,7 @@ async fn queue_eviction_worker_leaves_active_publisher_materialized() {
         b"x".to_vec(),
         Default::default(),
         Default::default(),
+        None,
         Default::default(),
     )
     .await
@@ -555,6 +563,7 @@ async fn broker_delivers_messages_in_order() {
             b"x".to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -599,6 +608,7 @@ async fn delayed_publish_waits_until_deadline() {
             b"x".to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
             not_before,
         )
@@ -638,6 +648,7 @@ async fn broker_respects_prefetch() {
             b"x".to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -678,6 +689,7 @@ async fn ack_releases_prefetch_slot() {
             format!("x{i}").as_bytes().to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -755,6 +767,7 @@ async fn ack_releases_prefetch_slot2() {
             format!("x{i}").as_bytes().to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -826,6 +839,7 @@ async fn broker_redelivers_after_expiry() {
         b"x".to_vec(),
         Default::default(),
         Default::default(),
+        None,
         Default::default(),
     )
     .await
@@ -865,6 +879,7 @@ async fn broker_distributes_across_consumers() {
             b"x".to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -897,6 +912,7 @@ async fn slow_consumer_does_not_starve_fast_one() {
             b"x".to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -940,6 +956,7 @@ async fn unsubscribe_requeues_prefetched_unacked_messages() {
             format!("x{i}").as_bytes().to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -995,6 +1012,7 @@ async fn unsubscribe_redistributes_prefetched_messages_to_active_subscriber() {
             format!("x{i}").as_bytes().to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -1061,6 +1079,7 @@ async fn unsubscribe_redelivery_survives_if_active_replacement_has_no_capacity_t
             format!("x{i}").as_bytes().to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -1146,6 +1165,7 @@ async fn unsubscribe_does_not_requeue_acked_messages_after_settles_drain() {
             format!("x{i}").as_bytes().to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await
@@ -1263,6 +1283,7 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
             b"poison".to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await?
@@ -1335,6 +1356,7 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
             b"discard".to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await?
@@ -1814,6 +1836,7 @@ async fn stress_single_consumer(total: usize) {
             to_publish.to_vec(),
             Default::default(),
             Default::default(),
+            None,
             Default::default(),
         )
         .await

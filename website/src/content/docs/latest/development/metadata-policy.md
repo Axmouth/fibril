@@ -21,20 +21,21 @@ Headers are for sparse metadata: values that are useful on some messages, but sh
 Examples that fit:
 
 - user trace ids
-- application content hints
+- application content hints that are not already represented by a protocol field
 - uncommon system annotations that are not part of the hot path
 
 Examples that should stay out of the user header map:
 
 - always-present broker metadata such as published timestamps
 - retry counts when the common case is zero
+- content type, which has a compact protocol/storage representation
 - fields that are better represented positionally in the wire/storage format
 
 ## Content Type
 
-`content-type` is currently a normal user header because it is an application-level decoding hint.
+`content-type` is application-level decoding metadata, but it is not stored in the user header map.
 
-A future wire/storage format may move content type out of the header map into a compact enum for common values, with an escape hatch for custom strings. That would keep the common JSON/msgpack/text cases cheaper without removing user-defined content types.
+The wire/storage representation uses explicit common variants for msgpack, JSON, and UTF-8 text, plus a custom string variant for other content types. Clients may expose a convenience method that accepts `content-type` as a header name, but that should normalize into the explicit content-type field before publish.
 
 ## DLQ Metadata
 

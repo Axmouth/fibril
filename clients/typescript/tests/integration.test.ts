@@ -89,7 +89,8 @@ test("client connects, handshakes, publishes confirmed", async () => {
         );
       } else if (f.opcode === Op.Publish) {
         const p = decodeFrameBody<PublishMsg>(f);
-        assert.equal(p.headers["content-type"], "application/msgpack");
+        assert.deepEqual(p.content_type, { kind: "msg_pack" });
+        assert.equal(p.headers["content-type"], undefined);
         if (p.require_confirm) {
           broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 7n }));
         }
@@ -189,7 +190,8 @@ test("client subscribes and receives a delivery", async () => {
             delivery_tag: { epoch: 42n },
             published: 1000n,
             publish_received: 1001n,
-            headers: { "content-type": "application/msgpack" },
+            content_type: { kind: "msg_pack" },
+            headers: {},
             payload: new Uint8Array([0xa5, 0x68, 0x65, 0x6c, 0x6c, 0x6f]), // msgpack "hello"
           }),
         );
@@ -340,7 +342,8 @@ test("client publishes delayed frame with headers and deadline", async () => {
     assert.ok(delayed);
     assert.equal(delayed.topic, "t-delay");
     assert.equal(delayed.require_confirm, true);
-    assert.equal(delayed.headers["content-type"], "application/json");
+    assert.deepEqual(delayed.content_type, { kind: "json" });
+    assert.equal(delayed.headers["content-type"], undefined);
     assert.equal(delayed.not_before, BigInt(deadline.getTime()));
     await client.shutdown();
   } finally {
@@ -386,7 +389,8 @@ test("delivery deserializes json by content-type", async () => {
             delivery_tag: { epoch: 99n },
             published: 1000n,
             publish_received: 1001n,
-            headers: { "content-type": "application/json" },
+            content_type: { kind: "json" },
+            headers: {},
             payload: new TextEncoder().encode(JSON.stringify({ ok: true })),
           }),
         );

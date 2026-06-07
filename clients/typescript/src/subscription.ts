@@ -3,7 +3,7 @@ import {
   DeserializationError,
   FibrilError,
 } from "./errors.js";
-import { deserializeByContentType } from "./message.js";
+import { contentTypeHeader, deserializeByContentType } from "./message.js";
 import type { DeliveryTag } from "./protocol.js";
 import type {
   Engine,
@@ -17,12 +17,13 @@ import type { Client } from "./client.js";
 /**
  * A delivered message in auto-ack mode (no settle action required).
  *
- * `deserialize()` chooses a decoder from `content-type`; missing content type
- * defaults to msgpack.
+ * `deserialize()` chooses a decoder from content type metadata; missing
+ * content type defaults to msgpack.
  */
 export class Message {
   readonly deliveryTag: DeliveryTag;
   readonly payload: Uint8Array;
+  readonly contentTypeValue: InternalDelivered["content_type"];
   readonly headers: Record<string, string>;
   /** Unix milliseconds when the publisher claimed to have published. */
   readonly published: number;
@@ -34,6 +35,7 @@ export class Message {
   constructor(d: InternalDelivered) {
     this.deliveryTag = d.delivery_tag;
     this.payload = d.payload;
+    this.contentTypeValue = d.content_type;
     this.headers = d.headers;
     this.published = Number(d.published);
     this.publishReceived = Number(d.publish_received);
@@ -41,7 +43,7 @@ export class Message {
   }
 
   /**
-   * Decode by `content-type`. Missing content type defaults to msgpack.
+   * Decode by content type metadata. Missing content type defaults to msgpack.
    *
    * @example
    * ```ts
@@ -60,21 +62,21 @@ export class Message {
   }
 
   /**
-   * Return the message `content-type` header, if present.
+   * Return the message content type, if present.
    */
   contentType(): string | undefined {
-    return this.headers["content-type"];
+    return contentTypeHeader(this.contentTypeValue);
   }
 
   /**
-   * Decode the payload as msgpack, ignoring `content-type`.
+   * Decode the payload as msgpack, ignoring content type metadata.
    */
   msgpack<T>(): T {
     return deserializeByContentType<T>("application/msgpack", this.payload);
   }
 
   /**
-   * Decode the payload as JSON, ignoring `content-type`.
+   * Decode the payload as JSON, ignoring content type metadata.
    */
   json<T>(): T {
     return deserializeByContentType<T>("application/json", this.payload);
@@ -115,6 +117,7 @@ type SettleState =
 export class InflightMessage {
   readonly deliveryTag: DeliveryTag;
   readonly payload: Uint8Array;
+  readonly contentTypeValue: InternalInflight["content_type"];
   readonly headers: Record<string, string>;
   readonly published: number;
   readonly publishReceived: number;
@@ -128,6 +131,7 @@ export class InflightMessage {
   constructor(engine: Engine, d: InternalInflight) {
     this.deliveryTag = d.delivery_tag;
     this.payload = d.payload;
+    this.contentTypeValue = d.content_type;
     this.headers = d.headers;
     this.published = Number(d.published);
     this.publishReceived = Number(d.publish_received);
@@ -138,7 +142,7 @@ export class InflightMessage {
   }
 
   /**
-   * Decode by `content-type`. Missing content type defaults to msgpack.
+   * Decode by content type metadata. Missing content type defaults to msgpack.
    */
   deserialize<T>(): T {
     try {
@@ -152,21 +156,21 @@ export class InflightMessage {
   }
 
   /**
-   * Return the message `content-type` header, if present.
+   * Return the message content type, if present.
    */
   contentType(): string | undefined {
-    return this.headers["content-type"];
+    return contentTypeHeader(this.contentTypeValue);
   }
 
   /**
-   * Decode the payload as msgpack, ignoring `content-type`.
+   * Decode the payload as msgpack, ignoring content type metadata.
    */
   msgpack<T>(): T {
     return deserializeByContentType<T>("application/msgpack", this.payload);
   }
 
   /**
-   * Decode the payload as JSON, ignoring `content-type`.
+   * Decode the payload as JSON, ignoring content type metadata.
    */
   json<T>(): T {
     return deserializeByContentType<T>("application/json", this.payload);
@@ -265,6 +269,7 @@ export class InflightMessage {
     return new Message({
       delivery_tag: this.deliveryTag,
       payload: this.payload,
+      content_type: this.contentTypeValue,
       headers: this.headers,
       published: BigInt(this.published),
       publish_received: BigInt(this.publishReceived),

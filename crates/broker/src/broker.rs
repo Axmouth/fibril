@@ -25,7 +25,8 @@ use crate::queue_engine::{
 };
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
-    MessageHeaders, NackEventMeta, StromaError, StromaMetrics, TaskGroup, UnixMillis,
+    MessageContentType, MessageHeaders, NackEventMeta, StromaError, StromaMetrics, TaskGroup,
+    UnixMillis,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -157,6 +158,7 @@ pub struct PublishRequest {
     pub require_confirm: bool,
     pub published: u64,
     pub publish_received: u64,
+    pub content_type: Option<MessageContentType>,
     pub extra: HashMap<String, String>,
 }
 
@@ -171,6 +173,7 @@ impl PublisherHandle {
         payload: Vec<u8>,
         published: u64,
         publish_received: u64,
+        content_type: Option<MessageContentType>,
         extra: HashMap<String, String>,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();
@@ -183,6 +186,7 @@ impl PublisherHandle {
                 not_before: None,
                 published,
                 publish_received,
+                content_type,
                 extra,
             })
             .await
@@ -203,6 +207,7 @@ impl PublisherHandle {
         payload: Vec<u8>,
         published: u64,
         publish_received: u64,
+        content_type: Option<MessageContentType>,
         extra: HashMap<String, String>,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();
@@ -215,6 +220,7 @@ impl PublisherHandle {
                 not_before: None,
                 publish_received,
                 published,
+                content_type,
                 extra,
             })
             .await
@@ -235,6 +241,7 @@ impl PublisherHandle {
         payload: Vec<u8>,
         published: u64,
         publish_received: u64,
+        content_type: Option<MessageContentType>,
         extra: HashMap<String, String>,
         not_before: u64,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
@@ -248,6 +255,7 @@ impl PublisherHandle {
                 not_before: Some(not_before),
                 published,
                 publish_received,
+                content_type,
                 extra,
             })
             .await
@@ -260,6 +268,7 @@ impl PublisherHandle {
         payload: Vec<u8>,
         published: u64,
         publish_received: u64,
+        content_type: Option<MessageContentType>,
         extra: HashMap<String, String>,
         not_before: u64,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
@@ -273,6 +282,7 @@ impl PublisherHandle {
                 not_before: Some(not_before),
                 published,
                 publish_received,
+                content_type,
                 extra,
             })
             .await
@@ -757,12 +767,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     require_confirm: _,
                     published,
                     publish_received,
+                    content_type,
                     extra,
                 } in batch
                 {
                     let headers = MessageHeaders {
                         published,
                         publish_received,
+                        content_type,
                         extra,
                     };
                     let (completion, rx_completion) = KeratinAppendCompletion::pair();
@@ -1509,6 +1521,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                                 published: d.published,
                                 publish_received: d.publish_received,
                                 retried: d.retries,
+                                content_type: d.content_type,
                                 headers: d.extra_headers,
                                 payload: d.payload,
                             },

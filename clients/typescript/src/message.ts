@@ -3,9 +3,10 @@ import {
   DeserializationError,
   SerializationError,
 } from "./errors.js";
+import type { ContentType } from "./protocol.js";
 
 /**
- * Message headers sent to the broker.
+ * Extra message headers sent to the broker.
  *
  * Fibril reserves `fibril.*` and `stroma.*` headers for system metadata. User
  * code should avoid those prefixes.
@@ -15,6 +16,32 @@ export type HeadersInit = Record<string, string>;
 const MSGPACK_CONTENT_TYPE = "application/msgpack";
 const JSON_CONTENT_TYPE = "application/json";
 const TEXT_CONTENT_TYPE = "text/plain; charset=utf-8";
+
+export function contentTypeFromHeader(value: string): ContentType {
+  const normalized = value.split(";")[0]?.trim();
+  if (normalized === MSGPACK_CONTENT_TYPE) return { kind: "msg_pack" };
+  if (normalized === JSON_CONTENT_TYPE) return { kind: "json" };
+  if (normalized === "text/plain" && value === TEXT_CONTENT_TYPE) {
+    return { kind: "text" };
+  }
+  return { kind: "custom", value };
+}
+
+export function contentTypeHeader(
+  contentType: ContentType | null | undefined,
+): string | undefined {
+  if (!contentType) return undefined;
+  switch (contentType.kind) {
+    case "msg_pack":
+      return MSGPACK_CONTENT_TYPE;
+    case "json":
+      return JSON_CONTENT_TYPE;
+    case "text":
+      return TEXT_CONTENT_TYPE;
+    case "custom":
+      return contentType.value;
+  }
+}
 
 /**
  * Explicit publish message.
@@ -36,11 +63,18 @@ const TEXT_CONTENT_TYPE = "text/plain; charset=utf-8";
 export class NewMessage {
   /** Encoded payload bytes sent to the broker. */
   readonly payload: Uint8Array;
-  /** Headers sent with the payload. */
+  /** Payload content type metadata sent outside the extra header map. */
+  readonly contentTypeValue: ContentType | null;
+  /** Extra headers sent with the payload. */
   readonly headers: Record<string, string>;
 
-  private constructor(payload: Uint8Array, headers: Record<string, string>) {
+  private constructor(
+    payload: Uint8Array,
+    contentTypeValue: ContentType | null,
+    headers: Record<string, string>,
+  ) {
     this.payload = payload;
+    this.contentTypeValue = contentTypeValue;
     this.headers = { ...headers };
   }
 
@@ -80,7 +114,7 @@ export class NewMessage {
    * Publish raw bytes without setting a content type.
    */
   static raw(payload: Uint8Array): NewMessage {
-    return new NewMessage(payload, {});
+    return new NewMessage(payload, null, {});
   }
 
   /**
@@ -97,21 +131,38 @@ export class NewMessage {
    * Return a copy with an added or replaced header.
    */
   header(key: string, value: string): NewMessage {
-    return new NewMessage(this.payload, { ...this.headers, [key]: value });
+    if (key.toLowerCase() === "content-type") {
+      return new NewMessage(
+        this.payload,
+        contentTypeFromHeader(value),
+        this.headers,
+      );
+    }
+    return new NewMessage(this.payload, this.contentTypeValue, {
+      ...this.headers,
+      [key]: value,
+    });
   }
 
   /**
-   * Return a copy with the `content-type` header set.
+   * Return a copy with content type metadata set.
    */
   contentType(contentType: string): NewMessage {
     return this.header("content-type", contentType);
+  }
+
+  /**
+   * Return the content type header value that will be sent as metadata.
+   */
+  contentTypeHeader(): string | undefined {
+    return contentTypeHeader(this.contentTypeValue);
   }
 
   private static withContentType(
     payload: Uint8Array,
     contentType: string,
   ): NewMessage {
-    return new NewMessage(payload, { "content-type": contentType });
+    return new NewMessage(payload, contentTypeFromHeader(contentType), {});
   }
 }
 
