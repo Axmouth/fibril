@@ -96,7 +96,7 @@ Current outcomes:
 - `resume_not_found`
 - `resume_rejected`
 
-This slice does not move deliveries yet. It establishes the wire shape, server
+This work item does not move deliveries yet. It establishes the wire shape, server
 identity registry, client API storage of the resume identity, and logs.
 
 ## Preferred Grace Model
@@ -265,7 +265,7 @@ one per owner. A resume identity should therefore be either:
 - scoped to one broker or partition owner, or
 - globally unique plus paired with the expected owner or partition set
 
-For the network-blip slice, server-issued `client_id` plus resume token is
+For the network-blip implementation, server-issued `client_id` plus resume token is
 enough. Later partition-aware clients can keep one resume identity per
 connection or owner.
 
