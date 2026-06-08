@@ -163,6 +163,10 @@ Current limits:
 - Rust and TypeScript clients make one automatic reconnect attempt before a new
   operation when the old engine is already known closed.
 - In-flight protocol requests from the old socket are not replayed.
+- Admin overview counters and TCP metrics logs expose resume, grace, and
+  reconciliation outcomes since broker start.
+- Reconciliation completion logs include client id, connection id, policy, and
+  action counts.
 
 Durable restart recovery and in-flight delivery reconstruction can come later.
 
@@ -208,6 +212,11 @@ The current policy is conservative:
   the result says to close it client-side.
 - If the server has a subscription that the client did not report, the broker
   drops it and reports `close_server_side`.
+
+Current Rust and TypeScript receive APIs do not carry a typed reconciliation
+close reason. A closed subscription stream ends normally from the application
+view, so a future client-surface pass should decide whether to change the
+pre-0.1 receive API or add an explicit subscription status channel.
 
 The opt-in restore-client-subscriptions policy differs only for client-only
 subscriptions. The broker recreates the missing subscription, returns `keep`,

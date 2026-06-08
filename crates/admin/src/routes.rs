@@ -14,7 +14,7 @@ use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLoadIssue, RuntimeSettingsLocks,
     RuntimeSettingsSnapshot, RuntimeSettingsUpdateOutcome,
 };
-use fibril_metrics::{BrokerStatsSnapshot, StorageStatsSnapshot, SystemSnapshot};
+use fibril_metrics::{BrokerStatsSnapshot, StorageStatsSnapshot, SystemSnapshot, TcpStatsSnapshot};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -25,6 +25,7 @@ use crate::server::AdminServer;
 pub struct OverviewResponse {
     pub broker: BrokerStatsSnapshot,
     pub storage: StorageStatsSnapshot,
+    pub tcp: TcpStatsSnapshot,
     pub sys: SystemSnapshot,
     pub storage_used: u64,
 }
@@ -211,6 +212,7 @@ pub async fn overview(
     Ok(Json(OverviewResponse {
         broker: server.metrics.broker().snapshot(),
         storage: server.metrics.storage().snapshot(),
+        tcp: server.metrics.tcp().snapshot(),
         sys: server.metrics.system().snapshot(),
         storage_used: server
             .storage

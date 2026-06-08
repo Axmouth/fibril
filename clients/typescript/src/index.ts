@@ -29,5 +29,6 @@ export {
   PROTOCOL_V1,
   COMPLIANCE_STRING,
   type DeliveryTag,
+  type ReconcilePolicy,
   type ResumeOutcome,
 } from "./protocol.js";

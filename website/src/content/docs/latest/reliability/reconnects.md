@@ -68,6 +68,11 @@ If resume is not accepted, or the broker reports that the client and server
 disagree about a subscription, treat that stream as unsafe and recreate the
 subscription at the application level.
 
+Today, Rust and TypeScript subscription receive APIs report a closed
+subscription as end-of-stream: Rust returns `None`, and TypeScript returns
+`null` or ends async iteration. They do not yet attach a specific
+reconciliation-close reason to that stream.
+
 Reconnect grace is also not durable restart recovery. If the broker process
 restarts, the in-memory dormant connection state is gone.
 
@@ -102,3 +107,13 @@ work as unsafe to continue without a fresh application-level decision.
 
 Automatic reconnect can be disabled in both clients. The default is intentionally
 small: one attempt before a new operation, not an unbounded background loop.
+
+## Operator Visibility
+
+The admin overview page exposes reconnect and subscription reconciliation
+counters since broker start. Use them to tell whether clients are resuming,
+being rejected, entering grace, expiring grace, keeping subscriptions, restoring
+subscriptions, or having subscriptions closed during reconciliation.
+
+The TCP metrics log also includes the same totals. Reconciliation completion is
+logged with the client id, connection id, policy, and per-action counts.

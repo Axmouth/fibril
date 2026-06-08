@@ -59,6 +59,8 @@ use fibril_protocol::v1::{
 
 // ===== Public API ============================================================
 
+pub use fibril_protocol::v1::ReconcilePolicy;
+
 /// Error type returned by the Fibril Rust client.
 ///
 /// Most operations return [`FibrilResult`]. Connection and shutdown related

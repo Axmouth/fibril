@@ -35,6 +35,49 @@
   </article>
 </section>
 
+<section class="overview-panel" aria-label="Reconnect reconciliation">
+  <div class="overview-panel-heading">
+    <h5>Reconnects</h5>
+    <p>Resume and subscription reconciliation outcomes since broker start.</p>
+  </div>
+  <table class="table table-compact narrow metric-table">
+    <tbody>
+      <tr>
+        <td>Resume accepted</td>
+        <td id="resume_accepted">--</td>
+      </tr>
+      <tr>
+        <td>Resume rejected</td>
+        <td id="resume_rejected">--</td>
+      </tr>
+      <tr>
+        <td>Grace entered</td>
+        <td id="grace_entered">--</td>
+      </tr>
+      <tr>
+        <td>Grace expired</td>
+        <td id="grace_expired">--</td>
+      </tr>
+      <tr>
+        <td>Subscriptions kept</td>
+        <td id="reconcile_kept">--</td>
+      </tr>
+      <tr>
+        <td>Subscriptions restored</td>
+        <td id="reconcile_restored">--</td>
+      </tr>
+      <tr>
+        <td>Client streams closed</td>
+        <td id="reconcile_client_closed">--</td>
+      </tr>
+      <tr>
+        <td>Server subscriptions dropped</td>
+        <td id="reconcile_server_dropped">--</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
 <section class="overview-panel" aria-label="Storage latency">
   <div class="overview-panel-heading">
     <h5>Storage Latency</h5>
@@ -79,6 +122,15 @@ async function refresh() {
   document.getElementById("write_ms").textContent = metric(d.storage.avg_write_latency_ms, 2, " ms");
   document.getElementById("append_ms").textContent = metric(d.storage.avg_append_batch_latency_ms, 2, " ms");
   document.getElementById("flush_ms").textContent = metric(d.storage.avg_flush_latency_ms, 2, " ms");
+  const tcp = d.tcp ?? {};
+  document.getElementById("resume_accepted").textContent = tcp.resume_accepted_total ?? "--";
+  document.getElementById("resume_rejected").textContent = tcp.resume_rejected_total ?? "--";
+  document.getElementById("grace_entered").textContent = tcp.reconnect_grace_entered_total ?? "--";
+  document.getElementById("grace_expired").textContent = tcp.reconnect_grace_expired_total ?? "--";
+  document.getElementById("reconcile_kept").textContent = tcp.reconcile_kept_total ?? "--";
+  document.getElementById("reconcile_restored").textContent = tcp.reconcile_restored_total ?? "--";
+  document.getElementById("reconcile_client_closed").textContent = tcp.reconcile_client_closed_total ?? "--";
+  document.getElementById("reconcile_server_dropped").textContent = tcp.reconcile_server_dropped_total ?? "--";
 }
 setInterval(refresh, 2000);
 refresh();

@@ -33,10 +33,13 @@ check what is already wired and under what conditions.
   restore-client-subscriptions policy. Server-only subscriptions are dropped,
   metadata mismatches close client streams, and restored subscriptions can remap
   to a fresh server subscription id.
+- Reconnect and subscription reconciliation outcomes are now visible through
+  admin overview counters, TCP metrics logs, and structured reconciliation logs.
 
 ## Near term
 
-- Improve operator and client feedback for reconnect cases where resume is rejected or reconciliation reports a mismatch.
+- Improve client feedback for reconnect cases where reconciliation closes a
+  subscription stream.
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
 - Add the next storage-level startup/runtime settings where they have clear operational value.
 - Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.

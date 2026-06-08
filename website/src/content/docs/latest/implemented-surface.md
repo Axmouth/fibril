@@ -104,6 +104,34 @@ Conditions and limits:
 - If a subscription ends with prefetched but unsettled messages, those messages are returned for redelivery.
 - A message can be delivered more than once under failure, retry, or lease expiry conditions.
 
+## Reconnects
+
+See also: [reconnects](/latest/reliability/reconnects/) and
+[reconnection grace internals](/latest/development/reconnection-grace/).
+
+| Item | Status | Implemented surface |
+| --- | --- | --- |
+| Resume identity handshake | Implemented | TCP protocol, Rust client, TypeScript client |
+| Reconnect grace window | Implemented | Runtime settings and TCP handler |
+| Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client |
+| Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client |
+| Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
+| Durable broker restart reconciliation | Planned | Design notes only |
+| In-flight publish replay | Out of scope | Clients do not replay old in-flight protocol requests |
+
+Conditions and limits:
+
+- Reconnect grace only applies while the broker process stays alive.
+- Resume requires the same client resume identity before grace expires.
+- The conservative policy keeps matching subscriptions, drops server-only
+  subscriptions, and closes client-side streams that the broker cannot prove are
+  still valid.
+- Restore mode can recreate missing server-side subscriptions reported by the
+  client after a successful resume.
+- Current Rust and TypeScript subscription receive APIs surface
+  reconciliation-closed streams as end-of-stream rather than a typed close
+  reason.
+
 ## Settlement, Retry, and Leasing
 
 See also: [core model](/latest/concepts/core-model/),

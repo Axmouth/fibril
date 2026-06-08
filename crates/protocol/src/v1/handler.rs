@@ -446,8 +446,10 @@ async fn reconcile_subscriptions(
     client_id: Uuid,
     reconcile: ReconcileClient,
 ) -> ReconcileResult {
+    let policy = reconcile.policy;
     let mut results = Vec::new();
     let mut seen = HashMap::<SubKey, ()>::new();
+    metrics.reconcile_request();
 
     for client in reconcile.subscriptions {
         let key: SubKey = (client.topic.clone(), client.group.clone());
@@ -572,6 +574,56 @@ async fn reconcile_subscriptions(
     }
 
     sort_reconcile_results(&mut results);
+    let mut kept = 0_u64;
+    let mut restored = 0_u64;
+    let mut client_closed = 0_u64;
+    let mut server_dropped = 0_u64;
+    let mut mismatched = 0_u64;
+    let mut restore_failed = 0_u64;
+
+    for result in &results {
+        match result.action {
+            ReconcileAction::Keep => {
+                kept += 1;
+                metrics.reconcile_kept();
+                if result.reason == "server_restored" {
+                    restored += 1;
+                    metrics.reconcile_restored();
+                }
+            }
+            ReconcileAction::CloseClientSide => {
+                client_closed += 1;
+                metrics.reconcile_client_closed();
+                if result.reason == "server_mismatch" {
+                    mismatched += 1;
+                    metrics.reconcile_mismatched();
+                }
+                if result.reason == "server_restore_failed" {
+                    restore_failed += 1;
+                    metrics.reconcile_restore_failed();
+                }
+            }
+            ReconcileAction::CloseServerSide => {
+                server_dropped += 1;
+                metrics.reconcile_server_dropped();
+            }
+            ReconcileAction::RecreateClientSide => {}
+        }
+    }
+
+    tracing::info!(
+        client_id = %client_id,
+        conn_id = %conn_id,
+        policy = ?policy,
+        kept,
+        restored,
+        client_closed,
+        server_dropped,
+        mismatched,
+        restore_failed,
+        "subscription reconciliation completed"
+    );
+
     ReconcileResult {
         subscriptions: results,
     }
@@ -931,6 +983,13 @@ pub async fn handle_connection(
     let resume = connection_settings
         .resume_sessions
         .resolve(hello.resume.clone());
+    match resume.outcome {
+        ResumeOutcome::New => tcp_stats.resume_new(),
+        ResumeOutcome::Resumed => tcp_stats.resume_accepted(),
+        ResumeOutcome::ResumeNotFound | ResumeOutcome::ResumeRejected => {
+            tcp_stats.resume_rejected()
+        }
+    }
     let logical = resume.logical.clone();
     let transport_generation = logical.attach_transport(frame_tx_high_prio.clone());
     client_id = resume.client_id;
@@ -1718,13 +1777,21 @@ pub async fn handle_connection(
     let entered_grace = reconnect_grace_ms > 0 && logical.mark_dormant(transport_generation);
 
     if entered_grace {
+        tcp_stats.reconnect_grace_entered();
         let grace_ms = reconnect_grace_ms;
         let broker_for_cleanup = broker.clone();
         let logical_for_cleanup = logical.clone();
         let resume_sessions = connection_settings.resume_sessions.clone();
+        let metrics_for_cleanup = tcp_stats.clone();
+        tracing::info!(
+            client_id = %logical.client_id,
+            grace_ms,
+            "client entered reconnect grace"
+        );
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(grace_ms)).await;
             if logical_for_cleanup.is_dormant_generation(transport_generation) {
+                metrics_for_cleanup.reconnect_grace_expired();
                 tracing::info!(
                     client_id = %logical_for_cleanup.client_id,
                     grace_ms,

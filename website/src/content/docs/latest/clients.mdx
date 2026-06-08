@@ -61,6 +61,44 @@ missing server-side subscriptions with
 TypeScript can do the same with
 `withReconnectReconcilePolicy("restore_client_subscriptions")`.
 
+## Reconnect Policy
+
+The conservative default is the safest operational behavior. It keeps matching
+subscriptions, closes client streams the broker cannot prove are still valid,
+and drops server-side subscriptions the client no longer reports.
+
+Use restore mode only when you want the client to ask the broker to recreate
+client-owned subscriptions that are missing after a successful resume.
+Restored subscriptions may receive a new server subscription id, which both
+clients remap internally.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+use fibril_client::{ClientOptions, ReconcilePolicy};
+
+let client = ClientOptions::new()
+    .reconnect_reconcile_policy(ReconcilePolicy::RestoreClientSubscriptions)
+    .connect("127.0.0.1:9876")
+    .await?;
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+import { ClientOptions, type ReconcilePolicy } from "@fibril/client"
+
+const policy: ReconcilePolicy = "restore_client_subscriptions"
+const client = await new ClientOptions()
+  .withReconnectReconcilePolicy(policy)
+  .connect("127.0.0.1:9876")
+```
+
+  </TabItem>
+</Tabs>
+
 ## Publish
 
 Plain publish uses the common unconfirmed path. Confirmed publish waits for the broker to acknowledge the stored message and returns the topic offset. For pipelined confirmed publishing, send with a confirmation handle and await those handles later.

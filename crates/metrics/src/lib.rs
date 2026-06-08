@@ -692,6 +692,18 @@ pub struct TcpStats {
     pub bytes_in: AtomicU64,
     pub bytes_out: AtomicU64,
     pub errors: AtomicU64,
+    pub resume_new: AtomicU64,
+    pub resume_accepted: AtomicU64,
+    pub resume_rejected: AtomicU64,
+    pub reconnect_grace_entered: AtomicU64,
+    pub reconnect_grace_expired: AtomicU64,
+    pub reconcile_requests: AtomicU64,
+    pub reconcile_kept: AtomicU64,
+    pub reconcile_restored: AtomicU64,
+    pub reconcile_client_closed: AtomicU64,
+    pub reconcile_server_dropped: AtomicU64,
+    pub reconcile_mismatched: AtomicU64,
+    pub reconcile_restore_failed: AtomicU64,
 }
 
 impl TcpStats {
@@ -702,6 +714,18 @@ impl TcpStats {
             bytes_in: AtomicU64::new(0),
             bytes_out: AtomicU64::new(0),
             errors: AtomicU64::new(0),
+            resume_new: AtomicU64::new(0),
+            resume_accepted: AtomicU64::new(0),
+            resume_rejected: AtomicU64::new(0),
+            reconnect_grace_entered: AtomicU64::new(0),
+            reconnect_grace_expired: AtomicU64::new(0),
+            reconcile_requests: AtomicU64::new(0),
+            reconcile_kept: AtomicU64::new(0),
+            reconcile_restored: AtomicU64::new(0),
+            reconcile_client_closed: AtomicU64::new(0),
+            reconcile_server_dropped: AtomicU64::new(0),
+            reconcile_mismatched: AtomicU64::new(0),
+            reconcile_restore_failed: AtomicU64::new(0),
         })
     }
 
@@ -730,6 +754,68 @@ impl TcpStats {
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
+    pub fn resume_new(&self) {
+        self.resume_new.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn resume_accepted(&self) {
+        self.resume_accepted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn resume_rejected(&self) {
+        self.resume_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn reconnect_grace_entered(&self) {
+        self.reconnect_grace_entered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn reconnect_grace_expired(&self) {
+        self.reconnect_grace_expired.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn reconcile_request(&self) {
+        self.reconcile_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn reconcile_kept(&self) {
+        self.reconcile_kept.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn reconcile_restored(&self) {
+        self.reconcile_restored.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn reconcile_client_closed(&self) {
+        self.reconcile_client_closed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn reconcile_server_dropped(&self) {
+        self.reconcile_server_dropped
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn reconcile_mismatched(&self) {
+        self.reconcile_mismatched.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn reconcile_restore_failed(&self) {
+        self.reconcile_restore_failed
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn snapshot(&self) -> TcpStatsSnapshot {
         let window = 60;
 
@@ -753,6 +839,19 @@ impl TcpStats {
             total_bytes_out: bytes_out,
 
             errors_total: self.errors.load(Ordering::Relaxed),
+
+            resume_new_total: self.resume_new.load(Ordering::Relaxed),
+            resume_accepted_total: self.resume_accepted.load(Ordering::Relaxed),
+            resume_rejected_total: self.resume_rejected.load(Ordering::Relaxed),
+            reconnect_grace_entered_total: self.reconnect_grace_entered.load(Ordering::Relaxed),
+            reconnect_grace_expired_total: self.reconnect_grace_expired.load(Ordering::Relaxed),
+            reconcile_requests_total: self.reconcile_requests.load(Ordering::Relaxed),
+            reconcile_kept_total: self.reconcile_kept.load(Ordering::Relaxed),
+            reconcile_restored_total: self.reconcile_restored.load(Ordering::Relaxed),
+            reconcile_client_closed_total: self.reconcile_client_closed.load(Ordering::Relaxed),
+            reconcile_server_dropped_total: self.reconcile_server_dropped.load(Ordering::Relaxed),
+            reconcile_mismatched_total: self.reconcile_mismatched.load(Ordering::Relaxed),
+            reconcile_restore_failed_total: self.reconcile_restore_failed.load(Ordering::Relaxed),
         }
     }
 }
@@ -770,6 +869,20 @@ pub struct TcpStatsSnapshot {
     pub total_bytes_out: u64,
 
     pub errors_total: u64,
+
+    pub resume_new_total: u64,
+    pub resume_accepted_total: u64,
+    pub resume_rejected_total: u64,
+    pub reconnect_grace_entered_total: u64,
+    pub reconnect_grace_expired_total: u64,
+
+    pub reconcile_requests_total: u64,
+    pub reconcile_kept_total: u64,
+    pub reconcile_restored_total: u64,
+    pub reconcile_client_closed_total: u64,
+    pub reconcile_server_dropped_total: u64,
+    pub reconcile_mismatched_total: u64,
+    pub reconcile_restore_failed_total: u64,
 }
 
 pub struct SystemStats {
@@ -1037,6 +1150,18 @@ pub async fn run_tcp_logger(
                     total_bytes_in = snap.total_bytes_in,
                     total_bytes_out = snap.total_bytes_out,
                     errors = snap.errors_total,
+                    resume_new = snap.resume_new_total,
+                    resume_accepted = snap.resume_accepted_total,
+                    resume_rejected = snap.resume_rejected_total,
+                    reconnect_grace_entered = snap.reconnect_grace_entered_total,
+                    reconnect_grace_expired = snap.reconnect_grace_expired_total,
+                    reconcile_requests = snap.reconcile_requests_total,
+                    reconcile_kept = snap.reconcile_kept_total,
+                    reconcile_restored = snap.reconcile_restored_total,
+                    reconcile_client_closed = snap.reconcile_client_closed_total,
+                    reconcile_server_dropped = snap.reconcile_server_dropped_total,
+                    reconcile_mismatched = snap.reconcile_mismatched_total,
+                    reconcile_restore_failed = snap.reconcile_restore_failed_total,
                     "[tcp]"
                 );
             }
