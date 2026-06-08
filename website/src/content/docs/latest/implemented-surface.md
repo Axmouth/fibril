@@ -187,6 +187,7 @@ See also: [many idle queues](/latest/concepts/many-idle-queues/) and
 | Idle queue cleanup | Implemented | Runtime settings, broker worker, Stroma unmaterialization |
 | Publisher idle expiry | Implemented | Runtime settings and broker publisher cache cleanup on incoming connection frames |
 | Cleanup race guard | Implemented | Broker prevents cleanup from racing with newly created publisher/subscriber leases |
+| Active lease materialization | Implemented | Publisher and subscriber creation materialize storage before returning a usable handle |
 | Cleanup observability | Partial | Admin queues page, `/admin/api/queues_debug`, cumulative metrics counters |
 | Exact cleanup timing | Out of scope | Cleanup is approximate and sweep based |
 
@@ -221,8 +222,10 @@ Operator-facing behavior:
 - Unloading is not deletion.
 - Durable messages, events, snapshots, and queue identity stay on disk.
 - A later publish, subscribe, or admin operation can reload the queue.
+- Creating a publisher or subscriber loads the queue before the handle is returned.
 - The first operation on a cold queue can pay reload cost.
 - Long-lived producer connections can keep queues active unless publisher idle expiry is enabled.
+- Automated cleanup does not keep rechecking storage after a queue is already unloaded unless new queue activity happens.
 
 Observability currently includes:
 

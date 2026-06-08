@@ -27,6 +27,8 @@ A queue is loaded into memory when the broker needs to operate on it. Common exa
 - an admin or broker operation needs the queue state
 - delayed or delivery work touches the queue
 
+Publisher and subscriber creation load the queue before returning a usable handle. This means the admin queues page should not normally show active publishers or subscribers for a queue that is still only on disk.
+
 A queue may not be in memory when:
 
 - the broker has just started and the queue only exists on disk
@@ -49,6 +51,8 @@ Subscribers stop keeping a queue active when they unsubscribe or their connectio
 Publishers normally keep a queue active while the connection that used them is still open. If publisher idle expiry is enabled, an unused publisher can stop keeping the queue active before the connection closes.
 
 The cleanup worker checks periodically. This means cleanup is intentionally approximate: a queue may unload on the first sweep after it qualifies, or on a later sweep.
+
+After cleanup has already unloaded an idle queue, the worker does not repeatedly ask storage to unload the same queue again. It will consider that queue again after new activity makes it active and idle in a later cycle.
 
 ## What Happens to Messages
 

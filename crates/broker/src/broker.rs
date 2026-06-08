@@ -602,20 +602,6 @@ impl QueueLoopState {
         self.epoch.load(Ordering::Acquire)
     }
 
-    async fn add_publisher_lease(&self) -> PublisherLease {
-        let guard = self.eviction_lock.lock().await;
-        let lease = self.activity.add_publisher();
-        drop(guard);
-        lease
-    }
-
-    async fn add_subscriber_lease(&self) -> ConsumerLease {
-        let guard = self.eviction_lock.lock().await;
-        let lease = self.activity.add_subscriber();
-        drop(guard);
-        lease
-    }
-
     async fn lock_for_eviction(&self) -> AsyncMutexGuard<'_, ()> {
         self.eviction_lock.lock().await
     }
@@ -838,7 +824,17 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             oneshot::Sender<Result<u64, BrokerError>>,
         )>(16384);
         let metrics = self.metrics.clone();
-        let activity_lease = qs.add_publisher_lease().await;
+        let activity_lease = {
+            let eviction_guard = qs.lock_for_eviction().await;
+            let lease = qs.activity.add_publisher();
+            if let Err(err) = engine.materialize(&tp, part, group.as_deref()).await {
+                drop(lease);
+                drop(eviction_guard);
+                return Err(BrokerError::Engine(err));
+            }
+            drop(eviction_guard);
+            lease
+        };
         let qs_publish = qs.clone();
         let qs_clone = qs.clone();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
@@ -1045,6 +1041,24 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         outcome
     }
 
+    fn queue_already_unloaded_since_last_activity(&self, key: &QueueKey) -> bool {
+        let Some(observation) = self.queue_eviction_observations.get(key) else {
+            return false;
+        };
+        let QueueEvictionAttempt::Storage(EvictOutcome::Evicted | EvictOutcome::NotMaterialized) =
+            observation.outcome
+        else {
+            return false;
+        };
+        let Some(qs) = self.queues.get(key) else {
+            return false;
+        };
+        let activity = qs.activity.snapshot();
+        activity
+            .idle_since_ms
+            .is_some_and(|idle_since| idle_since <= observation.attempted_at_ms)
+    }
+
     pub fn sparse_queue_observability_report(&self) -> SparseQueueObservabilitySnapshot {
         let now = unix_millis();
         let mut active_queue_count = 0;
@@ -1207,6 +1221,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         let mut attempts = Vec::with_capacity(keys.len());
         for key in keys {
+            if self.queue_already_unloaded_since_last_activity(&key) {
+                continue;
+            }
             let attempt = self
                 .try_evict_inactive_queue(&key.tp, key.group.as_deref(), idle_for_ms)
                 .await?;
@@ -1248,7 +1265,17 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         };
 
         let qs = self.queue(&key).await;
-        let activity_lease = qs.add_subscriber_lease().await;
+        let activity_lease = {
+            let eviction_guard = qs.lock_for_eviction().await;
+            let lease = qs.activity.add_subscriber();
+            if let Err(err) = self.engine.materialize(&tp, part, group.as_deref()).await {
+                drop(lease);
+                drop(eviction_guard);
+                return Err(BrokerError::Engine(err));
+            }
+            drop(eviction_guard);
+            lease
+        };
 
         qs.consumers.insert(sub_id, consumer.clone());
 

@@ -332,6 +332,65 @@ test("client subscribes and receives a delivery", async () => {
   }
 });
 
+test("delivery accepts array-encoded byte payloads from Rust", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(
+          s,
+          buildFrame(Op.HelloOk, f.requestId, {
+            protocol_version: PROTOCOL_V1,
+            client_id: "00000000-0000-0000-0000-000000000000",
+            server_name: "fake",
+            compliance: COMPLIANCE_STRING,
+          }),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 201n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: 201n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            offset: 3n,
+            delivery_tag: { epoch: 100n },
+            published: 1000n,
+            publish_received: 1001n,
+            content_type: { kind: "msg_pack" },
+            headers: {},
+            payload: [0x81, 0xa2, 0x6f, 0x6b, 0xc3],
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const sub = await client.subscribe("array-payload").subAutoAck();
+    const msg = await sub.recv();
+    assert.ok(msg);
+    assert.deepEqual([...msg.raw()], [0x81, 0xa2, 0x6f, 0x6b, 0xc3]);
+    assert.deepEqual(msg.deserialize<{ ok: boolean }>(), { ok: true });
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("subscription throws on engine disconnection", async () => {
   const broker = new FakeBroker();
   await broker.start();

@@ -393,6 +393,7 @@ async fn queue_activity_tracks_independent_publisher_sinks() {
     assert_eq!(snapshot.active_publishers, 1);
     assert_eq!(snapshot.active_subscribers, 0);
     assert_eq!(snapshot.idle_since_ms, None);
+    assert!(broker.is_queue_materialized("t", None));
 
     let (pubh2, _confirms2) = broker.get_publisher("t", &None).await.unwrap();
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
@@ -429,6 +430,7 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
     assert_eq!(snapshot.active_publishers, 1);
     assert_eq!(snapshot.active_subscribers, 1);
     assert_eq!(snapshot.idle_since_ms, None);
+    assert!(broker.is_queue_materialized("t", None));
 
     drop(pubh);
     wait_for_queue_activity(&broker, "t", None, 0, 1, false).await;
@@ -455,25 +457,30 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
 }
 
 #[tokio::test]
+async fn subscriber_lease_materializes_queue_before_returning() {
+    let (broker, _dir) = open_test_broker().await;
+    let client_id = Uuid::now_v7();
+
+    let sub = broker
+        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .await
+        .unwrap();
+
+    let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
+    assert_eq!(snapshot.active_publishers, 0);
+    assert_eq!(snapshot.active_subscribers, 1);
+    assert!(broker.is_queue_materialized("t", None));
+
+    drop(sub);
+}
+
+#[tokio::test]
 async fn queue_eviction_skips_active_publishers() {
     let (broker, _dir) = open_test_broker().await;
 
     let (_pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let attempt = loop {
-        let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
-        // Creating the first publisher can still be materializing/recovering the
-        // queue, which makes the storage-side inflight guard briefly win the
-        // race. The behavior this test cares about is that an established
-        // publisher lease prevents inactivity eviction.
-        if attempt != QueueEvictionAttempt::Skipped(QueueEvictionSkip::HasInflight)
-            || tokio::time::Instant::now() >= deadline
-        {
-            break attempt;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
+    let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
 
     assert_eq!(
         attempt,
@@ -745,6 +752,46 @@ async fn queue_eviction_sweep_unmaterializes_idle_materialized_queue() {
 }
 
 #[tokio::test]
+async fn queue_eviction_sweep_does_not_repeat_already_unloaded_queue() {
+    let metrics = Metrics::new(60);
+    let (broker, _dir) =
+        open_test_broker_with_metrics(BrokerConfig::default(), metrics.clone()).await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
+
+    let first = broker.evict_inactive_queues(0).await.unwrap();
+    let second = broker.evict_inactive_queues(0).await.unwrap();
+
+    assert_eq!(
+        first,
+        vec![(
+            "t".to_string(),
+            None,
+            QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
+        )]
+    );
+    assert!(second.is_empty());
+    let cleanup_metrics = metrics.broker().snapshot().queue_cleanup;
+    assert_eq!(cleanup_metrics.attempts_total, 1);
+    assert_eq!(cleanup_metrics.storage_evicted_total, 1);
+    assert_eq!(cleanup_metrics.storage_not_materialized_total, 0);
+}
+
+#[tokio::test]
 async fn queue_eviction_sweep_unmaterializes_storage_only_materialized_queue() {
     let (engine, _dir) = open_test_engine().await;
     engine.materialize("inspected", 0, None).await.unwrap();
@@ -863,6 +910,43 @@ async fn queue_eviction_worker_leaves_active_publisher_materialized() {
     tokio::time::advance(Duration::from_millis(11)).await;
     tokio::task::yield_now().await;
     tokio::task::yield_now().await;
+
+    assert!(broker.is_queue_materialized("t", None));
+    drop(pubh);
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn active_publisher_does_not_race_idle_cleanup_into_double_open() {
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        inflight_ttl_ms: 2000,
+        expiry_poll_min_ms: 100,
+        expiry_batch_max: 100,
+        delivery_poll_max_ms: 100000,
+        queue_idle_evict_after_ms: Some(0),
+        queue_idle_sweep_interval_ms: 1,
+    })
+    .await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+
+    for i in 0..50 {
+        let reply = pubh
+            .publish(
+                format!("msg-{i}").into_bytes(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply
+            .await
+            .unwrap()
+            .unwrap_or_else(|err| panic!("publish {i} failed while cleanup was sweeping: {err}"));
+        tokio::task::yield_now().await;
+    }
 
     assert!(broker.is_queue_materialized("t", None));
     drop(pubh);

@@ -95,6 +95,11 @@ const COMMAND_QUEUE_CAPACITY = 8192;
 const HANDSHAKE_REQUEST_ID = 1n;
 const AUTH_REQUEST_ID = 2n;
 
+function normalizePayload(payload: DeliverMsg["payload"] | number[]): Uint8Array {
+  if (payload instanceof Uint8Array) return payload;
+  return Uint8Array.from(payload);
+}
+
 // ===== Public engine handle =====
 
 export class Engine {
@@ -524,7 +529,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
 
         const base: InternalDelivered = {
           delivery_tag: d.delivery_tag,
-          payload: d.payload,
+          payload: normalizePayload(d.payload),
           content_type: d.content_type,
           headers: d.headers,
           published: d.published,
