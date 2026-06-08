@@ -64,6 +64,9 @@ locally, every higher layer would be built on the wrong foundation.
 - Keratin durability should stay local. `AfterReplicated` does not belong in
   `KDurability`; replication quorum semantics belong in Stroma or broker-level
   policy.
+- Checkpoint and snapshot installation semantics belong in Stroma. Keratin can
+  reset a local log continuation point and append caller-assigned records, but it
+  should not know what a Stroma snapshot means or how a queue catches up.
 - Normal replicated append remains contiguous. If a follower is too far behind
   because old log ranges were truncated, it should install a checkpoint or
   snapshot and then continue from the checkpoint offset. It should not fill gaps
@@ -71,16 +74,26 @@ locally, every higher layer would be built on the wrong foundation.
 - Keratin role/mode is runtime API protection, not durable truth. On restart,
   higher layers should decide how to set local log modes after consulting their
   coordination or configuration source.
+- Type-level owner/follower Keratin handles are not automatically safer while
+  handles can circulate. The problem is not only `Arc<Keratin>`; any cloneable or
+  otherwise retained handle can outlive a promotion. A type-only design would
+  need a way to prove all old handles are gone before promotion, or else every
+  handle still needs to observe shared runtime state. Until that lifecycle is
+  solved, runtime role checks are the more honest guardrail.
 
 ## Pending Decisions
 
-- Whether Keratin should expose distinct handle types for owner logs and
-  follower logs, or keep one handle with restricted replicated-append entry
-  points.
+- Whether Keratin should ever expose distinct handle types for owner logs and
+  follower logs. Runtime checks are the current choice because circulating
+  handles make type-only promotion unsafe without a handle-drain protocol.
 - How much snapshot installation belongs in Keratin versus Stroma.
 - Whether `destructive_reset_to_checkpoint` is enough for the first follower
-  snapshot path, or whether it should grow into a richer install operation that
-  takes snapshot bytes/checksums in the same transaction.
+  snapshot path. Richer snapshot bytes/checksums should be designed in Stroma,
+  with Keratin remaining a local log primitive.
+- Whether normal owner append should also carry an epoch, or whether the higher
+  layer should advance/fence the Keratin epoch before entering owner mode. The
+  safer intuition is to always supply epoch, but the current Keratin owner append
+  path intentionally stays minimal until Stroma role wiring clarifies the API.
 - First sharding metadata shape for static config and later etcd.
 - What the migration path is from external coordination to Fibril-owned metadata
   without forcing a data-path rewrite.
