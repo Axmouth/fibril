@@ -369,6 +369,7 @@ Conditions and limits:
 - Operations already in flight when the socket fails are not replayed.
 - Active subscriptions still need application-level handling when resume is rejected or reconciliation reports a mismatch.
 - Late settlements after a short disconnect are accepted only when the client explicitly resumes before grace expires.
+- Broker process restart reconciliation is not implemented. Current reconnect grace depends on the broker process keeping dormant connection state in memory.
 
 ## Benchmarks and Operational Scripts
 

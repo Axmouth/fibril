@@ -55,6 +55,10 @@ check what is already wired and under what conditions.
 
 - Replication design and implementation.
 - Clustering and partition ownership.
+- Durable broker restart reconciliation. This would let clients reclaim
+  persisted session and inflight ownership after a broker process restart,
+  using a startup grace window before normal redelivery resumes. Current
+  reconnect grace is live-process only.
 - More complete client ecosystem. Priority order: Python, including a blocking
   client, then C#, Go, and Java.
 

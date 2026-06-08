@@ -241,22 +241,51 @@ Broker restart reconciliation means restarting a broker process and letting
 clients continue as if the TCP break was the only interruption. That is larger
 than network-blip grace.
 
+Current reconnect grace is intentionally live-process only. A broker restart
+destroys the in-memory dormant connection state, so old resume identities are
+not enough by themselves. A durable restart design needs its own persistence and
+startup behavior.
+
 To support it properly, storage likely needs to persist enough ownership
-metadata to recover client and subscription relationships:
+metadata to recover client, subscription, and inflight relationships:
 
 - client id
+- resume token or another proof that the reconnecting client owns that session
 - subscription id or a stable subscription identity
 - delivery tag or durable delivery sequence
 - queue key and offset
 - lease deadline
+- ack mode and prefetch
+
+There are two viable subscription-id directions:
+
+- Persist subscription ids and initialize `next_sub_id` above the maximum
+  recovered id.
+- Treat subscription ids as process-local and use reconciliation to remap
+  client streams to fresh server ids after recovery.
+
+The second direction is simpler and matches the current remap behavior. It
+still needs a stable way to identify the logical subscription, such as client
+identity plus topic, group, partition, ack mode, and prefetch.
+
+The inflight model is the hard part. State needs to answer which client or
+session leased an offset, which logical subscription received it, which delivery
+tag was issued, and whether a late ack or nack is valid after reconnect or
+restart. Late settles should be idempotent, and stale settles from an old owner
+epoch should be rejected or ignored predictably.
+
+A durable restart implementation likely needs a startup grace mode:
+
+1. Recover queues and persisted runtime state.
+2. Accept reconnects from known clients for a bounded grace window.
+3. Let clients send subscription reconciliation and late settle requests.
+4. Keep reclaimed inflight work leased to the recovered client.
+5. Release unreclaimed inflight work back to normal delivery after grace
+   expires.
 
 That metadata should not be attached blindly to every common message path if it
 can be avoided. It should be sparse, compact, and only paid for by behavior that
 needs restart reconciliation.
-
-If subscription ids are persisted, `next_sub_id` must be initialized above the
-maximum recovered id. If subscription ids remain process-local, reconciliation
-should rely on client id plus queue and offset instead.
 
 For the first implementation, keep durable restart out of scope and document
 that grace only applies while the broker process remains alive.
@@ -293,10 +322,14 @@ Add structured logs for:
 - new client identity issued
 - resume accepted
 - resume rejected with reason
+- reconciliation result counts by action
 - client entered grace window
 - grace expired
 - late settle accepted during grace
+- late settle rejected with reason
 - inflight messages requeued after grace
+- future durable restart grace started and ended
+- future durable restart inflight work reclaimed or released
 
 These logs should include client id, connection id, and counts. Avoid logging
 payloads.
