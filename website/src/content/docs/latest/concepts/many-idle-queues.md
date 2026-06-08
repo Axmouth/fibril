@@ -54,6 +54,10 @@ The cleanup worker checks periodically. This means cleanup is intentionally appr
 
 After cleanup has already unloaded an idle queue, the worker does not repeatedly ask storage to unload the same queue again. It will consider that queue again after new activity makes it active and idle in a later cycle.
 
+Admin message inspection can also load a queue because it reads queue state and
+persisted message data. That does not create a publisher or subscriber lease. If
+idle cleanup is enabled, the queue can be unloaded again after the idle window.
+
 ## What Happens to Messages
 
 Ready messages remain durable while a queue is unloaded. If a subscriber comes back later, the queue is loaded again and those messages can be delivered.
@@ -89,7 +93,9 @@ skip reason.
 
 Enable publisher idle expiry when you have long-lived producer connections that only occasionally write to many different queues. Without it, a connection that has published to a queue can keep that queue active until the connection closes.
 
-Treat idle cleanup as resource management, not as a correctness boundary. It reduces memory use for quiet queues; it does not change retention, acknowledgement semantics, retry policy, or dead-lettering.
+Treat idle cleanup as resource management, not as a correctness boundary. It
+reduces memory use for quiet queues. It does not change retention,
+acknowledgement semantics, retry policy, or dead-lettering.
 
 The tradeoff is that the first operation on a cold queue may pay the cost of loading the queue back into memory.
 

@@ -41,6 +41,10 @@ you do not begin at offset `0` on large queues unless you choose to.
 Message inspection reads queue state and persisted message data on demand. Use
 it for debugging and operations, not as a live polling view.
 
+Inspecting a queue can load it into memory. If idle queue cleanup is enabled and
+no publisher or subscriber keeps that queue active, cleanup can unload it again
+after the idle window.
+
 By default, inspection shows active queue state:
 
 - ready messages

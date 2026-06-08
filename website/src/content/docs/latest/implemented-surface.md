@@ -171,6 +171,8 @@ Conditions and limits:
 - Active states include ready, inflight, delayed, and pending DLQ.
 - Settled records can be included explicitly.
 - Offsets without matching inspectable state or log records are skipped rather than shown as misleading partial rows.
+- Inspecting a queue can load that queue into memory. If idle cleanup is enabled
+  and no active publisher or subscriber exists, cleanup can unload it again.
 - Default page size is `50`.
 - Current API hard cap is `5000` messages per request.
 - Payload previews default to `4096` bytes and cap at `1048576` bytes.
@@ -188,6 +190,7 @@ See also: [many idle queues](/latest/concepts/many-idle-queues/) and
 | Publisher idle expiry | Implemented | Runtime settings and broker publisher cache cleanup on incoming connection frames |
 | Cleanup race guard | Implemented | Broker prevents cleanup from racing with newly created publisher/subscriber leases |
 | Active lease materialization | Implemented | Publisher and subscriber creation materialize storage before returning a usable handle |
+| Inspection reload cleanup | Implemented | Queues loaded by admin inspection can be unloaded again by idle cleanup |
 | Cleanup observability | Partial | Admin queues page, `/admin/api/queues_debug`, cumulative metrics counters |
 | Exact cleanup timing | Out of scope | Cleanup is approximate and sweep based |
 
@@ -223,6 +226,7 @@ Operator-facing behavior:
 - Durable messages, events, snapshots, and queue identity stay on disk.
 - A later publish, subscribe, or admin operation can reload the queue.
 - Creating a publisher or subscriber loads the queue before the handle is returned.
+- Admin message inspection can load a queue without creating a publisher or subscriber lease.
 - The first operation on a cold queue can pay reload cost.
 - Long-lived producer connections can keep queues active unless publisher idle expiry is enabled.
 - Automated cleanup does not keep rechecking storage after a queue is already unloaded unless new queue activity happens.
@@ -311,8 +315,9 @@ Conditions and limits:
 
 ## Client Surface
 
-See also: [client usage](/latest/clients/) and
-[quickstart](/latest/quickstart/).
+See also: [client usage](/latest/clients/),
+[quickstart](/latest/quickstart/), and
+[reconnection grace](/latest/development/reconnection-grace/).
 
 | Item | Rust | TypeScript |
 | --- | --- | --- |
@@ -328,6 +333,7 @@ See also: [client usage](/latest/clients/) and
 | Content type helpers | Implemented | Implemented |
 | Default group normalization | Implemented | Implemented |
 | Automatic reconnect and resubscribe | Planned | Planned |
+| Reconnection grace and reconciliation | Planned | Planned |
 
 Conditions and limits:
 
@@ -336,6 +342,7 @@ Conditions and limits:
 - Both clients expose delayed publish and delayed retry.
 - TypeScript uses `bigint` for protocol `u64` values such as offsets.
 - Existing publishers and subscriptions are not transparently restored after reconnect.
+- Late settlements after disconnect are not reconciled against a previous connection yet.
 
 ## Benchmarks and Operational Scripts
 

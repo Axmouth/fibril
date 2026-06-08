@@ -19,11 +19,14 @@ check what is already wired and under what conditions.
 - Message inspection and DLQ replay are available from the admin API, dashboard, and CLI.
 - Sparse queues use lazy loading plus idle cleanup, with queue-state visibility in the admin dashboard and CLI.
 - Idle cleanup is guarded against racing with newly created publisher and subscriber leases.
+- Message inspection can temporarily load a queue, and idle cleanup can unload that queue again after the idle window.
+- The TypeScript demo now closes subscriptions promptly on Ctrl-C while remaining continuous by default.
 - The admin dashboard has moved to the same visual language as the public site, with Clarity removed from the vendored UI assets.
 - The TypeScript client tracks the Rust client for delayed publish, confirmed publish pipelining, content-type metadata, queue declaration, and group-default behavior.
 
 ## Near term
 
+- Design and implement a reconnection grace period with a reconciliation handshake for recently disconnected clients.
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
 - Add the next storage-level startup/runtime settings where they have clear operational value.
 - Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.
