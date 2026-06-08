@@ -114,6 +114,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                             client_name: "Client1".into(),
                             client_version: "0.1".into(),
                             protocol_version: PROTOCOL_V1,
+                            resume: None,
                         },
                     )
                     .unwrap(),

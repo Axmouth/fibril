@@ -541,6 +541,7 @@ pub async fn visual_client(
             client_name: format!("tui-client-{}", pub_id),
             client_version: "0.1".into(),
             protocol_version: PROTOCOL_V1,
+            resume: None,
         },
     )?)
     .await?;

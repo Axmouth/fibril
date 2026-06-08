@@ -62,15 +62,33 @@ export interface Hello {
   client_name: string;
   client_version: string;
   protocol_version: number;
+  resume: ResumeIdentity | null;
 }
 
 /** Successful server handshake response. */
 export interface HelloOk {
   protocol_version: number;
+  owner_id: unknown;
   client_id: unknown;
+  resume_token: unknown;
+  resume_outcome: ResumeOutcome;
   server_name: string;
   compliance: string;
 }
+
+/** Identity returned by the broker and offered on reconnect. */
+export interface ResumeIdentity {
+  owner_id: unknown;
+  client_id: unknown;
+  resume_token: unknown;
+}
+
+/** Result of a resume attempt during handshake. */
+export type ResumeOutcome =
+  | "new"
+  | "resumed"
+  | "resume_not_found"
+  | "resume_rejected";
 
 /** Username/password authentication frame body. */
 export interface AuthMsg {

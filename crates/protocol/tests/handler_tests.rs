@@ -8,7 +8,7 @@ use fibril_broker::{
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish,
-    PublishDelayed, QueueDlqPolicy, Subscribe,
+    PublishDelayed, QueueDlqPolicy, ResumeIdentity, ResumeOutcome, Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
@@ -128,6 +128,7 @@ async fn handshake(framed: &mut Framed<TcpStream, ProtoCodec>) {
                     client_name: "protocol-test".into(),
                     client_version: "0.1.0".into(),
                     protocol_version: PROTOCOL_V1,
+                    resume: None,
                 },
             )
             .unwrap(),
@@ -139,6 +140,33 @@ async fn handshake(framed: &mut Framed<TcpStream, ProtoCodec>) {
     assert_eq!(frame.opcode, Op::HelloOk as u16);
     let hello_ok: HelloOk = try_decode(&frame).unwrap();
     assert_eq!(hello_ok.protocol_version, PROTOCOL_V1);
+    assert_eq!(hello_ok.resume_outcome, ResumeOutcome::New);
+}
+
+async fn handshake_with_resume(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    resume: Option<ResumeIdentity>,
+) -> HelloOk {
+    framed
+        .send(
+            try_encode(
+                Op::Hello,
+                1,
+                &Hello {
+                    client_name: "protocol-test".into(),
+                    client_version: "0.1.0".into(),
+                    protocol_version: PROTOCOL_V1,
+                    resume,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(framed).await;
+    assert_eq!(frame.opcode, Op::HelloOk as u16);
+    try_decode(&frame).unwrap()
 }
 
 async fn assert_error_frame(
@@ -162,6 +190,35 @@ async fn assert_connection_still_responds(framed: &mut Framed<TcpStream, ProtoCo
     let frame = recv_frame(framed).await;
     assert_eq!(frame.opcode, Op::Pong as u16);
     assert_eq!(frame.request_id, 99);
+}
+
+#[tokio::test]
+async fn hello_can_resume_with_owner_scoped_identity() {
+    let settings = ConnectionSettings::new(Some(60));
+    let (mut first, first_task, dir, broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+
+    let first_ok = handshake_with_resume(&mut first, None).await;
+    assert_eq!(first_ok.resume_outcome, ResumeOutcome::New);
+    let resume = ResumeIdentity {
+        owner_id: first_ok.owner_id,
+        client_id: first_ok.client_id,
+        resume_token: first_ok.resume_token,
+    };
+    drop(first);
+    first_task.await.unwrap().unwrap();
+
+    let (mut second, second_task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings, broker, dir).await;
+
+    let second_ok = handshake_with_resume(&mut second, Some(resume)).await;
+    assert_eq!(second_ok.resume_outcome, ResumeOutcome::Resumed);
+    assert_eq!(second_ok.client_id, first_ok.client_id);
+    assert_eq!(second_ok.owner_id, first_ok.owner_id);
+    assert_eq!(second_ok.resume_token, first_ok.resume_token);
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
 }
 
 async fn recv_delivery_for_topic(

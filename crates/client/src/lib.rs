@@ -963,7 +963,8 @@ impl Client {
     #[tracing::instrument(fields(address = ?self.address, opts = ?self.opts))]
     pub async fn reconnect(&mut self) -> FibrilResult<()> {
         let address = self.address;
-        let opts = self.opts.clone();
+        let mut opts = self.opts.clone();
+        opts.resume_identity = Some(self.engine.resume_identity.clone());
         let stream = TcpStream::connect(address)
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
@@ -1223,6 +1224,7 @@ impl AutoAckedSubscription {
 struct EngineHandle {
     tx: mpsc::Sender<Command>,
     shutdown: Arc<Notify>,
+    resume_identity: ResumeIdentity,
 }
 
 #[derive(Debug)]
@@ -1356,6 +1358,7 @@ where
             client_name: opts.client_name.clone(),
             client_version: opts.client_version.clone(),
             protocol_version: PROTOCOL_V1,
+            resume: opts.resume_identity.clone(),
         },
     )
     .await?;
@@ -1365,7 +1368,7 @@ where
         .await
         .ok_or(FibrilError::Eof)?
         .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
-    match frame.opcode {
+    let resume_identity = match frame.opcode {
         x if x == Op::HelloOk as u16 => {
             let ho: HelloOk = decode_protocol(&frame)?;
             if ho.compliance != COMPLIANCE_STRING {
@@ -1384,6 +1387,11 @@ where
                     msg: "Protocol version mismatch".into(),
                 });
             }
+            ResumeIdentity {
+                owner_id: ho.owner_id,
+                client_id: ho.client_id,
+                resume_token: ho.resume_token,
+            }
         }
         x if x == Op::HelloErr as u16 => {
             let e: ErrorMsg = decode_protocol(&frame)?;
@@ -1397,7 +1405,7 @@ where
                 msg: format!("Unexpected frame: opcode {}", frame.opcode),
             });
         }
-    }
+    };
 
     if let Some(auth) = opts.auth {
         send_protocol_frame(&mut framed, Op::Auth, 2, &auth).await?;
@@ -1428,6 +1436,7 @@ where
     let handle = Arc::new(EngineHandle {
         tx: cmd_tx.clone(),
         shutdown: shutdown.clone(),
+        resume_identity,
     });
 
     let mut subs = HashMap::<u64, SubState>::new();
@@ -2073,6 +2082,8 @@ pub struct ClientOptions {
     pub auth: Option<Auth>,
     /// Optional heartbeat interval in seconds. Server timeout is 3x this value.
     pub heartbeat_interval: Option<u64>,
+    /// Optional resume identity from a previous connection.
+    pub resume_identity: Option<ResumeIdentity>,
 }
 
 impl ClientOptions {
@@ -2085,6 +2096,7 @@ impl ClientOptions {
             client_version: client_version.into(),
             auth: None,
             heartbeat_interval: None,
+            resume_identity: None,
         }
     }
 
@@ -2095,6 +2107,14 @@ impl ClientOptions {
                 username: username.into(),
                 password: password.into(),
             }),
+            ..self
+        }
+    }
+
+    /// Return a copy configured to attempt resuming a previous connection.
+    pub fn resume_identity(self, resume_identity: ResumeIdentity) -> Self {
+        Self {
+            resume_identity: Some(resume_identity),
             ..self
         }
     }
@@ -2178,6 +2198,11 @@ mod tests {
                 engine: Arc::new(EngineHandle {
                     tx,
                     shutdown: Arc::new(Notify::new()),
+                    resume_identity: ResumeIdentity {
+                        owner_id: uuid::Uuid::nil(),
+                        client_id: uuid::Uuid::nil(),
+                        resume_token: uuid::Uuid::nil(),
+                    },
                 }),
             },
             rx,

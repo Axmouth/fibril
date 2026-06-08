@@ -328,6 +328,8 @@ See also: [client usage](/latest/clients/),
 | Delayed publish | Implemented | Implemented |
 | Manual ack subscription | Implemented | Implemented |
 | Auto ack subscription | Implemented | Implemented |
+| Resume identity handshake | Implemented | Implemented |
+| Graceful inflight recovery after reconnect | Planned | Planned |
 | Delayed retry | Implemented | Implemented |
 | Queue declaration | Implemented | Implemented |
 | Content type helpers | Implemented | Implemented |

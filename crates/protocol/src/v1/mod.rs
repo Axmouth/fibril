@@ -60,14 +60,34 @@ pub struct Hello {
     pub client_name: String,
     pub client_version: String,
     pub protocol_version: u16, // client-supported version
+    pub resume: Option<ResumeIdentity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HelloOk {
     pub protocol_version: u16, // negotiated
+    pub owner_id: Uuid,
     pub client_id: Uuid,
+    pub resume_token: Uuid,
+    pub resume_outcome: ResumeOutcome,
     pub server_name: String,
     pub compliance: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResumeIdentity {
+    pub owner_id: Uuid,
+    pub client_id: Uuid,
+    pub resume_token: Uuid,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeOutcome {
+    New,
+    Resumed,
+    ResumeNotFound,
+    ResumeRejected,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -523,6 +523,7 @@ mod tests {
                         client_name: "admin-flow-test".into(),
                         client_version: "0.1.0".into(),
                         protocol_version: PROTOCOL_V1,
+                        resume: None,
                     },
                 )
                 .unwrap(),

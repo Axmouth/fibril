@@ -31,6 +31,7 @@ import {
   type PublishDelayedMsg,
   type PublishMsg,
   type PublishOkMsg,
+  type ResumeIdentity,
   type SubscribeMsg,
   type SubscribeOkMsg,
 } from "./protocol.js";
@@ -105,6 +106,7 @@ function normalizePayload(payload: DeliverMsg["payload"] | number[]): Uint8Array
 export class Engine {
   readonly #commandQueue: BoundedQueue<Command>;
   readonly #socket: Socket;
+  readonly resumeIdentity: ResumeIdentity;
   #shutdownInitiated = false;
   /** Resolved (with the fatal error if any) when the engine task exits. */
   readonly #completed: Promise<void>;
@@ -113,10 +115,12 @@ export class Engine {
     commandQueue: BoundedQueue<Command>,
     socket: Socket,
     completed: Promise<void>,
+    resumeIdentity: ResumeIdentity,
   ) {
     this.#commandQueue = commandQueue;
     this.#socket = socket;
     this.#completed = completed;
+    this.resumeIdentity = resumeIdentity;
   }
 
   /**
@@ -133,6 +137,7 @@ export class Engine {
         client_name: opts.clientName,
         client_version: opts.clientVersion,
         protocol_version: PROTOCOL_V1,
+        resume: opts.resumeIdentity ?? null,
       } satisfies Hello),
     );
 
@@ -153,6 +158,11 @@ export class Engine {
         `Protocol version mismatch: expected ${PROTOCOL_V1}, got ${hello.protocol_version}`,
       );
     }
+    const resumeIdentity: ResumeIdentity = {
+      owner_id: hello.owner_id,
+      client_id: hello.client_id,
+      resume_token: hello.resume_token,
+    };
 
     // ---- AUTH (optional) ----
     if (opts.auth) {
@@ -184,7 +194,7 @@ export class Engine {
       heartbeatIntervalSeconds: heartbeatInterval,
     });
 
-    return new Engine(commandQueue, socket, completed);
+    return new Engine(commandQueue, socket, completed, resumeIdentity);
   }
 
   /**

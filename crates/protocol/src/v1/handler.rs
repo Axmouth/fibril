@@ -143,6 +143,85 @@ struct CachedPublisher {
     last_used_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+struct ResumeSession {
+    resume_token: Uuid,
+}
+
+#[derive(Debug)]
+struct ResumeSessionRegistry {
+    owner_id: Uuid,
+    sessions: dashmap::DashMap<Uuid, ResumeSession>,
+}
+
+impl ResumeSessionRegistry {
+    fn new() -> Self {
+        Self {
+            owner_id: Uuid::new_v4(),
+            sessions: dashmap::DashMap::new(),
+        }
+    }
+
+    fn resolve(&self, resume: Option<ResumeIdentity>) -> (Uuid, Uuid, ResumeOutcome) {
+        if let Some(resume) = resume {
+            if resume.owner_id != self.owner_id {
+                tracing::warn!(
+                    client_id = %resume.client_id,
+                    owner_id = %self.owner_id,
+                    requested_owner_id = %resume.owner_id,
+                    "client resume rejected for another owner"
+                );
+                return self.issue(ResumeOutcome::ResumeRejected);
+            }
+
+            if let Some(session) = self.sessions.get(&resume.client_id) {
+                if session.resume_token == resume.resume_token {
+                    tracing::info!(
+                        client_id = %resume.client_id,
+                        owner_id = %self.owner_id,
+                        "client resume accepted"
+                    );
+                    return (
+                        resume.client_id,
+                        resume.resume_token,
+                        ResumeOutcome::Resumed,
+                    );
+                }
+
+                tracing::warn!(
+                    client_id = %resume.client_id,
+                    owner_id = %self.owner_id,
+                    "client resume rejected"
+                );
+                return self.issue(ResumeOutcome::ResumeRejected);
+            }
+
+            tracing::warn!(
+                client_id = %resume.client_id,
+                owner_id = %self.owner_id,
+                "client resume identity not found"
+            );
+            return self.issue(ResumeOutcome::ResumeNotFound);
+        }
+
+        self.issue(ResumeOutcome::New)
+    }
+
+    fn issue(&self, outcome: ResumeOutcome) -> (Uuid, Uuid, ResumeOutcome) {
+        let client_id = Uuid::now_v7();
+        let resume_token = Uuid::new_v4();
+        self.sessions
+            .insert(client_id, ResumeSession { resume_token });
+        tracing::info!(
+            client_id = %client_id,
+            owner_id = %self.owner_id,
+            resume_outcome = ?outcome,
+            "client identity issued"
+        );
+        (client_id, resume_token, outcome)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConnectionRuntimeSettings {
     pub publisher_cache_idle_timeout_ms: Option<u64>,
@@ -152,6 +231,7 @@ pub struct ConnectionRuntimeSettings {
 pub struct ConnectionSettings {
     pub heartbeat_interval: Option<u64>,
     runtime: Arc<ArcSwap<ConnectionRuntimeSettings>>,
+    resume_sessions: Arc<ResumeSessionRegistry>,
 }
 
 impl ConnectionSettings {
@@ -159,6 +239,7 @@ impl ConnectionSettings {
         Self {
             heartbeat_interval,
             runtime: Arc::new(ArcSwap::from_pointee(ConnectionRuntimeSettings::default())),
+            resume_sessions: Arc::new(ResumeSessionRegistry::new()),
         }
     }
 
@@ -189,6 +270,7 @@ impl std::fmt::Debug for ConnectionSettings {
         f.debug_struct("ConnectionSettings")
             .field("heartbeat_interval", &self.heartbeat_interval)
             .field("runtime", &self.runtime_snapshot())
+            .field("owner_id", &self.resume_sessions.owner_id)
             .finish()
     }
 }
@@ -360,10 +442,16 @@ pub async fn handle_connection(
         return Ok(());
     }
 
-    client_id = Uuid::now_v7();
+    let (resolved_client_id, resume_token, resume_outcome) = connection_settings
+        .resume_sessions
+        .resolve(hello.resume.clone());
+    client_id = resolved_client_id;
     let hello_ok = &HelloOk {
         protocol_version: PROTOCOL_V1,
+        owner_id: connection_settings.resume_sessions.owner_id,
         client_id,
+        resume_token,
+        resume_outcome,
         server_name: "rust-broker".into(),
         compliance: "v=1;license=MIT;ai_train=disallowed;policy=AI_POLICY.md".to_owned(),
     };

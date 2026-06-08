@@ -22,6 +22,19 @@ import {
 import { Client, ClientOptions, QueueConfig } from "../src/client.js";
 import { NewMessage } from "../src/message.js";
 
+function helloOk(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    protocol_version: PROTOCOL_V1,
+    owner_id: "00000000-0000-0000-0000-000000000100",
+    client_id: "00000000-0000-0000-0000-000000000000",
+    resume_token: "00000000-0000-0000-0000-000000000200",
+    resume_outcome: "new",
+    server_name: "fake",
+    compliance: COMPLIANCE_STRING,
+    ...overrides,
+  };
+}
+
 /**
  * A minimal in-process fake broker that handles HELLO, SUBSCRIBE, PUBLISH,
  * and lets us push deliveries.
@@ -80,14 +93,10 @@ test("client connects, handshakes, publishes confirmed", async () => {
       if (f.opcode === Op.Hello) {
         const h = decodeFrameBody<Hello>(f);
         assert.equal(h.protocol_version, PROTOCOL_V1);
+        assert.equal(h.resume, null);
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.Publish) {
         const p = decodeFrameBody<PublishMsg>(f);
@@ -110,6 +119,52 @@ test("client connects, handshakes, publishes confirmed", async () => {
   }
 });
 
+test("client reconnect offers previous resume identity", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    const hellos: Hello[] = [];
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        const h = decodeFrameBody<Hello>(f);
+        hellos.push(h);
+        broker.send(
+          s,
+          buildFrame(
+            Op.HelloOk,
+            f.requestId,
+            helloOk(
+              h.resume
+                ? {
+                    client_id: h.resume.client_id,
+                    owner_id: h.resume.owner_id,
+                    resume_token: h.resume.resume_token,
+                    resume_outcome: "resumed",
+                  }
+                : {},
+            ),
+          ),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    await client.reconnect();
+
+    assert.equal(hellos.length, 2);
+    assert.equal(hellos[0]!.resume, null);
+    assert.deepEqual(hellos[1]!.resume, {
+      owner_id: "00000000-0000-0000-0000-000000000100",
+      client_id: "00000000-0000-0000-0000-000000000000",
+      resume_token: "00000000-0000-0000-0000-000000000200",
+    });
+
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("publish confirmation handle can be awaited later", async () => {
   const broker = new FakeBroker();
   await broker.start();
@@ -118,12 +173,7 @@ test("publish confirmation handle can be awaited later", async () => {
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.Publish) {
         const p = decodeFrameBody<PublishMsg>(f);
@@ -161,12 +211,7 @@ test("client declares queue policy", async () => {
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.DeclareQueue) {
         declare = decodeFrameBody<DeclareQueueMsg>(f);
@@ -219,12 +264,7 @@ test("default and blank groups normalize to ungrouped declarations and subscript
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.Subscribe) {
         subscribe = decodeFrameBody<SubscribeMsg>(f);
@@ -265,12 +305,7 @@ test("client subscribes and receives a delivery", async () => {
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.Subscribe) {
         const sub = decodeFrameBody<SubscribeMsg>(f);
@@ -340,12 +375,7 @@ test("delivery accepts array-encoded byte payloads from Rust", async () => {
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.Subscribe) {
         const sub = decodeFrameBody<SubscribeMsg>(f);
@@ -399,12 +429,7 @@ test("subscription throws on engine disconnection", async () => {
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.Subscribe) {
         broker.send(
@@ -453,12 +478,7 @@ test("publish without confirm does not block on reply", async () => {
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       }
       // Note: no PublishOk reply.
@@ -485,12 +505,7 @@ test("client publishes delayed frame with headers and deadline", async () => {
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.PublishDelayed) {
         delayed = decodeFrameBody<PublishDelayedMsg>(f);
@@ -525,12 +540,7 @@ test("delivery deserializes json by content-type", async () => {
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.Subscribe) {
         const sub = decodeFrameBody<SubscribeMsg>(f);
@@ -585,12 +595,7 @@ test("manual message retryAfter sends delayed nack", async () => {
       if (f.opcode === Op.Hello) {
         broker.send(
           s,
-          buildFrame(Op.HelloOk, f.requestId, {
-            protocol_version: PROTOCOL_V1,
-            client_id: "00000000-0000-0000-0000-000000000000",
-            server_name: "fake",
-            compliance: COMPLIANCE_STRING,
-          }),
+          buildFrame(Op.HelloOk, f.requestId, helloOk()),
         );
       } else if (f.opcode === Op.Subscribe) {
         const sub = decodeFrameBody<SubscribeMsg>(f);

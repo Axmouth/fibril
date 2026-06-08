@@ -4,7 +4,12 @@ import { DisconnectionError, FibrilError } from "./errors.js";
 import { deferred } from "./internal/deferred.js";
 import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
-import type { AuthMsg, DeclareQueueMsg, QueueDlqPolicy } from "./protocol.js";
+import type {
+  AuthMsg,
+  DeclareQueueMsg,
+  QueueDlqPolicy,
+  ResumeIdentity,
+} from "./protocol.js";
 
 function normalizeGroup(group: string | null): string | null {
   const trimmed = group?.trim();
@@ -31,6 +36,8 @@ export interface ClientOptionsInit {
   auth?: AuthMsg;
   /** Heartbeat interval in seconds. Server-side timeout is 3x this value. */
   heartbeatIntervalSeconds?: number;
+  /** Optional resume identity from a previous connection. */
+  resumeIdentity?: ResumeIdentity;
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
@@ -46,12 +53,14 @@ export class ClientOptions {
   readonly clientVersion: string;
   readonly auth: AuthMsg | undefined;
   readonly heartbeatIntervalSeconds: number | undefined;
+  readonly resumeIdentity: ResumeIdentity | undefined;
 
   constructor(init: ClientOptionsInit = {}) {
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
     this.clientVersion = init.clientVersion ?? DEFAULT_CLIENT_VERSION;
     this.auth = init.auth;
     this.heartbeatIntervalSeconds = init.heartbeatIntervalSeconds;
+    this.resumeIdentity = init.resumeIdentity;
   }
 
   /**
@@ -63,6 +72,7 @@ export class ClientOptions {
       clientVersion: this.clientVersion,
       auth: { username, password },
       heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
+      resumeIdentity: this.resumeIdentity,
     });
   }
 
@@ -75,6 +85,20 @@ export class ClientOptions {
       clientVersion: this.clientVersion,
       auth: this.auth,
       heartbeatIntervalSeconds: seconds,
+      resumeIdentity: this.resumeIdentity,
+    });
+  }
+
+  /**
+   * Return a copy configured to attempt resuming a previous connection.
+   */
+  withResumeIdentity(resumeIdentity: ResumeIdentity): ClientOptions {
+    return new ClientOptions({
+      clientName: this.clientName,
+      clientVersion: this.clientVersion,
+      auth: this.auth,
+      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
+      resumeIdentity,
     });
   }
 
@@ -278,7 +302,10 @@ export class Client {
     const socket = await openSocket(this.#address.host, this.#address.port);
     let engine: Engine;
     try {
-      engine = await Engine.start(socket, this.#opts);
+      engine = await Engine.start(
+        socket,
+        this.#opts.withResumeIdentity(oldEngine.resumeIdentity),
+      );
     } catch (err) {
       socket.destroy();
       if (err instanceof FibrilError) throw err;

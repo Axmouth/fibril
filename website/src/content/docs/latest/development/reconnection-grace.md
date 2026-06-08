@@ -76,28 +76,28 @@ Future topology:
 - Resume identity should be scoped so one partition owner cannot accidentally
   claim another owner's live connection state.
 
-## Proposed First Slice
+## Implemented First Slice
 
 Add explicit resume identity to the connection handshake.
 
-HELLO should optionally include a previously issued `client_id` plus a resume
-token. HELLO OK should report whether the connection is new or resumed.
+HELLO can optionally include a previously issued `client_id`, owner id, and
+resume token. HELLO OK reports whether the connection is new or resumed, and
+returns the identity the client should keep for the next reconnect attempt.
 
 The token matters because `client_id` alone is a public value once handed to the
 client. A random opaque resume token issued by the server gives the reconnecting
 client something harder to guess. For pre-0.1, this can be a simple random value
 kept in broker memory. Later it can become persisted or signed if needed.
 
-Suggested outcomes:
+Current outcomes:
 
 - `new`
 - `resumed`
 - `resume_not_found`
-- `resume_expired`
 - `resume_rejected`
 
-This slice does not need to move deliveries yet. It should establish the wire
-shape, client API storage of the resume identity, and logs.
+This slice does not move deliveries yet. It establishes the wire shape, server
+identity registry, client API storage of the resume identity, and logs.
 
 ## Preferred Grace Model
 
@@ -254,7 +254,8 @@ Broker tests:
 Client tests:
 
 - Rust and TypeScript clients store resume identity after connect
-- reconnect sends resume identity when available
+  (implemented)
+- reconnect sends resume identity when available (implemented)
 - reconnect handles rejected resume by falling back to fresh state
 
 ## Open Questions

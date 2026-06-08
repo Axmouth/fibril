@@ -25,6 +25,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             client_name: "demo".into(),
             client_version: "0.1".into(),
             protocol_version: PROTOCOL_V1,
+            resume: None,
         },
     )?)
     .await?;
