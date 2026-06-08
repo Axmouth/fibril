@@ -41,11 +41,25 @@ locally, every higher layer would be built on the wrong foundation.
 - Use external coordination long-term, with etcd as the likely target.
 - Static config is acceptable for the first local/in-process milestone if it
   does not leak into the storage or queue APIs.
+- Fibril should ideally own cluster metadata eventually. External coordination
+  is a practical starting point, not the desired final shape.
 - Replication is pull-oriented unless later evidence says otherwise.
 - Followers must not assign offsets.
 - Followers must not run independent queue-time decisions such as expiry or DLQ
   spawning.
 - Do not expose offsets as client-facing routing concepts.
+- Keratin replicated append should be exposed through a deliberately gated API.
+  A type-level split between leader-write and follower-apply handles is worth
+  exploring, but should not block the first primitive if it becomes too heavy.
+  An extension trait or separate writer command can still make the unsafe path
+  explicit and hard to call accidentally.
+- Keratin durability should stay local. `AfterReplicated` does not belong in
+  `KDurability`; replication quorum semantics belong in Stroma or broker-level
+  policy.
+- Normal replicated append remains contiguous. If a follower is too far behind
+  because old log ranges were truncated, it should install a checkpoint or
+  snapshot and then continue from the checkpoint offset. It should not fill gaps
+  with fake records.
 
 ## Pending Decisions
 
@@ -53,8 +67,15 @@ locally, every higher layer would be built on the wrong foundation.
 - Whether Keratin epoch tracking is a manifest field, separate metadata file, or
   both.
 - Exact name and shape of replicated append APIs.
+- Whether Keratin should expose distinct handle types for owner logs and
+  follower logs, or keep one handle with restricted replicated-append entry
+  points.
 - How much snapshot installation belongs in Keratin versus Stroma.
+- Shape of the Keratin checkpoint-install primitive that lets a follower say
+  "start this local log from offset N" after receiving a snapshot.
 - First sharding metadata shape for static config and later etcd.
+- What the migration path is from external coordination to Fibril-owned metadata
+  without forcing a data-path rewrite.
 - Not-owner error shape and topology refresh story for clients.
 
 ## Proposed First Milestones
@@ -82,3 +103,15 @@ locally, every higher layer would be built on the wrong foundation.
   `REPLICATION_PLANNING.md` and inspected Keratin append/read paths plus Stroma
   queue append paths. Conclusion: first useful slice is Keratin replicated
   append with explicit offsets and gap rejection.
+- 2026-06-09: Added direction that etcd/static config are stepping stones.
+  Longer term, Fibril should own metadata if that can be done without making the
+  early data-path replication more complex. Also noted the preference for
+  type-level or otherwise gated Keratin access so follower offset application is
+  explicit and not mixed into ordinary owner appends.
+- 2026-06-09: Implemented the first Keratin replicated append primitive on the
+  Keratin branch. It supports exact-fit append, gap reporting, already-present
+  reporting, and an explicit `AppendSuffixAfterKnownPrefix` mode for appending
+  only the missing suffix after an overlapping known prefix. Removed
+  `AfterReplicated` from Keratin durability. Normal replicated append still
+  refuses true gaps; followers that missed truncated history need a separate
+  checkpoint/snapshot install operation that sets the log continuation point.
