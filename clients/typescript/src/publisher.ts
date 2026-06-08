@@ -3,6 +3,10 @@ import type { Engine } from "./engine.js";
 import { deferred } from "./internal/deferred.js";
 import { intoMessage, type Publishable } from "./message.js";
 
+interface EngineRef {
+  current(): Engine;
+}
+
 /**
  * Delay accepted by delayed publish methods.
  *
@@ -60,12 +64,12 @@ export class PublishConfirmation {
  * ```
  */
 export class Publisher {
-  readonly #engine: Engine;
+  readonly #engine: EngineRef;
   readonly #topic: string;
   readonly #group: string | null;
 
   /** @internal */
-  constructor(engine: Engine, topic: string, group: string | null) {
+  constructor(engine: EngineRef, topic: string, group: string | null) {
     this.#engine = engine;
     this.#topic = topic;
     this.#group = group;
@@ -94,7 +98,7 @@ export class Publisher {
    */
   async publish<T>(payload: Publishable<T>): Promise<void> {
     const message = intoMessage(payload);
-    await this.#engine.submit({
+    await this.#engine.current().submit({
       type: "publishUnconfirmed",
       topic: this.#topic,
       group: this.#group,
@@ -124,7 +128,7 @@ export class Publisher {
   ): Promise<PublishConfirmation> {
     const message = intoMessage(payload);
     const reply = deferred<bigint>();
-    await this.#engine.submit({
+    await this.#engine.current().submit({
       type: "publishConfirmed",
       topic: this.#topic,
       group: this.#group,
@@ -141,7 +145,7 @@ export class Publisher {
    * Publish a raw byte payload without msgpack wrapping or content-type.
    */
   async publishBytes(payload: Uint8Array): Promise<void> {
-    await this.#engine.submit({
+    await this.#engine.current().submit({
       type: "publishUnconfirmed",
       topic: this.#topic,
       group: this.#group,
@@ -166,7 +170,7 @@ export class Publisher {
     payload: Uint8Array,
   ): Promise<PublishConfirmation> {
     const reply = deferred<bigint>();
-    await this.#engine.submit({
+    await this.#engine.current().submit({
       type: "publishConfirmed",
       topic: this.#topic,
       group: this.#group,
@@ -193,7 +197,7 @@ export class Publisher {
     delay: DelayInput,
   ): Promise<void> {
     const message = intoMessage(payload);
-    await this.#engine.submit({
+    await this.#engine.current().submit({
       type: "publishDelayedUnconfirmed",
       topic: this.#topic,
       group: this.#group,
@@ -234,7 +238,7 @@ export class Publisher {
   ): Promise<PublishConfirmation> {
     const message = intoMessage(payload);
     const reply = deferred<bigint>();
-    await this.#engine.submit({
+    await this.#engine.current().submit({
       type: "publishDelayedConfirmed",
       topic: this.#topic,
       group: this.#group,

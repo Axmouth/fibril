@@ -24,6 +24,7 @@ check what is already wired and under what conditions.
 - The admin dashboard has moved to the same visual language as the public site, with Clarity removed from the vendored UI assets.
 - The TypeScript client tracks the Rust client for delayed publish, confirmed publish pipelining, content-type metadata, queue declaration, and group-default behavior.
 - Reconnection resume identity is now part of the TCP handshake, and Rust and TypeScript explicit reconnect calls send it and report whether resume was accepted.
+- Existing Rust and TypeScript publisher handles use the latest engine after explicit reconnect, while active subscription reconciliation remains planned.
 - The TCP handler can keep a logical connection dormant during a configured grace window, accept late settles after resume, and requeue unsettled inflight messages when grace expires.
 
 ## Near term

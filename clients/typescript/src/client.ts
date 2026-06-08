@@ -246,6 +246,24 @@ function openSocket(host: string, port: number): Promise<Socket> {
   });
 }
 
+class EngineSlot {
+  #engine: Engine;
+
+  constructor(engine: Engine) {
+    this.#engine = engine;
+  }
+
+  current(): Engine {
+    return this.#engine;
+  }
+
+  replace(engine: Engine): Engine {
+    const old = this.#engine;
+    this.#engine = engine;
+    return old;
+  }
+}
+
 /**
  * Fibril broker client. Manages a single connection and dispatches
  * publish/subscribe operations through an internal engine.
@@ -261,7 +279,7 @@ function openSocket(host: string, port: number): Promise<Socket> {
 export class Client {
   readonly #address: { host: string; port: number };
   readonly #opts: ClientOptions;
-  #engine: Engine;
+  #engine: EngineSlot;
 
   private constructor(
     address: { host: string; port: number },
@@ -270,7 +288,7 @@ export class Client {
   ) {
     this.#address = address;
     this.#opts = opts;
-    this.#engine = engine;
+    this.#engine = new EngineSlot(engine);
   }
 
   /**
@@ -301,12 +319,12 @@ export class Client {
   /**
    * Replace the internal engine with a new connection.
    *
-   * Existing publishers and subscriptions from the old connection will fail
-   * with `BrokenPipeError`. The returned outcome tells whether the broker
-   * accepted the previous resume identity.
+   * Existing publishers created from this client use the new engine after this
+   * returns. Existing active subscriptions remain attached to their original
+   * stream until subscription reconciliation is implemented.
    */
   async reconnect(): Promise<ReconnectOutcome> {
-    const oldEngine = this.#engine;
+    const oldEngine = this.#engine.current();
     const socket = await openSocket(this.#address.host, this.#address.port);
     let engine: Engine;
     try {
@@ -321,7 +339,7 @@ export class Client {
         `Engine failed to start: ${(err as Error).message}`,
       );
     }
-    this.#engine = engine;
+    this.#engine.replace(engine);
     oldEngine.shutdown();
     return { resumeOutcome: engine.resumeOutcome };
   }
@@ -357,7 +375,7 @@ export class Client {
    */
   async declareQueue(config: QueueConfig): Promise<void> {
     const reply = deferred<void>();
-    await this.#engine.submit({
+    await this.#engine.current().submit({
       type: "declareQueue",
       req: config.toWire(),
       reply,
@@ -370,12 +388,13 @@ export class Client {
    * `BrokenPipeError`; subscription iterators throw or terminate.
    */
   async shutdown(): Promise<void> {
-    this.#engine.shutdown();
-    await this.#engine.whenComplete();
+    const engine = this.#engine.current();
+    engine.shutdown();
+    await engine.whenComplete();
   }
 
   /** @internal Used by the SubscriptionBuilder. */
   _engine(): Engine {
-    return this.#engine;
+    return this.#engine.current();
   }
 }

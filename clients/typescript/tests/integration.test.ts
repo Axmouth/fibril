@@ -166,6 +166,57 @@ test("client reconnect offers previous resume identity", async () => {
   }
 });
 
+test("existing publisher uses reconnected engine", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    const hellos: Hello[] = [];
+    const publishes: PublishMsg[] = [];
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        const h = decodeFrameBody<Hello>(f);
+        hellos.push(h);
+        broker.send(
+          s,
+          buildFrame(
+            Op.HelloOk,
+            f.requestId,
+            helloOk(
+              h.resume
+                ? {
+                    client_id: h.resume.client_id,
+                    owner_id: h.resume.owner_id,
+                    resume_token: h.resume.resume_token,
+                    resume_outcome: "resumed",
+                  }
+                : {},
+            ),
+          ),
+        );
+      } else if (f.opcode === Op.Publish) {
+        const p = decodeFrameBody<PublishMsg>(f);
+        publishes.push(p);
+        broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 99n }));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const pub = client.publisher("jobs");
+    const outcome = await client.reconnect();
+    const offset = await pub.publishConfirmed("after reconnect");
+
+    assert.equal(outcome.resumeOutcome, "resumed");
+    assert.equal(offset, 99n);
+    assert.equal(hellos.length, 2);
+    assert.equal(publishes.length, 1);
+    assert.equal(publishes[0]!.topic, "jobs");
+
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("publish confirmation handle can be awaited later", async () => {
   const broker = new FakeBroker();
   await broker.start();

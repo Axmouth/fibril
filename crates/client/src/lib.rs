@@ -38,7 +38,7 @@ use std::{
     fmt::{self, Debug},
     net::{SocketAddr, ToSocketAddrs},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 use thiserror::Error;
 use tokio::{
@@ -265,7 +265,7 @@ fn invalid_name<T>(kind: &'static str, name: &str, msg: &str) -> FibrilResult<T>
 pub struct Client {
     address: SocketAddr,
     opts: ClientOptions,
-    engine: Arc<EngineHandle>,
+    engine: Arc<EngineSlot>,
 }
 
 /// Result of an explicit reconnect attempt.
@@ -282,7 +282,7 @@ pub struct ReconnectOutcome {
 /// for JSON, text, raw bytes, or custom headers.
 #[derive(Debug, Clone)]
 pub struct Publisher {
-    engine: Arc<EngineHandle>,
+    engine: Arc<EngineSlot>,
     topic: TopicName,
     group: Option<GroupName>,
 }
@@ -914,7 +914,7 @@ impl<'a> SubscriptionBuilder<'a> {
             auto_ack: false,
         };
 
-        let rx = self.client.engine.subscribe(req).await?;
+        let rx = self.client.engine.current().subscribe(req).await?;
         Ok(Subscription { rx })
     }
 
@@ -931,7 +931,7 @@ impl<'a> SubscriptionBuilder<'a> {
             auto_ack: true,
         };
 
-        let rx = self.client.engine.subscribe_auto_ack(req).await?;
+        let rx = self.client.engine.current().subscribe_auto_ack(req).await?;
         Ok(AutoAckedSubscription { rx })
     }
 }
@@ -956,7 +956,7 @@ impl Client {
 
         let engine = start_engine(framed, opts.clone()).await?;
         Ok(Client {
-            engine,
+            engine: Arc::new(EngineSlot::new(engine)),
             address,
             opts,
         })
@@ -964,9 +964,10 @@ impl Client {
 
     /// Replace the internal engine with a new connection.
     ///
-    /// Existing [`Publisher`] and [`Subscription`] handles created from the old
-    /// connection remain attached to the old engine and will fail with
-    /// [`FibrilError::BrokenPipe`] or end their receive streams.
+    /// Existing [`Publisher`] handles created from this client use the new
+    /// engine after this returns. Existing active [`Subscription`] streams
+    /// remain attached to their original engine until subscription
+    /// reconciliation is implemented.
     ///
     /// The returned outcome tells whether the broker accepted the previous
     /// resume identity. `ResumeOutcome::Resumed` means the server-side logical
@@ -976,7 +977,8 @@ impl Client {
     pub async fn reconnect(&mut self) -> FibrilResult<ReconnectOutcome> {
         let address = self.address;
         let mut opts = self.opts.clone();
-        opts.resume_identity = Some(self.engine.resume_identity.clone());
+        let old_engine = self.engine.current();
+        opts.resume_identity = Some(old_engine.resume_identity.clone());
         let stream = TcpStream::connect(address)
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
@@ -990,15 +992,17 @@ impl Client {
         };
 
         // Swap the handle
-        self.engine = new_engine;
+        self.engine.replace(new_engine);
+        old_engine.shutdown.notify_waiters();
 
         Ok(outcome)
     }
 
     /// Reconnect and restore existing handles.
     ///
-    /// This is not implemented yet. Use [`reconnect`](Self::reconnect) and
-    /// recreate publishers/subscriptions explicitly.
+    /// This is not implemented yet. Use [`reconnect`](Self::reconnect);
+    /// existing publishers can continue afterward, but active subscriptions
+    /// should be recreated by the application.
     // TODO: try to handle inflight acks etc (resend?)
     #[tracing::instrument(fields(address = ?self.address, opts = ?self.opts))]
     pub async fn reconnect_restore(&mut self) -> FibrilResult<()> {
@@ -1069,14 +1073,17 @@ impl Client {
     /// selection is internal.
     #[tracing::instrument(skip(self), fields(topic = %config.topic, group = ?config.group))]
     pub async fn declare_queue(&self, config: QueueConfig) -> FibrilResult<()> {
-        self.engine.declare_queue(config.into_wire()).await
+        self.engine
+            .current()
+            .declare_queue(config.into_wire())
+            .await
     }
 
     /// Gracefully shut down the client.
     ///
     /// This closes the connection engine and wakes subscription receivers.
     pub async fn shutdown(&self) {
-        self.engine.shutdown.notify_waiters();
+        self.engine.current().shutdown.notify_waiters();
     }
 }
 
@@ -1092,6 +1099,7 @@ impl Publisher {
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;
         self.engine
+            .current()
             .publish_unconfirmed(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
@@ -1126,6 +1134,7 @@ impl Publisher {
     ) -> FibrilResult<PublishConfirmation> {
         let message = payload.into_message()?;
         self.engine
+            .current()
             .publish_with_confirmation(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
@@ -1149,6 +1158,7 @@ impl Publisher {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
         self.engine
+            .current()
             .publish_unconfirmed_delayed(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
@@ -1189,6 +1199,7 @@ impl Publisher {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
         self.engine
+            .current()
             .publish_delayed_with_confirmation(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
@@ -1234,6 +1245,30 @@ impl AutoAckedSubscription {
 }
 
 // ===== Engine =================================================================
+
+#[derive(Debug)]
+struct EngineSlot {
+    engine: RwLock<Arc<EngineHandle>>,
+}
+
+impl EngineSlot {
+    fn new(engine: Arc<EngineHandle>) -> Self {
+        Self {
+            engine: RwLock::new(engine),
+        }
+    }
+
+    fn current(&self) -> Arc<EngineHandle> {
+        self.engine
+            .read()
+            .expect("client engine slot poisoned")
+            .clone()
+    }
+
+    fn replace(&self, engine: Arc<EngineHandle>) {
+        *self.engine.write().expect("client engine slot poisoned") = engine;
+    }
+}
 
 #[derive(Debug, Clone)]
 struct EngineHandle {
@@ -2209,22 +2244,29 @@ mod tests {
         ));
     }
 
-    fn client_with_command_rx() -> (Client, mpsc::Receiver<Command>) {
+    fn engine_with_command_rx() -> (Arc<EngineHandle>, mpsc::Receiver<Command>) {
         let (tx, rx) = mpsc::channel(8);
+        let engine = Arc::new(EngineHandle {
+            tx,
+            shutdown: Arc::new(Notify::new()),
+            resume_identity: ResumeIdentity {
+                owner_id: uuid::Uuid::nil(),
+                client_id: uuid::Uuid::nil(),
+                resume_token: uuid::Uuid::nil(),
+            },
+            resume_outcome: ResumeOutcome::New,
+        });
+
+        (engine, rx)
+    }
+
+    fn client_with_command_rx() -> (Client, mpsc::Receiver<Command>) {
+        let (engine, rx) = engine_with_command_rx();
         (
             Client {
                 address: "127.0.0.1:0".parse().unwrap(),
                 opts: ClientOptions::new(),
-                engine: Arc::new(EngineHandle {
-                    tx,
-                    shutdown: Arc::new(Notify::new()),
-                    resume_identity: ResumeIdentity {
-                        owner_id: uuid::Uuid::nil(),
-                        client_id: uuid::Uuid::nil(),
-                        resume_token: uuid::Uuid::nil(),
-                    },
-                    resume_outcome: ResumeOutcome::New,
-                }),
+                engine: Arc::new(EngineSlot::new(engine)),
             },
             rx,
         )
@@ -2244,6 +2286,26 @@ mod tests {
             }
             other => panic!("expected unconfirmed publish, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn existing_publisher_uses_replaced_engine_slot() {
+        let (client, mut old_rx) = client_with_command_rx();
+        let publisher = client.publisher("jobs").unwrap();
+        let (new_engine, mut new_rx) = engine_with_command_rx();
+
+        client.engine.replace(new_engine);
+
+        publisher.publish("hello").await.unwrap();
+
+        match new_rx.recv().await.unwrap() {
+            Command::PublishUnconfirmed { topic, group, .. } => {
+                assert_eq!(topic, "jobs");
+                assert_eq!(group, None);
+            }
+            other => panic!("expected unconfirmed publish, got {other:?}"),
+        }
+        assert!(old_rx.try_recv().is_err());
     }
 
     #[tokio::test]

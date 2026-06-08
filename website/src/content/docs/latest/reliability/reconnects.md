@@ -32,9 +32,14 @@ Current clients store resume identity and explicit `reconnect()` sends it, but
 they do not yet run an automatic reconnect loop that hides a socket break from
 existing publisher and subscription handles.
 
-Existing handles are still tied to the connection engine that created them. If
-that engine exits, those handles can fail or end, even if the client later
-connects again.
+Publisher handles created from a client use the latest connection engine after
+explicit `reconnect()` returns. New subscriptions created after reconnect also
+use the latest engine.
+
+Active subscription streams are different. A stream that was already receiving
+messages is still tied to its original engine until subscription reconciliation
+exists. If that engine exits, the stream can fail or end, and the application
+should recreate the subscription after reconnect.
 
 Reconnect grace is also not durable restart recovery. If the broker process
 restarts, the in-memory dormant connection state is gone.

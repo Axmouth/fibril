@@ -146,6 +146,9 @@ Current limits:
   persisted runtime settings document exists yet.
 - Existing subscriptions are preserved server-side, but clients do not yet have
   an automatic reconnect loop that hides the socket break.
+- Existing Rust and TypeScript publisher handles use the latest engine after
+  explicit reconnect. New subscriptions also use the latest engine. Active
+  subscription streams still need reconciliation.
 - In-flight protocol requests from the old socket are not replayed.
 
 Transparent subscription restore and user-facing client automation can come
