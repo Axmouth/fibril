@@ -78,29 +78,64 @@
   </table>
 </section>
 
-<section class="overview-panel" aria-label="Storage latency">
+<section class="overview-panel" aria-label="Stroma timings">
   <div class="overview-panel-heading">
-    <h5>Storage Latency</h5>
-    <p>Recent averages reported by the storage layer.</p>
+    <h5>Stroma Timings</h5>
+    <p>Queue actor delay, durable event appends, and snapshot cost.</p>
   </div>
   <dl class="overview-latency-grid">
     <div>
-      <dt>Read</dt>
-      <dd id="read_ms">--</dd>
+      <dt>Event append</dt>
+      <dd id="stroma_event_append_ms">--</dd>
     </div>
     <div>
-      <dt>Write</dt>
-      <dd id="write_ms">--</dd>
+      <dt>Max queue wait</dt>
+      <dd id="stroma_max_wait_ms">--</dd>
     </div>
     <div>
-      <dt>Append batch</dt>
-      <dd id="append_ms">--</dd>
+      <dt>Max queue work</dt>
+      <dd id="stroma_max_process_ms">--</dd>
     </div>
     <div>
-      <dt>Flush</dt>
-      <dd id="flush_ms">--</dd>
+      <dt>Snapshot total</dt>
+      <dd id="snapshot_total_ms">--</dd>
     </div>
   </dl>
+</section>
+
+<section class="overview-panel" aria-label="Stroma health">
+  <div class="overview-panel-heading">
+    <h5>Stroma Health</h5>
+    <p>Compact storage-engine signals. Use Diagnostics for details.</p>
+  </div>
+  <table class="table table-compact narrow metric-table">
+    <tbody>
+      <tr>
+        <td>Queue actor backlog</td>
+        <td id="stroma_backlog">--</td>
+      </tr>
+      <tr>
+        <td>Event appends / s</td>
+        <td id="stroma_event_appends_per_sec">--</td>
+      </tr>
+      <tr>
+        <td>Event bytes written</td>
+        <td id="stroma_event_bytes">--</td>
+      </tr>
+      <tr>
+        <td>Snapshot attempts</td>
+        <td id="snapshot_attempts">--</td>
+      </tr>
+      <tr>
+        <td>Last snapshot size</td>
+        <td id="snapshot_size">--</td>
+      </tr>
+      <tr>
+        <td>Recovered queues</td>
+        <td id="recovered_queues">--</td>
+      </tr>
+    </tbody>
+  </table>
 </section>
 
 <script src="/static/js/api.js"></script>
@@ -110,18 +145,47 @@ function metric(value, digits = 1, suffix = "") {
   return Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "--";
 }
 
+function bytes(value) {
+  if (!Number.isFinite(value)) return "--";
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(2)} KB`;
+  return `${value} B`;
+}
+
+function maxLaneValue(stroma, field) {
+  const lanes = Object.values(stroma.command?.per_lane ?? {});
+  const values = lanes
+    .map((lane) => lane?.[field])
+    .filter((value) => Number.isFinite(value));
+  return values.length ? Math.max(...values) : NaN;
+}
+
+function laneBacklog(stroma) {
+  return Object.values(stroma.command?.per_lane ?? {})
+    .map((lane) => lane?.current_depth)
+    .filter((value) => Number.isFinite(value))
+    .reduce((sum, value) => sum + value, 0);
+}
+
 async function refresh() {
   const d = await api('/admin/api/overview');
+  const stroma = d.stroma ?? {};
   document.getElementById("delivered").textContent = metric(d.broker.delivered_per_sec_1m);
   document.getElementById("acked").textContent = metric(d.broker.acked_per_sec_1m);
   document.getElementById("published").textContent = metric(d.broker.published_per_sec_1m);
   document.getElementById("rss_mb").textContent = metric(d.sys.rss_mb / 1024, 2);
   document.getElementById("cpu").textContent = metric(d.sys.cpu, 2);
   document.getElementById("disk").textContent = metric(d.storage_used / (1024 * 1024), 2);
-  document.getElementById("read_ms").textContent = metric(d.storage.avg_read_latency_ms, 2, " ms");
-  document.getElementById("write_ms").textContent = metric(d.storage.avg_write_latency_ms, 2, " ms");
-  document.getElementById("append_ms").textContent = metric(d.storage.avg_append_batch_latency_ms, 2, " ms");
-  document.getElementById("flush_ms").textContent = metric(d.storage.avg_flush_latency_ms, 2, " ms");
+  document.getElementById("stroma_event_append_ms").textContent = metric(stroma.log?.event_log?.avg_append_latency_ms, 2, " ms");
+  document.getElementById("stroma_max_wait_ms").textContent = metric(maxLaneValue(stroma, "max_wait_ms"), 2, " ms");
+  document.getElementById("stroma_max_process_ms").textContent = metric(maxLaneValue(stroma, "max_process_ms"), 2, " ms");
+  document.getElementById("snapshot_total_ms").textContent = metric(stroma.snapshot?.avg_total_ms, 2, " ms");
+  document.getElementById("stroma_backlog").textContent = laneBacklog(stroma);
+  document.getElementById("stroma_event_appends_per_sec").textContent = metric(stroma.log?.event_log?.appends_per_sec_1m);
+  document.getElementById("stroma_event_bytes").textContent = bytes(stroma.log?.event_log?.total_bytes);
+  document.getElementById("snapshot_attempts").textContent = stroma.snapshot?.attempts_total ?? "--";
+  document.getElementById("snapshot_size").textContent = bytes(stroma.snapshot?.last_snapshot_size_bytes);
+  document.getElementById("recovered_queues").textContent = stroma.recovery?.queues_recovered ?? "--";
   const tcp = d.tcp ?? {};
   document.getElementById("resume_accepted").textContent = tcp.resume_accepted_total ?? "--";
   document.getElementById("resume_rejected").textContent = tcp.resume_rejected_total ?? "--";

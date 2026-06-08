@@ -1,0 +1,183 @@
+{% extends "layout.html" %}
+{% block content %}
+<h4 class="metrics-header">Diagnostics</h4>
+<p class="settings-note">
+  Detailed Stroma engine metrics for debugging queue actor pressure, event-log writes, snapshots, and recovery. Use the dashboard for a quick health read.
+</p>
+
+<section class="overview-panel" aria-label="Command lanes">
+  <div class="overview-panel-heading">
+    <h5>Command Lanes</h5>
+    <p>Queue actor backlog and timing by priority lane.</p>
+  </div>
+  <table class="table table-compact narrow metric-table">
+    <thead>
+      <tr>
+        <th>Lane</th>
+        <th class="text-right">Depth</th>
+        <th class="text-right">Dispatched / s</th>
+        <th class="text-right">Avg wait</th>
+        <th class="text-right">Max wait</th>
+        <th class="text-right">Avg work</th>
+        <th class="text-right">Max work</th>
+        <th class="text-right">Total</th>
+      </tr>
+    </thead>
+    <tbody id="command-lanes"></tbody>
+  </table>
+</section>
+
+<section class="overview-panel" aria-label="Command kinds">
+  <div class="overview-panel-heading">
+    <h5>Command Kinds</h5>
+    <p>Logical Stroma operations where counters are currently populated.</p>
+  </div>
+  <table class="table table-compact narrow metric-table">
+    <thead>
+      <tr>
+        <th>Kind</th>
+        <th class="text-right">Total</th>
+        <th class="text-right">Per second</th>
+        <th class="text-right">Average latency</th>
+      </tr>
+    </thead>
+    <tbody id="command-kinds"></tbody>
+  </table>
+</section>
+
+<section class="overview-panel" aria-label="Logs and snapshots">
+  <div class="overview-panel-heading">
+    <h5>Logs And Snapshots</h5>
+    <p>Durable event-log activity and snapshot cost since broker start.</p>
+  </div>
+  <div class="diagnostics-grid">
+    <table class="table table-compact narrow metric-table">
+      <tbody id="log-metrics"></tbody>
+    </table>
+    <table class="table table-compact narrow metric-table">
+      <tbody id="snapshot-metrics"></tbody>
+    </table>
+  </div>
+</section>
+
+<section class="overview-panel" aria-label="Recovery">
+  <div class="overview-panel-heading">
+    <h5>Recovery</h5>
+    <p>Startup and lazy recovery counters reported by Stroma.</p>
+  </div>
+  <table class="table table-compact narrow metric-table">
+    <tbody id="recovery-metrics"></tbody>
+  </table>
+</section>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/admin.js"></script>
+<script>
+function metric(value, digits = 2, suffix = "") {
+  return Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "--";
+}
+
+function integer(value) {
+  return Number.isFinite(value) ? `${value}` : "--";
+}
+
+function bytes(value) {
+  if (!Number.isFinite(value)) return "--";
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+  if (value >= 1024) return `${(value / 1024).toFixed(2)} KB`;
+  return `${value} B`;
+}
+
+function row(label, value) {
+  return `<tr><td>${label}</td><td>${value}</td></tr>`;
+}
+
+function renderCommandLanes(lanes) {
+  const order = ["express", "high", "medium", "low", "super_low"];
+  const rows = order.map((name) => {
+    const lane = lanes?.[name] ?? {};
+    return `
+      <tr>
+        <td>${name}</td>
+        <td class="text-right">${integer(lane.current_depth)}</td>
+        <td class="text-right">${metric(lane.dispatched_per_sec_1m)}</td>
+        <td class="text-right">${metric(lane.avg_wait_ms, 2, " ms")}</td>
+        <td class="text-right">${metric(lane.max_wait_ms, 2, " ms")}</td>
+        <td class="text-right">${metric(lane.avg_process_ms, 2, " ms")}</td>
+        <td class="text-right">${metric(lane.max_process_ms, 2, " ms")}</td>
+        <td class="text-right">${integer(lane.total_dispatched)}</td>
+      </tr>
+    `;
+  });
+  document.getElementById("command-lanes").innerHTML = rows.join("");
+}
+
+function renderCommandKinds(kinds) {
+  const order = ["enqueue", "poll_ready", "ack", "nack", "mark_inflight", "collect_expired"];
+  const rows = order.map((name) => {
+    const kind = kinds?.[name] ?? {};
+    return `
+      <tr>
+        <td>${name}</td>
+        <td class="text-right">${integer(kind.total)}</td>
+        <td class="text-right">${metric(kind.per_sec_1m)}</td>
+        <td class="text-right">${metric(kind.avg_latency_ms, 2, " ms")}</td>
+      </tr>
+    `;
+  });
+  document.getElementById("command-kinds").innerHTML = rows.join("");
+}
+
+function renderLogMetrics(log) {
+  const eventLog = log?.event_log ?? {};
+  document.getElementById("log-metrics").innerHTML = [
+    row("Event appends / s", metric(eventLog.appends_per_sec_1m)),
+    row("Event append avg", metric(eventLog.avg_append_latency_ms, 2, " ms")),
+    row("Event append max", metric(eventLog.max_append_latency_ms, 2, " ms")),
+    row("Event batch avg", metric(eventLog.avg_batch_size)),
+    row("Event append batches", integer(eventLog.total_appends)),
+    row("Event items", integer(eventLog.total_items)),
+    row("Event bytes", bytes(eventLog.total_bytes)),
+    row("Truncations", integer(log?.truncations_total)),
+  ].join("");
+}
+
+function renderSnapshotMetrics(snapshot) {
+  document.getElementById("snapshot-metrics").innerHTML = [
+    row("Attempts", integer(snapshot?.attempts_total)),
+    row("Skipped not dirty", integer(snapshot?.skipped_not_dirty)),
+    row("Skipped in progress", integer(snapshot?.skipped_in_progress)),
+    row("Clone avg", metric(snapshot?.avg_clone_ms, 2, " ms")),
+    row("Encode avg", metric(snapshot?.avg_encode_ms, 2, " ms")),
+    row("Total avg", metric(snapshot?.avg_total_ms, 2, " ms")),
+    row("Last size", bytes(snapshot?.last_snapshot_size_bytes)),
+    row("Bytes written", bytes(snapshot?.total_bytes_written)),
+  ].join("");
+}
+
+function renderRecovery(recovery) {
+  document.getElementById("recovery-metrics").innerHTML = [
+    row("Recovered queues", integer(recovery?.queues_recovered)),
+    row("Events replayed", integer(recovery?.total_events_replayed)),
+    row("Startup avg", metric(recovery?.avg_startup_ms, 2, " ms")),
+    row("Startup max", metric(recovery?.max_startup_ms, 2, " ms")),
+    row("Snapshot load avg", metric(recovery?.avg_snapshot_load_ms, 2, " ms")),
+    row("Replay avg", metric(recovery?.avg_replay_ms, 2, " ms")),
+    row("Replay max", metric(recovery?.max_replay_ms, 2, " ms")),
+  ].join("");
+}
+
+async function refresh() {
+  const data = await api("/admin/api/overview");
+  const stroma = data.stroma ?? {};
+  renderCommandLanes(stroma.command?.per_lane);
+  renderCommandKinds(stroma.command?.per_kind);
+  renderLogMetrics(stroma.log);
+  renderSnapshotMetrics(stroma.snapshot);
+  renderRecovery(stroma.recovery);
+}
+
+setInterval(refresh, 3000);
+refresh();
+</script>
+{% endblock %}

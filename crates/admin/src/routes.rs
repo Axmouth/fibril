@@ -26,6 +26,7 @@ pub struct OverviewResponse {
     pub broker: BrokerStatsSnapshot,
     pub storage: StorageStatsSnapshot,
     pub tcp: TcpStatsSnapshot,
+    pub stroma: serde_json::Value,
     pub sys: SystemSnapshot,
     pub storage_used: u64,
 }
@@ -213,6 +214,7 @@ pub async fn overview(
         broker: server.metrics.broker().snapshot(),
         storage: server.metrics.storage().snapshot(),
         tcp: server.metrics.tcp().snapshot(),
+        stroma: stroma_overview(&server),
         sys: server.metrics.system().snapshot(),
         storage_used: server
             .storage
@@ -220,6 +222,22 @@ pub async fn overview(
             .await
             .unwrap_or_default(),
     }))
+}
+
+fn stroma_overview(server: &AdminServer) -> serde_json::Value {
+    let command = server.stroma_metrics.command_snapshot();
+    let log = server.stroma_metrics.log_snapshot();
+    let snapshot = server.stroma_metrics.snapshot.snapshot();
+    let recovery = server.stroma_metrics.recovery.snapshot();
+    let depths = server.stroma_metrics.cmd_queue_depths_snapshot();
+
+    serde_json::json!({
+        "command": command,
+        "log": log,
+        "snapshot": snapshot,
+        "recovery": recovery,
+        "queue_depths": depths,
+    })
 }
 
 pub async fn connections(

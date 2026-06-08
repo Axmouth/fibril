@@ -13,6 +13,17 @@ The dashboard is not meant to be a high-frequency monitoring feed. Use it to
 answer specific operational questions, then rely on metrics and logs for
 continuous monitoring.
 
+## Overview And Diagnostics
+
+The overview page is intentionally curated. It shows broker throughput, process
+resource use, reconnect outcomes, and a small set of Stroma timing and health
+signals that help answer whether storage or queue actors are backing up.
+
+The diagnostics page shows the wider Stroma metrics snapshot: command lane
+depths and timings, command-kind counters, event-log append stats, snapshot
+cost, and recovery counters. Use it when the overview suggests pressure and you
+need the next level of detail.
+
 ## Auth State
 
 When admin authentication is configured, dashboard pages redirect unauthenticated

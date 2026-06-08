@@ -595,6 +595,16 @@ input[type="checkbox"] {
   margin: .35rem 0 0;
 }
 
+.diagnostics-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.diagnostics-grid .metric-table {
+  margin-bottom: 0;
+}
+
 .metric-table td:first-child {
   color: var(--muted);
 }

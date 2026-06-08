@@ -122,6 +122,7 @@ impl AdminServer {
             .route("/admin/subscriptions", get(subscriptions_page))
             .route("/admin/queues", get(queues_page))
             .route("/admin/messages", get(messages_page))
+            .route("/admin/diagnostics", get(diagnostics_page))
             .route("/admin/settings", get(settings_page))
             .route("/admin/api/overview", get(routes::overview))
             .route("/admin/api/connections", get(routes::connections))
@@ -242,6 +243,18 @@ async fn messages_page(
     }))
 }
 
+async fn diagnostics_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(Diagnostics {
+        page: "diagnostics",
+        title: "Diagnostics",
+        auth_enabled: server.config.auth.is_some(),
+    }))
+}
+
 async fn settings_page(
     State(server): State<Arc<AdminServer>>,
     headers: HeaderMap,
@@ -342,6 +355,14 @@ struct Queues {
 #[derive(Template)]
 #[template(path = "pages/messages.html")]
 struct Messages {
+    page: &'static str,
+    title: &'static str,
+    auth_enabled: bool,
+}
+
+#[derive(Template)]
+#[template(path = "pages/diagnostics.html")]
+struct Diagnostics {
     page: &'static str,
     title: &'static str,
     auth_enabled: bool,
@@ -653,6 +674,29 @@ mod tests {
         assert!(body.contains("message-inspection-form"));
         assert!(body.contains("/admin/api/messages"));
         assert!(body.contains("message-status-filter"));
+    }
+
+    #[tokio::test]
+    async fn diagnostics_page_renders_stroma_metrics() {
+        let server = test_server_with_auth(RuntimeSettingsLocks::default(), None).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/diagnostics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Command Lanes"));
+        assert!(body.contains("Logs And Snapshots"));
+        assert!(body.contains("/admin/api/overview"));
     }
 
     #[tokio::test]

@@ -35,6 +35,8 @@ check what is already wired and under what conditions.
   to a fresh server subscription id.
 - Reconnect and subscription reconciliation outcomes are now visible through
   admin overview counters, TCP metrics logs, and structured reconciliation logs.
+- The admin overview now includes compact Stroma timing and health signals, and
+  the diagnostics page exposes the broader Stroma metrics snapshot.
 
 ## Near term
 
