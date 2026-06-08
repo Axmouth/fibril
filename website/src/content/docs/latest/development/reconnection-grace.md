@@ -34,9 +34,11 @@ The desired behavior is:
 The server should still issue the identity. Clients should not mint identities
 that the broker trusts blindly.
 
-The first version should be broker-memory scoped. It helps transient TCP breaks
-while the broker process remains alive. Durable restart reconciliation is a
-separate feature because it needs persisted client and subscription ownership.
+The first version should be broker-memory scoped. It targets transient network
+breaks while the broker process remains alive. Durable restart reconciliation is
+a separate feature because it needs persisted client and subscription ownership,
+and that metadata must be designed carefully to avoid bloating every message or
+every hot-path state transition.
 
 Grace is a reliability tool, not a replacement for at-least-once semantics. If
 the client does not reconnect in time, messages should still become deliverable
@@ -65,6 +67,14 @@ Storage:
 - It does not currently persist client id or subscription id ownership for
   inflight messages in a way that can rebuild broker connection state after
   process restart.
+
+Future topology:
+
+- Fibril is not currently sharded or replicated.
+- The design should still leave room for clients to hold multiple connections
+  to different partition owners later.
+- Resume identity should be scoped so one partition owner cannot accidentally
+  claim another owner's live connection state.
 
 ## Proposed First Slice
 
@@ -160,7 +170,9 @@ or expect redelivery.
 
 ## Durable Restart Scope
 
-Broker restart reconciliation is larger.
+Broker restart reconciliation means restarting a broker process and letting
+clients continue as if the TCP break was the only interruption. That is larger
+than network-blip grace.
 
 To support it properly, storage likely needs to persist enough ownership
 metadata to recover client and subscription relationships:
@@ -171,12 +183,41 @@ metadata to recover client and subscription relationships:
 - queue key and offset
 - lease deadline
 
+That metadata should not be attached blindly to every common message path if it
+can be avoided. It should be sparse, compact, and only paid for by behavior that
+needs restart reconciliation.
+
 If subscription ids are persisted, `next_sub_id` must be initialized above the
 maximum recovered id. If subscription ids remain process-local, reconciliation
 should rely on client id plus queue and offset instead.
 
 For the first implementation, keep durable restart out of scope and document
 that grace only applies while the broker process remains alive.
+
+## Sharding and Replication Pressure
+
+The first version should work in a single broker process, but avoid design
+choices that make sharding awkward.
+
+Design guardrails:
+
+- Do not make one `client_id` mean "this broker owns all state for this client".
+- Do not put all client inflight state behind one global client record that
+  would later need cross-node locking.
+- Keep dormant state keyed by owner scope plus client identity.
+- Keep queue and partition identity in reconciliation data, even while
+  partition is still internally `0`.
+- Avoid protocol fields that assume a client has only one broker connection.
+
+If partitions later have owners, a client may hold multiple connections at once,
+one per owner. A resume identity should therefore be either:
+
+- scoped to one broker or partition owner, or
+- globally unique plus paired with the expected owner or partition set
+
+For the network-blip slice, server-issued `client_id` plus resume token is
+enough. Later partition-aware clients can keep one resume identity per
+connection or owner.
 
 ## Logging
 
