@@ -1,3 +1,59 @@
+
+* **Replication**
+
+  * Queue data replicated across nodes so a single broker failure does not result in queue loss.
+  * Explicit durability and failover semantics rather than relying on backup/restore strategies.
+
+* **Sharding / Partition Ownership**
+
+  * Queues distributed across a cluster instead of a single broker process.
+  * Ownership managed centrally, allowing the system to scale beyond one node while preserving queue semantics.
+
+* **etcd-backed Cluster Coordination**
+
+  * Shared source of truth for cluster membership and ownership decisions.
+  * Makes failover, leader election, and shard reassignment predictable and observable.
+
+* **Broker Restart Reconciliation**
+
+  * Sessions can be recovered even after broker restart or failover.
+  * Extends reconnect semantics beyond "broker stayed alive" into persistent session continuity.
+
+* **Message Expiration (TTL)**
+
+  * Messages can expire automatically after a configured period.
+  * Prevents stale work from being processed long after it remains useful.
+
+* **Time-based Retention**
+
+  * Queues can automatically discard old messages according to retention policies.
+  * Keeps storage growth bounded without manual intervention.
+
+* **Queue Purge**
+
+  * Fast removal of all queued messages while preserving the queue itself.
+  * Useful during incidents, testing, and recovery scenarios.
+
+* **Queue Deletion**
+
+  * Complete lifecycle management of queues from creation to removal.
+  * Eliminates operational cleanup gaps and orphaned resources.
+
+* **Documented Failure Semantics**
+
+  * Explicit documentation describing what happens during disconnects, crashes, failovers, reconnects, expirations, and ownership changes.
+  * Often more valuable than features themselves because operators know exactly what to expect.
+
+And if I had to pick the three features that would most change how technically-minded people perceive Fibril:
+
+1. **Replication**
+2. **Sharding with cluster ownership**
+3. **Restart reconciliation built on top of the existing reconnect model**
+
+Those are the features that make people stop seeing "single-node broker with nice ergonomics" and start seeing "distributed messaging system with an opinionated operational model."
+
+The interesting thing is that **restart reconciliation** is probably the most unique of the bunch. Replication and sharding are expected eventually. A well-defined, persistent session continuity model is much less common and aligns directly with the philosophy you've described: behavior that remains understandable during incidents.
+
 Copy Keratin file lock on Stroma too
 
 keep track off consumer id per message and extend lease for alive consumers instead of expiring. Or simply otherwise no expiry(configurable, depending on TTL there or not?) while client is still connected, bit instant expiry once client deemed lost
