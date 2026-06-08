@@ -140,8 +140,10 @@ leftovers.
 
 Current limits:
 
-- Reconnect grace is controlled by `ConnectionSettings::reconnect_grace_ms`.
-- It is not wired to startup/runtime configuration yet.
+- Reconnect grace is controlled by the live runtime setting
+  `connection.reconnect_grace_ms`.
+- The setting is seeded by `runtime_seed.connection.reconnect_grace_ms` when no
+  persisted runtime settings document exists yet.
 - Existing subscriptions are preserved server-side, but clients do not yet have
   an automatic reconnect loop that hides the socket break.
 - In-flight protocol requests from the old socket are not replayed.

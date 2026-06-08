@@ -48,6 +48,9 @@ struct CliArgs {
 
     #[arg(long)]
     publisher_idle_timeout_ms: Option<u64>,
+
+    #[arg(long)]
+    reconnect_grace_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -176,6 +179,10 @@ impl ServerConfig {
                 .publisher_idle_timeout_ms =
                 Some(parse_env("FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS", &value)?);
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_RECONNECT_GRACE_MS")? {
+            self.runtime_seed.connection.reconnect_grace_ms =
+                Some(parse_env("FIBRIL_RECONNECT_GRACE_MS", &value)?);
+        }
         Ok(())
     }
 
@@ -240,6 +247,9 @@ impl ServerConfig {
             self.runtime_seed
                 .idle_queue_cleanup
                 .publisher_idle_timeout_ms = Some(publisher_idle_timeout_ms);
+        }
+        if let Some(reconnect_grace_ms) = args.reconnect_grace_ms {
+            self.runtime_seed.connection.reconnect_grace_ms = Some(reconnect_grace_ms);
         }
     }
 
@@ -452,6 +462,7 @@ impl Default for ListenerSection {
 pub struct RuntimeSeedSection {
     pub delivery: DeliverySettings,
     pub idle_queue_cleanup: IdleQueueCleanupSettings,
+    pub connection: ConnectionSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -492,6 +503,12 @@ impl Default for IdleQueueCleanupSettings {
             publisher_idle_timeout_ms: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConnectionSettings {
+    pub reconnect_grace_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -540,6 +557,7 @@ mod tests {
         assert_eq!(config.runtime_seed.delivery.expiry_poll_min_ms, 15_000);
         assert_eq!(config.runtime_seed.delivery.expiry_batch_max, 8192);
         assert_eq!(config.runtime_seed.delivery.delivery_poll_max_ms, 5_000);
+        assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, None);
         assert_eq!(
             config.idle_queue_cleanup_internal(),
             InternalIdleQueueCleanup {
@@ -589,6 +607,9 @@ mod tests {
             sweep_interval_ms = 15
             publisher_idle_timeout_ms = 16
 
+            [runtime_seed.connection]
+            reconnect_grace_ms = 17
+
             [runtime_locks]
             idle_queue_cleanup = true
             "#,
@@ -628,6 +649,7 @@ mod tests {
                 publisher_idle_timeout_ms: Some(16),
             }
         );
+        assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, Some(17));
         assert!(config.runtime_locks.idle_queue_cleanup);
     }
 
@@ -668,6 +690,8 @@ mod tests {
             OsString::from("8388608"),
             OsString::from("--queue-idle-evict-after-ms"),
             OsString::from("123"),
+            OsString::from("--reconnect-grace-ms"),
+            OsString::from("456"),
         ])
         .unwrap();
 
@@ -694,6 +718,7 @@ mod tests {
                 .queue_idle_evict_after_ms,
             Some(123)
         );
+        assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, Some(456));
     }
 
     #[test]
@@ -747,6 +772,7 @@ mod tests {
                 "FIBRIL_ADMIN_PASSWORD" => Some(Ok("env-secret".to_string())),
                 "FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS" => Some(Ok("123".to_string())),
                 "FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS" => Some(Ok("".to_string())),
+                "FIBRIL_RECONNECT_GRACE_MS" => Some(Ok("789".to_string())),
                 _ => None,
             })
             .unwrap();
@@ -772,6 +798,7 @@ mod tests {
                 publisher_idle_timeout_ms: None,
             }
         );
+        assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, Some(789));
     }
 
     #[test]

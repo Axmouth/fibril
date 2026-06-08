@@ -340,6 +340,71 @@ async fn reconnect_grace_accepts_late_ack_after_resume() {
 }
 
 #[tokio::test]
+async fn reconnect_grace_runtime_update_affects_future_disconnects() {
+    let settings = ConnectionSettings::new(Some(60));
+    let (mut first, first_task, dir, broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+
+    let first_ok = handshake_with_resume(&mut first, None).await;
+    framed_subscribe(&mut first, 2, "grace.live", None, false).await;
+    framed_publish(&mut first, 3, "grace.live", None, b"ack-after-live-update").await;
+    let delivered = recv_delivery_for_topic(&mut first, "grace.live").await;
+
+    settings.update_runtime(fibril_protocol::v1::handler::ConnectionRuntimeSettings {
+        reconnect_grace_ms: Some(100),
+        ..Default::default()
+    });
+
+    let resume = ResumeIdentity {
+        owner_id: first_ok.owner_id,
+        client_id: first_ok.client_id,
+        resume_token: first_ok.resume_token,
+    };
+    drop(first);
+    first_task.await.unwrap().unwrap();
+
+    let (mut second, second_task, dir, broker) =
+        open_protocol_connection_for_broker(settings.clone(), broker, dir).await;
+    let second_ok = handshake_with_resume(&mut second, Some(resume)).await;
+    assert_eq!(second_ok.resume_outcome, ResumeOutcome::Resumed);
+
+    second
+        .send(
+            try_encode(
+                Op::Ack,
+                2,
+                &Ack {
+                    topic: "grace.live".into(),
+                    group: None,
+                    partition: 0,
+                    tags: vec![delivered.delivery_tag],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    broker.wait_for_pending_settles().await;
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (mut third, third_task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings, broker, dir).await;
+    handshake(&mut third).await;
+    framed_subscribe(&mut third, 2, "grace.live", None, false).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), third.next())
+            .await
+            .is_err()
+    );
+
+    drop(third);
+    third_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn reconnect_grace_expiry_requeues_unsettled_inflight() {
     let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(100));
     let (mut first, first_task, dir, broker) =
@@ -1160,6 +1225,7 @@ async fn publisher_cache_idle_timeout_updates_existing_connection() {
 
     settings.update_runtime(fibril_protocol::v1::handler::ConnectionRuntimeSettings {
         publisher_cache_idle_timeout_ms: Some(0),
+        ..Default::default()
     });
 
     tokio::time::sleep(Duration::from_millis(1_100)).await;

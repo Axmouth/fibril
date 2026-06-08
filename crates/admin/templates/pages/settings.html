@@ -62,6 +62,24 @@
       </label>
     </section>
 
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Connections</h5>
+        <p>Controls how the broker treats short TCP disconnects from clients that can resume.</p>
+      </div>
+      <label class="settings-field">
+        <span class="settings-label">Reconnect grace</span>
+        <span class="settings-help">Blank disables grace. Otherwise, a disconnected client can resume within this window before its subscriptions are cleaned up.</span>
+        <span class="settings-duration">
+          <input id="connection.reconnect_grace_ms" type="number" min="0" step="1" placeholder="disabled">
+          <select class="duration-unit" id="connection.reconnect_grace_ms.unit" data-for="connection.reconnect_grace_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      </label>
+    </section>
+
     <section class="settings-section" id="idle-section">
       <div class="settings-section-heading">
         <h5>Idle Queue Cleanup <span id="idle-lock" class="settings-lock"></span></h5>
@@ -367,6 +385,7 @@ function renderSettings(data) {
     "idle_queue_cleanup.publisher_idle_timeout_ms",
     data.settings.idle_queue_cleanup.publisher_idle_timeout_ms
   );
+  renderDuration("connection.reconnect_grace_ms", data.settings.connection.reconnect_grace_ms);
 
   currentLocks = data.locks || {};
   setDisabledForLockedGroups();
@@ -417,6 +436,9 @@ function collectSettings() {
       evict_after_ms: durationMsValue("idle_queue_cleanup.evict_after_ms"),
       sweep_interval_ms: durationMsValue("idle_queue_cleanup.sweep_interval_ms"),
       publisher_idle_timeout_ms: optionalDurationMsValue("idle_queue_cleanup.publisher_idle_timeout_ms"),
+    },
+    connection: {
+      reconnect_grace_ms: optionalDurationMsValue("connection.reconnect_grace_ms"),
     },
   };
 }

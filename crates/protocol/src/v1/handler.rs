@@ -360,12 +360,12 @@ struct ResumeResolution {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ConnectionRuntimeSettings {
     pub publisher_cache_idle_timeout_ms: Option<u64>,
+    pub reconnect_grace_ms: Option<u64>,
 }
 
 #[derive(Clone)]
 pub struct ConnectionSettings {
     pub heartbeat_interval: Option<u64>,
-    pub reconnect_grace_ms: Option<u64>,
     runtime: Arc<ArcSwap<ConnectionRuntimeSettings>>,
     resume_sessions: Arc<ResumeSessionRegistry>,
 }
@@ -374,21 +374,22 @@ impl ConnectionSettings {
     pub fn new(heartbeat_interval: Option<u64>) -> Self {
         Self {
             heartbeat_interval,
-            reconnect_grace_ms: None,
             runtime: Arc::new(ArcSwap::from_pointee(ConnectionRuntimeSettings::default())),
             resume_sessions: Arc::new(ResumeSessionRegistry::new()),
         }
     }
 
-    pub fn with_reconnect_grace_ms(mut self, reconnect_grace_ms: Option<u64>) -> Self {
-        self.reconnect_grace_ms = reconnect_grace_ms;
+    pub fn with_reconnect_grace_ms(self, reconnect_grace_ms: Option<u64>) -> Self {
+        let mut runtime = *self.runtime_snapshot();
+        runtime.reconnect_grace_ms = reconnect_grace_ms;
+        self.update_runtime(runtime);
         self
     }
 
     pub fn with_publisher_cache_idle_timeout_ms(self, timeout_ms: Option<u64>) -> Self {
-        self.update_runtime(ConnectionRuntimeSettings {
-            publisher_cache_idle_timeout_ms: timeout_ms,
-        });
+        let mut runtime = *self.runtime_snapshot();
+        runtime.publisher_cache_idle_timeout_ms = timeout_ms;
+        self.update_runtime(runtime);
         self
     }
 
@@ -411,7 +412,6 @@ impl std::fmt::Debug for ConnectionSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectionSettings")
             .field("heartbeat_interval", &self.heartbeat_interval)
-            .field("reconnect_grace_ms", &self.reconnect_grace_ms)
             .field("runtime", &self.runtime_snapshot())
             .field("owner_id", &self.resume_sessions.owner_id)
             .finish()
@@ -1452,13 +1452,14 @@ pub async fn handle_connection(
     }
 
     // ---- Connection closing ------------------------------------------------
-    let entered_grace = connection_settings
+    let reconnect_grace_ms = connection_settings
+        .runtime_snapshot()
         .reconnect_grace_ms
-        .is_some_and(|grace_ms| grace_ms > 0)
-        && logical.mark_dormant(transport_generation);
+        .unwrap_or_default();
+    let entered_grace = reconnect_grace_ms > 0 && logical.mark_dormant(transport_generation);
 
     if entered_grace {
-        let grace_ms = connection_settings.reconnect_grace_ms.unwrap_or_default();
+        let grace_ms = reconnect_grace_ms;
         let broker_for_cleanup = broker.clone();
         let logical_for_cleanup = logical.clone();
         let resume_sessions = connection_settings.resume_sessions.clone();

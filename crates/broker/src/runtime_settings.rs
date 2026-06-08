@@ -15,6 +15,8 @@ pub const RUNTIME_SETTINGS_KEY: &str = "settings";
 pub struct RuntimeSettings {
     pub delivery: DeliveryRuntimeSettings,
     pub idle_queue_cleanup: IdleQueueCleanupRuntimeSettings,
+    #[serde(default)]
+    pub connection: ConnectionRuntimeSettings,
 }
 
 impl RuntimeSettings {
@@ -44,6 +46,7 @@ impl Default for RuntimeSettings {
         Self {
             delivery: DeliveryRuntimeSettings::default(),
             idle_queue_cleanup: IdleQueueCleanupRuntimeSettings::default(),
+            connection: ConnectionRuntimeSettings::default(),
         }
     }
 }
@@ -92,6 +95,13 @@ impl IdleQueueCleanupRuntimeSettings {
     pub fn queue_idle_evict_after_ms(&self) -> Option<u64> {
         self.enabled.then_some(self.evict_after_ms)
     }
+}
+
+/// Runtime connection lifecycle settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConnectionRuntimeSettings {
+    pub reconnect_grace_ms: Option<u64>,
 }
 
 /// Boot-owned locks that prevent selected runtime sections from being overridden by persisted state.
@@ -448,6 +458,9 @@ mod tests {
                 sweep_interval_ms: 6,
                 publisher_idle_timeout_ms: Some(7),
             },
+            connection: ConnectionRuntimeSettings {
+                reconnect_grace_ms: Some(8),
+            },
         };
 
         let decoded = decode_snapshot(GlobalValue {
@@ -479,6 +492,9 @@ mod tests {
                 evict_after_ms: 14,
                 sweep_interval_ms: 15,
                 publisher_idle_timeout_ms: Some(16),
+            },
+            connection: ConnectionRuntimeSettings {
+                reconnect_grace_ms: Some(17),
             },
         };
 

@@ -578,7 +578,7 @@ async fn queue_eviction_skips_broker_delivery_tags() {
 }
 
 #[tokio::test]
-async fn queue_eviction_reports_not_present_when_idle_queue_has_no_storage_handle() {
+async fn queue_eviction_unmaterializes_idle_publisher_without_messages() {
     let (broker, _dir) = open_test_broker().await;
 
     let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
@@ -589,7 +589,7 @@ async fn queue_eviction_reports_not_present_when_idle_queue_has_no_storage_handl
 
     assert_eq!(
         attempt,
-        QueueEvictionAttempt::Storage(EvictOutcome::NotPresent)
+        QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
     );
 }
 

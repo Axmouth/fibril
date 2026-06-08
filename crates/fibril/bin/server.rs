@@ -5,13 +5,16 @@ use fibril_broker::{
     broker::{Broker, BrokerConfig},
     queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine},
     runtime_settings::{
-        DeliveryRuntimeSettings, IdleQueueCleanupRuntimeSettings, RuntimeSettings,
-        RuntimeSettingsLocks, RuntimeSettingsManager,
+        ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, DeliveryRuntimeSettings,
+        IdleQueueCleanupRuntimeSettings, RuntimeSettings, RuntimeSettingsLocks,
+        RuntimeSettingsManager,
     },
 };
 use fibril_config::ServerConfig;
 use fibril_metrics::{Metrics, MetricsConfig};
-use fibril_protocol::v1::handler::{ConnectionRuntimeSettings, ConnectionSettings, run_server};
+use fibril_protocol::v1::handler::{
+    ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings, ConnectionSettings, run_server,
+};
 use fibril_util::{StaticAuthHandler, init_tracing};
 use mimalloc::MiMalloc;
 
@@ -64,6 +67,9 @@ async fn main() -> anyhow::Result<()> {
                 .idle_queue_cleanup
                 .publisher_idle_timeout_ms,
         },
+        connection: BrokerConnectionRuntimeSettings {
+            reconnect_grace_ms: config.runtime_seed.connection.reconnect_grace_ms,
+        },
     };
     let runtime_settings = Arc::new(
         RuntimeSettingsManager::load_from_stroma_engine(
@@ -80,7 +86,8 @@ async fn main() -> anyhow::Result<()> {
     let broker_cfg = BrokerConfig::from_runtime_settings(runtime);
     let broker = Broker::new(engine.clone(), broker_cfg, Some(metrics.broker()));
     let connection_settings = ConnectionSettings::new(None)
-        .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms);
+        .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms)
+        .with_reconnect_grace_ms(runtime.connection.reconnect_grace_ms);
     {
         let broker = broker.clone();
         let connection_settings = connection_settings.clone();
@@ -89,11 +96,12 @@ async fn main() -> anyhow::Result<()> {
             while runtime_updates.changed().await.is_ok() {
                 let snapshot = runtime_updates.borrow().clone();
                 broker.update_config(BrokerConfig::from_runtime_settings(&snapshot.settings));
-                connection_settings.update_runtime(ConnectionRuntimeSettings {
+                connection_settings.update_runtime(ProtocolConnectionRuntimeSettings {
                     publisher_cache_idle_timeout_ms: snapshot
                         .settings
                         .idle_queue_cleanup
                         .publisher_idle_timeout_ms,
+                    reconnect_grace_ms: snapshot.settings.connection.reconnect_grace_ms,
                 });
             }
         });

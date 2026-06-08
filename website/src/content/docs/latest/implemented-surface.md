@@ -320,8 +320,8 @@ See also: [client usage](/latest/clients/),
 [reconnection grace](/latest/development/reconnection-grace/).
 
 Server-side reconnect grace for inflight settles is implemented in the TCP
-handler when grace is configured. Client automation around that behavior is
-still planned.
+handler when `connection.reconnect_grace_ms` is configured. Client automation
+around that behavior is still planned.
 
 | Item | Rust | TypeScript |
 | --- | --- | --- |
@@ -346,8 +346,8 @@ Conditions and limits:
 - Both clients treat content type separately from the header map.
 - Both clients expose delayed publish and delayed retry.
 - TypeScript uses `bigint` for protocol `u64` values such as offsets.
-- Existing publishers and subscriptions are not transparently restored after reconnect.
-- Late settlements after disconnect are not reconciled against a previous connection yet.
+- Existing publishers and subscriptions are not transparently restored by client reconnect loops yet.
+- Late settlements after a short disconnect are accepted only when the client explicitly resumes before grace expires.
 
 ## Benchmarks and Operational Scripts
 

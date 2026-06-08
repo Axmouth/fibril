@@ -51,6 +51,10 @@ sweep_interval_ms = 60000
 # Set this for sparse workloads with long-lived publishing connections.
 # publisher_idle_timeout_ms = 600000
 
+[runtime_seed.connection]
+# Blank or omit to disable reconnect grace.
+# reconnect_grace_ms = 30000
+
 [runtime_locks]
 idle_queue_cleanup = false
 ```
@@ -127,6 +131,14 @@ After runtime settings exist, the persisted values own these settings. You can e
 For sparse workloads, enable publisher idle expiry alongside queue cleanup. Without it, a long-lived connection that published to a queue can keep that queue active until the connection closes.
 
 See [many idle queues](/latest/concepts/many-idle-queues/) for the user-facing behavior.
+
+### Connections
+
+| TOML field | Env/CLI compatibility | Default | Meaning |
+| --- | --- | --- | --- |
+| `runtime_seed.connection.reconnect_grace_ms` | `FIBRIL_RECONNECT_GRACE_MS`, `--reconnect-grace-ms` | unset | Keeps a disconnected resumable client alive for this long before cleaning up subscriptions and requeueing unsettled messages. |
+
+Reconnect grace is disabled when unset. It only helps clients that use the resume identity handshake.
 
 ## Runtime Locks
 

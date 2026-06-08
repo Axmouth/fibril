@@ -818,6 +818,7 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["version"], 1);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 30_000);
+        assert!(body["settings"]["connection"]["reconnect_grace_ms"].is_null());
         assert_eq!(body["locks"]["idle_queue_cleanup"], false);
         assert!(body["load_issue"].is_null());
     }
@@ -870,6 +871,9 @@ mod tests {
                                     "evict_after_ms": 600_000,
                                     "sweep_interval_ms": 60_000,
                                     "publisher_idle_timeout_ms": null
+                                },
+                                "connection": {
+                                    "reconnect_grace_ms": 30_000
                                 }
                             }
                         })
@@ -884,6 +888,7 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["version"], 2);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 12_000);
+        assert_eq!(body["settings"]["connection"]["reconnect_grace_ms"], 30_000);
     }
 
     #[tokio::test]
@@ -919,6 +924,9 @@ mod tests {
                                     "evict_after_ms": 600_000,
                                     "sweep_interval_ms": 60_000,
                                     "publisher_idle_timeout_ms": null
+                                },
+                                "connection": {
+                                    "reconnect_grace_ms": 30_000
                                 }
                             }
                         })
@@ -964,6 +972,9 @@ mod tests {
                                     "evict_after_ms": 600_000,
                                     "sweep_interval_ms": 60_000,
                                     "publisher_idle_timeout_ms": null
+                                },
+                                "connection": {
+                                    "reconnect_grace_ms": null
                                 }
                             }
                         })

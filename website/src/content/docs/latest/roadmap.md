@@ -28,7 +28,7 @@ check what is already wired and under what conditions.
 
 ## Near term
 
-- Wire reconnect grace to production configuration and client reconnect loops.
+- Add automatic client reconnect loops that use reconnect grace.
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
 - Add the next storage-level startup/runtime settings where they have clear operational value.
 - Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.
