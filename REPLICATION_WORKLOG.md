@@ -21,6 +21,11 @@ Replication and sharding should be designed as one cluster model:
   queue identity `(topic, partition, group)`, not one role for the whole Stroma
   instance.
 
+Keratin must stay generic. It may expose local log primitives useful for
+replication, checkpoints, fencing, and repair, but it should not know about
+Fibril brokers, Stroma queues, cluster membership, coordination leases, or
+application-level ownership. Those concepts belong above it.
+
 The first implementation focus should be replication-safe storage primitives,
 not network transport. If a follower cannot apply leader-assigned offsets
 locally, every higher layer would be built on the wrong foundation.
@@ -63,19 +68,19 @@ locally, every higher layer would be built on the wrong foundation.
   because old log ranges were truncated, it should install a checkpoint or
   snapshot and then continue from the checkpoint offset. It should not fill gaps
   with fake records.
+- Keratin role/mode is runtime API protection, not durable truth. On restart,
+  higher layers should decide how to set local log modes after consulting their
+  coordination or configuration source.
 
 ## Pending Decisions
 
-- Exact epoch persistence location in Keratin, Stroma, or both.
-- Whether Keratin epoch tracking is a manifest field, separate metadata file, or
-  both.
 - Whether Keratin should expose distinct handle types for owner logs and
   follower logs, or keep one handle with restricted replicated-append entry
   points.
 - How much snapshot installation belongs in Keratin versus Stroma.
-- Whether `reset_to_checkpoint` is enough for the first follower snapshot path,
-  or whether it should grow into a richer install operation that takes snapshot
-  bytes/checksums in the same transaction.
+- Whether `destructive_reset_to_checkpoint` is enough for the first follower
+  snapshot path, or whether it should grow into a richer install operation that
+  takes snapshot bytes/checksums in the same transaction.
 - First sharding metadata shape for static config and later etcd.
 - What the migration path is from external coordination to Fibril-owned metadata
   without forcing a data-path rewrite.
@@ -139,3 +144,20 @@ locally, every higher layer would be built on the wrong foundation.
   is not the only lifecycle operation; shrinking should eventually be possible
   by marking partitions as no-longer-receiving, draining them, then deleting
   their ownership/data once empty and safe.
+- 2026-06-09: Added a generic Keratin manifest epoch. Replicated append now
+  carries an epoch, rejects stale epochs, and persists newer epochs before
+  applying replicated records. This is local fencing only; Keratin does not know
+  who owns a partition or why an epoch advanced.
+- 2026-06-09: Renamed the public checkpoint primitive to
+  `destructive_reset_to_checkpoint` so the API makes local data deletion obvious.
+  The operation remains follower-gated and still preserves the current Keratin
+  epoch.
+- 2026-06-09: Tightened suffix-overlap replication. `AppendSuffixAfterKnownPrefix`
+  now verifies that the overlapping prefix already stored locally matches the
+  incoming records before appending the missing suffix.
+- 2026-06-09: Rechecked offset tracking while adding tests. `next_offset`,
+  `head_offset`, durable watermark after fsync, exact `fetch`, and reopen
+  behavior now have focused coverage. One existing cleanup item remains:
+  empty-log `durable_offset` is initialized as `0` even though the comment says
+  `u64::MAX if none`; that was not changed in this slice to avoid broadening
+  behavior unexpectedly.
