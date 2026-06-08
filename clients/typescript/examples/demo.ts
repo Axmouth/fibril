@@ -11,6 +11,7 @@
  * Run:
  *   npx tsx examples/demo.ts
  *   FIBRIL_ADDR=127.0.0.1:9876 npx tsx examples/demo.ts
+ *   FIBRIL_DEMO_DURATION_MS=10000 npx tsx examples/demo.ts
  *
  * With auth:
  *   FIBRIL_USER=alice FIBRIL_PASS=secret npx tsx examples/demo.ts
@@ -28,6 +29,7 @@ import {
 const addr = process.env.FIBRIL_ADDR ?? "127.0.0.1:9876";
 const user = process.env.FIBRIL_USER ?? "fibril";
 const pass = process.env.FIBRIL_PASS ?? "fibril";
+const durationMs = Number.parseInt(process.env.FIBRIL_DEMO_DURATION_MS ?? "0", 10);
 
 interface Order {
   id: number;
@@ -66,9 +68,15 @@ const shutdown = (reason: string): void => {
   if (shutdownController.signal.aborted) return;
   console.log(`\nshutting down: ${reason}`);
   shutdownController.abort();
+  orders.close();
+  notices.close();
 };
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));
+let demoTimer: NodeJS.Timeout | null = null;
+if (durationMs > 0) {
+  demoTimer = setTimeout(() => shutdown(`demo duration ${durationMs}ms elapsed`), durationMs);
+}
 
 // ---- producer ----
 
@@ -196,5 +204,6 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 
 await Promise.all([produce(), consumeOrders(orders), consumeNotices(notices)]);
 
+if (demoTimer !== null) clearTimeout(demoTimer);
 await client.shutdown();
 console.log("done");

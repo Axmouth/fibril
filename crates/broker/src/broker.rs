@@ -1042,6 +1042,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 
     fn queue_already_unloaded_since_last_activity(&self, key: &QueueKey) -> bool {
+        // Admin inspection can materialize storage without creating a broker lease.
+        // In that case the previous "unloaded" observation is stale.
+        if self
+            .engine
+            .is_materialized(&key.tp, key.part, key.group.as_deref())
+        {
+            return false;
+        }
         let Some(observation) = self.queue_eviction_observations.get(key) else {
             return false;
         };

@@ -792,6 +792,52 @@ async fn queue_eviction_sweep_does_not_repeat_already_unloaded_queue() {
 }
 
 #[tokio::test]
+async fn queue_eviction_sweep_rechecks_queue_materialized_after_previous_unload() {
+    let (broker, _dir) = open_test_broker().await;
+
+    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    pubh.publish(
+        b"x".to_vec(),
+        Default::default(),
+        Default::default(),
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    drop(pubh);
+    wait_for_queue_idle(&broker, "t", None).await;
+
+    let first = broker.evict_inactive_queues(0).await.unwrap();
+    assert_eq!(
+        first,
+        vec![(
+            "t".to_string(),
+            None,
+            QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
+        )]
+    );
+    assert!(!broker.is_queue_materialized("t", None));
+
+    broker.engine().materialize("t", 0, None).await.unwrap();
+    assert!(broker.is_queue_materialized("t", None));
+
+    let second = broker.evict_inactive_queues(0).await.unwrap();
+    assert_eq!(
+        second,
+        vec![(
+            "t".to_string(),
+            None,
+            QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
+        )]
+    );
+    assert!(!broker.is_queue_materialized("t", None));
+}
+
+#[tokio::test]
 async fn queue_eviction_sweep_unmaterializes_storage_only_materialized_queue() {
     let (engine, _dir) = open_test_engine().await;
     engine.materialize("inspected", 0, None).await.unwrap();
