@@ -21,7 +21,7 @@
 
 Fibril is a message broker focused on durable delivery, retries, leasing, and asynchronous workflow coordination, built from first principles in Rust.
 
-Most applications need reliable queues, clear delivery semantics, reconnect behavior that does not surprise them, and admin operations that are obvious. Fibril optimizes for that path.
+Most applications need durable queues, predictable delivery semantics, reconnect behavior that doesn't surprise them, and operational controls that are easy to understand during incidents. Fibril optimizes for that path.
 
 The project is currently in a pre-alpha stage and under active development. APIs, persistence formats, and operational behavior may still change significantly as the system evolves.
 
