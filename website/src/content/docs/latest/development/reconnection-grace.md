@@ -155,12 +155,16 @@ Current limits:
 - Existing Rust and TypeScript publisher handles use the latest engine after
   explicit or automatic reconnect. New subscriptions also use the latest engine.
 - Active subscription streams continue when reconciliation returns `keep`.
+- Conservative reconciliation drops server-only subscriptions and closes
+  client-only or mismatched subscriptions client-side.
+- The opt-in restore-client-subscriptions policy recreates client-owned
+  subscriptions that are missing server-side and remaps the stream to the new
+  server subscription id.
 - Rust and TypeScript clients make one automatic reconnect attempt before a new
   operation when the old engine is already known closed.
 - In-flight protocol requests from the old socket are not replayed.
 
-Transparent subscription restore and user-facing client automation can come
-later.
+Durable restart recovery and in-flight delivery reconstruction can come later.
 
 ## Implemented Subscription Reconciliation Metadata
 
@@ -171,16 +175,19 @@ connection.
 
 The current client frame includes:
 
+- reconciliation policy
 - topic
 - group
 - sub id
 - partition
 - auto-ack mode
+- prefetch
 
 The broker replies with one result per subscription:
 
 - `keep`
 - `close_client_side`
+- `close_server_side`
 - `recreate_client_side`
 
 The result also carries the client and server view that caused the decision, plus
@@ -192,13 +199,19 @@ receiver.
 
 The current policy is conservative:
 
-- If the client reports a subscription the server no longer has, the result says
-  to close it client-side.
-- If both sides have a subscription id but disagree on topic, group, partition,
-  or auto-ack mode, the result says to recreate it client-side.
-- If the server has a subscription that the client did not report, the result
-  says to recreate it client-side.
-- If both sides match, the result says to keep it.
+- If both sides have matching topic, group, partition, auto-ack mode, and
+  prefetch, the result says to keep it. If only the server subscription id
+  changed, clients remap to the server id.
+- If the client reports a subscription the server no longer has, the result
+  says to close it client-side.
+- If both sides disagree on topic, group, partition, auto-ack mode, or prefetch,
+  the result says to close it client-side.
+- If the server has a subscription that the client did not report, the broker
+  drops it and reports `close_server_side`.
+
+The opt-in restore-client-subscriptions policy differs only for client-only
+subscriptions. The broker recreates the missing subscription, returns `keep`,
+and includes the new server subscription id for the client to use.
 
 This is enough to avoid silent disagreement without pretending to solve durable
 restart recovery.

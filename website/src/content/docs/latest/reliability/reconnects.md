@@ -42,14 +42,31 @@ subscription metadata they still believe is active. The broker compares it with
 the server-side logical connection and replies with a reconciliation result.
 When the broker reports that a subscription should be kept, the client routes
 new deliveries for that subscription back into the existing subscription stream.
+If the broker keeps the subscription with a different server subscription id,
+the clients remap the existing stream to that id.
+
+The default reconciliation policy is conservative:
+
+- Subscriptions present on both sides with matching topic, group, partition,
+  prefetch, and ack mode are kept.
+- Subscriptions reported by the client but missing on the server are closed on
+  the client.
+- Subscriptions with conflicting metadata are closed on the client.
+- Subscriptions present on the server but missing from the client are dropped by
+  the broker, because no client stream is listening for them.
+
+Both clients also expose an opt-in restore policy. With that policy, a
+client-owned subscription that is missing server-side is recreated by the
+broker, and the existing client stream continues with the broker's new
+subscription id. Metadata mismatches are still treated as unsafe.
 
 The clients do not replay operations that were already in flight when the socket
 failed. This avoids silently duplicating confirmed publishes whose frame may
 have reached the broker before the confirmation was lost.
 
-Active subscription recovery is conservative. If resume is not accepted, or the
-broker reports that the client and server disagree about a subscription, treat
-that stream as unsafe and recreate the subscription at the application level.
+If resume is not accepted, or the broker reports that the client and server
+disagree about a subscription, treat that stream as unsafe and recreate the
+subscription at the application level.
 
 Reconnect grace is also not durable restart recovery. If the broker process
 restarts, the in-memory dormant connection state is gone.

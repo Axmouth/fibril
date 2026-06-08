@@ -9,6 +9,10 @@ use fibril_storage::DeliveryTag;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn default_prefetch() -> u32 {
+    1
+}
+
 /// Handshake magic bytes.
 /// IMPORTANT: This field MUST be included and preserved unchanged
 /// in this protocol implementation. It serves as a protocol-level
@@ -211,11 +215,28 @@ pub struct ReconcileSubscription {
     pub group: Option<String>,
     pub partition: u32,
     pub auto_ack: bool,
+    #[serde(default = "default_prefetch")]
+    pub prefetch: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconcileClient {
+    #[serde(default)]
+    pub policy: ReconcilePolicy,
     pub subscriptions: Vec<ReconcileSubscription>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconcilePolicy {
+    Conservative,
+    RestoreClientSubscriptions,
+}
+
+impl Default for ReconcilePolicy {
+    fn default() -> Self {
+        Self::Conservative
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -228,6 +249,7 @@ pub struct ReconcileServer {
 pub enum ReconcileAction {
     Keep,
     CloseClientSide,
+    CloseServerSide,
     RecreateClientSide,
 }
 

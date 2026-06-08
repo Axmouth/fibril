@@ -324,7 +324,9 @@ handler when `connection.reconnect_grace_ms` is configured. Clients now attempt
 one automatic reconnect before a new operation when the old engine is already
 closed. Clients and broker also exchange subscription metadata after a
 successful resume. Active subscription streams continue when reconciliation
-confirms that the subscription should be kept.
+confirms that the subscription should be kept. An opt-in restore policy can ask
+the broker to recreate subscriptions that the client still owns but the server
+does not currently have.
 
 | Item | Rust | TypeScript |
 | --- | --- | --- |
@@ -342,6 +344,7 @@ confirms that the subscription should be kept.
 | Conservative automatic reconnect before new operation | Implemented | Implemented |
 | Subscription reconciliation metadata exchange | Implemented | Implemented |
 | Active subscription recovery after accepted resume | Implemented | Implemented |
+| Opt-in subscription restore after accepted resume | Implemented | Implemented |
 | Delayed retry | Implemented | Implemented |
 | Queue declaration | Implemented | Implemented |
 | Content type helpers | Implemented | Implemented |
@@ -360,6 +363,9 @@ Conditions and limits:
 - Automatic reconnect is bounded by client policy and defaults to one attempt before a new operation.
 - After a successful resume, both clients send known subscription metadata and read the broker reconciliation result.
 - When the broker returns `keep`, both clients route later deliveries for that subscription into the existing stream.
+- If the broker keeps a subscription under a different server `sub_id`, both clients remap the existing stream to that server id.
+- The default reconciliation policy is conservative. Client-only or mismatched subscriptions are closed client-side, while server-only subscriptions are dropped by the broker.
+- The opt-in restore-client-subscriptions policy recreates client-owned subscriptions that are missing server-side, then keeps the existing client stream using the broker's new subscription id.
 - Operations already in flight when the socket fails are not replayed.
 - Active subscriptions still need application-level handling when resume is rejected or reconciliation reports a mismatch.
 - Late settlements after a short disconnect are accepted only when the client explicitly resumes before grace expires.

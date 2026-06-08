@@ -126,6 +126,10 @@ function applyReconcileResult(
     if (!client) continue;
 
     if (item.action !== "keep") {
+      const registered = registry.get(client.sub_id);
+      registered?.delivery.queue.close(
+        new DisconnectionError(`subscription was not kept after reconnect: ${item.reason}`),
+      );
       registry.delete(client.sub_id);
       continue;
     }
@@ -134,6 +138,8 @@ function applyReconcileResult(
     if (!registered) continue;
     const server = item.server ?? client;
     registered.reconcile = server;
+    registry.delete(client.sub_id);
+    registry.set(server.sub_id, registered);
     restored.set(server.sub_id, {
       topic: server.topic,
       group: server.group,
@@ -241,6 +247,7 @@ export class Engine {
     let restoredSubscriptions = new Map<bigint, SubState>();
     if (hello.resume_outcome === "resumed") {
       const reconcile: ReconcileClientMsg = {
+        policy: opts.reconnectReconcilePolicy,
         subscriptions: [...subscriptionRegistry.values()].map((sub) => sub.reconcile),
       };
       await writeFrame(
@@ -621,6 +628,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
               group: ok.group,
               partition: ok.partition,
               auto_ack: false,
+              prefetch: ok.prefetch,
             },
             delivery,
           });
@@ -641,6 +649,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
               group: ok.group,
               partition: ok.partition,
               auto_ack: true,
+              prefetch: ok.prefetch,
             },
             delivery,
           });
@@ -764,8 +773,10 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
   // subscription async iterators throw rather than ending silently.
   for (const [subId, sub] of subs) {
     if (shutdownMode.preserveSubscriptions) {
-      const registered = subscriptionRegistry.get(subId);
-      if (registered?.delivery === sub.delivery) continue;
+      const stillRegistered = [...subscriptionRegistry.values()].some(
+        (registered) => registered.delivery === sub.delivery,
+      );
+      if (stillRegistered) continue;
     }
     sub.delivery.queue.close(cleanupError);
   }

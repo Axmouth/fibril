@@ -29,6 +29,10 @@ check what is already wired and under what conditions.
 - The TCP handler can keep a logical connection dormant during a configured grace window, accept late settles after resume, and requeue unsettled inflight messages when grace expires.
 - Rust and TypeScript clients now send subscription metadata after a successful resume, and the broker replies with a reconciliation result.
 - Rust and TypeScript clients now keep active subscription streams alive when reconciliation confirms the subscription should be kept.
+- Reconnection reconciliation now has a conservative default plus an opt-in
+  restore-client-subscriptions policy. Server-only subscriptions are dropped,
+  metadata mismatches close client streams, and restored subscriptions can remap
+  to a fresh server subscription id.
 
 ## Near term
 

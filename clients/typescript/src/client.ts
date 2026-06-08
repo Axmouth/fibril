@@ -8,6 +8,7 @@ import type {
   AuthMsg,
   DeclareQueueMsg,
   QueueDlqPolicy,
+  ReconcilePolicy,
   ResumeIdentity,
   ResumeOutcome,
 } from "./protocol.js";
@@ -41,6 +42,8 @@ export interface ClientOptionsInit {
   resumeIdentity?: ResumeIdentity;
   /** Automatic reconnect attempts before a new operation when the engine is closed. */
   autoReconnectAttempts?: number;
+  /** Subscription reconciliation policy used after a resumed reconnect. */
+  reconnectReconcilePolicy?: ReconcilePolicy;
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
@@ -58,6 +61,7 @@ export class ClientOptions {
   readonly heartbeatIntervalSeconds: number | undefined;
   readonly resumeIdentity: ResumeIdentity | undefined;
   readonly autoReconnectAttempts: number;
+  readonly reconnectReconcilePolicy: ReconcilePolicy;
 
   constructor(init: ClientOptionsInit = {}) {
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
@@ -66,6 +70,7 @@ export class ClientOptions {
     this.heartbeatIntervalSeconds = init.heartbeatIntervalSeconds;
     this.resumeIdentity = init.resumeIdentity;
     this.autoReconnectAttempts = init.autoReconnectAttempts ?? 1;
+    this.reconnectReconcilePolicy = init.reconnectReconcilePolicy ?? "conservative";
   }
 
   /**
@@ -79,6 +84,7 @@ export class ClientOptions {
       heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
       resumeIdentity: this.resumeIdentity,
       autoReconnectAttempts: this.autoReconnectAttempts,
+      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
     });
   }
 
@@ -93,6 +99,7 @@ export class ClientOptions {
       heartbeatIntervalSeconds: seconds,
       resumeIdentity: this.resumeIdentity,
       autoReconnectAttempts: this.autoReconnectAttempts,
+      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
     });
   }
 
@@ -107,6 +114,7 @@ export class ClientOptions {
       heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
       resumeIdentity,
       autoReconnectAttempts: this.autoReconnectAttempts,
+      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
     });
   }
 
@@ -131,6 +139,22 @@ export class ClientOptions {
       heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
       resumeIdentity: this.resumeIdentity,
       autoReconnectAttempts: maxAttempts,
+      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
+    });
+  }
+
+  /**
+   * Return a copy with a custom reconnect subscription reconciliation policy.
+   */
+  withReconnectReconcilePolicy(policy: ReconcilePolicy): ClientOptions {
+    return new ClientOptions({
+      clientName: this.clientName,
+      clientVersion: this.clientVersion,
+      auth: this.auth,
+      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
+      resumeIdentity: this.resumeIdentity,
+      autoReconnectAttempts: this.autoReconnectAttempts,
+      reconnectReconcilePolicy: policy,
     });
   }
 

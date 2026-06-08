@@ -55,8 +55,8 @@ mod tests {
 
     use super::*;
     use crate::v1::{
-        Hello, ReconcileAction, ReconcileClient, ReconcileResult, ReconcileSubscription,
-        ReconcileSubscriptionResult,
+        Hello, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
+        ReconcileSubscription, ReconcileSubscriptionResult,
     };
 
     #[test]
@@ -89,12 +89,14 @@ mod tests {
     #[test]
     fn reconcile_client_roundtrips() {
         let msg = ReconcileClient {
+            policy: ReconcilePolicy::Conservative,
             subscriptions: vec![ReconcileSubscription {
                 sub_id: 9,
                 topic: "jobs".into(),
                 group: Some("workers".into()),
                 partition: 0,
                 auto_ack: false,
+                prefetch: 32,
             }],
         };
 
@@ -111,6 +113,7 @@ mod tests {
             group: None,
             partition: 0,
             auto_ack: false,
+            prefetch: 1,
         };
         let msg = ReconcileResult {
             subscriptions: vec![ReconcileSubscriptionResult {

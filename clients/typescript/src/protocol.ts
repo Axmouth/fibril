@@ -168,9 +168,13 @@ export interface ReconcileSubscription {
   group: string | null;
   partition: number;
   auto_ack: boolean;
+  prefetch: number;
 }
 
+export type ReconcilePolicy = "conservative" | "restore_client_subscriptions";
+
 export interface ReconcileClientMsg {
+  policy: ReconcilePolicy;
   subscriptions: ReconcileSubscription[];
 }
 
@@ -181,6 +185,7 @@ export interface ReconcileServerMsg {
 export type ReconcileAction =
   | "keep"
   | "close_client_side"
+  | "close_server_side"
   | "recreate_client_side";
 
 export interface ReconcileSubscriptionResult {

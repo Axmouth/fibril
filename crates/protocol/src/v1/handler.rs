@@ -133,69 +133,15 @@ struct SubState {
     sub_id: u64,
     partition: u32,
     auto_ack: bool,
+    prefetch: u32,
+    stats_sub_id: Option<Uuid>,
     state_settler: tokio::sync::mpsc::Sender<SettleRequest>,
     pending_settles: Arc<AtomicUsize>,
     task: tokio::task::JoinHandle<()>,
     _activity_lease: ConsumerLease,
 }
 
-fn reconcile_subscriptions(
-    client_subs: Vec<ReconcileSubscription>,
-    state: &ConnState,
-) -> ReconcileResult {
-    let mut results = Vec::new();
-    let mut seen = HashMap::<SubKey, ()>::new();
-
-    for client in client_subs {
-        let key = (client.topic.clone(), client.group.clone());
-        seen.insert(key.clone(), ());
-        let server = state.subs.get(&key).map(|sub| ReconcileSubscription {
-            sub_id: sub.sub_id,
-            topic: client.topic.clone(),
-            group: client.group.clone(),
-            partition: sub.partition,
-            auto_ack: sub.auto_ack,
-        });
-
-        let (action, reason) = match &server {
-            None => (ReconcileAction::CloseClientSide, "server_missing"),
-            Some(server)
-                if server.sub_id == client.sub_id
-                    && server.partition == client.partition
-                    && server.auto_ack == client.auto_ack =>
-            {
-                (ReconcileAction::Keep, "matched")
-            }
-            Some(_) => (ReconcileAction::RecreateClientSide, "server_mismatch"),
-        };
-
-        results.push(ReconcileSubscriptionResult {
-            client: Some(client),
-            server,
-            action,
-            reason: reason.into(),
-        });
-    }
-
-    for ((topic, group), sub) in &state.subs {
-        if seen.contains_key(&(topic.clone(), group.clone())) {
-            continue;
-        }
-
-        results.push(ReconcileSubscriptionResult {
-            client: None,
-            server: Some(ReconcileSubscription {
-                sub_id: sub.sub_id,
-                topic: topic.clone(),
-                group: group.clone(),
-                partition: sub.partition,
-                auto_ack: sub.auto_ack,
-            }),
-            action: ReconcileAction::RecreateClientSide,
-            reason: "client_missing".into(),
-        });
-    }
-
+fn sort_reconcile_results(results: &mut [ReconcileSubscriptionResult]) {
     results.sort_by(|a, b| {
         let a_sub = a.client.as_ref().or(a.server.as_ref());
         let b_sub = b.client.as_ref().or(b.server.as_ref());
@@ -203,9 +149,20 @@ fn reconcile_subscriptions(
             .map(|sub| (&sub.group, &sub.topic, sub.sub_id))
             .cmp(&b_sub.map(|sub| (&sub.group, &sub.topic, sub.sub_id)))
     });
+}
 
-    ReconcileResult {
-        subscriptions: results,
+fn reconcile_subscription_from_state(
+    topic: &str,
+    group: Option<&str>,
+    sub: &SubState,
+) -> ReconcileSubscription {
+    ReconcileSubscription {
+        sub_id: sub.sub_id,
+        topic: topic.to_string(),
+        group: group.map(str::to_string),
+        partition: sub.partition,
+        auto_ack: sub.auto_ack,
+        prefetch: sub.prefetch,
     }
 }
 
@@ -301,6 +258,322 @@ async fn cleanup_connection_state(
         {
             tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
         }
+    }
+}
+
+async fn remove_subscription(
+    broker: &Arc<Broker<StromaEngine>>,
+    logical: &Arc<LogicalConnection>,
+    connection_stats: &Arc<ConnectionStats>,
+    conn_id: &Uuid,
+    topic: &str,
+    group: Option<&str>,
+) -> Option<ReconcileSubscription> {
+    let key: SubKey = (topic.to_string(), group.map(str::to_string));
+    let sub = {
+        let mut state = logical.state.lock().await;
+        state.subs.remove(&key)
+    }?;
+
+    sub.task.abort();
+    broker.wait_for_pending_settles().await;
+    if let Some(stats_sub_id) = sub.stats_sub_id {
+        connection_stats.remove_sub(conn_id, &stats_sub_id);
+    }
+    if let Err(err) = broker
+        .unsubscribe(topic, group, sub.partition, sub.sub_id)
+        .await
+    {
+        tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
+    }
+
+    Some(ReconcileSubscription {
+        sub_id: sub.sub_id,
+        topic: topic.to_string(),
+        group: group.map(str::to_string),
+        partition: sub.partition,
+        auto_ack: sub.auto_ack,
+        prefetch: sub.prefetch,
+    })
+}
+
+struct InstallSubscriptionArgs {
+    broker: Arc<Broker<StromaEngine>>,
+    logical: Arc<LogicalConnection>,
+    connection_stats: Arc<ConnectionStats>,
+    metrics: Arc<TcpStats>,
+    conn_id: Uuid,
+    client_id: Uuid,
+    req_id_gen: Arc<ReqIdGenerator>,
+    topic: String,
+    group: Option<String>,
+    prefetch: u32,
+    auto_ack: bool,
+}
+
+async fn install_subscription(args: InstallSubscriptionArgs) -> anyhow::Result<SubscribeOk> {
+    let sub_key: SubKey = (args.topic.clone(), args.group.clone());
+
+    if args.logical.state.lock().await.subs.contains_key(&sub_key) {
+        anyhow::bail!("already subscribed");
+    }
+
+    let consumer = args
+        .broker
+        .subscribe(
+            &args.topic,
+            args.group.as_deref(),
+            args.client_id,
+            ConsumerConfig {
+                prefetch: args.prefetch as usize,
+            },
+        )
+        .await
+        .context("subscribe failed")?;
+
+    let ConsumerHandle {
+        messages,
+        settler,
+        sub_id,
+        pending_settles,
+        activity_lease,
+        ..
+    } = consumer;
+
+    let mut transport_rx = args.logical.transport.subscribe();
+
+    let stats_sub_id = args.connection_stats.add_sub(
+        &args.conn_id,
+        args.topic.clone(),
+        args.group.clone(),
+        Instant::now(),
+        args.auto_ack,
+    );
+
+    let settler_clone = settler.clone();
+    let pending_settles_clone = pending_settles.clone();
+    let req_id_gen_clone = args.req_id_gen.clone();
+    let metrics = args.metrics.clone();
+    let auto_ack = args.auto_ack;
+    let handle = tokio::spawn(async move {
+        let mut rx = messages;
+
+        while let Some(msg) = rx.recv().await {
+            let mut headers = msg.message.headers.clone();
+            if msg.message.retried > 0 {
+                headers.insert("fibril.retries".into(), msg.message.retried.to_string());
+            }
+
+            let deliver = Deliver {
+                sub_id,
+                topic: msg.message.topic.clone(),
+                group: msg.group.clone(),
+                partition: msg.message.partition,
+                offset: msg.message.offset,
+                delivery_tag: msg.delivery_tag,
+                published: msg.message.published,
+                publish_received: msg.message.publish_received,
+                content_type: to_protocol_content_type(msg.message.content_type),
+                headers,
+                payload: msg.message.payload.clone(),
+            };
+
+            tracing::debug!("Sending Deliver");
+
+            let frame = match try_encode(Op::Deliver, req_id_gen_clone.next_id(), &deliver) {
+                Ok(frame) => frame,
+                Err(err) => {
+                    tracing::error!("Failed to encode Deliver frame: {err}");
+                    metrics.error();
+                    break;
+                }
+            };
+            if send_to_current_transport(&mut transport_rx, frame)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Failed to send deliver frame to active transport");
+                metrics.error();
+                break;
+            }
+
+            if auto_ack {
+                pending_settles_clone.fetch_add(1, Ordering::AcqRel);
+                let _ = settler
+                    .send(SettleRequest {
+                        settle_type: SettleType::Ack,
+                        delivery_tag: msg.delivery_tag,
+                    })
+                    .await
+                    .inspect_err(|_| {
+                        pending_settles_clone.fetch_sub(1, Ordering::AcqRel);
+                    });
+            }
+        }
+    });
+
+    args.logical.state.lock().await.subs.insert(
+        sub_key,
+        SubState {
+            sub_id,
+            partition: consumer.partition,
+            task: handle,
+            auto_ack: args.auto_ack,
+            prefetch: args.prefetch,
+            stats_sub_id,
+            state_settler: settler_clone,
+            pending_settles,
+            _activity_lease: activity_lease,
+        },
+    );
+
+    Ok(SubscribeOk {
+        sub_id,
+        topic: args.topic,
+        group: args.group,
+        partition: consumer.partition,
+        prefetch: args.prefetch,
+    })
+}
+
+async fn reconcile_subscriptions(
+    broker: Arc<Broker<StromaEngine>>,
+    logical: Arc<LogicalConnection>,
+    connection_stats: Arc<ConnectionStats>,
+    metrics: Arc<TcpStats>,
+    req_id_gen: Arc<ReqIdGenerator>,
+    conn_id: Uuid,
+    client_id: Uuid,
+    reconcile: ReconcileClient,
+) -> ReconcileResult {
+    let mut results = Vec::new();
+    let mut seen = HashMap::<SubKey, ()>::new();
+
+    for client in reconcile.subscriptions {
+        let key: SubKey = (client.topic.clone(), client.group.clone());
+        seen.insert(key.clone(), ());
+
+        let server = {
+            let state = logical.state.lock().await;
+            state.subs.get(&key).map(|sub| {
+                reconcile_subscription_from_state(&client.topic, client.group.as_deref(), sub)
+            })
+        };
+
+        match server {
+            Some(server)
+                if server.partition == client.partition
+                    && server.auto_ack == client.auto_ack
+                    && server.prefetch == client.prefetch =>
+            {
+                let reason = if server.sub_id == client.sub_id {
+                    "matched"
+                } else {
+                    "server_id_changed"
+                };
+                results.push(ReconcileSubscriptionResult {
+                    client: Some(client),
+                    server: Some(server),
+                    action: ReconcileAction::Keep,
+                    reason: reason.into(),
+                });
+            }
+            Some(server) => {
+                results.push(ReconcileSubscriptionResult {
+                    client: Some(client),
+                    server: Some(server),
+                    action: ReconcileAction::CloseClientSide,
+                    reason: "server_mismatch".into(),
+                });
+            }
+            None if reconcile.policy == ReconcilePolicy::RestoreClientSubscriptions => {
+                let restored = install_subscription(InstallSubscriptionArgs {
+                    broker: broker.clone(),
+                    logical: logical.clone(),
+                    connection_stats: connection_stats.clone(),
+                    metrics: metrics.clone(),
+                    conn_id,
+                    client_id,
+                    req_id_gen: req_id_gen.clone(),
+                    topic: client.topic.clone(),
+                    group: client.group.clone(),
+                    prefetch: client.prefetch,
+                    auto_ack: client.auto_ack,
+                })
+                .await;
+
+                match restored {
+                    Ok(ok) => {
+                        let auto_ack = client.auto_ack;
+                        results.push(ReconcileSubscriptionResult {
+                            client: Some(client),
+                            server: Some(ReconcileSubscription {
+                                sub_id: ok.sub_id,
+                                topic: ok.topic,
+                                group: ok.group,
+                                partition: ok.partition,
+                                auto_ack,
+                                prefetch: ok.prefetch,
+                            }),
+                            action: ReconcileAction::Keep,
+                            reason: "server_restored".into(),
+                        });
+                    }
+                    Err(err) => {
+                        tracing::warn!("failed to restore subscription during reconcile: {err}");
+                        results.push(ReconcileSubscriptionResult {
+                            client: Some(client),
+                            server: None,
+                            action: ReconcileAction::CloseClientSide,
+                            reason: "server_restore_failed".into(),
+                        });
+                    }
+                }
+            }
+            None => {
+                results.push(ReconcileSubscriptionResult {
+                    client: Some(client),
+                    server: None,
+                    action: ReconcileAction::CloseClientSide,
+                    reason: "server_missing".into(),
+                });
+            }
+        }
+    }
+
+    let server_only = {
+        let state = logical.state.lock().await;
+        state
+            .subs
+            .keys()
+            .filter(|key| !seen.contains_key(*key))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    for (topic, group) in server_only {
+        if let Some(server) = remove_subscription(
+            &broker,
+            &logical,
+            &connection_stats,
+            &conn_id,
+            &topic,
+            group.as_deref(),
+        )
+        .await
+        {
+            results.push(ReconcileSubscriptionResult {
+                client: None,
+                server: Some(server),
+                action: ReconcileAction::CloseServerSide,
+                reason: "client_missing".into(),
+            });
+        }
+    }
+
+    sort_reconcile_results(&mut results);
+    ReconcileResult {
+        subscriptions: results,
     }
 }
 
@@ -1022,10 +1295,17 @@ pub async fn handle_connection(
             x if x == Op::ReconcileClient as u16 => {
                 let reconcile: ReconcileClient =
                     decode_or_400!(frame, frame_tx_high_prio, metrics, ReconcileClient);
-                let result = {
-                    let state = logical.state.lock().await;
-                    reconcile_subscriptions(reconcile.subscriptions, &state)
-                };
+                let result = reconcile_subscriptions(
+                    broker.clone(),
+                    logical.clone(),
+                    connection_stats.clone(),
+                    metrics.clone(),
+                    req_id_gen.clone(),
+                    conn_id,
+                    client_id,
+                    reconcile,
+                )
+                .await;
                 frame_tx_high_prio
                     .send(try_encode(Op::ReconcileResult, frame.request_id, &result)?)
                     .await?;
@@ -1052,128 +1332,24 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                let consumer = broker
-                    .subscribe(
-                        &sub.topic,
-                        sub.group.as_deref(),
-                        client_id,
-                        ConsumerConfig {
-                            prefetch: sub.prefetch as usize,
-                        },
-                    )
-                    .await
-                    .context("subscribe failed")?;
-
-                let ConsumerHandle {
-                    messages,
-                    settler,
-                    sub_id,
-                    pending_settles,
-                    activity_lease,
-                    ..
-                } = consumer;
-
-                let auto_ack = sub.auto_ack;
-                let mut transport_rx = logical.transport.subscribe();
-
-                connection_stats.add_sub(
-                    &conn_id,
-                    sub.topic.clone(),
-                    sub.group.clone(),
-                    Instant::now(),
-                    auto_ack,
-                );
-
-                let settler_clone = settler.clone();
-                let pending_settles_clone = pending_settles.clone();
-                let req_id_gen_clone = req_id_gen.clone();
-                let handle = tokio::spawn(async move {
-                    let mut rx = messages;
-
-                    while let Some(msg) = rx.recv().await {
-                        let mut headers = msg.message.headers.clone();
-                        if msg.message.retried > 0 {
-                            headers
-                                .insert("fibril.retries".into(), msg.message.retried.to_string());
-                        }
-
-                        let deliver = Deliver {
-                            sub_id,
-                            topic: msg.message.topic.clone(),
-                            group: msg.group.clone(),
-                            partition: msg.message.partition,
-                            offset: msg.message.offset,
-                            delivery_tag: msg.delivery_tag,
-                            published: msg.message.published,
-                            publish_received: msg.message.publish_received,
-                            content_type: to_protocol_content_type(msg.message.content_type),
-                            headers,
-                            payload: msg.message.payload.clone(),
-                        };
-
-                        tracing::debug!("Sending Deliver");
-
-                        // 1. Try to write to socket
-                        let frame =
-                            match try_encode(Op::Deliver, req_id_gen_clone.next_id(), &deliver) {
-                                Ok(frame) => frame,
-                                Err(err) => {
-                                    tracing::error!("Failed to encode Deliver frame: {err}");
-                                    metrics.error();
-                                    break;
-                                }
-                            };
-                        if send_to_current_transport(&mut transport_rx, frame)
-                            .await
-                            .is_err()
-                        {
-                            // Socket dead and logical transport unavailable.
-                            tracing::warn!("Failed to send deliver frame to active transport");
-                            metrics.error();
-                            break;
-                        }
-
-                        // 2. Auto-ack ONLY after successful send
-                        if auto_ack {
-                            pending_settles_clone.fetch_add(1, Ordering::AcqRel);
-                            let _ = settler
-                                .send(SettleRequest {
-                                    settle_type: SettleType::Ack,
-                                    delivery_tag: msg.delivery_tag,
-                                })
-                                .await
-                                .inspect_err(|_| {
-                                    pending_settles_clone.fetch_sub(1, Ordering::AcqRel);
-                                });
-                        }
-                    }
-                });
-
-                logical.state.lock().await.subs.insert(
-                    sub_key,
-                    SubState {
-                        sub_id,
-                        partition: consumer.partition,
-                        task: handle,
-                        auto_ack: sub.auto_ack,
-                        state_settler: settler_clone,
-                        pending_settles,
-                        _activity_lease: activity_lease,
-                    },
-                );
+                let sub_ok = install_subscription(InstallSubscriptionArgs {
+                    broker: broker.clone(),
+                    logical: logical.clone(),
+                    connection_stats: connection_stats.clone(),
+                    metrics: metrics.clone(),
+                    conn_id,
+                    client_id,
+                    req_id_gen: req_id_gen.clone(),
+                    topic: sub.topic,
+                    group: sub.group,
+                    prefetch: sub.prefetch,
+                    auto_ack: sub.auto_ack,
+                })
+                .await
+                .context("subscribe failed")?;
 
                 frame_tx_high_prio
-                    .send(try_encode(
-                        Op::SubscribeOk,
-                        frame.request_id,
-                        &SubscribeOk {
-                            sub_id,
-                            topic: sub.topic,
-                            group: sub.group,
-                            partition: consumer.partition,
-                            prefetch: sub.prefetch,
-                        },
-                    )?)
+                    .send(try_encode(Op::SubscribeOk, frame.request_id, &sub_ok)?)
                     .await?;
             }
 

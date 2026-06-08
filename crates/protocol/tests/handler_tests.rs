@@ -8,8 +8,8 @@ use fibril_broker::{
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
-    Publish, PublishDelayed, QueueDlqPolicy, ReconcileAction, ReconcileClient, ReconcileResult,
-    ReconcileSubscription, ResumeIdentity, ResumeOutcome, Subscribe,
+    Publish, PublishDelayed, QueueDlqPolicy, ReconcileAction, ReconcileClient, ReconcilePolicy,
+    ReconcileResult, ReconcileSubscription, ResumeIdentity, ResumeOutcome, Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
@@ -199,7 +199,7 @@ async fn framed_subscribe(
     topic: &str,
     group: Option<&str>,
     auto_ack: bool,
-) {
+) -> fibril_protocol::v1::SubscribeOk {
     framed
         .send(
             try_encode(
@@ -216,7 +216,9 @@ async fn framed_subscribe(
         )
         .await
         .unwrap();
-    assert_eq!(recv_frame(framed).await.opcode, Op::SubscribeOk as u16);
+    let frame = recv_frame(framed).await;
+    assert_eq!(frame.opcode, Op::SubscribeOk as u16);
+    try_decode(&frame).unwrap()
 }
 
 async fn framed_publish(
@@ -326,12 +328,14 @@ async fn reconcile_after_resume_keeps_matching_subscription() {
                 Op::ReconcileClient,
                 3,
                 &ReconcileClient {
+                    policy: ReconcilePolicy::Conservative,
                     subscriptions: vec![ReconcileSubscription {
                         sub_id: sub_ok.sub_id,
                         topic: sub_ok.topic,
                         group: sub_ok.group,
                         partition: sub_ok.partition,
                         auto_ack: false,
+                        prefetch: sub_ok.prefetch,
                     }],
                 },
             )
@@ -353,7 +357,7 @@ async fn reconcile_after_resume_keeps_matching_subscription() {
 }
 
 #[tokio::test]
-async fn reconcile_after_resume_recreates_mismatched_subscription() {
+async fn reconcile_after_resume_closes_mismatched_subscription() {
     let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(1_000));
     let (mut first, first_task, dir, broker) =
         open_protocol_connection_with_settings(settings.clone()).await;
@@ -398,12 +402,14 @@ async fn reconcile_after_resume_recreates_mismatched_subscription() {
                 Op::ReconcileClient,
                 3,
                 &ReconcileClient {
+                    policy: ReconcilePolicy::Conservative,
                     subscriptions: vec![ReconcileSubscription {
-                        sub_id: sub_ok.sub_id + 1,
+                        sub_id: sub_ok.sub_id,
                         topic: sub_ok.topic,
                         group: sub_ok.group,
                         partition: sub_ok.partition,
                         auto_ack: false,
+                        prefetch: sub_ok.prefetch + 1,
                     }],
                 },
             )
@@ -418,12 +424,124 @@ async fn reconcile_after_resume_recreates_mismatched_subscription() {
     assert_eq!(result.subscriptions.len(), 1);
     assert_eq!(
         result.subscriptions[0].action,
-        ReconcileAction::RecreateClientSide
+        ReconcileAction::CloseClientSide
     );
     assert_eq!(result.subscriptions[0].reason, "server_mismatch");
 
     drop(second);
     second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn conservative_reconcile_drops_server_only_subscription() {
+    let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(1_000));
+    let (mut framed, task, dir, broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+
+    let _hello = handshake_with_resume(&mut framed, None).await;
+    let sub_ok = framed_subscribe(&mut framed, 2, "reconcile.server.only", None, false).await;
+    assert!(
+        broker
+            .queue_activity_snapshot("reconcile.server.only", None)
+            .is_some_and(|snapshot| snapshot.active_subscribers == 1)
+    );
+
+    framed
+        .send(
+            try_encode(
+                Op::ReconcileClient,
+                3,
+                &ReconcileClient {
+                    policy: ReconcilePolicy::Conservative,
+                    subscriptions: vec![],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::ReconcileResult as u16);
+    let result: ReconcileResult = try_decode(&frame).unwrap();
+    assert_eq!(result.subscriptions.len(), 1);
+    assert_eq!(result.subscriptions[0].client, None);
+    assert_eq!(
+        result.subscriptions[0].action,
+        ReconcileAction::CloseServerSide
+    );
+    assert_eq!(result.subscriptions[0].reason, "client_missing");
+    assert_eq!(
+        result.subscriptions[0]
+            .server
+            .as_ref()
+            .map(|sub| sub.sub_id),
+        Some(sub_ok.sub_id)
+    );
+    wait_for_queue_idle(&broker, "reconcile.server.only", None).await;
+
+    drop(framed);
+    task.await.unwrap().unwrap();
+    drop(dir);
+}
+
+#[tokio::test]
+async fn restore_policy_recreates_client_only_subscription() {
+    let (mut framed, task, dir, _broker) =
+        open_protocol_connection_with_settings(ConnectionSettings::new(Some(60))).await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::ReconcileClient,
+                2,
+                &ReconcileClient {
+                    policy: ReconcilePolicy::RestoreClientSubscriptions,
+                    subscriptions: vec![ReconcileSubscription {
+                        sub_id: 99,
+                        topic: "reconcile.restore".into(),
+                        group: Some("workers".into()),
+                        partition: 0,
+                        auto_ack: false,
+                        prefetch: 2,
+                    }],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::ReconcileResult as u16);
+    let result: ReconcileResult = try_decode(&frame).unwrap();
+    assert_eq!(result.subscriptions.len(), 1);
+    let item = &result.subscriptions[0];
+    assert_eq!(item.action, ReconcileAction::Keep);
+    assert_eq!(item.reason, "server_restored");
+    assert_eq!(item.client.as_ref().map(|sub| sub.sub_id), Some(99));
+    let restored = item.server.as_ref().unwrap();
+    assert_ne!(restored.sub_id, 99);
+    assert_eq!(restored.topic, "reconcile.restore");
+    assert_eq!(restored.group.as_deref(), Some("workers"));
+    assert_eq!(restored.prefetch, 2);
+
+    framed_publish(
+        &mut framed,
+        3,
+        "reconcile.restore",
+        Some("workers"),
+        b"restored",
+    )
+    .await;
+    let delivered = recv_delivery_for_topic(&mut framed, "reconcile.restore").await;
+    assert_eq!(delivered.sub_id, restored.sub_id);
+    assert_eq!(delivered.payload, Bytes::from_static(b"restored"));
+
+    drop(framed);
+    task.await.unwrap().unwrap();
+    drop(dir);
 }
 
 #[tokio::test]

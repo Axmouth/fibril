@@ -55,6 +55,12 @@ confirms with `keep` continue on the existing stream. This does not replay
 in-flight publish operations; see [reconnects](/latest/reliability/reconnects/)
 for the current limits.
 
+The default reconciliation policy is conservative. Rust can opt into restoring
+missing server-side subscriptions with
+`reconnect_reconcile_policy(ReconcilePolicy::RestoreClientSubscriptions)`.
+TypeScript can do the same with
+`withReconnectReconcilePolicy("restore_client_subscriptions")`.
+
 ## Publish
 
 Plain publish uses the common unconfirmed path. Confirmed publish waits for the broker to acknowledge the stored message and returns the topic offset. For pipelined confirmed publishing, send with a confirmation handle and await those handles later.

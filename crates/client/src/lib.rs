@@ -772,6 +772,7 @@ fn reconcile_subscription_from_subscribe_ok(
         group: ok.group.clone(),
         partition: ok.partition,
         auto_ack,
+        prefetch: ok.prefetch,
     }
 }
 
@@ -1483,18 +1484,20 @@ fn apply_reconcile_result(
             continue;
         }
 
-        let Some(registered) = registry.get_mut(&client.sub_id) else {
+        let Some(mut registered) = registry.remove(&client.sub_id) else {
             continue;
         };
         let server = item.server.unwrap_or(client);
         registered.reconcile = server.clone();
+        let delivery = registered.delivery.clone();
+        registry.insert(server.sub_id, registered);
         restored.insert(
             server.sub_id,
             SubState {
                 topic: server.topic,
                 group: server.group,
                 partition: server.partition,
-                delivery: registered.delivery.clone(),
+                delivery,
             },
         );
     }
@@ -1626,6 +1629,7 @@ where
     let mut restored_subs = HashMap::<u64, SubState>::new();
     if resume_outcome == ResumeOutcome::Resumed {
         let reconcile = ReconcileClient {
+            policy: opts.reconcile_policy,
             subscriptions: subscriptions
                 .read()
                 .map_err(|_| client_subscription_registry_poisoned())?
@@ -2399,6 +2403,8 @@ pub struct ClientOptions {
     pub resume_identity: Option<ResumeIdentity>,
     /// Automatic reconnect policy for future operations.
     pub auto_reconnect: AutoReconnect,
+    /// How resumed connections reconcile subscriptions after reconnect.
+    pub reconcile_policy: ReconcilePolicy,
 }
 
 impl ClientOptions {
@@ -2413,6 +2419,7 @@ impl ClientOptions {
             heartbeat_interval: None,
             resume_identity: None,
             auto_reconnect: AutoReconnect::default(),
+            reconcile_policy: ReconcilePolicy::Conservative,
         }
     }
 
@@ -2455,6 +2462,14 @@ impl ClientOptions {
     pub fn auto_reconnect_attempts(self, max_attempts: usize) -> Self {
         Self {
             auto_reconnect: AutoReconnect { max_attempts },
+            ..self
+        }
+    }
+
+    /// Return a copy with a custom reconnect subscription reconciliation policy.
+    pub fn reconnect_reconcile_policy(self, reconcile_policy: ReconcilePolicy) -> Self {
+        Self {
+            reconcile_policy,
             ..self
         }
     }
@@ -2703,12 +2718,17 @@ mod tests {
             assert_eq!(reconcile.opcode, Op::ReconcileClient as u16);
             let msg: ReconcileClient = try_decode(&reconcile).unwrap();
             tx.send(msg).await.unwrap();
-            let restored = ReconcileSubscription {
+            let client_sub = ReconcileSubscription {
                 sub_id: 77,
                 topic: "jobs".into(),
                 group: None,
                 partition: 0,
                 auto_ack: false,
+                prefetch: 1,
+            };
+            let restored = ReconcileSubscription {
+                sub_id: 88,
+                ..client_sub.clone()
             };
             second
                 .send(
@@ -2717,10 +2737,10 @@ mod tests {
                         reconcile.request_id,
                         &ReconcileResult {
                             subscriptions: vec![ReconcileSubscriptionResult {
-                                client: Some(restored.clone()),
+                                client: Some(client_sub),
                                 server: Some(restored.clone()),
                                 action: ReconcileAction::Keep,
-                                reason: "matched".into(),
+                                reason: "server_id_changed".into(),
                             }],
                         },
                     )
@@ -2734,7 +2754,7 @@ mod tests {
                         Op::Deliver,
                         88,
                         &Deliver {
-                            sub_id: 77,
+                            sub_id: 88,
                             topic: "jobs".into(),
                             group: None,
                             partition: 0,
@@ -2753,7 +2773,11 @@ mod tests {
                 .unwrap();
         });
 
-        let mut client = ClientOptions::new().connect(addr).await.unwrap();
+        let mut client = ClientOptions::new()
+            .reconnect_reconcile_policy(ReconcilePolicy::RestoreClientSubscriptions)
+            .connect(addr)
+            .await
+            .unwrap();
         let mut sub = client
             .subscribe("jobs")
             .unwrap()
@@ -2767,12 +2791,14 @@ mod tests {
         assert_eq!(
             reconcile,
             ReconcileClient {
+                policy: ReconcilePolicy::RestoreClientSubscriptions,
                 subscriptions: vec![ReconcileSubscription {
                     sub_id: 77,
                     topic: "jobs".into(),
                     group: None,
                     partition: 0,
                     auto_ack: false,
+                    prefetch: 1,
                 }],
             }
         );

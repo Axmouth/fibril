@@ -152,7 +152,10 @@ test("client reconnect offers previous resume identity", async () => {
       }
     };
 
-    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions().withReconnectReconcilePolicy("restore_client_subscriptions"),
+    );
     const outcome = await client.reconnect();
 
     assert.equal(hellos.length, 2);
@@ -262,22 +265,24 @@ test("client sends active subscriptions during reconnect reconciliation", async 
         );
       } else if (f.opcode === Op.ReconcileClient) {
         reconcile = decodeFrameBody<ReconcileClientMsg>(f);
-        const restored = {
+        const clientSub = {
           sub_id: 55n,
           topic: "jobs",
           group: "workers",
           partition: 0,
           auto_ack: false,
+          prefetch: 1,
         };
+        const restored = { ...clientSub, sub_id: 66n };
         broker.send(
           s,
           buildFrame(Op.ReconcileResult, f.requestId, {
             subscriptions: [
               {
-                client: restored,
+                client: clientSub,
                 server: restored,
                 action: "keep",
-                reason: "matched",
+                reason: "server_id_changed",
               },
             ],
           }),
@@ -285,7 +290,7 @@ test("client sends active subscriptions during reconnect reconciliation", async 
         broker.send(
           s,
           buildFrame(Op.Deliver, 99n, {
-            sub_id: 55n,
+            sub_id: 66n,
             topic: "jobs",
             group: "workers",
             partition: 0,
@@ -301,12 +306,16 @@ test("client sends active subscriptions during reconnect reconciliation", async 
       }
     };
 
-    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions().withReconnectReconcilePolicy("restore_client_subscriptions"),
+    );
     const sub = await client.subscribe("jobs").group("workers").subManualAck();
     const outcome = await client.reconnect();
 
     assert.equal(outcome.resumeOutcome, "resumed");
     assert.deepEqual(reconcile, {
+      policy: "restore_client_subscriptions",
       subscriptions: [
         {
           sub_id: 55n,
@@ -314,6 +323,7 @@ test("client sends active subscriptions during reconnect reconciliation", async 
           group: "workers",
           partition: 0,
           auto_ack: false,
+          prefetch: 1,
         },
       ],
     });
