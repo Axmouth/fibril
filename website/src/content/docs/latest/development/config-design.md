@@ -341,15 +341,13 @@ Done:
 - live broker runtime config snapshots with settings-change wakeups
 - live publisher idle expiry updates for existing TCP connections
 
-Next implementation slices:
+Useful follow-up work:
 
-1. Expand docs with the final user-facing config file reference once names settle.
+1. Add an operator-facing reset or repair flow for corrupted runtime settings.
 2. Add more focused admin route/UI tests once the admin test harness is less ad hoc.
 
 ## Open Questions
 
-- Exact config file discovery: default `fibril.toml`, `FIBRIL_CONFIG`, CLI `--config`, or all three.
-- Whether runtime locks should be implemented with the first persisted settings slice or only reserved in the schema.
 - Whether the global store belongs directly in Stroma core or in an adjacent Stroma metadata module.
 - Whether a global store snapshot format should be shared with queue snapshots or kept fully separate.
 - Exact admin auth model for mutation once read-only admin access exists.

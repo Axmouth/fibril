@@ -24,6 +24,9 @@ Status meanings:
 
 ## Queue Identity
 
+See also: [core model](/latest/concepts/core-model/) and
+[partition routing](/latest/development/partition-routing/).
+
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Topic plus optional group | Implemented | Broker, protocol, Rust client, TypeScript client, admin API, CLI |
@@ -38,6 +41,9 @@ Conditions and limits:
 - Future sharding should choose partitions inside Fibril.
 
 ## Durable Queue State
+
+See also: [reliability semantics](/latest/reliability/semantics/) and
+[many idle queues](/latest/concepts/many-idle-queues/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -56,6 +62,9 @@ Conditions and limits:
 
 ## Publish
 
+See also: [client usage](/latest/clients/) and
+[retries and delays](/latest/reliability/retries-delays/).
+
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Unconfirmed publish | Implemented | TCP protocol, Rust client, TypeScript client |
@@ -68,13 +77,16 @@ Conditions and limits:
 Conditions and limits:
 
 - Confirmed publish returns the broker-assigned offset.
-- Unconfirmed publish only waits for the local client engine or command path, not for broker persistence confirmation.
+- Unconfirmed client calls only wait for the local client engine or command path, not for a broker-assigned offset.
 - Delayed publish uses a distinct delayed-publish frame and a `not_before` deadline.
 - Content type is stored outside the user header map for common cases.
 - Manual `content-type` headers are interpreted as content type metadata by clients.
 - Broker-side validation rejects reserved system header prefixes on normal and delayed publish.
 
 ## Subscribe and Delivery
+
+See also: [backpressure](/latest/concepts/backpressure/) and
+[client usage](/latest/clients/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -94,6 +106,10 @@ Conditions and limits:
 
 ## Settlement, Retry, and Leasing
 
+See also: [core model](/latest/concepts/core-model/),
+[reliability semantics](/latest/reliability/semantics/), and
+[retries and delays](/latest/reliability/retries-delays/).
+
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Ack | Implemented | TCP protocol, Rust client, TypeScript client |
@@ -112,6 +128,9 @@ Conditions and limits:
 - Lease timing is controlled by runtime settings.
 
 ## Dead Lettering
+
+See also: [dead lettering](/latest/reliability/dead-lettering/) and
+[metadata policy](/latest/development/metadata-policy/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -134,6 +153,9 @@ Conditions and limits:
 
 ## Message Inspection
 
+See also: [admin dashboard](/latest/admin-dashboard/) and
+[dead lettering](/latest/reliability/dead-lettering/).
+
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Inspect active queue messages | Implemented | Admin API, admin dashboard, `fibrilctl` |
@@ -148,13 +170,16 @@ Conditions and limits:
 - By default, inspection returns messages still active in queue state.
 - Active states include ready, inflight, delayed, and pending DLQ.
 - Settled records can be included explicitly.
-- If state and persisted payload cannot both be found for a row, the dashboard should avoid showing misleading content.
+- Offsets without matching inspectable state or log records are skipped rather than shown as misleading partial rows.
 - Default page size is `50`.
 - Current API hard cap is `5000` messages per request.
 - Payload previews default to `4096` bytes and cap at `1048576` bytes.
 - Inspection reads persisted data and can affect realtime performance on large requests.
 
 ## Sparse Queues and Idle Cleanup
+
+See also: [many idle queues](/latest/concepts/many-idle-queues/) and
+[idle queue internals](/latest/development/idle-queue-internals/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -176,6 +201,7 @@ Conditions for a queue to be unloaded from memory:
 - storage reports no inflight messages
 - the configured idle window has elapsed
 - the cleanup sweep reaches that queue
+- storage accepts the unmaterialization attempt
 
 Conditions that keep a queue in memory or skip cleanup:
 
@@ -205,6 +231,10 @@ Observability currently includes:
 
 ## Runtime Settings and Startup Config
 
+See also: [configuration](/latest/configuration/),
+[configuration policy](/latest/development/config-policy/), and
+[configuration design](/latest/development/config-design/).
+
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | TOML startup config | Implemented | Config crate and server binary |
@@ -215,7 +245,7 @@ Observability currently includes:
 | Runtime idle cleanup settings | Implemented | Runtime settings manager, admin UI/API, broker worker |
 | Runtime locks | Implemented | Locked groups reject admin edits |
 | Global DLQ runtime state | Implemented | Stroma-owned versioned setting |
-| Corrupt runtime settings recovery UI | Planned | Load issue reporting exists, richer operator reset flow is pending |
+| Corrupt runtime settings recovery UI | Partial | Load issue reporting exists, richer operator reset flow is pending |
 
 Conditions and limits:
 
@@ -224,9 +254,11 @@ Conditions and limits:
 - Runtime seeds initialize persisted runtime settings only when no runtime settings exist.
 - After runtime settings exist, persisted state owns those values unless a group is locked by startup config.
 - Runtime updates use expected versions to detect concurrent edits.
-- Locked runtime groups return a locked-style response rather than silently applying changes.
+- Locked runtime groups reject admin edits instead of silently applying changes.
 
 ## Admin Surface
+
+See also: [admin dashboard](/latest/admin-dashboard/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -248,6 +280,9 @@ Conditions and limits:
 
 ## CLI Surface
 
+See also: [source deployment](/latest/deployment/source/) and
+[dead lettering](/latest/reliability/dead-lettering/).
+
 | Item | Status | Implemented command |
 | --- | --- | --- |
 | Queue declaration | Implemented | `fibrilctl queue declare` |
@@ -265,6 +300,9 @@ Conditions and limits:
 - Container usage assumes the CLI runs where it can reach the broker or admin surface.
 
 ## Client Surface
+
+See also: [client usage](/latest/clients/) and
+[quickstart](/latest/quickstart/).
 
 | Item | Rust | TypeScript |
 | --- | --- | --- |
@@ -291,6 +329,8 @@ Conditions and limits:
 
 ## Benchmarks and Operational Scripts
 
+See also: [benchmarks](/latest/benchmarks/).
+
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Throughput benchmark | Implemented | Rust bench helper and shell scripts |
@@ -306,6 +346,8 @@ Conditions and limits:
 - Hardware, storage, durability settings, payload size, queue depth, and batching strongly affect results.
 
 ## Deployment Surface
+
+See also: [source deployment](/latest/deployment/source/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
