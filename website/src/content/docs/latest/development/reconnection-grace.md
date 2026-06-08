@@ -48,10 +48,12 @@ again through the normal paths.
 
 Protocol:
 
-- HELLO carries client name, client version, and protocol version.
-- HELLO OK returns protocol version and a server-issued `client_id`.
-- There is no resume field in HELLO.
-- There is no reconciliation frame.
+- HELLO carries client name, client version, protocol version, and optionally a
+  previously issued resume identity.
+- HELLO OK returns protocol version, a server-issued `client_id`, resume token,
+  owner id, and a resume outcome.
+- The protocol has a subscription reconciliation metadata frame and result
+  frame.
 
 Broker:
 
@@ -60,6 +62,10 @@ Broker:
   offset, and consumer id.
 - unsubscribe removes the consumer and requeues matching inflight offsets.
 - `next_sub_id` is process-local and starts from `1`.
+- reconnect grace can keep a logical connection dormant instead of immediately
+  unsubscribing it.
+- after a successful resume, the broker can compare client-reported
+  subscription metadata with the dormant logical connection.
 
 Storage:
 
@@ -76,7 +82,7 @@ Future topology:
 - Resume identity should be scoped so one partition owner cannot accidentally
   claim another owner's live connection state.
 
-## Implemented First Slice
+## Implemented Resume Identity
 
 Add explicit resume identity to the connection handshake.
 
@@ -144,11 +150,12 @@ Current limits:
   `connection.reconnect_grace_ms`.
 - The setting is seeded by `runtime_seed.connection.reconnect_grace_ms` when no
   persisted runtime settings document exists yet.
-- Existing subscriptions are preserved server-side, but clients do not yet have
-  active subscription reconciliation that hides the socket break.
+- Existing subscriptions are preserved server-side, and clients send
+  subscription metadata after a successful resume.
 - Existing Rust and TypeScript publisher handles use the latest engine after
   explicit or automatic reconnect. New subscriptions also use the latest engine.
-  Active subscription streams still need reconciliation.
+  Active subscription streams still need automatic recovery based on the
+  reconciliation result.
 - Rust and TypeScript clients make one automatic reconnect attempt before a new
   operation when the old engine is already known closed.
 - In-flight protocol requests from the old socket are not replayed.
@@ -156,72 +163,63 @@ Current limits:
 Transparent subscription restore and user-facing client automation can come
 later.
 
-## Proposed Reconciliation Slice
+## Implemented Subscription Reconciliation Metadata
 
-Add a lightweight reconciliation exchange after a successful resume.
+After a successful resume, Rust and TypeScript clients send a lightweight
+subscription reconciliation frame. This frame tells the broker which
+subscriptions the client still believes belong to the resumed logical
+connection.
 
-Two directional frames keep the protocol easier to reason about than one
-overloaded frame:
-
-- client-to-server: "this is what I still believe I own"
-- server-to-client: "this is what I still believe this logical connection owns"
-
-Each direction should have an explicit result frame so both sides know what was
-kept, closed, or missing.
-
-### Client View Frame
-
-The client sends the subscriptions and local inflight messages it still has:
+The current client frame includes:
 
 - topic
 - group
-- old sub id, if known
+- sub id
+- partition
+- auto-ack mode
+
+The broker replies with one result per subscription:
+
+- `keep`
+- `close_client_side`
+- `recreate_client_side`
+
+The result also carries the client and server view that caused the decision, plus
+a short reason string. The broker currently uses this to report matched,
+missing, or mismatched subscription metadata. Clients read the result after
+resume, but they do not yet automatically rebuild active application streams
+from it.
+
+The current policy is conservative:
+
+- If the client reports a subscription the server no longer has, the result says
+  to close it client-side.
+- If both sides have a subscription id but disagree on topic, group, partition,
+  or auto-ack mode, the result says to recreate it client-side.
+- If the server has a subscription that the client did not report, the result
+  says to recreate it client-side.
+- If both sides match, the result says to keep it.
+
+This is enough to avoid silent disagreement without pretending to solve durable
+restart recovery.
+
+## Remaining Reconciliation Work
+
+The next step is active subscription stream recovery. That means using the
+reconciliation result to either keep, close, or recreate the user-visible stream
+instead of only recording that the two sides disagreed.
+
+Inflight delivery reconciliation is also not done yet. A future version may need
+additional frames or fields for:
+
 - delivery tag
 - offset
-- client-side status, such as processing, settled locally, or abandoned
+- local processing status
+- local settle status
+- lease deadline
 
-The broker replies with one result per item:
-
-- accepted
-- already settled
-- requeued
-- expired
-- unknown
-- subscription missing
-
-Unknown or rejected items must not be kept by the client as valid inflight
-work.
-
-### Server View Frame
-
-The broker sends the subscriptions and inflight offsets it still has for the
-resumed logical connection:
-
-- topic
-- group
-- server sub id
-- delivery tag
-- offset
-- lease deadline, if available
-
-The client replies with one result per item:
-
-- present locally
-- missing locally
-- should close subscription
-- should recreate subscription
-
-For the first version, the safest policy is conservative cleanup:
-
-- If the client reports a subscription the server no longer has, close it on the
-  client and let the user recreate it.
-- If the server reports a subscription the client no longer has, close it on the
-  server so its inflight work can be returned.
-- If both sides have the subscription but disagree on inflight work, only keep
-  entries both sides explicitly accept.
-
-This is enough to avoid silent split-brain behavior without requiring full
-durable restart recovery.
+If a server-to-client reconciliation view is added later, keep it separate from
+the client-to-server frame so each direction has a clear owner and result.
 
 ## Durable Restart Scope
 

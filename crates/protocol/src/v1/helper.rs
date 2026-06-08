@@ -54,7 +54,10 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::v1::Hello;
+    use crate::v1::{
+        Hello, ReconcileAction, ReconcileClient, ReconcileResult, ReconcileSubscription,
+        ReconcileSubscriptionResult,
+    };
 
     #[test]
     fn try_decode_returns_error_for_malformed_payload() {
@@ -81,5 +84,45 @@ mod tests {
         let error: ErrorMsg = try_decode(&frame).unwrap();
         assert_eq!(error.code, 400);
         assert_eq!(error.message, "bad request");
+    }
+
+    #[test]
+    fn reconcile_client_roundtrips() {
+        let msg = ReconcileClient {
+            subscriptions: vec![ReconcileSubscription {
+                sub_id: 9,
+                topic: "jobs".into(),
+                group: Some("workers".into()),
+                partition: 0,
+                auto_ack: false,
+            }],
+        };
+
+        let frame = try_encode(Op::ReconcileClient, 11, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReconcileClient as u16);
+        assert_eq!(try_decode::<ReconcileClient>(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn reconcile_result_roundtrips() {
+        let client = ReconcileSubscription {
+            sub_id: 9,
+            topic: "jobs".into(),
+            group: None,
+            partition: 0,
+            auto_ack: false,
+        };
+        let msg = ReconcileResult {
+            subscriptions: vec![ReconcileSubscriptionResult {
+                client: Some(client),
+                server: None,
+                action: ReconcileAction::CloseClientSide,
+                reason: "server_missing".into(),
+            }],
+        };
+
+        let frame = try_encode(Op::ReconcileResult, 12, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReconcileResult as u16);
+        assert_eq!(try_decode::<ReconcileResult>(&frame).unwrap(), msg);
     }
 }

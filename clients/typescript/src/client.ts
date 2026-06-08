@@ -1,5 +1,5 @@
 import { connect as netConnect, type Socket } from "node:net";
-import { Engine } from "./engine.js";
+import { Engine, type SubscriptionRegistry } from "./engine.js";
 import { BrokenPipeError, DisconnectionError, FibrilError } from "./errors.js";
 import { deferred } from "./internal/deferred.js";
 import { Publisher } from "./publisher.js";
@@ -313,15 +313,18 @@ export class Client {
   #engine: EngineSlot;
   #reconnectPromise: Promise<void> | null = null;
   #userShutdown = false;
+  readonly #subscriptions: SubscriptionRegistry;
 
   private constructor(
     address: { host: string; port: number },
     opts: ClientOptions,
     engine: Engine,
+    subscriptions: SubscriptionRegistry,
   ) {
     this.#address = address;
     this.#opts = opts;
     this.#engine = new EngineSlot(engine);
+    this.#subscriptions = subscriptions;
   }
 
   /**
@@ -336,9 +339,10 @@ export class Client {
   ): Promise<Client> {
     const addr = parseAddress(address);
     const socket = await openSocket(addr.host, addr.port);
+    const subscriptions: SubscriptionRegistry = new Map();
     let engine: Engine;
     try {
-      engine = await Engine.start(socket, opts);
+      engine = await Engine.start(socket, opts, subscriptions);
     } catch (err) {
       socket.destroy();
       if (err instanceof FibrilError) throw err;
@@ -346,7 +350,7 @@ export class Client {
         `Engine failed to start: ${(err as Error).message}`,
       );
     }
-    return new Client(addr, opts, engine);
+    return new Client(addr, opts, engine, subscriptions);
   }
 
   /**
@@ -371,6 +375,7 @@ export class Client {
       engine = await Engine.start(
         socket,
         this.#opts.withResumeIdentity(oldEngine.resumeIdentity),
+        this.#subscriptions,
       );
     } catch (err) {
       socket.destroy();

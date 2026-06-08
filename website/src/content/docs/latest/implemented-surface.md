@@ -322,7 +322,8 @@ See also: [client usage](/latest/clients/),
 Server-side reconnect grace for inflight settles is implemented in the TCP
 handler when `connection.reconnect_grace_ms` is configured. Clients now attempt
 one automatic reconnect before a new operation when the old engine is already
-closed. Transparent active subscription recovery is still planned.
+closed. Clients and broker also exchange subscription metadata after a
+successful resume. Transparent active subscription recovery is still planned.
 
 | Item | Rust | TypeScript |
 | --- | --- | --- |
@@ -338,6 +339,7 @@ closed. Transparent active subscription recovery is still planned.
 | Existing publishers after explicit reconnect | Implemented | Implemented |
 | New subscriptions after explicit reconnect | Implemented | Implemented |
 | Conservative automatic reconnect before new operation | Implemented | Implemented |
+| Subscription reconciliation metadata exchange | Implemented | Implemented |
 | Active subscription recovery after reconnect | Planned | Planned |
 | Delayed retry | Implemented | Implemented |
 | Queue declaration | Implemented | Implemented |
@@ -355,6 +357,7 @@ Conditions and limits:
 - Publisher handles use the latest client engine after explicit or automatic reconnect.
 - New subscriptions created after reconnect use the latest client engine.
 - Automatic reconnect is bounded by client policy and defaults to one attempt before a new operation.
+- After a successful resume, both clients send known subscription metadata and read the broker reconciliation result.
 - Operations already in flight when the socket fails are not replayed.
 - Active subscription streams created before reconnect are not transparently restored yet.
 - Late settlements after a short disconnect are accepted only when the client explicitly resumes before grace expires.

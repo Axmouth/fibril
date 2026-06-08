@@ -52,6 +52,10 @@ pub enum Op {
     DeclareQueue = 60,
     DeclareQueueOk = 61,
 
+    ReconcileClient = 70,
+    ReconcileServer = 71,
+    ReconcileResult = 72,
+
     Error = 255,
 }
 
@@ -198,6 +202,46 @@ pub struct SubscribeOk {
     pub group: Option<String>,
     pub partition: u32,
     pub prefetch: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileSubscription {
+    pub sub_id: u64,
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: u32,
+    pub auto_ack: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileClient {
+    pub subscriptions: Vec<ReconcileSubscription>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileServer {
+    pub subscriptions: Vec<ReconcileSubscription>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconcileAction {
+    Keep,
+    CloseClientSide,
+    RecreateClientSide,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileSubscriptionResult {
+    pub client: Option<ReconcileSubscription>,
+    pub server: Option<ReconcileSubscription>,
+    pub action: ReconcileAction,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconcileResult {
+    pub subscriptions: Vec<ReconcileSubscriptionResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

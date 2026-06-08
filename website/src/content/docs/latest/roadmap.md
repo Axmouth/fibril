@@ -24,13 +24,14 @@ check what is already wired and under what conditions.
 - The admin dashboard has moved to the same visual language as the public site, with Clarity removed from the vendored UI assets.
 - The TypeScript client tracks the Rust client for delayed publish, confirmed publish pipelining, content-type metadata, queue declaration, and group-default behavior.
 - Reconnection resume identity is now part of the TCP handshake, and Rust and TypeScript explicit reconnect calls send it and report whether resume was accepted.
-- Existing Rust and TypeScript publisher handles use the latest engine after explicit reconnect, while active subscription reconciliation remains planned.
+- Existing Rust and TypeScript publisher handles use the latest engine after explicit reconnect.
 - Rust and TypeScript clients make one conservative automatic reconnect attempt before a new operation when the previous engine is known closed.
 - The TCP handler can keep a logical connection dormant during a configured grace window, accept late settles after resume, and requeue unsettled inflight messages when grace expires.
+- Rust and TypeScript clients now send subscription metadata after a successful resume, and the broker replies with a reconciliation result.
 
 ## Near term
 
-- Add subscription reconciliation frames and active subscription recovery after reconnect.
+- Use subscription reconciliation results to restore or close active subscription streams after reconnect.
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
 - Add the next storage-level startup/runtime settings where they have clear operational value.
 - Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.

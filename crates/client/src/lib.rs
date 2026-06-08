@@ -756,6 +756,25 @@ fn decode_protocol<T: for<'de> serde::Deserialize<'de>>(frame: &Frame) -> Fibril
     })
 }
 
+fn client_subscription_registry_poisoned() -> FibrilError {
+    FibrilError::Unexpected {
+        msg: "client subscription registry poisoned".into(),
+    }
+}
+
+fn reconcile_subscription_from_subscribe_ok(
+    ok: &SubscribeOk,
+    auto_ack: bool,
+) -> ReconcileSubscription {
+    ReconcileSubscription {
+        sub_id: ok.sub_id,
+        topic: ok.topic.clone(),
+        group: ok.group.clone(),
+        partition: ok.partition,
+        auto_ack,
+    }
+}
+
 enum Waiter {
     Publish(oneshot::Sender<FibrilResult<u64>>),
     DeclareQueue(oneshot::Sender<FibrilResult<()>>),
@@ -967,7 +986,8 @@ impl Client {
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
         let framed = Framed::new(stream, ProtoCodec);
 
-        let engine = start_engine(framed, opts.clone()).await?;
+        let subscriptions = Arc::new(RwLock::new(HashMap::new()));
+        let engine = start_engine(framed, opts.clone(), subscriptions.clone()).await?;
         Ok(Client {
             shared: Arc::new(ClientShared {
                 address,
@@ -975,6 +995,7 @@ impl Client {
                 engine: Arc::new(EngineSlot::new(engine)),
                 reconnect_lock: Mutex::new(()),
                 user_shutdown: AtomicBool::new(false),
+                subscriptions,
             }),
         })
     }
@@ -1257,6 +1278,7 @@ struct ClientShared {
     engine: Arc<EngineSlot>,
     reconnect_lock: Mutex<()>,
     user_shutdown: AtomicBool,
+    subscriptions: Arc<RwLock<HashMap<u64, ReconcileSubscription>>>,
 }
 
 impl ClientShared {
@@ -1269,7 +1291,7 @@ impl ClientShared {
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
 
         let framed = Framed::new(stream, ProtoCodec);
-        let new_engine = start_engine(framed, opts).await?;
+        let new_engine = start_engine(framed, opts, self.subscriptions.clone()).await?;
         let outcome = ReconnectOutcome {
             resume_outcome: new_engine.resume_outcome,
         };
@@ -1465,6 +1487,7 @@ where
 async fn start_engine<S>(
     mut framed: Framed<S, ProtoCodec>,
     opts: ClientOptions,
+    subscriptions: Arc<RwLock<HashMap<u64, ReconcileSubscription>>>,
 ) -> FibrilResult<Arc<EngineHandle>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1556,6 +1579,40 @@ where
         }
     }
 
+    if resume_outcome == ResumeOutcome::Resumed {
+        let reconcile = ReconcileClient {
+            subscriptions: subscriptions
+                .read()
+                .map_err(|_| client_subscription_registry_poisoned())?
+                .values()
+                .cloned()
+                .collect(),
+        };
+        send_protocol_frame(&mut framed, Op::ReconcileClient, 3, &reconcile).await?;
+        let frame = framed
+            .next()
+            .await
+            .ok_or(FibrilError::Eof)?
+            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+        match frame.opcode {
+            x if x == Op::ReconcileResult as u16 => {
+                let _result: ReconcileResult = decode_protocol(&frame)?;
+            }
+            x if x == Op::Error as u16 => {
+                let err: ErrorMsg = decode_protocol(&frame)?;
+                return Err(FibrilError::Failure {
+                    code: err.code,
+                    msg: err.message,
+                });
+            }
+            _ => {
+                return Err(FibrilError::Unexpected {
+                    msg: format!("Unexpected reconcile frame: opcode {}", frame.opcode),
+                });
+            }
+        }
+    }
+
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(8192);
     let handle = Arc::new(EngineHandle {
         tx: cmd_tx.clone(),
@@ -1565,6 +1622,7 @@ where
     });
 
     let mut subs = HashMap::<u64, SubState>::new();
+    let subscription_registry = subscriptions.clone();
 
     let shutdown_engine = shutdown.clone();
     let shutdown_acks = shutdown.clone();
@@ -1576,7 +1634,7 @@ where
 
     // writer + reader loop
     tokio::spawn(async move {
-        let mut next_req = 1u64;
+        let mut next_req = 4u64;
         let mut waiters: HashMap<u64, Waiter> = HashMap::new();
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(heartbeat_secs));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1865,6 +1923,21 @@ where
                                             partition: ok.partition,
                                             delivery: SubDelivery::Manual(txm),
                                         });
+                                        match subscription_registry.write() {
+                                            Ok(mut registry) => {
+                                                registry.insert(
+                                                    ok.sub_id,
+                                                    reconcile_subscription_from_subscribe_ok(
+                                                        &ok, false,
+                                                    ),
+                                                );
+                                            }
+                                            Err(_) => {
+                                                fatal_error =
+                                                    Some(client_subscription_registry_poisoned());
+                                                break;
+                                            }
+                                        }
 
                                         let res = tx.send(Ok(AckableSubChannel { manual: rxm }));
 
@@ -1882,6 +1955,21 @@ where
                                             partition: ok.partition,
                                             delivery: SubDelivery::Auto(txa),
                                         });
+                                        match subscription_registry.write() {
+                                            Ok(mut registry) => {
+                                                registry.insert(
+                                                    ok.sub_id,
+                                                    reconcile_subscription_from_subscribe_ok(
+                                                        &ok, true,
+                                                    ),
+                                                );
+                                            }
+                                            Err(_) => {
+                                                fatal_error =
+                                                    Some(client_subscription_registry_poisoned());
+                                                break;
+                                            }
+                                        }
 
                                         let res = tx.send(Ok(AutoAckedSubChannel { auto: rxa }));
 
@@ -2399,6 +2487,7 @@ mod tests {
                     engine: Arc::new(EngineSlot::new(engine)),
                     reconnect_lock: Mutex::new(()),
                     user_shutdown: AtomicBool::new(false),
+                    subscriptions: Arc::new(RwLock::new(HashMap::new())),
                 }),
             },
             rx,
@@ -2462,6 +2551,133 @@ mod tests {
             other => panic!("expected unconfirmed publish, got {other:?}"),
         }
         assert!(old_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn reconnect_sends_active_subscription_reconciliation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let server = tokio::spawn(async move {
+            let owner_id = uuid::Uuid::new_v4();
+            let client_id = uuid::Uuid::new_v4();
+            let resume_token = uuid::Uuid::new_v4();
+
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = Framed::new(first, ProtoCodec);
+            let hello = first.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            first
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id,
+                            client_id,
+                            resume_token,
+                            resume_outcome: ResumeOutcome::New,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let subscribe = first.next().await.unwrap().unwrap();
+            assert_eq!(subscribe.opcode, Op::Subscribe as u16);
+            let req: Subscribe = try_decode(&subscribe).unwrap();
+            first
+                .send(
+                    try_encode(
+                        Op::SubscribeOk,
+                        subscribe.request_id,
+                        &SubscribeOk {
+                            sub_id: 77,
+                            topic: req.topic,
+                            group: req.group,
+                            partition: 0,
+                            prefetch: req.prefetch,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let (second, _) = listener.accept().await.unwrap();
+            let mut second = Framed::new(second, ProtoCodec);
+            let hello = second.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            second
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id,
+                            client_id,
+                            resume_token,
+                            resume_outcome: ResumeOutcome::Resumed,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let reconcile = second.next().await.unwrap().unwrap();
+            assert_eq!(reconcile.opcode, Op::ReconcileClient as u16);
+            let msg: ReconcileClient = try_decode(&reconcile).unwrap();
+            tx.send(msg).await.unwrap();
+            second
+                .send(
+                    try_encode(
+                        Op::ReconcileResult,
+                        reconcile.request_id,
+                        &ReconcileResult {
+                            subscriptions: vec![],
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let mut client = ClientOptions::new().connect(addr).await.unwrap();
+        let _sub = client
+            .subscribe("jobs")
+            .unwrap()
+            .sub_manual_ack()
+            .await
+            .unwrap();
+        let outcome = client.reconnect().await.unwrap();
+
+        assert_eq!(outcome.resume_outcome, ResumeOutcome::Resumed);
+        let reconcile = rx.recv().await.unwrap();
+        assert_eq!(
+            reconcile,
+            ReconcileClient {
+                subscriptions: vec![ReconcileSubscription {
+                    sub_id: 77,
+                    topic: "jobs".into(),
+                    group: None,
+                    partition: 0,
+                    auto_ack: false,
+                }],
+            }
+        );
+
+        client.shutdown().await;
+        server.await.unwrap();
     }
 
     #[tokio::test]

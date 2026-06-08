@@ -17,6 +17,7 @@ import {
   type NackMsg,
   type PublishDelayedMsg,
   type PublishMsg,
+  type ReconcileClientMsg,
   type SubscribeMsg,
 } from "../src/protocol.js";
 import { Client, ClientOptions, QueueConfig } from "../src/client.js";
@@ -146,6 +147,8 @@ test("client reconnect offers previous resume identity", async () => {
             ),
           ),
         );
+      } else if (f.opcode === Op.ReconcileClient) {
+        broker.send(s, buildFrame(Op.ReconcileResult, f.requestId, { subscriptions: [] }));
       }
     };
 
@@ -194,6 +197,8 @@ test("existing publisher uses reconnected engine", async () => {
             ),
           ),
         );
+      } else if (f.opcode === Op.ReconcileClient) {
+        broker.send(s, buildFrame(Op.ReconcileResult, f.requestId, { subscriptions: [] }));
       } else if (f.opcode === Op.Publish) {
         const p = decodeFrameBody<PublishMsg>(f);
         publishes.push(p);
@@ -212,6 +217,73 @@ test("existing publisher uses reconnected engine", async () => {
     assert.equal(publishes.length, 1);
     assert.equal(publishes[0]!.topic, "jobs");
 
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("client sends active subscriptions during reconnect reconciliation", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let reconcile: ReconcileClientMsg | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        const h = decodeFrameBody<Hello>(f);
+        broker.send(
+          s,
+          buildFrame(
+            Op.HelloOk,
+            f.requestId,
+            helloOk(
+              h.resume
+                ? {
+                    client_id: h.resume.client_id,
+                    owner_id: h.resume.owner_id,
+                    resume_token: h.resume.resume_token,
+                    resume_outcome: "resumed",
+                  }
+                : {},
+            ),
+          ),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 55n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+      } else if (f.opcode === Op.ReconcileClient) {
+        reconcile = decodeFrameBody<ReconcileClientMsg>(f);
+        broker.send(s, buildFrame(Op.ReconcileResult, f.requestId, { subscriptions: [] }));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const sub = await client.subscribe("jobs").group("workers").subManualAck();
+    const outcome = await client.reconnect();
+
+    assert.equal(outcome.resumeOutcome, "resumed");
+    assert.deepEqual(reconcile, {
+      subscriptions: [
+        {
+          sub_id: 55n,
+          topic: "jobs",
+          group: "workers",
+          partition: 0,
+          auto_ack: false,
+        },
+      ],
+    });
+
+    sub.close();
     await client.shutdown();
   } finally {
     await broker.stop();

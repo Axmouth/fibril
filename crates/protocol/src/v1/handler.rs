@@ -139,6 +139,76 @@ struct SubState {
     _activity_lease: ConsumerLease,
 }
 
+fn reconcile_subscriptions(
+    client_subs: Vec<ReconcileSubscription>,
+    state: &ConnState,
+) -> ReconcileResult {
+    let mut results = Vec::new();
+    let mut seen = HashMap::<SubKey, ()>::new();
+
+    for client in client_subs {
+        let key = (client.topic.clone(), client.group.clone());
+        seen.insert(key.clone(), ());
+        let server = state.subs.get(&key).map(|sub| ReconcileSubscription {
+            sub_id: sub.sub_id,
+            topic: client.topic.clone(),
+            group: client.group.clone(),
+            partition: sub.partition,
+            auto_ack: sub.auto_ack,
+        });
+
+        let (action, reason) = match &server {
+            None => (ReconcileAction::CloseClientSide, "server_missing"),
+            Some(server)
+                if server.sub_id == client.sub_id
+                    && server.partition == client.partition
+                    && server.auto_ack == client.auto_ack =>
+            {
+                (ReconcileAction::Keep, "matched")
+            }
+            Some(_) => (ReconcileAction::RecreateClientSide, "server_mismatch"),
+        };
+
+        results.push(ReconcileSubscriptionResult {
+            client: Some(client),
+            server,
+            action,
+            reason: reason.into(),
+        });
+    }
+
+    for ((topic, group), sub) in &state.subs {
+        if seen.contains_key(&(topic.clone(), group.clone())) {
+            continue;
+        }
+
+        results.push(ReconcileSubscriptionResult {
+            client: None,
+            server: Some(ReconcileSubscription {
+                sub_id: sub.sub_id,
+                topic: topic.clone(),
+                group: group.clone(),
+                partition: sub.partition,
+                auto_ack: sub.auto_ack,
+            }),
+            action: ReconcileAction::RecreateClientSide,
+            reason: "client_missing".into(),
+        });
+    }
+
+    results.sort_by(|a, b| {
+        let a_sub = a.client.as_ref().or(a.server.as_ref());
+        let b_sub = b.client.as_ref().or(b.server.as_ref());
+        a_sub
+            .map(|sub| (&sub.group, &sub.topic, sub.sub_id))
+            .cmp(&b_sub.map(|sub| (&sub.group, &sub.topic, sub.sub_id)))
+    });
+
+    ReconcileResult {
+        subscriptions: results,
+    }
+}
+
 struct CachedPublisher {
     handle: PublisherHandle,
     last_used_ms: u64,
@@ -946,6 +1016,19 @@ pub async fn handle_connection(
                         }
                     }
                 }
+            }
+
+            // -------- RECONCILE ---------------------------------------------
+            x if x == Op::ReconcileClient as u16 => {
+                let reconcile: ReconcileClient =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, ReconcileClient);
+                let result = {
+                    let state = logical.state.lock().await;
+                    reconcile_subscriptions(reconcile.subscriptions, &state)
+                };
+                frame_tx_high_prio
+                    .send(try_encode(Op::ReconcileResult, frame.request_id, &result)?)
+                    .await?;
             }
 
             // -------- SUBSCRIBE ---------------------------------------------

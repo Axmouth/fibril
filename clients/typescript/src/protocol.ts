@@ -40,6 +40,10 @@ export enum Op {
   DeclareQueue = 60,
   DeclareQueueOk = 61,
 
+  ReconcileClient = 70,
+  ReconcileServer = 71,
+  ReconcileResult = 72,
+
   Error = 255,
 }
 
@@ -156,6 +160,38 @@ export interface SubscribeOkMsg {
   group: string | null;
   partition: number;
   prefetch: number;
+}
+
+export interface ReconcileSubscription {
+  sub_id: bigint;
+  topic: string;
+  group: string | null;
+  partition: number;
+  auto_ack: boolean;
+}
+
+export interface ReconcileClientMsg {
+  subscriptions: ReconcileSubscription[];
+}
+
+export interface ReconcileServerMsg {
+  subscriptions: ReconcileSubscription[];
+}
+
+export type ReconcileAction =
+  | "keep"
+  | "close_client_side"
+  | "recreate_client_side";
+
+export interface ReconcileSubscriptionResult {
+  client: ReconcileSubscription | null;
+  server: ReconcileSubscription | null;
+  action: ReconcileAction;
+  reason: string;
+}
+
+export interface ReconcileResultMsg {
+  subscriptions: ReconcileSubscriptionResult[];
 }
 
 /** Broker delivery frame body. */

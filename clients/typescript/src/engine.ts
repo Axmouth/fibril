@@ -31,6 +31,9 @@ import {
   type PublishDelayedMsg,
   type PublishMsg,
   type PublishOkMsg,
+  type ReconcileClientMsg,
+  type ReconcileResultMsg,
+  type ReconcileSubscription,
   type ResumeIdentity,
   type SubscribeMsg,
   type SubscribeOkMsg,
@@ -95,6 +98,9 @@ const DEFAULT_HEARTBEAT_INTERVAL_S = 5;
 const COMMAND_QUEUE_CAPACITY = 8192;
 const HANDSHAKE_REQUEST_ID = 1n;
 const AUTH_REQUEST_ID = 2n;
+const RECONCILE_REQUEST_ID = 3n;
+
+export type SubscriptionRegistry = Map<bigint, ReconcileSubscription>;
 
 function normalizePayload(payload: DeliverMsg["payload"] | number[]): Uint8Array {
   if (payload instanceof Uint8Array) return payload;
@@ -132,7 +138,11 @@ export class Engine {
   /**
    * Connect, perform handshake (and optional auth), and start the engine task.
    */
-  static async start(socket: Socket, opts: ClientOptions): Promise<Engine> {
+  static async start(
+    socket: Socket,
+    opts: ClientOptions,
+    subscriptionRegistry: SubscriptionRegistry = new Map(),
+  ): Promise<Engine> {
     const reader = new FrameReader(socket);
     const iter = reader[Symbol.asyncIterator]();
 
@@ -188,6 +198,27 @@ export class Engine {
       }
     }
 
+    if (hello.resume_outcome === "resumed") {
+      const reconcile: ReconcileClientMsg = {
+        subscriptions: [...subscriptionRegistry.values()],
+      };
+      await writeFrame(
+        socket,
+        buildFrame(Op.ReconcileClient, RECONCILE_REQUEST_ID, reconcile),
+      );
+      const reconcileFrame = await nextFrameOrEof(iter);
+      if (reconcileFrame.opcode === Op.Error) {
+        const err = decodeFrameBody<ErrorMsg>(reconcileFrame);
+        throw new ServerError(err.code, err.message);
+      }
+      if (reconcileFrame.opcode !== Op.ReconcileResult) {
+        throw new UnexpectedError(
+          `Unexpected frame opcode ${reconcileFrame.opcode} during reconciliation`,
+        );
+      }
+      decodeFrameBody<ReconcileResultMsg>(reconcileFrame);
+    }
+
     // ---- Start engine loop ----
     const commandQueue = new BoundedQueue<Command>(COMMAND_QUEUE_CAPACITY);
     const heartbeatInterval =
@@ -198,6 +229,7 @@ export class Engine {
       reader,
       commandQueue,
       heartbeatIntervalSeconds: heartbeatInterval,
+      subscriptionRegistry,
     });
 
     return new Engine(commandQueue, socket, completed, resumeIdentity, hello.resume_outcome);
@@ -251,14 +283,21 @@ interface EngineLoopArgs {
   reader: FrameReader;
   commandQueue: BoundedQueue<Command>;
   heartbeatIntervalSeconds: number;
+  subscriptionRegistry: SubscriptionRegistry;
 }
 
 async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
-  const { socket, reader, commandQueue, heartbeatIntervalSeconds } = args;
+  const {
+    socket,
+    reader,
+    commandQueue,
+    heartbeatIntervalSeconds,
+    subscriptionRegistry,
+  } = args;
 
   const subs = new Map<bigint, SubState>();
   const waiters = new Map<bigint, Waiter>();
-  let nextRequestId = 3n; // 1 = HELLO, 2 = AUTH; user requests start at 3.
+  let nextRequestId = 4n; // 1 = HELLO, 2 = AUTH, 3 = optional reconcile.
   const nextReqId = (): bigint => {
     const id = nextRequestId;
     // u64 wraparound; will not happen in practice but stays consistent
@@ -517,6 +556,13 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
             partition: ok.partition,
             delivery: { kind: "manual", queue },
           });
+          subscriptionRegistry.set(ok.sub_id, {
+            sub_id: ok.sub_id,
+            topic: ok.topic,
+            group: ok.group,
+            partition: ok.partition,
+            auto_ack: false,
+          });
           w.deferred.resolve(queue);
         } else if (w.kind === "subscribeAuto") {
           const queue = new BoundedQueue<InternalDelivered>(prefetch);
@@ -525,6 +571,13 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
             group: ok.group,
             partition: ok.partition,
             delivery: { kind: "auto", queue },
+          });
+          subscriptionRegistry.set(ok.sub_id, {
+            sub_id: ok.sub_id,
+            topic: ok.topic,
+            group: ok.group,
+            partition: ok.partition,
+            auto_ack: true,
           });
           w.deferred.resolve(queue);
         } else {

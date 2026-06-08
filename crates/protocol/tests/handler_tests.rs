@@ -8,7 +8,8 @@ use fibril_broker::{
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
-    Publish, PublishDelayed, QueueDlqPolicy, ResumeIdentity, ResumeOutcome, Subscribe,
+    Publish, PublishDelayed, QueueDlqPolicy, ReconcileAction, ReconcileClient, ReconcileResult,
+    ReconcileSubscription, ResumeIdentity, ResumeOutcome, Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
@@ -274,6 +275,152 @@ async fn hello_can_resume_with_owner_scoped_identity() {
     assert_eq!(second_ok.client_id, first_ok.client_id);
     assert_eq!(second_ok.owner_id, first_ok.owner_id);
     assert_eq!(second_ok.resume_token, first_ok.resume_token);
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_after_resume_keeps_matching_subscription() {
+    let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(1_000));
+    let (mut first, first_task, dir, broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+
+    let first_ok = handshake_with_resume(&mut first, None).await;
+    first
+        .send(
+            try_encode(
+                Op::Subscribe,
+                2,
+                &Subscribe {
+                    topic: "reconcile.keep".into(),
+                    group: Some("workers".into()),
+                    prefetch: 1,
+                    auto_ack: false,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut first).await;
+    assert_eq!(frame.opcode, Op::SubscribeOk as u16);
+    let sub_ok: fibril_protocol::v1::SubscribeOk = try_decode(&frame).unwrap();
+
+    let resume = ResumeIdentity {
+        owner_id: first_ok.owner_id,
+        client_id: first_ok.client_id,
+        resume_token: first_ok.resume_token,
+    };
+    drop(first);
+    first_task.await.unwrap().unwrap();
+
+    let (mut second, second_task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings, broker, dir).await;
+    let second_ok = handshake_with_resume(&mut second, Some(resume)).await;
+    assert_eq!(second_ok.resume_outcome, ResumeOutcome::Resumed);
+
+    second
+        .send(
+            try_encode(
+                Op::ReconcileClient,
+                3,
+                &ReconcileClient {
+                    subscriptions: vec![ReconcileSubscription {
+                        sub_id: sub_ok.sub_id,
+                        topic: sub_ok.topic,
+                        group: sub_ok.group,
+                        partition: sub_ok.partition,
+                        auto_ack: false,
+                    }],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut second).await;
+    assert_eq!(frame.opcode, Op::ReconcileResult as u16);
+    assert_eq!(frame.request_id, 3);
+    let result: ReconcileResult = try_decode(&frame).unwrap();
+    assert_eq!(result.subscriptions.len(), 1);
+    assert_eq!(result.subscriptions[0].action, ReconcileAction::Keep);
+    assert_eq!(result.subscriptions[0].reason, "matched");
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn reconcile_after_resume_recreates_mismatched_subscription() {
+    let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(1_000));
+    let (mut first, first_task, dir, broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+
+    let first_ok = handshake_with_resume(&mut first, None).await;
+    first
+        .send(
+            try_encode(
+                Op::Subscribe,
+                2,
+                &Subscribe {
+                    topic: "reconcile.recreate".into(),
+                    group: None,
+                    prefetch: 1,
+                    auto_ack: false,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut first).await;
+    assert_eq!(frame.opcode, Op::SubscribeOk as u16);
+    let sub_ok: fibril_protocol::v1::SubscribeOk = try_decode(&frame).unwrap();
+
+    let resume = ResumeIdentity {
+        owner_id: first_ok.owner_id,
+        client_id: first_ok.client_id,
+        resume_token: first_ok.resume_token,
+    };
+    drop(first);
+    first_task.await.unwrap().unwrap();
+
+    let (mut second, second_task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings, broker, dir).await;
+    let second_ok = handshake_with_resume(&mut second, Some(resume)).await;
+    assert_eq!(second_ok.resume_outcome, ResumeOutcome::Resumed);
+
+    second
+        .send(
+            try_encode(
+                Op::ReconcileClient,
+                3,
+                &ReconcileClient {
+                    subscriptions: vec![ReconcileSubscription {
+                        sub_id: sub_ok.sub_id + 1,
+                        topic: sub_ok.topic,
+                        group: sub_ok.group,
+                        partition: sub_ok.partition,
+                        auto_ack: false,
+                    }],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut second).await;
+    assert_eq!(frame.opcode, Op::ReconcileResult as u16);
+    let result: ReconcileResult = try_decode(&frame).unwrap();
+    assert_eq!(result.subscriptions.len(), 1);
+    assert_eq!(
+        result.subscriptions[0].action,
+        ReconcileAction::RecreateClientSide
+    );
+    assert_eq!(result.subscriptions[0].reason, "server_mismatch");
 
     drop(second);
     second_task.await.unwrap().unwrap();
