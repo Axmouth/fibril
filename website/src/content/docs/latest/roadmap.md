@@ -24,10 +24,11 @@ check what is already wired and under what conditions.
 - The admin dashboard has moved to the same visual language as the public site, with Clarity removed from the vendored UI assets.
 - The TypeScript client tracks the Rust client for delayed publish, confirmed publish pipelining, content-type metadata, queue declaration, and group-default behavior.
 - Reconnection resume identity is now part of the TCP handshake, and Rust and TypeScript clients send it on explicit reconnect.
+- The TCP handler can keep a logical connection dormant during a configured grace window, accept late settles after resume, and requeue unsettled inflight messages when grace expires.
 
 ## Near term
 
-- Implement the reconnection grace window and inflight reconciliation for recently disconnected clients.
+- Wire reconnect grace to production configuration and client reconnect loops.
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
 - Add the next storage-level startup/runtime settings where they have clear operational value.
 - Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.

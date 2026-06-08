@@ -319,6 +319,10 @@ See also: [client usage](/latest/clients/),
 [quickstart](/latest/quickstart/), and
 [reconnection grace](/latest/development/reconnection-grace/).
 
+Server-side reconnect grace for inflight settles is implemented in the TCP
+handler when grace is configured. Client automation around that behavior is
+still planned.
+
 | Item | Rust | TypeScript |
 | --- | --- | --- |
 | Connect and auth | Implemented | Implemented |
@@ -329,13 +333,12 @@ See also: [client usage](/latest/clients/),
 | Manual ack subscription | Implemented | Implemented |
 | Auto ack subscription | Implemented | Implemented |
 | Resume identity handshake | Implemented | Implemented |
-| Graceful inflight recovery after reconnect | Planned | Planned |
+| Automatic client recovery after reconnect | Planned | Planned |
 | Delayed retry | Implemented | Implemented |
 | Queue declaration | Implemented | Implemented |
 | Content type helpers | Implemented | Implemented |
 | Default group normalization | Implemented | Implemented |
 | Automatic reconnect and resubscribe | Planned | Planned |
-| Reconnection grace and reconciliation | Planned | Planned |
 
 Conditions and limits:
 

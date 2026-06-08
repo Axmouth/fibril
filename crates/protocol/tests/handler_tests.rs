@@ -7,8 +7,8 @@ use fibril_broker::{
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
-    ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish,
-    PublishDelayed, QueueDlqPolicy, ResumeIdentity, ResumeOutcome, Subscribe,
+    Ack, ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
+    Publish, PublishDelayed, QueueDlqPolicy, ResumeIdentity, ResumeOutcome, Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
@@ -192,9 +192,67 @@ async fn assert_connection_still_responds(framed: &mut Framed<TcpStream, ProtoCo
     assert_eq!(frame.request_id, 99);
 }
 
+async fn framed_subscribe(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    request_id: u64,
+    topic: &str,
+    group: Option<&str>,
+    auto_ack: bool,
+) {
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                request_id,
+                &Subscribe {
+                    topic: topic.into(),
+                    group: group.map(str::to_string),
+                    prefetch: 1,
+                    auto_ack,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(framed).await.opcode, Op::SubscribeOk as u16);
+}
+
+async fn framed_publish(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    request_id: u64,
+    topic: &str,
+    group: Option<&str>,
+    payload: &[u8],
+) {
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                request_id,
+                &Publish {
+                    topic: topic.into(),
+                    partition: 0,
+                    group: group.map(str::to_string),
+                    require_confirm: true,
+                    content_type: None,
+                    headers: HashMap::new(),
+                    payload: payload.to_vec(),
+                    published: unix_millis(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(framed).await;
+    assert_eq!(frame.opcode, Op::PublishOk as u16);
+    assert_eq!(frame.request_id, request_id);
+}
+
 #[tokio::test]
 async fn hello_can_resume_with_owner_scoped_identity() {
-    let settings = ConnectionSettings::new(Some(60));
+    let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(1_000));
     let (mut first, first_task, dir, broker) =
         open_protocol_connection_with_settings(settings.clone()).await;
 
@@ -216,6 +274,100 @@ async fn hello_can_resume_with_owner_scoped_identity() {
     assert_eq!(second_ok.client_id, first_ok.client_id);
     assert_eq!(second_ok.owner_id, first_ok.owner_id);
     assert_eq!(second_ok.resume_token, first_ok.resume_token);
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_grace_accepts_late_ack_after_resume() {
+    let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(100));
+    let (mut first, first_task, dir, broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+
+    let first_ok = handshake_with_resume(&mut first, None).await;
+    framed_subscribe(&mut first, 2, "grace.ack", None, false).await;
+    framed_publish(&mut first, 3, "grace.ack", None, b"ack-after-resume").await;
+    let delivered = recv_delivery_for_topic(&mut first, "grace.ack").await;
+
+    let resume = ResumeIdentity {
+        owner_id: first_ok.owner_id,
+        client_id: first_ok.client_id,
+        resume_token: first_ok.resume_token,
+    };
+    drop(first);
+    first_task.await.unwrap().unwrap();
+
+    let (mut second, second_task, dir, broker) =
+        open_protocol_connection_for_broker(settings.clone(), broker, dir).await;
+    let second_ok = handshake_with_resume(&mut second, Some(resume)).await;
+    assert_eq!(second_ok.resume_outcome, ResumeOutcome::Resumed);
+
+    second
+        .send(
+            try_encode(
+                Op::Ack,
+                2,
+                &Ack {
+                    topic: "grace.ack".into(),
+                    group: None,
+                    partition: 0,
+                    tags: vec![delivered.delivery_tag],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    broker.wait_for_pending_settles().await;
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (mut third, third_task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings, broker, dir).await;
+    handshake(&mut third).await;
+    framed_subscribe(&mut third, 2, "grace.ack", None, false).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), third.next())
+            .await
+            .is_err()
+    );
+
+    drop(third);
+    third_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_grace_expiry_requeues_unsettled_inflight() {
+    let settings = ConnectionSettings::new(Some(60)).with_reconnect_grace_ms(Some(100));
+    let (mut first, first_task, dir, broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+
+    handshake(&mut first).await;
+    framed_subscribe(&mut first, 2, "grace.requeue", None, false).await;
+    framed_publish(
+        &mut first,
+        3,
+        "grace.requeue",
+        None,
+        b"requeued-after-grace",
+    )
+    .await;
+    let delivered = recv_delivery_for_topic(&mut first, "grace.requeue").await;
+    assert_eq!(delivered.payload, b"requeued-after-grace".to_vec());
+
+    drop(first);
+    first_task.await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let (mut second, second_task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings, broker, dir).await;
+    handshake(&mut second).await;
+    framed_subscribe(&mut second, 2, "grace.requeue", None, false).await;
+    let redelivered = recv_delivery_for_topic(&mut second, "grace.requeue").await;
+    assert_eq!(redelivered.payload, b"requeued-after-grace".to_vec());
 
     drop(second);
     second_task.await.unwrap().unwrap();

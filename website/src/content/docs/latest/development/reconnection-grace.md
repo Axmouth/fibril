@@ -113,37 +113,41 @@ This model is clearer than "reconnect and recreate everything" because the
 broker has one place to hold old subscription and inflight ownership until a
 decision is made.
 
-## Proposed Second Slice
+## Implemented Grace Window
 
-Add broker-side dormant client records.
+The broker now has broker-side dormant logical connections when reconnect grace
+is enabled for the TCP handler.
 
 On eligible disconnect, instead of immediately requeueing all inflight messages,
-the broker records a short-lived dormant client entry:
+the broker keeps a short-lived logical connection:
 
 - `client_id`
 - resume token
-- disconnect deadline
 - subscriptions that were active
-- broker delivery tags and offsets still associated with those subscriptions
+- broker delivery tags still associated with those subscriptions
+- a replaceable transport sink for the currently attached socket
 
-During the grace window, the broker should avoid normal redelivery of those
-specific broker-tracked messages. Late settlements using existing delivery tags
-should still work.
+During the grace window, the old subscription state stays alive. Late
+settlements using existing delivery tags work after a successful resume. If the
+client does not return before the grace window expires, the broker runs normal
+unsubscribe cleanup and requeues unsettled inflight messages.
 
-The broker also needs to pause old consumers while they are dormant. The current
-protocol task owns the receiving side of each delivery channel. Once the socket
-is gone, that receiver is not a usable delivery target. A dormant consumer should
-not receive more deliveries until it is resumed or replaced.
+Subscription delivery tasks no longer write directly to a single socket. They
+send through the logical connection's current transport sink. When a socket is
+gone, the sink is set to unavailable and delivery waits until either a resume
+attaches a new sink or grace expiry aborts the subscription and requeues
+leftovers.
 
-If the client resumes, the broker can either:
+Current limits:
 
-- bind the returning connection to the existing client record and let it settle
-  old tags, or
-- re-create subscriptions and reconcile what remains
+- Reconnect grace is controlled by `ConnectionSettings::reconnect_grace_ms`.
+- It is not wired to startup/runtime configuration yet.
+- Existing subscriptions are preserved server-side, but clients do not yet have
+  an automatic reconnect loop that hides the socket break.
+- In-flight protocol requests from the old socket are not replayed.
 
-The first version should prefer the smaller behavior: accept late settles during
-grace, pause old consumers, and let the client re-create subscriptions
-explicitly. Transparent subscription restore can come later.
+Transparent subscription restore and user-facing client automation can come
+later.
 
 ## Proposed Third Slice
 
@@ -244,11 +248,12 @@ Protocol tests:
 
 Broker tests:
 
-- disconnect without resume still requeues
-- disconnect with grace records inflight without immediate requeue
+- disconnect without grace still requeues
+- disconnect with grace keeps inflight without immediate requeue
+  (implemented)
 - dormant consumers are skipped by delivery
-- late settle during grace is accepted
-- grace expiry requeues remaining inflight messages
+- late settle after resume during grace is accepted (implemented)
+- grace expiry requeues remaining inflight messages (implemented)
 - reconnect after expiry is treated as fresh
 
 Client tests:

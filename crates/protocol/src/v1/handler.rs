@@ -31,12 +31,13 @@ use fibril_util::{AuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
 use tokio::{
     net::TcpListener,
-    sync::{mpsc, oneshot},
+    sync::{Mutex, mpsc, oneshot, watch},
 };
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
 type SubKey = (Topic, Option<Group>); // (topic, group)
+type FrameSink = mpsc::Sender<Frame>;
 const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
 
 struct ConnState {
@@ -143,9 +144,100 @@ struct CachedPublisher {
     last_used_ms: u64,
 }
 
+struct LogicalConnection {
+    client_id: Uuid,
+    state: Mutex<ConnState>,
+    transport: watch::Sender<Option<FrameSink>>,
+    generation: AtomicU64,
+}
+
+impl std::fmt::Debug for LogicalConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogicalConnection")
+            .field("client_id", &self.client_id)
+            .field("generation", &self.generation.load(Ordering::Acquire))
+            .finish_non_exhaustive()
+    }
+}
+
+impl LogicalConnection {
+    fn new(client_id: Uuid) -> Arc<Self> {
+        let (transport, _) = watch::channel(None);
+        Arc::new(Self {
+            client_id,
+            state: Mutex::new(ConnState {
+                authenticated: false,
+                subs: HashMap::new(),
+            }),
+            transport,
+            generation: AtomicU64::new(0),
+        })
+    }
+
+    fn attach_transport(&self, tx: FrameSink) -> u64 {
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.transport.send_replace(Some(tx));
+        generation
+    }
+
+    fn mark_dormant(&self, generation: u64) -> bool {
+        if self.generation.load(Ordering::Acquire) != generation {
+            return false;
+        }
+        self.transport.send_replace(None);
+        true
+    }
+
+    fn is_dormant_generation(&self, generation: u64) -> bool {
+        self.generation.load(Ordering::Acquire) == generation && self.transport.borrow().is_none()
+    }
+}
+
+async fn send_to_current_transport(
+    transport_rx: &mut watch::Receiver<Option<FrameSink>>,
+    mut frame: Frame,
+) -> Result<(), ()> {
+    loop {
+        let current_tx = transport_rx.borrow().clone();
+        if let Some(tx) = current_tx {
+            match tx.send(frame).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    frame = err.0;
+                }
+            }
+        }
+
+        transport_rx.changed().await.map_err(|_| ())?;
+    }
+}
+
+async fn cleanup_connection_state(
+    broker: Arc<Broker<StromaEngine>>,
+    logical: Arc<LogicalConnection>,
+) {
+    broker.wait_for_pending_settles().await;
+
+    let drained_subs = {
+        let mut state = logical.state.lock().await;
+        state.subs.drain().collect::<Vec<_>>()
+    };
+
+    for ((topic, group), sub) in drained_subs {
+        sub.task.abort();
+        if let Err(err) = broker
+            .unsubscribe(&topic, group.as_deref(), sub.partition, sub.sub_id)
+            .await
+        {
+            tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ResumeSession {
     resume_token: Uuid,
+    logical: Arc<LogicalConnection>,
 }
 
 #[derive(Debug)]
@@ -162,7 +254,7 @@ impl ResumeSessionRegistry {
         }
     }
 
-    fn resolve(&self, resume: Option<ResumeIdentity>) -> (Uuid, Uuid, ResumeOutcome) {
+    fn resolve(&self, resume: Option<ResumeIdentity>) -> ResumeResolution {
         if let Some(resume) = resume {
             if resume.owner_id != self.owner_id {
                 tracing::warn!(
@@ -181,11 +273,12 @@ impl ResumeSessionRegistry {
                         owner_id = %self.owner_id,
                         "client resume accepted"
                     );
-                    return (
-                        resume.client_id,
-                        resume.resume_token,
-                        ResumeOutcome::Resumed,
-                    );
+                    return ResumeResolution {
+                        client_id: resume.client_id,
+                        resume_token: resume.resume_token,
+                        outcome: ResumeOutcome::Resumed,
+                        logical: session.logical.clone(),
+                    };
                 }
 
                 tracing::warn!(
@@ -207,19 +300,61 @@ impl ResumeSessionRegistry {
         self.issue(ResumeOutcome::New)
     }
 
-    fn issue(&self, outcome: ResumeOutcome) -> (Uuid, Uuid, ResumeOutcome) {
+    fn issue(&self, outcome: ResumeOutcome) -> ResumeResolution {
         let client_id = Uuid::now_v7();
         let resume_token = Uuid::new_v4();
-        self.sessions
-            .insert(client_id, ResumeSession { resume_token });
+        let logical = LogicalConnection::new(client_id);
+        self.sessions.insert(
+            client_id,
+            ResumeSession {
+                resume_token,
+                logical: logical.clone(),
+            },
+        );
         tracing::info!(
             client_id = %client_id,
             owner_id = %self.owner_id,
             resume_outcome = ?outcome,
             "client identity issued"
         );
-        (client_id, resume_token, outcome)
+        ResumeResolution {
+            client_id,
+            resume_token,
+            outcome,
+            logical,
+        }
     }
+
+    fn forget_if_dormant(
+        &self,
+        client_id: Uuid,
+        logical: &Arc<LogicalConnection>,
+        generation: u64,
+    ) {
+        if !logical.is_dormant_generation(generation) {
+            return;
+        }
+        self.sessions.remove(&client_id);
+    }
+
+    fn forget_if_generation(
+        &self,
+        client_id: Uuid,
+        logical: &Arc<LogicalConnection>,
+        generation: u64,
+    ) {
+        if logical.generation.load(Ordering::Acquire) != generation {
+            return;
+        }
+        self.sessions.remove(&client_id);
+    }
+}
+
+struct ResumeResolution {
+    client_id: Uuid,
+    resume_token: Uuid,
+    outcome: ResumeOutcome,
+    logical: Arc<LogicalConnection>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -230,6 +365,7 @@ pub struct ConnectionRuntimeSettings {
 #[derive(Clone)]
 pub struct ConnectionSettings {
     pub heartbeat_interval: Option<u64>,
+    pub reconnect_grace_ms: Option<u64>,
     runtime: Arc<ArcSwap<ConnectionRuntimeSettings>>,
     resume_sessions: Arc<ResumeSessionRegistry>,
 }
@@ -238,9 +374,15 @@ impl ConnectionSettings {
     pub fn new(heartbeat_interval: Option<u64>) -> Self {
         Self {
             heartbeat_interval,
+            reconnect_grace_ms: None,
             runtime: Arc::new(ArcSwap::from_pointee(ConnectionRuntimeSettings::default())),
             resume_sessions: Arc::new(ResumeSessionRegistry::new()),
         }
+    }
+
+    pub fn with_reconnect_grace_ms(mut self, reconnect_grace_ms: Option<u64>) -> Self {
+        self.reconnect_grace_ms = reconnect_grace_ms;
+        self
     }
 
     pub fn with_publisher_cache_idle_timeout_ms(self, timeout_ms: Option<u64>) -> Self {
@@ -269,6 +411,7 @@ impl std::fmt::Debug for ConnectionSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectionSettings")
             .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("reconnect_grace_ms", &self.reconnect_grace_ms)
             .field("runtime", &self.runtime_snapshot())
             .field("owner_id", &self.resume_sessions.owner_id)
             .finish()
@@ -442,16 +585,18 @@ pub async fn handle_connection(
         return Ok(());
     }
 
-    let (resolved_client_id, resume_token, resume_outcome) = connection_settings
+    let resume = connection_settings
         .resume_sessions
         .resolve(hello.resume.clone());
-    client_id = resolved_client_id;
+    let logical = resume.logical.clone();
+    let transport_generation = logical.attach_transport(frame_tx_high_prio.clone());
+    client_id = resume.client_id;
     let hello_ok = &HelloOk {
         protocol_version: PROTOCOL_V1,
         owner_id: connection_settings.resume_sessions.owner_id,
         client_id,
-        resume_token,
-        resume_outcome,
+        resume_token: resume.resume_token,
+        resume_outcome: resume.outcome,
         server_name: "rust-broker".into(),
         compliance: "v=1;license=MIT;ai_train=disallowed;policy=AI_POLICY.md".to_owned(),
     };
@@ -561,12 +706,6 @@ pub async fn handle_connection(
 
         tracing::debug!("[writer] EXIT");
     });
-
-    // ---- Connection state --------------------------------------------------
-    let mut state = ConnState {
-        authenticated: false,
-        subs: HashMap::new(),
-    };
 
     frame_tx_high_prio
         .send(try_encode(Op::HelloOk, frame.request_id, &hello_ok)?)
@@ -733,7 +872,8 @@ pub async fn handle_connection(
         let is_ping = frame.opcode == Op::Ping as u16;
         let is_pong = frame.opcode == Op::Pong as u16;
 
-        if auth_required && !state.authenticated && !(is_auth || is_ping || is_pong) {
+        let authenticated = logical.state.lock().await.authenticated;
+        if auth_required && !authenticated && !(is_auth || is_ping || is_pong) {
             send_error_response(
                 &frame_tx_high_prio,
                 frame.request_id,
@@ -749,7 +889,7 @@ pub async fn handle_connection(
         match frame.opcode {
             // -------- AUTH ---------------------------------------------------
             x if x == Op::Auth as u16 => {
-                if state.authenticated {
+                if logical.state.lock().await.authenticated {
                     frame_tx_high_prio
                         .send(try_encode(
                             Op::AuthErr,
@@ -784,7 +924,7 @@ pub async fn handle_connection(
                             .await;
 
                         if verified {
-                            state.authenticated = true;
+                            logical.state.lock().await.authenticated = true;
                             frame_tx_high_prio
                                 .send(try_encode(Op::AuthOk, frame.request_id, &())?)
                                 .await?;
@@ -814,7 +954,7 @@ pub async fn handle_connection(
 
                 let sub_key: SubKey = (sub.topic.clone(), sub.group.clone());
 
-                if state.subs.contains_key(&sub_key) {
+                if logical.state.lock().await.subs.contains_key(&sub_key) {
                     frame_tx_high_prio
                         .send(try_encode(
                             Op::SubscribeErr,
@@ -851,7 +991,7 @@ pub async fn handle_connection(
                 } = consumer;
 
                 let auto_ack = sub.auto_ack;
-                let frame_tx_clone = frame_tx_high_prio.clone();
+                let mut transport_rx = logical.transport.subscribe();
 
                 connection_stats.add_sub(
                     &conn_id,
@@ -900,9 +1040,12 @@ pub async fn handle_connection(
                                     break;
                                 }
                             };
-                        if let Err(err) = frame_tx_clone.send(frame).await {
-                            // Socket dead -> do NOT auto-ack
-                            tracing::warn!("Failed to send to socket writer : {err}");
+                        if send_to_current_transport(&mut transport_rx, frame)
+                            .await
+                            .is_err()
+                        {
+                            // Socket dead and logical transport unavailable.
+                            tracing::warn!("Failed to send deliver frame to active transport");
                             metrics.error();
                             break;
                         }
@@ -923,7 +1066,7 @@ pub async fn handle_connection(
                     }
                 });
 
-                state.subs.insert(
+                logical.state.lock().await.subs.insert(
                     sub_key,
                     SubState {
                         sub_id,
@@ -1014,11 +1157,15 @@ pub async fn handle_connection(
 
                 let key: SubKey = (ack.topic.clone(), ack.group.clone());
 
-                if let Some(sub) = state.subs.get(&key)
-                    && !sub.auto_ack
-                {
-                    let state_settler = sub.state_settler.clone();
-                    let pending_settles = sub.pending_settles.clone();
+                let settle_target = {
+                    let state = logical.state.lock().await;
+                    state.subs.get(&key).and_then(|sub| {
+                        (!sub.auto_ack)
+                            .then(|| (sub.state_settler.clone(), sub.pending_settles.clone()))
+                    })
+                };
+
+                if let Some((state_settler, pending_settles)) = settle_target {
                     // tokio::spawn(async move {
                     for tag in ack.tags {
                         let req = SettleRequest {
@@ -1053,11 +1200,15 @@ pub async fn handle_connection(
 
                 let key: SubKey = (nack.topic.clone(), nack.group.clone());
 
-                if let Some(sub) = state.subs.get(&key)
-                    && !sub.auto_ack
-                {
-                    let state_settler = sub.state_settler.clone();
-                    let pending_settles = sub.pending_settles.clone();
+                let settle_target = {
+                    let state = logical.state.lock().await;
+                    state.subs.get(&key).and_then(|sub| {
+                        (!sub.auto_ack)
+                            .then(|| (sub.state_settler.clone(), sub.pending_settles.clone()))
+                    })
+                };
+
+                if let Some((state_settler, pending_settles)) = settle_target {
                     // tokio::spawn(async move {
                     for tag in nack.tags {
                         let req = SettleRequest {
@@ -1301,7 +1452,35 @@ pub async fn handle_connection(
     }
 
     // ---- Connection closing ------------------------------------------------
-    // closes writer channel
+    let entered_grace = connection_settings
+        .reconnect_grace_ms
+        .is_some_and(|grace_ms| grace_ms > 0)
+        && logical.mark_dormant(transport_generation);
+
+    if entered_grace {
+        let grace_ms = connection_settings.reconnect_grace_ms.unwrap_or_default();
+        let broker_for_cleanup = broker.clone();
+        let logical_for_cleanup = logical.clone();
+        let resume_sessions = connection_settings.resume_sessions.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_millis(grace_ms)).await;
+            if logical_for_cleanup.is_dormant_generation(transport_generation) {
+                tracing::info!(
+                    client_id = %logical_for_cleanup.client_id,
+                    grace_ms,
+                    "reconnect grace expired; cleaning up dormant connection"
+                );
+                cleanup_connection_state(broker_for_cleanup, logical_for_cleanup.clone()).await;
+                resume_sessions.forget_if_dormant(
+                    logical_for_cleanup.client_id,
+                    &logical_for_cleanup,
+                    transport_generation,
+                );
+            }
+        });
+    }
+
+    // Closes this socket session's writer channels.
     drop(pub_tx);
     drop(frame_tx_high_prio);
     drop(frame_tx_low_prio);
@@ -1310,16 +1489,13 @@ pub async fn handle_connection(
     writer_task.abort();
     pub_queue_handle.await?;
 
-    broker.wait_for_pending_settles().await;
-
-    for ((topic, group), sub) in state.subs.drain() {
-        sub.task.abort();
-        if let Err(err) = broker
-            .unsubscribe(&topic, group.as_deref(), sub.partition, sub.sub_id)
-            .await
-        {
-            tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
-        }
+    if !entered_grace {
+        cleanup_connection_state(broker.clone(), logical.clone()).await;
+        connection_settings.resume_sessions.forget_if_generation(
+            logical.client_id,
+            &logical,
+            transport_generation,
+        );
     }
 
     tracing::debug!("[conn] EXIT handle_connection peer={:?}", peer_addr);
