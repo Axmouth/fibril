@@ -25,6 +25,7 @@ export default defineConfig({
             { label: "Client usage", slug: "latest/clients" },
             { label: "Configuration", slug: "latest/configuration" },
             { label: "Project status", slug: "latest/status" },
+            { label: "Implemented surface", slug: "latest/implemented-surface" },
           ],
         },
         {

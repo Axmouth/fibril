@@ -5,6 +5,9 @@ description: A candid feature matrix for the current Fibril implementation.
 
 Fibril is pre-alpha infrastructure. This table distinguishes the working baseline from active design and wiring work.
 
+For a more detailed checklist of what is wired and what conditions apply, see
+[implemented surface](/latest/implemented-surface/).
+
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Durable queues | Available | Append-only message and event logs, snapshot, and replay |

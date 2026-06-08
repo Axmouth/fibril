@@ -21,6 +21,14 @@ const checks = [
     includes: ["<title>Project status | Fibril</title>", "Explicit settlement", "Dead lettering"],
   },
   {
+    path: "latest/implemented-surface/index.html",
+    includes: [
+      "<title>Implemented surface | Fibril</title>",
+      "reverse roadmap",
+      "Conditions for a queue to be unloaded from memory",
+    ],
+  },
+  {
     path: "latest/reliability/retries-delays/index.html",
     includes: ["<title>Retries and delays | Fibril</title>", "retry_after"],
   },

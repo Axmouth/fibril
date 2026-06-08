@@ -16,6 +16,7 @@ It is currently pre-alpha. The useful baseline is working, but APIs, persistence
 - Read [retries and delays](/latest/reliability/retries-delays/) and [dead lettering](/latest/reliability/dead-lettering/) for reliability features and their current limits.
 - Read [many idle queues](/latest/concepts/many-idle-queues/) if your workload defines many queues but only uses a few at once.
 - Check [project status](/latest/status/) before depending on a feature.
+- Check [implemented surface](/latest/implemented-surface/) when you need the detailed answer for whether a path is wired and under what conditions.
 - Check the [roadmap](/latest/roadmap/) for recently landed work and near-term pending items.
 
 ## Design intent

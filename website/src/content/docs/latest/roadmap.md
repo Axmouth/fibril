@@ -8,6 +8,9 @@ landed recently and what is still pending. The near-term focus is making the
 existing semantics complete, observable, and usable before adding larger
 distributed-system features.
 
+For the reverse view, use [implemented surface](/latest/implemented-surface/) to
+check what is already wired and under what conditions.
+
 ## Recently landed
 
 - Runtime broker settings can be read and updated through the admin surface.
@@ -31,8 +34,6 @@ distributed-system features.
 - Add more production deployment guidance for the broker itself.
 - Improve admin interface observability.
 - Produce repeatable benchmark reports.
-- Add a detailed implemented-surface inventory, effectively a reverse roadmap
-  for checking whether a behavior is already wired.
 - Tighten memory behavior under large queue depth, high inflight load, and many idle queues.
 
 ## Longer term
