@@ -17,6 +17,9 @@ Replication and sharding should be designed as one cluster model:
 - Keratin remains a local log library, unaware of peers or elections
 - Stroma owns queue role behavior, because queue semantics live there
 - Fibril broker routes client traffic to the owner or returns a not-owner error
+- Stroma is an engine that can host many queue identities. Roles should be per
+  queue identity `(topic, partition, group)`, not one role for the whole Stroma
+  instance.
 
 The first implementation focus should be replication-safe storage primitives,
 not network transport. If a follower cannot apply leader-assigned offsets
@@ -127,3 +130,12 @@ locally, every higher layer would be built on the wrong foundation.
   internal mode flag. Promotion is tricky because many callers hold
   `Arc<Keratin>`, so any type-level design must avoid making role transitions
   impossible.
+- 2026-06-09: Added Keratin API gatekeeping with a `KeratinReplicaExt` trait and
+  a local `KeratinRole` guard. Default role is owner. Normal append requires
+  owner mode. Replicated append and checkpoint reset require follower mode.
+  Frozen mode rejects both. This is local misuse protection only; Stroma/broker
+  still own real cluster role decisions.
+- 2026-06-09: Noted very future partition shrink path. Expanding partition count
+  is not the only lifecycle operation; shrinking should eventually be possible
+  by marking partitions as no-longer-receiving, draining them, then deleting
+  their ownership/data once empty and safe.
