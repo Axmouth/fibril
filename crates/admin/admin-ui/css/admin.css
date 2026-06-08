@@ -547,6 +547,10 @@ input[type="checkbox"] {
   padding: 1rem;
 }
 
+.overview-panel-secondary {
+  opacity: .92;
+}
+
 .overview-panel-heading {
   align-items: baseline;
   border-bottom: 1px solid var(--line);
@@ -593,6 +597,52 @@ input[type="checkbox"] {
   font-variant-numeric: tabular-nums;
   font-weight: 800;
   margin: .35rem 0 0;
+}
+
+.overview-reconnect-summary {
+  display: grid;
+  gap: .6rem;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+}
+
+.overview-reconnect-summary div {
+  background: color-mix(in srgb, var(--panel-2) 52%, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: .7rem .75rem;
+}
+
+.overview-reconnect-summary dt {
+  color: var(--muted);
+  font: 700 .66rem/1.2 var(--mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.overview-reconnect-summary dd {
+  color: var(--text);
+  font-size: 1.15rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+  margin: .3rem 0 0;
+}
+
+.overview-details {
+  margin-top: .85rem;
+}
+
+.overview-details summary {
+  color: var(--muted);
+  cursor: pointer;
+  font: 700 .72rem/1.2 var(--mono);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.overview-details .metric-table {
+  margin: .75rem 0 0;
+  max-width: 100%;
 }
 
 .diagnostics-grid {
@@ -1238,6 +1288,10 @@ input[type="checkbox"] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .overview-reconnect-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .nav-links {
     grid-column: 1 / -1;
     justify-content: flex-start;
@@ -1267,7 +1321,8 @@ input[type="checkbox"] {
   }
 
   .overview-grid,
-  .overview-latency-grid {
+  .overview-latency-grid,
+  .overview-reconnect-summary {
     grid-template-columns: 1fr;
   }
 

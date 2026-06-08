@@ -18,6 +18,7 @@ It is currently pre-alpha. The useful baseline is working, but APIs, persistence
 - Check [project status](/latest/status/) before depending on a feature.
 - Check [implemented surface](/latest/implemented-surface/) when you need the detailed answer for whether a path is wired and under what conditions.
 - Check the [roadmap](/latest/roadmap/) for recently landed work and near-term pending items.
+- Use the [optimization log](/latest/development/optimization-log/) for benchmark-first performance investigations.
 
 ## Design intent
 

@@ -53,7 +53,9 @@ check what is already wired and under what conditions.
 - Continue improving runnable broker images and binaries, including `fibrilctl` in the server image.
 - Add more production deployment guidance for the broker itself.
 - Improve admin interface observability.
-- Produce repeatable benchmark reports.
+- Produce repeatable benchmark reports and keep the
+  [optimization log](/latest/development/optimization-log/) current as
+  low-level performance work is investigated.
 - Tighten memory behavior under large queue depth, high inflight load, and many idle queues.
 
 ## Longer term

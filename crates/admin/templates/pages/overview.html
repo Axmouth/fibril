@@ -35,49 +35,6 @@
   </article>
 </section>
 
-<section class="overview-panel" aria-label="Reconnect reconciliation">
-  <div class="overview-panel-heading">
-    <h5>Reconnects</h5>
-    <p>Resume and subscription reconciliation outcomes since broker start.</p>
-  </div>
-  <table class="table table-compact narrow metric-table">
-    <tbody>
-      <tr>
-        <td>Resume accepted</td>
-        <td id="resume_accepted">--</td>
-      </tr>
-      <tr>
-        <td>Resume rejected</td>
-        <td id="resume_rejected">--</td>
-      </tr>
-      <tr>
-        <td>Grace entered</td>
-        <td id="grace_entered">--</td>
-      </tr>
-      <tr>
-        <td>Grace expired</td>
-        <td id="grace_expired">--</td>
-      </tr>
-      <tr>
-        <td>Subscriptions kept</td>
-        <td id="reconcile_kept">--</td>
-      </tr>
-      <tr>
-        <td>Subscriptions restored</td>
-        <td id="reconcile_restored">--</td>
-      </tr>
-      <tr>
-        <td>Client streams closed</td>
-        <td id="reconcile_client_closed">--</td>
-      </tr>
-      <tr>
-        <td>Server subscriptions dropped</td>
-        <td id="reconcile_server_dropped">--</td>
-      </tr>
-    </tbody>
-  </table>
-</section>
-
 <section class="overview-panel" aria-label="Stroma timings">
   <div class="overview-panel-heading">
     <h5>Stroma Timings</h5>
@@ -138,6 +95,58 @@
   </table>
 </section>
 
+<section class="overview-panel overview-panel-secondary" aria-label="Reconnect reconciliation">
+  <div class="overview-panel-heading">
+    <h5>Reconnects</h5>
+    <p>Compact session continuity signals since broker start.</p>
+  </div>
+  <dl class="overview-reconnect-summary">
+    <div>
+      <dt>Resumed</dt>
+      <dd id="resume_accepted">--</dd>
+    </div>
+    <div>
+      <dt>Rejected</dt>
+      <dd id="resume_rejected">--</dd>
+    </div>
+    <div>
+      <dt>Grace expired</dt>
+      <dd id="grace_expired">--</dd>
+    </div>
+    <div>
+      <dt>Reconciled subs</dt>
+      <dd id="reconcile_total">--</dd>
+    </div>
+  </dl>
+  <details class="overview-details">
+    <summary>Detailed reconnect counters</summary>
+    <table class="table table-compact narrow metric-table">
+      <tbody>
+        <tr>
+          <td>Grace entered</td>
+          <td id="grace_entered">--</td>
+        </tr>
+        <tr>
+          <td>Subscriptions kept</td>
+          <td id="reconcile_kept">--</td>
+        </tr>
+        <tr>
+          <td>Subscriptions restored</td>
+          <td id="reconcile_restored">--</td>
+        </tr>
+        <tr>
+          <td>Client streams closed</td>
+          <td id="reconcile_client_closed">--</td>
+        </tr>
+        <tr>
+          <td>Server subscriptions dropped</td>
+          <td id="reconcile_server_dropped">--</td>
+        </tr>
+      </tbody>
+    </table>
+  </details>
+</section>
+
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
@@ -191,10 +200,18 @@ async function refresh() {
   document.getElementById("resume_rejected").textContent = tcp.resume_rejected_total ?? "--";
   document.getElementById("grace_entered").textContent = tcp.reconnect_grace_entered_total ?? "--";
   document.getElementById("grace_expired").textContent = tcp.reconnect_grace_expired_total ?? "--";
-  document.getElementById("reconcile_kept").textContent = tcp.reconcile_kept_total ?? "--";
-  document.getElementById("reconcile_restored").textContent = tcp.reconcile_restored_total ?? "--";
-  document.getElementById("reconcile_client_closed").textContent = tcp.reconcile_client_closed_total ?? "--";
-  document.getElementById("reconcile_server_dropped").textContent = tcp.reconcile_server_dropped_total ?? "--";
+  const reconcileKept = tcp.reconcile_kept_total ?? 0;
+  const reconcileRestored = tcp.reconcile_restored_total ?? 0;
+  const reconcileClientClosed = tcp.reconcile_client_closed_total ?? 0;
+  const reconcileServerDropped = tcp.reconcile_server_dropped_total ?? 0;
+  document.getElementById("reconcile_kept").textContent = reconcileKept;
+  document.getElementById("reconcile_restored").textContent = reconcileRestored;
+  document.getElementById("reconcile_client_closed").textContent = reconcileClientClosed;
+  document.getElementById("reconcile_server_dropped").textContent = reconcileServerDropped;
+  document.getElementById("reconcile_total").textContent = reconcileKept
+    + reconcileRestored
+    + reconcileClientClosed
+    + reconcileServerDropped;
 }
 setInterval(refresh, 2000);
 refresh();
