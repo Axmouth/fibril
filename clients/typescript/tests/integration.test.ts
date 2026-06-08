@@ -262,7 +262,42 @@ test("client sends active subscriptions during reconnect reconciliation", async 
         );
       } else if (f.opcode === Op.ReconcileClient) {
         reconcile = decodeFrameBody<ReconcileClientMsg>(f);
-        broker.send(s, buildFrame(Op.ReconcileResult, f.requestId, { subscriptions: [] }));
+        const restored = {
+          sub_id: 55n,
+          topic: "jobs",
+          group: "workers",
+          partition: 0,
+          auto_ack: false,
+        };
+        broker.send(
+          s,
+          buildFrame(Op.ReconcileResult, f.requestId, {
+            subscriptions: [
+              {
+                client: restored,
+                server: restored,
+                action: "keep",
+                reason: "matched",
+              },
+            ],
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 99n, {
+            sub_id: 55n,
+            topic: "jobs",
+            group: "workers",
+            partition: 0,
+            offset: 9n,
+            delivery_tag: { epoch: 123n },
+            published: 1n,
+            publish_received: 2n,
+            content_type: null,
+            headers: {},
+            payload: new Uint8Array([1, 2, 3]),
+          }),
+        );
       }
     };
 
@@ -282,6 +317,11 @@ test("client sends active subscriptions during reconnect reconciliation", async 
         },
       ],
     });
+
+    const delivered = await sub.recv();
+    assert.ok(delivered);
+    assert.deepEqual([...delivered.payload], [1, 2, 3]);
+    assert.deepEqual(delivered.deliveryTag, { epoch: 123n });
 
     sub.close();
     await client.shutdown();

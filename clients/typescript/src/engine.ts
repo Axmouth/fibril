@@ -100,11 +100,48 @@ const HANDSHAKE_REQUEST_ID = 1n;
 const AUTH_REQUEST_ID = 2n;
 const RECONCILE_REQUEST_ID = 3n;
 
-export type SubscriptionRegistry = Map<bigint, ReconcileSubscription>;
+export interface RegisteredSubscription {
+  reconcile: ReconcileSubscription;
+  delivery: SubDelivery;
+}
+
+export type SubscriptionRegistry = Map<bigint, RegisteredSubscription>;
+
+interface ShutdownMode {
+  preserveSubscriptions: boolean;
+}
 
 function normalizePayload(payload: DeliverMsg["payload"] | number[]): Uint8Array {
   if (payload instanceof Uint8Array) return payload;
   return Uint8Array.from(payload);
+}
+
+function applyReconcileResult(
+  registry: SubscriptionRegistry,
+  result: ReconcileResultMsg,
+): Map<bigint, SubState> {
+  const restored = new Map<bigint, SubState>();
+  for (const item of result.subscriptions) {
+    const client = item.client;
+    if (!client) continue;
+
+    if (item.action !== "keep") {
+      registry.delete(client.sub_id);
+      continue;
+    }
+
+    const registered = registry.get(client.sub_id);
+    if (!registered) continue;
+    const server = item.server ?? client;
+    registered.reconcile = server;
+    restored.set(server.sub_id, {
+      topic: server.topic,
+      group: server.group,
+      partition: server.partition,
+      delivery: registered.delivery,
+    });
+  }
+  return restored;
 }
 
 // ===== Public engine handle =====
@@ -112,6 +149,7 @@ function normalizePayload(payload: DeliverMsg["payload"] | number[]): Uint8Array
 export class Engine {
   readonly #commandQueue: BoundedQueue<Command>;
   readonly #socket: Socket;
+  readonly #shutdownMode: ShutdownMode;
   readonly resumeIdentity: ResumeIdentity;
   readonly resumeOutcome: HelloOk["resume_outcome"];
   #shutdownInitiated = false;
@@ -123,11 +161,13 @@ export class Engine {
     commandQueue: BoundedQueue<Command>,
     socket: Socket,
     completed: Promise<void>,
+    shutdownMode: ShutdownMode,
     resumeIdentity: ResumeIdentity,
     resumeOutcome: HelloOk["resume_outcome"],
   ) {
     this.#commandQueue = commandQueue;
     this.#socket = socket;
+    this.#shutdownMode = shutdownMode;
     this.#completed = completed.finally(() => {
       this.#closed = true;
     });
@@ -198,9 +238,10 @@ export class Engine {
       }
     }
 
+    let restoredSubscriptions = new Map<bigint, SubState>();
     if (hello.resume_outcome === "resumed") {
       const reconcile: ReconcileClientMsg = {
-        subscriptions: [...subscriptionRegistry.values()],
+        subscriptions: [...subscriptionRegistry.values()].map((sub) => sub.reconcile),
       };
       await writeFrame(
         socket,
@@ -216,7 +257,10 @@ export class Engine {
           `Unexpected frame opcode ${reconcileFrame.opcode} during reconciliation`,
         );
       }
-      decodeFrameBody<ReconcileResultMsg>(reconcileFrame);
+      restoredSubscriptions = applyReconcileResult(
+        subscriptionRegistry,
+        decodeFrameBody<ReconcileResultMsg>(reconcileFrame),
+      );
     }
 
     // ---- Start engine loop ----
@@ -224,15 +268,18 @@ export class Engine {
     const heartbeatInterval =
       opts.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_S;
 
+    const shutdownMode = { preserveSubscriptions: false };
     const completed = runEngineLoop({
       socket,
       reader,
       commandQueue,
       heartbeatIntervalSeconds: heartbeatInterval,
       subscriptionRegistry,
+      initialSubscriptions: restoredSubscriptions,
+      shutdownMode,
     });
 
-    return new Engine(commandQueue, socket, completed, resumeIdentity, hello.resume_outcome);
+    return new Engine(commandQueue, socket, completed, shutdownMode, resumeIdentity, hello.resume_outcome);
   }
 
   /**
@@ -265,6 +312,12 @@ export class Engine {
     }
   }
 
+  /** @internal Preserve restored subscription queues while replacing engines. */
+  shutdownForReconnect(): void {
+    this.#shutdownMode.preserveSubscriptions = true;
+    this.shutdown();
+  }
+
   /** Resolves when the engine task has fully exited. */
   whenComplete(): Promise<void> {
     return this.#completed;
@@ -284,6 +337,8 @@ interface EngineLoopArgs {
   commandQueue: BoundedQueue<Command>;
   heartbeatIntervalSeconds: number;
   subscriptionRegistry: SubscriptionRegistry;
+  initialSubscriptions: Map<bigint, SubState>;
+  shutdownMode: ShutdownMode;
 }
 
 async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
@@ -293,9 +348,11 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     commandQueue,
     heartbeatIntervalSeconds,
     subscriptionRegistry,
+    initialSubscriptions,
+    shutdownMode,
   } = args;
 
-  const subs = new Map<bigint, SubState>();
+  const subs = new Map<bigint, SubState>(initialSubscriptions);
   const waiters = new Map<bigint, Waiter>();
   let nextRequestId = 4n; // 1 = HELLO, 2 = AUTH, 3 = optional reconcile.
   const nextReqId = (): bigint => {
@@ -550,34 +607,42 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         const prefetch = Math.max(1, ok.prefetch);
         if (w.kind === "subscribeManual") {
           const queue = new BoundedQueue<InternalInflight>(prefetch);
+          const delivery: SubDelivery = { kind: "manual", queue };
           subs.set(ok.sub_id, {
             topic: ok.topic,
             group: ok.group,
             partition: ok.partition,
-            delivery: { kind: "manual", queue },
+            delivery,
           });
           subscriptionRegistry.set(ok.sub_id, {
-            sub_id: ok.sub_id,
-            topic: ok.topic,
-            group: ok.group,
-            partition: ok.partition,
-            auto_ack: false,
+            reconcile: {
+              sub_id: ok.sub_id,
+              topic: ok.topic,
+              group: ok.group,
+              partition: ok.partition,
+              auto_ack: false,
+            },
+            delivery,
           });
           w.deferred.resolve(queue);
         } else if (w.kind === "subscribeAuto") {
           const queue = new BoundedQueue<InternalDelivered>(prefetch);
+          const delivery: SubDelivery = { kind: "auto", queue };
           subs.set(ok.sub_id, {
             topic: ok.topic,
             group: ok.group,
             partition: ok.partition,
-            delivery: { kind: "auto", queue },
+            delivery,
           });
           subscriptionRegistry.set(ok.sub_id, {
-            sub_id: ok.sub_id,
-            topic: ok.topic,
-            group: ok.group,
-            partition: ok.partition,
-            auto_ack: true,
+            reconcile: {
+              sub_id: ok.sub_id,
+              topic: ok.topic,
+              group: ok.group,
+              partition: ok.partition,
+              auto_ack: true,
+            },
+            delivery,
           });
           w.deferred.resolve(queue);
         } else {
@@ -622,13 +687,15 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           try {
             await sub.delivery.queue.send(inflight);
           } catch {
-            // queue closed — sub is dead, drop silently.
+            subs.delete(d.sub_id);
+            subscriptionRegistry.delete(d.sub_id);
           }
         } else {
           try {
             await sub.delivery.queue.send(base);
           } catch {
-            // queue closed
+            subs.delete(d.sub_id);
+            subscriptionRegistry.delete(d.sub_id);
           }
         }
         return;
@@ -695,7 +762,11 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
 
   // Close all subscription queues with the failure cause so
   // subscription async iterators throw rather than ending silently.
-  for (const sub of subs.values()) {
+  for (const [subId, sub] of subs) {
+    if (shutdownMode.preserveSubscriptions) {
+      const registered = subscriptionRegistry.get(subId);
+      if (registered?.delivery === sub.delivery) continue;
+    }
     sub.delivery.queue.close(cleanupError);
   }
   subs.clear();

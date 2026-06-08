@@ -40,18 +40,16 @@ use the latest engine.
 After a successful resume, Rust and TypeScript clients send the broker the
 subscription metadata they still believe is active. The broker compares it with
 the server-side logical connection and replies with a reconciliation result.
-Today this is an explicit safety check. It detects matched, missing, or
-mismatched subscription metadata, but it does not yet automatically recreate a
-running application stream.
+When the broker reports that a subscription should be kept, the client routes
+new deliveries for that subscription back into the existing subscription stream.
 
 The clients do not replay operations that were already in flight when the socket
 failed. This avoids silently duplicating confirmed publishes whose frame may
 have reached the broker before the confirmation was lost.
 
-Active subscription streams are different. A stream that was already receiving
-messages is still tied to its original engine. If that engine exits, the stream
-can fail or end, and the application should recreate the subscription after
-reconnect. Transparent stream restoration is the next reconnect step.
+Active subscription recovery is conservative. If resume is not accepted, or the
+broker reports that the client and server disagree about a subscription, treat
+that stream as unsafe and recreate the subscription at the application level.
 
 Reconnect grace is also not durable restart recovery. If the broker process
 restarts, the in-memory dormant connection state is gone.

@@ -28,10 +28,11 @@ check what is already wired and under what conditions.
 - Rust and TypeScript clients make one conservative automatic reconnect attempt before a new operation when the previous engine is known closed.
 - The TCP handler can keep a logical connection dormant during a configured grace window, accept late settles after resume, and requeue unsettled inflight messages when grace expires.
 - Rust and TypeScript clients now send subscription metadata after a successful resume, and the broker replies with a reconciliation result.
+- Rust and TypeScript clients now keep active subscription streams alive when reconciliation confirms the subscription should be kept.
 
 ## Near term
 
-- Use subscription reconciliation results to restore or close active subscription streams after reconnect.
+- Improve operator and client feedback for reconnect cases where resume is rejected or reconciliation reports a mismatch.
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
 - Add the next storage-level startup/runtime settings where they have clear operational value.
 - Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.

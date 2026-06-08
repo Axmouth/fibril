@@ -93,8 +93,9 @@ explicitly. Plain values passed to publish methods use msgpack.
 
 ## Limitations
 
-- `reconnect_restore` (resubscribing after reconnect) is not implemented.
-  Use `reconnect()` and re-create publishers/subscriptions.
+- Automatic resubscribe after a rejected or mismatched resume is not implemented.
+  When reconciliation returns `keep`, active subscriptions continue on the
+  existing stream. Otherwise recreate the subscription at the application level.
 - No write timeouts; relies on heartbeat (3× interval) to detect dead
   half-open connections.
 - Delayed retry is exposed through `retryAfter(...)`.

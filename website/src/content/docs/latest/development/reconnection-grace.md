@@ -154,8 +154,7 @@ Current limits:
   subscription metadata after a successful resume.
 - Existing Rust and TypeScript publisher handles use the latest engine after
   explicit or automatic reconnect. New subscriptions also use the latest engine.
-  Active subscription streams still need automatic recovery based on the
-  reconciliation result.
+- Active subscription streams continue when reconciliation returns `keep`.
 - Rust and TypeScript clients make one automatic reconnect attempt before a new
   operation when the old engine is already known closed.
 - In-flight protocol requests from the old socket are not replayed.
@@ -187,8 +186,9 @@ The broker replies with one result per subscription:
 The result also carries the client and server view that caused the decision, plus
 a short reason string. The broker currently uses this to report matched,
 missing, or mismatched subscription metadata. Clients read the result after
-resume, but they do not yet automatically rebuild active application streams
-from it.
+resume. When the result says `keep`, they attach the existing subscription
+stream to the new engine so later deliveries keep flowing to the same user-facing
+receiver.
 
 The current policy is conservative:
 
@@ -205,9 +205,10 @@ restart recovery.
 
 ## Remaining Reconciliation Work
 
-The next step is active subscription stream recovery. That means using the
-reconciliation result to either keep, close, or recreate the user-visible stream
-instead of only recording that the two sides disagreed.
+Active stream recovery handles the `keep` case. The remaining user-facing work
+is clearer feedback when a stream cannot be kept, and a possible automatic
+resubscribe path for safe cases where the broker says to recreate the
+subscription.
 
 Inflight delivery reconciliation is also not done yet. A future version may need
 additional frames or fields for:
@@ -317,7 +318,7 @@ Client tests:
 - Should resume be opt-in per client, enabled globally, or enabled by default?
 - Should auto-ack subscriptions participate in grace, or only manual-ack
   subscriptions?
-- Should the server restore subscriptions automatically, or should clients
-  resubscribe after a successful resume?
+- Should clients automatically resubscribe when reconciliation says a
+  subscription should be recreated?
 - How long should the default grace window be?
 - Should late settles after the grace window return a specific error code?

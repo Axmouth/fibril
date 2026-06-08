@@ -50,9 +50,10 @@ By default, both clients make one automatic reconnect attempt before a new
 operation if the previous engine is already closed. Disable that with
 `disable_auto_reconnect()` in Rust or `disableAutoReconnect()` in TypeScript.
 After a successful resume, both clients send their known subscription metadata
-to the broker and read the reconciliation result. This does not replay in-flight
-operations or restore active subscription streams yet; see
-[reconnects](/latest/reliability/reconnects/) for the current limits.
+to the broker and read the reconciliation result. Subscriptions that the broker
+confirms with `keep` continue on the existing stream. This does not replay
+in-flight publish operations; see [reconnects](/latest/reliability/reconnects/)
+for the current limits.
 
 ## Publish
 

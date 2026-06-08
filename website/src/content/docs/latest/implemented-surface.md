@@ -323,7 +323,8 @@ Server-side reconnect grace for inflight settles is implemented in the TCP
 handler when `connection.reconnect_grace_ms` is configured. Clients now attempt
 one automatic reconnect before a new operation when the old engine is already
 closed. Clients and broker also exchange subscription metadata after a
-successful resume. Transparent active subscription recovery is still planned.
+successful resume. Active subscription streams continue when reconciliation
+confirms that the subscription should be kept.
 
 | Item | Rust | TypeScript |
 | --- | --- | --- |
@@ -340,7 +341,7 @@ successful resume. Transparent active subscription recovery is still planned.
 | New subscriptions after explicit reconnect | Implemented | Implemented |
 | Conservative automatic reconnect before new operation | Implemented | Implemented |
 | Subscription reconciliation metadata exchange | Implemented | Implemented |
-| Active subscription recovery after reconnect | Planned | Planned |
+| Active subscription recovery after accepted resume | Implemented | Implemented |
 | Delayed retry | Implemented | Implemented |
 | Queue declaration | Implemented | Implemented |
 | Content type helpers | Implemented | Implemented |
@@ -358,8 +359,9 @@ Conditions and limits:
 - New subscriptions created after reconnect use the latest client engine.
 - Automatic reconnect is bounded by client policy and defaults to one attempt before a new operation.
 - After a successful resume, both clients send known subscription metadata and read the broker reconciliation result.
+- When the broker returns `keep`, both clients route later deliveries for that subscription into the existing stream.
 - Operations already in flight when the socket fails are not replayed.
-- Active subscription streams created before reconnect are not transparently restored yet.
+- Active subscriptions still need application-level handling when resume is rejected or reconciliation reports a mismatch.
 - Late settlements after a short disconnect are accepted only when the client explicitly resumes before grace expires.
 
 ## Benchmarks and Operational Scripts

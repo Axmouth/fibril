@@ -386,7 +386,7 @@ export class Client {
     }
     this.#engine.replace(engine);
     this.#userShutdown = false;
-    oldEngine.shutdown();
+    oldEngine.shutdownForReconnect();
     return { resumeOutcome: engine.resumeOutcome };
   }
 

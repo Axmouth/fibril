@@ -1278,7 +1278,7 @@ struct ClientShared {
     engine: Arc<EngineSlot>,
     reconnect_lock: Mutex<()>,
     user_shutdown: AtomicBool,
-    subscriptions: Arc<RwLock<HashMap<u64, ReconcileSubscription>>>,
+    subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
 }
 
 impl ClientShared {
@@ -1458,6 +1458,50 @@ struct SubState {
     delivery: SubDelivery,
 }
 
+#[derive(Debug, Clone)]
+struct RegisteredSubscription {
+    reconcile: ReconcileSubscription,
+    delivery: SubDelivery,
+}
+
+fn apply_reconcile_result(
+    subscriptions: &Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
+    result: ReconcileResult,
+) -> FibrilResult<HashMap<u64, SubState>> {
+    let mut registry = subscriptions
+        .write()
+        .map_err(|_| client_subscription_registry_poisoned())?;
+    let mut restored = HashMap::new();
+
+    for item in result.subscriptions {
+        let Some(client) = item.client else {
+            continue;
+        };
+
+        if item.action != ReconcileAction::Keep {
+            registry.remove(&client.sub_id);
+            continue;
+        }
+
+        let Some(registered) = registry.get_mut(&client.sub_id) else {
+            continue;
+        };
+        let server = item.server.unwrap_or(client);
+        registered.reconcile = server.clone();
+        restored.insert(
+            server.sub_id,
+            SubState {
+                topic: server.topic,
+                group: server.group,
+                partition: server.partition,
+                delivery: registered.delivery.clone(),
+            },
+        );
+    }
+
+    Ok(restored)
+}
+
 const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
 
 async fn send_protocol_frame<S, T>(
@@ -1487,7 +1531,7 @@ where
 async fn start_engine<S>(
     mut framed: Framed<S, ProtoCodec>,
     opts: ClientOptions,
-    subscriptions: Arc<RwLock<HashMap<u64, ReconcileSubscription>>>,
+    subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
 ) -> FibrilResult<Arc<EngineHandle>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1579,13 +1623,14 @@ where
         }
     }
 
+    let mut restored_subs = HashMap::<u64, SubState>::new();
     if resume_outcome == ResumeOutcome::Resumed {
         let reconcile = ReconcileClient {
             subscriptions: subscriptions
                 .read()
                 .map_err(|_| client_subscription_registry_poisoned())?
                 .values()
-                .cloned()
+                .map(|sub| sub.reconcile.clone())
                 .collect(),
         };
         send_protocol_frame(&mut framed, Op::ReconcileClient, 3, &reconcile).await?;
@@ -1596,7 +1641,8 @@ where
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
         match frame.opcode {
             x if x == Op::ReconcileResult as u16 => {
-                let _result: ReconcileResult = decode_protocol(&frame)?;
+                let result: ReconcileResult = decode_protocol(&frame)?;
+                restored_subs = apply_reconcile_result(&subscriptions, result)?;
             }
             x if x == Op::Error as u16 => {
                 let err: ErrorMsg = decode_protocol(&frame)?;
@@ -1621,7 +1667,7 @@ where
         resume_outcome,
     });
 
-    let mut subs = HashMap::<u64, SubState>::new();
+    let mut subs = restored_subs;
     let subscription_registry = subscriptions.clone();
 
     let shutdown_engine = shutdown.clone();
@@ -1823,8 +1869,8 @@ where
                                     break;
                                 }
                             };
-                            if let Some(sub) = subs.get(&d.sub_id) {
-                                match &sub.delivery {
+                            if let Some(sub) = subs.get(&d.sub_id).cloned() {
+                                match sub.delivery {
                                     SubDelivery::Manual(tx) => {
                                         let (ack_tx, ack_rx) = oneshot::channel();
                                         let msg = InflightMessage {
@@ -1883,6 +1929,12 @@ where
                                                     }
                                                 }
                                             });
+                                        } else {
+                                            tracing::warn!("Subscription receiver dropped");
+                                            subs.remove(&d.sub_id);
+                                            if let Ok(mut registry) = subscription_registry.write() {
+                                                registry.remove(&d.sub_id);
+                                            }
                                         }
                                     }
 
@@ -1897,7 +1949,11 @@ where
                                         }).await;
 
                                         if res.is_err() {
-                                            tracing::warn!("Broken pipe");
+                                            tracing::warn!("Subscription receiver dropped");
+                                            subs.remove(&d.sub_id);
+                                            if let Ok(mut registry) = subscription_registry.write() {
+                                                registry.remove(&d.sub_id);
+                                            }
                                         }
                                     }
                                 }
@@ -1916,20 +1972,25 @@ where
                                 match waiter {
                                     Waiter::SubscribeManual(tx) => {
                                         let (txm, rxm) = mpsc::channel(ok.prefetch as usize);
+                                        let delivery = SubDelivery::Manual(txm);
 
                                         subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
                                             group: ok.group.clone(),
                                             partition: ok.partition,
-                                            delivery: SubDelivery::Manual(txm),
+                                            delivery: delivery.clone(),
                                         });
                                         match subscription_registry.write() {
                                             Ok(mut registry) => {
                                                 registry.insert(
                                                     ok.sub_id,
-                                                    reconcile_subscription_from_subscribe_ok(
-                                                        &ok, false,
-                                                    ),
+                                                    RegisteredSubscription {
+                                                        reconcile:
+                                                            reconcile_subscription_from_subscribe_ok(
+                                                                &ok, false,
+                                                            ),
+                                                        delivery,
+                                                    },
                                                 );
                                             }
                                             Err(_) => {
@@ -1948,20 +2009,25 @@ where
 
                                     Waiter::SubscribeAuto(tx) => {
                                         let (txa, rxa) = mpsc::channel(ok.prefetch as usize);
+                                        let delivery = SubDelivery::Auto(txa);
 
                                         subs.insert(ok.sub_id, SubState {
                                             topic: ok.topic.clone(),
                                             group: ok.group.clone(),
                                             partition: ok.partition,
-                                            delivery: SubDelivery::Auto(txa),
+                                            delivery: delivery.clone(),
                                         });
                                         match subscription_registry.write() {
                                             Ok(mut registry) => {
                                                 registry.insert(
                                                     ok.sub_id,
-                                                    reconcile_subscription_from_subscribe_ok(
-                                                        &ok, true,
-                                                    ),
+                                                    RegisteredSubscription {
+                                                        reconcile:
+                                                            reconcile_subscription_from_subscribe_ok(
+                                                                &ok, true,
+                                                            ),
+                                                        delivery,
+                                                    },
                                                 );
                                             }
                                             Err(_) => {
@@ -2637,13 +2703,48 @@ mod tests {
             assert_eq!(reconcile.opcode, Op::ReconcileClient as u16);
             let msg: ReconcileClient = try_decode(&reconcile).unwrap();
             tx.send(msg).await.unwrap();
+            let restored = ReconcileSubscription {
+                sub_id: 77,
+                topic: "jobs".into(),
+                group: None,
+                partition: 0,
+                auto_ack: false,
+            };
             second
                 .send(
                     try_encode(
                         Op::ReconcileResult,
                         reconcile.request_id,
                         &ReconcileResult {
-                            subscriptions: vec![],
+                            subscriptions: vec![ReconcileSubscriptionResult {
+                                client: Some(restored.clone()),
+                                server: Some(restored.clone()),
+                                action: ReconcileAction::Keep,
+                                reason: "matched".into(),
+                            }],
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            second
+                .send(
+                    try_encode(
+                        Op::Deliver,
+                        88,
+                        &Deliver {
+                            sub_id: 77,
+                            topic: "jobs".into(),
+                            group: None,
+                            partition: 0,
+                            offset: 9,
+                            delivery_tag: DeliveryTag { epoch: 123 },
+                            published: 1,
+                            publish_received: 2,
+                            content_type: None,
+                            headers: HashMap::new(),
+                            payload: b"after-reconnect".to_vec(),
                         },
                     )
                     .unwrap(),
@@ -2653,7 +2754,7 @@ mod tests {
         });
 
         let mut client = ClientOptions::new().connect(addr).await.unwrap();
-        let _sub = client
+        let mut sub = client
             .subscribe("jobs")
             .unwrap()
             .sub_manual_ack()
@@ -2675,6 +2776,9 @@ mod tests {
                 }],
             }
         );
+        let msg = sub.recv().await.unwrap();
+        assert_eq!(msg.payload, b"after-reconnect");
+        assert_eq!(msg.delivery_tag, DeliveryTag { epoch: 123 });
 
         client.shutdown().await;
         server.await.unwrap();
