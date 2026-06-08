@@ -26,8 +26,8 @@
         <span class="settings-label">Inflight TTL</span>
         <span class="settings-help">How long a delivered message can remain unacknowledged before it becomes eligible again.</span>
         <span class="settings-duration">
-          <input class="clr-input" id="delivery.inflight_ttl_ms" type="number" min="0" step="1">
-          <select class="clr-select duration-unit" id="delivery.inflight_ttl_ms.unit" data-for="delivery.inflight_ttl_ms">
+          <input id="delivery.inflight_ttl_ms" type="number" min="0" step="1">
+          <select class="duration-unit" id="delivery.inflight_ttl_ms.unit" data-for="delivery.inflight_ttl_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
           </select>
@@ -37,8 +37,8 @@
         <span class="settings-label">Expiry poll minimum</span>
         <span class="settings-help">Minimum wait between checks for delayed messages becoming ready.</span>
         <span class="settings-duration">
-          <input class="clr-input" id="delivery.expiry_poll_min_ms" type="number" min="0" step="1">
-          <select class="clr-select duration-unit" id="delivery.expiry_poll_min_ms.unit" data-for="delivery.expiry_poll_min_ms">
+          <input id="delivery.expiry_poll_min_ms" type="number" min="0" step="1">
+          <select class="duration-unit" id="delivery.expiry_poll_min_ms.unit" data-for="delivery.expiry_poll_min_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
           </select>
@@ -47,14 +47,14 @@
       <label class="settings-field">
         <span class="settings-label">Expiry batch max</span>
         <span class="settings-help">Maximum delayed or expired offsets processed in one pass.</span>
-        <input class="clr-input" id="delivery.expiry_batch_max" type="number" min="1" step="1">
+        <input id="delivery.expiry_batch_max" type="number" min="1" step="1">
       </label>
       <label class="settings-field">
         <span class="settings-label">Delivery poll max</span>
         <span class="settings-help">Maximum wait used by broker delivery polling when no message is immediately ready.</span>
         <span class="settings-duration">
-          <input class="clr-input" id="delivery.delivery_poll_max_ms" type="number" min="0" step="1">
-          <select class="clr-select duration-unit" id="delivery.delivery_poll_max_ms.unit" data-for="delivery.delivery_poll_max_ms">
+          <input id="delivery.delivery_poll_max_ms" type="number" min="0" step="1">
+          <select class="duration-unit" id="delivery.delivery_poll_max_ms.unit" data-for="delivery.delivery_poll_max_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
           </select>
@@ -78,8 +78,8 @@
         <span class="settings-label">Evict after</span>
         <span class="settings-help">How long a queue must have no publishers or subscribers before it can be removed from memory.</span>
         <span class="settings-duration">
-          <input class="clr-input" id="idle_queue_cleanup.evict_after_ms" type="number" min="0" step="1">
-          <select class="clr-select duration-unit" id="idle_queue_cleanup.evict_after_ms.unit" data-for="idle_queue_cleanup.evict_after_ms">
+          <input id="idle_queue_cleanup.evict_after_ms" type="number" min="0" step="1">
+          <select class="duration-unit" id="idle_queue_cleanup.evict_after_ms.unit" data-for="idle_queue_cleanup.evict_after_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
           </select>
@@ -89,8 +89,8 @@
         <span class="settings-label">Sweep interval</span>
         <span class="settings-help">How often the broker checks for queues that have become idle.</span>
         <span class="settings-duration">
-          <input class="clr-input" id="idle_queue_cleanup.sweep_interval_ms" type="number" min="1" step="1">
-          <select class="clr-select duration-unit" id="idle_queue_cleanup.sweep_interval_ms.unit" data-for="idle_queue_cleanup.sweep_interval_ms">
+          <input id="idle_queue_cleanup.sweep_interval_ms" type="number" min="1" step="1">
+          <select class="duration-unit" id="idle_queue_cleanup.sweep_interval_ms.unit" data-for="idle_queue_cleanup.sweep_interval_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
           </select>
@@ -100,8 +100,8 @@
         <span class="settings-label">Publisher idle timeout</span>
         <span class="settings-help">Blank disables publisher idle expiry. Otherwise, unused publisher leases stop keeping the queue active after this long.</span>
         <span class="settings-duration">
-          <input class="clr-input" id="idle_queue_cleanup.publisher_idle_timeout_ms" type="number" min="0" step="1" placeholder="disabled">
-          <select class="clr-select duration-unit" id="idle_queue_cleanup.publisher_idle_timeout_ms.unit" data-for="idle_queue_cleanup.publisher_idle_timeout_ms">
+          <input id="idle_queue_cleanup.publisher_idle_timeout_ms" type="number" min="0" step="1" placeholder="disabled">
+          <select class="duration-unit" id="idle_queue_cleanup.publisher_idle_timeout_ms.unit" data-for="idle_queue_cleanup.publisher_idle_timeout_ms">
             <option value="s">seconds</option>
             <option value="ms">milliseconds</option>
           </select>
@@ -181,12 +181,12 @@
         <label class="settings-field">
           <span class="settings-label">Target topic</span>
           <span class="settings-help">Queue topic that receives dead-lettered messages.</span>
-          <input class="clr-input" id="global-dlq.tp" placeholder="_dlq.default">
+          <input id="global-dlq.tp" placeholder="_dlq.default">
         </label>
         <label class="settings-field">
           <span class="settings-label">Target group</span>
           <span class="settings-help">Optional queue group for the target queue.</span>
-          <input class="clr-input" id="global-dlq.group" placeholder="blank for default">
+          <input id="global-dlq.group" placeholder="blank for default">
         </label>
       </div>
 
@@ -210,12 +210,12 @@
         <label class="settings-field">
           <span class="settings-label">Queue topic</span>
           <span class="settings-help">Source queue to configure.</span>
-          <input class="clr-input" id="queue-dlq.tp" required placeholder="orders.created">
+          <input id="queue-dlq.tp" required placeholder="orders.created">
         </label>
         <label class="settings-field">
           <span class="settings-label">Queue group</span>
           <span class="settings-help">Optional group name for the source queue.</span>
-          <input class="clr-input" id="queue-dlq.group" placeholder="blank for default">
+          <input id="queue-dlq.group" placeholder="blank for default">
         </label>
       </div>
 
@@ -223,7 +223,7 @@
         <label class="settings-field">
           <span class="settings-label">Policy</span>
           <span class="settings-help">Discard, use the global DLQ, or route to a queue-specific target.</span>
-          <select class="clr-select" id="queue-dlq.policy">
+          <select id="queue-dlq.policy">
             <option value="discard">Discard</option>
             <option value="global">Use global DLQ</option>
             <option value="custom">Custom DLQ target</option>
@@ -233,7 +233,7 @@
         <label class="settings-field">
           <span class="settings-label">Max retries</span>
           <span class="settings-help">Blank leaves the current value for this queue unchanged.</span>
-          <input class="clr-input" id="queue-dlq.max_retries" type="number" min="0" step="1" placeholder="unchanged">
+          <input id="queue-dlq.max_retries" type="number" min="0" step="1" placeholder="unchanged">
         </label>
       </div>
 
@@ -241,12 +241,12 @@
         <label class="settings-field">
           <span class="settings-label">Target topic</span>
           <span class="settings-help">Queue topic that receives this queue's dead-lettered messages.</span>
-          <input class="clr-input" id="queue-dlq.target.tp" placeholder="_dlq.orders">
+          <input id="queue-dlq.target.tp" placeholder="_dlq.orders">
         </label>
         <label class="settings-field">
           <span class="settings-label">Target group</span>
           <span class="settings-help">Optional group name for the custom DLQ target.</span>
-          <input class="clr-input" id="queue-dlq.target.group" placeholder="blank for default">
+          <input id="queue-dlq.target.group" placeholder="blank for default">
         </label>
       </div>
 

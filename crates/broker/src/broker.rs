@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use fibril_metrics::{BrokerStats, QueuesStateSnapshot};
 use futures::FutureExt;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use fibril_storage::{
@@ -167,8 +167,13 @@ pub struct PublishRequest {
     pub extra: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PublisherHandle {
+    // Intentionally not Clone. A broker publisher handle owns one sink task and
+    // one active-publisher lease. Sharing a cloned sender would make lease
+    // accounting easy to misunderstand, while cloning with a new lease would
+    // need a matching sink lifetime. Call get_publisher again for another
+    // independently tracked publisher.
     pub publisher: mpsc::Sender<PublishRequest>,
 }
 
@@ -376,24 +381,28 @@ struct QueueActivityState {
 #[derive(Debug, Default)]
 struct QueueActivity {
     state: Mutex<QueueActivityState>,
+    last_used_ms: AtomicU64,
 }
 
 impl QueueActivity {
     fn snapshot(&self) -> QueueActivitySnapshot {
         let state = self.state.lock().expect("queue activity lock poisoned");
+        let last_used_ms = self.last_used_ms.load(Ordering::Acquire);
         QueueActivitySnapshot {
             active_publishers: state.active_publishers,
             active_subscribers: state.active_subscribers,
             idle_since_ms: state.idle_since_ms,
-            last_active_ms: state.last_active_ms,
+            last_active_ms: (last_used_ms > 0).then_some(last_used_ms),
         }
     }
 
     fn add_publisher(self: &Arc<Self>) -> PublisherLease {
         let mut state = self.state.lock().expect("queue activity lock poisoned");
+        let now = unix_millis();
         state.active_publishers += 1;
         state.idle_since_ms = None;
-        state.last_active_ms = Some(unix_millis());
+        state.last_active_ms = Some(now);
+        self.last_used_ms.store(now, Ordering::Release);
         drop(state);
 
         PublisherLease {
@@ -405,14 +414,16 @@ impl QueueActivity {
         let mut state = self.state.lock().expect("queue activity lock poisoned");
         debug_assert!(state.active_publishers > 0);
         state.active_publishers = state.active_publishers.saturating_sub(1);
-        Self::mark_idle_if_empty(&mut state);
+        Self::mark_idle_if_empty(&mut state, &self.last_used_ms);
     }
 
     fn add_subscriber(self: &Arc<Self>) -> ConsumerLease {
         let mut state = self.state.lock().expect("queue activity lock poisoned");
+        let now = unix_millis();
         state.active_subscribers += 1;
         state.idle_since_ms = None;
-        state.last_active_ms = Some(unix_millis());
+        state.last_active_ms = Some(now);
+        self.last_used_ms.store(now, Ordering::Release);
         drop(state);
 
         ConsumerLease {
@@ -424,14 +435,24 @@ impl QueueActivity {
         let mut state = self.state.lock().expect("queue activity lock poisoned");
         debug_assert!(state.active_subscribers > 0);
         state.active_subscribers = state.active_subscribers.saturating_sub(1);
-        Self::mark_idle_if_empty(&mut state);
+        Self::mark_idle_if_empty(&mut state, &self.last_used_ms);
     }
 
-    fn mark_idle_if_empty(state: &mut QueueActivityState) {
+    fn touch(&self) {
+        self.last_used_ms.store(unix_millis(), Ordering::Release);
+    }
+
+    fn mark_idle_if_no_leases(&self) {
+        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        Self::mark_idle_if_empty(&mut state, &self.last_used_ms);
+    }
+
+    fn mark_idle_if_empty(state: &mut QueueActivityState, last_used_ms: &AtomicU64) {
         if state.active_publishers == 0 && state.active_subscribers == 0 {
             let now = unix_millis();
             state.idle_since_ms.get_or_insert(now);
             state.last_active_ms = Some(now);
+            last_used_ms.store(now, Ordering::Release);
         }
     }
 }
@@ -515,12 +536,6 @@ pub struct PublisherLease {
     activity: Arc<QueueActivity>,
 }
 
-impl Clone for PublisherLease {
-    fn clone(&self) -> Self {
-        self.activity.add_publisher()
-    }
-}
-
 impl Drop for PublisherLease {
     fn drop(&mut self) {
         self.activity.drop_publisher();
@@ -560,6 +575,7 @@ struct QueueLoopState {
     rr: AtomicU64,
     consumers: DashMap<ConsumerId, Arc<ConsumerState>>,
     activity: Arc<QueueActivity>,
+    eviction_lock: AsyncMutex<()>,
     // used to wake the delivery loop
     notify: tokio::sync::Notify,
     epoch: AtomicU64,
@@ -572,6 +588,7 @@ impl QueueLoopState {
             rr: AtomicU64::new(0),
             consumers: DashMap::new(),
             activity: Arc::new(QueueActivity::default()),
+            eviction_lock: AsyncMutex::new(()),
             notify: tokio::sync::Notify::new(),
             epoch: AtomicU64::new(1),
         }
@@ -583,6 +600,24 @@ impl QueueLoopState {
 
     fn current_epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
+    }
+
+    async fn add_publisher_lease(&self) -> PublisherLease {
+        let guard = self.eviction_lock.lock().await;
+        let lease = self.activity.add_publisher();
+        drop(guard);
+        lease
+    }
+
+    async fn add_subscriber_lease(&self) -> ConsumerLease {
+        let guard = self.eviction_lock.lock().await;
+        let lease = self.activity.add_subscriber();
+        drop(guard);
+        lease
+    }
+
+    async fn lock_for_eviction(&self) -> AsyncMutexGuard<'_, ()> {
+        self.eviction_lock.lock().await
     }
 }
 
@@ -803,7 +838,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             oneshot::Sender<Result<u64, BrokerError>>,
         )>(16384);
         let metrics = self.metrics.clone();
-        let activity_lease = qs.activity.add_publisher();
+        let activity_lease = qs.add_publisher_lease().await;
         let qs_publish = qs.clone();
         let qs_clone = qs.clone();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
@@ -850,8 +885,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     }
                 }
 
-                // Build items
                 let mut items = Vec::with_capacity(batch.len());
+                let mut confirmations = Vec::with_capacity(batch.len());
                 for PublishRequest {
                     payload,
                     reply,
@@ -871,11 +906,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     };
                     let (completion, rx_completion) = KeratinAppendCompletion::pair();
 
-                    // Always go through confirm sink (uniform handling)
-                    if let Err(e) = confirm_sink_tx.send((rx_completion, reply)).await {
-                        tracing::error!("Failed to forward to confirm sink: {e:?}");
-                        continue;
-                    }
+                    confirmations.push((rx_completion, reply));
                     items.push(stroma_core::PublishItem {
                         headers,
                         payload,
@@ -894,12 +925,29 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     .await
                 {
                     tracing::error!("publish_batch failed: {err:?}");
+                    let err_msg = err.to_string();
+                    for (_, reply) in confirmations {
+                        let res = Err(BrokerError::Engine(StromaError::Io(err_msg.clone())));
+                        if let Err(e) = reply.send(res) {
+                            tracing::error!("Failed to send publish error response: {e:?}");
+                        }
+                    }
                     continue;
+                }
+
+                for confirmation in confirmations {
+                    if let Err(e) = confirm_sink_tx.send(confirmation).await {
+                        let (_, reply) = e.0;
+                        if let Err(e) = reply.send(Err(BrokerError::ChannelClosed)) {
+                            tracing::error!("Failed to send publish error response: {e:?}");
+                        }
+                    }
                 }
 
                 if let Some(metrics) = metrics.as_ref() {
                     metrics.published_many(batch_size as u64);
                 }
+                qs_publish.activity.touch();
                 qs_publish.wake();
             }
         });
@@ -921,9 +969,19 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     }
                     Ok(Err(e)) => {
                         tracing::error!("Append failed: {e:?}");
+                        let res = Err(BrokerError::Engine(StromaError::Io(e.to_string())));
+                        if let Err(e) = reply.send(res) {
+                            tracing::error!("Failed to send publish response: {e:?}");
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Failed to receive append completion: {e:?}");
+                        let res = Err(BrokerError::Engine(StromaError::Io(
+                            "append completion channel closed".to_string(),
+                        )));
+                        if let Err(e) = reply.send(res) {
+                            tracing::error!("Failed to send publish response: {e:?}");
+                        }
                     }
                 }
 
@@ -1051,8 +1109,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             ));
         };
 
+        let eviction_guard = qs.lock_for_eviction().await;
+
         let activity = qs.activity.snapshot();
         if activity.active_publishers > 0 || activity.active_subscribers > 0 {
+            drop(eviction_guard);
             return Ok(self.record_queue_eviction_attempt(
                 &key,
                 QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active),
@@ -1060,12 +1121,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
 
         let Some(idle_since_ms) = activity.idle_since_ms else {
+            drop(eviction_guard);
             return Ok(self.record_queue_eviction_attempt(
                 &key,
                 QueueEvictionAttempt::Skipped(QueueEvictionSkip::Active),
             ));
         };
         if unix_millis().saturating_sub(idle_since_ms) < idle_for_ms {
+            drop(eviction_guard);
             return Ok(self.record_queue_eviction_attempt(
                 &key,
                 QueueEvictionAttempt::Skipped(QueueEvictionSkip::NotIdleEnough),
@@ -1073,6 +1136,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
 
         if self.pending_settles.load(Ordering::Acquire) > 0 {
+            drop(eviction_guard);
             return Ok(self.record_queue_eviction_attempt(
                 &key,
                 QueueEvictionAttempt::Skipped(QueueEvictionSkip::PendingSettles),
@@ -1084,6 +1148,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .iter()
             .any(|entry| entry.value().key == key)
         {
+            drop(eviction_guard);
             return Ok(self.record_queue_eviction_attempt(
                 &key,
                 QueueEvictionAttempt::Skipped(QueueEvictionSkip::HasBrokerDeliveries),
@@ -1095,6 +1160,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .has_inflight(&key.tp, key.part, key.group.as_deref())
             .await?
         {
+            drop(eviction_guard);
             return Ok(self.record_queue_eviction_attempt(
                 &key,
                 QueueEvictionAttempt::Skipped(QueueEvictionSkip::HasInflight),
@@ -1105,6 +1171,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .engine
             .unmaterialize(&key.tp, key.part, key.group.as_deref())
             .await?;
+        drop(eviction_guard);
         Ok(self.record_queue_eviction_attempt(&key, QueueEvictionAttempt::Storage(outcome)))
     }
 
@@ -1112,11 +1179,31 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         &self,
         idle_for_ms: u64,
     ) -> Result<Vec<(Topic, Option<Group>, QueueEvictionAttempt)>, BrokerError> {
-        let keys: Vec<QueueKey> = self
+        let mut seen = HashSet::new();
+        let mut keys: Vec<QueueKey> = self
             .queues
             .iter()
-            .map(|entry| entry.key().clone())
+            .filter_map(|entry| {
+                let key = entry.key().clone();
+                seen.insert(key.clone()).then_some(key)
+            })
             .collect();
+
+        let storage_snapshot = self.engine.debug_snapshot().await?;
+        for queue in storage_snapshot.queues {
+            if !queue.materialized || queue.evicting {
+                continue;
+            }
+            let key = QueueKey {
+                tp: queue.topic,
+                part: queue.partition,
+                group: queue.group,
+            };
+            if seen.insert(key.clone()) {
+                self.queue(&key).await.activity.mark_idle_if_no_leases();
+                keys.push(key);
+            }
+        }
 
         let mut attempts = Vec::with_capacity(keys.len());
         for key in keys {
@@ -1161,6 +1248,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         };
 
         let qs = self.queue(&key).await;
+        let activity_lease = qs.add_subscriber_lease().await;
 
         qs.consumers.insert(sub_id, consumer.clone());
 
@@ -1190,7 +1278,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             messages: msg_rx,
             settler: settle_tx,
             pending_settles: self.pending_settles.clone(),
-            activity_lease: qs.activity.add_subscriber(),
+            activity_lease,
         })
     }
 
@@ -1733,6 +1821,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             if let Some(metrics) = &broker.metrics {
                                 metrics.delivered();
                             }
+                            qs.activity.touch();
                             progressed = true;
                         }
                         qs.wake();

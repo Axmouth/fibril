@@ -6,6 +6,9 @@ description: Use the Fibril admin UI for operational inspection and runtime sett
 The admin dashboard is for operators. It shows broker state, active connections,
 queues, runtime settings, and message inspection tools.
 
+The UI uses the same dark/light visual language as the public site and vendors
+only the small icon set it needs.
+
 The dashboard is not meant to be a high-frequency monitoring feed. Use it to
 answer specific operational questions, then rely on metrics and logs for
 continuous monitoring.

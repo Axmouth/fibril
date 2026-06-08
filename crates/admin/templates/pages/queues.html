@@ -41,7 +41,21 @@ function formatDuration(ms) {
 
 function formatTime(ms) {
   if (!ms) return "N/A";
-  return new Date(ms).toLocaleString();
+  return new Intl.DateTimeFormat(undefined, {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(ms));
+}
+
+function formatLastLeaseActivity(activity) {
+  if (!activity) return "Not seen this run";
+  return formatTime(activity.last_active_ms);
+}
+
+function formatQueueStateValue(item, value) {
+  return item.materialized ? String(value ?? 0) : "-";
 }
 
 function humanizeSnake(value) {
@@ -58,6 +72,9 @@ function cleanupOutcomeLabel(observation) {
 function loadStateLabel(item, activity) {
   if (item.evicting) return "Unloading";
   if (item.materialized) return "Loaded";
+  if ((activity?.active_publishers ?? 0) > 0 || (activity?.active_subscribers ?? 0) > 0) {
+    return "Active lease";
+  }
   if (
     activity?.last_eviction_attempt?.kind === "storage" &&
     activity?.last_eviction_attempt?.outcome === "evicted"
@@ -66,15 +83,17 @@ function loadStateLabel(item, activity) {
   return "Not loaded";
 }
 
-function rowClass(item) {
+function rowClass(item, activity) {
   if (item.evicting) return "queue-row queue-row-unloading";
+  if ((activity?.active_publishers ?? 0) > 0 || (activity?.active_subscribers ?? 0) > 0) return "queue-row queue-row-active";
   if (!item.materialized) return "queue-row queue-row-unloaded";
   return "queue-row";
 }
 
-function stateClass(item) {
+function stateClass(item, activity) {
   if (item.evicting) return "queue-state-pill queue-state-unloading";
   if (item.materialized) return "queue-state-pill queue-state-loaded";
+  if ((activity?.active_publishers ?? 0) > 0 || (activity?.active_subscribers ?? 0) > 0) return "queue-state-pill queue-state-active";
   return "queue-state-pill queue-state-unloaded";
 }
 
@@ -141,18 +160,18 @@ async function refresh() {
         .map(item => {
           const activity = activityByQueue.get(queueKey(item));
           return `
-          <tr class="${rowClass(item)}">
-            <td>${escapeHtml(item.topic)}</td>
-            <td><span class="${stateClass(item)}">${escapeHtml(loadStateLabel(item, activity))}</span></td>
+          <tr class="${rowClass(item, activity)}">
+            <td class="queue-topic-cell" title="${escapeHtml(item.topic)}">${escapeHtml(item.topic)}</td>
+            <td><span class="${stateClass(item, activity)}">${escapeHtml(loadStateLabel(item, activity))}</span></td>
             <td class="text-right">${activity?.active_publishers ?? 0}</td>
             <td class="text-right">${activity?.active_subscribers ?? 0}</td>
             <td class="text-right">${escapeHtml(formatDuration(activity?.idle_for_ms))}</td>
-            <td>${escapeHtml(formatTime(activity?.last_active_ms))}</td>
+            <td>${escapeHtml(formatLastLeaseActivity(activity))}</td>
             <td>${escapeHtml(cleanupOutcomeLabel(activity?.last_eviction_attempt))}</td>
-            <td class="text-right">${item.state.ready_count}</td>
-            <td class="text-right">${item.state.inflight_count}</td>
-            <td class="text-right">${item.state.settled_until}</td>
-            <td><a href="${inspectHref(item)}">Inspect messages</a></td>
+            <td class="text-right">${formatQueueStateValue(item, item.state.ready_count)}</td>
+            <td class="text-right">${formatQueueStateValue(item, item.state.inflight_count)}</td>
+            <td class="text-right">${formatQueueStateValue(item, item.state.settled_until)}</td>
+            <td><a class="queue-messages-link" href="${inspectHref(item)}" title="Inspect messages">Inspect</a></td>
           </tr>
         `;
         }).join('');
@@ -170,7 +189,7 @@ async function refresh() {
               <th class="text-right">Publishers</th>
               <th class="text-right">Subscribers</th>
               <th class="text-right">Idle for</th>
-              <th>Last used</th>
+              <th>Last lease activity</th>
               <th>Last cleanup</th>
               <th class="text-right">Ready</th>
               <th class="text-right">In-flight</th>

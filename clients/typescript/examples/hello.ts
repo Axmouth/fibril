@@ -30,7 +30,7 @@ console.log(`published at offset ${offset}`);
 // Receive one message.
 const msg = await sub.recv();
 if (msg) {
-  console.log("received:", msg.deserialize<{ greeting: string; at: number }>());
+  console.log("received:", msg.deserialize());
   await msg.complete();
 }
 

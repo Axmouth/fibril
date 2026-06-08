@@ -2,19 +2,19 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{title}}</title>
-  <link rel="stylesheet" href="/static/vendor/clarity/global.min.css">
-  <link rel="stylesheet" href="/static/vendor/clarity/clr-ui.min.css">
-  <link rel="stylesheet" href="/static/vendor/clarity/theme.dark.min.css">
-  <link rel="stylesheet" href="/static/vendor/clarity/clarity-icons.min.css">
   <link rel="stylesheet" href="/static/css/admin.css">
 </head>
-<body cds-theme="dark" class="login-body">
+<body class="login-body">
   <main class="login-shell">
     <section class="login-card">
       <div class="login-brand">
-        <clr-icon shape="eye"></clr-icon>
-        <span>Fibril Admin</span>
+        <span class="mark" aria-hidden="true">
+          <span></span>
+          <span></span>
+        </span>
+        <span>fibril admin</span>
       </div>
       <h1>Sign in</h1>
       <p>Use your admin credentials to open the dashboard.</p>
@@ -35,9 +35,11 @@
     </section>
   </main>
   <script>
-    document.body.setAttribute("cds-theme",
-      window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
-    );
+    (() => {
+      const stored = window.localStorage.getItem("fibril-admin-theme");
+      const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
+      document.documentElement.dataset.theme = stored || (prefersLight ? "light" : "dark");
+    })();
   </script>
 </body>
 </html>

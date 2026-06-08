@@ -18,13 +18,15 @@ check what is already wired and under what conditions.
 - Queue-specific retry and dead-letter policy can be declared from clients and `fibrilctl`.
 - Message inspection and DLQ replay are available from the admin API, dashboard, and CLI.
 - Sparse queues use lazy loading plus idle cleanup, with queue-state visibility in the admin dashboard and CLI.
+- Idle cleanup is guarded against racing with newly created publisher and subscriber leases.
+- The admin dashboard has moved to the same visual language as the public site, with Clarity removed from the vendored UI assets.
 - The TypeScript client tracks the Rust client for delayed publish, confirmed publish pipelining, content-type metadata, queue declaration, and group-default behavior.
 
 ## Near term
 
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
 - Add the next storage-level startup/runtime settings where they have clear operational value.
-- Expand sparse-queue observability with more explicit lazy-load, idle-cleanup, and skip-reason reporting.
+- Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.
 - Improve TCP protocol ergonomics and error behavior.
 - Keep Rust and TypeScript client APIs aligned as public-path behavior changes.
 

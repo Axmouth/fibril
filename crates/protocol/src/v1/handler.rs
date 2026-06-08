@@ -633,6 +633,9 @@ pub async fn handle_connection(
             }
         };
 
+        let settings = connection_settings.runtime_snapshot();
+        expire_idle_publishers(&mut publishers, settings.publisher_cache_idle_timeout_ms);
+
         let metrics = tcp_stats.clone();
         let size = size_of_val(&frame) + frame.payload.len();
         metrics.bytes_in(size as u64);
@@ -1045,7 +1048,6 @@ pub async fn handle_connection(
                     continue;
                 };
                 cached_publisher.last_used_ms = now_ms;
-                let publisher = cached_publisher.handle.clone();
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
                 // tokio::spawn(async move {
@@ -1053,7 +1055,8 @@ pub async fn handle_connection(
                     tokio::sync::oneshot::Receiver<Result<u64, fibril_broker::broker::BrokerError>>,
                     fibril_broker::broker::BrokerError,
                 > = if pubreq.require_confirm {
-                    publisher
+                    cached_publisher
+                        .handle
                         .publish(
                             pubreq.payload,
                             pubreq.published,
@@ -1063,7 +1066,8 @@ pub async fn handle_connection(
                         )
                         .await
                 } else {
-                    publisher
+                    cached_publisher
+                        .handle
                         .publish_no_confirm(
                             pubreq.payload,
                             pubreq.published,
@@ -1143,7 +1147,6 @@ pub async fn handle_connection(
                     continue;
                 };
                 cached_publisher.last_used_ms = now_ms;
-                let publisher = cached_publisher.handle.clone();
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
                 // tokio::spawn(async move {
@@ -1151,7 +1154,8 @@ pub async fn handle_connection(
                     tokio::sync::oneshot::Receiver<Result<u64, fibril_broker::broker::BrokerError>>,
                     fibril_broker::broker::BrokerError,
                 > = if pubreq.require_confirm {
-                    publisher
+                    cached_publisher
+                        .handle
                         .publish_delayed(
                             pubreq.payload,
                             pubreq.published,
@@ -1162,7 +1166,8 @@ pub async fn handle_connection(
                         )
                         .await
                 } else {
-                    publisher
+                    cached_publisher
+                        .handle
                         .publish_no_confirm_delayed(
                             pubreq.payload,
                             pubreq.published,

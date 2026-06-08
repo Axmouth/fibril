@@ -185,7 +185,8 @@ See also: [many idle queues](/latest/concepts/many-idle-queues/) and
 | --- | --- | --- |
 | Lazy loading | Implemented | Storage and broker startup behavior |
 | Idle queue cleanup | Implemented | Runtime settings, broker worker, Stroma unmaterialization |
-| Publisher idle expiry | Implemented | Runtime settings and broker publisher cache cleanup |
+| Publisher idle expiry | Implemented | Runtime settings and broker publisher cache cleanup on incoming connection frames |
+| Cleanup race guard | Implemented | Broker prevents cleanup from racing with newly created publisher/subscriber leases |
 | Cleanup observability | Partial | Admin queues page, `/admin/api/queues_debug`, cumulative metrics counters |
 | Exact cleanup timing | Out of scope | Cleanup is approximate and sweep based |
 
@@ -202,10 +203,12 @@ Conditions for a queue to be unloaded from memory:
 - the configured idle window has elapsed
 - the cleanup sweep reaches that queue
 - storage accepts the unmaterialization attempt
+- no publisher or subscriber lease is being created at the same time as cleanup
 
 Conditions that keep a queue in memory or skip cleanup:
 
 - active publisher or subscriber
+- a new publisher or subscriber lease arriving while cleanup is trying to unload the queue
 - not idle long enough
 - pending settlements
 - broker-tracked deliveries still active
@@ -228,6 +231,10 @@ Observability currently includes:
 - idle time and last-used time when known by the current process
 - last cleanup result or skip reason per tracked queue
 - cumulative cleanup attempts and selected outcomes in broker metrics snapshots
+
+Developer-facing note:
+
+- Broker `PublisherHandle` is intentionally not cloneable. A broker publisher handle owns one sink task and one active-publisher lease. Creating another independently tracked publisher must go through `get_publisher`, which creates another sink and another lease.
 
 ## Runtime Settings and Startup Config
 

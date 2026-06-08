@@ -11,25 +11,25 @@
       <label class="settings-field">
         <span class="settings-label">Topic</span>
         <span class="settings-help">Queue topic to inspect.</span>
-        <input class="clr-input" id="message-topic" required placeholder="orders.created">
+        <input id="message-topic" required placeholder="orders.created">
       </label>
 
       <label class="settings-field">
         <span class="settings-label">Group</span>
         <span class="settings-help">Optional queue group. Leave blank for the default group.</span>
-        <input class="clr-input" id="message-group" placeholder="default">
+        <input id="message-group" placeholder="default">
       </label>
 
       <label class="settings-field">
         <span class="settings-label">From offset</span>
         <span class="settings-help">First offset to inspect.</span>
-        <input class="clr-input" id="message-from" type="number" min="0" step="1" value="0">
+        <input id="message-from" type="number" min="0" step="1" value="0">
       </label>
 
       <label class="settings-field">
         <span class="settings-label">Limit</span>
         <span class="settings-help">Maximum rows to request. The server applies a hard cap.</span>
-        <input class="clr-input" id="message-limit" type="number" min="1" max="5000" step="1" value="50">
+        <input id="message-limit" type="number" min="1" max="5000" step="1" value="50">
       </label>
 
       <label class="checkbox-label">
@@ -51,7 +51,7 @@
       <label class="settings-field" id="payload-limit-row" hidden>
         <span class="settings-label">Payload preview bytes</span>
         <span class="settings-help">Maximum bytes returned per message preview.</span>
-        <input class="clr-input" id="message-payload-limit" type="number" min="1" max="1048576" step="1" value="4096">
+        <input id="message-payload-limit" type="number" min="1" max="1048576" step="1" value="4096">
       </label>
 
       <fieldset class="message-status-filter">

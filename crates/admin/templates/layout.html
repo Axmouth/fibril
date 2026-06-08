@@ -2,53 +2,49 @@
 <html>
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{title}}</title>
-  <link rel="stylesheet" href="/static/vendor/clarity/global.min.css">
-  <link rel="stylesheet" href="/static/vendor/clarity/clr-ui.min.css">
-  <link rel="stylesheet" href="/static/vendor/clarity/theme.dark.min.css">
-  <link rel="stylesheet" href="/static/vendor/clarity/clarity-icons.min.css">
-  <script src="/static/vendor/clarity/custom-elements.min.js"></script>
-  <script src="/static/vendor/clarity/clarity-icons.min.js"></script>
+  <script>
+    (() => {
+      const storageKey = "fibril-admin-theme";
+      const stored = window.localStorage.getItem(storageKey);
+      const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
+      document.documentElement.dataset.theme = stored || (prefersLight ? "light" : "dark");
+    })();
+  </script>
   <link rel="stylesheet" href="/static/css/admin.css">
 </head>
-<body cds-theme="dark">
+<body class="admin-body">
   <div class="main-container">
-    <header class="header-6">
-      <div class="branding">
-        <a href="/">
-          <clr-icon shape="eye"></clr-icon>
-          <span class="title">Fibril Admin</span>
+    <header class="site-header">
+      <nav class="admin-nav" aria-label="Admin navigation">
+        <a class="brand" href="/">
+          <span class="mark" aria-hidden="true">
+            <span></span>
+            <span></span>
+          </span>
+          <span>fibril admin</span>
         </a>
-      </div>
-      <div class="settings">
-        {% if auth_enabled %}
-          <a href="/logout" class="nav-link nav-icon" aria-label="logout" title="Log out">
-            <clr-icon shape="logout"></clr-icon>
-          </a>
-        {% else %}
-          <span class="admin-auth-pill">Auth disabled</span>
-        {% endif %}
-      </div>
-    </header>
-    <nav class="subnav">
-      <ul class="nav">
-        <li class="nav-item">
-              <a class="nav-link {% if page == "dashboard" %}active{% endif %}" href="/">Dashboard</a>
-        </li>
-        <li class="nav-item">
+        <div class="nav-links">
+          <a class="nav-link {% if page == "dashboard" %}active{% endif %}" href="/">Dashboard</a>
           <a class="nav-link {% if page == "connections" %}active{% endif %}" href="/admin/connections">Connections</a>
-        </li>
-        <li class="nav-item">
           <a class="nav-link {% if page == "subscriptions" %}active{% endif %}" href="/admin/subscriptions">Subscriptions</a>
-        </li>
-        <li class="nav-item">
           <a class="nav-link {% if page == "queues" %}active{% endif %}" href="/admin/queues">Queues</a>
-        </li>
-        <li class="nav-item">
           <a class="nav-link {% if page == "settings" %}active{% endif %}" href="/admin/settings">Settings</a>
-        </li>
-      </ul>
-    </nav>
+        </div>
+        <div class="nav-actions">
+          {% if auth_enabled %}
+            <a href="/logout" class="icon-link" aria-label="Log out" title="Log out">
+              <span class="icon icon-logout" aria-hidden="true"></span>
+              <span>Logout</span>
+            </a>
+          {% else %}
+            <span class="admin-auth-pill">Auth disabled</span>
+          {% endif %}
+          <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme"></button>
+        </div>
+      </nav>
+    </header>
     <div class="content-container">
       <div class="content-area">
         {% block content %}{% endblock %}
@@ -60,19 +56,39 @@
       </span>
       ·
       <a href="https://github.com/axmouth/fibril" target="_blank">
-        <clr-icon shape="code"></clr-icon> GitHub
+        <span class="icon icon-github" aria-hidden="true"></span> GitHub
       </a>
       ·
       <a href="https://axmouth.dev" target="_blank">
-        <clr-icon shape="user"></clr-icon> Author
+        <span class="icon icon-user" aria-hidden="true"></span> Author
       </a>
     </footer>
 
   </div>
   <script>
-    document.body.setAttribute("cds-theme",
-      window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
-    );
+    (() => {
+      const root = document.documentElement;
+      const toggle = document.querySelector("[data-theme-toggle]");
+      const storageKey = "fibril-admin-theme";
+      let current = root.dataset.theme || "dark";
+
+      function applyTheme(theme) {
+        current = theme;
+        root.dataset.theme = theme;
+        if (!toggle) return;
+        toggle.textContent = theme === "light" ? "☀" : "☾";
+        toggle.setAttribute("aria-label", theme === "light" ? "Use dark theme" : "Use light theme");
+      }
+
+      applyTheme(current);
+      toggle?.addEventListener("click", () => {
+        const next = current === "light" ? "dark" : "light";
+        window.localStorage.setItem(storageKey, next);
+        root.classList.add("theme-transition");
+        applyTheme(next);
+        window.setTimeout(() => root.classList.remove("theme-transition"), 260);
+      });
+    })();
   </script>
 </body>
 </html>

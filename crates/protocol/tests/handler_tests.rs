@@ -731,6 +731,186 @@ async fn publisher_cache_idle_timeout_allows_queue_eviction_while_connection_sta
 }
 
 #[tokio::test]
+async fn publisher_cache_idle_timeout_expires_on_next_frame_without_waiting_for_heartbeat() {
+    let (mut framed, server_task, _dir, broker) = open_protocol_connection_with_settings(
+        ConnectionSettings::new(Some(60)).with_publisher_cache_idle_timeout_ms(Some(0)),
+    )
+    .await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                2,
+                &Publish {
+                    topic: "publisher.cache.frame.expiry".into(),
+                    partition: 0,
+                    group: None,
+                    require_confirm: true,
+                    content_type: None,
+                    headers: HashMap::new(),
+                    payload: b"payload".to_vec(),
+                    published: unix_millis(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::PublishOk as u16);
+    assert_eq!(frame.request_id, 2);
+    assert_eq!(
+        broker
+            .queue_activity_snapshot("publisher.cache.frame.expiry", None)
+            .unwrap()
+            .active_publishers,
+        1
+    );
+
+    framed
+        .send(try_encode(Op::Ping, 3, &()).unwrap())
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::Pong as u16);
+    assert_eq!(frame.request_id, 3);
+
+    wait_for_queue_idle(&broker, "publisher.cache.frame.expiry", None).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
+    let (engine, dir) = open_test_engine().await;
+    let broker = Broker::new(
+        engine,
+        BrokerConfig {
+            inflight_ttl_ms: 2_000,
+            expiry_poll_min_ms: 10,
+            expiry_batch_max: 100,
+            delivery_poll_max_ms: 10,
+            queue_idle_evict_after_ms: Some(5),
+            queue_idle_sweep_interval_ms: 5,
+        },
+        None,
+    );
+    let (mut framed, server_task, _dir, broker) = open_protocol_connection_for_broker(
+        ConnectionSettings::new(Some(60)).with_publisher_cache_idle_timeout_ms(Some(1)),
+        broker,
+        dir,
+    )
+    .await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                2,
+                &Subscribe {
+                    topic: "notices".into(),
+                    group: Some("workers".into()),
+                    prefetch: 20,
+                    auto_ack: true,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(&mut framed).await.opcode, Op::SubscribeOk as u16);
+
+    for i in 0..40_u64 {
+        let request_id = 10 + i;
+        let payload = format!("notice-{i}").into_bytes();
+        framed
+            .send(
+                try_encode(
+                    Op::Publish,
+                    request_id,
+                    &Publish {
+                        topic: "notices".into(),
+                        partition: 0,
+                        group: Some("workers".into()),
+                        require_confirm: true,
+                        content_type: None,
+                        headers: HashMap::new(),
+                        payload: payload.clone(),
+                        published: unix_millis(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let mut saw_publish_ok = false;
+        let mut saw_delivery = false;
+        while !saw_publish_ok || !saw_delivery {
+            let frame = recv_frame(&mut framed).await;
+            match frame.opcode {
+                x if x == Op::PublishOk as u16 && frame.request_id == request_id => {
+                    saw_publish_ok = true;
+                }
+                x if x == Op::Deliver as u16 => {
+                    let delivered: Deliver = try_decode(&frame).unwrap();
+                    if delivered.topic == "notices"
+                        && delivered.group.as_deref() == Some("workers")
+                        && delivered.payload == payload
+                    {
+                        saw_delivery = true;
+                    }
+                }
+                x if x == Op::Error as u16 => {
+                    let err: ErrorMsg = try_decode(&frame).unwrap();
+                    panic!(
+                        "unexpected publish flow error for request {}: {} {}",
+                        frame.request_id, err.code, err.message
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    framed
+        .send(try_encode(Op::Ping, 1000, &()).unwrap())
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::Pong as u16);
+    assert_eq!(frame.request_id, 1000);
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if broker
+                .queue_activity_snapshot("notices", Some("workers"))
+                .is_some_and(|snapshot| {
+                    snapshot.active_publishers == 0 && snapshot.active_subscribers == 1
+                })
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(broker.is_queue_materialized("notices", Some("workers")));
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn publisher_cache_idle_timeout_updates_existing_connection() {
     let settings = ConnectionSettings::new(Some(1));
     let (mut framed, server_task, _dir, broker) =

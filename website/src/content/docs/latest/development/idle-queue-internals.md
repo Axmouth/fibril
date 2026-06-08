@@ -16,4 +16,8 @@ The broker records activity through publisher and subscriber leases. A queue bec
 
 Connection-lifetime publisher caching is the default. It avoids create/destroy publisher protocol messages that can desync if clients create and drop publisher objects frequently. `FIBRIL_PUBLISHER_CACHE_IDLE_TIMEOUT_MS` is a server-side backstop for long-lived connections that publish to many queues over time.
 
+Publisher and subscriber lease creation is serialized with queue cleanup. This prevents the broker from checking "no active publishers or subscribers", starting storage unmaterialization, and then accepting a new lease for the same queue in the middle of that cleanup.
+
+Broker `PublisherHandle` is intentionally not cloneable. A handle owns one publisher sink task and one active-publisher lease. If clone only copied the sender, multiple logical handles would still count as one active publisher. If clone added another lease, that lease would not have a clear sink lifetime. Creating another independently tracked publisher should call `get_publisher` again.
+
 Future explicit publisher destroy commands should use server-issued or otherwise unique-enough publisher ids, and should still keep timeout-based cleanup as a backstop.

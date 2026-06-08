@@ -2,31 +2,83 @@
 {% block content %}
 <h4 class="metrics-header">Overview</h4>
 
-  <table class="table table-compact narrow metric-table">
-    <tr><th>Delivered / s</th><td id="delivered"></td></tr>
-    <tr><th>Acked / s</th><td id="acked"></td></tr>
-    <tr><th>Published / s</th><td id="published"></td></tr>
-    <tr><th>Deliver latency (ms)</th><td id="deliver_ms"></td></tr>
-    <tr><th>Publish latency (ms)</th><td id="publish_ms"></td></tr>
-    <tr><th>E2E latency (ms)</th><td id="e2e_ms"></td></tr>
-    <tr><th>Memory Usage (mb)</th><td id="rss_mb"></td></tr>
-    <tr><th>CPU Usage</th><td id="cpu"></td></tr>
-    <tr><th>Approx Disk Usage (mb)</th><td id="disk"></td></tr>
-  </table>
+<section class="overview-grid" aria-label="Broker overview">
+  <article class="overview-card overview-card-primary">
+    <span class="overview-label">Published / s</span>
+    <strong id="published">--</strong>
+    <span class="overview-help">Messages accepted by the broker</span>
+  </article>
+  <article class="overview-card overview-card-primary">
+    <span class="overview-label">Delivered / s</span>
+    <strong id="delivered">--</strong>
+    <span class="overview-help">Messages handed to subscribers</span>
+  </article>
+  <article class="overview-card overview-card-primary">
+    <span class="overview-label">Acked / s</span>
+    <strong id="acked">--</strong>
+    <span class="overview-help">Messages settled by clients</span>
+  </article>
+  <article class="overview-card">
+    <span class="overview-label">Memory</span>
+    <strong id="rss_mb">--</strong>
+    <span class="overview-help">Resident process memory, MB</span>
+  </article>
+  <article class="overview-card">
+    <span class="overview-label">CPU</span>
+    <strong id="cpu">--</strong>
+    <span class="overview-help">Current process CPU usage</span>
+  </article>
+  <article class="overview-card">
+    <span class="overview-label">Disk</span>
+    <strong id="disk">--</strong>
+    <span class="overview-help">Approximate data directory usage, MB</span>
+  </article>
+</section>
+
+<section class="overview-panel" aria-label="Storage latency">
+  <div class="overview-panel-heading">
+    <h5>Storage Latency</h5>
+    <p>Recent averages reported by the storage layer.</p>
+  </div>
+  <dl class="overview-latency-grid">
+    <div>
+      <dt>Read</dt>
+      <dd id="read_ms">--</dd>
+    </div>
+    <div>
+      <dt>Write</dt>
+      <dd id="write_ms">--</dd>
+    </div>
+    <div>
+      <dt>Append batch</dt>
+      <dd id="append_ms">--</dd>
+    </div>
+    <div>
+      <dt>Flush</dt>
+      <dd id="flush_ms">--</dd>
+    </div>
+  </dl>
+</section>
 
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+function metric(value, digits = 1, suffix = "") {
+  return Number.isFinite(value) ? `${value.toFixed(digits)}${suffix}` : "--";
+}
+
 async function refresh() {
   const d = await api('/admin/api/overview');
-  document.getElementById("delivered").textContent = d.broker.delivered_per_sec_1m.toFixed(1);
-  document.getElementById("acked").textContent = d.broker.acked_per_sec_1m.toFixed(1);
-  document.getElementById("published").textContent = d.broker.published_per_sec_1m.toFixed(1);
-  // document.getElementById("write_ms").textContent = d.storage.avg_write_latency_ms?.toFixed(2);
-  // document.getElementById("append_ms").textContent = d.storage.avg_append_batch_latency_ms?.toFixed(2);
-  document.getElementById("rss_mb").textContent = (d.sys.rss_mb / 1024).toFixed(2);
-  document.getElementById("cpu").textContent = d.sys.cpu?.toFixed(2);
-  document.getElementById("disk").textContent = (d.storage_used / (1024 * 1024)).toFixed(2);
+  document.getElementById("delivered").textContent = metric(d.broker.delivered_per_sec_1m);
+  document.getElementById("acked").textContent = metric(d.broker.acked_per_sec_1m);
+  document.getElementById("published").textContent = metric(d.broker.published_per_sec_1m);
+  document.getElementById("rss_mb").textContent = metric(d.sys.rss_mb / 1024, 2);
+  document.getElementById("cpu").textContent = metric(d.sys.cpu, 2);
+  document.getElementById("disk").textContent = metric(d.storage_used / (1024 * 1024), 2);
+  document.getElementById("read_ms").textContent = metric(d.storage.avg_read_latency_ms, 2, " ms");
+  document.getElementById("write_ms").textContent = metric(d.storage.avg_write_latency_ms, 2, " ms");
+  document.getElementById("append_ms").textContent = metric(d.storage.avg_append_batch_latency_ms, 2, " ms");
+  document.getElementById("flush_ms").textContent = metric(d.storage.avg_flush_latency_ms, 2, " ms");
 }
 setInterval(refresh, 2000);
 refresh();

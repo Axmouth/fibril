@@ -1,5 +1,6 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet as StdHashSet, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use fibril_broker::{
     CompletionPair,
     broker::{
@@ -7,20 +8,238 @@ use fibril_broker::{
         SettleRequest, SettleType,
     },
     queue_engine::{
-        EvictOutcome, KeratinAppendCompletion, MessageHeaders, QueueEngine,
-        ReplayDeadLetterOutcome, StromaEngine,
+        Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, MessageHeaders,
+        QueueEngine, ReplayDeadLetterOutcome, ReplayDeadLettersReport,
+        SettleRequest as EngineSettleRequest, StromaEngine,
     },
     test_util::TestState,
 };
-use fibril_metrics::Metrics;
-use fibril_storage::DeliverableMessage;
+use fibril_metrics::{Metrics, QueuesStateSnapshot};
+use fibril_storage::{DeliverableMessage, Offset};
 use fibril_util::unix_millis;
 use hashbrown::HashSet;
 use stroma_core::{
-    DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
-    KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir, test_dir,
+    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot,
+    GlobalDlqUpdateOutcome, KeratinConfig, MessageInspectionPage, PublishItem, SnapshotConfig,
+    StromaDebugSnapshot, StromaError, StromaKeratinConfig, StromaMetrics, TempDir, test_dir,
 };
+use tokio::sync::Notify;
 use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+struct FailingPublishEngine;
+
+#[async_trait]
+impl QueueEngine for FailingPublishEngine {
+    async fn poll_ready(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _max: usize,
+        _lease_deadline: u64,
+    ) -> Result<Vec<Deliverable>, StromaError> {
+        unimplemented!()
+    }
+
+    async fn ack(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _offset: Offset,
+        _completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        unimplemented!()
+    }
+
+    async fn ack_batch(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _items: Vec<stroma_core::AckEventMeta>,
+        _completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        unimplemented!()
+    }
+
+    async fn nack(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _offset: Offset,
+        _requeue: bool,
+        _completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        unimplemented!()
+    }
+
+    async fn nack_batch(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _items: Vec<stroma_core::NackEventMeta>,
+        _completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        unimplemented!()
+    }
+
+    async fn settle(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _req: EngineSettleRequest,
+        _completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        unimplemented!()
+    }
+
+    async fn publish(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _headers: &MessageHeaders,
+        _payload: Vec<u8>,
+        _completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        unimplemented!()
+    }
+
+    async fn publish_batch(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _items: Vec<PublishItem>,
+    ) -> Result<(), StromaError> {
+        Err(StromaError::Io(
+            "Keratin already open for test queue".into(),
+        ))
+    }
+
+    async fn next_expiry_hint(&self) -> Result<Option<u64>, StromaError> {
+        Ok(None)
+    }
+
+    async fn requeue_expired(
+        &self,
+        _now: u64,
+        _max: usize,
+    ) -> Result<StdHashSet<(String, u32, Option<String>, u64)>, StromaError> {
+        Ok(StdHashSet::new())
+    }
+
+    async fn shutdown(&self) -> Result<(), StromaError> {
+        Ok(())
+    }
+
+    async fn estimate_disk_used(&self) -> Result<u64, StromaError> {
+        Ok(0)
+    }
+
+    async fn list_queues(&self) -> Result<Vec<(String, Option<String>)>, StromaError> {
+        Ok(Vec::new())
+    }
+
+    async fn queue_stats_snapshot(&self) -> Result<QueuesStateSnapshot, StromaError> {
+        Ok(QueuesStateSnapshot {
+            queues: Default::default(),
+        })
+    }
+
+    async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, StromaError> {
+        unimplemented!()
+    }
+
+    async fn inspect_messages(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _from: Offset,
+        _limit: usize,
+        _mode: InspectMode,
+        _include_payload: bool,
+        _payload_limit_bytes: usize,
+    ) -> Result<MessageInspectionPage, StromaError> {
+        unimplemented!()
+    }
+
+    async fn replay_dead_letters(
+        &self,
+        _dlq_tp: &str,
+        _dlq_group: Option<&str>,
+        _offsets: &[Offset],
+    ) -> Result<ReplayDeadLettersReport, StromaError> {
+        unimplemented!()
+    }
+
+    async fn global_dlq(&self) -> Result<GlobalDlqSnapshot, StromaError> {
+        unimplemented!()
+    }
+
+    async fn set_global_dlq(
+        &self,
+        _target: Option<GlobalDLQ>,
+        _expected_version: u64,
+    ) -> Result<GlobalDlqUpdateOutcome, StromaError> {
+        unimplemented!()
+    }
+
+    async fn declare_queue(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _meta: DeclareMeta,
+    ) -> Result<(), StromaError> {
+        unimplemented!()
+    }
+
+    async fn materialize(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        Ok(())
+    }
+
+    async fn unmaterialize(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+    ) -> Result<EvictOutcome, StromaError> {
+        unimplemented!()
+    }
+
+    fn is_materialized(&self, _tp: &str, _part: u32, _group: Option<&str>) -> bool {
+        false
+    }
+
+    async fn has_inflight(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+    ) -> Result<bool, StromaError> {
+        Ok(false)
+    }
+
+    fn metrics(&self) -> Arc<StromaMetrics> {
+        Arc::new(StromaMetrics::default())
+    }
+
+    fn deadline_awaker(&self) -> Arc<Notify> {
+        Arc::new(Notify::new())
+    }
+}
 
 async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
     let broker_cfg = BrokerConfig {
@@ -164,7 +383,7 @@ async fn wait_for_queue_idle(broker: &Broker<StromaEngine>, topic: &str, group: 
 }
 
 #[tokio::test]
-async fn queue_activity_tracks_publisher_sink_until_last_handle_drop() {
+async fn queue_activity_tracks_independent_publisher_sinks() {
     let (broker, _dir) = open_test_broker().await;
 
     assert!(broker.queue_activity_snapshot("t", None).is_none());
@@ -175,12 +394,13 @@ async fn queue_activity_tracks_publisher_sink_until_last_handle_drop() {
     assert_eq!(snapshot.active_subscribers, 0);
     assert_eq!(snapshot.idle_since_ms, None);
 
-    let pubh2 = pubh.clone();
+    let (pubh2, _confirms2) = broker.get_publisher("t", &None).await.unwrap();
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
-    assert_eq!(snapshot.active_publishers, 1);
+    assert_eq!(snapshot.active_publishers, 2);
     assert_eq!(snapshot.idle_since_ms, None);
 
     drop(pubh2);
+    wait_for_queue_activity(&broker, "t", None, 1, 0, false).await;
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 1);
     assert_eq!(snapshot.idle_since_ms, None);
@@ -522,6 +742,27 @@ async fn queue_eviction_sweep_unmaterializes_idle_materialized_queue() {
             QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
         )]
     );
+}
+
+#[tokio::test]
+async fn queue_eviction_sweep_unmaterializes_storage_only_materialized_queue() {
+    let (engine, _dir) = open_test_engine().await;
+    engine.materialize("inspected", 0, None).await.unwrap();
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+
+    assert!(broker.is_queue_materialized("inspected", None));
+
+    let attempts = broker.evict_inactive_queues(0).await.unwrap();
+
+    assert_eq!(
+        attempts,
+        vec![(
+            "inspected".to_string(),
+            None,
+            QueueEvictionAttempt::Storage(EvictOutcome::Evicted)
+        )]
+    );
+    assert!(!broker.is_queue_materialized("inspected", None));
 }
 
 #[tokio::test(start_paused = true)]
@@ -1368,6 +1609,33 @@ async fn nack_without_requeue_drops_message() -> Result<(), Box<dyn std::error::
 
     t.expect_no_message(&c, 50).await;
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn publish_engine_open_conflict_is_returned_to_publisher() -> anyhow::Result<()> {
+    let broker = Broker::new(FailingPublishEngine, BrokerConfig::default(), None);
+    let (publisher, _confirms) = broker.get_publisher("t", &None).await?;
+    let reply = publisher
+        .publish(
+            b"conflict".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await?;
+    let err = tokio::time::timeout(Duration::from_secs(2), reply)
+        .await
+        .expect("publish reply should not hang")?
+        .expect_err("storage open conflict should be returned to publisher");
+
+    assert!(
+        err.to_string().contains("already open"),
+        "unexpected publish error: {err}"
+    );
+
+    broker.shutdown_graceful().await;
     Ok(())
 }
 
