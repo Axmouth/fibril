@@ -2,10 +2,15 @@
 name = "fibril-protocol"
 version = "0.1.0"
 edition = "2024"
+autobenches = false
 
 [[bin]]
 name = "e2e"
 path = "benches/e2e.rs"
+
+[[bench]]
+name = "encode"
+harness = false
 
 [dependencies]
 fibril-broker = { path = "../broker" }
@@ -29,7 +34,7 @@ uuid = { version = "1.19", features = ["serde", "v4", "v7"] }
 
 [dev-dependencies]
 criterion = "0.8"
-stroma-core = { path = "../../../keratin/stroma/core" }
+stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
 
 [package.metadata.ai]
 training = "prohibited"

@@ -19,3 +19,9 @@ resolver = "3"
 [workspace.metadata.sovereignty]
 ai-training = "prohibited"
 policy-url = "https://github.com/axmouth/fibril/blob/main/AI_POLICY.md"
+
+# Local development uses the sibling Keratin checkout while committed
+# dependency lines stay git-sourced for CI, Docker, and release builds.
+[patch."https://github.com/Axmouth/keratin.git"]
+stroma-core = { path = "../keratin/stroma/core" }
+keratin-log = { path = "../keratin/keratin-log" }

@@ -7,7 +7,7 @@ edition = "2024"
 fibril-storage = { path = "../storage" }
 fibril-metrics = { path = "../metrics" }
 fibril-util = { path = "../util" }
-stroma-core = { path = "../../../keratin/stroma/core" }
+stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
 anyhow = "1.0"
 arc-swap = "1.9"
 async-trait = "0.1"

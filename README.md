@@ -21,6 +21,8 @@
 
 Fibril is a message broker focused on durable delivery, retries, leasing, and asynchronous workflow coordination, built from first principles in Rust.
 
+Most applications need reliable queues, clear delivery semantics, reconnect behavior that does not surprise them, and admin operations that are obvious. Fibril optimizes for that path.
+
 The project is currently in a pre-alpha stage and under active development. APIs, persistence formats, and operational behavior may still change significantly as the system evolves.
 
 Fibril aims to provide a simpler and more ergonomic messaging model, where the message itself carries the lifecycle of processing:
@@ -97,21 +99,21 @@ CI and release builds use `stroma-core` from the Keratin git repository:
 https://github.com/Axmouth/keratin.git
 ```
 
-For local sibling-checkout development, switch the Fibril manifests to the
-local `stroma-core` path:
+For local sibling-checkout development, keep the crate dependency lines
+git-sourced and enable the workspace patch override:
 
 ```sh
 scripts/stroma-source.sh local
 ```
 
-Switch back before CI-style checks, Docker builds, or commits intended for
-main:
+Switch to git mode before CI-style checks or Docker builds. This removes the
+local patch override while leaving the committed dependency lines unchanged:
 
 ```sh
 scripts/stroma-source.sh git
 ```
 
-The local path currently expects the Keratin checkout at `../keratin`.
+The local patch currently expects the Keratin checkout at `../keratin`.
 
 ## Direction
 

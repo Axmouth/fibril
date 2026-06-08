@@ -841,8 +841,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.task_group.spawn("publisher_sink", async move {
             let _activity_lease = activity_lease;
             const MAX_BATCH: usize = 256;
-            const COALESCE_WINDOW: Duration = Duration::from_millis(1);
+            const COALESCE_WINDOW: Duration = Duration::from_micros(250);
             const SMALL_BATCH: usize = 32;
+            let mut last_flush = None;
 
             loop {
                 let first = tokio::select! {
@@ -864,17 +865,22 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     }
                 }
 
-                // Brief wait if small
+                // Coalesce only inside the window opened by the previous flush.
+                // A first message after a quiet period should not wait for a batch.
                 if batch.len() < SMALL_BATCH {
-                    let deadline = tokio::time::Instant::now() + COALESCE_WINDOW;
-                    while batch.len() < MAX_BATCH {
-                        tokio::select! {
-                            biased;
-                            _ = shutdown.cancelled() => break,
-                            res = tokio::time::timeout_at(deadline, rx.recv()) => {
-                                match res {
-                                    Ok(Some(req)) => batch.push(req),
-                                    _ => break,
+                    if let Some(last_flush) = last_flush {
+                        let deadline = last_flush + COALESCE_WINDOW;
+                        if deadline > tokio::time::Instant::now() {
+                            while batch.len() < MAX_BATCH {
+                                tokio::select! {
+                                    biased;
+                                    _ = shutdown.cancelled() => break,
+                                    res = tokio::time::timeout_at(deadline, rx.recv()) => {
+                                        match res {
+                                            Ok(Some(req)) => batch.push(req),
+                                            _ => break,
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -945,6 +951,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 }
                 qs_publish.activity.touch();
                 qs_publish.wake();
+                last_flush = Some(tokio::time::Instant::now());
             }
         });
 

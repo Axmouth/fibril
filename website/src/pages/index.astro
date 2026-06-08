@@ -38,6 +38,8 @@ const github = "https://github.com/Axmouth/fibril";
         <p class="lead">
           Fibril is a lightweight message broker focused on durable queues,
           explicit delivery semantics, leasing, retries, and predictable operational behavior.
+          Most applications need reliable queues, clear reconnect behavior, and admin
+          operations that are obvious. Fibril optimizes for that path.
           It is implemented in Rust, but the identity is simple, inspectable broker behavior.
           It is still early, and the missing pieces are named rather than hidden.
         </p>
@@ -55,7 +57,7 @@ const github = "https://github.com/Axmouth/fibril";
 
     <section class="feature-grid" aria-label="Core capabilities">
       <FeatureCard number="01" title="Durable by default">Append-only logs, snapshot, and replay are part of the model.</FeatureCard>
-      <FeatureCard number="02" title="Settle explicitly">Complete, retry, or fail a message with APIs that read like intent.</FeatureCard>
+      <FeatureCard number="02" title="Clients that read like intent">Complete, retry, delay, or fail work without building broker rituals into your app.</FeatureCard>
       <FeatureCard number="03" title="Lease under load">Pull-based delivery and bounded prefetch make pressure visible.</FeatureCard>
     </section>
 

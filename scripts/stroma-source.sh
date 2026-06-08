@@ -5,16 +5,12 @@ usage() {
   cat <<'EOF'
 Usage: scripts/stroma-source.sh <git|local>
 
-Switch the stroma-core dependency source used by crates/broker,
-crates/storage, and protocol tests.
+Switch the workspace Stroma source override.
 
-  git    Use https://github.com/Axmouth/keratin.git.
-         This is the CI/release/Docker mode. Defaults to branch main.
-         Set STROMA_SOURCE_REF_KIND to branch, tag, or rev and
-         STROMA_SOURCE_REF to pin a specific source ref.
+  git    Use the git dependency declared in the crate manifests.
+         This removes the local [patch] block and is used by CI/release builds.
 
-  local  Use ../../../keratin/stroma/core for sibling-checkout development.
-         This expects a local Keratin checkout at ../keratin.
+  local  Use ../keratin as a local patch for sibling-checkout development.
 EOF
 }
 
@@ -23,47 +19,62 @@ if [[ $# -ne 1 ]]; then
   exit 2
 fi
 
+patch_header='[patch."https://github.com/Axmouth/keratin.git"]'
+patch_block='# Local development uses the sibling Keratin checkout while committed
+# dependency lines stay git-sourced for CI, Docker, and release builds.
+[patch."https://github.com/Axmouth/keratin.git"]
+stroma-core = { path = "../keratin/stroma/core" }
+keratin-log = { path = "../keratin/keratin-log" }'
+
+remove_patch_block() {
+  python3 - <<'PY'
+from pathlib import Path
+
+path = Path("Cargo.toml")
+lines = path.read_text().splitlines()
+out = []
+i = 0
+
+while i < len(lines):
+    if (
+        lines[i] == "# Local development uses the sibling Keratin checkout while committed"
+        and i + 2 < len(lines)
+        and lines[i + 1] == "# dependency lines stay git-sourced for CI, Docker, and release builds."
+        and lines[i + 2] == '[patch."https://github.com/Axmouth/keratin.git"]'
+    ):
+        i += 3
+        while i < len(lines) and not lines[i].startswith("["):
+            i += 1
+        continue
+
+    if lines[i] == '[patch."https://github.com/Axmouth/keratin.git"]':
+        i += 1
+        while i < len(lines) and not lines[i].startswith("["):
+            i += 1
+        continue
+
+    out.append(lines[i])
+    i += 1
+
+path.write_text("\n".join(out).rstrip() + "\n")
+PY
+}
+
 case "$1" in
   git)
-    ref_kind="${STROMA_SOURCE_REF_KIND:-branch}"
-    ref="${STROMA_SOURCE_REF:-main}"
-    case "$ref_kind" in
-      branch | tag | rev) ;;
-      *)
-        echo "STROMA_SOURCE_REF_KIND must be branch, tag, or rev" >&2
-        exit 2
-        ;;
-    esac
-    replacement="stroma-core = { git = \"https://github.com/Axmouth/keratin.git\", ${ref_kind} = \"${ref}\" }"
+    remove_patch_block
+    echo "Cargo.toml: removed local Keratin patch override"
     ;;
   local)
-    replacement='stroma-core = { path = "../../../keratin/stroma/core" }'
+    if grep -Fq "$patch_header" Cargo.toml; then
+      echo "Cargo.toml: local Keratin patch override already present"
+    else
+      printf '\n%s\n' "$patch_block" >> Cargo.toml
+      echo "Cargo.toml: added local Keratin patch override"
+    fi
     ;;
   *)
     usage >&2
     exit 2
     ;;
 esac
-
-python3 - "$replacement" crates/broker/Cargo.toml crates/storage/Cargo.toml crates/protocol/Cargo.toml <<'PY'
-from pathlib import Path
-import sys
-
-replacement = sys.argv[1]
-files = [Path(path) for path in sys.argv[2:]]
-
-for path in files:
-    text = path.read_text()
-    lines = text.splitlines()
-    changed = False
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("stroma-core = {"):
-            lines[i] = replacement
-            changed = True
-            break
-    if not changed:
-        raise SystemExit(f"no stroma-core dependency found in {path}")
-    path.write_text("\n".join(lines) + "\n")
-    print(f"{path}: {replacement}")
-PY

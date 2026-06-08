@@ -24,9 +24,9 @@ Fibril already has useful end-to-end benchmarks:
 - `scripts/bench-results-table.sh` turns steady benchmark result files into a
   Markdown table.
 
-The current microbenchmark surface is thin. `crates/protocol/benches/encode.rs`
-contains a Criterion encode/decode benchmark, but it is not yet wired as a
-normal Cargo bench target. Before changing serialization, headers, batching, or
+The current microbenchmark surface is still small, but
+`crates/protocol/benches/encode.rs` is wired as a Criterion encode/decode bench
+for publish frames. Before changing serialization, headers, batching, or
 queue-handle lookup behavior, add a targeted microbench or an explicit
 end-to-end benchmark case that isolates the expected effect.
 
@@ -119,7 +119,9 @@ localized enough.
 Risk: batching delivery too aggressively can hurt fairness, backpressure, and
 tail latency.
 
-Status: idea only.
+Status: tuned once. The current implementation uses a short coalesce window
+measured from the previous flush, so sparse messages do not wait just to form a
+batch.
 
 ### Publish sink batch shape
 
@@ -161,7 +163,7 @@ Then run `baseline` to confirm the microbench result matters end to end.
 Risk: custom serialization changes can make the protocol harder to evolve and
 can lose against `rmp-serde` on real data.
 
-Status: microbench setup needed.
+Status: microbench exists for publish encode/decode.
 
 ### Keratin writer pipelining
 
@@ -221,6 +223,11 @@ Add entries here when an optimization is actually tried.
 | Date | Commit | Experiment | Expected effect | Benchmark | Result | Decision |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-06-08 | investigation | Establish benchmark-first optimization process | Avoid unmeasured low-level changes | Existing benchmark inventory | No runtime change | Keep this log updated |
+| 2026-06-08 | local experiment | Batch delivery metrics and queue activity touch per poll batch | Reduce per-message time reads, atomics, and queue wakes in the delivery loop | `throughput-1k`, 250k-500k/s, 2s warmup, 5s steady | Neutral at 250k/s, worse p95/p99 and RSS at 350k/s, roughly neutral to worse above that | Reverted. The existing per-message updates stay until a better-targeted change proves itself |
+| 2026-06-08 | local experiment | Wire protocol encode/decode Criterion bench and add content-type/header/payload-size cases | Make protocol/header optimization measurable before changing wire layout | `cargo bench -p fibril-protocol --bench encode -- --sample-size 20` | 1KB encode+decode about 6.3-6.7µs. Three small user headers were only slightly slower than no headers. 64KB encode+decode about 373µs | Keep the bench. Header layout is not the first obvious bottleneck for current end-to-end runs |
+| 2026-06-08 | local experiment | Reduce publish sink small-batch coalesce window from 1ms to 250µs | Keep useful batching while reducing artificial wait in normal and near-saturation runs | `baseline`, `confirmed`, and `throughput-1k`, 2s warmup, 5s steady | Low-rate 50k/150k was neutral. High-rate p95 improved from 471ms to 385ms at 350k/s, 1598ms to 1533ms at 400k/s, and 3304ms to 3267ms at 500k/s. RSS was also lower in high-rate runs | Keep 250µs. It improves the knee without increasing the window |
+| 2026-06-08 | local experiment | Remove publish sink small-batch wait entirely | Avoid any coalescing delay and rely only on immediate channel draining | `throughput-1k`, 2s warmup, 5s steady | Good at 250k/s, but worse than 250µs at 350k/s and 400k/s. Similar at 500k/s | Reverted. Some short coalescing still helps around the backlog knee |
+| 2026-06-08 | local experiment | Start the publish sink coalesce window at the previous flush instead of after the next message arrives | Avoid artificial sparse-message latency while keeping burst batching when traffic is already flowing | `baseline`, `confirmed`, and `throughput-1k`, 2s warmup, 5s steady | Low-rate 50k/150k stayed neutral. High-rate p95 improved from the 250µs always-wait run: 385ms to 337ms at 350k/s, 1533ms to 1418ms at 400k/s, and 3267ms to 3152ms at 500k/s | Keep. This gives the sparse case immediate flush behavior and improves the measured saturation knee |
 
 ## Lessons so far
 
@@ -228,6 +235,15 @@ Add entries here when an optimization is actually tried.
   not isolate small serialization or allocation changes.
 - Low-rate steady runs are as important as saturation runs because batching can
   improve peak throughput while making normal latency worse.
+- Reducing obvious per-message metric work did not improve the measured
+  high-rate TCP path in the first trial. Scheduler behavior and delivery-loop
+  wake timing need more precise measurement before changing this path.
+- For 1KB publish frames, MessagePack encode/decode is measurable but not large
+  enough by itself to explain the current backlog knee.
+- The publish sink benefits from a much shorter coalescing window than the
+  original 1ms. Removing the wait entirely lost useful batching around the
+  350k-400k/s knee. Measuring the window from the previous flush gives sparse
+  traffic immediate sends while preserving useful batching under load.
 - Large payload results are hardware-specific on the current SATA SSD machine.
   They are still useful for detecting memory and storage-regression direction.
 - Operator metrics should stay cheap and useful. Percentile-heavy measurement
