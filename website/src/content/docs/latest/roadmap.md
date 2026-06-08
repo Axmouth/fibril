@@ -23,7 +23,7 @@ check what is already wired and under what conditions.
 - The TypeScript demo now closes subscriptions promptly on Ctrl-C while remaining continuous by default.
 - The admin dashboard has moved to the same visual language as the public site, with Clarity removed from the vendored UI assets.
 - The TypeScript client tracks the Rust client for delayed publish, confirmed publish pipelining, content-type metadata, queue declaration, and group-default behavior.
-- Reconnection resume identity is now part of the TCP handshake, and Rust and TypeScript clients send it on explicit reconnect.
+- Reconnection resume identity is now part of the TCP handshake, and Rust and TypeScript explicit reconnect calls send it and report whether resume was accepted.
 - The TCP handler can keep a logical connection dormant during a configured grace window, accept late settles after resume, and requeue unsettled inflight messages when grace expires.
 
 ## Near term

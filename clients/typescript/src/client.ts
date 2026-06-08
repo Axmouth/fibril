@@ -9,6 +9,7 @@ import type {
   DeclareQueueMsg,
   QueueDlqPolicy,
   ResumeIdentity,
+  ResumeOutcome,
 } from "./protocol.js";
 
 function normalizeGroup(group: string | null): string | null {
@@ -196,6 +197,10 @@ export class QueueConfig {
   }
 }
 
+export interface ReconnectOutcome {
+  resumeOutcome: ResumeOutcome;
+}
+
 function parseAddress(
   address: string | { host: string; port: number },
 ): { host: string; port: number } {
@@ -294,10 +299,13 @@ export class Client {
   }
 
   /**
-   * Replace the internal engine with a new connection. Existing publishers
-   * and subscriptions from the old connection will fail with `BrokenPipeError`.
+   * Replace the internal engine with a new connection.
+   *
+   * Existing publishers and subscriptions from the old connection will fail
+   * with `BrokenPipeError`. The returned outcome tells whether the broker
+   * accepted the previous resume identity.
    */
-  async reconnect(): Promise<void> {
+  async reconnect(): Promise<ReconnectOutcome> {
     const oldEngine = this.#engine;
     const socket = await openSocket(this.#address.host, this.#address.port);
     let engine: Engine;
@@ -315,6 +323,7 @@ export class Client {
     }
     this.#engine = engine;
     oldEngine.shutdown();
+    return { resumeOutcome: engine.resumeOutcome };
   }
 
   /**

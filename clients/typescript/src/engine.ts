@@ -107,6 +107,7 @@ export class Engine {
   readonly #commandQueue: BoundedQueue<Command>;
   readonly #socket: Socket;
   readonly resumeIdentity: ResumeIdentity;
+  readonly resumeOutcome: HelloOk["resume_outcome"];
   #shutdownInitiated = false;
   /** Resolved (with the fatal error if any) when the engine task exits. */
   readonly #completed: Promise<void>;
@@ -116,11 +117,13 @@ export class Engine {
     socket: Socket,
     completed: Promise<void>,
     resumeIdentity: ResumeIdentity,
+    resumeOutcome: HelloOk["resume_outcome"],
   ) {
     this.#commandQueue = commandQueue;
     this.#socket = socket;
     this.#completed = completed;
     this.resumeIdentity = resumeIdentity;
+    this.resumeOutcome = resumeOutcome;
   }
 
   /**
@@ -194,7 +197,7 @@ export class Engine {
       heartbeatIntervalSeconds: heartbeatInterval,
     });
 
-    return new Engine(commandQueue, socket, completed, resumeIdentity);
+    return new Engine(commandQueue, socket, completed, resumeIdentity, hello.resume_outcome);
   }
 
   /**

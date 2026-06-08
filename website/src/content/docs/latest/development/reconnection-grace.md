@@ -151,28 +151,72 @@ Current limits:
 Transparent subscription restore and user-facing client automation can come
 later.
 
-## Proposed Third Slice
+## Proposed Reconciliation Slice
 
-Add a reconciliation frame.
+Add a lightweight reconciliation exchange after a successful resume.
 
-The client should be able to send what it believes is still inflight locally:
+Two directional frames keep the protocol easier to reason about than one
+overloaded frame:
+
+- client-to-server: "this is what I still believe I own"
+- server-to-client: "this is what I still believe this logical connection owns"
+
+Each direction should have an explicit result frame so both sides know what was
+kept, closed, or missing.
+
+### Client View Frame
+
+The client sends the subscriptions and local inflight messages it still has:
 
 - topic
 - group
-- old sub id
+- old sub id, if known
 - delivery tag
 - offset
+- client-side status, such as processing, settled locally, or abandoned
 
-The broker replies with what it accepts:
+The broker replies with one result per item:
 
-- still valid
+- accepted
 - already settled
 - requeued
-- unknown
 - expired
+- unknown
+- subscription missing
 
-This lets a client decide whether to keep processing, drop local inflight work,
-or expect redelivery.
+Unknown or rejected items must not be kept by the client as valid inflight
+work.
+
+### Server View Frame
+
+The broker sends the subscriptions and inflight offsets it still has for the
+resumed logical connection:
+
+- topic
+- group
+- server sub id
+- delivery tag
+- offset
+- lease deadline, if available
+
+The client replies with one result per item:
+
+- present locally
+- missing locally
+- should close subscription
+- should recreate subscription
+
+For the first version, the safest policy is conservative cleanup:
+
+- If the client reports a subscription the server no longer has, close it on the
+  client and let the user recreate it.
+- If the server reports a subscription the client no longer has, close it on the
+  server so its inflight work can be returned.
+- If both sides have the subscription but disagree on inflight work, only keep
+  entries both sides explicitly accept.
+
+This is enough to avoid silent split-brain behavior without requiring full
+durable restart recovery.
 
 ## Durable Restart Scope
 

@@ -149,9 +149,10 @@ test("client reconnect offers previous resume identity", async () => {
     };
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
-    await client.reconnect();
+    const outcome = await client.reconnect();
 
     assert.equal(hellos.length, 2);
+    assert.equal(outcome.resumeOutcome, "resumed");
     assert.equal(hellos[0]!.resume, null);
     assert.deepEqual(hellos[1]!.resume, {
       owner_id: "00000000-0000-0000-0000-000000000100",

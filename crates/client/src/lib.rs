@@ -268,6 +268,13 @@ pub struct Client {
     engine: Arc<EngineHandle>,
 }
 
+/// Result of an explicit reconnect attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectOutcome {
+    /// Handshake outcome reported by the broker.
+    pub resume_outcome: ResumeOutcome,
+}
+
 /// Topic-scoped handle for publishing messages.
 ///
 /// Create with [`Client::publisher`] or [`Client::publisher_grouped`]. Plain
@@ -960,8 +967,13 @@ impl Client {
     /// Existing [`Publisher`] and [`Subscription`] handles created from the old
     /// connection remain attached to the old engine and will fail with
     /// [`FibrilError::BrokenPipe`] or end their receive streams.
+    ///
+    /// The returned outcome tells whether the broker accepted the previous
+    /// resume identity. `ResumeOutcome::Resumed` means the server-side logical
+    /// connection was reattached. Any other outcome means the broker treated the
+    /// connection as fresh.
     #[tracing::instrument(fields(address = ?self.address, opts = ?self.opts))]
-    pub async fn reconnect(&mut self) -> FibrilResult<()> {
+    pub async fn reconnect(&mut self) -> FibrilResult<ReconnectOutcome> {
         let address = self.address;
         let mut opts = self.opts.clone();
         opts.resume_identity = Some(self.engine.resume_identity.clone());
@@ -973,11 +985,14 @@ impl Client {
 
         // Start a fresh engine
         let new_engine = start_engine(framed, opts).await?;
+        let outcome = ReconnectOutcome {
+            resume_outcome: new_engine.resume_outcome,
+        };
 
         // Swap the handle
         self.engine = new_engine;
 
-        Ok(())
+        Ok(outcome)
     }
 
     /// Reconnect and restore existing handles.
@@ -1225,6 +1240,7 @@ struct EngineHandle {
     tx: mpsc::Sender<Command>,
     shutdown: Arc<Notify>,
     resume_identity: ResumeIdentity,
+    resume_outcome: ResumeOutcome,
 }
 
 #[derive(Debug)]
@@ -1368,7 +1384,7 @@ where
         .await
         .ok_or(FibrilError::Eof)?
         .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
-    let resume_identity = match frame.opcode {
+    let (resume_identity, resume_outcome) = match frame.opcode {
         x if x == Op::HelloOk as u16 => {
             let ho: HelloOk = decode_protocol(&frame)?;
             if ho.compliance != COMPLIANCE_STRING {
@@ -1387,11 +1403,14 @@ where
                     msg: "Protocol version mismatch".into(),
                 });
             }
-            ResumeIdentity {
-                owner_id: ho.owner_id,
-                client_id: ho.client_id,
-                resume_token: ho.resume_token,
-            }
+            (
+                ResumeIdentity {
+                    owner_id: ho.owner_id,
+                    client_id: ho.client_id,
+                    resume_token: ho.resume_token,
+                },
+                ho.resume_outcome,
+            )
         }
         x if x == Op::HelloErr as u16 => {
             let e: ErrorMsg = decode_protocol(&frame)?;
@@ -1437,6 +1456,7 @@ where
         tx: cmd_tx.clone(),
         shutdown: shutdown.clone(),
         resume_identity,
+        resume_outcome,
     });
 
     let mut subs = HashMap::<u64, SubState>::new();
@@ -2203,6 +2223,7 @@ mod tests {
                         client_id: uuid::Uuid::nil(),
                         resume_token: uuid::Uuid::nil(),
                     },
+                    resume_outcome: ResumeOutcome::New,
                 }),
             },
             rx,

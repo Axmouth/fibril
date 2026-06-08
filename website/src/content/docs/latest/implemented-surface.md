@@ -333,6 +333,7 @@ around that behavior is still planned.
 | Manual ack subscription | Implemented | Implemented |
 | Auto ack subscription | Implemented | Implemented |
 | Resume identity handshake | Implemented | Implemented |
+| Explicit reconnect outcome | Implemented | Implemented |
 | Automatic client recovery after reconnect | Planned | Planned |
 | Delayed retry | Implemented | Implemented |
 | Queue declaration | Implemented | Implemented |
@@ -346,6 +347,7 @@ Conditions and limits:
 - Both clients treat content type separately from the header map.
 - Both clients expose delayed publish and delayed retry.
 - TypeScript uses `bigint` for protocol `u64` values such as offsets.
+- Explicit reconnect returns whether the broker accepted the resume identity.
 - Existing publishers and subscriptions are not transparently restored by client reconnect loops yet.
 - Late settlements after a short disconnect are accepted only when the client explicitly resumes before grace expires.
 
