@@ -66,13 +66,13 @@ locally, every higher layer would be built on the wrong foundation.
 - Exact epoch persistence location in Keratin, Stroma, or both.
 - Whether Keratin epoch tracking is a manifest field, separate metadata file, or
   both.
-- Exact name and shape of replicated append APIs.
 - Whether Keratin should expose distinct handle types for owner logs and
   follower logs, or keep one handle with restricted replicated-append entry
   points.
 - How much snapshot installation belongs in Keratin versus Stroma.
-- Shape of the Keratin checkpoint-install primitive that lets a follower say
-  "start this local log from offset N" after receiving a snapshot.
+- Whether `reset_to_checkpoint` is enough for the first follower snapshot path,
+  or whether it should grow into a richer install operation that takes snapshot
+  bytes/checksums in the same transaction.
 - First sharding metadata shape for static config and later etcd.
 - What the migration path is from external coordination to Fibril-owned metadata
   without forcing a data-path rewrite.
@@ -115,3 +115,15 @@ locally, every higher layer would be built on the wrong foundation.
   `AfterReplicated` from Keratin durability. Normal replicated append still
   refuses true gaps; followers that missed truncated history need a separate
   checkpoint/snapshot install operation that sets the log continuation point.
+- 2026-06-09: Added Keratin `reset_to_checkpoint(next_offset)`. It clears local
+  log segments, creates a fresh active segment at the checkpoint offset, updates
+  head/tail/durable watermarks, and persists the manifest. This gives follower
+  catch-up a clean "install checkpoint, then apply from here" primitive without
+  making ordinary replicated append sparse. Also fixed scans that start before
+  the first retained segment so they advance to the first available record.
+- 2026-06-09: Next design topic is API gatekeeping. Options to evaluate:
+  distinct leader/follower Keratin handle types, a capability/token for
+  replicated operations, an extension trait only used by replication code, or an
+  internal mode flag. Promotion is tricky because many callers hold
+  `Arc<Keratin>`, so any type-level design must avoid making role transitions
+  impossible.
