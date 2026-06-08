@@ -46,6 +46,12 @@ const client = await new ClientOptions()
   </TabItem>
 </Tabs>
 
+By default, both clients make one automatic reconnect attempt before a new
+operation if the previous engine is already closed. Disable that with
+`disable_auto_reconnect()` in Rust or `disableAutoReconnect()` in TypeScript.
+This does not replay in-flight operations or restore active subscription streams;
+see [reconnects](/latest/reliability/reconnects/) for the current limits.
+
 ## Publish
 
 Plain publish uses the common unconfirmed path. Confirmed publish waits for the broker to acknowledge the stored message and returns the topic offset. For pipelined confirmed publishing, send with a confirmation handle and await those handles later.

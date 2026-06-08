@@ -28,13 +28,18 @@ returning the message for redelivery.
 
 ## What It Does Not Do Yet
 
-Current clients store resume identity and explicit `reconnect()` sends it, but
-they do not yet run an automatic reconnect loop that hides a socket break from
-existing publisher and subscription handles.
+Current Rust and TypeScript clients store resume identity and use it for
+explicit `reconnect()`. They also make one conservative automatic reconnect
+attempt before a new publish, subscribe, or declare operation when the previous
+engine is already known to be closed.
 
 Publisher handles created from a client use the latest connection engine after
-explicit `reconnect()` returns. New subscriptions created after reconnect also
+explicit or automatic reconnect. New subscriptions created after reconnect also
 use the latest engine.
+
+The clients do not replay operations that were already in flight when the socket
+failed. This avoids silently duplicating confirmed publishes whose frame may
+have reached the broker before the confirmation was lost.
 
 Active subscription streams are different. A stream that was already receiving
 messages is still tied to its original engine until subscription reconciliation
@@ -72,3 +77,6 @@ logical connection or started a fresh one.
 
 If the outcome is not `resumed`, treat old subscriptions and unsettled local
 work as unsafe to continue without a fresh application-level decision.
+
+Automatic reconnect can be disabled in both clients. The default is intentionally
+small: one attempt before a new operation, not an unbounded background loop.

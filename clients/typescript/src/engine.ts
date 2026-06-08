@@ -109,6 +109,7 @@ export class Engine {
   readonly resumeIdentity: ResumeIdentity;
   readonly resumeOutcome: HelloOk["resume_outcome"];
   #shutdownInitiated = false;
+  #closed = false;
   /** Resolved (with the fatal error if any) when the engine task exits. */
   readonly #completed: Promise<void>;
 
@@ -121,7 +122,9 @@ export class Engine {
   ) {
     this.#commandQueue = commandQueue;
     this.#socket = socket;
-    this.#completed = completed;
+    this.#completed = completed.finally(() => {
+      this.#closed = true;
+    });
     this.resumeIdentity = resumeIdentity;
     this.resumeOutcome = resumeOutcome;
   }
@@ -233,6 +236,11 @@ export class Engine {
   /** Resolves when the engine task has fully exited. */
   whenComplete(): Promise<void> {
     return this.#completed;
+  }
+
+  /** True when this engine cannot accept new commands. */
+  isClosed(): boolean {
+    return this.#closed || this.#shutdownInitiated || this.#socket.destroyed;
   }
 }
 

@@ -1,6 +1,6 @@
 import { connect as netConnect, type Socket } from "node:net";
 import { Engine } from "./engine.js";
-import { DisconnectionError, FibrilError } from "./errors.js";
+import { BrokenPipeError, DisconnectionError, FibrilError } from "./errors.js";
 import { deferred } from "./internal/deferred.js";
 import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
@@ -39,6 +39,8 @@ export interface ClientOptionsInit {
   heartbeatIntervalSeconds?: number;
   /** Optional resume identity from a previous connection. */
   resumeIdentity?: ResumeIdentity;
+  /** Automatic reconnect attempts before a new operation when the engine is closed. */
+  autoReconnectAttempts?: number;
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
@@ -55,6 +57,7 @@ export class ClientOptions {
   readonly auth: AuthMsg | undefined;
   readonly heartbeatIntervalSeconds: number | undefined;
   readonly resumeIdentity: ResumeIdentity | undefined;
+  readonly autoReconnectAttempts: number;
 
   constructor(init: ClientOptionsInit = {}) {
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
@@ -62,6 +65,7 @@ export class ClientOptions {
     this.auth = init.auth;
     this.heartbeatIntervalSeconds = init.heartbeatIntervalSeconds;
     this.resumeIdentity = init.resumeIdentity;
+    this.autoReconnectAttempts = init.autoReconnectAttempts ?? 1;
   }
 
   /**
@@ -74,6 +78,7 @@ export class ClientOptions {
       auth: { username, password },
       heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
       resumeIdentity: this.resumeIdentity,
+      autoReconnectAttempts: this.autoReconnectAttempts,
     });
   }
 
@@ -87,6 +92,7 @@ export class ClientOptions {
       auth: this.auth,
       heartbeatIntervalSeconds: seconds,
       resumeIdentity: this.resumeIdentity,
+      autoReconnectAttempts: this.autoReconnectAttempts,
     });
   }
 
@@ -100,6 +106,31 @@ export class ClientOptions {
       auth: this.auth,
       heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
       resumeIdentity,
+      autoReconnectAttempts: this.autoReconnectAttempts,
+    });
+  }
+
+  /**
+   * Return a copy with automatic reconnect disabled.
+   */
+  disableAutoReconnect(): ClientOptions {
+    return this.withAutoReconnectAttempts(0);
+  }
+
+  /**
+   * Return a copy with a custom automatic reconnect attempt limit.
+   */
+  withAutoReconnectAttempts(maxAttempts: number): ClientOptions {
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 0) {
+      throw new Error("maxAttempts must be a non-negative integer");
+    }
+    return new ClientOptions({
+      clientName: this.clientName,
+      clientVersion: this.clientVersion,
+      auth: this.auth,
+      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
+      resumeIdentity: this.resumeIdentity,
+      autoReconnectAttempts: maxAttempts,
     });
   }
 
@@ -280,6 +311,8 @@ export class Client {
   readonly #address: { host: string; port: number };
   readonly #opts: ClientOptions;
   #engine: EngineSlot;
+  #reconnectPromise: Promise<void> | null = null;
+  #userShutdown = false;
 
   private constructor(
     address: { host: string; port: number },
@@ -324,6 +357,13 @@ export class Client {
    * stream until subscription reconciliation is implemented.
    */
   async reconnect(): Promise<ReconnectOutcome> {
+    if (this.#reconnectPromise) {
+      await this.#reconnectPromise;
+    }
+    return this.#reconnectOnce();
+  }
+
+  async #reconnectOnce(): Promise<ReconnectOutcome> {
     const oldEngine = this.#engine.current();
     const socket = await openSocket(this.#address.host, this.#address.port);
     let engine: Engine;
@@ -340,15 +380,52 @@ export class Client {
       );
     }
     this.#engine.replace(engine);
+    this.#userShutdown = false;
     oldEngine.shutdown();
     return { resumeOutcome: engine.resumeOutcome };
+  }
+
+  async #reconnectIfClosed(): Promise<void> {
+    if (!this.#engine.current().isClosed()) return;
+    if (this.#userShutdown) {
+      throw new BrokenPipeError();
+    }
+    if (this.#opts.autoReconnectAttempts === 0) {
+      throw new BrokenPipeError();
+    }
+
+    if (!this.#reconnectPromise) {
+      this.#reconnectPromise = (async () => {
+        let lastErr: unknown = null;
+        for (let attempt = 0; attempt < this.#opts.autoReconnectAttempts; attempt += 1) {
+          try {
+            await this.#reconnectOnce();
+            return;
+          } catch (err) {
+            lastErr = err;
+          }
+        }
+        if (lastErr instanceof Error) throw lastErr;
+        throw new BrokenPipeError();
+      })().finally(() => {
+        this.#reconnectPromise = null;
+      });
+    }
+
+    await this.#reconnectPromise;
+  }
+
+  /** @internal Used by handles before starting a new operation. */
+  async _engineForOperation(): Promise<Engine> {
+    await this.#reconnectIfClosed();
+    return this.#engine.current();
   }
 
   /**
    * Get a publisher handle for a topic with no group.
    */
   publisher(topic: string): Publisher {
-    return new Publisher(this.#engine, topic, null);
+    return new Publisher(this, topic, null);
   }
 
   /**
@@ -357,7 +434,7 @@ export class Client {
    * Grouping writes to an optional queue namespace under the topic.
    */
   publisherGrouped(topic: string, group: string): Publisher {
-    return new Publisher(this.#engine, topic, normalizeGroup(group));
+    return new Publisher(this, topic, normalizeGroup(group));
   }
 
   /**
@@ -375,7 +452,7 @@ export class Client {
    */
   async declareQueue(config: QueueConfig): Promise<void> {
     const reply = deferred<void>();
-    await this.#engine.current().submit({
+    await (await this._engineForOperation()).submit({
       type: "declareQueue",
       req: config.toWire(),
       reply,
@@ -388,12 +465,13 @@ export class Client {
    * `BrokenPipeError`; subscription iterators throw or terminate.
    */
   async shutdown(): Promise<void> {
+    this.#userShutdown = true;
     const engine = this.#engine.current();
     engine.shutdown();
     await engine.whenComplete();
   }
 
-  /** @internal Used by the SubscriptionBuilder. */
+  /** @internal Used by active delivery handles. */
   _engine(): Engine {
     return this.#engine.current();
   }

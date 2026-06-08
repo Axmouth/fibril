@@ -20,6 +20,7 @@ import {
   type SubscribeMsg,
 } from "../src/protocol.js";
 import { Client, ClientOptions, QueueConfig } from "../src/client.js";
+import { BrokenPipeError, DisconnectionError } from "../src/errors.js";
 import { NewMessage } from "../src/message.js";
 
 function helloOk(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -212,6 +213,84 @@ test("existing publisher uses reconnected engine", async () => {
     assert.equal(publishes[0]!.topic, "jobs");
 
     await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("default auto reconnect attempts before a new operation", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  let stopped = false;
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const pub = client.publisher("jobs");
+    await broker.stop();
+    stopped = true;
+    await new Promise((r) => setTimeout(r, 20));
+
+    await assert.rejects(
+      () => pub.publish("after close"),
+      (err) => err instanceof DisconnectionError,
+    );
+  } finally {
+    if (!stopped) await broker.stop();
+  }
+});
+
+test("disabled auto reconnect returns broken pipe for closed engine", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  let stopped = false;
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions().disableAutoReconnect(),
+    );
+    const pub = client.publisher("jobs");
+    await broker.stop();
+    stopped = true;
+    await new Promise((r) => setTimeout(r, 20));
+
+    await assert.rejects(
+      () => pub.publish("after close"),
+      (err) => err instanceof BrokenPipeError,
+    );
+  } finally {
+    if (!stopped) await broker.stop();
+  }
+});
+
+test("shutdown client does not auto reconnect", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const pub = client.publisher("jobs");
+    await client.shutdown();
+
+    await assert.rejects(
+      () => pub.publish("after shutdown"),
+      (err) => err instanceof BrokenPipeError,
+    );
   } finally {
     await broker.stop();
   }

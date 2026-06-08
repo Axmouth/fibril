@@ -38,13 +38,16 @@ use std::{
     fmt::{self, Debug},
     net::{SocketAddr, ToSocketAddrs},
     str::FromStr,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
-    sync::{Notify, mpsc, oneshot},
+    sync::{Mutex, Notify, mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
 
@@ -263,9 +266,7 @@ fn invalid_name<T>(kind: &'static str, name: &str, msg: &str) -> FibrilResult<T>
 /// ```
 #[derive(Debug, Clone)]
 pub struct Client {
-    address: SocketAddr,
-    opts: ClientOptions,
-    engine: Arc<EngineSlot>,
+    shared: Arc<ClientShared>,
 }
 
 /// Result of an explicit reconnect attempt.
@@ -282,7 +283,7 @@ pub struct ReconnectOutcome {
 /// for JSON, text, raw bytes, or custom headers.
 #[derive(Debug, Clone)]
 pub struct Publisher {
-    engine: Arc<EngineSlot>,
+    shared: Arc<ClientShared>,
     topic: TopicName,
     group: Option<GroupName>,
 }
@@ -914,7 +915,13 @@ impl<'a> SubscriptionBuilder<'a> {
             auto_ack: false,
         };
 
-        let rx = self.client.engine.current().subscribe(req).await?;
+        let rx = self
+            .client
+            .shared
+            .engine_for_operation()
+            .await?
+            .subscribe(req)
+            .await?;
         Ok(Subscription { rx })
     }
 
@@ -931,7 +938,13 @@ impl<'a> SubscriptionBuilder<'a> {
             auto_ack: true,
         };
 
-        let rx = self.client.engine.current().subscribe_auto_ack(req).await?;
+        let rx = self
+            .client
+            .shared
+            .engine_for_operation()
+            .await?
+            .subscribe_auto_ack(req)
+            .await?;
         Ok(AutoAckedSubscription { rx })
     }
 }
@@ -956,9 +969,13 @@ impl Client {
 
         let engine = start_engine(framed, opts.clone()).await?;
         Ok(Client {
-            engine: Arc::new(EngineSlot::new(engine)),
-            address,
-            opts,
+            shared: Arc::new(ClientShared {
+                address,
+                opts,
+                engine: Arc::new(EngineSlot::new(engine)),
+                reconnect_lock: Mutex::new(()),
+                user_shutdown: AtomicBool::new(false),
+            }),
         })
     }
 
@@ -973,29 +990,10 @@ impl Client {
     /// resume identity. `ResumeOutcome::Resumed` means the server-side logical
     /// connection was reattached. Any other outcome means the broker treated the
     /// connection as fresh.
-    #[tracing::instrument(fields(address = ?self.address, opts = ?self.opts))]
+    #[tracing::instrument(fields(address = ?self.shared.address, opts = ?self.shared.opts))]
     pub async fn reconnect(&mut self) -> FibrilResult<ReconnectOutcome> {
-        let address = self.address;
-        let mut opts = self.opts.clone();
-        let old_engine = self.engine.current();
-        opts.resume_identity = Some(old_engine.resume_identity.clone());
-        let stream = TcpStream::connect(address)
-            .await
-            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
-
-        let framed = Framed::new(stream, ProtoCodec);
-
-        // Start a fresh engine
-        let new_engine = start_engine(framed, opts).await?;
-        let outcome = ReconnectOutcome {
-            resume_outcome: new_engine.resume_outcome,
-        };
-
-        // Swap the handle
-        self.engine.replace(new_engine);
-        old_engine.shutdown.notify_waiters();
-
-        Ok(outcome)
+        let _guard = self.shared.reconnect_lock.lock().await;
+        self.shared.reconnect_once().await
     }
 
     /// Reconnect and restore existing handles.
@@ -1004,7 +1002,7 @@ impl Client {
     /// existing publishers can continue afterward, but active subscriptions
     /// should be recreated by the application.
     // TODO: try to handle inflight acks etc (resend?)
-    #[tracing::instrument(fields(address = ?self.address, opts = ?self.opts))]
+    #[tracing::instrument(fields(address = ?self.shared.address, opts = ?self.shared.opts))]
     pub async fn reconnect_restore(&mut self) -> FibrilResult<()> {
         todo!()
     }
@@ -1032,7 +1030,7 @@ impl Client {
     #[tracing::instrument(fields(topic = ?topic))]
     pub fn publisher(&self, topic: impl AsRef<str> + fmt::Debug) -> FibrilResult<Publisher> {
         Ok(Publisher {
-            engine: self.engine.clone(),
+            shared: self.shared.clone(),
             topic: TopicName::parse(topic)?,
             group: None,
         })
@@ -1048,7 +1046,7 @@ impl Client {
         group: impl AsRef<str> + fmt::Debug,
     ) -> FibrilResult<Publisher> {
         Ok(Publisher {
-            engine: self.engine.clone(),
+            shared: self.shared.clone(),
             topic: TopicName::parse(topic)?,
             group: GroupName::parse_optional(group)?,
         })
@@ -1073,8 +1071,9 @@ impl Client {
     /// selection is internal.
     #[tracing::instrument(skip(self), fields(topic = %config.topic, group = ?config.group))]
     pub async fn declare_queue(&self, config: QueueConfig) -> FibrilResult<()> {
-        self.engine
-            .current()
+        self.shared
+            .engine_for_operation()
+            .await?
             .declare_queue(config.into_wire())
             .await
     }
@@ -1083,7 +1082,8 @@ impl Client {
     ///
     /// This closes the connection engine and wakes subscription receivers.
     pub async fn shutdown(&self) {
-        self.engine.current().shutdown.notify_waiters();
+        self.shared.user_shutdown.store(true, Ordering::Release);
+        self.shared.engine.current().shutdown.notify_waiters();
     }
 }
 
@@ -1098,8 +1098,9 @@ impl Publisher {
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;
-        self.engine
-            .current()
+        self.shared
+            .engine_for_operation()
+            .await?
             .publish_unconfirmed(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
@@ -1133,8 +1134,9 @@ impl Publisher {
         payload: T,
     ) -> FibrilResult<PublishConfirmation> {
         let message = payload.into_message()?;
-        self.engine
-            .current()
+        self.shared
+            .engine_for_operation()
+            .await?
             .publish_with_confirmation(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
@@ -1157,8 +1159,9 @@ impl Publisher {
     ) -> FibrilResult<()> {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
-        self.engine
-            .current()
+        self.shared
+            .engine_for_operation()
+            .await?
             .publish_unconfirmed_delayed(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
@@ -1198,8 +1201,9 @@ impl Publisher {
     ) -> FibrilResult<PublishConfirmation> {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
-        self.engine
-            .current()
+        self.shared
+            .engine_for_operation()
+            .await?
             .publish_delayed_with_confirmation(
                 self.topic.as_str().to_string(),
                 self.group.as_ref().map(|group| group.as_str().to_string()),
@@ -1245,6 +1249,72 @@ impl AutoAckedSubscription {
 }
 
 // ===== Engine =================================================================
+
+#[derive(Debug)]
+struct ClientShared {
+    address: SocketAddr,
+    opts: ClientOptions,
+    engine: Arc<EngineSlot>,
+    reconnect_lock: Mutex<()>,
+    user_shutdown: AtomicBool,
+}
+
+impl ClientShared {
+    async fn reconnect_once(&self) -> FibrilResult<ReconnectOutcome> {
+        let old_engine = self.engine.current();
+        let mut opts = self.opts.clone();
+        opts.resume_identity = Some(old_engine.resume_identity.clone());
+        let stream = TcpStream::connect(self.address)
+            .await
+            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+
+        let framed = Framed::new(stream, ProtoCodec);
+        let new_engine = start_engine(framed, opts).await?;
+        let outcome = ReconnectOutcome {
+            resume_outcome: new_engine.resume_outcome,
+        };
+
+        self.engine.replace(new_engine);
+        self.user_shutdown.store(false, Ordering::Release);
+        old_engine.shutdown.notify_waiters();
+
+        Ok(outcome)
+    }
+
+    async fn reconnect_if_closed(&self) -> FibrilResult<()> {
+        if !self.engine.current().is_closed() {
+            return Ok(());
+        }
+        if self.user_shutdown.load(Ordering::Acquire) {
+            return Err(FibrilError::BrokenPipe);
+        }
+
+        let attempts = self.opts.auto_reconnect.max_attempts;
+        if attempts == 0 {
+            return Err(FibrilError::BrokenPipe);
+        }
+
+        let _guard = self.reconnect_lock.lock().await;
+        if !self.engine.current().is_closed() {
+            return Ok(());
+        }
+
+        let mut last_err = None;
+        for _ in 0..attempts {
+            match self.reconnect_once().await {
+                Ok(_) => return Ok(()),
+                Err(err) => last_err = Some(err),
+            }
+        }
+
+        Err(last_err.unwrap_or(FibrilError::BrokenPipe))
+    }
+
+    async fn engine_for_operation(&self) -> FibrilResult<Arc<EngineHandle>> {
+        self.reconnect_if_closed().await?;
+        Ok(self.engine.current())
+    }
+}
 
 #[derive(Debug)]
 struct EngineSlot {
@@ -1975,6 +2045,10 @@ fn fail_waiter(waiter: Waiter, err: FibrilError) {
 }
 
 impl EngineHandle {
+    fn is_closed(&self) -> bool {
+        self.tx.is_closed()
+    }
+
     async fn publish_unconfirmed(
         &self,
         topic: String,
@@ -2109,6 +2183,36 @@ impl EngineHandle {
 
 // ===== Options ===============================================================
 
+/// Automatic reconnect policy for future operations.
+///
+/// The default attempts one reconnect before a new publish, subscribe, or
+/// declare operation if the previous engine is already known to be closed. It
+/// does not replay an operation that was already in flight when the socket
+/// failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoReconnect {
+    /// Maximum reconnect attempts before one new operation.
+    pub max_attempts: usize,
+}
+
+impl AutoReconnect {
+    /// Disable automatic reconnect attempts.
+    pub const fn disabled() -> Self {
+        Self { max_attempts: 0 }
+    }
+
+    /// Attempt reconnect once before a new operation.
+    pub const fn once() -> Self {
+        Self { max_attempts: 1 }
+    }
+}
+
+impl Default for AutoReconnect {
+    fn default() -> Self {
+        Self::once()
+    }
+}
+
 #[derive(Debug, Clone)]
 /// Connection options for [`Client`].
 ///
@@ -2139,6 +2243,8 @@ pub struct ClientOptions {
     pub heartbeat_interval: Option<u64>,
     /// Optional resume identity from a previous connection.
     pub resume_identity: Option<ResumeIdentity>,
+    /// Automatic reconnect policy for future operations.
+    pub auto_reconnect: AutoReconnect,
 }
 
 impl ClientOptions {
@@ -2152,6 +2258,7 @@ impl ClientOptions {
             auth: None,
             heartbeat_interval: None,
             resume_identity: None,
+            auto_reconnect: AutoReconnect::default(),
         }
     }
 
@@ -2178,6 +2285,22 @@ impl ClientOptions {
     pub fn heartbeat_interval(self, interval: u64) -> Self {
         Self {
             heartbeat_interval: Some(interval),
+            ..self
+        }
+    }
+
+    /// Return a copy with automatic reconnect disabled.
+    pub fn disable_auto_reconnect(self) -> Self {
+        Self {
+            auto_reconnect: AutoReconnect::disabled(),
+            ..self
+        }
+    }
+
+    /// Return a copy with a custom automatic reconnect attempt limit.
+    pub fn auto_reconnect_attempts(self, max_attempts: usize) -> Self {
+        Self {
+            auto_reconnect: AutoReconnect { max_attempts },
             ..self
         }
     }
@@ -2261,15 +2384,48 @@ mod tests {
     }
 
     fn client_with_command_rx() -> (Client, mpsc::Receiver<Command>) {
+        client_with_options_and_command_rx(ClientOptions::new())
+    }
+
+    fn client_with_options_and_command_rx(
+        opts: ClientOptions,
+    ) -> (Client, mpsc::Receiver<Command>) {
         let (engine, rx) = engine_with_command_rx();
         (
             Client {
-                address: "127.0.0.1:0".parse().unwrap(),
-                opts: ClientOptions::new(),
-                engine: Arc::new(EngineSlot::new(engine)),
+                shared: Arc::new(ClientShared {
+                    address: "127.0.0.1:0".parse().unwrap(),
+                    opts,
+                    engine: Arc::new(EngineSlot::new(engine)),
+                    reconnect_lock: Mutex::new(()),
+                    user_shutdown: AtomicBool::new(false),
+                }),
             },
             rx,
         )
+    }
+
+    #[tokio::test]
+    async fn disabled_auto_reconnect_returns_broken_pipe_for_closed_engine() {
+        let (client, rx) =
+            client_with_options_and_command_rx(ClientOptions::new().disable_auto_reconnect());
+        drop(rx);
+        let publisher = client.publisher("jobs").unwrap();
+
+        let err = publisher.publish("hello").await.unwrap_err();
+
+        assert!(matches!(err, FibrilError::BrokenPipe));
+    }
+
+    #[tokio::test]
+    async fn default_auto_reconnect_attempts_before_new_operation() {
+        let (client, rx) = client_with_command_rx();
+        drop(rx);
+        let publisher = client.publisher("jobs").unwrap();
+
+        let err = publisher.publish("hello").await.unwrap_err();
+
+        assert!(matches!(err, FibrilError::Disconnection { .. }));
     }
 
     #[tokio::test]
@@ -2294,7 +2450,7 @@ mod tests {
         let publisher = client.publisher("jobs").unwrap();
         let (new_engine, mut new_rx) = engine_with_command_rx();
 
-        client.engine.replace(new_engine);
+        client.shared.engine.replace(new_engine);
 
         publisher.publish("hello").await.unwrap();
 

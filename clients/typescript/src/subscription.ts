@@ -460,7 +460,7 @@ export class SubscriptionBuilder {
    */
   async subManualAck(): Promise<Subscription> {
     const reply = deferred<BoundedQueue<InternalInflight>>();
-    const engine = this.#client._engine();
+    const engine = await this.#client._engineForOperation();
     await engine.submit({
       type: "subscribe",
       req: {
@@ -486,7 +486,7 @@ export class SubscriptionBuilder {
    */
   async subAutoAck(): Promise<AutoAckedSubscription> {
     const reply = deferred<BoundedQueue<InternalDelivered>>();
-    const engine = this.#client._engine();
+    const engine = await this.#client._engineForOperation();
     await engine.submit({
       type: "subscribeAutoAck",
       req: {

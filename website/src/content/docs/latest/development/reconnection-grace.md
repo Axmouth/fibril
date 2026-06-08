@@ -145,10 +145,12 @@ Current limits:
 - The setting is seeded by `runtime_seed.connection.reconnect_grace_ms` when no
   persisted runtime settings document exists yet.
 - Existing subscriptions are preserved server-side, but clients do not yet have
-  an automatic reconnect loop that hides the socket break.
+  active subscription reconciliation that hides the socket break.
 - Existing Rust and TypeScript publisher handles use the latest engine after
-  explicit reconnect. New subscriptions also use the latest engine. Active
-  subscription streams still need reconciliation.
+  explicit or automatic reconnect. New subscriptions also use the latest engine.
+  Active subscription streams still need reconciliation.
+- Rust and TypeScript clients make one automatic reconnect attempt before a new
+  operation when the old engine is already known closed.
 - In-flight protocol requests from the old socket are not replayed.
 
 Transparent subscription restore and user-facing client automation can come
