@@ -112,6 +112,9 @@ locally, every higher layer would be built on the wrong foundation.
   only then switch to follower or owner mode. This is separate from the first
   role guard because it needs careful handling of asynchronous completions and
   background tasks.
+- Shape of the internal Stroma owner-operation lease. A lease should let an
+  already-started owner operation complete after freeze begins, but it must not
+  make `Frozen` generally writable while any owner operation is active.
 - First sharding metadata shape for static config and later etcd.
 - What the migration path is from external coordination to Fibril-owned metadata
   without forcing a data-path rewrite.
@@ -135,6 +138,55 @@ locally, every higher layer would be built on the wrong foundation.
 - Do not make followers serve reads.
 - Do not build around client-visible offsets.
 - Do not optimize replication throughput before correctness tests exist.
+- Do not make `Frozen` mean "allowed while some owner operation is active".
+  That would let unrelated new writes slip through during a transition.
+
+## Stroma Transition Notes
+
+The first role guard is intentionally not the full role transition protocol.
+The transition hazard is async owner work that has already crossed part of the
+durable path:
+
+- `append_message_batch` queues message-log writes, then `MsgBatchCompletion`
+  later appends the matching enqueue events.
+- single-message append spawns a task after message-log completion before the
+  enqueue event is appended.
+- `ApplyThenComplete` applies ack/nack-style events from a completion callback.
+- `dlq_copy_then_commit` can outlive the request that spawned it, then append a
+  DLQ commit for the source queue.
+- periodic snapshot tasks hold queue handles, but snapshots are not owner-only
+  decisions and can remain role-neutral as long as truncation stays safe.
+
+A correct owner-to-follower transition should therefore look like:
+
+1. Set the queue role to `Frozen` so new public owner operations fail before
+   durable appends.
+2. Stop or fence owner-only background work for that queue, including expiry
+   decisions and DLQ spawning.
+3. Wait for owner-operation leases that were acquired before the freeze.
+4. Let those leased operations finish their already-started durable sequence,
+   including the event-log append that corresponds to an accepted message-log
+   append.
+5. Advance or install the appropriate epoch/checkpoint state.
+6. Switch the queue to `Follower` or back to `Owner`.
+
+The lease should be explicit. It can be a small shared counter plus notify under
+`QueueHandle`, but applying already accepted owner events will probably also
+need an internal event-apply path that is authorized by the lease rather than by
+the current role bit. Otherwise a freeze that begins after a message log append
+but before the enqueue event would create orphan payload records. Orphan
+payloads are not corruption if delivery stays event-log driven, but transitions
+should still avoid creating them as normal behavior.
+
+Tests needed before implementing transition:
+
+- freeze waits for a deliberately blocked message-batch completion and then
+  permits the matching enqueue event to finish.
+- new publish, ack, nack, delivery leasing, and declare calls reject once frozen.
+- DLQ copy spawned before freeze either completes under lease or is cleanly
+  rejected and left recoverable.
+- periodic snapshot can keep running on a follower without creating owner-only
+  events.
 
 ## Log
 
@@ -199,3 +251,9 @@ locally, every higher layer would be built on the wrong foundation.
   non-owner queues. Focused tests cover stale/follower handles, rejection before
   event-log append, and follower expiry skip behavior. Remaining role work is
   the transition/freeze protocol and replicated ingest API.
+- 2026-06-09: Reviewed Stroma long-lived handle holders before implementing
+  transition draining. The clean solution needs an explicit owner-operation
+  lease that spans async completion callbacks. A naive `Frozen` exception based
+  on active operation count would be unsafe because unrelated new writes could
+  pass while the queue is transitioning. Left this as a documented transition
+  protocol instead of adding a half-measure.
