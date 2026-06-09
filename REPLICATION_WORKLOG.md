@@ -276,7 +276,9 @@ resume after context compaction.
     this pull shape. The frames carry raw message headers/payloads and raw event
     bytes so the wire contract stays log-shaped instead of Stroma-shaped.
     Handler wiring now exists for owner read and follower apply. Background
-    scheduling is still pending.
+    scheduling is still pending. The follower worker now depends on a small
+    owner-peer trait rather than a concrete owner broker, so the same worker
+    tick can use an in-process broker today and a protocol-backed peer later.
 11. Done: replace ad hoc assignment computation with a pluggable
     partition placement policy. The default policy is deterministic and keeps
     stable assignments where possible, so later controller tests can focus on
@@ -367,8 +369,12 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    behavior should remain conservative: workers report checkpoint-required and
    retry later. A separate flag can allow worker-triggered checkpoint-aware
    catch-up because it briefly pauses the owner while exporting state.
-27. Next: wire the follower worker transport loop. Once a real owner transport
-   exists, it should choose between normal bounded catch-up and
+27. In progress: wire the follower worker transport boundary. The run-once
+   worker now consumes a `BrokerOwnerReplicationPeer` abstraction that exposes
+   owner record reads and owner checkpoint export. `Broker<StromaEngine>` and
+   `Arc<Broker<StromaEngine>>` implement this for current in-process tests.
+   Once a real owner transport exists, the permanent background loop should use
+   the same trait and choose between normal bounded catch-up and
    checkpoint-aware catch-up based on the worker policy.
 28. Priority order from here:
    - follower worker tick and background loop around the existing catch-up
@@ -465,6 +471,13 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    non-owner nodes, and preserves durability settings across recomputation. This
    is deliberately not an etcd controller yet. It is the testable algorithm a
    future controller can call before writing a coordination snapshot.
+40. Done for owner-peer catch-up boundary: follower catch-up no longer requires
+   a concrete owner broker argument. `BrokerOwnerReplicationPeer` is the minimal
+   owner-side interface needed by a follower worker: read owner message/event
+   replication records and export an owner state checkpoint. A focused fake-peer
+   test verifies that the worker tick updates state through this boundary. The
+   permanent background loop is still pending because it needs owner discovery,
+   connection management, and retry behavior around the same trait.
 
 Previous completed implementation checkpoints:
 

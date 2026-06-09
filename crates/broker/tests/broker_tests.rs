@@ -9,11 +9,12 @@ use fibril_broker::{
     CompletionPair,
     broker::{
         Broker, BrokerAssignmentTransitionApply, BrokerConfig, BrokerError,
-        BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords, BrokerReplicationCatchUp,
-        BrokerReplicationCatchUpOptions, BrokerReplicationCatchUpProgress,
-        BrokerReplicationCheckpointRequired, ConsumerConfig, FollowerReplicationWorkerConfig,
-        FollowerReplicationWorkerState, FollowerReplicationWorkerStatus, OwnedQueue,
-        QueueEvictionAttempt, QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
+        BrokerFollowerReplicationApply, BrokerOwnerReplicationPeer, BrokerOwnerReplicationRecords,
+        BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
+        BrokerReplicationCatchUpProgress, BrokerReplicationCheckpointRequired, ConsumerConfig,
+        FollowerReplicationWorkerConfig, FollowerReplicationWorkerState,
+        FollowerReplicationWorkerStatus, OwnedQueue, QueueEvictionAttempt, QueueEvictionSkip,
+        SettleRequest, SettleType, StaticQueueOwnership,
     },
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
@@ -23,14 +24,16 @@ use fibril_broker::{
     queue_engine::{
         Deliverable, EvictOutcome, FollowerStateCheckpointInstall, InspectMode, IoError,
         KeratinAppendCompletion, Message, MessageHeaders, OwnerReplicationBatch,
-        OwnerReplicationRead, QueueEngine, QueuePromotionOutcome, ReplayDeadLetterOutcome,
-        ReplayDeadLettersReport, SettleRequest as EngineSettleRequest, StromaEngine,
+        OwnerReplicationRead, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome,
+        ReplayDeadLetterOutcome, ReplayDeadLettersReport, SettleRequest as EngineSettleRequest,
+        StromaEngine,
     },
     test_util::TestState,
 };
 use fibril_metrics::{Metrics, QueuesStateSnapshot};
 use fibril_storage::{DeliverableMessage, Offset};
 use fibril_util::unix_millis;
+use futures::future::BoxFuture;
 use hashbrown::HashSet;
 use stroma_core::{
     AckEventMeta, AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ,
@@ -1901,6 +1904,94 @@ async fn follower_worker_tick_records_catch_up_progress() {
     );
 
     owner.shutdown().await;
+    follower.shutdown().await;
+}
+
+#[derive(Debug)]
+struct EmptyOwnerPeer;
+
+impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
+    fn read_owner_replication_records<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: fibril_storage::LogId,
+        _group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        _max_messages: usize,
+        _max_events: usize,
+    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        Box::pin(async move {
+            Ok(BrokerOwnerReplicationRecords {
+                messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
+                    epoch: 0,
+                    requested_offset: message_from,
+                    next_offset: message_from,
+                    records: Vec::new(),
+                }),
+                events: OwnerReplicationRead::Batch(OwnerReplicationBatch {
+                    epoch: 0,
+                    requested_offset: event_from,
+                    next_offset: event_from,
+                    records: Vec::new(),
+                }),
+            })
+        })
+    }
+
+    fn export_owner_state_checkpoint<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: fibril_storage::LogId,
+        _group: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+        Box::pin(async {
+            Err(BrokerError::Unknown(
+                "empty owner peer does not export checkpoints".into(),
+            ))
+        })
+    }
+}
+
+#[tokio::test]
+async fn follower_worker_tick_uses_owner_peer_abstraction() {
+    let (follower, _follower_dir) = open_test_broker().await;
+    let queue = QueueIdentity::new("peer-abstraction", 0, Some("workers"));
+    let transition = assignment_transition(
+        "peer-abstraction",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    follower
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    let cfg = FollowerReplicationWorkerConfig::default();
+    let outcome = follower
+        .run_follower_replication_worker_once(&EmptyOwnerPeer, &queue, cfg)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
+            iterations: 1,
+            applied_message_records: 0,
+            applied_event_records: 0,
+            message_next_offset: 0,
+            event_next_offset: 0,
+        })
+    );
+    assert_eq!(
+        follower
+            .follower_replication_worker_snapshot("peer-abstraction", 0, Some("workers"))
+            .await
+            .map(|state| state.status),
+        Some(FollowerReplicationWorkerStatus::CaughtUp)
+    );
+
     follower.shutdown().await;
 }
 

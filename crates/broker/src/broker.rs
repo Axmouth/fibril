@@ -10,7 +10,7 @@ use std::{
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use fibril_metrics::{BrokerStats, QueuesStateSnapshot};
-use futures::FutureExt;
+use futures::{FutureExt, future::BoxFuture};
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -412,6 +412,26 @@ impl OwnedQueue {
 pub struct BrokerOwnerReplicationRecords {
     pub messages: OwnerReplicationRead<Message>,
     pub events: OwnerReplicationRead<StromaEvent>,
+}
+
+pub trait BrokerOwnerReplicationPeer: Send + Sync {
+    fn read_owner_replication_records<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: LogId,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>>;
+
+    fn export_owner_state_checkpoint<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: LogId,
+        group: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -2948,7 +2968,7 @@ impl Broker<StromaEngine> {
 
     pub async fn catch_up_replication_follower_from_owner(
         &self,
-        owner: &Broker<StromaEngine>,
+        owner: &dyn BrokerOwnerReplicationPeer,
         topic: &str,
         partition: LogId,
         group: Option<&str>,
@@ -3053,7 +3073,7 @@ impl Broker<StromaEngine> {
 
     pub async fn catch_up_replication_follower_from_owner_with_checkpoint(
         &self,
-        owner: &Broker<StromaEngine>,
+        owner: &dyn BrokerOwnerReplicationPeer,
         topic: &str,
         partition: LogId,
         group: Option<&str>,
@@ -3122,7 +3142,7 @@ impl Broker<StromaEngine> {
 
     pub async fn run_follower_replication_worker_once(
         &self,
-        owner: &Broker<StromaEngine>,
+        owner: &dyn BrokerOwnerReplicationPeer,
         queue: &crate::coordination::QueueIdentity,
         cfg: FollowerReplicationWorkerConfig,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
@@ -3157,6 +3177,81 @@ impl Broker<StromaEngine> {
 
         worker.lock().await.record_catch_up(cfg, &outcome);
         Ok(outcome)
+    }
+}
+
+impl BrokerOwnerReplicationPeer for Broker<StromaEngine> {
+    fn read_owner_replication_records<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: LogId,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        Box::pin(async move {
+            Broker::<StromaEngine>::read_owner_replication_records(
+                self,
+                topic,
+                partition,
+                group,
+                message_from,
+                event_from,
+                max_messages,
+                max_events,
+            )
+            .await
+        })
+    }
+
+    fn export_owner_state_checkpoint<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: LogId,
+        group: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+        Box::pin(async move {
+            Broker::<StromaEngine>::export_owner_state_checkpoint(self, topic, partition, group)
+                .await
+        })
+    }
+}
+
+impl<T> BrokerOwnerReplicationPeer for Arc<T>
+where
+    T: BrokerOwnerReplicationPeer + ?Sized,
+{
+    fn read_owner_replication_records<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: LogId,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        self.as_ref().read_owner_replication_records(
+            topic,
+            partition,
+            group,
+            message_from,
+            event_from,
+            max_messages,
+            max_events,
+        )
+    }
+
+    fn export_owner_state_checkpoint<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: LogId,
+        group: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+        self.as_ref()
+            .export_owner_state_checkpoint(topic, partition, group)
     }
 }
 
