@@ -10,9 +10,13 @@ use bytes::Bytes;
 use fibril_broker::{
     broker::{
         Broker, BrokerConfig, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
-        QueueEvictionAttempt, StaticQueueOwnership,
+        FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
+        FollowerReplicationWorkerStatus, QueueEvictionAttempt, StaticQueueOwnership,
     },
-    coordination::{PartitionAssignment, QueueIdentity},
+    coordination::{
+        LocalAssignmentIntent, LocalAssignmentRole, LocalAssignmentTransition, PartitionAssignment,
+        QueueIdentity,
+    },
     queue_engine::{
         EvictOutcome, GlobalDLQ, OwnerReplicationRead, QueueEngine, QueuePromotionOutcome,
         StromaEngine,
@@ -42,6 +46,7 @@ use futures::{SinkExt, StreamExt};
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaEvent, StromaKeratinConfig, TempDir};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::Framed;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 async fn open_test_engine() -> (StromaEngine, TempDir) {
@@ -176,6 +181,17 @@ async fn start_protocol_listener_for_broker(
     });
 
     (addr, server_task, dir, broker)
+}
+
+fn follower_assignment_transition(topic: &str, group: Option<&str>) -> LocalAssignmentTransition {
+    LocalAssignmentTransition {
+        queue: QueueIdentity::new(topic, 0, group),
+        previous_role: None,
+        next_role: Some(LocalAssignmentRole::Follower),
+        previous: None,
+        next: None,
+        intent: LocalAssignmentIntent::BecomeFollower,
+    }
 }
 
 async fn recv_frame(framed: &mut Framed<TcpStream, ProtoCodec>) -> Frame {
@@ -1386,6 +1402,114 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
     assert_eq!(messages.records[0].1.payload, b"auth-payload");
 
     drop(peer);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
+    let topic = "replication.resolver.loop";
+    let group = Some("workers".to_string());
+    let (owner_broker, owner_dir) = open_test_broker().await;
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, &group).await.unwrap();
+    for payload in [b"loop-first".as_slice(), b"loop-second".as_slice()] {
+        let reply = publisher
+            .publish(
+                payload.to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+    let owner_checkpoint = owner_broker
+        .export_owner_state_checkpoint(topic, 0, group.as_deref())
+        .await
+        .unwrap();
+
+    let (addr, server_task, _owner_dir, owner_broker) = start_protocol_listener_for_broker(
+        ConnectionSettings::new(Some(60)),
+        owner_broker,
+        owner_dir,
+        None,
+    )
+    .await;
+    let resolver =
+        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
+    let resolver = Arc::new(resolver);
+
+    let (follower_broker, _follower_dir) = open_test_broker().await;
+    follower_broker
+        .apply_assignment_transition(&follower_assignment_transition(topic, group.as_deref()))
+        .await
+        .unwrap();
+
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new(topic, 0, group.as_deref()),
+        "owner-a",
+        vec!["follower-a".to_string()],
+        1,
+    );
+    let shutdown = CancellationToken::new();
+    let cfg = FollowerReplicationWorkerConfig {
+        caught_up_poll_ms: 60_000,
+        ..Default::default()
+    };
+
+    let observer = async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let state = follower_broker
+                    .follower_replication_worker_snapshot(topic, 0, group.as_deref())
+                    .await;
+                if state
+                    .as_ref()
+                    .is_some_and(|state| state.status == FollowerReplicationWorkerStatus::CaughtUp)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("follower worker should catch up over protocol");
+        shutdown.cancel();
+    };
+    let loop_task = follower_broker.run_follower_replication_worker_loop(
+        assignment,
+        resolver,
+        cfg,
+        shutdown.clone(),
+    );
+    let (_, loop_outcome) = tokio::join!(observer, loop_task);
+
+    assert_eq!(
+        loop_outcome.unwrap(),
+        FollowerReplicationWorkerLoopExit::Cancelled { ticks: 1 }
+    );
+    let promoted = follower_broker
+        .promote_replication_follower_if_caught_up(
+            topic,
+            0,
+            group.as_deref(),
+            owner_checkpoint.message_next_offset,
+            owner_checkpoint.event_next_offset,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        promoted,
+        QueuePromotionOutcome::Promoted {
+            message_next_offset: owner_checkpoint.message_next_offset,
+            event_next_offset: owner_checkpoint.event_next_offset,
+            applied_event_offset: Some(owner_checkpoint.applied_event_offset),
+        }
+    );
+
+    follower_broker.shutdown().await;
+    owner_broker.shutdown().await;
     server_task.await.unwrap().unwrap();
 }
 

@@ -509,7 +509,17 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    The default watcher remains unchanged for standalone/local mode. Remaining
    work: implement a resolver backed by coordination snapshots and protocol
    clients, then make that the real cluster watcher path.
-43. Future test cleanup pass: broker replication tests now repeat enough setup
+43. Done for protocol-backed follower loop proof: protocol tests now cover a
+   follower broker running its real follower replication loop through
+   `StaticProtocolOwnerPeerResolver`. The resolver opens a protocol TCP
+   connection to an owner broker, the worker pulls records through
+   `BrokerOwnerReplicationPeer`, the follower reaches `CaughtUp`, and checked
+   promotion succeeds against the owner's checkpoint offsets. This proves the
+   worker/resolver/protocol boundary works for ordinary contiguous catch-up.
+   Remaining transport work: connection reuse, reconnect/backoff, topology-watch
+   refresh, checkpoint-required loop handling over the same resolver boundary,
+   and longer-running supervised watcher coverage.
+44. Future test cleanup pass: broker replication tests now repeat enough setup
    that helpers are worth adding before the next large group of tests. Keep
    helpers behavior-shaped, not assertion-hiding. Good candidates:
    owner/follower broker pair setup, follower assignment setup, publishing `N`
@@ -519,7 +529,7 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    reduce boilerplate in future adversarial/concurrency tests without hiding the
    state transition being tested. This is cleanup, not a reason to add more
    abstractions to production code.
-44. Future admin dashboard topology view: once coordination-backed assignments
+45. Future admin dashboard topology view: once coordination-backed assignments
    exist, add a topology page to the dashboard. Ideally this is a live diagram
    showing nodes, partition owners, followers, lag, role transitions, and
    unhealthy or disconnected links. The first version can be table-first if
@@ -538,15 +548,16 @@ in-process fake peers.
 
 Breakdown:
 
-- Add a broker/client-side peer implementation of `BrokerOwnerReplicationPeer`
+- Done: add a broker/client-side peer implementation of `BrokerOwnerReplicationPeer`
   that speaks protocol v1 replication read and checkpoint frames.
-- Reuse existing protocol handler frames before adding new wire surface.
+- Done: reuse existing protocol handler frames before adding new wire surface.
 - Add connection lifecycle handling: connect, reconnect, fail current tick,
   and let the worker retry by policy.
 - Keep ownership errors explicit. If the contacted node is not owner anymore,
   the peer should return a typed error that causes resolver/topology refresh.
-- Add TCP end-to-end tests with two local brokers: owner publishes, follower
-  worker pulls over protocol, follower reaches matching offsets.
+- Done for contiguous catch-up: add TCP end-to-end tests with two local brokers:
+  owner publishes, follower worker pulls over protocol, follower reaches
+  matching offsets, and checked promotion succeeds.
 - Add a checkpoint-required TCP path test after record catch-up works.
 
 Risks:
