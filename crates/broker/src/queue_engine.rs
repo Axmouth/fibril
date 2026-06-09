@@ -116,6 +116,15 @@ pub trait QueueEngine {
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError>;
 
+    async fn release_inflight_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<AckEventMeta>,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError>;
+
     async fn settle(
         &self,
         tp: &str,
@@ -558,6 +567,19 @@ impl QueueEngine for StromaEngine {
     ) -> Result<(), StromaError> {
         self.inner
             .nack_enqueue_many(tp, part, group, items, completion)
+            .await
+    }
+
+    async fn release_inflight_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<AckEventMeta>,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .release_inflight_many(tp, part, group, items, completion)
             .await
     }
 

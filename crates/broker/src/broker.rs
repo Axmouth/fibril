@@ -32,8 +32,8 @@ use crate::queue_engine::{
 };
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
-    Message, MessageContentType, MessageHeaders, NackEventMeta, OwnerReplicationRead, StromaError,
-    StromaEvent, StromaMetrics, TaskGroup, UnixMillis,
+    Message, MessageContentType, MessageHeaders, NackEventMeta, OwnerReplicationRead,
+    StromaDebugSnapshot, StromaError, StromaEvent, StromaMetrics, TaskGroup, UnixMillis,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -1320,14 +1320,17 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .clone()
     }
 
-    fn stop_owner_queue_runtime(&self, key: &QueueKey) -> bool {
+    fn stop_owner_queue_runtime(&self, key: &QueueKey) -> Option<Vec<Offset>> {
         let Some((_, qs)) = self.queues.remove(key) else {
-            return false;
+            return None;
         };
 
         qs.cancel_owner_runtime();
         qs.consumers.clear();
+        Some(self.take_delivery_offsets_for_queue(key))
+    }
 
+    fn take_delivery_offsets_for_queue(&self, key: &QueueKey) -> Vec<Offset> {
         let mut stale_tags = Vec::new();
         for entry in self.records_by_tags.iter() {
             if entry.value().key == *key {
@@ -1335,12 +1338,59 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             }
         }
 
+        let mut offsets = Vec::with_capacity(stale_tags.len());
         for (tag, offset) in stale_tags {
             self.records_by_tags.remove(&tag);
             self.tags_by_key_offset.remove(&(key.clone(), offset));
+            offsets.push(offset);
         }
 
-        true
+        offsets
+    }
+
+    async fn release_offsets_for_role_transition(
+        &self,
+        key: &QueueKey,
+        offsets: Vec<Offset>,
+    ) -> Result<(), BrokerError> {
+        if offsets.is_empty() {
+            return Ok(());
+        }
+
+        let count = offsets.len();
+        let (done_tx, done_rx) = oneshot::channel::<bool>();
+        let mut done_tx = Some(done_tx);
+        let done = move |ok: bool| {
+            if let Some(done_tx) = done_tx.take() {
+                let _ = done_tx.send(ok);
+            }
+        };
+
+        let reqs = offsets
+            .into_iter()
+            .map(|off| AckEventMeta { off })
+            .collect();
+        let completion: Box<dyn AppendCompletion<IoError>> = Box::new(SimpleCompletion::new(done));
+        self.engine
+            .release_inflight_batch(&key.tp, key.part, key.group.as_deref(), reqs, completion)
+            .await?;
+
+        match done_rx.await {
+            Ok(true) => {
+                tracing::debug!(
+                    topic = %key.tp,
+                    partition = key.part,
+                    group = ?key.group,
+                    count,
+                    "released broker-tracked deliveries before role transition"
+                );
+                Ok(())
+            }
+            Ok(false) => Err(BrokerError::Engine(StromaError::Io(format!(
+                "role transition release failed for {count} broker-tracked deliveries"
+            )))),
+            Err(_) => Err(BrokerError::ChannelClosed),
+        }
     }
 
     pub fn queue_activity_snapshot(
@@ -1358,6 +1408,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     pub fn is_queue_materialized(&self, topic: &str, group: Option<&str>) -> bool {
         self.engine.is_materialized(topic, 0, group)
+    }
+
+    pub async fn debug_snapshot(&self) -> Result<StromaDebugSnapshot, BrokerError> {
+        Ok(self.engine.debug_snapshot().await?)
     }
 
     pub fn has_follower_replication_worker(
@@ -1732,21 +1786,21 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             qs.wake();
         }
 
-        let mut tagged_offsets = Vec::new();
+        let mut tagged_tags = Vec::new();
         for entry in self.records_by_tags.iter() {
             let tag = *entry.key();
             let rec = entry.value();
             if rec.consumer_id == sub_id && rec.key == key {
-                tagged_offsets.push((tag, rec.offset));
+                tagged_tags.push((tag, rec.offset));
             }
         }
 
-        if tagged_offsets.is_empty() {
+        if tagged_tags.is_empty() {
             return Ok(());
         }
 
-        let mut offsets = Vec::with_capacity(tagged_offsets.len());
-        for (tag, offset) in tagged_offsets {
+        let mut offsets = Vec::with_capacity(tagged_tags.len());
+        for (tag, offset) in tagged_tags {
             self.records_by_tags.remove(&tag);
             self.tags_by_key_offset.remove(&(key.clone(), offset));
             offsets.push(offset);
@@ -2578,14 +2632,17 @@ impl Broker<StromaEngine> {
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::DemoteOwnerToFollower => {
-                self.engine
-                    .demote_queue_owner_to_follower(&topic, transition.queue.partition, group)
-                    .await?;
-                self.stop_owner_queue_runtime(&QueueKey {
+                let key = QueueKey {
                     tp: topic.clone(),
                     part: transition.queue.partition,
                     group: transition.queue.group.clone(),
-                });
+                };
+                let broker_deliveries = self.stop_owner_queue_runtime(&key).unwrap_or_default();
+                self.release_offsets_for_role_transition(&key, broker_deliveries)
+                    .await?;
+                self.engine
+                    .demote_queue_owner_to_follower(&topic, transition.queue.partition, group)
+                    .await?;
                 self.ensure_follower_replication_worker(&transition.queue);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
@@ -2593,7 +2650,7 @@ impl Broker<StromaEngine> {
                 self.engine
                     .freeze_queue_for_transition(&topic, transition.queue.partition, group)
                     .await?;
-                self.stop_owner_queue_runtime(&QueueKey {
+                let _ = self.stop_owner_queue_runtime(&QueueKey {
                     tp: topic.clone(),
                     part: transition.queue.partition,
                     group: transition.queue.group.clone(),

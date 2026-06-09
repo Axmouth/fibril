@@ -375,14 +375,17 @@ Current focus: checkpoint-required follower boundary.
    created lazily by real traffic. StopFollower still needs explicit shutdown
    semantics for the follower worker and local queue state.
 30. Done for the first owner-runtime boundary: `QueueLoopState` now has a
-   per-queue owner-runtime cancellation token. Assignment demotion and freeze
-   call the Stroma role transition first, which synchronously freezes new owner
-   operations, then cancel and remove the broker owner queue runtime. Stale
-   publisher handles close instead of continuing as normal owner traffic. This
-   also clears broker delivery tag maps for that queue. Remaining detail work:
-   define how to requeue or account for broker-tracked deliveries during
-   demotion, and define explicit StopFollower/follower-worker shutdown
-   semantics.
+   per-queue owner-runtime cancellation token. Assignment demotion cancels and
+   removes the broker owner queue runtime first, collects broker-tracked
+   delivery offsets, writes a durable Stroma release-inflight event for those
+   offsets, then demotes the queue to follower and starts the follower worker.
+   Release-inflight is intentionally not a NACK: it returns already leased work
+   to ready without consuming retry budget or entering the DLQ path. Freeze also
+   removes the owner runtime after the Stroma freeze. Stale publisher handles
+   close instead of continuing as normal owner traffic. Remaining detail work:
+   define explicit StopFollower/follower-worker shutdown semantics and decide
+   whether freeze without demotion should also release broker-tracked
+   deliveries or leave them to the transition owner.
 
 Previous completed implementation checkpoints:
 

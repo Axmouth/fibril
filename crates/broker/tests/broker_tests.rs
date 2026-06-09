@@ -33,9 +33,10 @@ use fibril_storage::{DeliverableMessage, Offset};
 use fibril_util::unix_millis;
 use hashbrown::HashSet;
 use stroma_core::{
-    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot,
-    GlobalDlqUpdateOutcome, KeratinConfig, MessageInspectionPage, PublishItem, SnapshotConfig,
-    StromaDebugSnapshot, StromaError, StromaKeratinConfig, StromaMetrics, TempDir, test_dir,
+    AckEventMeta, AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ,
+    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, KeratinConfig, MessageInspectionPage, PublishItem,
+    SnapshotConfig, StromaDebugSnapshot, StromaError, StromaKeratinConfig, StromaMetrics, TempDir,
+    test_dir,
 };
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -107,6 +108,17 @@ impl QueueEngine for FailingPublishEngine {
         _part: u32,
         _group: Option<&str>,
         _req: EngineSettleRequest,
+        _completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        unimplemented!()
+    }
+
+    async fn release_inflight_batch(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _items: Vec<AckEventMeta>,
         _completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError> {
         unimplemented!()
@@ -744,6 +756,125 @@ async fn demote_owner_to_follower_stops_broker_owner_runtime() {
     })
     .await
     .expect("stale publisher should close after demotion");
+
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
+    let (broker, _dir) = open_test_broker().await;
+    let group = Some("workers".to_string());
+    let (publisher, _confirms) = broker
+        .get_publisher("transition-demote-inflight", &group)
+        .await
+        .unwrap();
+
+    let reply = publisher
+        .publish(
+            b"before demote".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let mut sub = broker
+        .subscribe(
+            "transition-demote-inflight",
+            Some("workers"),
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await
+        .unwrap();
+    let msg = recv_with_timeout(&mut sub, 1_000)
+        .await
+        .expect("published message should be delivered before demotion");
+    assert_eq!(msg.message.offset, 0);
+
+    let transition = assignment_transition(
+        "transition-demote-inflight",
+        LocalAssignmentIntent::DemoteOwnerToFollower,
+        Some(LocalAssignmentRole::Owner),
+        Some(LocalAssignmentRole::Follower),
+    );
+    let outcome = broker
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::DemoteOwnerToFollower)
+    );
+
+    let promoted = broker
+        .promote_replication_follower_if_caught_up(
+            "transition-demote-inflight",
+            0,
+            Some("workers"),
+            1,
+            2,
+        )
+        .await
+        .expect("demoted queue should be promotable after local requeue");
+    assert!(
+        matches!(
+            promoted,
+            QueuePromotionOutcome::Promoted {
+                message_next_offset: 1,
+                event_next_offset: 2,
+                ..
+            }
+        ),
+        "unexpected promotion outcome: {promoted:?}"
+    );
+
+    let snapshot = broker.debug_snapshot().await.unwrap();
+    let queue = snapshot
+        .queues
+        .iter()
+        .find(|queue| {
+            queue.topic == "transition-demote-inflight"
+                && queue.partition == 0
+                && queue.group.as_deref() == Some("workers")
+        })
+        .expect("queue should remain materialized after promotion");
+    assert_eq!(format!("{:?}", queue.role), "Owner");
+    assert_eq!(queue.state.ready_count, 1);
+    assert_eq!(queue.state.inflight_count, 0);
+
+    let mut redelivery = broker
+        .subscribe(
+            "transition-demote-inflight",
+            Some("workers"),
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await
+        .unwrap();
+    let msg = match recv_with_timeout(&mut redelivery, 1_000).await {
+        Some(msg) => msg,
+        None => {
+            let snapshot = broker.debug_snapshot().await.unwrap();
+            panic!(
+                "demotion should requeue broker-tracked delivery, state after subscribe: {:?}",
+                snapshot
+                    .queues
+                    .iter()
+                    .find(|queue| {
+                        queue.topic == "transition-demote-inflight"
+                            && queue.partition == 0
+                            && queue.group.as_deref() == Some("workers")
+                    })
+                    .map(|queue| &queue.state)
+            );
+        }
+    };
+    assert_eq!(msg.message.offset, 0);
 
     broker.shutdown().await;
 }
