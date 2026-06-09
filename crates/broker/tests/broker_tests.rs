@@ -35,8 +35,8 @@ use hashbrown::HashSet;
 use stroma_core::{
     AckEventMeta, AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, KeratinConfig, MessageInspectionPage, PublishItem,
-    SnapshotConfig, StromaDebugSnapshot, StromaError, StromaKeratinConfig, StromaMetrics, TempDir,
-    test_dir,
+    QueueRole, SnapshotConfig, StromaDebugSnapshot, StromaError, StromaKeratinConfig,
+    StromaMetrics, TempDir, test_dir,
 };
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -591,6 +591,80 @@ async fn assignment_transition_apply_can_make_queue_follower() {
         err,
         BrokerError::Engine(StromaError::WrongQueueRole { .. })
     ));
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn assignment_transition_apply_can_stop_follower() {
+    let (broker, _dir) = open_test_broker().await;
+    let become_follower = assignment_transition(
+        "transition-stop-follower",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    broker
+        .apply_assignment_transition(&become_follower)
+        .await
+        .unwrap();
+    assert!(broker.has_follower_replication_worker("transition-stop-follower", 0, Some("workers")));
+
+    let stop = assignment_transition(
+        "transition-stop-follower",
+        LocalAssignmentIntent::StopFollower,
+        Some(LocalAssignmentRole::Follower),
+        None,
+    );
+    let outcome = broker.apply_assignment_transition(&stop).await.unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::StopFollower)
+    );
+    assert!(!broker.has_follower_replication_worker(
+        "transition-stop-follower",
+        0,
+        Some("workers")
+    ));
+
+    let snapshot = broker.debug_snapshot().await.unwrap();
+    let queue = snapshot
+        .queues
+        .iter()
+        .find(|queue| {
+            queue.topic == "transition-stop-follower"
+                && queue.partition == 0
+                && queue.group.as_deref() == Some("workers")
+        })
+        .expect("stopped follower should remain materialized but frozen");
+    assert_eq!(queue.role, QueueRole::Frozen);
+
+    let records = BrokerOwnerReplicationRecords {
+        messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
+            epoch: 0,
+            requested_offset: 0,
+            next_offset: 0,
+            records: Vec::new(),
+        }),
+        events: OwnerReplicationRead::Batch(OwnerReplicationBatch {
+            epoch: 0,
+            requested_offset: 0,
+            next_offset: 0,
+            records: Vec::new(),
+        }),
+    };
+    let err = broker
+        .apply_follower_replication_records("transition-stop-follower", 0, Some("workers"), records)
+        .await
+        .expect_err("stopped follower should reject replicated ingest");
+    assert!(matches!(
+        err,
+        BrokerError::Engine(StromaError::WrongQueueRole {
+            expected: QueueRole::Follower,
+            actual: QueueRole::Frozen
+        })
+    ));
+
     broker.shutdown().await;
 }
 

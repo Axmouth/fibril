@@ -1448,6 +1448,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             });
     }
 
+    fn stop_follower_replication_worker(&self, queue: &crate::coordination::QueueIdentity) -> bool {
+        self.follower_replication_workers.remove(queue).is_some()
+    }
+
     fn follower_replication_worker(
         &self,
         queue: &crate::coordination::QueueIdentity,
@@ -2670,16 +2674,18 @@ impl Broker<StromaEngine> {
                 })
             }
             LocalAssignmentIntent::StopFollower => {
+                self.engine
+                    .stop_queue_follower_for_transition(&topic, transition.queue.partition, group)
+                    .await?;
+                let stopped_worker = self.stop_follower_replication_worker(&transition.queue);
                 tracing::debug!(
                     topic,
                     partition = transition.queue.partition,
                     group = ?group,
-                    "deferring follower stop until follower shutdown semantics are defined"
+                    stopped_worker,
+                    "stopped local follower assignment"
                 );
-                Ok(BrokerAssignmentTransitionApply::Deferred {
-                    intent: transition.intent,
-                    reason: "stopping a follower requires explicit local shutdown semantics",
-                })
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
         }
     }

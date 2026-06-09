@@ -372,8 +372,8 @@ Current focus: checkpoint-required follower boundary.
    broker deliveries, remove stale tag records, then demote Stroma and start the
    follower worker. Follower to owner should stop the follower worker after
    verified catch-up and promotion, then allow the owner queue loop to be
-   created lazily by real traffic. StopFollower still needs explicit shutdown
-   semantics for the follower worker and local queue state.
+   created lazily by real traffic. StopFollower has since been given explicit
+   local shutdown semantics.
 30. Done for the first owner-runtime boundary: `QueueLoopState` now has a
    per-queue owner-runtime cancellation token. Assignment demotion cancels and
    removes the broker owner queue runtime first, collects broker-tracked
@@ -386,6 +386,15 @@ Current focus: checkpoint-required follower boundary.
    define explicit StopFollower/follower-worker shutdown semantics and decide
    whether freeze without demotion should also release broker-tracked
    deliveries or leave them to the transition owner.
+31. Done for StopFollower: broker assignment application now removes the local
+   follower replication worker and asks Stroma to stop the follower queue for
+   transition. Stroma validates the queue is currently a follower, freezes the
+   queue role and both Keratin logs, and rejects further replicated ingest.
+   This keeps an unassigned local queue from accepting owner traffic or follower
+   traffic by accident. Remaining detail work: decide whether StopFollower
+   should also try memory-only unmaterialization once no local role remains, and
+   keep the current frozen state as the conservative default until that is
+   explicitly designed.
 
 Previous completed implementation checkpoints:
 
