@@ -60,6 +60,9 @@ pub enum Op {
     ReconcileServer = 71,
     ReconcileResult = 72,
 
+    ReplicationRead = 80,
+    ReplicationReadOk = 81,
+
     Error = 255,
 }
 
@@ -264,6 +267,68 @@ pub struct ReconcileSubscriptionResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReconcileResult {
     pub subscriptions: Vec<ReconcileSubscriptionResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationRead {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: u32,
+    pub message_from: u64,
+    pub event_from: u64,
+    pub max_messages: u32,
+    pub max_events: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationMessageRecord {
+    pub offset: u64,
+    pub headers: Vec<u8>,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationEventRecord {
+    pub offset: u64,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointRequired {
+    pub epoch: u64,
+    pub requested_offset: u64,
+    pub head_offset: u64,
+    pub next_offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplicationMessageRead {
+    Batch {
+        epoch: u64,
+        requested_offset: u64,
+        next_offset: u64,
+        records: Vec<ReplicationMessageRecord>,
+    },
+    CheckpointRequired(ReplicationCheckpointRequired),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplicationEventRead {
+    Batch {
+        epoch: u64,
+        requested_offset: u64,
+        next_offset: u64,
+        records: Vec<ReplicationEventRecord>,
+    },
+    CheckpointRequired(ReplicationCheckpointRequired),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationReadOk {
+    pub messages: ReplicationMessageRead,
+    pub events: ReplicationEventRead,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -56,7 +56,9 @@ mod tests {
     use super::*;
     use crate::v1::{
         Hello, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
-        ReconcileSubscription, ReconcileSubscriptionResult,
+        ReconcileSubscription, ReconcileSubscriptionResult, ReplicationCheckpointRequired,
+        ReplicationEventRead, ReplicationEventRecord, ReplicationMessageRead,
+        ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
     };
 
     #[test]
@@ -127,5 +129,76 @@ mod tests {
         let frame = try_encode(Op::ReconcileResult, 12, &msg).unwrap();
         assert_eq!(frame.opcode, Op::ReconcileResult as u16);
         assert_eq!(try_decode::<ReconcileResult>(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn replication_read_roundtrips() {
+        let msg = ReplicationRead {
+            topic: "orders".into(),
+            group: Some("workers".into()),
+            partition: 3,
+            message_from: 11,
+            event_from: 17,
+            max_messages: 128,
+            max_events: 256,
+        };
+
+        let frame = try_encode(Op::ReplicationRead, 13, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationRead as u16);
+        assert_eq!(try_decode::<ReplicationRead>(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn replication_read_ok_roundtrips_batches() {
+        let msg = ReplicationReadOk {
+            messages: ReplicationMessageRead::Batch {
+                epoch: 4,
+                requested_offset: 10,
+                next_offset: 12,
+                records: vec![
+                    ReplicationMessageRecord {
+                        offset: 10,
+                        headers: b"headers-a".to_vec(),
+                        payload: b"payload-a".to_vec(),
+                    },
+                    ReplicationMessageRecord {
+                        offset: 11,
+                        headers: b"headers-b".to_vec(),
+                        payload: b"payload-b".to_vec(),
+                    },
+                ],
+            },
+            events: ReplicationEventRead::Batch {
+                epoch: 4,
+                requested_offset: 20,
+                next_offset: 21,
+                records: vec![ReplicationEventRecord {
+                    offset: 20,
+                    payload: b"event".to_vec(),
+                }],
+            },
+        };
+
+        let frame = try_encode(Op::ReplicationReadOk, 14, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
+        assert_eq!(try_decode::<ReplicationReadOk>(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn replication_read_ok_roundtrips_checkpoint_required() {
+        let checkpoint = ReplicationCheckpointRequired {
+            epoch: 7,
+            requested_offset: 1,
+            head_offset: 10,
+            next_offset: 20,
+        };
+        let msg = ReplicationReadOk {
+            messages: ReplicationMessageRead::CheckpointRequired(checkpoint.clone()),
+            events: ReplicationEventRead::CheckpointRequired(checkpoint),
+        };
+
+        let frame = try_encode(Op::ReplicationReadOk, 15, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
+        assert_eq!(try_decode::<ReplicationReadOk>(&frame).unwrap(), msg);
     }
 }

@@ -183,6 +183,10 @@ resume after context compaction.
     broker, applies batches to a follower broker, advances message/event
     offsets, and stops when both streams return empty at the owner's current
     tail.
+    Protocol v1 now has replication read request/response frame definitions for
+    this pull shape. The frames carry raw message headers/payloads and raw event
+    bytes so the wire contract stays log-shaped instead of Stroma-shaped.
+    Handler wiring, authentication, and background scheduling are still pending.
 11. Later: replace static ownership with coordinator-backed ownership, likely
     based on an etcd-style lease/watch model.
 12. Later: admin and metrics visibility for queue role, local offsets,
@@ -208,6 +212,8 @@ resume after context compaction.
    follower-apply broker boundaries. Add multi-pass coverage with small read
    limits. Full checkpoint-install testing remains pending until the snapshot
    handoff path exists.
+10. Done: add protocol v1 replication read frame definitions and codec
+    tests. Keep this as wire shape only before adding handler behavior.
 
 ## Pending Decisions
 
