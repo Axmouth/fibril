@@ -56,8 +56,9 @@ mod tests {
     use super::*;
     use crate::v1::{
         Hello, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
-        ReconcileSubscription, ReconcileSubscriptionResult, ReplicationCheckpointRequired,
-        ReplicationEventRead, ReplicationEventRecord, ReplicationMessageRead,
+        ReconcileSubscription, ReconcileSubscriptionResult, ReplicationApply, ReplicationApplyOk,
+        ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
+        ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
         ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
     };
 
@@ -158,11 +159,13 @@ mod tests {
                 records: vec![
                     ReplicationMessageRecord {
                         offset: 10,
+                        flags: 0,
                         headers: b"headers-a".to_vec(),
                         payload: b"payload-a".to_vec(),
                     },
                     ReplicationMessageRecord {
                         offset: 11,
+                        flags: 0,
                         headers: b"headers-b".to_vec(),
                         payload: b"payload-b".to_vec(),
                     },
@@ -200,5 +203,46 @@ mod tests {
         let frame = try_encode(Op::ReplicationReadOk, 15, &msg).unwrap();
         assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
         assert_eq!(try_decode::<ReplicationReadOk>(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn replication_apply_roundtrips() {
+        let msg = ReplicationApply {
+            topic: "orders".into(),
+            group: Some("workers".into()),
+            partition: 3,
+            messages: Some(ReplicationMessageApplyBatch {
+                epoch: 4,
+                records: vec![ReplicationMessageRecord {
+                    offset: 10,
+                    flags: 0,
+                    headers: b"headers".to_vec(),
+                    payload: b"payload".to_vec(),
+                }],
+            }),
+            events: Some(ReplicationEventApplyBatch {
+                epoch: 4,
+                records: vec![ReplicationEventRecord {
+                    offset: 20,
+                    payload: b"event".to_vec(),
+                }],
+            }),
+        };
+
+        let frame = try_encode(Op::ReplicationApply, 16, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationApply as u16);
+        assert_eq!(try_decode::<ReplicationApply>(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn replication_apply_ok_roundtrips_applied() {
+        let msg = ReplicationApplyOk {
+            messages_applied: true,
+            events_applied: true,
+        };
+
+        let frame = try_encode(Op::ReplicationApplyOk, 18, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationApplyOk as u16);
+        assert_eq!(try_decode::<ReplicationApplyOk>(&frame).unwrap(), msg);
     }
 }

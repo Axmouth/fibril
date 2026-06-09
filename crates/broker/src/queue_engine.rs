@@ -13,9 +13,10 @@ pub use stroma_core::{
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KeratinAppendCompletion,
     KeratinConfig, Message, MessageContentType, MessageHeaders, MessageInspectionPage,
-    MessageInspectionStatus, OwnerReplicationRead, QueueInspectionState, QueuePromotionOutcome,
-    ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SnapshotConfig,
-    Stroma, StromaError, StromaEvent, StromaKeratinConfig,
+    MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead, QueueInspectionState,
+    QueuePromotionOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
+    ReplicatedQueueApplyOutcome, SnapshotConfig, Stroma, StromaError, StromaEvent,
+    StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 

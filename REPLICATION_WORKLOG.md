@@ -221,9 +221,60 @@ resume after context compaction.
 12. Done: add handler coverage for owner success and not-owner rejection.
     Malformed requests use the existing decode-to-400 path, and there is no
     extra validation yet beyond ordinary frame decoding.
-13. Next: add protocol/admin support for follower apply or a higher-level
-    catch-up command after read behavior is tested. Avoid adding background
-    scheduling until manual pull/apply mechanics are observable and boring.
+13. Done: add protocol follower-apply frames and handler support. Apply
+    requests should carry contiguous raw message/event records plus an epoch.
+    The handler converts them back into the broker's owner-read shape before
+    calling follower apply. Non-contiguous records are malformed and should be
+    rejected before offsets are stripped. Plain apply returns a small success
+    summary only. Checkpoint negotiation remains a read/catch-up concern, not
+    a raw apply response.
+14. Next: add protocol/admin support for a higher-level catch-up command after
+    read/apply behavior is tested. Avoid adding background scheduling until
+    manual pull/apply mechanics are observable and boring.
+
+### Protocol Apply Implementation Notes
+
+The first protocol follower-apply pass adds:
+
+- `crates/protocol/src/v1/mod.rs`
+  - added `ReplicationApply = 82` and `ReplicationApplyOk = 83`
+  - added apply request/response wire structs
+  - `ReplicationMessageRecord` now includes `flags: u16` so replication
+    preserves Keratin message records rather than only payload/header bytes
+- `crates/protocol/src/v1/helper.rs`
+  - added codec roundtrip tests for `ReplicationApply` and `ReplicationApplyOk`
+- `crates/broker/src/queue_engine.rs`
+  - re-exported `OwnerReplicationBatch` so the protocol handler can convert
+    through the broker boundary instead of importing Stroma directly
+- `crates/protocol/src/v1/handler.rs`
+  - added conversion helpers from raw apply batches into
+    `BrokerOwnerReplicationRecords`
+  - validates contiguous message/event offsets before stripping offsets for the
+    broker follower-apply helper
+  - decodes raw event bytes back into `StromaEvent`
+  - maps successful follower apply into a small `ReplicationApplyOk` summary
+  - logs and returns an error if plain apply somehow reaches the broker's
+    checkpoint-required branch, because that should be handled before apply
+  - added a `ReplicationApply` handler arm
+- `crates/protocol/tests/handler_tests.rs`
+  - added tests for successful follower apply and non-contiguous malformed
+    apply records
+  - success test promotes the follower afterward to verify the applied
+    message/event logs and state are coherent
+
+Current verification:
+
+- `cargo fmt --all`
+- `cargo test --quiet -p fibril-protocol replication_apply --locked`
+- `cargo test --quiet -p fibril-protocol replication --locked`
+- `cargo check -p fibril-protocol --locked`
+- `git diff --check`
+
+- empty apply batches currently become empty `OwnerReplicationRead::Batch`
+  values with epoch/offset zero. That is acceptable for this first handler pass
+  because the broker treats empty batches as no-op, but revisit if epoch
+  accounting needs to distinguish "empty stream at known tail" from "not
+  provided"
 
 ## Pending Decisions
 

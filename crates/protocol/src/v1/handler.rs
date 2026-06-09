@@ -17,12 +17,13 @@ use anyhow::Context;
 use arc_swap::ArcSwap;
 use fibril_broker::{
     broker::{
-        Broker, BrokerError, BrokerOwnerReplicationRecords, ConsumerConfig, ConsumerHandle,
-        ConsumerLease, PublisherHandle, SettleRequest, SettleType,
+        Broker, BrokerError, BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords,
+        ConsumerConfig, ConsumerHandle, ConsumerLease, PublisherHandle, SettleRequest, SettleType,
     },
     queue_engine::{
         DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, Message, MessageContentType,
-        OwnerReplicationRead, QueueEngine, StromaEngine, StromaError, StromaEvent,
+        OwnerReplicationBatch, OwnerReplicationRead, QueueEngine, StromaEngine, StromaError,
+        StromaEvent,
     },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
@@ -165,6 +166,7 @@ fn to_replication_message_read(read: OwnerReplicationRead<Message>) -> Replicati
                 .into_iter()
                 .map(|(offset, message)| ReplicationMessageRecord {
                     offset,
+                    flags: message.flags,
                     headers: message.headers,
                     payload: message.payload,
                 })
@@ -222,6 +224,112 @@ fn to_replication_read_ok(
         messages: to_replication_message_read(records.messages),
         events: to_replication_event_read(records.events)?,
     })
+}
+
+fn ensure_contiguous_offsets<I>(offsets: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = u64>,
+{
+    let mut iter = offsets.into_iter();
+    let Some(first) = iter.next() else {
+        return Ok(());
+    };
+    let mut expected = first + 1;
+    for offset in iter {
+        if offset != expected {
+            return Err(format!(
+                "replication apply records must be contiguous; expected offset {expected}, got {offset}"
+            ));
+        }
+        expected += 1;
+    }
+    Ok(())
+}
+
+fn to_owner_message_read(
+    batch: Option<ReplicationMessageApplyBatch>,
+) -> Result<OwnerReplicationRead<Message>, String> {
+    let Some(batch) = batch else {
+        return Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+            epoch: 0,
+            requested_offset: 0,
+            next_offset: 0,
+            records: Vec::new(),
+        }));
+    };
+
+    ensure_contiguous_offsets(batch.records.iter().map(|record| record.offset))?;
+    let requested_offset = batch.records.first().map_or(0, |record| record.offset);
+    let next_offset = batch.records.last().map_or(0, |record| record.offset + 1);
+    let records = batch
+        .records
+        .into_iter()
+        .map(|record| {
+            (
+                record.offset,
+                Message {
+                    flags: record.flags,
+                    headers: record.headers,
+                    payload: record.payload,
+                },
+            )
+        })
+        .collect();
+
+    Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+        epoch: batch.epoch,
+        requested_offset,
+        next_offset,
+        records,
+    }))
+}
+
+fn to_owner_event_read(
+    batch: Option<ReplicationEventApplyBatch>,
+) -> Result<OwnerReplicationRead<StromaEvent>, String> {
+    let Some(batch) = batch else {
+        return Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+            epoch: 0,
+            requested_offset: 0,
+            next_offset: 0,
+            records: Vec::new(),
+        }));
+    };
+
+    ensure_contiguous_offsets(batch.records.iter().map(|record| record.offset))?;
+    let requested_offset = batch.records.first().map_or(0, |record| record.offset);
+    let next_offset = batch.records.last().map_or(0, |record| record.offset + 1);
+    let records = batch
+        .records
+        .into_iter()
+        .map(|record| {
+            let event = StromaEvent::decode(&record.payload).map_err(|err| err.to_string())?;
+            Ok((record.offset, event))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+        epoch: batch.epoch,
+        requested_offset,
+        next_offset,
+        records,
+    }))
+}
+
+fn to_owner_replication_records(
+    apply: ReplicationApply,
+) -> Result<BrokerOwnerReplicationRecords, String> {
+    Ok(BrokerOwnerReplicationRecords {
+        messages: to_owner_message_read(apply.messages)?,
+        events: to_owner_event_read(apply.events)?,
+    })
+}
+
+fn to_replication_apply_ok(messages_applied: bool, events_applied: bool) -> ReplicationApplyOk {
+    ReplicationApplyOk {
+        messages_applied,
+        events_applied,
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1523,6 +1631,80 @@ pub async fn handle_connection(
                                 &response,
                             )?)
                             .await?;
+                    }
+                    Err(err) => {
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            // -------- REPLICATION APPLY -------------------------------------
+            x if x == Op::ReplicationApply as u16 => {
+                let apply: ReplicationApply =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, ReplicationApply);
+                let topic = apply.topic.clone();
+                let group = apply.group.clone();
+                let partition = apply.partition;
+                let records = match to_owner_replication_records(apply) {
+                    Ok(records) => records,
+                    Err(message) => {
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            400,
+                            message,
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
+                match broker
+                    .apply_follower_replication_records(
+                        &topic,
+                        partition,
+                        group.as_deref(),
+                        records,
+                    )
+                    .await
+                {
+                    Ok(BrokerFollowerReplicationApply::Applied(outcome)) => {
+                        let response = to_replication_apply_ok(
+                            outcome.message_log.is_some(),
+                            outcome.event_log.is_some(),
+                        );
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::ReplicationApplyOk,
+                                frame.request_id,
+                                &response,
+                            )?)
+                            .await?;
+                    }
+                    Ok(BrokerFollowerReplicationApply::CheckpointRequired { .. }) => {
+                        tracing::error!(
+                            topic,
+                            partition,
+                            group,
+                            "plain replication apply unexpectedly required a checkpoint"
+                        );
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            500,
+                            "replication apply unexpectedly required checkpoint",
+                        )
+                        .await;
                     }
                     Err(err) => {
                         let (code, message) = broker_error_response(&err);

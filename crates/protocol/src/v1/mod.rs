@@ -62,6 +62,8 @@ pub enum Op {
 
     ReplicationRead = 80,
     ReplicationReadOk = 81,
+    ReplicationApply = 82,
+    ReplicationApplyOk = 83,
 
     Error = 255,
 }
@@ -283,6 +285,7 @@ pub struct ReplicationRead {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplicationMessageRecord {
     pub offset: u64,
+    pub flags: u16,
     pub headers: Vec<u8>,
     pub payload: Vec<u8>,
 }
@@ -329,6 +332,33 @@ pub enum ReplicationEventRead {
 pub struct ReplicationReadOk {
     pub messages: ReplicationMessageRead,
     pub events: ReplicationEventRead,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationMessageApplyBatch {
+    pub epoch: u64,
+    pub records: Vec<ReplicationMessageRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationEventApplyBatch {
+    pub epoch: u64,
+    pub records: Vec<ReplicationEventRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationApply {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: u32,
+    pub messages: Option<ReplicationMessageApplyBatch>,
+    pub events: Option<ReplicationEventApplyBatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationApplyOk {
+    pub messages_applied: bool,
+    pub events_applied: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,13 +8,15 @@ use std::{
 use bytes::Bytes;
 use fibril_broker::{
     broker::{Broker, BrokerConfig, QueueEvictionAttempt, StaticQueueOwnership},
-    queue_engine::{EvictOutcome, GlobalDLQ, QueueEngine, StromaEngine},
+    queue_engine::{EvictOutcome, GlobalDLQ, QueueEngine, QueuePromotionOutcome, StromaEngine},
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
     Publish, PublishDelayed, QueueDlqPolicy, ReconcileAction, ReconcileClient, ReconcilePolicy,
-    ReconcileResult, ReconcileSubscription, ReplicationEventRead, ReplicationMessageRead,
+    ReconcileResult, ReconcileSubscription, ReplicationApply, ReplicationApplyOk,
+    ReplicationEventApplyBatch, ReplicationEventRead, ReplicationEventRecord,
+    ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationMessageRecord,
     ReplicationRead, ReplicationReadOk, ResumeIdentity, ResumeOutcome, Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
@@ -22,7 +24,7 @@ use fibril_protocol::v1::{
 };
 use fibril_util::{StaticAuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
-use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir};
+use stroma_core::{KeratinConfig, SnapshotConfig, StromaEvent, StromaKeratinConfig, TempDir};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::Framed;
 use uuid::Uuid;
@@ -855,6 +857,7 @@ async fn replication_read_returns_owner_log_records() {
         ReplicationMessageRead::Batch { records, .. } => {
             assert_eq!(records.len(), 1);
             assert_eq!(records[0].offset, 0);
+            assert_eq!(records[0].flags, 0);
             assert_eq!(records[0].payload, b"replicated-payload".to_vec());
         }
         ReplicationMessageRead::CheckpointRequired(required) => {
@@ -906,6 +909,128 @@ async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_o
         .unwrap();
 
     assert_error_frame(&mut framed, 2, 409).await;
+    assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn replication_apply_writes_follower_log_records() {
+    let (broker, dir) = open_test_broker().await;
+    broker
+        .become_replication_follower("replication.apply.tcp", 0, None)
+        .await
+        .unwrap();
+    let (mut framed, server_task, _dir, broker) =
+        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    handshake(&mut framed).await;
+
+    let event_payload = StromaEvent::Enqueue { off: 0, retries: 0 }
+        .encode()
+        .unwrap();
+    framed
+        .send(
+            try_encode(
+                Op::ReplicationApply,
+                2,
+                &ReplicationApply {
+                    topic: "replication.apply.tcp".into(),
+                    group: None,
+                    partition: 0,
+                    messages: Some(ReplicationMessageApplyBatch {
+                        epoch: 0,
+                        records: vec![ReplicationMessageRecord {
+                            offset: 0,
+                            flags: 0,
+                            headers: Vec::new(),
+                            payload: b"replicated-follower-payload".to_vec(),
+                        }],
+                    }),
+                    events: Some(ReplicationEventApplyBatch {
+                        epoch: 0,
+                        records: vec![ReplicationEventRecord {
+                            offset: 0,
+                            payload: event_payload,
+                        }],
+                    }),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::ReplicationApplyOk as u16);
+    assert_eq!(frame.request_id, 2);
+    let response: ReplicationApplyOk = try_decode(&frame).unwrap();
+    assert!(response.messages_applied);
+    assert!(response.events_applied);
+
+    let promoted = broker
+        .promote_replication_follower_if_caught_up("replication.apply.tcp", 0, None, 1, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        promoted,
+        QueuePromotionOutcome::Promoted {
+            message_next_offset: 1,
+            event_next_offset: 1,
+            applied_event_offset: Some(0),
+        }
+    );
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn replication_apply_rejects_non_contiguous_records_and_keeps_connection_open() {
+    let (broker, dir) = open_test_broker().await;
+    broker
+        .become_replication_follower("replication.apply.bad", 0, None)
+        .await
+        .unwrap();
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::ReplicationApply,
+                2,
+                &ReplicationApply {
+                    topic: "replication.apply.bad".into(),
+                    group: None,
+                    partition: 0,
+                    messages: Some(ReplicationMessageApplyBatch {
+                        epoch: 0,
+                        records: vec![
+                            ReplicationMessageRecord {
+                                offset: 0,
+                                flags: 0,
+                                headers: Vec::new(),
+                                payload: b"first".to_vec(),
+                            },
+                            ReplicationMessageRecord {
+                                offset: 2,
+                                flags: 0,
+                                headers: Vec::new(),
+                                payload: b"gap".to_vec(),
+                            },
+                        ],
+                    }),
+                    events: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_error_frame(&mut framed, 2, 400).await;
     assert_connection_still_responds(&mut framed).await;
 
     drop(framed);
