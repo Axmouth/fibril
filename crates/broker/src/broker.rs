@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::coordination::{
     Coordination, CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentTransition,
-    StaticCoordination, plan_local_assignment_transitions,
+    PartitionAssignment, StaticCoordination, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
     EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome,
@@ -434,6 +434,13 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>>;
 }
 
+pub trait BrokerOwnerReplicationPeerResolver: Send + Sync {
+    fn resolve_owner_peer<'a>(
+        &'a self,
+        assignment: &'a PartitionAssignment,
+    ) -> BoxFuture<'a, Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BrokerReplicationCheckpointRequired {
     pub epoch: u64,
@@ -492,6 +499,12 @@ pub enum BrokerReplicationCatchUp {
     IterationLimit {
         progress: BrokerReplicationCatchUpProgress,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowerReplicationWorkerLoopExit {
+    Cancelled { ticks: usize },
+    WorkerStopped { ticks: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3178,6 +3191,81 @@ impl Broker<StromaEngine> {
         worker.lock().await.record_catch_up(cfg, &outcome);
         Ok(outcome)
     }
+
+    pub async fn run_follower_replication_worker_loop(
+        &self,
+        assignment: PartitionAssignment,
+        resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
+        cfg: FollowerReplicationWorkerConfig,
+        shutdown: CancellationToken,
+    ) -> Result<FollowerReplicationWorkerLoopExit, BrokerError> {
+        let mut ticks = 0;
+        loop {
+            if shutdown.is_cancelled() {
+                return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
+            }
+
+            if !self
+                .follower_replication_workers
+                .contains_key(&assignment.queue)
+            {
+                return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+            }
+
+            let Some(owner) = resolver.resolve_owner_peer(&assignment).await? else {
+                tracing::warn!(
+                    topic = %assignment.queue.topic,
+                    partition = assignment.queue.partition,
+                    group = ?assignment.queue.group,
+                    owner = %assignment.owner,
+                    "follower replication worker could not resolve owner peer"
+                );
+                wait_for_follower_worker_delay(cfg.retry_poll_ms, &shutdown).await;
+                continue;
+            };
+
+            match self
+                .run_follower_replication_worker_once(owner.as_ref(), &assignment.queue, cfg)
+                .await
+            {
+                Ok(_) => {
+                    ticks += 1;
+                }
+                Err(BrokerError::InvalidArgument(_))
+                    if !self
+                        .follower_replication_workers
+                        .contains_key(&assignment.queue) =>
+                {
+                    return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        topic = %assignment.queue.topic,
+                        partition = assignment.queue.partition,
+                        group = ?assignment.queue.group,
+                        owner = %assignment.owner,
+                        "follower replication worker tick failed: {err:?}"
+                    );
+                    wait_for_follower_worker_delay(cfg.retry_poll_ms, &shutdown).await;
+                    continue;
+                }
+            }
+
+            if !self
+                .follower_replication_workers
+                .contains_key(&assignment.queue)
+            {
+                return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+            }
+
+            let delay_ms = self
+                .follower_replication_worker(&assignment.queue)?
+                .lock()
+                .await
+                .next_delay_ms;
+            wait_for_follower_worker_delay(delay_ms, &shutdown).await;
+        }
+    }
 }
 
 impl BrokerOwnerReplicationPeer for Broker<StromaEngine> {
@@ -3252,6 +3340,13 @@ where
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         self.as_ref()
             .export_owner_state_checkpoint(topic, partition, group)
+    }
+}
+
+async fn wait_for_follower_worker_delay(delay_ms: u64, shutdown: &CancellationToken) {
+    tokio::select! {
+        _ = shutdown.cancelled() => {}
+        _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
     }
 }
 

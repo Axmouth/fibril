@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet as StdHashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -9,12 +12,13 @@ use fibril_broker::{
     CompletionPair,
     broker::{
         Broker, BrokerAssignmentTransitionApply, BrokerConfig, BrokerError,
-        BrokerFollowerReplicationApply, BrokerOwnerReplicationPeer, BrokerOwnerReplicationRecords,
+        BrokerFollowerReplicationApply, BrokerOwnerReplicationPeer,
+        BrokerOwnerReplicationPeerResolver, BrokerOwnerReplicationRecords,
         BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
         BrokerReplicationCatchUpProgress, BrokerReplicationCheckpointRequired, ConsumerConfig,
-        FollowerReplicationWorkerConfig, FollowerReplicationWorkerState,
-        FollowerReplicationWorkerStatus, OwnedQueue, QueueEvictionAttempt, QueueEvictionSkip,
-        SettleRequest, SettleType, StaticQueueOwnership,
+        FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
+        FollowerReplicationWorkerState, FollowerReplicationWorkerStatus, OwnedQueue,
+        QueueEvictionAttempt, QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
     },
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
@@ -42,6 +46,7 @@ use stroma_core::{
     StromaMetrics, TempDir, test_dir,
 };
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -1953,6 +1958,91 @@ impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
     }
 }
 
+struct StaticOwnerPeerResolver {
+    peer: Arc<dyn BrokerOwnerReplicationPeer>,
+}
+
+impl StaticOwnerPeerResolver {
+    fn new(peer: Arc<dyn BrokerOwnerReplicationPeer>) -> Self {
+        Self { peer }
+    }
+}
+
+impl BrokerOwnerReplicationPeerResolver for StaticOwnerPeerResolver {
+    fn resolve_owner_peer<'a>(
+        &'a self,
+        _assignment: &'a PartitionAssignment,
+    ) -> BoxFuture<'a, Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>> {
+        Box::pin(async move { Ok(Some(self.peer.clone())) })
+    }
+}
+
+#[derive(Debug)]
+struct CountingEmptyOwnerPeer {
+    reads: AtomicUsize,
+    read_notify: Notify,
+}
+
+impl CountingEmptyOwnerPeer {
+    fn new() -> Self {
+        Self {
+            reads: AtomicUsize::new(0),
+            read_notify: Notify::new(),
+        }
+    }
+
+    async fn wait_for_read(&self) {
+        while self.reads.load(Ordering::Acquire) == 0 {
+            self.read_notify.notified().await;
+        }
+    }
+}
+
+impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
+    fn read_owner_replication_records<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: fibril_storage::LogId,
+        _group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        _max_messages: usize,
+        _max_events: usize,
+    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        self.reads.fetch_add(1, Ordering::AcqRel);
+        self.read_notify.notify_waiters();
+        Box::pin(async move {
+            Ok(BrokerOwnerReplicationRecords {
+                messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
+                    epoch: 0,
+                    requested_offset: message_from,
+                    next_offset: message_from,
+                    records: Vec::new(),
+                }),
+                events: OwnerReplicationRead::Batch(OwnerReplicationBatch {
+                    epoch: 0,
+                    requested_offset: event_from,
+                    next_offset: event_from,
+                    records: Vec::new(),
+                }),
+            })
+        })
+    }
+
+    fn export_owner_state_checkpoint<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: fibril_storage::LogId,
+        _group: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+        Box::pin(async {
+            Err(BrokerError::Unknown(
+                "counting owner peer does not export checkpoints".into(),
+            ))
+        })
+    }
+}
+
 #[tokio::test]
 async fn follower_worker_tick_uses_owner_peer_abstraction() {
     let (follower, _follower_dir) = open_test_broker().await;
@@ -1990,6 +2080,74 @@ async fn follower_worker_tick_uses_owner_peer_abstraction() {
             .await
             .map(|state| state.status),
         Some(FollowerReplicationWorkerStatus::CaughtUp)
+    );
+
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn follower_worker_loop_ticks_until_cancelled() {
+    let (follower, _follower_dir) = open_test_broker().await;
+    let queue = QueueIdentity::new("peer-loop", 0, Some("workers"));
+    let assignment =
+        PartitionAssignment::new(queue.clone(), "node-a", vec!["node-b".to_string()], 1);
+    let transition = assignment_transition(
+        "peer-loop",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    follower
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    let peer = Arc::new(CountingEmptyOwnerPeer::new());
+    let resolver = Arc::new(StaticOwnerPeerResolver::new(peer.clone()));
+    let shutdown = CancellationToken::new();
+    let cfg = FollowerReplicationWorkerConfig {
+        caught_up_poll_ms: 60_000,
+        ..Default::default()
+    };
+
+    let canceller = async {
+        peer.wait_for_read().await;
+        shutdown.cancel();
+    };
+    let loop_result =
+        follower.run_follower_replication_worker_loop(assignment, resolver, cfg, shutdown.clone());
+    let (_, outcome) = tokio::join!(canceller, loop_result);
+
+    assert_eq!(
+        outcome.unwrap(),
+        FollowerReplicationWorkerLoopExit::Cancelled { ticks: 1 }
+    );
+    assert_eq!(peer.reads.load(Ordering::Acquire), 1);
+
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn follower_worker_loop_exits_when_worker_is_stopped() {
+    let (follower, _follower_dir) = open_test_broker().await;
+    let queue = QueueIdentity::new("peer-loop-stopped", 0, Some("workers"));
+    let assignment = PartitionAssignment::new(queue, "node-a", vec!["node-b".to_string()], 1);
+    let resolver = Arc::new(StaticOwnerPeerResolver::new(Arc::new(EmptyOwnerPeer)));
+    let shutdown = CancellationToken::new();
+
+    let outcome = follower
+        .run_follower_replication_worker_loop(
+            assignment,
+            resolver,
+            FollowerReplicationWorkerConfig::default(),
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        FollowerReplicationWorkerLoopExit::WorkerStopped { ticks: 0 }
     );
 
     follower.shutdown().await;

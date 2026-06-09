@@ -279,6 +279,9 @@ resume after context compaction.
     scheduling is still pending. The follower worker now depends on a small
     owner-peer trait rather than a concrete owner broker, so the same worker
     tick can use an in-process broker today and a protocol-backed peer later.
+    A first loop scaffold now resolves the owner peer, runs bounded catch-up
+    ticks, waits according to worker policy, and exits when cancelled or when
+    the local follower worker is no longer assigned.
 11. Done: replace ad hoc assignment computation with a pluggable
     partition placement policy. The default policy is deterministic and keeps
     stable assignments where possible, so later controller tests can focus on
@@ -373,12 +376,14 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    worker now consumes a `BrokerOwnerReplicationPeer` abstraction that exposes
    owner record reads and owner checkpoint export. `Broker<StromaEngine>` and
    `Arc<Broker<StromaEngine>>` implement this for current in-process tests.
-   Once a real owner transport exists, the permanent background loop should use
-   the same trait and choose between normal bounded catch-up and
-   checkpoint-aware catch-up based on the worker policy.
+   The loop scaffold resolves an owner peer through a separate resolver trait,
+   runs one bounded catch-up tick at a time, and waits through a
+   cancellation-aware delay. A real owner transport can implement the same peer
+   boundary later, and a real coordinator watch cache can implement the resolver
+   later. Checkpoint-aware worker catch-up remains policy-gated and is not
+   automatically used by the loop yet.
 28. Priority order from here:
-   - follower worker tick and background loop around the existing catch-up
-     helpers
+   - spawn and supervise follower worker loops from assignment application
    - checkpoint export/install over the replication transport
    - coordinator-backed assignments using the existing snapshot/watch shape
    - publish-confirm quorum enforcement from follower progress
@@ -478,6 +483,19 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    test verifies that the worker tick updates state through this boundary. The
    permanent background loop is still pending because it needs owner discovery,
    connection management, and retry behavior around the same trait.
+41. Done for the first follower-loop scaffold: broker code can now run a
+   follower replication loop around the existing run-once worker. The loop is
+   cancellation-aware, records ticks only after a completed catch-up attempt,
+   retries after unresolved owners or tick errors, and exits as `WorkerStopped`
+   when the local follower assignment has been removed. Normal role transitions
+   should prefer this graceful path: stop routing or assigning new work first,
+   let the current follower tick finish, then remove the worker and change local
+   role. Hard cancellation exists for process shutdown or broken workers, not as
+   the preferred ownership-transition mechanism. Remaining detail work:
+   actually spawn and supervise these loops from the assignment watcher, define
+   the resolver backed by coordination snapshots and protocol clients, and
+   prevent StopFollower from racing a mid-batch follower ingest once loops are
+   fully supervised.
 
 Previous completed implementation checkpoints:
 
