@@ -179,7 +179,10 @@ resume after context compaction.
     Stroma replicated ingest batches, refuse to partially apply when a
     checkpoint is required, and leave snapshot installation for a later
     checkpoint path. Real TCP/admin transport and follower scheduling are still
-    pending.
+    pending. A bounded local catch-up helper now repeatedly reads from an owner
+    broker, applies batches to a follower broker, advances message/event
+    offsets, and stops when both streams return empty at the owner's current
+    tail.
 11. Later: replace static ownership with coordinator-backed ownership, likely
     based on an etcd-style lease/watch model.
 12. Later: admin and metrics visibility for queue role, local offsets,
@@ -201,6 +204,10 @@ resume after context compaction.
    test from owner broker to follower broker.
 8. Next: use the same boundaries from a repeated pull loop that can stop when
    both streams return empty batches at the owner's current tail.
+9. Done: add a bounded local catch-up helper using owner-read and
+   follower-apply broker boundaries. Add multi-pass coverage with small read
+   limits. Full checkpoint-install testing remains pending until the snapshot
+   handoff path exists.
 
 ## Pending Decisions
 
@@ -233,6 +240,11 @@ resume after context compaction.
 - What the migration path is from external coordination to Fibril-owned metadata
   without forcing a data-path rewrite.
 - Not-owner error shape and topology refresh story for clients.
+- Split `stroma.rs` into responsibility-focused modules once the current
+  replication mechanics are stable enough. It currently holds queue lifecycle,
+  replication, snapshots, inspection, global settings, tests, and helper code.
+  Doing this after the mechanics settle should keep the refactor mechanical and
+  reviewable.
 
 ## Proposed First Milestones
 

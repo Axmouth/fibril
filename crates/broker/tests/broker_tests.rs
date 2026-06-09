@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use fibril_broker::{
     CompletionPair,
     broker::{
-        Broker, BrokerConfig, BrokerError, BrokerFollowerReplicationApply, ConsumerConfig,
-        OwnedQueue, QueueEvictionAttempt, QueueEvictionSkip, SettleRequest, SettleType,
-        StaticQueueOwnership,
+        Broker, BrokerConfig, BrokerError, BrokerFollowerReplicationApply,
+        BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
+        BrokerReplicationCatchUpProgress, ConsumerConfig, OwnedQueue, QueueEvictionAttempt,
+        QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
     },
     queue_engine::{
         Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, MessageHeaders,
@@ -556,6 +557,107 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
         .expect("second replicated message should deliver after promotion");
     assert_eq!(first.message.payload, b"first");
     assert_eq!(second.message.payload, b"second");
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn broker_replication_catch_up_loop_handles_multiple_passes() {
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+
+    follower
+        .become_replication_follower("multi-pass", 0, None)
+        .await
+        .unwrap();
+
+    let (publisher, _confirms) = owner.get_publisher("multi-pass", &None).await.unwrap();
+    for payload in [
+        b"one".to_vec(),
+        b"two".to_vec(),
+        b"three".to_vec(),
+        b"four".to_vec(),
+        b"five".to_vec(),
+    ] {
+        let reply = publisher
+            .publish(
+                payload,
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+
+    let outcome = follower
+        .catch_up_replication_follower_from_owner(
+            &owner,
+            "multi-pass",
+            0,
+            None,
+            BrokerReplicationCatchUpOptions {
+                max_messages_per_read: 2,
+                max_events_per_read: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
+            iterations: 4,
+            applied_message_records: 5,
+            applied_event_records: 5,
+            message_next_offset: 5,
+            event_next_offset: 5,
+        })
+    );
+
+    let promotion = follower
+        .promote_replication_follower_if_caught_up("multi-pass", 0, None, 5, 5)
+        .await
+        .unwrap();
+    assert!(matches!(
+        promotion,
+        QueuePromotionOutcome::Promoted {
+            message_next_offset: 5,
+            event_next_offset: 5,
+            applied_event_offset: Some(4),
+        }
+    ));
+
+    let mut sub = follower
+        .subscribe(
+            "multi-pass",
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 5 },
+        )
+        .await
+        .unwrap();
+    let mut payloads = Vec::new();
+    for _ in 0..5 {
+        let msg = recv_with_timeout(&mut sub, 1000)
+            .await
+            .expect("replicated message should deliver after promotion");
+        payloads.push(msg.message.payload);
+    }
+    assert_eq!(
+        payloads,
+        vec![
+            b"one".to_vec(),
+            b"two".to_vec(),
+            b"three".to_vec(),
+            b"four".to_vec(),
+            b"five".to_vec(),
+        ]
+    );
 
     owner.shutdown().await;
     follower.shutdown().await;

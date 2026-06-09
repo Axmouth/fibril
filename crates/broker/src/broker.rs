@@ -48,6 +48,9 @@ pub enum BrokerError {
         group: Option<Group>,
     },
 
+    #[error("invalid argument: {0}")]
+    InvalidArgument(String),
+
     #[error("unknown: {0}")]
     Unknown(String),
 }
@@ -413,6 +416,49 @@ pub enum BrokerFollowerReplicationApply {
     CheckpointRequired {
         messages: Option<BrokerReplicationCheckpointRequired>,
         events: Option<BrokerReplicationCheckpointRequired>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrokerReplicationCatchUpOptions {
+    pub message_from: Offset,
+    pub event_from: Offset,
+    pub max_messages_per_read: usize,
+    pub max_events_per_read: usize,
+    pub max_iterations: usize,
+}
+
+impl Default for BrokerReplicationCatchUpOptions {
+    fn default() -> Self {
+        Self {
+            message_from: 0,
+            event_from: 0,
+            max_messages_per_read: 256,
+            max_events_per_read: 256,
+            max_iterations: 1024,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BrokerReplicationCatchUpProgress {
+    pub iterations: usize,
+    pub applied_message_records: usize,
+    pub applied_event_records: usize,
+    pub message_next_offset: Offset,
+    pub event_next_offset: Offset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerReplicationCatchUp {
+    CaughtUp(BrokerReplicationCatchUpProgress),
+    CheckpointRequired {
+        progress: BrokerReplicationCatchUpProgress,
+        messages: Option<BrokerReplicationCheckpointRequired>,
+        events: Option<BrokerReplicationCheckpointRequired>,
+    },
+    IterationLimit {
+        progress: BrokerReplicationCatchUpProgress,
     },
 }
 
@@ -2352,6 +2398,111 @@ impl Broker<StromaEngine> {
             .await
             .map_err(BrokerError::from)
     }
+
+    pub async fn catch_up_replication_follower_from_owner(
+        &self,
+        owner: &Broker<StromaEngine>,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+        options: BrokerReplicationCatchUpOptions,
+    ) -> Result<BrokerReplicationCatchUp, BrokerError> {
+        if options.max_messages_per_read == 0
+            || options.max_events_per_read == 0
+            || options.max_iterations == 0
+        {
+            return Err(BrokerError::InvalidArgument(
+                "replication catch-up limits must be greater than zero".into(),
+            ));
+        }
+
+        let mut progress = BrokerReplicationCatchUpProgress {
+            message_next_offset: options.message_from,
+            event_next_offset: options.event_from,
+            ..Default::default()
+        };
+
+        for _ in 0..options.max_iterations {
+            let records = owner
+                .read_owner_replication_records(
+                    topic,
+                    partition,
+                    group,
+                    progress.message_next_offset,
+                    progress.event_next_offset,
+                    options.max_messages_per_read,
+                    options.max_events_per_read,
+                )
+                .await?;
+
+            let message_progress = owner_read_batch_progress(&records.messages);
+            let event_progress = owner_read_batch_progress(&records.events);
+            let (message_record_count, message_next_offset, event_record_count, event_next_offset) =
+                match (message_progress, event_progress) {
+                    (
+                        Some((message_record_count, message_next_offset)),
+                        Some((event_record_count, event_next_offset)),
+                    ) => (
+                        message_record_count,
+                        message_next_offset,
+                        event_record_count,
+                        event_next_offset,
+                    ),
+                    _ => {
+                        let apply = self
+                            .apply_follower_replication_records(topic, partition, group, records)
+                            .await?;
+                        return match apply {
+                            BrokerFollowerReplicationApply::CheckpointRequired {
+                                messages,
+                                events,
+                            } => Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                                progress,
+                                messages,
+                                events,
+                            }),
+                            BrokerFollowerReplicationApply::Applied(_) => {
+                                tracing::error!(
+                                    topic,
+                                    partition,
+                                    group,
+                                    "replication catch-up applied records even though owner read reported checkpoint required"
+                                );
+                                Err(BrokerError::Unknown(
+                                    "checkpoint-required owner read unexpectedly applied".into(),
+                                ))
+                            }
+                        };
+                    }
+                };
+
+            match self
+                .apply_follower_replication_records(topic, partition, group, records)
+                .await?
+            {
+                BrokerFollowerReplicationApply::Applied(_) => {}
+                BrokerFollowerReplicationApply::CheckpointRequired { messages, events } => {
+                    return Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                        progress,
+                        messages,
+                        events,
+                    });
+                }
+            }
+
+            progress.iterations += 1;
+            progress.applied_message_records += message_record_count;
+            progress.applied_event_records += event_record_count;
+            progress.message_next_offset = message_next_offset;
+            progress.event_next_offset = event_next_offset;
+
+            if message_record_count == 0 && event_record_count == 0 {
+                return Ok(BrokerReplicationCatchUp::CaughtUp(progress));
+            }
+        }
+
+        Ok(BrokerReplicationCatchUp::IterationLimit { progress })
+    }
 }
 
 fn checkpoint_required<T>(
@@ -2370,6 +2521,22 @@ fn checkpoint_required<T>(
             head_offset: *head_offset,
             next_offset: *next_offset,
         }),
+    }
+}
+
+fn owner_read_batch_progress<T>(read: &OwnerReplicationRead<T>) -> Option<(usize, Offset)> {
+    match read {
+        OwnerReplicationRead::Batch(batch) => {
+            // Stroma reports the owner log tail as batch.next_offset. For a
+            // limited read, the next pull must continue after the last returned
+            // record rather than jumping straight to the owner tail.
+            let next_request_offset = batch
+                .records
+                .last()
+                .map_or(batch.next_offset, |(offset, _)| offset + 1);
+            Some((batch.records.len(), next_request_offset))
+        }
+        OwnerReplicationRead::CheckpointRequired { .. } => None,
     }
 }
 
