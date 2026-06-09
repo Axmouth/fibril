@@ -12,7 +12,7 @@ use futures::{SinkExt, StreamExt};
 use tokio::sync::Mutex;
 
 use crate::v1::{
-    ErrorMsg, Op, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
+    ERR_NOT_OWNER, ErrorMsg, Op, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
     ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
     ReplicationEventRead, ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead,
     ReplicationReadOk,
@@ -62,6 +62,26 @@ pub enum ProtocolReplicationCatchUp {
     IterationLimit {
         progress: ProtocolReplicationCatchUpProgress,
     },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolReplicationRequestError {
+    #[error("connection closed while waiting for response")]
+    ConnectionClosed,
+    #[error("failed to read response frame: {0}")]
+    Read(String),
+    #[error("failed to encode heartbeat response: {0}")]
+    HeartbeatEncode(String),
+    #[error("failed to send heartbeat response: {0}")]
+    HeartbeatSend(String),
+    #[error("unexpected response request id {actual}; expected {expected}")]
+    UnexpectedRequestId { actual: u64, expected: u64 },
+    #[error("unexpected response opcode {actual}; expected {expected}")]
+    UnexpectedOpcode { actual: u16, expected: u16 },
+    #[error("replication request failed: {code} {message}")]
+    Protocol { code: u16, message: String },
+    #[error("failed to decode response frame: {0}")]
+    Decode(String),
 }
 
 /// Protocol-backed owner replication peer.
@@ -129,7 +149,9 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let read: ReplicationReadOk =
                 recv_response(&mut conn, request_id, Op::ReplicationReadOk)
                     .await
-                    .map_err(anyhow_to_broker_error)?;
+                    .map_err(|err| {
+                        protocol_request_error_to_broker(err, topic, partition, group)
+                    })?;
             to_broker_owner_replication_records(read)
         })
     }
@@ -163,7 +185,9 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let export: ReplicationCheckpointExportOk =
                 recv_response(&mut conn, request_id, Op::ReplicationCheckpointExportOk)
                     .await
-                    .map_err(anyhow_to_broker_error)?;
+                    .map_err(|err| {
+                        protocol_request_error_to_broker(err, topic, partition, group)
+                    })?;
             Ok(OwnerStateCheckpoint {
                 message_epoch: export.checkpoint.message_epoch,
                 event_epoch: export.checkpoint.event_epoch,
@@ -286,7 +310,11 @@ pub async fn catch_up_replication_over_protocol(
     Ok(ProtocolReplicationCatchUp::IterationLimit { progress })
 }
 
-async fn recv_response<T>(conn: &mut Conn, request_id: u64, expected: Op) -> anyhow::Result<T>
+async fn recv_response<T>(
+    conn: &mut Conn,
+    request_id: u64,
+    expected: Op,
+) -> Result<T, ProtocolReplicationRequestError>
 where
     T: for<'de> serde::Deserialize<'de>,
 {
@@ -294,42 +322,43 @@ where
         let frame = conn
             .next()
             .await
-            .ok_or_else(|| anyhow::anyhow!("connection closed while waiting for response"))?
-            .context("failed to read response frame")?;
+            .ok_or(ProtocolReplicationRequestError::ConnectionClosed)?
+            .map_err(|err| ProtocolReplicationRequestError::Read(err.to_string()))?;
 
         if frame.opcode == Op::Ping as u16 {
-            conn.send(try_encode(Op::Pong, frame.request_id, &())?)
+            let pong = try_encode(Op::Pong, frame.request_id, &())
+                .map_err(|err| ProtocolReplicationRequestError::HeartbeatEncode(err.to_string()))?;
+            conn.send(pong)
                 .await
-                .context("failed to respond to heartbeat ping")?;
+                .map_err(|err| ProtocolReplicationRequestError::HeartbeatSend(err.to_string()))?;
             continue;
         }
 
         if frame.request_id != request_id {
-            bail!(
-                "unexpected response request id {}; expected {}",
-                frame.request_id,
-                request_id
-            );
+            return Err(ProtocolReplicationRequestError::UnexpectedRequestId {
+                actual: frame.request_id,
+                expected: request_id,
+            });
         }
 
         if frame.opcode == Op::Error as u16 {
-            let error: ErrorMsg = try_decode(&frame)?;
-            bail!(
-                "replication request failed: {} {}",
-                error.code,
-                error.message
-            );
+            let error: ErrorMsg = try_decode(&frame)
+                .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))?;
+            return Err(ProtocolReplicationRequestError::Protocol {
+                code: error.code,
+                message: error.message,
+            });
         }
 
         if frame.opcode != expected as u16 {
-            bail!(
-                "unexpected response opcode {}; expected {}",
-                frame.opcode,
-                expected as u16
-            );
+            return Err(ProtocolReplicationRequestError::UnexpectedOpcode {
+                actual: frame.opcode,
+                expected: expected as u16,
+            });
         }
 
-        return try_decode(&frame).map_err(anyhow::Error::from);
+        return try_decode(&frame)
+            .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()));
     }
 }
 
@@ -399,8 +428,22 @@ fn protocol_error(err: impl std::fmt::Display) -> BrokerError {
     BrokerError::Unknown(format!("protocol replication error: {err}"))
 }
 
-fn anyhow_to_broker_error(err: anyhow::Error) -> BrokerError {
-    BrokerError::Unknown(err.to_string())
+fn protocol_request_error_to_broker(
+    err: ProtocolReplicationRequestError,
+    topic: &str,
+    partition: LogId,
+    group: Option<&str>,
+) -> BrokerError {
+    match err {
+        ProtocolReplicationRequestError::Protocol { code, .. } if code == ERR_NOT_OWNER => {
+            BrokerError::NotOwner {
+                topic: topic.into(),
+                partition,
+                group: group.map(str::to_string),
+            }
+        }
+        _ => BrokerError::Unknown(err.to_string()),
+    }
 }
 
 fn to_broker_owner_replication_records(

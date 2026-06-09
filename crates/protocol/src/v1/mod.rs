@@ -450,3 +450,8 @@ pub struct ErrorMsg {
     pub code: u16,
     pub message: String,
 }
+
+pub const ERR_CONFLICT: u16 = 409;
+// Not-owner is a topology or state conflict, not an auth failure. Retrying
+// against the current owner is valid, so 403-style "forbidden" is misleading.
+pub const ERR_NOT_OWNER: u16 = ERR_CONFLICT;

@@ -1206,6 +1206,29 @@ async fn protocol_owner_replication_peer_exports_checkpoint() {
 }
 
 #[tokio::test]
+async fn protocol_owner_replication_peer_maps_not_owner_error() {
+    let (broker, dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::new()))).await;
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    handshake(&mut framed).await;
+
+    let peer = ProtocolOwnerReplicationPeer::new(framed);
+    let err = peer
+        .read_owner_replication_records("unowned", 0, None, 0, 0, 8, 8)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        fibril_broker::broker::BrokerError::NotOwner { .. }
+    ));
+
+    drop(peer);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn replication_checkpoint_export_install_composes_with_catch_up() {
     let topic = "replication.checkpoint.tcp";
     let group = Some("workers".to_string());

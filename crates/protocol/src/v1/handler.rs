@@ -40,10 +40,6 @@ use uuid::Uuid;
 type SubKey = (Topic, Option<Group>); // (topic, group)
 type FrameSink = mpsc::Sender<Frame>;
 const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
-const ERR_CONFLICT: u16 = 409;
-// Not-owner is a topology or state conflict, not an auth failure. Retrying against
-// the current owner is valid, so 403-style "forbidden" would be misleading.
-const ERR_NOT_OWNER: u16 = ERR_CONFLICT;
 
 struct ConnState {
     authenticated: bool,

@@ -1266,3 +1266,9 @@ Tests needed before implementing transition:
   work is resolver wiring, connection/reconnect management, and typed protocol
   error mapping so not-owner and retryable failures are preserved without
   string parsing.
+- 2026-06-09: Added typed replication request errors in the protocol helper and
+  promoted the not-owner status code to a protocol-level constant. The
+  protocol-backed owner peer now maps wire `ERR_NOT_OWNER` responses back into
+  `BrokerError::NotOwner` with the requested queue identity instead of losing
+  the condition as an opaque string. Focused protocol coverage verifies this
+  through the same TCP handler path.
