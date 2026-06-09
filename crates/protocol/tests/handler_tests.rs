@@ -28,10 +28,10 @@ use fibril_protocol::v1::{
     Publish, PublishDelayed, QueueDlqPolicy, ReconcileAction, ReconcileClient, ReconcilePolicy,
     ReconcileResult, ReconcileSubscription, ReplicationApply, ReplicationApplyOk,
     ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
-    ReplicationCheckpointInstallOk, ReplicationEventApplyBatch, ReplicationEventRead,
-    ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
-    ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ResumeIdentity, ResumeOutcome,
-    Subscribe,
+    ReplicationCheckpointInstallOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
+    ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
+    ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
+    ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
@@ -192,6 +192,115 @@ fn follower_assignment_transition(topic: &str, group: Option<&str>) -> LocalAssi
         next: None,
         intent: LocalAssignmentIntent::BecomeFollower,
     }
+}
+
+async fn start_checkpoint_required_owner_server(
+    checkpoint: ReplicationStateCheckpoint,
+    message_records: Vec<ReplicationMessageRecord>,
+) -> (SocketAddr, tokio::task::JoinHandle<anyhow::Result<()>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().await?;
+            let mut conn = Framed::new(stream, ProtoCodec);
+
+            let frame = conn
+                .next()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("client closed before hello"))??;
+            assert_eq!(frame.opcode, Op::Hello as u16);
+            conn.send(try_encode(
+                Op::HelloOk,
+                frame.request_id,
+                &HelloOk {
+                    protocol_version: PROTOCOL_V1,
+                    owner_id: Uuid::now_v7(),
+                    client_id: Uuid::now_v7(),
+                    resume_token: Uuid::now_v7(),
+                    resume_outcome: ResumeOutcome::New,
+                    server_name: "fake-owner".into(),
+                    compliance: "test".into(),
+                },
+            )?)
+            .await?;
+
+            let mut first_read = true;
+            while let Some(frame) = conn.next().await {
+                let frame = frame?;
+                match frame.opcode {
+                    x if x == Op::ReplicationRead as u16 => {
+                        let read: ReplicationRead = try_decode(&frame)?;
+                        let response = if first_read {
+                            first_read = false;
+                            ReplicationReadOk {
+                                messages: ReplicationMessageRead::CheckpointRequired(
+                                    ReplicationCheckpointRequired {
+                                        epoch: checkpoint.message_epoch,
+                                        requested_offset: read.message_from,
+                                        head_offset: checkpoint.message_checkpoint_offset.max(1),
+                                        next_offset: checkpoint.message_next_offset,
+                                    },
+                                ),
+                                events: ReplicationEventRead::CheckpointRequired(
+                                    ReplicationCheckpointRequired {
+                                        epoch: checkpoint.event_epoch,
+                                        requested_offset: read.event_from,
+                                        head_offset: checkpoint.event_next_offset,
+                                        next_offset: checkpoint.event_next_offset,
+                                    },
+                                ),
+                            }
+                        } else {
+                            let records = message_records
+                                .iter()
+                                .filter(|record| record.offset >= read.message_from)
+                                .take(read.max_messages as usize)
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let message_next_offset = records
+                                .last()
+                                .map_or(read.message_from, |record| record.offset + 1);
+                            ReplicationReadOk {
+                                messages: ReplicationMessageRead::Batch {
+                                    epoch: checkpoint.message_epoch,
+                                    requested_offset: read.message_from,
+                                    next_offset: message_next_offset,
+                                    records,
+                                },
+                                events: ReplicationEventRead::Batch {
+                                    epoch: checkpoint.event_epoch,
+                                    requested_offset: read.event_from,
+                                    next_offset: read.event_from,
+                                    records: Vec::new(),
+                                },
+                            }
+                        };
+                        conn.send(try_encode(
+                            Op::ReplicationReadOk,
+                            frame.request_id,
+                            &response,
+                        )?)
+                        .await?;
+                    }
+                    x if x == Op::ReplicationCheckpointExport as u16 => {
+                        let _: ReplicationCheckpointExport = try_decode(&frame)?;
+                        conn.send(try_encode(
+                            Op::ReplicationCheckpointExportOk,
+                            frame.request_id,
+                            &ReplicationCheckpointExportOk {
+                                checkpoint: checkpoint.clone(),
+                            },
+                        )?)
+                        .await?;
+                    }
+                    other => anyhow::bail!("unexpected fake owner opcode {other}"),
+                }
+            }
+        }
+        Ok(())
+    });
+    (addr, server_task)
 }
 
 async fn recv_frame(framed: &mut Framed<TcpStream, ProtoCodec>) -> Frame {
@@ -1488,6 +1597,140 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     assert_eq!(
         loop_outcome.unwrap(),
         FollowerReplicationWorkerLoopExit::Cancelled { ticks: 1 }
+    );
+    let promoted = follower_broker
+        .promote_replication_follower_if_caught_up(
+            topic,
+            0,
+            group.as_deref(),
+            owner_checkpoint.message_next_offset,
+            owner_checkpoint.event_next_offset,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        promoted,
+        QueuePromotionOutcome::Promoted {
+            message_next_offset: owner_checkpoint.message_next_offset,
+            event_next_offset: owner_checkpoint.event_next_offset,
+            applied_event_offset: Some(owner_checkpoint.applied_event_offset),
+        }
+    );
+
+    follower_broker.shutdown().await;
+    owner_broker.shutdown().await;
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver() {
+    let topic = "replication.resolver.checkpoint";
+    let group = Some("workers".to_string());
+    let (owner_broker, _owner_dir) = open_test_broker().await;
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, &group).await.unwrap();
+    for payload in [
+        b"checkpoint-loop-first".as_slice(),
+        b"checkpoint-loop-second".as_slice(),
+    ] {
+        let reply = publisher
+            .publish(
+                payload.to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+    let owner_checkpoint = owner_broker
+        .export_owner_state_checkpoint(topic, 0, group.as_deref())
+        .await
+        .unwrap();
+    let owner_records = owner_broker
+        .read_owner_replication_records(topic, 0, group.as_deref(), 0, 2, 8, 8)
+        .await
+        .unwrap();
+    let OwnerReplicationRead::Batch(messages) = owner_records.messages else {
+        panic!("expected owner message batch");
+    };
+    let message_records = messages
+        .records
+        .into_iter()
+        .map(|(offset, message)| ReplicationMessageRecord {
+            offset,
+            flags: message.flags,
+            headers: message.headers,
+            payload: message.payload,
+        })
+        .collect::<Vec<_>>();
+
+    let checkpoint = ReplicationStateCheckpoint {
+        message_epoch: owner_checkpoint.message_epoch,
+        event_epoch: owner_checkpoint.event_epoch,
+        message_checkpoint_offset: owner_checkpoint.message_checkpoint_offset,
+        message_next_offset: owner_checkpoint.message_next_offset,
+        event_next_offset: owner_checkpoint.event_next_offset,
+        applied_event_offset: owner_checkpoint.applied_event_offset,
+        state_snapshot: owner_checkpoint.state_snapshot.clone(),
+    };
+    let (addr, server_task) =
+        start_checkpoint_required_owner_server(checkpoint, message_records).await;
+    let resolver =
+        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
+    let resolver = Arc::new(resolver);
+
+    let (follower_broker, _follower_dir) = open_test_broker().await;
+    follower_broker
+        .apply_assignment_transition(&follower_assignment_transition(topic, group.as_deref()))
+        .await
+        .unwrap();
+
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new(topic, 0, group.as_deref()),
+        "owner-a",
+        vec!["follower-a".to_string()],
+        1,
+    );
+    let shutdown = CancellationToken::new();
+    let cfg = FollowerReplicationWorkerConfig {
+        allow_checkpoint_install: true,
+        checkpoint_retry_poll_ms: 1,
+        caught_up_poll_ms: 60_000,
+        ..Default::default()
+    };
+
+    let observer = async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let state = follower_broker
+                    .follower_replication_worker_snapshot(topic, 0, group.as_deref())
+                    .await;
+                if state
+                    .as_ref()
+                    .is_some_and(|state| state.status == FollowerReplicationWorkerStatus::CaughtUp)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("follower worker should install checkpoint and catch up");
+        shutdown.cancel();
+    };
+    let loop_task = follower_broker.run_follower_replication_worker_loop(
+        assignment,
+        resolver,
+        cfg,
+        shutdown.clone(),
+    );
+    let (_, loop_outcome) = tokio::join!(observer, loop_task);
+
+    assert_eq!(
+        loop_outcome.unwrap(),
+        FollowerReplicationWorkerLoopExit::Cancelled { ticks: 2 }
     );
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(

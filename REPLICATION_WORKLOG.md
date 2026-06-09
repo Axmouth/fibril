@@ -516,10 +516,20 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    `BrokerOwnerReplicationPeer`, the follower reaches `CaughtUp`, and checked
    promotion succeeds against the owner's checkpoint offsets. This proves the
    worker/resolver/protocol boundary works for ordinary contiguous catch-up.
+44. Done for protocol-backed checkpoint loop proof: protocol tests now cover the
+   follower worker's policy-gated checkpoint install path through
+   `StaticProtocolOwnerPeerResolver`. The test uses a small fake owner protocol
+   server to force a checkpoint-required read, return a real broker-exported
+   owner state checkpoint, then return retained message records. The follower
+   records the blocked checkpoint status on the first tick, installs the
+   checkpoint on the second tick when policy allows it, catches up, and passes
+   checked promotion. This avoids adding a production truncation hook just to
+   make an integration test deterministic. Lower-level Stroma tests still own
+   real retained-head/checkpoint-required behavior.
    Remaining transport work: connection reuse, reconnect/backoff, topology-watch
-   refresh, checkpoint-required loop handling over the same resolver boundary,
-   and longer-running supervised watcher coverage.
-44. Future test cleanup pass: broker replication tests now repeat enough setup
+   refresh, typed not-owner/topology refresh reactions in the loop, and
+   longer-running supervised watcher coverage.
+45. Future test cleanup pass: broker replication tests now repeat enough setup
    that helpers are worth adding before the next large group of tests. Keep
    helpers behavior-shaped, not assertion-hiding. Good candidates:
    owner/follower broker pair setup, follower assignment setup, publishing `N`
@@ -529,7 +539,7 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    reduce boilerplate in future adversarial/concurrency tests without hiding the
    state transition being tested. This is cleanup, not a reason to add more
    abstractions to production code.
-45. Future admin dashboard topology view: once coordination-backed assignments
+46. Future admin dashboard topology view: once coordination-backed assignments
    exist, add a topology page to the dashboard. Ideally this is a live diagram
    showing nodes, partition owners, followers, lag, role transitions, and
    unhealthy or disconnected links. The first version can be table-first if
@@ -558,7 +568,10 @@ Breakdown:
 - Done for contiguous catch-up: add TCP end-to-end tests with two local brokers:
   owner publishes, follower worker pulls over protocol, follower reaches
   matching offsets, and checked promotion succeeds.
-- Add a checkpoint-required TCP path test after record catch-up works.
+- Done for checkpoint install policy: add TCP path coverage where a
+  checkpoint-required owner read leads the follower worker to install an owner
+  state checkpoint on the next policy-enabled tick, resume message catch-up, and
+  pass checked promotion.
 
 Risks:
 
