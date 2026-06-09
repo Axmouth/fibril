@@ -169,8 +169,10 @@ resume after context compaction.
    replication. Reads return explicit offsets and either a contiguous batch or a
    checkpoint-required outcome when the requested offset is older than the local
    head.
-10. Next: prototype follower pull replication and local catch-up loop, then use
-    checked promotion/demotion APIs for handoff tests.
+10. In progress: prototype follower pull replication and local catch-up loop.
+    The Stroma surfaces now compose in tests: owner reads provide message/event
+    batches, follower ingest applies them, and checked promotion accepts the
+    follower after exact catch-up. Real broker transport is still pending.
 11. Later: replace static ownership with coordinator-backed ownership, likely
     based on an etcd-style lease/watch model.
 12. Later: admin and metrics visibility for queue role, local offsets,
@@ -398,3 +400,9 @@ Tests needed before implementing transition:
   offset is older than the local log head, the API returns a checkpoint-required
   outcome instead of silently skipping forward. Other gaps are treated as
   corruption because replication must not hide missing owner log ranges.
+- 2026-06-09: Added Stroma composition coverage for the first pull-replication
+  path. A test now reads owner message/event batches, applies them to a follower,
+  promotes the caught-up follower, and verifies delivery works after promotion.
+  Adversarial coverage checks that message-only or event-only catch-up refuses
+  promotion. This also fixed replicated ingest to advance the follower's applied
+  event watermark as events are applied.
