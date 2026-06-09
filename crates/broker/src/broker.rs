@@ -956,6 +956,73 @@ impl std::fmt::Display for WakeReason {
     }
 }
 
+#[derive(Debug)]
+struct FollowerReplicationWorkerRuntime {
+    state: Arc<AsyncMutex<FollowerReplicationWorkerState>>,
+    shutdown: CancellationToken,
+    started: AtomicBool,
+    stopping: AtomicBool,
+    active_ticks: AtomicUsize,
+    idle: Notify,
+}
+
+impl FollowerReplicationWorkerRuntime {
+    fn new(message_next_offset: Offset, event_next_offset: Offset) -> Self {
+        Self {
+            state: Arc::new(AsyncMutex::new(FollowerReplicationWorkerState::new(
+                message_next_offset,
+                event_next_offset,
+            ))),
+            shutdown: CancellationToken::new(),
+            started: AtomicBool::new(false),
+            stopping: AtomicBool::new(false),
+            active_ticks: AtomicUsize::new(0),
+            idle: Notify::new(),
+        }
+    }
+
+    fn begin_tick(self: &Arc<Self>) -> Option<FollowerReplicationTickGuard> {
+        if self.stopping.load(Ordering::Acquire) {
+            return None;
+        }
+
+        self.active_ticks.fetch_add(1, Ordering::AcqRel);
+        if self.stopping.load(Ordering::Acquire) {
+            self.finish_tick();
+            return None;
+        }
+
+        Some(FollowerReplicationTickGuard {
+            runtime: self.clone(),
+        })
+    }
+
+    fn finish_tick(&self) {
+        if self.active_ticks.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.idle.notify_waiters();
+        }
+    }
+
+    async fn stop_and_wait(&self) {
+        self.stopping.store(true, Ordering::Release);
+        self.shutdown.cancel();
+        while self.active_ticks.load(Ordering::Acquire) != 0 {
+            self.idle.notified().await;
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FollowerReplicationTickGuard {
+    runtime: Arc<FollowerReplicationWorkerRuntime>,
+}
+
+impl Drop for FollowerReplicationTickGuard {
+    fn drop(&mut self) {
+        self.runtime.finish_tick();
+    }
+}
+
 // ---------------- Broker ----------------
 
 // TODO cleanup old?
@@ -975,10 +1042,8 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     records_by_tags: DashMap<DeliveryTag, TagRecord>,
     tags_by_key_offset: DashMap<(QueueKey, Offset), DeliveryTag>,
     queue_eviction_observations: DashMap<QueueKey, QueueEvictionObservation>,
-    follower_replication_workers: DashMap<
-        crate::coordination::QueueIdentity,
-        Arc<AsyncMutex<FollowerReplicationWorkerState>>,
-    >,
+    follower_replication_workers:
+        DashMap<crate::coordination::QueueIdentity, Arc<FollowerReplicationWorkerRuntime>>,
 
     pending_settles: Arc<AtomicUsize>,
     settle_drained: Arc<Notify>,
@@ -1493,25 +1558,35 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 .get(&crate::coordination::QueueIdentity::new(
                     topic, partition, group,
                 ))?;
-        Some(worker.value().lock().await.clone())
+        Some(worker.value().state.lock().await.clone())
     }
 
-    fn ensure_follower_replication_worker(&self, queue: &crate::coordination::QueueIdentity) {
-        self.follower_replication_workers
-            .entry(queue.clone())
-            .or_insert_with(|| {
-                Arc::new(AsyncMutex::new(FollowerReplicationWorkerState::new(0, 0)))
-            });
-    }
-
-    fn stop_follower_replication_worker(&self, queue: &crate::coordination::QueueIdentity) -> bool {
-        self.follower_replication_workers.remove(queue).is_some()
-    }
-
-    fn follower_replication_worker(
+    fn ensure_follower_replication_worker(
         &self,
         queue: &crate::coordination::QueueIdentity,
-    ) -> Result<Arc<AsyncMutex<FollowerReplicationWorkerState>>, BrokerError> {
+    ) -> Arc<FollowerReplicationWorkerRuntime> {
+        self.follower_replication_workers
+            .entry(queue.clone())
+            .or_insert_with(|| Arc::new(FollowerReplicationWorkerRuntime::new(0, 0)))
+            .value()
+            .clone()
+    }
+
+    async fn stop_follower_replication_worker(
+        &self,
+        queue: &crate::coordination::QueueIdentity,
+    ) -> bool {
+        let Some((_, worker)) = self.follower_replication_workers.remove(queue) else {
+            return false;
+        };
+        worker.stop_and_wait().await;
+        true
+    }
+
+    fn follower_replication_worker_runtime(
+        &self,
+        queue: &crate::coordination::QueueIdentity,
+    ) -> Result<Arc<FollowerReplicationWorkerRuntime>, BrokerError> {
         self.follower_replication_workers
             .get(queue)
             .map(|entry| entry.value().clone())
@@ -1523,6 +1598,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     queue.group.as_deref().unwrap_or("<default>")
                 ))
             })
+    }
+
+    fn follower_replication_worker(
+        &self,
+        queue: &crate::coordination::QueueIdentity,
+    ) -> Result<Arc<AsyncMutex<FollowerReplicationWorkerState>>, BrokerError> {
+        Ok(self
+            .follower_replication_worker_runtime(queue)?
+            .state
+            .clone())
     }
 
     fn record_queue_eviction_attempt(
@@ -1642,7 +1727,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .iter()
             .map(|entry| {
                 let queue = entry.key();
-                let state = entry.value().try_lock().ok().map(|state| state.clone());
+                let state = entry
+                    .value()
+                    .state
+                    .try_lock()
+                    .ok()
+                    .map(|state| state.clone());
                 if let Some(state) = &state {
                     match state.status {
                         FollowerReplicationWorkerStatus::CaughtUp => caught_up_count += 1,
@@ -2692,6 +2782,55 @@ impl Broker<StromaEngine> {
         });
     }
 
+    pub fn spawn_assignment_watcher_with_follower_replication(
+        self: &Arc<Self>,
+        coordination: Arc<dyn Coordination>,
+        resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
+        cfg: FollowerReplicationWorkerConfig,
+    ) {
+        let broker = self.clone();
+        self.task_group.spawn("assignment_watcher", async move {
+            let node_id = coordination.node_id().to_string();
+            let mut previous = CoordinationSnapshot::default();
+            let mut watch = coordination.watch();
+
+            let initial = coordination.snapshot();
+            broker
+                .apply_assignment_snapshot_transitions_with_follower_replication(
+                    &node_id,
+                    &previous,
+                    &initial,
+                    resolver.clone(),
+                    cfg,
+                )
+                .await;
+            previous = initial;
+
+            loop {
+                if watch.changed().await.is_err() {
+                    tracing::debug!("assignment watcher exiting because coordination watch closed");
+                    break;
+                }
+
+                let next = watch.borrow().clone();
+                if next == previous {
+                    continue;
+                }
+
+                broker
+                    .apply_assignment_snapshot_transitions_with_follower_replication(
+                        &node_id,
+                        &previous,
+                        &next,
+                        resolver.clone(),
+                        cfg,
+                    )
+                    .await;
+                previous = next;
+            }
+        });
+    }
+
     pub async fn apply_assignment_snapshot_transitions(
         &self,
         node_id: &str,
@@ -2710,6 +2849,55 @@ impl Broker<StromaEngine> {
                     intent = ?transition.intent,
                     "failed to apply assignment transition: {err:?}"
                 );
+            }
+            outcomes.push(result);
+        }
+        outcomes
+    }
+
+    async fn apply_assignment_snapshot_transitions_with_follower_replication(
+        self: &Arc<Self>,
+        node_id: &str,
+        previous: &CoordinationSnapshot,
+        next: &CoordinationSnapshot,
+        resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
+        cfg: FollowerReplicationWorkerConfig,
+    ) -> Vec<Result<BrokerAssignmentTransitionApply, BrokerError>> {
+        let transitions = plan_local_assignment_transitions(node_id, previous, next);
+        let mut outcomes = Vec::with_capacity(transitions.len());
+        for transition in transitions {
+            let result = self.apply_assignment_transition(&transition).await;
+            match &result {
+                Ok(BrokerAssignmentTransitionApply::Applied(
+                    LocalAssignmentIntent::BecomeFollower
+                    | LocalAssignmentIntent::DemoteOwnerToFollower,
+                )) => {
+                    if let Some(assignment) = transition.next.clone() {
+                        if let Err(err) = self.spawn_follower_replication_worker_loop(
+                            assignment,
+                            resolver.clone(),
+                            cfg,
+                        ) {
+                            tracing::error!(
+                                topic = %transition.queue.topic,
+                                partition = transition.queue.partition,
+                                group = ?transition.queue.group,
+                                intent = ?transition.intent,
+                                "failed to start follower replication worker: {err:?}"
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(
+                        topic = %transition.queue.topic,
+                        partition = transition.queue.partition,
+                        group = ?transition.queue.group,
+                        intent = ?transition.intent,
+                        "failed to apply assignment transition: {err:?}"
+                    );
+                }
+                _ => {}
             }
             outcomes.push(result);
         }
@@ -2790,10 +2978,12 @@ impl Broker<StromaEngine> {
                 })
             }
             LocalAssignmentIntent::StopFollower => {
+                let stopped_worker = self
+                    .stop_follower_replication_worker(&transition.queue)
+                    .await;
                 self.engine
                     .stop_queue_follower_for_transition(&topic, transition.queue.partition, group)
                     .await?;
-                let stopped_worker = self.stop_follower_replication_worker(&transition.queue);
                 tracing::debug!(
                     topic,
                     partition = transition.queue.partition,
@@ -3201,15 +3391,12 @@ impl Broker<StromaEngine> {
     ) -> Result<FollowerReplicationWorkerLoopExit, BrokerError> {
         let mut ticks = 0;
         loop {
+            let Ok(runtime) = self.follower_replication_worker_runtime(&assignment.queue) else {
+                return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+            };
+
             if shutdown.is_cancelled() {
                 return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
-            }
-
-            if !self
-                .follower_replication_workers
-                .contains_key(&assignment.queue)
-            {
-                return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
             }
 
             let Some(owner) = resolver.resolve_owner_peer(&assignment).await? else {
@@ -3220,9 +3407,18 @@ impl Broker<StromaEngine> {
                     owner = %assignment.owner,
                     "follower replication worker could not resolve owner peer"
                 );
-                wait_for_follower_worker_delay(cfg.retry_poll_ms, &shutdown).await;
+                wait_for_follower_worker_delay(cfg.retry_poll_ms, &shutdown, &runtime.shutdown)
+                    .await;
                 continue;
             };
+
+            let Some(_tick_guard) = runtime.begin_tick() else {
+                return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+            };
+
+            if shutdown.is_cancelled() {
+                return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
+            }
 
             match self
                 .run_follower_replication_worker_once(owner.as_ref(), &assignment.queue, cfg)
@@ -3246,25 +3442,66 @@ impl Broker<StromaEngine> {
                         owner = %assignment.owner,
                         "follower replication worker tick failed: {err:?}"
                     );
-                    wait_for_follower_worker_delay(cfg.retry_poll_ms, &shutdown).await;
+                    drop(_tick_guard);
+                    wait_for_follower_worker_delay(cfg.retry_poll_ms, &shutdown, &runtime.shutdown)
+                        .await;
                     continue;
                 }
             }
+            drop(_tick_guard);
 
-            if !self
-                .follower_replication_workers
-                .contains_key(&assignment.queue)
-            {
+            let Ok(runtime) = self.follower_replication_worker_runtime(&assignment.queue) else {
                 return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
-            }
+            };
 
-            let delay_ms = self
-                .follower_replication_worker(&assignment.queue)?
-                .lock()
-                .await
-                .next_delay_ms;
-            wait_for_follower_worker_delay(delay_ms, &shutdown).await;
+            let delay_ms = runtime.state.lock().await.next_delay_ms;
+            wait_for_follower_worker_delay(delay_ms, &shutdown, &runtime.shutdown).await;
         }
+    }
+
+    pub fn spawn_follower_replication_worker_loop(
+        self: &Arc<Self>,
+        assignment: PartitionAssignment,
+        resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
+        cfg: FollowerReplicationWorkerConfig,
+    ) -> Result<bool, BrokerError> {
+        let runtime = self.follower_replication_worker_runtime(&assignment.queue)?;
+        if runtime.started.swap(true, Ordering::AcqRel) {
+            return Ok(false);
+        }
+
+        let broker = self.clone();
+        let shutdown = runtime.shutdown.clone();
+        self.task_group
+            .spawn("follower_replication_worker", async move {
+                let topic = assignment.queue.topic.to_string();
+                let partition = assignment.queue.partition;
+                let group = assignment.queue.group.clone();
+                match broker
+                    .run_follower_replication_worker_loop(assignment, resolver, cfg, shutdown)
+                    .await
+                {
+                    Ok(outcome) => {
+                        tracing::debug!(
+                            topic,
+                            partition,
+                            group = ?group,
+                            outcome = ?outcome,
+                            "follower replication worker loop exited"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            topic,
+                            partition,
+                            group = ?group,
+                            "follower replication worker loop failed: {err:?}"
+                        );
+                    }
+                }
+            });
+
+        Ok(true)
     }
 }
 
@@ -3343,9 +3580,14 @@ where
     }
 }
 
-async fn wait_for_follower_worker_delay(delay_ms: u64, shutdown: &CancellationToken) {
+async fn wait_for_follower_worker_delay(
+    delay_ms: u64,
+    shutdown: &CancellationToken,
+    worker_shutdown: &CancellationToken,
+) {
     tokio::select! {
         _ = shutdown.cancelled() => {}
+        _ = worker_shutdown.cancelled() => {}
         _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
     }
 }

@@ -2154,6 +2154,95 @@ async fn follower_worker_loop_exits_when_worker_is_stopped() {
 }
 
 #[tokio::test]
+async fn follower_worker_loop_supervisor_starts_only_once() {
+    let (follower, _follower_dir) = open_test_broker().await;
+    let queue = QueueIdentity::new("peer-loop-once", 0, Some("workers"));
+    let assignment =
+        PartitionAssignment::new(queue.clone(), "node-a", vec!["node-b".to_string()], 1);
+    let transition = assignment_transition(
+        "peer-loop-once",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    follower
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    let peer = Arc::new(CountingEmptyOwnerPeer::new());
+    let resolver_peer: Arc<dyn BrokerOwnerReplicationPeer> = peer.clone();
+    let resolver = Arc::new(StaticOwnerPeerResolver::new(resolver_peer));
+    let cfg = FollowerReplicationWorkerConfig {
+        caught_up_poll_ms: 60_000,
+        ..Default::default()
+    };
+
+    assert!(
+        follower
+            .spawn_follower_replication_worker_loop(assignment.clone(), resolver.clone(), cfg)
+            .unwrap()
+    );
+    assert!(
+        !follower
+            .spawn_follower_replication_worker_loop(assignment, resolver, cfg)
+            .unwrap()
+    );
+
+    peer.wait_for_read().await;
+    assert_eq!(peer.reads.load(Ordering::Acquire), 1);
+
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn assignment_watcher_can_start_and_stop_follower_replication_loop() {
+    let coordination = Arc::new(StaticCoordination::new(
+        "node-a",
+        coordination_snapshot(Vec::new(), 1),
+    ));
+    let (broker, _dir) = open_test_broker_with_ownership(coordination.clone()).await;
+    let peer = Arc::new(CountingEmptyOwnerPeer::new());
+    let resolver_peer: Arc<dyn BrokerOwnerReplicationPeer> = peer.clone();
+    let resolver = Arc::new(StaticOwnerPeerResolver::new(resolver_peer));
+    let cfg = FollowerReplicationWorkerConfig {
+        caught_up_poll_ms: 60_000,
+        ..Default::default()
+    };
+    broker.spawn_assignment_watcher_with_follower_replication(coordination.clone(), resolver, cfg);
+
+    let queue = QueueIdentity::new("watched-replicated", 0, Some("workers"));
+    coordination.update_snapshot(coordination_snapshot(
+        vec![PartitionAssignment::new(
+            queue,
+            "node-b",
+            vec!["node-a".to_string()],
+            2,
+        )],
+        2,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), peer.wait_for_read())
+        .await
+        .expect("assignment watcher should start follower replication loop");
+    assert!(broker.has_follower_replication_worker("watched-replicated", 0, Some("workers")));
+
+    coordination.update_snapshot(coordination_snapshot(Vec::new(), 3));
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if !broker.has_follower_replication_worker("watched-replicated", 0, Some("workers")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("assignment watcher should stop follower replication loop");
+
+    broker.shutdown().await;
+}
+
+#[tokio::test]
 async fn follower_worker_tick_requires_registered_worker() {
     let (owner, _owner_dir) = open_test_broker().await;
     let (follower, _follower_dir) = open_test_broker().await;

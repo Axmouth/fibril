@@ -380,11 +380,13 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    runs one bounded catch-up tick at a time, and waits through a
    cancellation-aware delay. A real owner transport can implement the same peer
    boundary later, and a real coordinator watch cache can implement the resolver
-   later. Checkpoint-aware worker catch-up remains policy-gated and is not
-   automatically used by the loop yet.
+   later. The assignment watcher now has an opt-in variant that starts
+   supervised follower loops when local follower assignments appear and stops
+   them when the assignment is removed. Checkpoint-aware worker catch-up remains
+   policy-gated and is not automatically used by the loop yet.
 28. Priority order from here:
-   - spawn and supervise follower worker loops from assignment application
    - checkpoint export/install over the replication transport
+   - protocol-backed owner peer and coordination-backed peer resolver
    - coordinator-backed assignments using the existing snapshot/watch shape
    - publish-confirm quorum enforcement from follower progress
    - failover and promotion orchestration
@@ -496,6 +498,17 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    the resolver backed by coordination snapshots and protocol clients, and
    prevent StopFollower from racing a mid-batch follower ingest once loops are
    fully supervised.
+42. Done for follower loop supervision: follower worker state is now wrapped in
+   a small runtime object with a shutdown token, single-start guard, and active
+   tick counter. StopFollower marks the runtime as stopping, wakes the loop, and
+   waits for any active catch-up tick before freezing the local follower role.
+   This is the production reason for the wrapper: it prevents role changes from
+   racing a replicated ingest batch. The assignment watcher now has an opt-in
+   `spawn_assignment_watcher_with_follower_replication` variant that starts the
+   supervised loop after `BecomeFollower` or `DemoteOwnerToFollower` applies.
+   The default watcher remains unchanged for standalone/local mode. Remaining
+   work: implement a resolver backed by coordination snapshots and protocol
+   clients, then make that the real cluster watcher path.
 
 Previous completed implementation checkpoints:
 
