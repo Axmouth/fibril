@@ -175,7 +175,10 @@ resume after context compaction.
     follower after exact catch-up. Broker owner-read helpers now provide the
     first transport-facing boundary: they check broker queue ownership before
     touching Stroma, then return owner message and event records for a follower
-    pull loop. Real TCP/admin transport and follower scheduling are still
+    pull loop. Broker follower-apply helpers now convert owner-read batches into
+    Stroma replicated ingest batches, refuse to partially apply when a
+    checkpoint is required, and leave snapshot installation for a later
+    checkpoint path. Real TCP/admin transport and follower scheduling are still
     pending.
 11. Later: replace static ownership with coordinator-backed ownership, likely
     based on an etcd-style lease/watch model.
@@ -191,9 +194,13 @@ resume after context compaction.
 3. Done: add broker tests for successful owner reads and not-owner
    rejection before materialization.
 4. Done: run focused broker checks.
-5. In progress: commit this checkpoint if the checks are clean.
+5. Done: commit the owner-read checkpoint.
 6. Next: start the follower pull catch-up loop using the broker owner-read
    boundary and Stroma follower-ingest boundary.
+7. Done: add broker follower-apply helpers and an in-process catch-up
+   test from owner broker to follower broker.
+8. Next: use the same boundaries from a repeated pull loop that can stop when
+   both streams return empty batches at the owner's current tail.
 
 ## Pending Decisions
 

@@ -13,8 +13,9 @@ pub use stroma_core::{
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KeratinAppendCompletion,
     KeratinConfig, Message, MessageContentType, MessageHeaders, MessageInspectionPage,
-    MessageInspectionStatus, OwnerReplicationRead, QueueInspectionState, SnapshotConfig, Stroma,
-    StromaError, StromaEvent, StromaKeratinConfig,
+    MessageInspectionStatus, OwnerReplicationRead, QueueInspectionState, QueuePromotionOutcome,
+    ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SnapshotConfig,
+    Stroma, StromaError, StromaEvent, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -265,6 +266,47 @@ impl StromaEngine {
     ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
         self.inner
             .read_owner_event_records(tp, part, group, from, max)
+            .await
+    }
+
+    pub async fn become_queue_follower(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner.become_queue_follower(tp, part, group).await
+    }
+
+    pub async fn apply_replicated_queue_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        messages: Option<ReplicatedMessageBatch>,
+        events: Option<ReplicatedEventBatch>,
+    ) -> Result<ReplicatedQueueApplyOutcome, StromaError> {
+        self.inner
+            .apply_replicated_queue_batch(tp, part, group, messages, events)
+            .await
+    }
+
+    pub async fn promote_queue_follower_if_caught_up(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        expected_message_next_offset: Offset,
+        expected_event_next_offset: Offset,
+    ) -> Result<QueuePromotionOutcome, StromaError> {
+        self.inner
+            .promote_queue_follower_if_caught_up(
+                tp,
+                part,
+                group,
+                expected_message_next_offset,
+                expected_event_next_offset,
+            )
             .await
     }
 

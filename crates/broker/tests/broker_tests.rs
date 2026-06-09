@@ -4,13 +4,14 @@ use async_trait::async_trait;
 use fibril_broker::{
     CompletionPair,
     broker::{
-        Broker, BrokerConfig, BrokerError, ConsumerConfig, OwnedQueue, QueueEvictionAttempt,
-        QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
+        Broker, BrokerConfig, BrokerError, BrokerFollowerReplicationApply, ConsumerConfig,
+        OwnedQueue, QueueEvictionAttempt, QueueEvictionSkip, SettleRequest, SettleType,
+        StaticQueueOwnership,
     },
     queue_engine::{
         Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, MessageHeaders,
-        OwnerReplicationRead, QueueEngine, ReplayDeadLetterOutcome, ReplayDeadLettersReport,
-        SettleRequest as EngineSettleRequest, StromaEngine,
+        OwnerReplicationRead, QueueEngine, QueuePromotionOutcome, ReplayDeadLetterOutcome,
+        ReplayDeadLettersReport, SettleRequest as EngineSettleRequest, StromaEngine,
     },
     test_util::TestState,
 };
@@ -469,6 +470,95 @@ async fn owner_replication_read_rejects_unowned_queue_before_materializing() {
     ));
     assert!(!broker.is_queue_materialized("unowned", None));
     broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn broker_replication_read_applies_to_follower_and_promotes() {
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+
+    follower
+        .become_replication_follower("catchup", 0, None)
+        .await
+        .unwrap();
+
+    let (publisher, _confirms) = owner.get_publisher("catchup", &None).await.unwrap();
+    for payload in [b"first".to_vec(), b"second".to_vec()] {
+        let reply = publisher
+            .publish(
+                payload,
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+
+    let records = owner
+        .read_owner_replication_records("catchup", 0, None, 0, 0, 10, 10)
+        .await
+        .unwrap();
+    let expected_message_next_offset = match &records.messages {
+        OwnerReplicationRead::Batch(batch) => batch.next_offset,
+        OwnerReplicationRead::CheckpointRequired { .. } => {
+            panic!("fresh follower unexpectedly needed a message checkpoint")
+        }
+    };
+    let expected_event_next_offset = match &records.events {
+        OwnerReplicationRead::Batch(batch) => batch.next_offset,
+        OwnerReplicationRead::CheckpointRequired { .. } => {
+            panic!("fresh follower unexpectedly needed an event checkpoint")
+        }
+    };
+
+    let apply = follower
+        .apply_follower_replication_records("catchup", 0, None, records)
+        .await
+        .unwrap();
+    assert!(matches!(apply, BrokerFollowerReplicationApply::Applied(_)));
+
+    let promotion = follower
+        .promote_replication_follower_if_caught_up(
+            "catchup",
+            0,
+            None,
+            expected_message_next_offset,
+            expected_event_next_offset,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        promotion,
+        QueuePromotionOutcome::Promoted {
+            message_next_offset: 2,
+            event_next_offset: 2,
+            applied_event_offset: Some(1),
+        }
+    );
+
+    let mut sub = follower
+        .subscribe(
+            "catchup",
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 2 },
+        )
+        .await
+        .unwrap();
+    let first = recv_with_timeout(&mut sub, 1000)
+        .await
+        .expect("first replicated message should deliver after promotion");
+    let second = recv_with_timeout(&mut sub, 1000)
+        .await
+        .expect("second replicated message should deliver after promotion");
+    assert_eq!(first.message.payload, b"first");
+    assert_eq!(second.message.payload, b"second");
+
+    owner.shutdown().await;
+    follower.shutdown().await;
 }
 
 async fn recv_with_timeout(

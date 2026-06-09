@@ -21,7 +21,8 @@ use fibril_util::unix_millis;
 use uuid::Uuid;
 
 use crate::queue_engine::{
-    EvictOutcome, QueueEngine, SettleKind, SettleRequest as EngineSettleRequest, StromaEngine,
+    EvictOutcome, QueueEngine, QueuePromotionOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
+    ReplicatedQueueApplyOutcome, SettleKind, SettleRequest as EngineSettleRequest, StromaEngine,
 };
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
@@ -396,6 +397,23 @@ impl OwnedQueue {
 pub struct BrokerOwnerReplicationRecords {
     pub messages: OwnerReplicationRead<Message>,
     pub events: OwnerReplicationRead<StromaEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrokerReplicationCheckpointRequired {
+    pub epoch: u64,
+    pub requested_offset: Offset,
+    pub head_offset: Offset,
+    pub next_offset: Offset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerFollowerReplicationApply {
+    Applied(ReplicatedQueueApplyOutcome),
+    CheckpointRequired {
+        messages: Option<BrokerReplicationCheckpointRequired>,
+        events: Option<BrokerReplicationCheckpointRequired>,
+    },
 }
 
 // ---------------- Internal state ----------------
@@ -2210,6 +2228,148 @@ impl Broker<StromaEngine> {
             .await?;
 
         Ok(BrokerOwnerReplicationRecords { messages, events })
+    }
+
+    pub async fn become_replication_follower(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+    ) -> Result<(), BrokerError> {
+        self.engine
+            .become_queue_follower(topic, partition, group)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn apply_follower_replication_records(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+        records: BrokerOwnerReplicationRecords,
+    ) -> Result<BrokerFollowerReplicationApply, BrokerError> {
+        let messages = match records.messages {
+            OwnerReplicationRead::Batch(batch) if !batch.records.is_empty() => {
+                Some(ReplicatedMessageBatch {
+                    epoch: batch.epoch,
+                    first_offset: batch.records[0].0,
+                    records: batch
+                        .records
+                        .into_iter()
+                        .map(|(_, message)| message)
+                        .collect(),
+                    durability: None,
+                })
+            }
+            OwnerReplicationRead::Batch(_) => None,
+            OwnerReplicationRead::CheckpointRequired {
+                epoch,
+                requested_offset,
+                head_offset,
+                next_offset,
+            } => {
+                tracing::debug!(
+                    topic,
+                    partition,
+                    group,
+                    requested_offset,
+                    head_offset,
+                    next_offset,
+                    "replication message read requires checkpoint before follower apply"
+                );
+                return Ok(BrokerFollowerReplicationApply::CheckpointRequired {
+                    messages: Some(BrokerReplicationCheckpointRequired {
+                        epoch,
+                        requested_offset,
+                        head_offset,
+                        next_offset,
+                    }),
+                    events: checkpoint_required(&records.events),
+                });
+            }
+        };
+        let events = match records.events {
+            OwnerReplicationRead::Batch(batch) if !batch.records.is_empty() => {
+                Some(ReplicatedEventBatch {
+                    epoch: batch.epoch,
+                    first_offset: batch.records[0].0,
+                    events: batch.records.into_iter().map(|(_, event)| event).collect(),
+                    durability: None,
+                })
+            }
+            OwnerReplicationRead::Batch(_) => None,
+            OwnerReplicationRead::CheckpointRequired {
+                epoch,
+                requested_offset,
+                head_offset,
+                next_offset,
+            } => {
+                tracing::debug!(
+                    topic,
+                    partition,
+                    group,
+                    requested_offset,
+                    head_offset,
+                    next_offset,
+                    "replication event read requires checkpoint before follower apply"
+                );
+                return Ok(BrokerFollowerReplicationApply::CheckpointRequired {
+                    messages: None,
+                    events: Some(BrokerReplicationCheckpointRequired {
+                        epoch,
+                        requested_offset,
+                        head_offset,
+                        next_offset,
+                    }),
+                });
+            }
+        };
+
+        let outcome = self
+            .engine
+            .apply_replicated_queue_batch(topic, partition, group, messages, events)
+            .await?;
+        Ok(BrokerFollowerReplicationApply::Applied(outcome))
+    }
+
+    pub async fn promote_replication_follower_if_caught_up(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+        expected_message_next_offset: Offset,
+        expected_event_next_offset: Offset,
+    ) -> Result<QueuePromotionOutcome, BrokerError> {
+        self.engine
+            .promote_queue_follower_if_caught_up(
+                topic,
+                partition,
+                group,
+                expected_message_next_offset,
+                expected_event_next_offset,
+            )
+            .await
+            .map_err(BrokerError::from)
+    }
+}
+
+fn checkpoint_required<T>(
+    read: &OwnerReplicationRead<T>,
+) -> Option<BrokerReplicationCheckpointRequired> {
+    match read {
+        OwnerReplicationRead::Batch(_) => None,
+        OwnerReplicationRead::CheckpointRequired {
+            epoch,
+            requested_offset,
+            head_offset,
+            next_offset,
+        } => Some(BrokerReplicationCheckpointRequired {
+            epoch: *epoch,
+            requested_offset: *requested_offset,
+            head_offset: *head_offset,
+            next_offset: *next_offset,
+        }),
     }
 }
 
