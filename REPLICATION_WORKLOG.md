@@ -178,6 +178,13 @@ but before the enqueue event would create orphan payload records. Orphan
 payloads are not corruption if delivery stays event-log driven, but transitions
 should still avoid creating them as normal behavior.
 
+Performance note: the first lease implementation uses atomic accounting on
+owner operation entry/exit. That is the right correctness-first shape, but it is
+a possible point of friction for hot publish, delivery, ack, and nack paths. If
+benchmarks show regression, move lease acquisition outward to larger Stroma
+batch boundaries or specialize the hottest paths. Do not remove the transition
+guard without replacing it with an equivalent drain mechanism.
+
 Tests needed before implementing transition:
 
 - freeze waits for a deliberately blocked message-batch completion and then
@@ -257,3 +264,10 @@ Tests needed before implementing transition:
   on active operation count would be unsafe because unrelated new writes could
   pass while the queue is transitioning. Left this as a documented transition
   protocol instead of adding a half-measure.
+- 2026-06-09: Added the first Stroma owner-operation lease implementation. New
+  owner operations acquire an atomic lease, freeze stops new leases, and
+  `freeze_queue_for_transition` waits for already accepted owner work before the
+  higher layer switches the queue role. Publish completions now carry the lease
+  from message-log append through matching event-log append so graceful freeze
+  should not create normal orphan payloads. This may need benchmark attention
+  because the hot paths now include atomic lease accounting.
