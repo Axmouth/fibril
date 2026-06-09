@@ -349,6 +349,17 @@ Current focus: checkpoint-required follower boundary.
 27. Next: wire the follower worker transport loop. Once a real owner transport
    exists, it should choose between normal bounded catch-up and
    checkpoint-aware catch-up based on the worker policy.
+28. Priority order from here:
+   - follower worker tick and background loop around the existing catch-up
+     helpers
+   - checkpoint export/install over the replication transport
+   - coordinator-backed assignments using the existing snapshot/watch shape
+   - publish-confirm quorum enforcement from follower progress
+   - failover and promotion orchestration
+   - topology-aware clients and admin/operator visibility
+   The original planning document should remain useful as historical grounding.
+   New details should be appended here as implementation checkpoints rather
+   than rewriting the starting plan.
 
 Previous completed implementation checkpoints:
 

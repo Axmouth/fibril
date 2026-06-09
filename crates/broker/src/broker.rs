@@ -1339,12 +1339,43 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             ))
     }
 
+    pub async fn follower_replication_worker_snapshot(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+    ) -> Option<FollowerReplicationWorkerState> {
+        let worker =
+            self.follower_replication_workers
+                .get(&crate::coordination::QueueIdentity::new(
+                    topic, partition, group,
+                ))?;
+        Some(worker.value().lock().await.clone())
+    }
+
     fn ensure_follower_replication_worker(&self, queue: &crate::coordination::QueueIdentity) {
         self.follower_replication_workers
             .entry(queue.clone())
             .or_insert_with(|| {
                 Arc::new(AsyncMutex::new(FollowerReplicationWorkerState::new(0, 0)))
             });
+    }
+
+    fn follower_replication_worker(
+        &self,
+        queue: &crate::coordination::QueueIdentity,
+    ) -> Result<Arc<AsyncMutex<FollowerReplicationWorkerState>>, BrokerError> {
+        self.follower_replication_workers
+            .get(queue)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| {
+                BrokerError::InvalidArgument(format!(
+                    "no follower replication worker registered for {}/{}/{}",
+                    queue.topic,
+                    queue.partition,
+                    queue.group.as_deref().unwrap_or("<default>")
+                ))
+            })
     }
 
     fn record_queue_eviction_attempt(
@@ -2894,6 +2925,42 @@ impl Broker<StromaEngine> {
             "checkpoint-aware catch-up loop reached an unreachable state"
         );
         unreachable!("checkpoint_attempts loop always returns");
+    }
+
+    pub async fn run_follower_replication_worker_once(
+        &self,
+        owner: &Broker<StromaEngine>,
+        queue: &crate::coordination::QueueIdentity,
+        cfg: FollowerReplicationWorkerConfig,
+    ) -> Result<BrokerReplicationCatchUp, BrokerError> {
+        let worker = self.follower_replication_worker(queue)?;
+        let options = {
+            let state = worker.lock().await;
+            state.catch_up_options(cfg)
+        };
+
+        let outcome = if cfg.allow_checkpoint_install {
+            self.catch_up_replication_follower_from_owner_with_checkpoint(
+                owner,
+                queue.topic.as_str(),
+                queue.partition,
+                queue.group.as_deref(),
+                options,
+            )
+            .await?
+        } else {
+            self.catch_up_replication_follower_from_owner(
+                owner,
+                queue.topic.as_str(),
+                queue.partition,
+                queue.group.as_deref(),
+                options,
+            )
+            .await?
+        };
+
+        worker.lock().await.record_catch_up(cfg, &outcome);
+        Ok(outcome)
     }
 }
 

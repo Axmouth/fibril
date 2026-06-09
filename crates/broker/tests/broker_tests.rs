@@ -1343,6 +1343,100 @@ fn follower_worker_checkpoint_install_requires_checkpoint_status() {
     assert!(!state.should_install_checkpoint(cfg));
 }
 
+#[tokio::test]
+async fn follower_worker_tick_records_catch_up_progress() {
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+    let queue = QueueIdentity::new("worker-tick", 0, Some("workers"));
+
+    let transition = assignment_transition(
+        "worker-tick",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    follower
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    let group = Some("workers".to_string());
+    let (publisher, _confirms) = owner.get_publisher("worker-tick", &group).await.unwrap();
+    for payload in [b"one".to_vec(), b"two".to_vec()] {
+        let reply = publisher
+            .publish(
+                payload,
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+
+    let cfg = FollowerReplicationWorkerConfig {
+        max_messages_per_read: 1,
+        max_events_per_read: 1,
+        max_iterations_per_tick: 1,
+        ..Default::default()
+    };
+    let outcome = follower
+        .run_follower_replication_worker_once(&owner, &queue, cfg)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerReplicationCatchUp::IterationLimit {
+            progress: BrokerReplicationCatchUpProgress {
+                iterations: 1,
+                applied_message_records: 1,
+                applied_event_records: 1,
+                message_next_offset: 1,
+                event_next_offset: 1,
+            },
+        }
+    );
+    assert_eq!(
+        follower
+            .follower_replication_worker_snapshot("worker-tick", 0, Some("workers"))
+            .await,
+        Some(FollowerReplicationWorkerState {
+            message_next_offset: 1,
+            event_next_offset: 1,
+            status: FollowerReplicationWorkerStatus::PendingRetry,
+            next_delay_ms: cfg.retry_poll_ms,
+        })
+    );
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn follower_worker_tick_requires_registered_worker() {
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+    let queue = QueueIdentity::new("missing-worker", 0, None);
+
+    let err = follower
+        .run_follower_replication_worker_once(
+            &owner,
+            &queue,
+            FollowerReplicationWorkerConfig::default(),
+        )
+        .await
+        .expect_err("worker tick should reject unregistered queues");
+
+    assert!(matches!(err, BrokerError::InvalidArgument(_)));
+    assert!(!follower.has_follower_replication_worker("missing-worker", 0, None));
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
 async fn recv_with_timeout(
     sub: &mut fibril_broker::broker::ConsumerHandle,
     timeout_ms: u64,
