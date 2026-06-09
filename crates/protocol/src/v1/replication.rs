@@ -14,7 +14,7 @@ use fibril_broker::{
         BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
         BrokerOwnerReplicationRecords,
     },
-    coordination::{NodeInfo, PartitionAssignment},
+    coordination::{Coordination, NodeInfo, PartitionAssignment},
     queue_engine::{
         Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, StromaEvent,
     },
@@ -171,6 +171,85 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
                     self.cfg.client_version.clone(),
                 ));
             peers.insert(assignment.owner.clone(), peer.clone());
+            Ok(Some(peer))
+        })
+    }
+}
+
+struct CachedProtocolOwnerPeer {
+    addr: SocketAddr,
+    peer: Arc<dyn BrokerOwnerReplicationPeer>,
+}
+
+/// Coordination-backed owner-peer resolver for replication workers.
+///
+/// Each resolve uses the current coordination snapshot, so owner address changes
+/// are picked up without restarting the worker. The peer cache is still small
+/// and conservative: one cached peer per owner id, invalidated when that owner
+/// disappears or its broker address changes.
+pub struct CoordinationProtocolOwnerPeerResolver {
+    coordination: Arc<dyn Coordination>,
+    cfg: ProtocolOwnerPeerResolverConfig,
+    peers: Mutex<HashMap<String, CachedProtocolOwnerPeer>>,
+}
+
+impl CoordinationProtocolOwnerPeerResolver {
+    pub fn new(coordination: Arc<dyn Coordination>) -> Self {
+        Self::with_config(
+            coordination,
+            ProtocolOwnerPeerResolverConfig::new(HashMap::new()),
+        )
+    }
+
+    pub fn with_config(
+        coordination: Arc<dyn Coordination>,
+        cfg: ProtocolOwnerPeerResolverConfig,
+    ) -> Self {
+        Self {
+            coordination,
+            cfg,
+            peers: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolver {
+    fn resolve_owner_peer<'a>(
+        &'a self,
+        assignment: &'a PartitionAssignment,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>,
+    > {
+        Box::pin(async move {
+            let snapshot = self.coordination.snapshot();
+            let Some(node) = snapshot.nodes.get(&assignment.owner) else {
+                self.peers.lock().await.remove(&assignment.owner);
+                return Ok(None);
+            };
+            let addr = node.broker_addr;
+
+            let mut peers = self.peers.lock().await;
+            if let Some(cached) = peers.get(&assignment.owner) {
+                if cached.addr == addr {
+                    return Ok(Some(cached.peer.clone()));
+                }
+            }
+
+            let peer: Arc<dyn BrokerOwnerReplicationPeer> =
+                Arc::new(ProtocolOwnerReplicationPeer::new_reconnecting(
+                    addr,
+                    self.cfg.auth.clone(),
+                    self.cfg.client_name.clone(),
+                    self.cfg.client_version.clone(),
+                ));
+            peers.insert(
+                assignment.owner.clone(),
+                CachedProtocolOwnerPeer {
+                    addr,
+                    peer: peer.clone(),
+                },
+            );
             Ok(Some(peer))
         })
     }

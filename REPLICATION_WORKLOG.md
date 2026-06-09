@@ -543,7 +543,18 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    cover peer reuse, authenticated reads, and the protocol-backed worker loop.
    Remaining transport work: explicit reconnect/backoff observability,
    topology-watch refresh, and longer-running supervised watcher coverage.
-47. Future test cleanup pass: broker replication tests now repeat enough setup
+47. Done for coordination-backed protocol peer resolution:
+   `CoordinationProtocolOwnerPeerResolver` reads the current coordination
+   snapshot on each resolve, looks up the assignment owner in `NodeInfo`, and
+   keeps a conservative peer cache keyed by owner id. Stable owner addresses
+   reuse the same lazy protocol peer. Missing owner nodes return `None` and
+   clear that owner's cache entry. Changed owner broker addresses replace the
+   cached peer so follower workers do not keep talking to a stale endpoint after
+   topology refresh. This is still snapshot-driven, not a watcher loop. The
+   watcher/supervisor layer remains responsible for reacting to
+   `OwnerChanged`, reading a newer assignment, and restarting or stopping the
+   follower loop as appropriate.
+48. Future test cleanup pass: broker replication tests now repeat enough setup
    that helpers are worth adding before the next large group of tests. Keep
    helpers behavior-shaped, not assertion-hiding. Good candidates:
    owner/follower broker pair setup, follower assignment setup, publishing `N`
@@ -553,7 +564,7 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    reduce boilerplate in future adversarial/concurrency tests without hiding the
    state transition being tested. This is cleanup, not a reason to add more
    abstractions to production code.
-48. Future admin dashboard topology view: once coordination-backed assignments
+49. Future admin dashboard topology view: once coordination-backed assignments
    exist, add a topology page to the dashboard. Ideally this is a live diagram
    showing nodes, partition owners, followers, lag, role transitions, and
    unhealthy or disconnected links. The first version can be table-first if
@@ -603,13 +614,18 @@ coordination snapshot/watch cache.
 
 Breakdown:
 
-- Add a resolver that reads `PartitionAssignment.owner` and looks up `NodeInfo`.
-- Add a small peer/client cache keyed by node id or broker address.
-- Invalidate or refresh peers when assignment generation or node address changes.
+- Done for the resolver core: add a resolver that reads
+  `PartitionAssignment.owner` and looks up `NodeInfo` in the current
+  coordination snapshot.
+- Done for the initial cache: add a small peer cache keyed by owner id.
+- Done for address refresh: replace cached peers when the owner's broker
+  address changes, and clear a cached peer when the owner node disappears.
 - Keep resolver output as `Option<Arc<dyn BrokerOwnerReplicationPeer>>` for now:
   unresolved owner should remain retryable.
 - Add tests for missing owner node, changed owner address, stable owner cache,
-  and assignment owner moving to another node.
+  and assignment owner moving to another node. These resolver-boundary cases
+  are covered. The full owner-change reaction remains a follower supervisor
+  concern because it consumes a new `PartitionAssignment`.
 
 Risks:
 

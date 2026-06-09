@@ -14,8 +14,9 @@ use fibril_broker::{
         FollowerReplicationWorkerStatus, QueueEvictionAttempt, StaticQueueOwnership,
     },
     coordination::{
-        LocalAssignmentIntent, LocalAssignmentRole, LocalAssignmentTransition, PartitionAssignment,
-        QueueIdentity,
+        CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
+        LocalAssignmentTransition, NodeInfo, PartitionAssignment, QueueIdentity,
+        StaticCoordination,
     },
     queue_engine::{
         EvictOutcome, GlobalDLQ, OwnerReplicationRead, QueueEngine, QueuePromotionOutcome,
@@ -36,7 +37,8 @@ use fibril_protocol::v1::{
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
     replication::{
-        ProtocolOwnerPeerResolverConfig, ProtocolOwnerReplicationPeer, ProtocolReplicationCatchUp,
+        CoordinationProtocolOwnerPeerResolver, ProtocolOwnerPeerResolverConfig,
+        ProtocolOwnerReplicationPeer, ProtocolReplicationCatchUp,
         ProtocolReplicationCatchUpOptions, StaticProtocolOwnerPeerResolver,
         catch_up_replication_over_protocol,
     },
@@ -1520,6 +1522,177 @@ async fn static_protocol_owner_peer_resolver_reuses_peer_for_owner() {
         .expect("second owner peer");
 
     assert!(Arc::ptr_eq(&first, &second));
+}
+
+fn protocol_coordination_snapshot(
+    owner_addr: Option<SocketAddr>,
+    assignment: PartitionAssignment,
+    generation: u64,
+) -> CoordinationSnapshot {
+    let nodes = owner_addr
+        .map(|broker_addr| {
+            HashMap::from([(
+                assignment.owner.clone(),
+                NodeInfo {
+                    node_id: assignment.owner.clone(),
+                    broker_addr,
+                    admin_addr: None,
+                },
+            )])
+        })
+        .unwrap_or_default();
+    CoordinationSnapshot {
+        nodes,
+        assignments: HashMap::from([(assignment.queue.clone(), assignment)]),
+        generation,
+    }
+}
+
+#[tokio::test]
+async fn coordination_protocol_owner_peer_resolver_returns_none_for_missing_owner_node() {
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new("replication.resolver.coord.missing", 0, None),
+        "owner-a",
+        vec![],
+        1,
+    );
+    let coordination = Arc::new(StaticCoordination::new(
+        "node-b",
+        protocol_coordination_snapshot(None, assignment.clone(), 1),
+    ));
+    let resolver = CoordinationProtocolOwnerPeerResolver::new(coordination);
+
+    assert!(
+        resolver
+            .resolve_owner_peer(&assignment)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn coordination_protocol_owner_peer_resolver_reuses_stable_owner_address() {
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new("replication.resolver.coord.cached", 0, None),
+        "owner-a",
+        vec![],
+        1,
+    );
+    let coordination = Arc::new(StaticCoordination::new(
+        "node-b",
+        protocol_coordination_snapshot(
+            Some("127.0.0.1:10001".parse().unwrap()),
+            assignment.clone(),
+            1,
+        ),
+    ));
+    let resolver = CoordinationProtocolOwnerPeerResolver::new(coordination);
+
+    let first = resolver
+        .resolve_owner_peer(&assignment)
+        .await
+        .unwrap()
+        .expect("first owner peer");
+    let second = resolver
+        .resolve_owner_peer(&assignment)
+        .await
+        .unwrap()
+        .expect("second owner peer");
+
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[tokio::test]
+async fn coordination_protocol_owner_peer_resolver_replaces_peer_when_owner_address_changes() {
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new("replication.resolver.coord.changed", 0, None),
+        "owner-a",
+        vec![],
+        1,
+    );
+    let coordination = Arc::new(StaticCoordination::new(
+        "node-b",
+        protocol_coordination_snapshot(
+            Some("127.0.0.1:10001".parse().unwrap()),
+            assignment.clone(),
+            1,
+        ),
+    ));
+    let resolver = CoordinationProtocolOwnerPeerResolver::new(coordination.clone());
+
+    let first = resolver
+        .resolve_owner_peer(&assignment)
+        .await
+        .unwrap()
+        .expect("first owner peer");
+
+    coordination.update_snapshot(protocol_coordination_snapshot(
+        Some("127.0.0.1:10002".parse().unwrap()),
+        assignment.clone(),
+        2,
+    ));
+
+    let second = resolver
+        .resolve_owner_peer(&assignment)
+        .await
+        .unwrap()
+        .expect("second owner peer");
+
+    assert!(!Arc::ptr_eq(&first, &second));
+}
+
+#[tokio::test]
+async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_move() {
+    let queue = QueueIdentity::new("replication.resolver.coord.moved", 0, None);
+    let first_assignment = PartitionAssignment::new(queue.clone(), "owner-a", vec![], 1);
+    let second_assignment = PartitionAssignment::new(queue.clone(), "owner-b", vec![], 2);
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        "owner-a".to_string(),
+        NodeInfo {
+            node_id: "owner-a".to_string(),
+            broker_addr: "127.0.0.1:10001".parse().unwrap(),
+            admin_addr: None,
+        },
+    );
+    nodes.insert(
+        "owner-b".to_string(),
+        NodeInfo {
+            node_id: "owner-b".to_string(),
+            broker_addr: "127.0.0.1:10002".parse().unwrap(),
+            admin_addr: None,
+        },
+    );
+    let coordination = Arc::new(StaticCoordination::new(
+        "node-c",
+        CoordinationSnapshot {
+            nodes: nodes.clone(),
+            assignments: HashMap::from([(queue.clone(), first_assignment.clone())]),
+            generation: 1,
+        },
+    ));
+    let resolver = CoordinationProtocolOwnerPeerResolver::new(coordination.clone());
+
+    let first = resolver
+        .resolve_owner_peer(&first_assignment)
+        .await
+        .unwrap()
+        .expect("first owner peer");
+
+    coordination.update_snapshot(CoordinationSnapshot {
+        nodes,
+        assignments: HashMap::from([(queue, second_assignment.clone())]),
+        generation: 2,
+    });
+
+    let second = resolver
+        .resolve_owner_peer(&second_assignment)
+        .await
+        .unwrap()
+        .expect("second owner peer");
+
+    assert!(!Arc::ptr_eq(&first, &second));
 }
 
 #[tokio::test]
