@@ -123,6 +123,16 @@ locally, every higher layer would be built on the wrong foundation.
   because old log ranges were truncated, it should install a checkpoint or
   snapshot and then continue from the checkpoint offset. It should not fill gaps
   with fake records.
+- State checkpoints are not message checkpoints. They carry compacted queue
+  bookkeeping such as ready/inflight/acked/retry state, not payload bytes.
+  Message catch-up remains a separate transfer from the message log. The first
+  implementation can use contiguous message-log catch-up from the checkpoint
+  continuation offset, but this may become very large when an old referenced
+  message pins a large retained range. Future optimization should consider
+  fetching only message offsets still referenced by compacted state, likely with
+  explicit offset-list/range requests, chunking, resume support, and optional
+  compression. That should be designed deliberately rather than implied by the
+  state snapshot install path.
 - Keratin role/mode is runtime API protection, not durable truth. On restart,
   higher layers should decide how to set local log modes after consulting their
   coordination or configuration source.
@@ -312,12 +322,14 @@ Current focus: checkpoint-required follower boundary.
    reports that the follower is behind the retained log range, the broker should
    surface `CheckpointRequired`, avoid partial apply, and avoid materializing a
    follower queue just to report that status.
-21. Next: snapshot install support for followers that are behind the owner's
-   retained log range.
-22. Next: add a Stroma follower checkpoint install API. It should reset the
-   follower message and event logs to the checkpoint continuation offsets,
-   install compacted queue state, keep the queue in follower role, and then let
-   normal replicated append continue from those offsets.
+21. Done: add Stroma state-checkpoint install support for followers that are
+   behind the owner's retained event log range.
+22. Done: add a Stroma follower state-checkpoint install API. It resets follower
+   logs to safe continuation offsets, installs compacted queue state, keeps the
+   queue in follower role, and then lets normal replicated append continue from
+   those offsets. For the current contiguous message-log contract, it rejects an
+   install that would advance the message log past messages still referenced by
+   the installed state.
 
 Previous completed implementation checkpoints:
 
@@ -589,6 +601,12 @@ Tests needed before implementing transition:
   partial follower apply or materializing a queue just to report the status. The
   actual checkpoint install operation still belongs in Stroma because it must
   reset local queue logs and compacted queue state together.
+- 2026-06-09: Added Stroma follower state-checkpoint install. The API is named
+  around state, not messages, because compacted queue snapshots do not contain
+  payload bytes. It installs compacted queue state, resets the local event and
+  message logs to continuation offsets, keeps the queue in follower role, and
+  rejects an install that would advance the follower message log beyond the
+  lowest message still referenced by installed state.
 - 2026-06-09: Next design topic is API gatekeeping. Options to evaluate:
   distinct leader/follower Keratin handle types, a capability/token for
   replicated operations, an extension trait only used by replication code, or an
