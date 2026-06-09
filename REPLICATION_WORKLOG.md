@@ -509,6 +509,70 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    The default watcher remains unchanged for standalone/local mode. Remaining
    work: implement a resolver backed by coordination snapshots and protocol
    clients, then make that the real cluster watcher path.
+43. Future test cleanup pass: broker replication tests now repeat enough setup
+   that helpers are worth adding before the next large group of tests. Keep
+   helpers behavior-shaped, not assertion-hiding. Good candidates:
+   owner/follower broker pair setup, follower assignment setup, publishing `N`
+   messages to an owner, running catch-up once or until caught up, waiting for a
+   follower worker status with timeout, default `PartitionAssignment` builders,
+   and fake owner peer builders for records and checkpoints. The purpose is to
+   reduce boilerplate in future adversarial/concurrency tests without hiding the
+   state transition being tested. This is cleanup, not a reason to add more
+   abstractions to production code.
+
+## Core Completion Estimate
+
+Rough status as of checkpoint 43, measured against a functional first version
+with external coordination, pull replication, local failover mechanics, and
+basic operator visibility:
+
+- Keratin replication primitives: about 70%. Caller-assigned append,
+  checkpoint/reset primitives, and role guard direction exist. Remaining work is
+  mostly hardening, warnings/cleanup, and any later range/repair primitives that
+  snapshot-based catch-up proves it needs.
+- Stroma queue replication mechanics: about 65%. Queue roles, owner
+  freeze/drain, follower ingest, state checkpoint export/install, checked
+  promotion, and demotion exist. Remaining work is stronger adversarial tests,
+  role-transition cleanup, possible module split, and more explicit
+  consistency checks around snapshot/message catch-up.
+- Broker ownership and assignment model: about 45%. Static coordination,
+  assignment snapshots, transition planning, owner gates, not-owner protocol
+  errors, and stable placement policy exist. Remaining work is real
+  coordinator-backed watch/cache, owner fencing, controller loop, and promotion
+  orchestration.
+- Follower pull replication worker: about 55%. Worker state, catch-up tick,
+  checkpoint policy, owner-peer boundary, loop scaffold, and loop supervision
+  exist. Remaining work is protocol-backed owner peer, coordination-backed peer
+  resolver, retry/connection management, and end-to-end replication tests over
+  TCP.
+- Replication transport: about 35%. Protocol frames and handler wiring exist
+  for record reads, applies, and state checkpoint export/install. Remaining work
+  is the client/peer implementation, real networked worker wiring, resume/error
+  behavior, and larger transfer handling.
+- Failover and promotion orchestration: about 20%. Local primitives exist, but
+  the real sequence across coordinator leases, catch-up, fencing, promotion,
+  and client reroute is still mostly unimplemented.
+- Sharding and placement: about 25%. Deterministic placement policy exists and
+  preserves stable assignments. Remaining work is queue partition topology,
+  client partition routing, controller-managed balancing, partition scale-out,
+  and eventual shrink/drain behavior.
+- Publish-confirm replication durability: about 15%. The policy model exists,
+  but follower accepted/durable acknowledgements and enforcement in the publish
+  confirm path are still pending.
+- Operator/admin visibility: about 30%. Queue roles and follower worker state
+  are visible through broker observability surfaces. Remaining work is
+  user-facing replication lag/role display, transition logs, refusal reasons,
+  controller status, and health signals.
+- Testing for replication and sharding: about 40%. Good bottom-up coverage
+  exists for storage, Stroma roles, broker assignment, placement, worker ticks,
+  and supervision. Remaining work is helper cleanup, adversarial race tests,
+  TCP end-to-end tests, multi-broker tests, fault-injection tests, and eventually
+  longer chaos/soak tests.
+
+Overall for a decent first replication/sharding milestone: about 35-40%.
+The foundation is no longer speculative, but the feature is not operationally
+complete until real coordination, protocol-backed follower workers, failover
+orchestration, and end-to-end tests are in place.
 
 Previous completed implementation checkpoints:
 
