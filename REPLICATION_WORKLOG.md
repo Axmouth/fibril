@@ -330,6 +330,16 @@ Current focus: checkpoint-required follower boundary.
    those offsets. For the current contiguous message-log contract, it rejects an
    install that would advance the message log past messages still referenced by
    the installed state.
+23. Done: add an owner state-checkpoint export API in Stroma. The first
+   version may briefly freeze and drain owner operations before encoding the
+   checkpoint so the exported state, applied event offset, and log continuation
+   offsets describe one coherent point. This is a controlled handoff/catch-up
+   primitive, not a hot-path background checkpoint.
+24. Done: add broker-facing methods that fetch an owner state checkpoint and
+   install it on a follower through the existing Stroma install API.
+25. Next: extend the bounded follower catch-up helper so a checkpoint-required
+   response can drive state checkpoint install, contiguous message catch-up,
+   event catch-up, and promotion checks.
 
 Previous completed implementation checkpoints:
 
@@ -607,6 +617,16 @@ Tests needed before implementing transition:
   message logs to continuation offsets, keeps the queue in follower role, and
   rejects an install that would advance the follower message log beyond the
   lowest message still referenced by installed state.
+- 2026-06-09: Planned owner state-checkpoint export as a controlled
+  freeze/drain operation for the first implementation. That avoids exporting a
+  snapshot whose bytes and applied event offset can race under live owner
+  traffic. A later non-disruptive checkpoint path can move applied-offset
+  tracking inside the queue actor if this pause becomes too costly.
+- 2026-06-09: Added owner state-checkpoint export and broker forwarding. The
+  exported checkpoint separates `message_checkpoint_offset`, the first payload
+  the installed state may still reference, from `message_next_offset`, the owner
+  message-log tail the follower must reach before promotion. Broker tests now
+  cover export, follower install, contiguous message catch-up, and promotion.
 - 2026-06-09: Next design topic is API gatekeeping. Options to evaluate:
   distinct leader/follower Keratin handle types, a capability/token for
   replicated operations, an extension trait only used by replication code, or an

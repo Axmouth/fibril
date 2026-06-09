@@ -10,11 +10,12 @@ use stroma_core::{
     StromaMetrics,
 };
 pub use stroma_core::{
-    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
+    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome,
+    FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KeratinAppendCompletion,
     KeratinConfig, Message, MessageContentType, MessageHeaders, MessageInspectionPage,
-    MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead, QueueInspectionState,
-    QueuePromotionOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
+    MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
+    QueueInspectionState, QueuePromotionOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
     ReplicatedQueueApplyOutcome, SnapshotConfig, Stroma, StromaError, StromaEvent,
     StromaKeratinConfig,
 };
@@ -267,6 +268,29 @@ impl StromaEngine {
     ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
         self.inner
             .read_owner_event_records(tp, part, group, from, max)
+            .await
+    }
+
+    pub async fn export_owner_state_checkpoint(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<OwnerStateCheckpoint, StromaError> {
+        self.inner
+            .export_owner_state_checkpoint(tp, part, group)
+            .await
+    }
+
+    pub async fn install_follower_state_checkpoint(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        install: FollowerStateCheckpointInstall,
+    ) -> Result<FollowerStateCheckpointInstallOutcome, StromaError> {
+        self.inner
+            .install_follower_state_checkpoint(tp, part, group, install)
             .await
     }
 

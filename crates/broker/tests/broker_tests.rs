@@ -21,10 +21,10 @@ use fibril_broker::{
         StaticCoordination,
     },
     queue_engine::{
-        Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, Message,
-        MessageHeaders, OwnerReplicationBatch, OwnerReplicationRead, QueueEngine,
-        QueuePromotionOutcome, ReplayDeadLetterOutcome, ReplayDeadLettersReport,
-        SettleRequest as EngineSettleRequest, StromaEngine,
+        Deliverable, EvictOutcome, FollowerStateCheckpointInstall, InspectMode, IoError,
+        KeratinAppendCompletion, Message, MessageHeaders, OwnerReplicationBatch,
+        OwnerReplicationRead, QueueEngine, QueuePromotionOutcome, ReplayDeadLetterOutcome,
+        ReplayDeadLettersReport, SettleRequest as EngineSettleRequest, StromaEngine,
     },
     test_util::TestState,
 };
@@ -819,6 +819,113 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     let second = recv_with_timeout(&mut sub, 1000)
         .await
         .expect("second replicated message should deliver after promotion");
+    assert_eq!(first.message.payload, b"first");
+    assert_eq!(second.message.payload, b"second");
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+
+    let (publisher, _confirms) = owner.get_publisher("checkpoint", &None).await.unwrap();
+    for payload in [b"first".to_vec(), b"second".to_vec()] {
+        let reply = publisher
+            .publish(
+                payload,
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+
+    let checkpoint = owner
+        .export_owner_state_checkpoint("checkpoint", 0, None)
+        .await
+        .unwrap();
+    assert_eq!(checkpoint.message_checkpoint_offset, 0);
+    assert_eq!(checkpoint.message_next_offset, 2);
+    assert_eq!(checkpoint.event_next_offset, 2);
+    assert_eq!(checkpoint.applied_event_offset, 1);
+
+    follower
+        .become_replication_follower("checkpoint", 0, None)
+        .await
+        .unwrap();
+    follower
+        .install_follower_state_checkpoint(
+            "checkpoint",
+            0,
+            None,
+            FollowerStateCheckpointInstall {
+                message_next_offset: checkpoint.message_checkpoint_offset,
+                event_next_offset: checkpoint.event_next_offset,
+                applied_event_offset: checkpoint.applied_event_offset,
+                state_snapshot: checkpoint.state_snapshot,
+            },
+        )
+        .await
+        .unwrap();
+
+    let records = owner
+        .read_owner_replication_records(
+            "checkpoint",
+            0,
+            None,
+            checkpoint.message_checkpoint_offset,
+            checkpoint.event_next_offset,
+            10,
+            10,
+        )
+        .await
+        .unwrap();
+    let apply = follower
+        .apply_follower_replication_records("checkpoint", 0, None, records)
+        .await
+        .unwrap();
+    assert!(matches!(apply, BrokerFollowerReplicationApply::Applied(_)));
+
+    let promotion = follower
+        .promote_replication_follower_if_caught_up(
+            "checkpoint",
+            0,
+            None,
+            checkpoint.message_next_offset,
+            checkpoint.event_next_offset,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        promotion,
+        QueuePromotionOutcome::Promoted {
+            message_next_offset: 2,
+            event_next_offset: 2,
+            applied_event_offset: Some(1),
+        }
+    );
+
+    let mut sub = follower
+        .subscribe(
+            "checkpoint",
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 2 },
+        )
+        .await
+        .unwrap();
+    let first = recv_with_timeout(&mut sub, 1000)
+        .await
+        .expect("first checkpointed message should deliver after promotion");
+    let second = recv_with_timeout(&mut sub, 1000)
+        .await
+        .expect("second checkpointed message should deliver after promotion");
     assert_eq!(first.message.payload, b"first");
     assert_eq!(second.message.payload, b"second");
 

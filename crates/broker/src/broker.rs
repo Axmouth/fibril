@@ -25,8 +25,10 @@ use crate::coordination::{
     StaticCoordination, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
-    EvictOutcome, QueueEngine, QueuePromotionOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
-    ReplicatedQueueApplyOutcome, SettleKind, SettleRequest as EngineSettleRequest, StromaEngine,
+    EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome,
+    OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedEventBatch,
+    ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SettleKind,
+    SettleRequest as EngineSettleRequest, StromaEngine,
 };
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
@@ -2571,6 +2573,32 @@ impl Broker<StromaEngine> {
             .become_queue_follower(topic, partition, group)
             .await?;
         Ok(())
+    }
+
+    pub async fn export_owner_state_checkpoint(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+    ) -> Result<OwnerStateCheckpoint, BrokerError> {
+        self.ensure_queue_owner(topic, partition, group)?;
+        Ok(self
+            .engine
+            .export_owner_state_checkpoint(topic, partition, group)
+            .await?)
+    }
+
+    pub async fn install_follower_state_checkpoint(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+        install: FollowerStateCheckpointInstall,
+    ) -> Result<FollowerStateCheckpointInstallOutcome, BrokerError> {
+        Ok(self
+            .engine
+            .install_follower_state_checkpoint(topic, partition, group, install)
+            .await?)
     }
 
     pub async fn apply_follower_replication_records(
