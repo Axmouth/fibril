@@ -281,9 +281,14 @@ Current focus: follower replication worker foundation.
 13. Done: add focused tests for follower worker scheduling decisions:
    caught-up cooldown, iteration-limit retry, checkpoint-required blocking,
    and progress advancing offsets.
-14. In progress: commit the follower worker state checkpoint.
-15. Next: attach the worker to coordination watcher follower assignments.
-16. Later: snapshot install support for followers that are behind the owner's
+14. Done: commit the follower worker state checkpoint.
+15. Done: attach follower worker lifecycle to local follower
+   assignments. This checkpoint should register local worker state when a queue
+   becomes a follower, but should not start protocol/network replication yet.
+16. Done: add tests proving follower assignment creates worker state and owner
+   assignment keeps sparse queues cold.
+17. In progress: commit the follower worker lifecycle checkpoint.
+18. Next: snapshot install support for followers that are behind the owner's
    retained log range.
 
 Previous completed implementation checkpoints:

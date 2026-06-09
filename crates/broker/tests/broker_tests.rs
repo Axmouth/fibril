@@ -568,6 +568,7 @@ async fn assignment_transition_apply_can_make_queue_follower() {
         outcome,
         BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::BecomeFollower)
     );
+    assert!(broker.has_follower_replication_worker("transition-followed", 0, Some("workers")));
 
     let err = broker
         .read_owner_replication_records("transition-followed", 0, Some("workers"), 0, 0, 1, 1)
@@ -610,6 +611,7 @@ async fn assignment_watcher_applies_snapshot_update_to_follower_role() {
     })
     .await
     .expect("assignment watcher should materialize local follower queue");
+    assert!(broker.has_follower_replication_worker("watched-followed", 0, Some("workers")));
 
     let err = broker
         .engine()
@@ -640,6 +642,7 @@ async fn assignment_transition_apply_does_not_materialize_new_owner_queue() {
         BrokerAssignmentTransitionApply::Noop(LocalAssignmentIntent::BecomeOwner)
     );
     assert!(!broker.is_queue_materialized("transition-owned", Some("workers")));
+    assert!(!broker.has_follower_replication_worker("transition-owned", 0, Some("workers")));
     broker.shutdown().await;
 }
 

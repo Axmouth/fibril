@@ -900,6 +900,10 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     records_by_tags: DashMap<DeliveryTag, TagRecord>,
     tags_by_key_offset: DashMap<(QueueKey, Offset), DeliveryTag>,
     queue_eviction_observations: DashMap<QueueKey, QueueEvictionObservation>,
+    follower_replication_workers: DashMap<
+        crate::coordination::QueueIdentity,
+        Arc<AsyncMutex<FollowerReplicationWorkerState>>,
+    >,
 
     pending_settles: Arc<AtomicUsize>,
     settle_drained: Arc<Notify>,
@@ -960,6 +964,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             records_by_tags: DashMap::new(),
             tags_by_key_offset: DashMap::new(),
             queue_eviction_observations: DashMap::new(),
+            follower_replication_workers: DashMap::new(),
             pending_settles: Arc::new(AtomicUsize::new(0)),
             settle_drained: Arc::new(Notify::new()),
             settings_changed: Arc::new(Notify::new()),
@@ -1308,6 +1313,26 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     pub fn is_queue_materialized(&self, topic: &str, group: Option<&str>) -> bool {
         self.engine.is_materialized(topic, 0, group)
+    }
+
+    pub fn has_follower_replication_worker(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+    ) -> bool {
+        self.follower_replication_workers
+            .contains_key(&crate::coordination::QueueIdentity::new(
+                topic, partition, group,
+            ))
+    }
+
+    fn ensure_follower_replication_worker(&self, queue: &crate::coordination::QueueIdentity) {
+        self.follower_replication_workers
+            .entry(queue.clone())
+            .or_insert_with(|| {
+                Arc::new(AsyncMutex::new(FollowerReplicationWorkerState::new(0, 0)))
+            });
     }
 
     fn record_queue_eviction_attempt(
@@ -2469,12 +2494,14 @@ impl Broker<StromaEngine> {
             LocalAssignmentIntent::BecomeFollower => {
                 self.become_replication_follower(&topic, transition.queue.partition, group)
                     .await?;
+                self.ensure_follower_replication_worker(&transition.queue);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::DemoteOwnerToFollower => {
                 self.engine
                     .demote_queue_owner_to_follower(&topic, transition.queue.partition, group)
                     .await?;
+                self.ensure_follower_replication_worker(&transition.queue);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::FreezeOwner => {
