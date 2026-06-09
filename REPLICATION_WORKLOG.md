@@ -271,9 +271,11 @@ Current focus: broker assignment watcher foundation.
    sparse queues should stay cold until traffic or an explicit operation loads
    them.
 9. Done: commit the assignment transition planner/apply checkpoint.
-10. Next: broker assignment watcher task that watches coordination snapshots
-   and applies role transitions.
-11. Later: follower worker scheduling and snapshot install.
+10. Done: broker assignment watcher task that watches coordination snapshots
+   and applies role transitions. This should be opt-in at first so standalone
+   broker construction does not change behavior.
+11. In progress: commit the assignment watcher checkpoint.
+12. Next: follower worker scheduling and snapshot install.
 
 Previous completed implementation checkpoints:
 

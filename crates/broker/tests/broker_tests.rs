@@ -513,6 +513,41 @@ fn assignment_transition(
     }
 }
 
+fn coordination_nodes() -> HashMap<String, NodeInfo> {
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        "node-a".to_string(),
+        NodeInfo {
+            node_id: "node-a".to_string(),
+            broker_addr: "127.0.0.1:1001".parse().unwrap(),
+            admin_addr: None,
+        },
+    );
+    nodes.insert(
+        "node-b".to_string(),
+        NodeInfo {
+            node_id: "node-b".to_string(),
+            broker_addr: "127.0.0.1:1002".parse().unwrap(),
+            admin_addr: None,
+        },
+    );
+    nodes
+}
+
+fn coordination_snapshot(
+    assignments: Vec<PartitionAssignment>,
+    generation: u64,
+) -> CoordinationSnapshot {
+    CoordinationSnapshot {
+        nodes: coordination_nodes(),
+        assignments: assignments
+            .into_iter()
+            .map(|assignment| (assignment.queue.clone(), assignment))
+            .collect(),
+        generation,
+    }
+}
+
 #[tokio::test]
 async fn assignment_transition_apply_can_make_queue_follower() {
     let (broker, _dir) = open_test_broker().await;
@@ -540,6 +575,46 @@ async fn assignment_transition_apply_can_make_queue_follower() {
         err,
         BrokerError::Engine(StromaError::WrongQueueRole { .. })
     ));
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn assignment_watcher_applies_snapshot_update_to_follower_role() {
+    let coordination = Arc::new(StaticCoordination::new(
+        "node-a",
+        coordination_snapshot(Vec::new(), 1),
+    ));
+    let (broker, _dir) = open_test_broker_with_ownership(coordination.clone()).await;
+    broker.spawn_assignment_watcher(coordination.clone());
+
+    let queue = QueueIdentity::new("watched-followed", 0, Some("workers"));
+    coordination.update_snapshot(coordination_snapshot(
+        vec![PartitionAssignment::new(
+            queue,
+            "node-b",
+            vec!["node-a".to_string()],
+            2,
+        )],
+        2,
+    ));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if broker.is_queue_materialized("watched-followed", Some("workers")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("assignment watcher should materialize local follower queue");
+
+    let err = broker
+        .engine()
+        .read_owner_message_records("watched-followed", 0, Some("workers"), 0, 1)
+        .await
+        .expect_err("watched follower queue should reject owner reads");
+    assert!(matches!(err, StromaError::WrongQueueRole { .. }));
     broker.shutdown().await;
 }
 

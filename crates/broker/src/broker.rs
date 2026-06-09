@@ -21,7 +21,8 @@ use fibril_util::unix_millis;
 use uuid::Uuid;
 
 use crate::coordination::{
-    Coordination, LocalAssignmentIntent, LocalAssignmentTransition, StaticCoordination,
+    Coordination, CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentTransition,
+    StaticCoordination, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
     EvictOutcome, QueueEngine, QueuePromotionOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
@@ -2271,6 +2272,62 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 }
 
 impl Broker<StromaEngine> {
+    pub fn spawn_assignment_watcher(self: &Arc<Self>, coordination: Arc<dyn Coordination>) {
+        let broker = self.clone();
+        self.task_group.spawn("assignment_watcher", async move {
+            let node_id = coordination.node_id().to_string();
+            let mut previous = CoordinationSnapshot::default();
+            let mut watch = coordination.watch();
+
+            let initial = coordination.snapshot();
+            broker
+                .apply_assignment_snapshot_transitions(&node_id, &previous, &initial)
+                .await;
+            previous = initial;
+
+            loop {
+                if watch.changed().await.is_err() {
+                    tracing::debug!("assignment watcher exiting because coordination watch closed");
+                    break;
+                }
+
+                let next = watch.borrow().clone();
+                if next == previous {
+                    continue;
+                }
+
+                broker
+                    .apply_assignment_snapshot_transitions(&node_id, &previous, &next)
+                    .await;
+                previous = next;
+            }
+        });
+    }
+
+    pub async fn apply_assignment_snapshot_transitions(
+        &self,
+        node_id: &str,
+        previous: &CoordinationSnapshot,
+        next: &CoordinationSnapshot,
+    ) -> Vec<Result<BrokerAssignmentTransitionApply, BrokerError>> {
+        let transitions = plan_local_assignment_transitions(node_id, previous, next);
+        let mut outcomes = Vec::with_capacity(transitions.len());
+        for transition in transitions {
+            let result = self.apply_assignment_transition(&transition).await;
+            if let Err(err) = &result {
+                tracing::error!(
+                    topic = %transition.queue.topic,
+                    partition = transition.queue.partition,
+                    group = ?transition.queue.group,
+                    intent = ?transition.intent,
+                    "failed to apply assignment transition: {err:?}"
+                );
+            }
+            outcomes.push(result);
+        }
+        outcomes
+    }
+
     pub async fn apply_assignment_transition(
         &self,
         transition: &LocalAssignmentTransition,
