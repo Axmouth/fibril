@@ -746,6 +746,56 @@ Risks:
 
 - Helper refactors should be separate from behavior changes where possible.
 
+### 11. Code Organization After Mechanics Settle
+
+Goal: reorganize broker/Stroma replication code once behavior is stable enough
+that the refactor can be mostly mechanical.
+
+Breakdown:
+
+- Move broker replication types, peer traits, follower worker state, and worker
+  supervision into a dedicated broker replication module where practical.
+- Split large Stroma responsibilities into focused modules after the current
+  replication mechanics stop moving: roles/transitions, replicated ingest,
+  checkpoints, snapshots, inspection, and test utilities are likely candidates.
+- Keep public surfaces stable during the move. Prefer module extraction over
+  behavior changes in the same commit.
+- Use the extraction pass to identify abstractions that can be removed or
+  collapsed because the real implementation shape is now clearer.
+- Keep Keratin generic. Any Fibril/Stroma-shaped concept found during the split
+  should move upward, not into Keratin.
+
+Risks:
+
+- Refactoring too early will churn interfaces that are still being designed.
+  Wait until protocol peer, resolver, and checkpoint catch-up behavior are
+  mostly settled.
+
+### 12. High-Level Scenario Runner
+
+Goal: make end-to-end cluster behavior testable without writing bespoke async
+plumbing for every scenario.
+
+Breakdown:
+
+- Add a test-only scenario harness that can start multiple brokers with temp
+  data dirs, TCP ports, static or fake coordination, and controlled assignment
+  snapshots.
+- Provide scenario operations: publish, subscribe/read, advance assignment,
+  wait for follower catch-up, stop owner runtime, promote follower, restart
+  broker, and inspect queue state.
+- Keep it deterministic enough for CI: explicit waits on observed state where
+  possible, bounded timeouts only at scenario edges.
+- Use it for multi-broker TCP replication, checkpoint recovery, failover,
+  not-owner reroute, and later chaos-style tests.
+- Keep this as test infrastructure. It should not create production framework
+  code unless production behavior genuinely needs it.
+
+Risks:
+
+- A too-powerful scenario DSL can hide important assertions. Start with helper
+  functions and a simple harness struct before inventing a language.
+
 ## Core Completion Estimate
 
 Rough status as of checkpoint 43, measured against a functional first version
