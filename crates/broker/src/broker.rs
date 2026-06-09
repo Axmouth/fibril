@@ -505,6 +505,7 @@ pub enum BrokerReplicationCatchUp {
 pub enum FollowerReplicationWorkerLoopExit {
     Cancelled { ticks: usize },
     WorkerStopped { ticks: usize },
+    OwnerChanged { ticks: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3433,6 +3434,16 @@ impl Broker<StromaEngine> {
                         .contains_key(&assignment.queue) =>
                 {
                     return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+                }
+                Err(BrokerError::NotOwner { .. }) => {
+                    tracing::warn!(
+                        topic = %assignment.queue.topic,
+                        partition = assignment.queue.partition,
+                        group = ?assignment.queue.group,
+                        owner = %assignment.owner,
+                        "follower replication worker owner peer is no longer owner"
+                    );
+                    return Ok(FollowerReplicationWorkerLoopExit::OwnerChanged { ticks });
                 }
                 Err(err) => {
                     tracing::warn!(

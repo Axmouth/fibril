@@ -526,10 +526,16 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    checked promotion. This avoids adding a production truncation hook just to
    make an integration test deterministic. Lower-level Stroma tests still own
    real retained-head/checkpoint-required behavior.
+45. Done for not-owner loop reaction: the follower worker loop now treats a
+   `BrokerError::NotOwner` from its resolved owner peer as an ownership/topology
+   change, not as an ordinary retryable transport failure. It exits with
+   `OwnerChanged { ticks }` so a future coordination watcher can refresh
+   topology or wait for a newer assignment instead of sleeping against a stale
+   owner. Protocol peers already map wire `ERR_NOT_OWNER` into this broker error,
+   so the behavior applies to real protocol owner connections.
    Remaining transport work: connection reuse, reconnect/backoff, topology-watch
-   refresh, typed not-owner/topology refresh reactions in the loop, and
-   longer-running supervised watcher coverage.
-45. Future test cleanup pass: broker replication tests now repeat enough setup
+   refresh, and longer-running supervised watcher coverage.
+46. Future test cleanup pass: broker replication tests now repeat enough setup
    that helpers are worth adding before the next large group of tests. Keep
    helpers behavior-shaped, not assertion-hiding. Good candidates:
    owner/follower broker pair setup, follower assignment setup, publishing `N`
@@ -539,7 +545,7 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    reduce boilerplate in future adversarial/concurrency tests without hiding the
    state transition being tested. This is cleanup, not a reason to add more
    abstractions to production code.
-46. Future admin dashboard topology view: once coordination-backed assignments
+47. Future admin dashboard topology view: once coordination-backed assignments
    exist, add a topology page to the dashboard. Ideally this is a live diagram
    showing nodes, partition owners, followers, lag, role transitions, and
    unhealthy or disconnected links. The first version can be table-first if
@@ -563,8 +569,10 @@ Breakdown:
 - Done: reuse existing protocol handler frames before adding new wire surface.
 - Add connection lifecycle handling: connect, reconnect, fail current tick,
   and let the worker retry by policy.
-- Keep ownership errors explicit. If the contacted node is not owner anymore,
-  the peer should return a typed error that causes resolver/topology refresh.
+- Done at the loop boundary: keep ownership errors explicit. If the contacted
+  node is not owner anymore, the protocol peer returns `BrokerError::NotOwner`
+  and the follower loop exits with `OwnerChanged`, giving the future
+  resolver/topology watcher a precise refresh signal.
 - Done for contiguous catch-up: add TCP end-to-end tests with two local brokers:
   owner publishes, follower worker pulls over protocol, follower reaches
   matching offsets, and checked promotion succeeds.

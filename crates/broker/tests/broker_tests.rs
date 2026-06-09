@@ -1978,6 +1978,43 @@ impl BrokerOwnerReplicationPeerResolver for StaticOwnerPeerResolver {
 }
 
 #[derive(Debug)]
+struct NotOwnerPeer;
+
+impl BrokerOwnerReplicationPeer for NotOwnerPeer {
+    fn read_owner_replication_records<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: fibril_storage::LogId,
+        group: Option<&'a str>,
+        _message_from: Offset,
+        _event_from: Offset,
+        _max_messages: usize,
+        _max_events: usize,
+    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        Box::pin(async move {
+            Err(BrokerError::NotOwner {
+                topic: topic.into(),
+                partition,
+                group: group.map(str::to_string),
+            })
+        })
+    }
+
+    fn export_owner_state_checkpoint<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: fibril_storage::LogId,
+        _group: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+        Box::pin(async {
+            Err(BrokerError::Unknown(
+                "not-owner peer does not export checkpoints".into(),
+            ))
+        })
+    }
+}
+
+#[derive(Debug)]
 struct CountingEmptyOwnerPeer {
     reads: AtomicUsize,
     read_notify: Notify,
@@ -2148,6 +2185,43 @@ async fn follower_worker_loop_exits_when_worker_is_stopped() {
     assert_eq!(
         outcome,
         FollowerReplicationWorkerLoopExit::WorkerStopped { ticks: 0 }
+    );
+
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn follower_worker_loop_exits_when_owner_peer_is_not_owner() {
+    let (follower, _follower_dir) = open_test_broker().await;
+    let queue = QueueIdentity::new("peer-loop-not-owner", 0, Some("workers"));
+    let assignment =
+        PartitionAssignment::new(queue.clone(), "node-a", vec!["node-b".to_string()], 1);
+    let transition = assignment_transition(
+        "peer-loop-not-owner",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    follower
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    let resolver = Arc::new(StaticOwnerPeerResolver::new(Arc::new(NotOwnerPeer)));
+    let shutdown = CancellationToken::new();
+    let outcome = follower
+        .run_follower_replication_worker_loop(
+            assignment,
+            resolver,
+            FollowerReplicationWorkerConfig::default(),
+            shutdown,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        FollowerReplicationWorkerLoopExit::OwnerChanged { ticks: 0 }
     );
 
     follower.shutdown().await;
