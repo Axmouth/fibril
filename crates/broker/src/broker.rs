@@ -472,6 +472,118 @@ pub enum BrokerReplicationCatchUp {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FollowerReplicationWorkerConfig {
+    pub max_messages_per_read: usize,
+    pub max_events_per_read: usize,
+    pub max_iterations_per_tick: usize,
+    pub caught_up_poll_ms: u64,
+    pub retry_poll_ms: u64,
+    pub checkpoint_retry_poll_ms: u64,
+}
+
+impl Default for FollowerReplicationWorkerConfig {
+    fn default() -> Self {
+        Self {
+            max_messages_per_read: 256,
+            max_events_per_read: 256,
+            max_iterations_per_tick: 8,
+            caught_up_poll_ms: 1000,
+            retry_poll_ms: 100,
+            checkpoint_retry_poll_ms: 5000,
+        }
+    }
+}
+
+impl FollowerReplicationWorkerConfig {
+    pub fn catch_up_options(
+        self,
+        message_from: Offset,
+        event_from: Offset,
+    ) -> BrokerReplicationCatchUpOptions {
+        BrokerReplicationCatchUpOptions {
+            message_from,
+            event_from,
+            max_messages_per_read: self.max_messages_per_read,
+            max_events_per_read: self.max_events_per_read,
+            max_iterations: self.max_iterations_per_tick,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowerReplicationWorkerStatus {
+    Idle,
+    CaughtUp,
+    PendingRetry,
+    CheckpointRequired {
+        messages: Option<BrokerReplicationCheckpointRequired>,
+        events: Option<BrokerReplicationCheckpointRequired>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FollowerReplicationWorkerState {
+    pub message_next_offset: Offset,
+    pub event_next_offset: Offset,
+    pub status: FollowerReplicationWorkerStatus,
+    pub next_delay_ms: u64,
+}
+
+impl FollowerReplicationWorkerState {
+    pub fn new(message_next_offset: Offset, event_next_offset: Offset) -> Self {
+        Self {
+            message_next_offset,
+            event_next_offset,
+            status: FollowerReplicationWorkerStatus::Idle,
+            next_delay_ms: 0,
+        }
+    }
+
+    pub fn catch_up_options(
+        &self,
+        cfg: FollowerReplicationWorkerConfig,
+    ) -> BrokerReplicationCatchUpOptions {
+        cfg.catch_up_options(self.message_next_offset, self.event_next_offset)
+    }
+
+    pub fn record_catch_up(
+        &mut self,
+        cfg: FollowerReplicationWorkerConfig,
+        outcome: &BrokerReplicationCatchUp,
+    ) {
+        match outcome {
+            BrokerReplicationCatchUp::CaughtUp(progress) => {
+                self.apply_progress(progress);
+                self.status = FollowerReplicationWorkerStatus::CaughtUp;
+                self.next_delay_ms = cfg.caught_up_poll_ms;
+            }
+            BrokerReplicationCatchUp::IterationLimit { progress } => {
+                self.apply_progress(progress);
+                self.status = FollowerReplicationWorkerStatus::PendingRetry;
+                self.next_delay_ms = cfg.retry_poll_ms;
+            }
+            BrokerReplicationCatchUp::CheckpointRequired {
+                progress,
+                messages,
+                events,
+            } => {
+                self.apply_progress(progress);
+                self.status = FollowerReplicationWorkerStatus::CheckpointRequired {
+                    messages: messages.clone(),
+                    events: events.clone(),
+                };
+                self.next_delay_ms = cfg.checkpoint_retry_poll_ms;
+            }
+        }
+    }
+
+    fn apply_progress(&mut self, progress: &BrokerReplicationCatchUpProgress) {
+        self.message_next_offset = progress.message_next_offset;
+        self.event_next_offset = progress.event_next_offset;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrokerAssignmentTransitionApply {
     Applied(LocalAssignmentIntent),

@@ -245,7 +245,7 @@ resume after context compaction.
 
 ## Active Implementation Plan
 
-Current focus: broker assignment watcher foundation.
+Current focus: follower replication worker foundation.
 
 1. Done: replace the old leader-only `Coordination` stub with a cached
    assignment model shaped like the controller spec: nodes, partition
@@ -274,8 +274,17 @@ Current focus: broker assignment watcher foundation.
 10. Done: broker assignment watcher task that watches coordination snapshots
    and applies role transitions. This should be opt-in at first so standalone
    broker construction does not change behavior.
-11. In progress: commit the assignment watcher checkpoint.
-12. Next: follower worker scheduling and snapshot install.
+11. Done: commit the assignment watcher checkpoint.
+12. Done: add a follower worker state machine that tracks local
+   replication offsets, schedules pull attempts, records checkpoint-required
+   state, and remains independent of the eventual protocol transport.
+13. Done: add focused tests for follower worker scheduling decisions:
+   caught-up cooldown, iteration-limit retry, checkpoint-required blocking,
+   and progress advancing offsets.
+14. In progress: commit the follower worker state checkpoint.
+15. Next: attach the worker to coordination watcher follower assignments.
+16. Later: snapshot install support for followers that are behind the owner's
+   retained log range.
 
 Previous completed implementation checkpoints:
 

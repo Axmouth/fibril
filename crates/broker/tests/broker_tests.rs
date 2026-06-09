@@ -10,8 +10,10 @@ use fibril_broker::{
     broker::{
         Broker, BrokerAssignmentTransitionApply, BrokerConfig, BrokerError,
         BrokerFollowerReplicationApply, BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
-        BrokerReplicationCatchUpProgress, ConsumerConfig, OwnedQueue, QueueEvictionAttempt,
-        QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
+        BrokerReplicationCatchUpProgress, BrokerReplicationCheckpointRequired, ConsumerConfig,
+        FollowerReplicationWorkerConfig, FollowerReplicationWorkerState,
+        FollowerReplicationWorkerStatus, OwnedQueue, QueueEvictionAttempt, QueueEvictionSkip,
+        SettleRequest, SettleType, StaticQueueOwnership,
     },
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
@@ -919,6 +921,106 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
 
     owner.shutdown().await;
     follower.shutdown().await;
+}
+
+#[test]
+fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
+    let cfg = FollowerReplicationWorkerConfig {
+        max_messages_per_read: 11,
+        max_events_per_read: 13,
+        max_iterations_per_tick: 17,
+        caught_up_poll_ms: 1000,
+        retry_poll_ms: 100,
+        checkpoint_retry_poll_ms: 5000,
+    };
+    let state = FollowerReplicationWorkerState::new(23, 29);
+
+    assert_eq!(
+        state.catch_up_options(cfg),
+        BrokerReplicationCatchUpOptions {
+            message_from: 23,
+            event_from: 29,
+            max_messages_per_read: 11,
+            max_events_per_read: 13,
+            max_iterations: 17,
+        }
+    );
+}
+
+#[test]
+fn follower_worker_state_records_caught_up_progress_and_cooldown() {
+    let cfg = FollowerReplicationWorkerConfig::default();
+    let mut state = FollowerReplicationWorkerState::new(0, 0);
+
+    state.record_catch_up(
+        cfg,
+        &BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
+            message_next_offset: 5,
+            event_next_offset: 7,
+            ..Default::default()
+        }),
+    );
+
+    assert_eq!(state.message_next_offset, 5);
+    assert_eq!(state.event_next_offset, 7);
+    assert_eq!(state.status, FollowerReplicationWorkerStatus::CaughtUp);
+    assert_eq!(state.next_delay_ms, cfg.caught_up_poll_ms);
+}
+
+#[test]
+fn follower_worker_state_records_iteration_limit_as_retry() {
+    let cfg = FollowerReplicationWorkerConfig::default();
+    let mut state = FollowerReplicationWorkerState::new(1, 2);
+
+    state.record_catch_up(
+        cfg,
+        &BrokerReplicationCatchUp::IterationLimit {
+            progress: BrokerReplicationCatchUpProgress {
+                message_next_offset: 3,
+                event_next_offset: 4,
+                ..Default::default()
+            },
+        },
+    );
+
+    assert_eq!(state.message_next_offset, 3);
+    assert_eq!(state.event_next_offset, 4);
+    assert_eq!(state.status, FollowerReplicationWorkerStatus::PendingRetry);
+    assert_eq!(state.next_delay_ms, cfg.retry_poll_ms);
+}
+
+#[test]
+fn follower_worker_state_records_checkpoint_requirement() {
+    let cfg = FollowerReplicationWorkerConfig::default();
+    let mut state = FollowerReplicationWorkerState::new(10, 20);
+    let checkpoint = BrokerReplicationCheckpointRequired {
+        epoch: 2,
+        requested_offset: 10,
+        head_offset: 15,
+        next_offset: 40,
+    };
+
+    state.record_catch_up(
+        cfg,
+        &BrokerReplicationCatchUp::CheckpointRequired {
+            progress: BrokerReplicationCatchUpProgress {
+                message_next_offset: 10,
+                event_next_offset: 20,
+                ..Default::default()
+            },
+            messages: Some(checkpoint.clone()),
+            events: None,
+        },
+    );
+
+    assert_eq!(
+        state.status,
+        FollowerReplicationWorkerStatus::CheckpointRequired {
+            messages: Some(checkpoint),
+            events: None,
+        }
+    );
+    assert_eq!(state.next_delay_ms, cfg.checkpoint_retry_poll_ms);
 }
 
 async fn recv_with_timeout(
