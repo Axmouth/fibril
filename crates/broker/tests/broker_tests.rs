@@ -1618,19 +1618,18 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
 fn follower_worker_state_records_caught_up_progress_and_cooldown() {
     let cfg = FollowerReplicationWorkerConfig::default();
     let mut state = FollowerReplicationWorkerState::new(0, 0);
+    let progress = BrokerReplicationCatchUpProgress {
+        message_next_offset: 5,
+        event_next_offset: 7,
+        ..Default::default()
+    };
 
-    state.record_catch_up(
-        cfg,
-        &BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
-            message_next_offset: 5,
-            event_next_offset: 7,
-            ..Default::default()
-        }),
-    );
+    state.record_catch_up(cfg, &BrokerReplicationCatchUp::CaughtUp(progress));
 
     assert_eq!(state.message_next_offset, 5);
     assert_eq!(state.event_next_offset, 7);
     assert_eq!(state.status, FollowerReplicationWorkerStatus::CaughtUp);
+    assert_eq!(state.last_progress, Some(progress));
     assert_eq!(state.next_delay_ms, cfg.caught_up_poll_ms);
 }
 
@@ -1638,21 +1637,18 @@ fn follower_worker_state_records_caught_up_progress_and_cooldown() {
 fn follower_worker_state_records_iteration_limit_as_retry() {
     let cfg = FollowerReplicationWorkerConfig::default();
     let mut state = FollowerReplicationWorkerState::new(1, 2);
+    let progress = BrokerReplicationCatchUpProgress {
+        message_next_offset: 3,
+        event_next_offset: 4,
+        ..Default::default()
+    };
 
-    state.record_catch_up(
-        cfg,
-        &BrokerReplicationCatchUp::IterationLimit {
-            progress: BrokerReplicationCatchUpProgress {
-                message_next_offset: 3,
-                event_next_offset: 4,
-                ..Default::default()
-            },
-        },
-    );
+    state.record_catch_up(cfg, &BrokerReplicationCatchUp::IterationLimit { progress });
 
     assert_eq!(state.message_next_offset, 3);
     assert_eq!(state.event_next_offset, 4);
     assert_eq!(state.status, FollowerReplicationWorkerStatus::PendingRetry);
+    assert_eq!(state.last_progress, Some(progress));
     assert_eq!(state.next_delay_ms, cfg.retry_poll_ms);
 }
 
@@ -1666,15 +1662,16 @@ fn follower_worker_state_records_checkpoint_requirement() {
         head_offset: 15,
         next_offset: 40,
     };
+    let progress = BrokerReplicationCatchUpProgress {
+        message_next_offset: 10,
+        event_next_offset: 20,
+        ..Default::default()
+    };
 
     state.record_catch_up(
         cfg,
         &BrokerReplicationCatchUp::CheckpointRequired {
-            progress: BrokerReplicationCatchUpProgress {
-                message_next_offset: 10,
-                event_next_offset: 20,
-                ..Default::default()
-            },
+            progress,
             messages: Some(checkpoint.clone()),
             events: None,
         },
@@ -1687,6 +1684,7 @@ fn follower_worker_state_records_checkpoint_requirement() {
             events: None,
         }
     );
+    assert_eq!(state.last_progress, Some(progress));
     assert_eq!(state.next_delay_ms, cfg.checkpoint_retry_poll_ms);
 }
 
@@ -1808,6 +1806,13 @@ async fn follower_worker_tick_records_catch_up_progress() {
             message_next_offset: 1,
             event_next_offset: 1,
             status: FollowerReplicationWorkerStatus::PendingRetry,
+            last_progress: Some(BrokerReplicationCatchUpProgress {
+                iterations: 1,
+                applied_message_records: 1,
+                applied_event_records: 1,
+                message_next_offset: 1,
+                event_next_offset: 1,
+            }),
             next_delay_ms: cfg.retry_poll_ms,
         })
     );

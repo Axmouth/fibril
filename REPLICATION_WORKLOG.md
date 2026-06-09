@@ -398,6 +398,13 @@ Current focus: checkpoint-required follower boundary.
    still owner, then freezes the Stroma queue. This means local owner removal
    does not leave stale broker leases stuck as inflight, and stale publisher
    handles close after freeze.
+33. Done for follower worker status detail: the local follower replication
+   worker state now stores the latest catch-up progress alongside current
+   message/event offsets, status, and next delay. Status remains intentionally
+   small: caught up, pending retry, or checkpoint required. The progress field
+   records what the last tick actually applied or attempted, which gives later
+   admin/controller code a clear watermark and recent movement signal without
+   adding coordination behavior yet.
 
 Previous completed implementation checkpoints:
 

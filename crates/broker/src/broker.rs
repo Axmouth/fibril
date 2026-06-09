@@ -531,6 +531,7 @@ pub struct FollowerReplicationWorkerState {
     pub message_next_offset: Offset,
     pub event_next_offset: Offset,
     pub status: FollowerReplicationWorkerStatus,
+    pub last_progress: Option<BrokerReplicationCatchUpProgress>,
     pub next_delay_ms: u64,
 }
 
@@ -540,6 +541,7 @@ impl FollowerReplicationWorkerState {
             message_next_offset,
             event_next_offset,
             status: FollowerReplicationWorkerStatus::Idle,
+            last_progress: None,
             next_delay_ms: 0,
         }
     }
@@ -593,6 +595,7 @@ impl FollowerReplicationWorkerState {
     fn apply_progress(&mut self, progress: &BrokerReplicationCatchUpProgress) {
         self.message_next_offset = progress.message_next_offset;
         self.event_next_offset = progress.event_next_offset;
+        self.last_progress = Some(*progress);
     }
 }
 
