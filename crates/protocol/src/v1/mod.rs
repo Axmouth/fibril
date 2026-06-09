@@ -2,6 +2,7 @@ pub mod client;
 pub mod frame;
 pub mod handler;
 pub mod helper;
+pub mod replication;
 
 use std::collections::HashMap;
 

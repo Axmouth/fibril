@@ -254,6 +254,11 @@ resume after context compaction.
     can compose the existing read/apply frames and gives a deterministic way to
     debug replication before introducing follower scheduling, topology watches,
     or retry/backoff policy.
+    The protocol crate now has a reusable manual catch-up helper that composes
+    two already-connected protocol streams: one owner connection for
+    `ReplicationRead`, one follower connection for `ReplicationApply`. It
+    repeats until both streams return empty batches, a checkpoint is required,
+    or an iteration limit is reached.
 16. Next: design the follower background worker around pull correctness:
     repeated pulls from follower-owned offsets, optional owner wake-up hints
     with cooldown, and long-poll or bounded timer safety.
@@ -293,6 +298,25 @@ The first protocol follower-apply pass adds:
     apply records
   - success test promotes the follower afterward to verify the applied
     message/event logs and state are coherent
+
+### Bounded Read Regression
+
+While adding the protocol catch-up helper, a one-record read limit exposed a
+replication correctness bug in Stroma owner reads. `OwnerReplicationBatch`
+reported the log tail as `next_offset`, even when the returned batch contained
+only an earlier prefix. That would make a follower skip unread offsets under
+bounded reads.
+
+The fixed contract is:
+
+- `next_offset` in a normal batch means "resume immediately after this returned
+  batch"
+- empty batches return `next_offset == requested_offset`
+- checkpoint-required responses may still report the owner log's current
+  `next_offset`, because they are describing the checkpoint/snapshot handoff
+  boundary rather than a consumed batch
+
+Stroma now has regression coverage for bounded message and event owner reads.
 
 Current verification:
 

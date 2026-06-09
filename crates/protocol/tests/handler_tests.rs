@@ -21,6 +21,10 @@ use fibril_protocol::v1::{
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
+    replication::{
+        ProtocolReplicationCatchUp, ProtocolReplicationCatchUpOptions,
+        catch_up_replication_over_protocol,
+    },
 };
 use fibril_util::{StaticAuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
@@ -1060,51 +1064,6 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
     )
     .await;
 
-    owner_framed
-        .send(
-            try_encode(
-                Op::ReplicationRead,
-                4,
-                &ReplicationRead {
-                    topic: topic.into(),
-                    group: group.clone(),
-                    partition: 0,
-                    message_from: 0,
-                    event_from: 0,
-                    max_messages: 10,
-                    max_events: 10,
-                },
-            )
-            .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    let frame = recv_frame(&mut owner_framed).await;
-    assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
-    let read: ReplicationReadOk = try_decode(&frame).unwrap();
-
-    let messages = match read.messages {
-        ReplicationMessageRead::Batch { epoch, records, .. } => {
-            assert_eq!(records.len(), 2);
-            assert_eq!(records[0].payload, b"first-replicated-payload".to_vec());
-            assert_eq!(records[1].payload, b"second-replicated-payload".to_vec());
-            Some(ReplicationMessageApplyBatch { epoch, records })
-        }
-        ReplicationMessageRead::CheckpointRequired(required) => {
-            panic!("unexpected message checkpoint requirement: {required:?}");
-        }
-    };
-    let events = match read.events {
-        ReplicationEventRead::Batch { epoch, records, .. } => {
-            assert_eq!(records.len(), 2);
-            Some(ReplicationEventApplyBatch { epoch, records })
-        }
-        ReplicationEventRead::CheckpointRequired(required) => {
-            panic!("unexpected event checkpoint requirement: {required:?}");
-        }
-    };
-
     let (follower_broker, follower_dir) = open_test_broker().await;
     follower_broker
         .become_replication_follower(topic, 0, group.as_deref())
@@ -1119,30 +1078,33 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
         .await;
     handshake(&mut follower_framed).await;
 
-    follower_framed
-        .send(
-            try_encode(
-                Op::ReplicationApply,
-                2,
-                &ReplicationApply {
-                    topic: topic.into(),
-                    group: group.clone(),
-                    partition: 0,
-                    messages,
-                    events,
-                },
-            )
-            .unwrap(),
+    let outcome = catch_up_replication_over_protocol(
+        &mut owner_framed,
+        &mut follower_framed,
+        topic,
+        0,
+        group.as_deref(),
+        ProtocolReplicationCatchUpOptions {
+            max_messages_per_read: 1,
+            max_events_per_read: 1,
+            max_iterations: 4,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        ProtocolReplicationCatchUp::CaughtUp(
+            fibril_protocol::v1::replication::ProtocolReplicationCatchUpProgress {
+                iterations: 2,
+                applied_message_records: 2,
+                applied_event_records: 2,
+                message_next_offset: 2,
+                event_next_offset: 2,
+            }
         )
-        .await
-        .unwrap();
-
-    let frame = recv_frame(&mut follower_framed).await;
-    assert_eq!(frame.opcode, Op::ReplicationApplyOk as u16);
-    assert_eq!(frame.request_id, 2);
-    let response: ReplicationApplyOk = try_decode(&frame).unwrap();
-    assert!(response.messages_applied);
-    assert!(response.events_applied);
+    );
 
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(topic, 0, group.as_deref(), 2, 2)
