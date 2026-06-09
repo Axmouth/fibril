@@ -43,22 +43,22 @@ These are non-negotiable rules that constrain everything below.
 
 ## Stroma changes
 
-- Add `role: Leader | Follower` per `QueueHandle` (not per-Stroma — a node may be leader for some partitions, follower for others).
+- Add `role: Owner | Follower | Frozen` per `QueueHandle` (not per-Stroma — a node may own some partitions and follow others).
 - Add `epoch: u64` per `QueueHandle`, persisted alongside the snapshot/event-log metadata.
-- Add `freeze()` method: refuse all writes until further notice. For use during role transitions.
+- Add `freeze()` method: refuse all owner writes until further notice. Use this during role transitions.
 - Methods that must check role and reject on Follower:
   - `append_message`, `append_message_batch`
   - `ack_*`, `nack_*`, `mark_inflight_*`
   - `declare`
   - All public write paths
-- Background tasks that must be leader-only:
+- Background tasks that must be owner-only:
   - Expiry worker (followers see expiry via replicated Nack events)
   - DLQ copy spawning (the DeadLetter event tells the follower a copy is happening; follower doesn't initiate one)
   - DLQ commit appends (same)
 - Background tasks that run on both leaders and followers:
   - Periodic snapshot writes (followers want fast startup too)
   - Periodic msg-log and event-log truncation (followers GC too)
-- State transitions: `become_follower(replicated_from_offset, epoch)`, `become_leader(new_epoch)`. Both must be idempotent. Both must persist epoch *before* doing role-specific work.
+- State transitions: `become_follower(replicated_from_offset, epoch)`, `become_owner(new_epoch)`. Both must be idempotent. Both must persist epoch *before* doing role-specific work.
 
 ## Replication transport (outside Keratin and Stroma)
 

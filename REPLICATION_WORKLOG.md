@@ -80,6 +80,19 @@ locally, every higher layer would be built on the wrong foundation.
   need a way to prove all old handles are gone before promotion, or else every
   handle still needs to observe shared runtime state. Until that lifecycle is
   solved, runtime role checks are the more honest guardrail.
+- Stroma uses the same principle at the queue layer. Queue role is shared
+  runtime state under each `QueueHandle`, with a generation counter for future
+  transition fencing. Typed owner/follower wrappers may still be useful as API
+  shape later, but they cannot replace runtime checks while queue handles can
+  be cloned and held by background tasks.
+- Stroma owner operations must reject follower or frozen queues before durable
+  event/message appends. Recovery and future replicated ingest may use internal
+  replay paths that bypass ordinary owner checks, because followers need to
+  apply decisions made by the owner.
+- Leader-only queue-time decisions should be phrased as owner-only in Stroma:
+  expiry collection, delivery leasing, DLQ spawning, and DLQ commit appends.
+  Followers may still snapshot and truncate local data once those paths are
+  safe, because that does not create new queue decisions.
 
 ## Pending Decisions
 
@@ -94,6 +107,11 @@ locally, every higher layer would be built on the wrong foundation.
   layer should advance/fence the Keratin epoch before entering owner mode. The
   safer intuition is to always supply epoch, but the current Keratin owner append
   path intentionally stays minimal until Stroma role wiring clarifies the API.
+- Exact Stroma role transition protocol. Freezing should stop new owner work,
+  drain or reject in-flight owner commands, advance epochs where needed, and
+  only then switch to follower or owner mode. This is separate from the first
+  role guard because it needs careful handling of asynchronous completions and
+  background tasks.
 - First sharding metadata shape for static config and later etcd.
 - What the migration path is from external coordination to Fibril-owned metadata
   without forcing a data-path rewrite.
@@ -174,3 +192,10 @@ locally, every higher layer would be built on the wrong foundation.
   empty-log `durable_offset` is initialized as `0` even though the comment says
   `u64::MAX if none`; that was not changed in this slice to avoid broadening
   behavior unexpectedly.
+- 2026-06-09: Started Stroma role wiring. Added queue-level
+  `Owner | Follower | Frozen` runtime role state, exposed role debug fields,
+  and guarded ordinary owner operations. Public Stroma append paths now reject a
+  follower before writing durable owner events, and expiry scanning skips
+  non-owner queues. Focused tests cover stale/follower handles, rejection before
+  event-log append, and follower expiry skip behavior. Remaining role work is
+  the transition/freeze protocol and replicated ingest API.
