@@ -93,6 +93,38 @@ locally, every higher layer would be built on the wrong foundation.
   expiry collection, delivery leasing, DLQ spawning, and DLQ commit appends.
   Followers may still snapshot and truncate local data once those paths are
   safe, because that does not create new queue decisions.
+- Replication should carry the owner's durable log decisions. A follower should
+  record and apply replicated message/event logs, but it should not independently
+  execute owner side effects. In particular, DLQ spawning/copying is an owner
+  decision. A follower only applies the resulting replicated events and message
+  records. A source-queue follower still applies source events such as
+  `DeadLetter` and `DeadLetterCommit` so its local source state matches the
+  owner. The copied DLQ payload is replicated through the DLQ queue's own
+  message/event logs, so only followers of that DLQ queue apply the DLQ message
+  itself.
+
+## Phase Plan
+
+1. Validate Stroma freeze/drain semantics with real durable paths. Cover publish
+   and event completions first, then add DLQ-specific coverage when there is a
+   deterministic owner-side hook rather than a timing guess.
+2. Define the Stroma replication surface: owner append, follower replicated
+   ingest, freeze before role change, promote follower, and demote owner. Keep it
+   in queue terms only.
+3. Add follower ingest in Stroma. It should use Keratin replicated append,
+   reject ordinary owner traffic, apply replicated queue state, and avoid
+   owner-only side effects.
+4. Define local promotion and demotion checks. A follower should only become
+   owner once local state is internally consistent and caught up according to
+   Stroma-owned offsets/checkpoints.
+5. Add the first broker ownership model. Static config is enough at first if the
+   broker cleanly routes client traffic to owners and returns clear not-owner
+   errors elsewhere.
+6. Prototype replication transport. Prefer pull from follower to owner for the
+   first version because the follower best knows its local offset and checkpoint
+   state.
+7. Add operator visibility after the mechanics exist: queue role, replicated
+   offset, owner offset, lag, freeze/drain state, and promotion/refusal reasons.
 
 ## Pending Decisions
 
@@ -107,14 +139,13 @@ locally, every higher layer would be built on the wrong foundation.
   layer should advance/fence the Keratin epoch before entering owner mode. The
   safer intuition is to always supply epoch, but the current Keratin owner append
   path intentionally stays minimal until Stroma role wiring clarifies the API.
-- Exact Stroma role transition protocol. Freezing should stop new owner work,
-  drain or reject in-flight owner commands, advance epochs where needed, and
-  only then switch to follower or owner mode. This is separate from the first
-  role guard because it needs careful handling of asynchronous completions and
-  background tasks.
-- Shape of the internal Stroma owner-operation lease. A lease should let an
-  already-started owner operation complete after freeze begins, but it must not
-  make `Frozen` generally writable while any owner operation is active.
+- Exact epoch/checkpoint handoff during Stroma role transition. The local
+  freeze/drain primitive exists, but the higher layer still has to decide when
+  Keratin epochs advance and what checkpoint state is installed before a queue
+  becomes follower or owner.
+- Whether Stroma owner-operation leases should stay on every owner operation or
+  move outward to larger batch boundaries if benchmarks show measurable
+  overhead.
 - First sharding metadata shape for static config and later etcd.
 - What the migration path is from external coordination to Fibril-owned metadata
   without forcing a data-path rewrite.
