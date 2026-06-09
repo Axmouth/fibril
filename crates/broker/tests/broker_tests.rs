@@ -1194,6 +1194,7 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
         max_messages_per_read: 11,
         max_events_per_read: 13,
         max_iterations_per_tick: 17,
+        allow_checkpoint_install: false,
         caught_up_poll_ms: 1000,
         retry_poll_ms: 100,
         checkpoint_retry_poll_ms: 5000,
@@ -1286,6 +1287,60 @@ fn follower_worker_state_records_checkpoint_requirement() {
         }
     );
     assert_eq!(state.next_delay_ms, cfg.checkpoint_retry_poll_ms);
+}
+
+#[test]
+fn follower_worker_checkpoint_install_is_policy_gated() {
+    let mut state = FollowerReplicationWorkerState::new(10, 20);
+    let checkpoint = BrokerReplicationCheckpointRequired {
+        epoch: 2,
+        requested_offset: 10,
+        head_offset: 15,
+        next_offset: 40,
+    };
+
+    state.record_catch_up(
+        FollowerReplicationWorkerConfig::default(),
+        &BrokerReplicationCatchUp::CheckpointRequired {
+            progress: BrokerReplicationCatchUpProgress {
+                message_next_offset: 10,
+                event_next_offset: 20,
+                ..Default::default()
+            },
+            messages: Some(checkpoint),
+            events: None,
+        },
+    );
+
+    assert!(!state.should_install_checkpoint(FollowerReplicationWorkerConfig::default()));
+    assert!(
+        state.should_install_checkpoint(FollowerReplicationWorkerConfig {
+            allow_checkpoint_install: true,
+            ..Default::default()
+        })
+    );
+}
+
+#[test]
+fn follower_worker_checkpoint_install_requires_checkpoint_status() {
+    let mut state = FollowerReplicationWorkerState::new(0, 0);
+    let cfg = FollowerReplicationWorkerConfig {
+        allow_checkpoint_install: true,
+        ..Default::default()
+    };
+
+    assert!(!state.should_install_checkpoint(cfg));
+
+    state.record_catch_up(
+        cfg,
+        &BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
+            message_next_offset: 1,
+            event_next_offset: 1,
+            ..Default::default()
+        }),
+    );
+
+    assert!(!state.should_install_checkpoint(cfg));
 }
 
 async fn recv_with_timeout(

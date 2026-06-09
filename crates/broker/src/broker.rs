@@ -479,6 +479,7 @@ pub struct FollowerReplicationWorkerConfig {
     pub max_messages_per_read: usize,
     pub max_events_per_read: usize,
     pub max_iterations_per_tick: usize,
+    pub allow_checkpoint_install: bool,
     pub caught_up_poll_ms: u64,
     pub retry_poll_ms: u64,
     pub checkpoint_retry_poll_ms: u64,
@@ -490,6 +491,7 @@ impl Default for FollowerReplicationWorkerConfig {
             max_messages_per_read: 256,
             max_events_per_read: 256,
             max_iterations_per_tick: 8,
+            allow_checkpoint_install: false,
             caught_up_poll_ms: 1000,
             retry_poll_ms: 100,
             checkpoint_retry_poll_ms: 5000,
@@ -547,6 +549,14 @@ impl FollowerReplicationWorkerState {
         cfg: FollowerReplicationWorkerConfig,
     ) -> BrokerReplicationCatchUpOptions {
         cfg.catch_up_options(self.message_next_offset, self.event_next_offset)
+    }
+
+    pub fn should_install_checkpoint(&self, cfg: FollowerReplicationWorkerConfig) -> bool {
+        cfg.allow_checkpoint_install
+            && matches!(
+                self.status,
+                FollowerReplicationWorkerStatus::CheckpointRequired { .. }
+            )
     }
 
     pub fn record_catch_up(

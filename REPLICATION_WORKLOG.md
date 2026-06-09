@@ -342,9 +342,13 @@ Current focus: checkpoint-required follower boundary.
    state checkpoint install, contiguous message catch-up, event catch-up, and
    promotion checks. Keep the existing bounded helper unchanged for worker paths
    that should only report checkpoint-required without pausing the owner.
-26. Next: decide when the follower worker is allowed to call the
-   checkpoint-aware helper. That should likely be policy gated because it pauses
-   the owner briefly while exporting the state checkpoint.
+26. Done: add follower worker policy for checkpoint install. Default
+   behavior should remain conservative: workers report checkpoint-required and
+   retry later. A separate flag can allow worker-triggered checkpoint-aware
+   catch-up because it briefly pauses the owner while exporting state.
+27. Next: wire the follower worker transport loop. Once a real owner transport
+   exists, it should choose between normal bounded catch-up and
+   checkpoint-aware catch-up based on the worker policy.
 
 Previous completed implementation checkpoints:
 
@@ -646,6 +650,15 @@ Tests needed before implementing transition:
   the broker export/install handoff test. A full branch-triggering broker test
   would currently need either a slow snapshot-worker wait or a test-only
   truncation hook, so it is deferred.
+- 2026-06-09: The follower worker currently has state and lifecycle
+  registration, but no running owner-transport loop. Checkpoint install policy
+  should therefore be recorded in worker config before wiring the loop. The
+  default should be conservative because checkpoint-aware catch-up can pause the
+  owner to export state.
+- 2026-06-09: Added `allow_checkpoint_install` to follower worker config,
+  defaulting to false. Worker state now has an explicit
+  `should_install_checkpoint` predicate that only returns true when the worker
+  is checkpoint-blocked and the policy flag is enabled.
 - 2026-06-09: Next design topic is API gatekeeping. Options to evaluate:
   distinct leader/follower Keratin handle types, a capability/token for
   replicated operations, an extension trait only used by replication code, or an
