@@ -165,9 +165,10 @@ resume after context compaction.
 8. Done: broker `NotOwner` maps to protocol-visible conflict errors for publish
    and subscribe setup. The connection stays open so clients can refresh
    topology or retry elsewhere later.
-9. Next: expose owner log read APIs needed by follower pull replication. The
-   first transport should let followers ask owners for message and event batches
-   from known offsets.
+9. Done: Stroma exposes owner-only log read APIs needed by follower pull
+   replication. Reads return explicit offsets and either a contiguous batch or a
+   checkpoint-required outcome when the requested offset is older than the local
+   head.
 10. Next: prototype follower pull replication and local catch-up loop, then use
     checked promotion/demotion APIs for handoff tests.
 11. Later: replace static ownership with coordinator-backed ownership, likely
@@ -391,3 +392,9 @@ Tests needed before implementing transition:
   with conflict status code `409`. The handler keeps the connection open so
   clients can retry, refresh topology, or continue other work. Subscription setup
   now uses a typed local error for duplicate subscriptions instead of `anyhow`.
+- 2026-06-09: Added Stroma owner replication read APIs. Owners can read message
+  and event records from a requested offset, with explicit record offsets,
+  current epoch, and next offset. Reads reject non-owner queues. If the requested
+  offset is older than the local log head, the API returns a checkpoint-required
+  outcome instead of silently skipping forward. Other gaps are treated as
+  corruption because replication must not hide missing owner log ranges.
