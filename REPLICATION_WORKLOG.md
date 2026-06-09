@@ -360,6 +360,20 @@ Current focus: checkpoint-required follower boundary.
    The original planning document should remain useful as historical grounding.
    New details should be appended here as implementation checkpoints rather
    than rewriting the starting plan.
+29. Important broker-loop transition work item: role changes must transition
+   broker-level queue runtime too, not only Stroma queue role. Today
+   `QueueLoopState` can remain in `queues` with publisher sink tasks, consumer
+   delivery loops, leases, and broker inflight/tag maps even after an assignment
+   demotes the queue to follower. Stroma role guards prevent durable owner
+   writes from succeeding, but the normal path should make those errors mostly
+   unreachable by draining or closing broker owner loops before starting the
+   follower replication worker. Owner to follower should stop accepting new
+   publishers/subscribers, close or fail existing owner handles, drain/requeue
+   broker deliveries, remove stale tag records, then demote Stroma and start the
+   follower worker. Follower to owner should stop the follower worker after
+   verified catch-up and promotion, then allow the owner queue loop to be
+   created lazily by real traffic. StopFollower still needs explicit shutdown
+   semantics for the follower worker and local queue state.
 
 Previous completed implementation checkpoints:
 
