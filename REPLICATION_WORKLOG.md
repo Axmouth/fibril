@@ -259,7 +259,8 @@ resume after context compaction.
     Protocol v1 now has replication read request/response frame definitions for
     this pull shape. The frames carry raw message headers/payloads and raw event
     bytes so the wire contract stays log-shaped instead of Stroma-shaped.
-    Handler wiring, authentication, and background scheduling are still pending.
+    Handler wiring now exists for owner read and follower apply. Background
+    scheduling is still pending.
 11. Later: replace static ownership with coordinator-backed ownership, likely
     based on an etcd-style lease/watch model.
 12. Later: admin and metrics visibility for queue role, local offsets,
@@ -267,7 +268,7 @@ resume after context compaction.
 
 ## Active Implementation Plan
 
-Current focus: checkpoint-required follower boundary.
+Current focus: follower transport boundary, visibility, and role lifecycle.
 
 1. Done: replace the old leader-only `Coordination` stub with a cached
    assignment model shaped like the controller spec: nodes, partition
@@ -414,6 +415,28 @@ Current focus: checkpoint-required follower boundary.
    broker test that triggers a real checkpoint-required owner read is still
    deferred until there is a clean transport/test hook for owner log
    truncation.
+35. Done for follower transport loop shape: the worker state already
+   records `next_delay_ms` after each tick. That is the scheduler contract for
+   now: caught-up workers poll slowly, iteration-limited workers retry quickly,
+   and checkpoint-required workers wait on the checkpoint retry cadence. A
+   permanent background loop should use this field plus future owner wake-up
+   hints, rather than hard-coding sleep behavior in transport code.
+36. Done for replication observability: broker sparse queue
+   observability now includes follower worker reports and summary counts. The
+   admin queue debug API passes these through as `replication_followers` and
+   `replication_summary`. Worker state is read with a non-blocking lock so
+   observability never stalls an active catch-up tick; a busy worker can report
+   `busy: true` with no state snapshot for that instant.
+37. Done for checkpoint transport: protocol v1 now has explicit
+   state-checkpoint export/install frames. Export is owner-side and returns a
+   compact queue-state checkpoint plus message/event continuation offsets.
+   Install is follower-side and installs only queue state; message payloads
+   still catch up through the normal replication read/apply path from the
+   checkpoint's message continuation offset.
+38. Done for assignment lifecycle cleanup: follower refresh transitions
+   are intentionally no-ops for local worker lifecycle and must not reset
+   replication progress. This keeps coordination metadata refreshes from
+   rewinding a follower that is already catching up.
 
 Previous completed implementation checkpoints:
 

@@ -21,9 +21,9 @@ use fibril_broker::{
         ConsumerConfig, ConsumerHandle, ConsumerLease, PublisherHandle, SettleRequest, SettleType,
     },
     queue_engine::{
-        DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, Message, MessageContentType,
-        OwnerReplicationBatch, OwnerReplicationRead, QueueEngine, StromaEngine, StromaError,
-        StromaEvent,
+        DLQDiscardPolicyWire, DeclareMeta, FollowerStateCheckpointInstall, GlobalDLQ, Message,
+        MessageContentType, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
+        QueueEngine, StromaEngine, StromaError, StromaEvent,
     },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
@@ -329,6 +329,29 @@ fn to_replication_apply_ok(messages_applied: bool, events_applied: bool) -> Repl
     ReplicationApplyOk {
         messages_applied,
         events_applied,
+    }
+}
+
+fn to_replication_state_checkpoint(checkpoint: OwnerStateCheckpoint) -> ReplicationStateCheckpoint {
+    ReplicationStateCheckpoint {
+        message_epoch: checkpoint.message_epoch,
+        event_epoch: checkpoint.event_epoch,
+        message_checkpoint_offset: checkpoint.message_checkpoint_offset,
+        message_next_offset: checkpoint.message_next_offset,
+        event_next_offset: checkpoint.event_next_offset,
+        applied_event_offset: checkpoint.applied_event_offset,
+        state_snapshot: checkpoint.state_snapshot,
+    }
+}
+
+fn to_follower_state_checkpoint_install(
+    checkpoint: ReplicationStateCheckpoint,
+) -> FollowerStateCheckpointInstall {
+    FollowerStateCheckpointInstall {
+        message_next_offset: checkpoint.message_checkpoint_offset,
+        event_next_offset: checkpoint.event_next_offset,
+        applied_event_offset: checkpoint.applied_event_offset,
+        state_snapshot: checkpoint.state_snapshot,
     }
 }
 
@@ -1627,6 +1650,99 @@ pub async fn handle_connection(
                         frame_tx_high_prio
                             .send(try_encode(
                                 Op::ReplicationReadOk,
+                                frame.request_id,
+                                &response,
+                            )?)
+                            .await?;
+                    }
+                    Err(err) => {
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            // -------- REPLICATION CHECKPOINT EXPORT ------------------------
+            x if x == Op::ReplicationCheckpointExport as u16 => {
+                let export: ReplicationCheckpointExport = decode_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    ReplicationCheckpointExport
+                );
+
+                match broker
+                    .export_owner_state_checkpoint(
+                        &export.topic,
+                        export.partition,
+                        export.group.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(checkpoint) => {
+                        let response = ReplicationCheckpointExportOk {
+                            checkpoint: to_replication_state_checkpoint(checkpoint),
+                        };
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::ReplicationCheckpointExportOk,
+                                frame.request_id,
+                                &response,
+                            )?)
+                            .await?;
+                    }
+                    Err(err) => {
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            // -------- REPLICATION CHECKPOINT INSTALL -----------------------
+            x if x == Op::ReplicationCheckpointInstall as u16 => {
+                let install: ReplicationCheckpointInstall = decode_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    ReplicationCheckpointInstall
+                );
+                let topic = install.topic.clone();
+                let group = install.group.clone();
+                let partition = install.partition;
+                let checkpoint = to_follower_state_checkpoint_install(install.checkpoint);
+
+                match broker
+                    .install_follower_state_checkpoint(
+                        &topic,
+                        partition,
+                        group.as_deref(),
+                        checkpoint,
+                    )
+                    .await
+                {
+                    Ok(outcome) => {
+                        let response = ReplicationCheckpointInstallOk {
+                            message_next_offset: outcome.message_next_offset,
+                            event_next_offset: outcome.event_next_offset,
+                            applied_event_offset: outcome.applied_event_offset,
+                        };
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::ReplicationCheckpointInstallOk,
                                 frame.request_id,
                                 &response,
                             )?)

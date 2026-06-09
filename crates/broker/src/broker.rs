@@ -414,7 +414,7 @@ pub struct BrokerOwnerReplicationRecords {
     pub events: OwnerReplicationRead<StromaEvent>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BrokerReplicationCheckpointRequired {
     pub epoch: u64,
     pub requested_offset: Offset,
@@ -452,7 +452,7 @@ impl Default for BrokerReplicationCatchUpOptions {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
 pub struct BrokerReplicationCatchUpProgress {
     pub iterations: usize,
     pub applied_message_records: usize,
@@ -515,7 +515,8 @@ impl FollowerReplicationWorkerConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum FollowerReplicationWorkerStatus {
     Idle,
     CaughtUp,
@@ -526,7 +527,7 @@ pub enum FollowerReplicationWorkerStatus {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct FollowerReplicationWorkerState {
     pub message_next_offset: Offset,
     pub event_next_offset: Offset,
@@ -766,6 +767,25 @@ pub struct SparseQueueObservabilitySummary {
 pub struct SparseQueueObservabilitySnapshot {
     pub queues: Vec<SparseQueueObservability>,
     pub summary: SparseQueueObservabilitySummary,
+    pub replication_followers: Vec<FollowerReplicationWorkerObservability>,
+    pub replication_summary: FollowerReplicationWorkerSummary,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FollowerReplicationWorkerObservability {
+    pub topic: String,
+    pub partition: LogId,
+    pub group: Option<String>,
+    pub state: Option<FollowerReplicationWorkerState>,
+    pub busy: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FollowerReplicationWorkerSummary {
+    pub follower_worker_count: usize,
+    pub caught_up_count: usize,
+    pub pending_retry_count: usize,
+    pub checkpoint_required_count: usize,
 }
 
 fn eviction_attempt_summary(
@@ -1561,11 +1581,68 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             active_queue_count,
             idle_queue_count,
         };
-        SparseQueueObservabilitySnapshot { queues, summary }
+        let (replication_followers, replication_summary) =
+            self.follower_replication_observability_report();
+        SparseQueueObservabilitySnapshot {
+            queues,
+            summary,
+            replication_followers,
+            replication_summary,
+        }
     }
 
     pub fn sparse_queue_observability_snapshot(&self) -> Vec<SparseQueueObservability> {
         self.sparse_queue_observability_report().queues
+    }
+
+    fn follower_replication_observability_report(
+        &self,
+    ) -> (
+        Vec<FollowerReplicationWorkerObservability>,
+        FollowerReplicationWorkerSummary,
+    ) {
+        let mut caught_up_count = 0;
+        let mut pending_retry_count = 0;
+        let mut checkpoint_required_count = 0;
+        let mut workers: Vec<_> = self
+            .follower_replication_workers
+            .iter()
+            .map(|entry| {
+                let queue = entry.key();
+                let state = entry.value().try_lock().ok().map(|state| state.clone());
+                if let Some(state) = &state {
+                    match state.status {
+                        FollowerReplicationWorkerStatus::CaughtUp => caught_up_count += 1,
+                        FollowerReplicationWorkerStatus::PendingRetry => pending_retry_count += 1,
+                        FollowerReplicationWorkerStatus::CheckpointRequired { .. } => {
+                            checkpoint_required_count += 1;
+                        }
+                        FollowerReplicationWorkerStatus::Idle => {}
+                    }
+                }
+                let busy = state.is_none();
+                FollowerReplicationWorkerObservability {
+                    topic: queue.topic.to_string(),
+                    partition: queue.partition,
+                    group: queue.group.as_ref().map(ToString::to_string),
+                    state,
+                    busy,
+                }
+            })
+            .collect();
+        workers.sort_by(|a, b| {
+            a.group
+                .cmp(&b.group)
+                .then_with(|| a.topic.cmp(&b.topic))
+                .then_with(|| a.partition.cmp(&b.partition))
+        });
+        let summary = FollowerReplicationWorkerSummary {
+            follower_worker_count: workers.len(),
+            caught_up_count,
+            pending_retry_count,
+            checkpoint_required_count,
+        };
+        (workers, summary)
     }
 
     pub async fn try_evict_inactive_queue(

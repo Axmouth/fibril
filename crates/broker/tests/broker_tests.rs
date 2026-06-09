@@ -669,6 +669,76 @@ async fn assignment_transition_apply_can_stop_follower() {
 }
 
 #[tokio::test]
+async fn refresh_follower_keeps_replication_worker_progress() {
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+    let become_follower = assignment_transition(
+        "transition-refresh-follower",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    follower
+        .apply_assignment_transition(&become_follower)
+        .await
+        .unwrap();
+
+    let group = Some("workers".to_string());
+    let (publisher, _confirms) = owner
+        .get_publisher("transition-refresh-follower", &group)
+        .await
+        .unwrap();
+    let reply = publisher
+        .publish(
+            b"before refresh".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let queue = QueueIdentity::new("transition-refresh-follower", 0, Some("workers"));
+    follower
+        .run_follower_replication_worker_once(
+            &owner,
+            &queue,
+            FollowerReplicationWorkerConfig::default(),
+        )
+        .await
+        .unwrap();
+    let before = follower
+        .follower_replication_worker_snapshot("transition-refresh-follower", 0, Some("workers"))
+        .await
+        .unwrap();
+
+    let refresh = assignment_transition(
+        "transition-refresh-follower",
+        LocalAssignmentIntent::RefreshFollower,
+        Some(LocalAssignmentRole::Follower),
+        Some(LocalAssignmentRole::Follower),
+    );
+    let outcome = follower
+        .apply_assignment_transition(&refresh)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        BrokerAssignmentTransitionApply::Noop(LocalAssignmentIntent::RefreshFollower)
+    );
+    let after = follower
+        .follower_replication_worker_snapshot("transition-refresh-follower", 0, Some("workers"))
+        .await
+        .unwrap();
+    assert_eq!(after, before);
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
+#[tokio::test]
 async fn assignment_watcher_applies_snapshot_update_to_follower_role() {
     let coordination = Arc::new(StaticCoordination::new(
         "node-a",
@@ -1815,6 +1885,19 @@ async fn follower_worker_tick_records_catch_up_progress() {
             }),
             next_delay_ms: cfg.retry_poll_ms,
         })
+    );
+    let observability = follower.sparse_queue_observability_report();
+    assert_eq!(observability.replication_summary.follower_worker_count, 1);
+    assert_eq!(observability.replication_summary.pending_retry_count, 1);
+    assert_eq!(observability.replication_followers.len(), 1);
+    let worker = &observability.replication_followers[0];
+    assert_eq!(worker.topic, "worker-tick");
+    assert_eq!(worker.partition, 0);
+    assert_eq!(worker.group.as_deref(), Some("workers"));
+    assert!(!worker.busy);
+    assert_eq!(
+        worker.state.as_ref().map(|state| state.message_next_offset),
+        Some(1)
     );
 
     owner.shutdown().await;

@@ -1437,6 +1437,27 @@ mod tests {
                             "kind": "storage",
                             "outcome": "evicted"
                         }
+                    }],
+                    "replication_summary": {
+                        "follower_worker_count": 1,
+                        "caught_up_count": 0,
+                        "pending_retry_count": 1,
+                        "checkpoint_required_count": 0
+                    },
+                    "replication_followers": [{
+                        "topic": "orders.created",
+                        "partition": 0,
+                        "group": null,
+                        "state": {
+                            "message_next_offset": 4,
+                            "event_next_offset": 6,
+                            "status": {
+                                "status": "pending_retry"
+                            },
+                            "last_progress": null,
+                            "next_delay_ms": 100
+                        },
+                        "busy": false
                     }]
                 })
             })),
@@ -1462,6 +1483,11 @@ mod tests {
             "evicted"
         );
         assert_eq!(body["broker_activity_summary"]["tracked_queue_count"], 1);
+        assert_eq!(
+            body["replication_summary"]["follower_worker_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(body["replication_followers"][0]["topic"], "orders.created");
         assert_eq!(body["broker_cleanup_metrics"]["attempts_total"], 0);
     }
 

@@ -65,6 +65,10 @@ pub enum Op {
     ReplicationReadOk = 81,
     ReplicationApply = 82,
     ReplicationApplyOk = 83,
+    ReplicationCheckpointExport = 84,
+    ReplicationCheckpointExportOk = 85,
+    ReplicationCheckpointInstall = 86,
+    ReplicationCheckpointInstallOk = 87,
 
     Error = 255,
 }
@@ -360,6 +364,44 @@ pub struct ReplicationApply {
 pub struct ReplicationApplyOk {
     pub messages_applied: bool,
     pub events_applied: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointExport {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStateCheckpoint {
+    pub message_epoch: u64,
+    pub event_epoch: u64,
+    pub message_checkpoint_offset: u64,
+    pub message_next_offset: u64,
+    pub event_next_offset: u64,
+    pub applied_event_offset: u64,
+    pub state_snapshot: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointExportOk {
+    pub checkpoint: ReplicationStateCheckpoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointInstall {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: u32,
+    pub checkpoint: ReplicationStateCheckpoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointInstallOk {
+    pub message_next_offset: u64,
+    pub event_next_offset: u64,
+    pub applied_event_offset: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

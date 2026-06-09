@@ -57,9 +57,11 @@ mod tests {
     use crate::v1::{
         Hello, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
         ReconcileSubscription, ReconcileSubscriptionResult, ReplicationApply, ReplicationApplyOk,
-        ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
-        ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
-        ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
+        ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
+        ReplicationCheckpointInstallOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
+        ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
+        ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
+        ReplicationStateCheckpoint,
     };
 
     #[test]
@@ -244,5 +246,84 @@ mod tests {
         let frame = try_encode(Op::ReplicationApplyOk, 18, &msg).unwrap();
         assert_eq!(frame.opcode, Op::ReplicationApplyOk as u16);
         assert_eq!(try_decode::<ReplicationApplyOk>(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn replication_checkpoint_export_roundtrips() {
+        let msg = ReplicationCheckpointExport {
+            topic: "orders".into(),
+            group: Some("workers".into()),
+            partition: 3,
+        };
+
+        let frame = try_encode(Op::ReplicationCheckpointExport, 19, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationCheckpointExport as u16);
+        assert_eq!(
+            try_decode::<ReplicationCheckpointExport>(&frame).unwrap(),
+            msg
+        );
+    }
+
+    #[test]
+    fn replication_checkpoint_export_ok_roundtrips() {
+        let msg = ReplicationCheckpointExportOk {
+            checkpoint: ReplicationStateCheckpoint {
+                message_epoch: 2,
+                event_epoch: 3,
+                message_checkpoint_offset: 10,
+                message_next_offset: 20,
+                event_next_offset: 30,
+                applied_event_offset: 29,
+                state_snapshot: b"snapshot".to_vec(),
+            },
+        };
+
+        let frame = try_encode(Op::ReplicationCheckpointExportOk, 20, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationCheckpointExportOk as u16);
+        assert_eq!(
+            try_decode::<ReplicationCheckpointExportOk>(&frame).unwrap(),
+            msg
+        );
+    }
+
+    #[test]
+    fn replication_checkpoint_install_roundtrips() {
+        let msg = ReplicationCheckpointInstall {
+            topic: "orders".into(),
+            group: Some("workers".into()),
+            partition: 3,
+            checkpoint: ReplicationStateCheckpoint {
+                message_epoch: 2,
+                event_epoch: 3,
+                message_checkpoint_offset: 10,
+                message_next_offset: 20,
+                event_next_offset: 30,
+                applied_event_offset: 29,
+                state_snapshot: b"snapshot".to_vec(),
+            },
+        };
+
+        let frame = try_encode(Op::ReplicationCheckpointInstall, 21, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationCheckpointInstall as u16);
+        assert_eq!(
+            try_decode::<ReplicationCheckpointInstall>(&frame).unwrap(),
+            msg
+        );
+    }
+
+    #[test]
+    fn replication_checkpoint_install_ok_roundtrips() {
+        let msg = ReplicationCheckpointInstallOk {
+            message_next_offset: 10,
+            event_next_offset: 30,
+            applied_event_offset: 29,
+        };
+
+        let frame = try_encode(Op::ReplicationCheckpointInstallOk, 22, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationCheckpointInstallOk as u16);
+        assert_eq!(
+            try_decode::<ReplicationCheckpointInstallOk>(&frame).unwrap(),
+            msg
+        );
     }
 }

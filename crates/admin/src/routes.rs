@@ -295,6 +295,15 @@ pub async fn queues_debug(
             if let Some(summary) = observability.get("summary") {
                 object.insert("broker_activity_summary".into(), summary.clone());
             }
+            if let Some(replication_followers) = observability.get("replication_followers") {
+                object.insert(
+                    "replication_followers".into(),
+                    replication_followers.clone(),
+                );
+            }
+            if let Some(replication_summary) = observability.get("replication_summary") {
+                object.insert("replication_summary".into(), replication_summary.clone());
+            }
             object.insert(
                 "broker_cleanup_metrics".into(),
                 serde_json::to_value(server.metrics.broker().snapshot().queue_cleanup)
