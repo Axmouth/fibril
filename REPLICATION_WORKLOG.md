@@ -1256,3 +1256,13 @@ Tests needed before implementing transition:
   Adversarial coverage checks that message-only or event-only catch-up refuses
   promotion. This also fixed replicated ingest to advance the follower's applied
   event watermark as events are applied.
+- 2026-06-09: Added a protocol-backed owner replication peer adapter. The
+  adapter lives in `fibril-protocol`, owns one already-handshaken protocol
+  connection, serializes replication requests on that connection, and implements
+  the broker's `BrokerOwnerReplicationPeer` boundary. It supports owner record
+  reads and owner state checkpoint export, converting wire records back into
+  broker/Stroma record shapes. Protocol integration tests cover reading owner
+  records and exporting checkpoints through the adapter. Remaining transport
+  work is resolver wiring, connection/reconnect management, and typed protocol
+  error mapping so not-owner and retryable failures are preserved without
+  string parsing.

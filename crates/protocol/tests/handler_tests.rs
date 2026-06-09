@@ -7,8 +7,14 @@ use std::{
 
 use bytes::Bytes;
 use fibril_broker::{
-    broker::{Broker, BrokerConfig, QueueEvictionAttempt, StaticQueueOwnership},
-    queue_engine::{EvictOutcome, GlobalDLQ, QueueEngine, QueuePromotionOutcome, StromaEngine},
+    broker::{
+        Broker, BrokerConfig, BrokerOwnerReplicationPeer, QueueEvictionAttempt,
+        StaticQueueOwnership,
+    },
+    queue_engine::{
+        EvictOutcome, GlobalDLQ, OwnerReplicationRead, QueueEngine, QueuePromotionOutcome,
+        StromaEngine,
+    },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
@@ -24,8 +30,8 @@ use fibril_protocol::v1::{
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
     replication::{
-        ProtocolReplicationCatchUp, ProtocolReplicationCatchUpOptions,
-        catch_up_replication_over_protocol,
+        ProtocolOwnerReplicationPeer, ProtocolReplicationCatchUp,
+        ProtocolReplicationCatchUpOptions, catch_up_replication_over_protocol,
     },
 };
 use fibril_util::{StaticAuthHandler, unix_millis};
@@ -1125,6 +1131,78 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
     drop(follower_framed);
     owner_task.await.unwrap().unwrap();
     follower_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn protocol_owner_replication_peer_reads_owner_records() {
+    let topic = "replication.peer.read";
+    let group = Some("workers".to_string());
+    let (mut owner_framed, owner_task, _owner_dir) = open_protocol_connection().await;
+    handshake(&mut owner_framed).await;
+    framed_publish(
+        &mut owner_framed,
+        2,
+        topic,
+        group.as_deref(),
+        b"peer-replicated-payload",
+    )
+    .await;
+
+    let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
+    let records = peer
+        .read_owner_replication_records(topic, 0, group.as_deref(), 0, 0, 8, 8)
+        .await
+        .unwrap();
+
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("expected message batch");
+    };
+    assert_eq!(messages.requested_offset, 0);
+    assert_eq!(messages.next_offset, 1);
+    assert_eq!(messages.records.len(), 1);
+    assert_eq!(messages.records[0].0, 0);
+    assert_eq!(messages.records[0].1.payload, b"peer-replicated-payload");
+
+    let OwnerReplicationRead::Batch(events) = records.events else {
+        panic!("expected event batch");
+    };
+    assert_eq!(events.requested_offset, 0);
+    assert_eq!(events.next_offset, 1);
+    assert_eq!(events.records.len(), 1);
+
+    drop(peer);
+    owner_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn protocol_owner_replication_peer_exports_checkpoint() {
+    let topic = "replication.peer.checkpoint";
+    let group = Some("workers".to_string());
+    let (mut owner_framed, owner_task, _owner_dir) = open_protocol_connection().await;
+    handshake(&mut owner_framed).await;
+    framed_publish(
+        &mut owner_framed,
+        2,
+        topic,
+        group.as_deref(),
+        b"checkpointed-payload",
+    )
+    .await;
+
+    let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
+    let checkpoint = peer
+        .export_owner_state_checkpoint(topic, 0, group.as_deref())
+        .await
+        .unwrap();
+
+    assert_eq!(checkpoint.message_checkpoint_offset, 0);
+    assert_eq!(checkpoint.message_next_offset, 1);
+    assert_eq!(checkpoint.event_next_offset, 1);
+    assert_eq!(checkpoint.applied_event_offset, 0);
+    assert!(!checkpoint.state_snapshot.is_empty());
+
+    drop(peer);
+    owner_task.await.unwrap().unwrap();
 }
 
 #[tokio::test]
