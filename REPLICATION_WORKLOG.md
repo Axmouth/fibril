@@ -245,6 +245,25 @@ resume after context compaction.
 
 ## Active Implementation Plan
 
+Current focus: coordination interface and static assignment backend.
+
+1. Done: replace the old leader-only `Coordination` stub with a cached
+   assignment model shaped like the controller spec: nodes, partition
+   assignments, owners, followers, epochs, and watchable snapshots.
+2. Done: add a static coordination implementation for tests/local manual setup.
+   It should model the same assignment snapshot shape the future etcd backend
+   will expose.
+3. Done: make static coordination usable as the broker's `QueueOwnership`
+   provider so existing owner gates can consume assignment data without waiting
+   for the full broker assignment watcher.
+4. Done: add focused coordination tests and run broker checks.
+5. In progress: commit the static coordination checkpoint.
+6. Next: broker assignment watcher that reacts to coordination snapshots and
+   starts owner/follower role transitions.
+7. Later: follower worker scheduling and snapshot install.
+
+Previous completed implementation checkpoints:
+
 1. Done: add StromaEngine forwarding methods for owner message and event
    replication reads.
 2. Done: add a broker owner-replication read helper that checks queue ownership

@@ -20,6 +20,7 @@ use fibril_storage::{
 use fibril_util::unix_millis;
 use uuid::Uuid;
 
+use crate::coordination::{Coordination, StaticCoordination};
 use crate::queue_engine::{
     EvictOutcome, QueueEngine, QueuePromotionOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
     ReplicatedQueueApplyOutcome, SettleKind, SettleRequest as EngineSettleRequest, StromaEngine,
@@ -376,6 +377,12 @@ impl QueueOwnership for StaticQueueOwnership {
     fn owns_queue(&self, topic: &str, partition: LogId, group: Option<&str>) -> bool {
         self.owned
             .contains(&OwnedQueue::new(topic, partition, group))
+    }
+}
+
+impl QueueOwnership for StaticCoordination {
+    fn owns_queue(&self, topic: &str, partition: LogId, group: Option<&str>) -> bool {
+        Coordination::owns_queue(self, topic, partition, group)
     }
 }
 

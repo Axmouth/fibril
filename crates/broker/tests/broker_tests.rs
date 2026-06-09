@@ -1,4 +1,8 @@
-use std::{collections::HashSet as StdHashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet as StdHashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use fibril_broker::{
@@ -8,6 +12,9 @@ use fibril_broker::{
         BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
         BrokerReplicationCatchUpProgress, ConsumerConfig, OwnedQueue, QueueEvictionAttempt,
         QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
+    },
+    coordination::{
+        CoordinationSnapshot, NodeInfo, PartitionAssignment, QueueIdentity, StaticCoordination,
     },
     queue_engine::{
         Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, MessageHeaders,
@@ -406,6 +413,85 @@ async fn static_ownership_allows_owned_queue() {
         .await
         .expect("owned queue should deliver published message");
     assert_eq!(msg.message.offset, 0);
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn static_coordination_can_drive_broker_ownership_gate() {
+    let local_node = "node-a".to_string();
+    let remote_node = "node-b".to_string();
+    let mut nodes = HashMap::new();
+    nodes.insert(
+        local_node.clone(),
+        NodeInfo {
+            node_id: local_node.clone(),
+            broker_addr: "127.0.0.1:1001".parse().unwrap(),
+            admin_addr: None,
+        },
+    );
+    nodes.insert(
+        remote_node.clone(),
+        NodeInfo {
+            node_id: remote_node.clone(),
+            broker_addr: "127.0.0.1:1002".parse().unwrap(),
+            admin_addr: None,
+        },
+    );
+
+    let owned_queue = QueueIdentity::new("coord-owned", 0, Some("workers"));
+    let followed_queue = QueueIdentity::new("coord-followed", 0, Some("workers"));
+    let mut assignments = HashMap::new();
+    assignments.insert(
+        owned_queue.clone(),
+        PartitionAssignment::new(
+            owned_queue,
+            local_node.clone(),
+            vec![remote_node.clone()],
+            1,
+        ),
+    );
+    assignments.insert(
+        followed_queue.clone(),
+        PartitionAssignment::new(followed_queue, remote_node, vec![local_node.clone()], 1),
+    );
+
+    let coordination = StaticCoordination::new(
+        local_node,
+        CoordinationSnapshot {
+            nodes,
+            assignments,
+            generation: 1,
+        },
+    );
+    let (broker, _dir) = open_test_broker_with_ownership(Arc::new(coordination)).await;
+    let group = Some("workers".to_string());
+
+    let (publisher, _confirms) = broker.get_publisher("coord-owned", &group).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"hello".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let err = match broker.get_publisher("coord-followed", &group).await {
+        Ok(_) => panic!("followed queue unexpectedly accepted an owner publisher"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        err,
+        BrokerError::NotOwner {
+            topic,
+            partition: 0,
+            group: Some(group),
+        } if topic == "coord-followed" && group == "workers"
+    ));
+    assert!(!broker.is_queue_materialized("coord-followed", Some("workers")));
     broker.shutdown().await;
 }
 
