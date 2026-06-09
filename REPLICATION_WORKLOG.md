@@ -43,6 +43,11 @@ locally, every higher layer would be built on the wrong foundation.
   remains event-log driven.
 - Stroma queue handles are per `(topic, partition, group)`, which is compatible
   with per-partition role and ownership.
+- Stroma now has a minimal follower-ingest API for a queue identity. It accepts
+  caller-offset message batches and caller-offset event batches, requires the
+  queue to be in follower role, writes through Keratin replicated append, then
+  applies the replicated events to local queue state through the internal replay
+  path.
 
 ## Decisions
 
@@ -105,13 +110,13 @@ locally, every higher layer would be built on the wrong foundation.
 
 ## Phase Plan
 
-1. Validate Stroma freeze/drain semantics with real durable paths. Cover publish
+1. Done: validate Stroma freeze/drain semantics with real durable paths. Cover publish
    and event completions first, then add DLQ-specific coverage when there is a
    deterministic owner-side hook rather than a timing guess.
-2. Define the Stroma replication surface: owner append, follower replicated
+2. In progress: define the Stroma replication surface: owner append, follower replicated
    ingest, freeze before role change, promote follower, and demote owner. Keep it
    in queue terms only.
-3. Add follower ingest in Stroma. It should use Keratin replicated append,
+3. Done: add follower ingest in Stroma. It should use Keratin replicated append,
    reject ordinary owner traffic, apply replicated queue state, and avoid
    owner-only side effects.
 4. Define local promotion and demotion checks. A follower should only become
@@ -302,3 +307,14 @@ Tests needed before implementing transition:
   from message-log append through matching event-log append so graceful freeze
   should not create normal orphan payloads. This may need benchmark attention
   because the hot paths now include atomic lease accounting.
+- 2026-06-09: Added real freeze/drain tests around started publish and ack
+  completions. Also fixed the owner-side NACK path to apply already accepted
+  NACK events through the internal path under its lease, and let spawned DLQ
+  continuation work inherit a continuation lease instead of reopening the public
+  owner gate after freeze.
+- 2026-06-09: Added first Stroma follower-ingest API. A caller can apply
+  replicated message and event batches to a follower queue. The method requires
+  follower role, sets the queue's Keratin logs to follower mode, uses Keratin
+  replicated append, and applies replicated events without running owner-only
+  side effects. Focused tests cover normal replicated ingest, rejecting owner
+  queues, and source-queue DLQ events not writing the DLQ target queue.
