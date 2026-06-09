@@ -56,6 +56,19 @@ locally, every higher layer would be built on the wrong foundation.
   does not leak into the storage or queue APIs.
 - Fibril should ideally own cluster metadata eventually. External coordination
   is a practical starting point, not the desired final shape.
+- Coordination should expose both ownership and follower assignments. Ownership
+  is the single-writer lease/fencing path; follower assignment tells each node
+  which partitions to replicate and where their owners are.
+- Balancing is a policy above coordination. It can later consider target
+  follower count, max owned partitions per node, max followed partitions per
+  node, disk pressure, and replication lag. It should not leak into Keratin or
+  Stroma.
+- Partition scaling is a separate queue/topology operation. Growing adds
+  partitions and assigns owners/followers. Shrinking should stop new routing to
+  retiring partitions, drain them, then remove them after they are empty.
+- Clients eventually need topology-aware routing. A logical queue may span
+  partitions owned by different brokers, so clients may need connections to
+  multiple owners while keeping partition choice out of the normal user API.
 - Replication is pull-oriented unless later evidence says otherwise.
 - Followers must not assign offsets.
 - Followers must not run independent queue-time decisions such as expiry or DLQ

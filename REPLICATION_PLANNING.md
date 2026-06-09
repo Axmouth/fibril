@@ -15,6 +15,8 @@
 - **Metadata storage**: external (etcd) vs. self-hosted replicated log. **Recommend external.** Self-hosting metadata via your own replicated log creates a chicken-egg bootstrap problem (need metadata to know who's leader for the metadata partition). The workload is tiny; etcd handles it trivially. Revisit only after data-path replication is stable.
 - **Replica set granularity**: per-partition or per-broker? Per-partition is more flexible, more complex. Per-broker is simpler. Pick now, hard to change later.
 - **Number of replicas per partition**: configurable per topic, or global default?
+- **Placement and balancing policy**: eventually the coordination layer needs more than "who is owner." It should also expose desired follower assignments and enough node capacity metadata for a balancer to choose where partition owners and followers live.
+- **Partition scaling policy**: increasing partition count should be a deliberate queue/topic-level operation. Shrinking is harder because old partitions may still hold messages; the likely path is stop routing new publishes to retiring partitions, drain them, then remove them once empty.
 - **Behavior when ISR shrinks**: configurable via `min_in_sync_replicas` knob. Default: keep serving with degraded ISR (availability bias). Operators tighten via config when they want durability bias. Below `min_in_sync_replicas`, leader refuses writes rather than acking unsafely.
 - **Snapshot transfer format**: stream the existing snapshot blob with a wire-level frame and checksum. No new format.
 
@@ -68,10 +70,24 @@ These are non-negotiable rules that constrain everything below.
 - Leader exposes: "give me events from offset N at epoch E" and "give me snapshot at offset M plus events from M+1 at epoch E."
 - Heartbeats: follower sends periodic "alive, at offset N, epoch E" so leader knows replication lag and ISR membership.
 
+## Coordination, placement, and balancing
+
+- External coordination issues ownership leases and fencing epochs. Fibril should not implement consensus itself.
+- The broker should depend on a coordination/watch trait, not directly on etcd. The trait should expose current owner, whether this node owns a partition, desired follower assignments for this node, owner endpoints for followed partitions, and assignment change watches.
+- etcd, Consul, or another metadata store can implement that trait later. Static config remains useful for local tests and early manual operation.
+- Election is lease/assignment driven. If an owner disappears, coordination chooses a new owner from eligible followers according to policy; the broker then performs local promotion checks before serving client traffic.
+- Balancing is a separate policy layer over coordination. It should consider configurable rules such as target follower count, maximum owned partitions per node, maximum followed partitions per node, disk pressure, and replication lag.
+- Do not make balancing part of Keratin or Stroma. Those layers only enforce local log and queue role correctness.
+- Follower assignment and ownership assignment are related but different. A node can own some partitions and follow others at the same time.
+
 ## Client side (out of scope for v1, but plan the wire protocol)
 
 - Bootstrap list: clients get N broker addresses, try in order until one answers, refresh full topology from there. Survives any single broker failure.
 - Client must handle "not leader" errors by refreshing metadata and retrying. Don't fail.
+- For sharded queues, clients eventually need a topology view: which partitions exist, which broker owns each partition, and which broker endpoint to use.
+- A client may need connections to multiple owners for one logical queue if that queue spans partitions owned by different brokers.
+- Normal users still should not choose partitions directly. Client routing should pick a partition according to Fibril policy, while keeping offsets and partition internals out of the user API.
+- Subscriptions may need one stream per owner/partition behind one logical user-facing subscription. That should be hidden by the client library where possible.
 - Idempotent producer dedup table lives on the leader, keyed by `(producer_id, sequence)`. Must be replicated (or rebuildable from event log) so failover doesn't break dedup.
 
 ## Truncation rules
