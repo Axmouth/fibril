@@ -2651,14 +2651,17 @@ impl Broker<StromaEngine> {
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::FreezeOwner => {
-                self.engine
-                    .freeze_queue_for_transition(&topic, transition.queue.partition, group)
-                    .await?;
-                let _ = self.stop_owner_queue_runtime(&QueueKey {
+                let key = QueueKey {
                     tp: topic.clone(),
                     part: transition.queue.partition,
                     group: transition.queue.group.clone(),
-                });
+                };
+                let broker_deliveries = self.stop_owner_queue_runtime(&key).unwrap_or_default();
+                self.release_offsets_for_role_transition(&key, broker_deliveries)
+                    .await?;
+                self.engine
+                    .freeze_queue_for_transition(&topic, transition.queue.partition, group)
+                    .await?;
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::PromoteFollowerToOwner => {

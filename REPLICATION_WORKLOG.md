@@ -380,12 +380,8 @@ Current focus: checkpoint-required follower boundary.
    delivery offsets, writes a durable Stroma release-inflight event for those
    offsets, then demotes the queue to follower and starts the follower worker.
    Release-inflight is intentionally not a NACK: it returns already leased work
-   to ready without consuming retry budget or entering the DLQ path. Freeze also
-   removes the owner runtime after the Stroma freeze. Stale publisher handles
-   close instead of continuing as normal owner traffic. Remaining detail work:
-   define explicit StopFollower/follower-worker shutdown semantics and decide
-   whether freeze without demotion should also release broker-tracked
-   deliveries or leave them to the transition owner.
+   to ready without consuming retry budget or entering the DLQ path. Stale
+   publisher handles close instead of continuing as normal owner traffic.
 31. Done for StopFollower: broker assignment application now removes the local
    follower replication worker and asks Stroma to stop the follower queue for
    transition. Stroma validates the queue is currently a follower, freezes the
@@ -395,6 +391,13 @@ Current focus: checkpoint-required follower boundary.
    should also try memory-only unmaterialization once no local role remains, and
    keep the current frozen state as the conservative default until that is
    explicitly designed.
+32. Done for FreezeOwner delivery handling: freeze without demotion now follows
+   the same owner-runtime boundary as demotion. Broker assignment application
+   removes the owner runtime, collects broker-tracked delivery offsets, writes a
+   durable Stroma release-inflight event for those offsets while the queue is
+   still owner, then freezes the Stroma queue. This means local owner removal
+   does not leave stale broker leases stuck as inflight, and stale publisher
+   handles close after freeze.
 
 Previous completed implementation checkpoints:
 

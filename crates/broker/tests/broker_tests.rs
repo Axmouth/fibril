@@ -954,6 +954,127 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
 }
 
 #[tokio::test]
+async fn freeze_owner_requeues_broker_tracked_deliveries() {
+    let (broker, _dir) = open_test_broker().await;
+    let group = Some("workers".to_string());
+    let (publisher, _confirms) = broker
+        .get_publisher("transition-freeze-inflight", &group)
+        .await
+        .unwrap();
+
+    let reply = publisher
+        .publish(
+            b"before freeze".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let mut sub = broker
+        .subscribe(
+            "transition-freeze-inflight",
+            Some("workers"),
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await
+        .unwrap();
+    let msg = recv_with_timeout(&mut sub, 1_000)
+        .await
+        .expect("published message should be delivered before freeze");
+    assert_eq!(msg.message.offset, 0);
+
+    let freeze = assignment_transition(
+        "transition-freeze-inflight",
+        LocalAssignmentIntent::FreezeOwner,
+        Some(LocalAssignmentRole::Owner),
+        None,
+    );
+    let outcome = broker.apply_assignment_transition(&freeze).await.unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::FreezeOwner)
+    );
+    assert_eq!(
+        broker.queue_activity_snapshot("transition-freeze-inflight", Some("workers")),
+        None
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match publisher
+                .publish(
+                    b"after freeze".to_vec(),
+                    unix_millis(),
+                    unix_millis(),
+                    None,
+                    Default::default(),
+                )
+                .await
+            {
+                Err(BrokerError::ChannelClosed) => break,
+                Ok(reply) => {
+                    let _ = reply.await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("unexpected stale publisher error: {err:?}"),
+            }
+        }
+    })
+    .await
+    .expect("stale publisher should close after freeze");
+
+    let snapshot = broker.debug_snapshot().await.unwrap();
+    let queue = snapshot
+        .queues
+        .iter()
+        .find(|queue| {
+            queue.topic == "transition-freeze-inflight"
+                && queue.partition == 0
+                && queue.group.as_deref() == Some("workers")
+        })
+        .expect("frozen queue should remain materialized");
+    assert_eq!(queue.role, QueueRole::Frozen);
+    assert_eq!(queue.state.ready_count, 1);
+    assert_eq!(queue.state.inflight_count, 0);
+
+    let become_owner = assignment_transition(
+        "transition-freeze-inflight",
+        LocalAssignmentIntent::BecomeOwner,
+        None,
+        Some(LocalAssignmentRole::Owner),
+    );
+    let outcome = broker
+        .apply_assignment_transition(&become_owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::BecomeOwner)
+    );
+
+    let mut redelivery = broker
+        .subscribe(
+            "transition-freeze-inflight",
+            Some("workers"),
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await
+        .unwrap();
+    let msg = recv_with_timeout(&mut redelivery, 1_000)
+        .await
+        .expect("freeze should requeue broker-tracked delivery");
+    assert_eq!(msg.message.offset, 0);
+
+    broker.shutdown().await;
+}
+
+#[tokio::test]
 async fn owner_replication_read_returns_published_records() {
     let (broker, _dir) = open_test_broker().await;
     let (publisher, _confirms) = broker.get_publisher("replicated", &None).await.unwrap();
