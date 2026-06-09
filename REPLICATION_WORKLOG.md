@@ -135,6 +135,22 @@ locally, every higher layer would be built on the wrong foundation.
 6. Prototype replication transport. Prefer pull from follower to owner for the
    first version because the follower best knows its local offset and checkpoint
    state.
+   Owner notifications are useful as wake-up hints, not as correctness. A
+   follower should still be able to catch up by polling or long-polling from its
+   last known message and event offsets. The eventual worker shape is:
+   follower pulls until the owner returns empty batches, then waits by long poll
+   or a bounded timer. The owner may notify followers that new data exists, but
+   notifications should be coalesced per queue/follower at a small cooldown and
+   can be lost without breaking replication. If a notification is lost, the
+   follower catches up on the next long poll or periodic retry.
+   Contiguous log catch-up only works while the owner still retains the
+   requested message and event ranges. Once the follower asks for data older
+   than the retained head, the owner should not stream all history and may no
+   longer have it. The follower must install a compact owner checkpoint or
+   snapshot, reset its local continuation point, then resume normal replicated
+   ingest from the snapshot's message and event offsets. This is a Stroma-level
+   concern: the snapshot contains compact queue state, while Keratin only needs
+   generic log reset/continuation primitives.
 7. Add operator visibility after the mechanics exist: queue role, replicated
    offset, owner offset, lag, freeze/drain state, and promotion/refusal reasons.
 
@@ -228,9 +244,25 @@ resume after context compaction.
     rejected before offsets are stripped. Plain apply returns a small success
     summary only. Checkpoint negotiation remains a read/catch-up concern, not
     a raw apply response.
-14. Next: add protocol/admin support for a higher-level catch-up command after
-    read/apply behavior is tested. Avoid adding background scheduling until
-    manual pull/apply mechanics are observable and boring.
+14. Done: prove manual protocol catch-up by composing
+    `ReplicationRead` from an owner connection with `ReplicationApply` to a
+    follower connection, then promoting the follower after exact catch-up.
+15. Next: add protocol/admin or CLI support for a higher-level catch-up command
+    after manual read/apply behavior is tested. Avoid adding background
+    scheduling until manual pull/apply mechanics are observable and boring.
+    This should be the next implementation boundary. A manual catch-up command
+    can compose the existing read/apply frames and gives a deterministic way to
+    debug replication before introducing follower scheduling, topology watches,
+    or retry/backoff policy.
+16. Next: design the follower background worker around pull correctness:
+    repeated pulls from follower-owned offsets, optional owner wake-up hints
+    with cooldown, and long-poll or bounded timer safety.
+17. Next: design snapshot/checkpoint install for followers that fall behind the
+    retained owner logs. The owner should expose compact Stroma state plus the
+    continuation offsets where replicated message and event ingest resumes.
+18. Later: add coordinator-backed ownership and follower assignment. The first
+    implementation can be config-backed for local tests, but the API should
+    look like a watch/cache over ownership and follow assignments.
 
 ### Protocol Apply Implementation Notes
 

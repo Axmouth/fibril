@@ -1038,6 +1038,132 @@ async fn replication_apply_rejects_non_contiguous_records_and_keeps_connection_o
 }
 
 #[tokio::test]
+async fn replication_read_and_apply_compose_for_manual_catch_up() {
+    let topic = "replication.catchup.tcp";
+    let group = Some("workers".to_string());
+    let (mut owner_framed, owner_task, _owner_dir) = open_protocol_connection().await;
+    handshake(&mut owner_framed).await;
+    framed_publish(
+        &mut owner_framed,
+        2,
+        topic,
+        group.as_deref(),
+        b"first-replicated-payload",
+    )
+    .await;
+    framed_publish(
+        &mut owner_framed,
+        3,
+        topic,
+        group.as_deref(),
+        b"second-replicated-payload",
+    )
+    .await;
+
+    owner_framed
+        .send(
+            try_encode(
+                Op::ReplicationRead,
+                4,
+                &ReplicationRead {
+                    topic: topic.into(),
+                    group: group.clone(),
+                    partition: 0,
+                    message_from: 0,
+                    event_from: 0,
+                    max_messages: 10,
+                    max_events: 10,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut owner_framed).await;
+    assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
+    let read: ReplicationReadOk = try_decode(&frame).unwrap();
+
+    let messages = match read.messages {
+        ReplicationMessageRead::Batch { epoch, records, .. } => {
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].payload, b"first-replicated-payload".to_vec());
+            assert_eq!(records[1].payload, b"second-replicated-payload".to_vec());
+            Some(ReplicationMessageApplyBatch { epoch, records })
+        }
+        ReplicationMessageRead::CheckpointRequired(required) => {
+            panic!("unexpected message checkpoint requirement: {required:?}");
+        }
+    };
+    let events = match read.events {
+        ReplicationEventRead::Batch { epoch, records, .. } => {
+            assert_eq!(records.len(), 2);
+            Some(ReplicationEventApplyBatch { epoch, records })
+        }
+        ReplicationEventRead::CheckpointRequired(required) => {
+            panic!("unexpected event checkpoint requirement: {required:?}");
+        }
+    };
+
+    let (follower_broker, follower_dir) = open_test_broker().await;
+    follower_broker
+        .become_replication_follower(topic, 0, group.as_deref())
+        .await
+        .unwrap();
+    let (mut follower_framed, follower_task, _follower_dir, follower_broker) =
+        open_protocol_connection_for_broker(
+            ConnectionSettings::new(Some(60)),
+            follower_broker,
+            follower_dir,
+        )
+        .await;
+    handshake(&mut follower_framed).await;
+
+    follower_framed
+        .send(
+            try_encode(
+                Op::ReplicationApply,
+                2,
+                &ReplicationApply {
+                    topic: topic.into(),
+                    group: group.clone(),
+                    partition: 0,
+                    messages,
+                    events,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut follower_framed).await;
+    assert_eq!(frame.opcode, Op::ReplicationApplyOk as u16);
+    assert_eq!(frame.request_id, 2);
+    let response: ReplicationApplyOk = try_decode(&frame).unwrap();
+    assert!(response.messages_applied);
+    assert!(response.events_applied);
+
+    let promoted = follower_broker
+        .promote_replication_follower_if_caught_up(topic, 0, group.as_deref(), 2, 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        promoted,
+        QueuePromotionOutcome::Promoted {
+            message_next_offset: 2,
+            event_next_offset: 2,
+            applied_event_offset: Some(1),
+        }
+    );
+
+    drop(owner_framed);
+    drop(follower_framed);
+    owner_task.await.unwrap().unwrap();
+    follower_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn unowned_publish_returns_not_owner_error_and_keeps_connection_open() {
     let (broker, dir) =
         open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::new()))).await;
