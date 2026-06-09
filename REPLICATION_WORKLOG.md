@@ -104,6 +104,18 @@ locally, every higher layer would be built on the wrong foundation.
 - Keratin durability should stay local. `AfterReplicated` does not belong in
   `KDurability`; replication quorum semantics belong in Stroma or broker-level
   policy.
+- Broker-level replication durability should use explicit operator-facing
+  contracts:
+  - `local_durable`: confirm when the owner has durably written locally.
+  - `replica_accepted(n)`: confirm when `n` assigned nodes, including the
+    owner, have accepted the append. This is lower latency but weaker than
+    durable replication.
+  - `replica_durable(n)`: confirm when `n` assigned nodes, including the owner,
+    have durably written the append.
+  - `majority_durable`: confirm when a durable majority of the assigned replica
+    set has written the append.
+  "Written" means fsynced or otherwise durably committed by the local log.
+  Enforcement belongs in broker/Stroma publish-confirm flow, not in Keratin.
 - Checkpoint and snapshot installation semantics belong in Stroma. Keratin can
   reset a local log continuation point and append caller-assigned records, but it
   should not know what a Stroma snapshot means or how a queue catches up.
@@ -245,7 +257,7 @@ resume after context compaction.
 
 ## Active Implementation Plan
 
-Current focus: follower replication worker foundation.
+Current focus: replication durability policy model.
 
 1. Done: replace the old leader-only `Coordination` stub with a cached
    assignment model shaped like the controller spec: nodes, partition
@@ -287,8 +299,16 @@ Current focus: follower replication worker foundation.
    becomes a follower, but should not start protocol/network replication yet.
 16. Done: add tests proving follower assignment creates worker state and owner
    assignment keeps sparse queues cold.
-17. In progress: commit the follower worker lifecycle checkpoint.
-18. Next: snapshot install support for followers that are behind the owner's
+17. Done: commit the follower worker lifecycle checkpoint.
+18. Done: add a typed broker assignment durability policy that records
+   whether confirms require local durability, replica acceptance, replica
+   durability, or durable majority. This should be modeled but not enforced yet.
+19. Done: record the publish-confirm enforcement hook. The publish-confirm path
+   should resolve the assignment policy after the owner append has a local
+   result, then wait for follower acknowledgements that satisfy the required
+   node count and acknowledgement kind. This requires follower accepted/durable
+   offset reporting before enforcement can be real.
+20. Next: snapshot install support for followers that are behind the owner's
    retained log range.
 
 Previous completed implementation checkpoints:
@@ -551,6 +571,11 @@ Tests needed before implementing transition:
   catch-up a clean "install checkpoint, then apply from here" primitive without
   making ordinary replicated append sparse. Also fixed scans that start before
   the first retained segment so they advance to the first available record.
+- 2026-06-09: Added broker assignment durability policy vocabulary:
+  `local_durable`, `replica_accepted(n)`, `replica_durable(n)`, and
+  `majority_durable`. The model resolves policies against the assigned replica
+  set and validates impossible requirements, but enforcement is intentionally
+  deferred until follower accepted/durable offset acknowledgements exist.
 - 2026-06-09: Next design topic is API gatekeeping. Options to evaluate:
   distinct leader/follower Keratin handle types, a capability/token for
   replicated operations, an extension trait only used by replication code, or an

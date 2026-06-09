@@ -37,6 +37,7 @@ pub struct PartitionAssignment {
     pub owner: String,
     pub followers: Vec<String>,
     pub epoch: u64,
+    pub durability: ReplicationDurabilityPolicy,
 }
 
 impl PartitionAssignment {
@@ -51,7 +52,13 @@ impl PartitionAssignment {
             owner: owner.into(),
             followers,
             epoch,
+            durability: ReplicationDurabilityPolicy::LocalDurable,
         }
+    }
+
+    pub fn with_durability(mut self, durability: ReplicationDurabilityPolicy) -> Self {
+        self.durability = durability;
+        self
     }
 
     pub fn is_owned_by(&self, node_id: &str) -> bool {
@@ -61,6 +68,102 @@ impl PartitionAssignment {
     pub fn is_followed_by(&self, node_id: &str) -> bool {
         self.followers.iter().any(|follower| follower == node_id)
     }
+
+    pub fn replica_set_size(&self) -> usize {
+        1 + self.followers.len()
+    }
+
+    pub fn durability_requirement(
+        &self,
+    ) -> Result<ReplicationDurabilityRequirement, ReplicationDurabilityError> {
+        self.durability.resolve(self.replica_set_size())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicationDurabilityPolicy {
+    /// Confirm after the local owner has durably written the append.
+    LocalDurable,
+    /// Confirm after this many assigned nodes have accepted the append.
+    ///
+    /// `nodes` includes the owner. Acceptance is weaker than durable fsync.
+    ReplicaAccepted { nodes: usize },
+    /// Confirm after this many assigned nodes have durably written the append.
+    ///
+    /// `nodes` includes the owner.
+    ReplicaDurable { nodes: usize },
+    /// Confirm after a durable majority of the assigned replica set.
+    MajorityDurable,
+}
+
+impl Default for ReplicationDurabilityPolicy {
+    fn default() -> Self {
+        Self::LocalDurable
+    }
+}
+
+impl ReplicationDurabilityPolicy {
+    pub fn resolve(
+        self,
+        available_nodes: usize,
+    ) -> Result<ReplicationDurabilityRequirement, ReplicationDurabilityError> {
+        let requirement = match self {
+            Self::LocalDurable => ReplicationDurabilityRequirement {
+                nodes: 1,
+                acknowledgement: ReplicationAcknowledgement::Durable,
+            },
+            Self::ReplicaAccepted { nodes } => ReplicationDurabilityRequirement {
+                nodes,
+                acknowledgement: ReplicationAcknowledgement::Accepted,
+            },
+            Self::ReplicaDurable { nodes } => ReplicationDurabilityRequirement {
+                nodes,
+                acknowledgement: ReplicationAcknowledgement::Durable,
+            },
+            Self::MajorityDurable => ReplicationDurabilityRequirement {
+                nodes: (available_nodes / 2) + 1,
+                acknowledgement: ReplicationAcknowledgement::Durable,
+            },
+        };
+
+        requirement.validate(available_nodes)?;
+        Ok(requirement)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicationDurabilityRequirement {
+    pub nodes: usize,
+    pub acknowledgement: ReplicationAcknowledgement,
+}
+
+impl ReplicationDurabilityRequirement {
+    fn validate(self, available_nodes: usize) -> Result<(), ReplicationDurabilityError> {
+        if self.nodes == 0 {
+            return Err(ReplicationDurabilityError::ZeroNodes);
+        }
+
+        if self.nodes > available_nodes {
+            return Err(ReplicationDurabilityError::NotEnoughAssignedNodes {
+                required: self.nodes,
+                available: available_nodes,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicationAcknowledgement {
+    Accepted,
+    Durable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicationDurabilityError {
+    ZeroNodes,
+    NotEnoughAssignedNodes { required: usize, available: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -446,6 +549,80 @@ mod tests {
         assert_eq!(followed.len(), 1);
         assert_eq!(followed[0].queue.topic.to_string(), "emails");
         assert_eq!(followed[0].epoch, 7);
+    }
+
+    #[test]
+    fn partition_assignment_defaults_to_local_durable_policy() {
+        let assignment = assignment("emails", "node-a", vec!["node-b"], 1);
+
+        assert_eq!(assignment.replica_set_size(), 2);
+        assert_eq!(
+            assignment.durability_requirement().unwrap(),
+            ReplicationDurabilityRequirement {
+                nodes: 1,
+                acknowledgement: ReplicationAcknowledgement::Durable,
+            }
+        );
+    }
+
+    #[test]
+    fn replication_durability_policy_distinguishes_accepted_and_durable() {
+        let accepted = assignment("accepted", "node-a", vec!["node-b", "node-c"], 1)
+            .with_durability(ReplicationDurabilityPolicy::ReplicaAccepted { nodes: 2 });
+        let durable = assignment("durable", "node-a", vec!["node-b", "node-c"], 1)
+            .with_durability(ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 });
+
+        assert_eq!(
+            accepted.durability_requirement().unwrap(),
+            ReplicationDurabilityRequirement {
+                nodes: 2,
+                acknowledgement: ReplicationAcknowledgement::Accepted,
+            }
+        );
+        assert_eq!(
+            durable.durability_requirement().unwrap(),
+            ReplicationDurabilityRequirement {
+                nodes: 2,
+                acknowledgement: ReplicationAcknowledgement::Durable,
+            }
+        );
+    }
+
+    #[test]
+    fn majority_durable_uses_assigned_replica_set_size() {
+        let one = assignment("one", "node-a", vec![], 1)
+            .with_durability(ReplicationDurabilityPolicy::MajorityDurable);
+        let two = assignment("two", "node-a", vec!["node-b"], 1)
+            .with_durability(ReplicationDurabilityPolicy::MajorityDurable);
+        let three = assignment("three", "node-a", vec!["node-b", "node-c"], 1)
+            .with_durability(ReplicationDurabilityPolicy::MajorityDurable);
+        let four = assignment("four", "node-a", vec!["node-b", "node-c", "node-d"], 1)
+            .with_durability(ReplicationDurabilityPolicy::MajorityDurable);
+
+        assert_eq!(one.durability_requirement().unwrap().nodes, 1);
+        assert_eq!(two.durability_requirement().unwrap().nodes, 2);
+        assert_eq!(three.durability_requirement().unwrap().nodes, 2);
+        assert_eq!(four.durability_requirement().unwrap().nodes, 3);
+    }
+
+    #[test]
+    fn replication_durability_policy_rejects_invalid_requirements() {
+        let zero = assignment("zero", "node-a", vec!["node-b"], 1)
+            .with_durability(ReplicationDurabilityPolicy::ReplicaAccepted { nodes: 0 });
+        let too_many = assignment("too-many", "node-a", vec!["node-b"], 1)
+            .with_durability(ReplicationDurabilityPolicy::ReplicaDurable { nodes: 3 });
+
+        assert_eq!(
+            zero.durability_requirement().unwrap_err(),
+            ReplicationDurabilityError::ZeroNodes
+        );
+        assert_eq!(
+            too_many.durability_requirement().unwrap_err(),
+            ReplicationDurabilityError::NotEnoughAssignedNodes {
+                required: 3,
+                available: 2,
+            }
+        );
     }
 
     #[tokio::test]
