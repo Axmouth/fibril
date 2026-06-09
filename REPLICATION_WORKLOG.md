@@ -405,6 +405,15 @@ Current focus: checkpoint-required follower boundary.
    records what the last tick actually applied or attempted, which gives later
    admin/controller code a clear watermark and recent movement signal without
    adding coordination behavior yet.
+34. Done for follower checkpoint policy tightening: `run_follower_replication_worker_once`
+   now uses the worker state's `should_install_checkpoint` predicate before
+   choosing the checkpoint-aware catch-up helper. That keeps the first
+   checkpoint-required worker tick conservative: it records the blocked status
+   and waits. A later tick may install a checkpoint only when the worker is
+   already checkpoint-blocked and `allow_checkpoint_install` is enabled. A full
+   broker test that triggers a real checkpoint-required owner read is still
+   deferred until there is a clean transport/test hook for owner log
+   truncation.
 
 Previous completed implementation checkpoints:
 

@@ -3050,12 +3050,15 @@ impl Broker<StromaEngine> {
         cfg: FollowerReplicationWorkerConfig,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
         let worker = self.follower_replication_worker(queue)?;
-        let options = {
+        let (options, install_checkpoint) = {
             let state = worker.lock().await;
-            state.catch_up_options(cfg)
+            (
+                state.catch_up_options(cfg),
+                state.should_install_checkpoint(cfg),
+            )
         };
 
-        let outcome = if cfg.allow_checkpoint_install {
+        let outcome = if install_checkpoint {
             self.catch_up_replication_follower_from_owner_with_checkpoint(
                 owner,
                 queue.topic.as_str(),
