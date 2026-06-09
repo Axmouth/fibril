@@ -1,8 +1,13 @@
-use std::{collections::HashMap, sync::Arc, time::Duration, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+    time::Instant,
+};
 
 use bytes::Bytes;
 use fibril_broker::{
-    broker::{Broker, BrokerConfig, QueueEvictionAttempt},
+    broker::{Broker, BrokerConfig, QueueEvictionAttempt, StaticQueueOwnership},
     queue_engine::{EvictOutcome, GlobalDLQ, QueueEngine, StromaEngine},
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
@@ -53,6 +58,15 @@ async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
         },
         None,
     );
+
+    (broker, dir)
+}
+
+async fn open_test_broker_with_ownership(
+    ownership: Arc<StaticQueueOwnership>,
+) -> (Arc<Broker<StromaEngine>>, TempDir) {
+    let (engine, dir) = open_test_engine().await;
+    let broker = Broker::new_with_ownership(engine, BrokerConfig::default(), None, ownership);
 
     (broker, dir)
 }
@@ -177,6 +191,19 @@ async fn assert_error_frame(
 ) {
     let frame = recv_frame(framed).await;
     assert_eq!(frame.opcode, Op::Error as u16);
+    assert_eq!(frame.request_id, request_id);
+    let err: ErrorMsg = try_decode(&frame).unwrap();
+    assert_eq!(err.code, code);
+    assert!(!err.message.is_empty());
+}
+
+async fn assert_subscribe_error_frame(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    request_id: u64,
+    code: u16,
+) {
+    let frame = recv_frame(framed).await;
+    assert_eq!(frame.opcode, Op::SubscribeErr as u16);
     assert_eq!(frame.request_id, request_id);
     let err: ErrorMsg = try_decode(&frame).unwrap();
     assert_eq!(err.code, code);
@@ -779,6 +806,104 @@ async fn malformed_publish_returns_error_and_keeps_connection_open() {
         .unwrap();
 
     assert_error_frame(&mut framed, 2, 400).await;
+    assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn unowned_publish_returns_not_owner_error_and_keeps_connection_open() {
+    let (broker, dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::new()))).await;
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                2,
+                &Publish {
+                    topic: "unowned".into(),
+                    partition: 0,
+                    group: None,
+                    require_confirm: true,
+                    content_type: None,
+                    headers: HashMap::new(),
+                    payload: b"payload".to_vec(),
+                    published: unix_millis(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_error_frame(&mut framed, 2, 409).await;
+    assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn unowned_subscribe_returns_not_owner_error_and_keeps_connection_open() {
+    let (broker, dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::new()))).await;
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                2,
+                &Subscribe {
+                    topic: "unowned".into(),
+                    group: None,
+                    prefetch: 1,
+                    auto_ack: false,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_subscribe_error_frame(&mut framed, 2, 409).await;
+    assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn duplicate_subscribe_returns_conflict_and_keeps_connection_open() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+    framed_subscribe(&mut framed, 2, "duplicate.subscribe", None, false).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                3,
+                &Subscribe {
+                    topic: "duplicate.subscribe".into(),
+                    group: None,
+                    prefetch: 1,
+                    auto_ack: false,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_subscribe_error_frame(&mut framed, 3, 409).await;
     assert_connection_still_responds(&mut framed).await;
 
     drop(framed);

@@ -39,6 +39,10 @@ use uuid::Uuid;
 type SubKey = (Topic, Option<Group>); // (topic, group)
 type FrameSink = mpsc::Sender<Frame>;
 const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
+const ERR_CONFLICT: u16 = 409;
+// Not-owner is a topology or state conflict, not an auth failure. Retrying against
+// the current owner is valid, so 403-style "forbidden" would be misleading.
+const ERR_NOT_OWNER: u16 = ERR_CONFLICT;
 
 struct ConnState {
     authenticated: bool,
@@ -127,6 +131,29 @@ async fn send_error_response_and_count(
         tracing::error!("failed to send error response: {err}");
     }
     metrics.error();
+}
+
+fn broker_error_response(err: &BrokerError) -> (u16, String) {
+    match err {
+        BrokerError::NotOwner { .. } => (ERR_NOT_OWNER, err.to_string()),
+        _ => (500, err.to_string()),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum InstallSubscriptionError {
+    #[error(transparent)]
+    Broker(#[from] BrokerError),
+
+    #[error("already subscribed")]
+    AlreadySubscribed,
+}
+
+fn install_subscription_error_response(err: &InstallSubscriptionError) -> (u16, String) {
+    match err {
+        InstallSubscriptionError::Broker(err) => broker_error_response(err),
+        InstallSubscriptionError::AlreadySubscribed => (ERR_CONFLICT, err.to_string()),
+    }
 }
 
 struct SubState {
@@ -311,11 +338,13 @@ struct InstallSubscriptionArgs {
     auto_ack: bool,
 }
 
-async fn install_subscription(args: InstallSubscriptionArgs) -> anyhow::Result<SubscribeOk> {
+async fn install_subscription(
+    args: InstallSubscriptionArgs,
+) -> Result<SubscribeOk, InstallSubscriptionError> {
     let sub_key: SubKey = (args.topic.clone(), args.group.clone());
 
     if args.logical.state.lock().await.subs.contains_key(&sub_key) {
-        anyhow::bail!("already subscribed");
+        return Err(InstallSubscriptionError::AlreadySubscribed);
     }
 
     let consumer = args
@@ -328,8 +357,7 @@ async fn install_subscription(args: InstallSubscriptionArgs) -> anyhow::Result<S
                 prefetch: args.prefetch as usize,
             },
         )
-        .await
-        .context("subscribe failed")?;
+        .await?;
 
     let ConsumerHandle {
         messages,
@@ -1130,13 +1158,10 @@ pub async fn handle_connection(
                         Ok(Ok(offset)) => offset,
                         Ok(Err(err)) => {
                             if require_confirm {
-                                let send_res = send_error_response(
-                                    &frame_tx_pub,
-                                    request_id,
-                                    500,
-                                    err.to_string(),
-                                )
-                                .await;
+                                let (code, message) = broker_error_response(&err);
+                                let send_res =
+                                    send_error_response(&frame_tx_pub, request_id, code, message)
+                                        .await;
 
                                 if let Err(err) = send_res {
                                     tracing::error!("Error sending Publish Confirm: {err}");
@@ -1178,8 +1203,9 @@ pub async fn handle_connection(
                     }
                 }
                 Err(err) => {
+                    let (code, message) = broker_error_response(&err);
                     let send_res =
-                        send_error_response(&frame_tx_pub, request_id, 500, err.to_string()).await;
+                        send_error_response(&frame_tx_pub, request_id, code, message).await;
 
                     if let Err(err) = send_res {
                         tracing::error!("Error sending Publish Confirm: {err}");
@@ -1374,23 +1400,6 @@ pub async fn handle_connection(
             x if x == Op::Subscribe as u16 => {
                 let sub: Subscribe = decode_or_400!(frame, frame_tx_high_prio, metrics, Subscribe);
 
-                let sub_key: SubKey = (sub.topic.clone(), sub.group.clone());
-
-                if logical.state.lock().await.subs.contains_key(&sub_key) {
-                    frame_tx_high_prio
-                        .send(try_encode(
-                            Op::SubscribeErr,
-                            frame.request_id,
-                            &ErrorMsg {
-                                code: 409,
-                                message: "already subscribed".into(),
-                            },
-                        )?)
-                        .await?;
-                    metrics.error();
-                    continue;
-                }
-
                 let sub_ok = install_subscription(InstallSubscriptionArgs {
                     broker: broker.clone(),
                     logical: logical.clone(),
@@ -1404,8 +1413,23 @@ pub async fn handle_connection(
                     prefetch: sub.prefetch,
                     auto_ack: sub.auto_ack,
                 })
-                .await
-                .context("subscribe failed")?;
+                .await;
+
+                let sub_ok = match sub_ok {
+                    Ok(sub_ok) => sub_ok,
+                    Err(err) => {
+                        let (code, message) = install_subscription_error_response(&err);
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::SubscribeErr,
+                                frame.request_id,
+                                &ErrorMsg { code, message },
+                            )?)
+                            .await?;
+                        metrics.error();
+                        continue;
+                    }
+                };
 
                 frame_tx_high_prio
                     .send(try_encode(Op::SubscribeOk, frame.request_id, &sub_ok)?)
@@ -1566,10 +1590,22 @@ pub async fn handle_connection(
                 let key = (pubreq.topic.clone(), pubreq.group.clone());
                 let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
-                    let (pubh, mut conf_stream) = broker
-                        .get_publisher(&pubreq.topic, &pubreq.group)
-                        .await
-                        .context("get publisher failed")?;
+                    let (pubh, mut conf_stream) =
+                        match broker.get_publisher(&pubreq.topic, &pubreq.group).await {
+                            Ok(publisher) => publisher,
+                            Err(err) => {
+                                let (code, message) = broker_error_response(&err);
+                                send_error_response_and_count(
+                                    &frame_tx_low_prio,
+                                    &metrics,
+                                    frame.request_id,
+                                    code,
+                                    message,
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
 
                     // let conf_sink = frame_tx_low_prio.clone();
                     // let req_id_gen_clone = req_id_gen.clone();
@@ -1665,10 +1701,22 @@ pub async fn handle_connection(
                 let key = (pubreq.topic.clone(), pubreq.group.clone());
                 let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
-                    let (pubh, mut conf_stream) = broker
-                        .get_publisher(&pubreq.topic, &pubreq.group)
-                        .await
-                        .context("get publisher failed")?;
+                    let (pubh, mut conf_stream) =
+                        match broker.get_publisher(&pubreq.topic, &pubreq.group).await {
+                            Ok(publisher) => publisher,
+                            Err(err) => {
+                                let (code, message) = broker_error_response(&err);
+                                send_error_response_and_count(
+                                    &frame_tx_low_prio,
+                                    &metrics,
+                                    frame.request_id,
+                                    code,
+                                    message,
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
 
                     // let conf_sink = frame_tx_low_prio.clone();
                     // let req_id_gen_clone = req_id_gen.clone();

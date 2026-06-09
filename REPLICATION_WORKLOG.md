@@ -129,8 +129,9 @@ locally, every higher layer would be built on the wrong foundation.
 5. In progress: add the first broker ownership model. The broker now has a
    queue ownership provider interface and a static test implementation. Publisher
    and subscriber creation are rejected before queue materialization when this
-   node does not own the queue. Protocol-level not-owner frames and real
-   coordinator-backed ownership are still pending.
+   node does not own the queue. TCP protocol handling now returns a stable
+   conflict response for not-owner publish and subscribe attempts without closing
+   the connection. Real coordinator-backed ownership is still pending.
 6. Prototype replication transport. Prefer pull from follower to owner for the
    first version because the follower best knows its local offset and checkpoint
    state.
@@ -158,11 +159,12 @@ resume after context compaction.
    event tails plus applied event state before switching to owner.
 6. Done: Stroma checked owner demotion freezes, drains, records local tails, and
    switches queue plus Keratin logs to follower.
-7. In progress: broker ownership gate. The broker has a sync ownership provider
+7. Done: broker ownership gate. The broker has a sync ownership provider
    interface suitable for a future coordinator watch cache, with `OwnAllQueues`
    as the default and `StaticQueueOwnership` for tests and early wiring.
-8. Next: map broker `NotOwner` into protocol/client-visible errors, still
-   without designing full routing or forwarding.
+8. Done: broker `NotOwner` maps to protocol-visible conflict errors for publish
+   and subscribe setup. The connection stays open so clients can refresh
+   topology or retry elsewhere later.
 9. Next: expose owner log read APIs needed by follower pull replication. The
    first transport should let followers ask owners for message and event batches
    from known offsets.
@@ -384,3 +386,8 @@ Tests needed before implementing transition:
   queue and logs to follower mode. Focused tests cover demotion while a publish
   completion is still in flight, rejection of new owner traffic during freeze,
   replicated ingest after demotion, and refusal to demote non-owner queues.
+- 2026-06-09: Mapped broker not-owner failures into stable TCP protocol errors.
+  Publish uses the ordinary `Error` frame and subscribe uses `SubscribeErr`, both
+  with conflict status code `409`. The handler keeps the connection open so
+  clients can retry, refresh topology, or continue other work. Subscription setup
+  now uses a typed local error for duplicate subscriptions instead of `anyhow`.
