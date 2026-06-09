@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use fibril_broker::{
     CompletionPair,
     broker::{
-        Broker, BrokerConfig, ConsumerConfig, QueueEvictionAttempt, QueueEvictionSkip,
-        SettleRequest, SettleType,
+        Broker, BrokerConfig, BrokerError, ConsumerConfig, OwnedQueue, QueueEvictionAttempt,
+        QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
     },
     queue_engine::{
         Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, MessageHeaders,
@@ -286,6 +286,23 @@ async fn open_test_broker_with_metrics(
     (broker, dir)
 }
 
+async fn open_test_broker_with_ownership(
+    ownership: Arc<dyn fibril_broker::broker::QueueOwnership>,
+) -> (Arc<Broker<StromaEngine>>, TempDir) {
+    let dir = test_dir!("broker_test");
+
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker = Broker::new_with_ownership(engine, BrokerConfig::default(), None, ownership);
+
+    (broker, dir)
+}
+
 async fn open_test_engine() -> (StromaEngine, TempDir) {
     let dir = test_dir!("broker_test");
     let engine = StromaEngine::open(
@@ -297,6 +314,97 @@ async fn open_test_engine() -> (StromaEngine, TempDir) {
     .unwrap();
 
     (engine, dir)
+}
+
+#[tokio::test]
+async fn static_ownership_rejects_publisher_for_unowned_queue() {
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(StdHashSet::new())))
+            .await;
+
+    let err = match broker.get_publisher("unowned", &None).await {
+        Ok(_) => panic!("unowned queue unexpectedly accepted a publisher"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(
+        err,
+        BrokerError::NotOwner {
+            topic,
+            partition: 0,
+            group: None,
+        } if topic == "unowned"
+    ));
+    assert!(!broker.is_queue_materialized("unowned", None));
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn static_ownership_rejects_subscriber_for_unowned_queue() {
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(StdHashSet::new())))
+            .await;
+
+    let err = match broker
+        .subscribe(
+            "unowned",
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await
+    {
+        Ok(_) => panic!("unowned queue unexpectedly accepted a subscriber"),
+        Err(err) => err,
+    };
+
+    assert!(matches!(
+        err,
+        BrokerError::NotOwner {
+            topic,
+            partition: 0,
+            group: None,
+        } if topic == "unowned"
+    ));
+    assert!(!broker.is_queue_materialized("unowned", None));
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn static_ownership_allows_owned_queue() {
+    let mut owned = StdHashSet::new();
+    owned.insert(OwnedQueue::new("owned", 0, Some("workers")));
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
+    let group = Some("workers".to_string());
+
+    let (publisher, _confirms) = broker.get_publisher("owned", &group).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"hello".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let mut sub = broker
+        .subscribe(
+            "owned",
+            Some("workers"),
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await
+        .unwrap();
+    let msg = recv_with_timeout(&mut sub, 1000)
+        .await
+        .expect("owned queue should deliver published message");
+    assert_eq!(msg.message.offset, 0);
+    broker.shutdown().await;
 }
 
 async fn recv_with_timeout(

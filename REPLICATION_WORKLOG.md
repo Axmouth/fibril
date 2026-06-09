@@ -126,14 +126,52 @@ locally, every higher layer would be built on the wrong foundation.
    accepted work, recording local tails, and switching the queue and Keratin logs
    to follower mode. Cluster fencing and handoff ownership still belong above
    Stroma.
-5. Add the first broker ownership model. Static config is enough at first if the
-   broker cleanly routes client traffic to owners and returns clear not-owner
-   errors elsewhere.
+5. In progress: add the first broker ownership model. The broker now has a
+   queue ownership provider interface and a static test implementation. Publisher
+   and subscriber creation are rejected before queue materialization when this
+   node does not own the queue. Protocol-level not-owner frames and real
+   coordinator-backed ownership are still pending.
 6. Prototype replication transport. Prefer pull from follower to owner for the
    first version because the follower best knows its local offset and checkpoint
    state.
 7. Add operator visibility after the mechanics exist: queue role, replicated
    offset, owner offset, lag, freeze/drain state, and promotion/refusal reasons.
+
+## Current Work Plan
+
+This section should stay in sync with the active implementation plan so work can
+resume after context compaction.
+
+1. Done: Keratin exposes generic replicated append and checkpoint primitives.
+   Keratin remains a local log library and does not know about Fibril, Stroma
+   queue ownership, replication topology, or coordination.
+2. Done: Stroma exposes local queue roles and role guards. Owner operations are
+   rejected on follower and frozen queues, and normal expiry work skips non-owner
+   queues.
+3. Done: Stroma freeze/drain protects role transitions. Freeze blocks new owner
+   work, accepted owner work is allowed to complete under its operation lease,
+   and tests cover publish, ack, NACK, and DLQ continuation paths.
+4. Done: Stroma follower ingest applies replicated message and event batches to
+   follower queues. Source queue DLQ events stay source-local, and DLQ payloads
+   are replicated through the DLQ queue's own logs.
+5. Done: Stroma checked follower promotion verifies exact local message and
+   event tails plus applied event state before switching to owner.
+6. Done: Stroma checked owner demotion freezes, drains, records local tails, and
+   switches queue plus Keratin logs to follower.
+7. In progress: broker ownership gate. The broker has a sync ownership provider
+   interface suitable for a future coordinator watch cache, with `OwnAllQueues`
+   as the default and `StaticQueueOwnership` for tests and early wiring.
+8. Next: map broker `NotOwner` into protocol/client-visible errors, still
+   without designing full routing or forwarding.
+9. Next: expose owner log read APIs needed by follower pull replication. The
+   first transport should let followers ask owners for message and event batches
+   from known offsets.
+10. Next: prototype follower pull replication and local catch-up loop, then use
+    checked promotion/demotion APIs for handoff tests.
+11. Later: replace static ownership with coordinator-backed ownership, likely
+    based on an etcd-style lease/watch model.
+12. Later: admin and metrics visibility for queue role, local offsets,
+    replicated offsets, lag, transition state, and refusal reasons.
 
 ## Pending Decisions
 
@@ -148,6 +186,13 @@ locally, every higher layer would be built on the wrong foundation.
   layer should advance/fence the Keratin epoch before entering owner mode. The
   safer intuition is to always supply epoch, but the current Keratin owner append
   path intentionally stays minimal until Stroma role wiring clarifies the API.
+- Whether the old `Coordination` trait should be removed or replaced with the
+  queue ownership provider once real coordination starts. Its leader terminology
+  does not match the current owner/follower partition model.
+- Exact etcd deployment assumptions are not decided. The likely production shape
+  is a small odd-numbered etcd cluster that stores ownership leases and epochs,
+  while broker nodes watch keys and maintain a local ownership cache. A single
+  etcd container remains fine for local development and early integration tests.
 - Exact epoch/checkpoint handoff during Stroma role transition. The local
   freeze/drain primitive exists, but the higher layer still has to decide when
   Keratin epochs advance and what checkpoint state is installed before a queue

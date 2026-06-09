@@ -40,6 +40,13 @@ pub enum BrokerError {
     #[error("channel closed")]
     ChannelClosed,
 
+    #[error("not owner for queue {topic}/{partition}/{group:?}")]
+    NotOwner {
+        topic: Topic,
+        partition: LogId,
+        group: Option<Group>,
+    },
+
     #[error("unknown: {0}")]
     Unknown(String),
 }
@@ -333,6 +340,54 @@ impl Default for BrokerConfig {
             delivery_poll_max_ms: 500,
             queue_idle_evict_after_ms: None,
             queue_idle_sweep_interval_ms: 60_000,
+        }
+    }
+}
+
+pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
+    fn owns_queue(&self, topic: &str, partition: LogId, group: Option<&str>) -> bool;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OwnAllQueues;
+
+impl QueueOwnership for OwnAllQueues {
+    fn owns_queue(&self, _topic: &str, _partition: LogId, _group: Option<&str>) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StaticQueueOwnership {
+    owned: HashSet<OwnedQueue>,
+}
+
+impl StaticQueueOwnership {
+    pub fn new(owned: HashSet<OwnedQueue>) -> Self {
+        Self { owned }
+    }
+}
+
+impl QueueOwnership for StaticQueueOwnership {
+    fn owns_queue(&self, topic: &str, partition: LogId, group: Option<&str>) -> bool {
+        self.owned
+            .contains(&OwnedQueue::new(topic, partition, group))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OwnedQueue {
+    pub topic: Topic,
+    pub partition: LogId,
+    pub group: Option<Group>,
+}
+
+impl OwnedQueue {
+    pub fn new(topic: impl Into<Topic>, partition: LogId, group: Option<&str>) -> Self {
+        Self {
+            topic: topic.into(),
+            partition,
+            group: group.map(str::to_string),
         }
     }
 }
@@ -652,10 +707,20 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     task_group: Arc<TaskGroup>,
 
     metrics: Option<Arc<BrokerStats>>,
+    ownership: Arc<dyn QueueOwnership>,
 }
 
 impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
     pub fn new(engine: E, cfg: BrokerConfig, metrics: Option<Arc<BrokerStats>>) -> Arc<Self> {
+        Self::new_with_ownership(engine, cfg, metrics, Arc::new(OwnAllQueues))
+    }
+
+    pub fn new_with_ownership(
+        engine: E,
+        cfg: BrokerConfig,
+        metrics: Option<Arc<BrokerStats>>,
+        ownership: Arc<dyn QueueOwnership>,
+    ) -> Arc<Self> {
         let metrics_clone = metrics.clone();
         if let Some(metrics) = metrics_clone {
             metrics.register_queue_state_callback(Some(Arc::new({
@@ -699,6 +764,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             settings_epoch: AtomicU64::new(1),
             task_group: Arc::new(TaskGroup::new()),
             metrics,
+            ownership,
         });
 
         // expiry worker: keeps Stroma turning inflight -> ready again
@@ -731,6 +797,23 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     fn settings_epoch(&self) -> u64 {
         self.settings_epoch.load(Ordering::Acquire)
+    }
+
+    fn ensure_queue_owner(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+    ) -> Result<(), BrokerError> {
+        if self.ownership.owns_queue(topic, partition, group) {
+            return Ok(());
+        }
+
+        Err(BrokerError::NotOwner {
+            topic: topic.to_string(),
+            partition,
+            group: group.map(str::to_string),
+        })
     }
 
     pub async fn shutdown(&self) {
@@ -809,6 +892,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let tp: Topic = topic.to_string();
         let part: LogId = 0;
         let group = group.clone();
+
+        self.ensure_queue_owner(&tp, part, group.as_deref())?;
 
         let qs = self
             .queue(&QueueKey {
@@ -1258,6 +1343,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let tp: Topic = topic.to_string();
         let part: LogId = 0;
         let group: Option<Group> = group.map(|s| s.to_string());
+
+        self.ensure_queue_owner(&tp, part, group.as_deref())?;
 
         let sub_id = self.next_sub_id.fetch_add(1, Ordering::SeqCst);
 
