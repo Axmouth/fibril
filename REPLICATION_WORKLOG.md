@@ -113,17 +113,19 @@ locally, every higher layer would be built on the wrong foundation.
 1. Done: validate Stroma freeze/drain semantics with real durable paths. Cover publish
    and event completions first, then add DLQ-specific coverage when there is a
    deterministic owner-side hook rather than a timing guess.
-2. In progress: define the Stroma replication surface: owner append, follower replicated
-   ingest, freeze before role change, promote follower, and demote owner. Keep it
-   in queue terms only.
+2. Done for local mechanics: define the Stroma replication surface around owner
+   append, follower replicated ingest, owner freeze before role change, checked
+   follower promotion, and owner demotion. Keep it in queue terms only.
 3. Done: add follower ingest in Stroma. It should use Keratin replicated append,
    reject ordinary owner traffic, apply replicated queue state, and avoid
    owner-only side effects.
 4. In progress: define local promotion and demotion checks. A follower can now
    be promoted only when its local message and event log tails exactly match the
    externally supplied expected tails, and its event state is applied through the
-   event tail. Demotion still needs the matching freeze, checkpoint, and handoff
-   contract.
+   event tail. An owner can now be demoted by freezing owner traffic, draining
+   accepted work, recording local tails, and switching the queue and Keratin logs
+   to follower mode. Cluster fencing and handoff ownership still belong above
+   Stroma.
 5. Add the first broker ownership model. Static config is enough at first if the
    broker cleanly routes client traffic to owners and returns clear not-owner
    errors elsewhere.
@@ -329,3 +331,11 @@ Tests needed before implementing transition:
   unexpected local state. This is only a local readiness check. It does not prove
   the old owner is fenced, and it does not replace the future ownership election
   protocol.
+- 2026-06-09: Added checked Stroma owner demotion. Freezing now requires the
+  queue to still be owner instead of unconditionally forcing `Frozen`, which
+  prevents a stale transition caller from freezing an existing follower. Demotion
+  freezes owner traffic, waits for accepted owner operations to drain, freezes
+  both Keratin logs, records local message and event tails, then switches the
+  queue and logs to follower mode. Focused tests cover demotion while a publish
+  completion is still in flight, rejection of new owner traffic during freeze,
+  replicated ingest after demotion, and refusal to demote non-owner queues.
