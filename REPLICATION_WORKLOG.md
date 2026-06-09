@@ -526,6 +526,226 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    needed, but the target operator experience should make the cluster shape
    obvious during incidents.
 
+## Medium-Term Plan
+
+This section is the current execution guide. It should be updated as items land,
+but the older starting plan should remain useful as historical grounding.
+
+### 1. Protocol-Backed Owner Peer
+
+Goal: make follower worker loops pull from real owner nodes instead of only
+in-process fake peers.
+
+Breakdown:
+
+- Add a broker/client-side peer implementation of `BrokerOwnerReplicationPeer`
+  that speaks protocol v1 replication read and checkpoint frames.
+- Reuse existing protocol handler frames before adding new wire surface.
+- Add connection lifecycle handling: connect, reconnect, fail current tick,
+  and let the worker retry by policy.
+- Keep ownership errors explicit. If the contacted node is not owner anymore,
+  the peer should return a typed error that causes resolver/topology refresh.
+- Add TCP end-to-end tests with two local brokers: owner publishes, follower
+  worker pulls over protocol, follower reaches matching offsets.
+- Add a checkpoint-required TCP path test after record catch-up works.
+
+Risks:
+
+- Avoid coupling the peer directly to static coordination. It should only need
+  an address and protocol client behavior.
+- Do not hide partial network failures as normal empty batches.
+
+### 2. Coordination-Backed Peer Resolver
+
+Goal: resolve an assignment owner into a usable replication peer from the local
+coordination snapshot/watch cache.
+
+Breakdown:
+
+- Add a resolver that reads `PartitionAssignment.owner` and looks up `NodeInfo`.
+- Add a small peer/client cache keyed by node id or broker address.
+- Invalidate or refresh peers when assignment generation or node address changes.
+- Keep resolver output as `Option<Arc<dyn BrokerOwnerReplicationPeer>>` for now:
+  unresolved owner should remain retryable.
+- Add tests for missing owner node, changed owner address, stable owner cache,
+  and assignment owner moving to another node.
+
+Risks:
+
+- This is where too many abstractions can creep in. Prefer one resolver with a
+  small cache over separate registry/client-factory layers until the protocol
+  implementation proves more is needed.
+
+### 3. Checkpoint Catch-Up Over Transport
+
+Goal: let a follower recover when it asks for records older than the owner's
+retained log head.
+
+Breakdown:
+
+- Wire owner checkpoint export and follower checkpoint install through the
+  protocol-backed peer.
+- Keep worker-triggered checkpoint install policy-gated. Default remains report
+  and retry.
+- After checkpoint install, resume normal message/event catch-up from the
+  checkpoint continuation offsets.
+- Add tests for: checkpoint-required response, checkpoint export, install,
+  resume catch-up, and promotion eligibility after catch-up.
+- Track large-message/log-range behavior in tests, even if optimization waits.
+
+Risks:
+
+- State checkpoints are not payload checkpoints. Message catch-up can still be
+  large and must be treated as a separate transfer.
+- Owner checkpoint export pauses owner work briefly, so worker policy must stay
+  conservative by default.
+
+### 4. Coordinator-Backed Assignments
+
+Goal: replace static coordination in cluster mode with an etcd-backed watch/CAS
+implementation while preserving the existing snapshot interface.
+
+Breakdown:
+
+- Define the etcd key layout for nodes, assignments, controller lease, and
+  generation.
+- Implement node registration with TTL/lease refresh.
+- Implement watch-to-`CoordinationSnapshot` cache.
+- Implement CAS assignment update with generation/fencing checks.
+- Keep static coordination for tests and local deterministic setups.
+- Add integration tests against a real or embedded/test etcd if practical.
+
+Risks:
+
+- Coordination failures must be visible and conservative. A broker that loses
+  coordination should not silently keep acting as owner forever without a valid
+  lease.
+- Etcd dependency should be isolated behind the coordination trait so another
+  backend remains possible later.
+
+### 5. Controller Loop and Placement Application
+
+Goal: have exactly one active controller compute desired assignments and write
+them through coordination.
+
+Breakdown:
+
+- Add controller lease acquisition and renewal.
+- Feed current nodes, queue set, existing assignments, and policy settings into
+  `PartitionPlacementPolicy`.
+- Preserve stable owners/followers where valid. Do not move owners just because
+  the planner ran.
+- Add controller tests for missing owner repair, missing follower repair,
+  stable healthy assignments, and node removal.
+- Add basic controller observability: active controller id, last plan time,
+  generation, and last error.
+
+Risks:
+
+- Do not combine controller handoff with partition failover semantics. They are
+  related but not the same operation.
+
+### 6. Failover and Promotion Orchestration
+
+Goal: convert local primitives into a real ownership transfer sequence.
+
+Breakdown:
+
+- Detect owner loss from coordination lease/node health.
+- Pick a caught-up follower, or choose checkpoint/catch-up path before
+  promotion.
+- Fence old owner through assignment generation/epoch before new owner serves
+  traffic.
+- Stop follower worker, verify local tails/applied state, promote Stroma queue,
+  update broker ownership view.
+- Return not-owner or retryable errors while transition is in progress.
+- Add adversarial tests: stale owner tries to publish, follower promotes before
+  caught up, owner returns during failover, and assignment generation races.
+
+Risks:
+
+- This is the highest correctness area. Prefer explicit refusal over optimistic
+  promotion.
+
+### 7. Replicated Publish Confirm Policy
+
+Goal: enforce configured replication durability contracts in publish confirms.
+
+Breakdown:
+
+- Track follower accepted/durable offsets per assignment.
+- Have follower workers report progress to broker/coordination or an owner-side
+  acknowledgement path.
+- In owner publish-confirm flow, wait for policy: local durable, replica
+  accepted, replica durable, or majority durable.
+- Add timeout/error handling that reports which durability condition was not
+  met.
+- Add tests for each policy and for insufficient assigned replicas.
+
+Risks:
+
+- Do not block unconfirmed publish paths more than their contract requires.
+- The policy must be understandable to operators, not just internally correct.
+
+### 8. Sharding and Client Topology
+
+Goal: let a logical queue span partitions owned by different brokers while
+keeping partition choice out of the normal user API.
+
+Breakdown:
+
+- Define queue topology metadata: partition count, owners, followers, generation.
+- Add client topology fetch/refresh path.
+- Route publish/subscribe traffic to the correct owner connection.
+- Decide initial partition selection policy: hash key later, simple round-robin
+  or server-selected partition first.
+- Keep partition ids mostly internal in docs and user-facing client APIs.
+- Add tests for not-owner reroute, owner movement, and multi-partition publish.
+
+Risks:
+
+- Avoid exposing partition mechanics too early. Users should think in queues
+  unless they intentionally need advanced routing.
+
+### 9. Operator Visibility and Topology Dashboard
+
+Goal: make cluster state understandable during incidents.
+
+Breakdown:
+
+- Add API surfaces for topology: nodes, assignments, owners, followers, lag,
+  health, controller, and transition state.
+- Add dashboard topology page. Target: live diagram showing nodes and
+  owner/follower links, with table fallback if needed first.
+- Add queue-level replication details: role, owner, lag, last catch-up, last
+  error, checkpoint-required status.
+- Add logs/events for freeze started, drained, role changed, replicated batch
+  applied, promotion accepted/refused.
+
+Risks:
+
+- Avoid dumping every low-level metric on the overview page. Put detailed
+  replication/debug state on the topology/queue drilldown pages.
+
+### 10. Test Helper Cleanup and Adversarial Tests
+
+Goal: reduce boilerplate enough to make future race and multi-broker tests easy
+to write.
+
+Breakdown:
+
+- Add broker test helpers for owner/follower pairs, assignments, publishing,
+  catch-up, worker waits, and fake peers.
+- Keep helpers small and behavior-shaped. They should not hide the assertion or
+  the state transition under test.
+- Add adversarial tests around role changes during active work.
+- Add TCP end-to-end tests for replication read/apply and checkpoint install.
+- Later, add multi-process or containerized chaos tests.
+
+Risks:
+
+- Helper refactors should be separate from behavior changes where possible.
+
 ## Core Completion Estimate
 
 Rough status as of checkpoint 43, measured against a functional first version
