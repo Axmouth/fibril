@@ -164,6 +164,18 @@ locally, every higher layer would be built on the wrong foundation.
   owner. The copied DLQ payload is replicated through the DLQ queue's own
   message/event logs, so only followers of that DLQ queue apply the DLQ message
   itself.
+- Partition placement is a pure policy boundary above coordination storage.
+  The default policy should be deterministic and testable without a broker,
+  Stroma, Keratin, or etcd instance. It computes owners and followers from a
+  node set, queue set, existing assignments, target follower count, and
+  generation. The future controller calls a policy, then writes the resulting
+  assignment snapshot through coordination.
+- The default placement policy prioritizes stability over perfect balance:
+  keep an existing owner if the node still exists, keep valid existing followers
+  in order, drop missing or duplicate followers, fill missing followers from
+  sorted nodes, and reassign ownership only when the previous owner is no
+  longer present. More advanced policies can later consider health, disk
+  pressure, lag, and balancing rules behind the same trait.
 
 ## Phase Plan
 
@@ -189,7 +201,11 @@ locally, every higher layer would be built on the wrong foundation.
    node does not own the queue. TCP protocol handling now returns a stable
    conflict response for not-owner publish and subscribe attempts without closing
    the connection. Real coordinator-backed ownership is still pending.
-6. Prototype replication transport. Prefer pull from follower to owner for the
+6. Done: add assignment computation as a pluggable placement policy.
+   The first policy is deterministic, pure, and unit-tested. It does not talk to
+   etcd or mutate broker runtime state. The controller-backed implementation
+   should later call the policy and publish the resulting coordination snapshot.
+7. Prototype replication transport. Prefer pull from follower to owner for the
    first version because the follower best knows its local offset and checkpoint
    state.
    Owner notifications are useful as wake-up hints, not as correctness. A
@@ -208,7 +224,7 @@ locally, every higher layer would be built on the wrong foundation.
    ingest from the snapshot's message and event offsets. This is a Stroma-level
    concern: the snapshot contains compact queue state, while Keratin only needs
    generic log reset/continuation primitives.
-7. Add operator visibility after the mechanics exist: queue role, replicated
+8. Add operator visibility after the mechanics exist: queue role, replicated
    offset, owner offset, lag, freeze/drain state, and promotion/refusal reasons.
 
 ## Current Work Plan
@@ -261,9 +277,13 @@ resume after context compaction.
     bytes so the wire contract stays log-shaped instead of Stroma-shaped.
     Handler wiring now exists for owner read and follower apply. Background
     scheduling is still pending.
-11. Later: replace static ownership with coordinator-backed ownership, likely
+11. Done: replace ad hoc assignment computation with a pluggable
+    partition placement policy. The default policy is deterministic and keeps
+    stable assignments where possible, so later controller tests can focus on
+    lease/CAS behavior instead of placement details.
+12. Later: replace static ownership with coordinator-backed ownership, likely
     based on an etcd-style lease/watch model.
-12. Later: admin and metrics visibility for queue role, local offsets,
+13. Later: admin and metrics visibility for queue role, local offsets,
     replicated offsets, lag, transition state, and refusal reasons.
 
 ## Active Implementation Plan
@@ -437,6 +457,14 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    are intentionally no-ops for local worker lifecycle and must not reset
    replication progress. This keeps coordination metadata refreshes from
    rewinding a follower that is already catching up.
+39. Done for placement policy boundary: `PartitionPlacementPolicy` now models
+   assignment computation as a pure broker-level policy. The deterministic
+   default sorts queues and nodes, preserves existing owners when still present,
+   repairs missing owners by assigning a replacement, preserves valid followers,
+   fills follower slots up to the target, caps follower count to available
+   non-owner nodes, and preserves durability settings across recomputation. This
+   is deliberately not an etcd controller yet. It is the testable algorithm a
+   future controller can call before writing a coordination snapshot.
 
 Previous completed implementation checkpoints:
 
