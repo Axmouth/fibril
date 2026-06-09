@@ -257,7 +257,7 @@ resume after context compaction.
 
 ## Active Implementation Plan
 
-Current focus: replication durability policy model.
+Current focus: checkpoint-required follower boundary.
 
 1. Done: replace the old leader-only `Coordination` stub with a cached
    assignment model shaped like the controller spec: nodes, partition
@@ -308,8 +308,16 @@ Current focus: replication durability policy model.
    result, then wait for follower acknowledgements that satisfy the required
    node count and acknowledgement kind. This requires follower accepted/durable
    offset reporting before enforcement can be real.
-20. Next: snapshot install support for followers that are behind the owner's
+20. Done: pin the Fibril checkpoint-required boundary. If an owner read
+   reports that the follower is behind the retained log range, the broker should
+   surface `CheckpointRequired`, avoid partial apply, and avoid materializing a
+   follower queue just to report that status.
+21. Next: snapshot install support for followers that are behind the owner's
    retained log range.
+22. Next: add a Stroma follower checkpoint install API. It should reset the
+   follower message and event logs to the checkpoint continuation offsets,
+   install compacted queue state, keep the queue in follower role, and then let
+   normal replicated append continue from those offsets.
 
 Previous completed implementation checkpoints:
 
@@ -576,6 +584,11 @@ Tests needed before implementing transition:
   `majority_durable`. The model resolves policies against the assigned replica
   set and validates impossible requirements, but enforcement is intentionally
   deferred until follower accepted/durable offset acknowledgements exist.
+- 2026-06-09: Pinned the checkpoint-required broker boundary with tests. Fibril
+  keeps checkpoint-required reads as an explicit status without attempting
+  partial follower apply or materializing a queue just to report the status. The
+  actual checkpoint install operation still belongs in Stroma because it must
+  reset local queue logs and compacted queue state together.
 - 2026-06-09: Next design topic is API gatekeeping. Options to evaluate:
   distinct leader/follower Keratin handle types, a capability/token for
   replicated operations, an extension trait only used by replication code, or an

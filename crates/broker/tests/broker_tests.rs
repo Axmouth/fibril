@@ -9,11 +9,11 @@ use fibril_broker::{
     CompletionPair,
     broker::{
         Broker, BrokerAssignmentTransitionApply, BrokerConfig, BrokerError,
-        BrokerFollowerReplicationApply, BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
-        BrokerReplicationCatchUpProgress, BrokerReplicationCheckpointRequired, ConsumerConfig,
-        FollowerReplicationWorkerConfig, FollowerReplicationWorkerState,
-        FollowerReplicationWorkerStatus, OwnedQueue, QueueEvictionAttempt, QueueEvictionSkip,
-        SettleRequest, SettleType, StaticQueueOwnership,
+        BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords, BrokerReplicationCatchUp,
+        BrokerReplicationCatchUpOptions, BrokerReplicationCatchUpProgress,
+        BrokerReplicationCheckpointRequired, ConsumerConfig, FollowerReplicationWorkerConfig,
+        FollowerReplicationWorkerState, FollowerReplicationWorkerStatus, OwnedQueue,
+        QueueEvictionAttempt, QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
     },
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
@@ -21,9 +21,10 @@ use fibril_broker::{
         StaticCoordination,
     },
     queue_engine::{
-        Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, MessageHeaders,
-        OwnerReplicationRead, QueueEngine, QueuePromotionOutcome, ReplayDeadLetterOutcome,
-        ReplayDeadLettersReport, SettleRequest as EngineSettleRequest, StromaEngine,
+        Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, Message,
+        MessageHeaders, OwnerReplicationBatch, OwnerReplicationRead, QueueEngine,
+        QueuePromotionOutcome, ReplayDeadLetterOutcome, ReplayDeadLettersReport,
+        SettleRequest as EngineSettleRequest, StromaEngine,
     },
     test_util::TestState,
 };
@@ -822,6 +823,102 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     assert_eq!(second.message.payload, b"second");
 
     owner.shutdown().await;
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn follower_apply_returns_checkpoint_required_without_materializing_queue() {
+    let (follower, _dir) = open_test_broker().await;
+    let message_checkpoint = BrokerReplicationCheckpointRequired {
+        epoch: 3,
+        requested_offset: 5,
+        head_offset: 8,
+        next_offset: 20,
+    };
+    let event_checkpoint = BrokerReplicationCheckpointRequired {
+        epoch: 3,
+        requested_offset: 4,
+        head_offset: 9,
+        next_offset: 21,
+    };
+
+    let apply = follower
+        .apply_follower_replication_records(
+            "checkpointed",
+            0,
+            None,
+            BrokerOwnerReplicationRecords {
+                messages: OwnerReplicationRead::CheckpointRequired {
+                    epoch: message_checkpoint.epoch,
+                    requested_offset: message_checkpoint.requested_offset,
+                    head_offset: message_checkpoint.head_offset,
+                    next_offset: message_checkpoint.next_offset,
+                },
+                events: OwnerReplicationRead::CheckpointRequired {
+                    epoch: event_checkpoint.epoch,
+                    requested_offset: event_checkpoint.requested_offset,
+                    head_offset: event_checkpoint.head_offset,
+                    next_offset: event_checkpoint.next_offset,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        apply,
+        BrokerFollowerReplicationApply::CheckpointRequired {
+            messages: Some(message_checkpoint),
+            events: Some(event_checkpoint),
+        }
+    );
+    assert!(!follower.is_queue_materialized("checkpointed", None));
+
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn follower_apply_returns_event_checkpoint_required_after_empty_message_batch() {
+    let (follower, _dir) = open_test_broker().await;
+    let event_checkpoint = BrokerReplicationCheckpointRequired {
+        epoch: 4,
+        requested_offset: 11,
+        head_offset: 13,
+        next_offset: 30,
+    };
+
+    let apply = follower
+        .apply_follower_replication_records(
+            "event-checkpointed",
+            0,
+            None,
+            BrokerOwnerReplicationRecords {
+                messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
+                    epoch: 4,
+                    requested_offset: 0,
+                    next_offset: 0,
+                    records: Vec::new(),
+                }),
+                events: OwnerReplicationRead::CheckpointRequired {
+                    epoch: event_checkpoint.epoch,
+                    requested_offset: event_checkpoint.requested_offset,
+                    head_offset: event_checkpoint.head_offset,
+                    next_offset: event_checkpoint.next_offset,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        apply,
+        BrokerFollowerReplicationApply::CheckpointRequired {
+            messages: None,
+            events: Some(event_checkpoint),
+        }
+    );
+    assert!(!follower.is_queue_materialized("event-checkpointed", None));
+
     follower.shutdown().await;
 }
 
