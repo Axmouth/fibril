@@ -12,7 +12,7 @@
 ## Decisions still to make
 
 - **Coordination layer**: etcd, Consul, custom, or just config files for v1? Recommend etcd long-term, static config to start.
-- **Metadata storage**: external (etcd) vs. self-hosted replicated log. **Recommend external.** Self-hosting metadata via your own replicated log creates a chicken-egg bootstrap problem (need metadata to know who's leader for the metadata partition). The workload is tiny; etcd handles it trivially. Revisit only after data-path replication is stable.
+- **Metadata storage**: external etcd by default for HA. Self-hosting metadata via Fibril's own replicated log creates a chicken-egg bootstrap problem (need metadata to know who's leader for the metadata partition). The workload is tiny; etcd handles it directly. Revisit only after data-path replication is stable.
 - **Replica set granularity**: per-partition or per-broker? Per-partition is more flexible, more complex. Per-broker is simpler. Pick now, hard to change later.
 - **Number of replicas per partition**: configurable per topic, or global default?
 - **Placement and balancing policy**: eventually the coordination layer needs more than "who is owner." It should also expose desired follower assignments and enough node capacity metadata for a balancer to choose where partition owners and followers live.
@@ -74,7 +74,15 @@ These are non-negotiable rules that constrain everything below.
 
 - External coordination issues ownership leases and fencing epochs. Fibril should not implement consensus itself.
 - The broker should depend on a coordination/watch trait, not directly on etcd. The trait should expose current owner, whether this node owns a partition, desired follower assignments for this node, owner endpoints for followed partitions, and assignment change watches.
-- etcd, Consul, or another metadata store can implement that trait later. Static config remains useful for local tests and early manual operation.
+- etcd is the default HA backend. A normal HA deployment should run a small
+  etcd cluster, typically three nodes, and point Fibril brokers at it.
+- Static config remains useful for local tests and early manual operation.
+- Consul, Postgres, Kubernetes leases, or a future self-hosted Fibril
+  coordinator can implement the same trait later, but they are not the primary
+  target now.
+- Long term, Fibril may absorb more coordination complexity to reduce operator
+  burden. That is deliberately a later project. The immediate priority is a
+  correct HA path using a proven coordination substrate.
 - Election is lease/assignment driven. If an owner disappears, coordination chooses a new owner from eligible followers according to policy; the broker then performs local promotion checks before serving client traffic.
 - Cluster decisions should be made by one active controller at a time. Brokers can all be controller-capable, but only the broker holding a lease-backed controller key should compute and write placement changes.
 - The controller is metadata-plane only. It is not special for client traffic and is not on the replication data path.

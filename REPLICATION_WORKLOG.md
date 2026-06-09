@@ -51,11 +51,15 @@ locally, every higher layer would be built on the wrong foundation.
 
 ## Decisions
 
-- Use external coordination long-term, with etcd as the likely target.
+- Use etcd as the default HA coordination backend. Static coordination remains
+  useful for tests and local manual setups, but the first serious HA path should
+  assume a small etcd cluster for leases, watches, CAS assignment writes, and
+  controller election.
 - Static config is acceptable for the first local/in-process milestone if it
   does not leak into the storage or queue APIs.
-- Fibril should ideally own cluster metadata eventually. External coordination
-  is a practical starting point, not the desired final shape.
+- Fibril may absorb more coordination complexity eventually to reduce operator
+  burden, but that should happen behind the same coordination interface and only
+  after the etcd-backed HA path is correct.
 - Coordination should expose both ownership and follower assignments. Ownership
   is the single-writer lease/fencing path; follower assignment tells each node
   which partitions to replicate and where their owners are.
