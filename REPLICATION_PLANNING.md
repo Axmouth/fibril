@@ -76,9 +76,259 @@ These are non-negotiable rules that constrain everything below.
 - The broker should depend on a coordination/watch trait, not directly on etcd. The trait should expose current owner, whether this node owns a partition, desired follower assignments for this node, owner endpoints for followed partitions, and assignment change watches.
 - etcd, Consul, or another metadata store can implement that trait later. Static config remains useful for local tests and early manual operation.
 - Election is lease/assignment driven. If an owner disappears, coordination chooses a new owner from eligible followers according to policy; the broker then performs local promotion checks before serving client traffic.
+- Cluster decisions should be made by one active controller at a time. Brokers can all be controller-capable, but only the broker holding a lease-backed controller key should compute and write placement changes.
+- The controller is metadata-plane only. It is not special for client traffic and is not on the replication data path.
 - Balancing is a separate policy layer over coordination. It should consider configurable rules such as target follower count, maximum owned partitions per node, maximum followed partitions per node, disk pressure, and replication lag.
 - Do not make balancing part of Keratin or Stroma. Those layers only enforce local log and queue role correctness.
 - Follower assignment and ownership assignment are related but different. A node can own some partitions and follow others at the same time.
+- Prefer a stable controller lease holder by default. Do not rotate controllers for normal operation; needless controller churn creates assignment churn risk and makes logs harder to read.
+- Later, allow voluntary controller lease handoff when the active controller is persistently less healthy than another eligible node. Candidate health can consider controller loop latency, etcd write latency, local load, command queue depth, disk pressure, and data-plane degradation.
+- Controller handoff must be conservative: minimum tenure, cooldown after handoff, no handoff during a multi-step assignment change, and clear handoff reason logs/metadata.
+- Controller handoff does not imply partition ownership failover. Ownership changes still go through assignment writes, fencing epochs, local freeze/drain, catch-up checks, and promotion checks.
+
+### Coordination keyspace sketch
+
+Names are illustrative. The important part is separating durable desired state,
+ephemeral liveness, and observed progress.
+
+- `/fibril/cluster/config`
+  - durable cluster-level defaults: target follower count, placement limits,
+    failover policy, unclean election policy, partition scaling policy
+- `/fibril/nodes/{node_id}`
+  - lease-backed liveness record
+  - endpoints, advertised zones/racks if any, capacity hints, software version
+- `/fibril/controller`
+  - lease-backed active-controller record
+  - controller node id, lease id, controller epoch, acquired timestamp
+- `/fibril/queues/{queue_id}`
+  - durable queue topology: partition count, desired replica policy, optional
+    per-queue overrides
+- `/fibril/assignments/{queue_id}/{partition}`
+  - durable desired partition assignment
+  - owner node id, follower node ids, assignment epoch, placement generation
+- `/fibril/follower-status/{queue_id}/{partition}/{node_id}`
+  - lease-backed or periodically updated follower status
+  - applied message offset, applied event offset, follower epoch, lag,
+    health/state, last update timestamp
+- `/fibril/owner-status/{queue_id}/{partition}/{node_id}`
+  - owner-reported status when useful
+  - local tails, retained heads, serving state, drain/freeze state
+- `/fibril/operations/{operation_id}`
+  - optional durable operation record for multi-step moves
+  - used for observability and recovery of in-progress assignment changes
+
+Static config can model a subset of this for early tests: nodes, queue partition
+count, owner assignment, follower assignment. It should still look like the same
+snapshot shape the real coordinator exposes.
+
+### Controller lease
+
+- Every broker can be controller-capable.
+- Brokers compete for `/fibril/controller` using a lease-backed compare-and-set.
+- Only the active controller computes desired placement and writes assignment
+  changes.
+- Standby brokers watch metadata but do not write assignment decisions.
+- Controller loss is handled by lease expiry. A standby acquires a new
+  controller lease and reconstructs state from durable assignments plus live
+  node/follower status.
+- Controller identity is metadata-plane only. Clients do not route through it,
+  and data replication does not depend on talking to it.
+
+Controller lease records should include enough data for diagnostics:
+
+- node id
+- controller epoch/generation
+- lease id or metadata backend revision
+- acquired timestamp
+- last successful control-loop timestamp
+- optional handoff reason if voluntarily released
+
+### Controller loop
+
+The loop should be boring and testable:
+
+1. Acquire or renew the controller lease.
+2. Read/watch a metadata snapshot: live nodes, queue topology, assignments,
+   follower status, owner status, and cluster policy.
+3. Run pure planning functions:
+   - detect invalid assignments
+   - detect dead owners/followers
+   - pick failover candidates
+   - choose follower replacements
+   - choose balancing moves
+   - choose partition scaling moves
+4. Convert the plan into small safe operations.
+5. Write each operation through compare-and-set transactions.
+6. Record operation outcome and metrics.
+7. Wait for watch events or a bounded control-loop interval.
+
+The smart parts should be pure functions over a snapshot of metadata. etcd
+integration should mostly be read/watch/CAS plumbing.
+
+### Assignment transitions
+
+Ownership assignment is permission, not proof that the local queue is safe to
+serve. A broker receiving an assignment still has to pass local checks.
+
+Owner to follower:
+
+1. Controller writes an operation intent or new assignment generation.
+2. Current owner stops accepting new client traffic for the partition.
+3. Owner freezes and drains accepted Stroma work.
+4. Owner records local tails and switches local queue/logs to follower or
+   non-owner state.
+5. Assignment is updated only through CAS against the expected generation.
+
+Follower to owner:
+
+1. Controller chooses an eligible follower from follower status.
+2. Controller writes a new owner assignment with an incremented fencing epoch.
+3. Candidate broker catches up if needed.
+4. Candidate runs Stroma promotion checks against expected message/event tails.
+5. Candidate begins serving only after local promotion succeeds under the
+   current assignment/epoch.
+
+If local promotion fails, the broker must not serve traffic. It should publish a
+refusal reason or status so the controller can pick another candidate or require
+operator action.
+
+### Failover policy
+
+Failover is external metadata policy plus local safety checks.
+
+- Clean failover: old owner is known stopped/frozen, candidate follower is
+  caught up, promotion succeeds.
+- Degraded failover: owner is gone, candidate is the best known follower but may
+  need catch-up from retained logs or snapshot.
+- Unclean failover: candidate is not known caught up and data loss is possible.
+  This should be disabled by default and require explicit operator policy.
+
+Candidate selection should consider:
+
+- follower applied offsets and lag
+- follower status freshness
+- matching epoch/generation
+- node liveness
+- node health score
+- zone/rack diversity if configured
+- whether the candidate already owns too many partitions
+
+The controller may decide intent, but Stroma promotion remains the final local
+gate before serving.
+
+### Balancing policy
+
+Balancing should minimize movement. Moving a partition owner is expensive and
+risky compared with assigning a new follower.
+
+Inputs:
+
+- target followers per partition
+- maximum owned partitions per node
+- maximum followed partitions per node
+- node capacity hints
+- disk pressure
+- replication lag
+- command queue depth or broker load
+- software version compatibility
+- zone/rack labels if configured
+
+Outputs:
+
+- add follower
+- remove follower
+- move follower
+- move owner only when materially useful or required
+- refuse to move if safety preconditions are not met
+
+Balancing should be conservative:
+
+- prefer filling missing followers before moving owners
+- avoid moving hot partitions unless necessary
+- use cooldowns after moves
+- avoid cascading moves from one control-loop tick
+- preserve enough followers before retiring an old follower
+
+### Partition scaling
+
+Growing partitions:
+
+1. Update queue topology with a higher partition count.
+2. Assign owners and followers for new partitions.
+3. Clients refresh topology and start routing new publishes according to the
+   partitioning policy.
+
+Shrinking partitions:
+
+1. Mark partitions as retiring.
+2. Stop routing new publishes to retiring partitions.
+3. Continue delivering/draining existing work.
+4. Remove assignments only after the retiring partition is empty and safe to
+   delete or archive.
+
+Shrinking should be considered a later feature. It is much harder than growth
+because queue partitions can contain live delayed, ready, inflight, and DLQ
+state.
+
+### Health score and controller handoff
+
+Health score is an input to placement and optional controller handoff. It should
+not be a magic global truth.
+
+Possible node health inputs:
+
+- control-loop latency
+- etcd read/write latency from that node
+- broker command queue depth
+- CPU/load
+- memory pressure
+- disk pressure
+- replication apply lag
+- owner/follower error rates
+- data-plane degraded flag
+- software version compatibility
+
+Controller handoff rules:
+
+- stable controller is the default
+- no routine rotation
+- voluntary handoff only after sustained degradation
+- require a clearly healthier eligible candidate
+- minimum tenure before handoff
+- cooldown after handoff
+- never hand off in the middle of a multi-step assignment operation
+- write handoff reason for observability
+
+Controller handoff changes only who computes metadata-plane assignments. It
+does not by itself move any queue ownership.
+
+### Broker watch behavior
+
+Brokers watch assignment changes and apply local role transitions:
+
+- assigned owner: catch up if needed, promote locally, serve only after local
+  checks pass
+- assigned follower: become follower, start pull replication from current owner
+- assignment removed: stop follower worker or stop serving after safe demotion
+- owner changed elsewhere: reject new client traffic and surface not-owner
+
+Brokers should keep local status records current enough for the controller to
+make decisions, but stale status should be treated conservatively.
+
+### Client topology behavior
+
+Clients eventually need a metadata/topology view separate from normal queue
+operations:
+
+- bootstrap from one or more broker addresses
+- fetch topology for a queue
+- route publish/subscribe operations to the owner of the relevant partition
+- refresh topology on not-owner/stale-topology errors
+- maintain multiple broker connections when one logical queue spans owners
+- hide partition selection from normal user APIs
+
+The client-facing contract stays topic/group oriented. Partition ownership is an
+implementation and routing detail.
 
 ## Client side (out of scope for v1, but plan the wire protocol)
 

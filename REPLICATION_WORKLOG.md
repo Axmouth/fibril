@@ -59,6 +59,24 @@ locally, every higher layer would be built on the wrong foundation.
 - Coordination should expose both ownership and follower assignments. Ownership
   is the single-writer lease/fencing path; follower assignment tells each node
   which partitions to replicate and where their owners are.
+- Cluster assignment decisions should be made by one active controller at a
+  time, acquired through a lease-backed metadata key. Brokers can all be
+  controller-capable, but only the active controller computes and writes desired
+  placement.
+- The controller should be stable by default. Later, it may voluntarily hand off
+  its lease if sustained health scoring shows another eligible node is clearly
+  better. Candidate signals include controller loop latency, etcd write latency,
+  local load, command queue depth, disk pressure, and data-plane degradation.
+- Controller handoff is not partition ownership failover. It only changes who
+  computes metadata-plane assignments; queue ownership changes still require
+  assignment writes, fencing epochs, local freeze/drain, catch-up checks, and
+  promotion checks.
+- `REPLICATION_PLANNING.md` now contains the detailed controller and
+  coordination spec: metadata keyspace sketch, controller lease, controller
+  loop, assignment transitions, failover policy, balancing policy, partition
+  scaling, health scoring, broker watch behavior, and client topology behavior.
+  Future coordination trait work should converge on that shape rather than the
+  current minimal leader-only stub.
 - Balancing is a policy above coordination. It can later consider target
   follower count, max owned partitions per node, max followed partitions per
   node, disk pressure, and replication lag. It should not leak into Keratin or
