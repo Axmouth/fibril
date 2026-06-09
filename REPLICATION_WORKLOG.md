@@ -533,9 +533,17 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    topology or wait for a newer assignment instead of sleeping against a stale
    owner. Protocol peers already map wire `ERR_NOT_OWNER` into this broker error,
    so the behavior applies to real protocol owner connections.
-   Remaining transport work: connection reuse, reconnect/backoff, topology-watch
-   refresh, and longer-running supervised watcher coverage.
-46. Future test cleanup pass: broker replication tests now repeat enough setup
+46. Done for protocol peer connection reuse: `StaticProtocolOwnerPeerResolver`
+   now caches one protocol owner peer per owner id instead of opening a new TCP
+   connection on every worker tick. The cached peer opens lazily on the first
+   request and clears its connection after transport-level failures, so a later
+   tick can reconnect through the same stable peer object. Protocol errors such
+   as `ERR_NOT_OWNER` do not poison the connection; they still surface as typed
+   broker errors for the loop/topology layer to handle. Focused resolver tests
+   cover peer reuse, authenticated reads, and the protocol-backed worker loop.
+   Remaining transport work: explicit reconnect/backoff observability,
+   topology-watch refresh, and longer-running supervised watcher coverage.
+47. Future test cleanup pass: broker replication tests now repeat enough setup
    that helpers are worth adding before the next large group of tests. Keep
    helpers behavior-shaped, not assertion-hiding. Good candidates:
    owner/follower broker pair setup, follower assignment setup, publishing `N`
@@ -545,7 +553,7 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    reduce boilerplate in future adversarial/concurrency tests without hiding the
    state transition being tested. This is cleanup, not a reason to add more
    abstractions to production code.
-47. Future admin dashboard topology view: once coordination-backed assignments
+48. Future admin dashboard topology view: once coordination-backed assignments
    exist, add a topology page to the dashboard. Ideally this is a live diagram
    showing nodes, partition owners, followers, lag, role transitions, and
    unhealthy or disconnected links. The first version can be table-first if
@@ -567,8 +575,9 @@ Breakdown:
 - Done: add a broker/client-side peer implementation of `BrokerOwnerReplicationPeer`
   that speaks protocol v1 replication read and checkpoint frames.
 - Done: reuse existing protocol handler frames before adding new wire surface.
-- Add connection lifecycle handling: connect, reconnect, fail current tick,
-  and let the worker retry by policy.
+- Done for the static resolver path: cache one protocol peer per owner id, open
+  the TCP connection lazily on first use, clear it after transport failures, and
+  let the worker retry by its existing policy.
 - Done at the loop boundary: keep ownership errors explicit. If the contacted
   node is not owner anymore, the protocol peer returns `BrokerError::NotOwner`
   and the follower loop exits with `OwnerChanged`, giving the future
@@ -1313,3 +1322,7 @@ Tests needed before implementing transition:
   cache connections yet; connection reuse, reconnect/backoff, topology-watch
   refresh, and real coordination-backed address discovery remain follow-up
   transport work.
+- 2026-06-09: Updated the static protocol owner-peer resolver to cache one lazy
+  protocol peer per owner id. The historical note above describes the first
+  resolver slice; the current behavior is connection reuse with lazy reconnect
+  after transport failures.

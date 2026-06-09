@@ -197,110 +197,141 @@ fn follower_assignment_transition(topic: &str, group: Option<&str>) -> LocalAssi
 async fn start_checkpoint_required_owner_server(
     checkpoint: ReplicationStateCheckpoint,
     message_records: Vec<ReplicationMessageRecord>,
+    event_records: Vec<ReplicationEventRecord>,
 ) -> (SocketAddr, tokio::task::JoinHandle<anyhow::Result<()>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server_task = tokio::spawn(async move {
-        for _ in 0..2 {
-            let (stream, _) = listener.accept().await?;
-            let mut conn = Framed::new(stream, ProtoCodec);
+        let (stream, _) = listener.accept().await?;
+        let mut conn = Framed::new(stream, ProtoCodec);
 
-            let frame = conn
-                .next()
-                .await
-                .ok_or_else(|| anyhow::anyhow!("client closed before hello"))??;
-            assert_eq!(frame.opcode, Op::Hello as u16);
-            conn.send(try_encode(
-                Op::HelloOk,
-                frame.request_id,
-                &HelloOk {
-                    protocol_version: PROTOCOL_V1,
-                    owner_id: Uuid::now_v7(),
-                    client_id: Uuid::now_v7(),
-                    resume_token: Uuid::now_v7(),
-                    resume_outcome: ResumeOutcome::New,
-                    server_name: "fake-owner".into(),
-                    compliance: "test".into(),
-                },
-            )?)
-            .await?;
+        let frame = conn
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("client closed before hello"))??;
+        assert_eq!(frame.opcode, Op::Hello as u16);
+        conn.send(try_encode(
+            Op::HelloOk,
+            frame.request_id,
+            &HelloOk {
+                protocol_version: PROTOCOL_V1,
+                owner_id: Uuid::now_v7(),
+                client_id: Uuid::now_v7(),
+                resume_token: Uuid::now_v7(),
+                resume_outcome: ResumeOutcome::New,
+                server_name: "fake-owner".into(),
+                compliance: "test".into(),
+            },
+        )?)
+        .await?;
 
-            let mut first_read = true;
-            while let Some(frame) = conn.next().await {
-                let frame = frame?;
-                match frame.opcode {
-                    x if x == Op::ReplicationRead as u16 => {
-                        let read: ReplicationRead = try_decode(&frame)?;
-                        let response = if first_read {
-                            first_read = false;
-                            ReplicationReadOk {
-                                messages: ReplicationMessageRead::CheckpointRequired(
-                                    ReplicationCheckpointRequired {
-                                        epoch: checkpoint.message_epoch,
-                                        requested_offset: read.message_from,
-                                        head_offset: checkpoint.message_checkpoint_offset.max(1),
-                                        next_offset: checkpoint.message_next_offset,
-                                    },
-                                ),
-                                events: ReplicationEventRead::CheckpointRequired(
-                                    ReplicationCheckpointRequired {
-                                        epoch: checkpoint.event_epoch,
-                                        requested_offset: read.event_from,
-                                        head_offset: checkpoint.event_next_offset,
-                                        next_offset: checkpoint.event_next_offset,
-                                    },
-                                ),
-                            }
-                        } else {
-                            let records = message_records
-                                .iter()
-                                .filter(|record| record.offset >= read.message_from)
-                                .take(read.max_messages as usize)
-                                .cloned()
-                                .collect::<Vec<_>>();
-                            let message_next_offset = records
-                                .last()
-                                .map_or(read.message_from, |record| record.offset + 1);
-                            ReplicationReadOk {
-                                messages: ReplicationMessageRead::Batch {
-                                    epoch: checkpoint.message_epoch,
-                                    requested_offset: read.message_from,
-                                    next_offset: message_next_offset,
-                                    records,
-                                },
-                                events: ReplicationEventRead::Batch {
+        while let Some(frame) = conn.next().await {
+            let frame = frame?;
+            match frame.opcode {
+                x if x == Op::ReplicationRead as u16 => {
+                    let read: ReplicationRead = try_decode(&frame)?;
+                    // This fake models an owner whose event log has been
+                    // compacted but whose messages are still available from
+                    // the checkpoint message offset.
+                    let response = if read.event_from < checkpoint.event_next_offset {
+                        ReplicationReadOk {
+                            messages: read_fake_message_batch(
+                                &checkpoint,
+                                &message_records,
+                                read.message_from,
+                                read.max_messages,
+                            ),
+                            events: ReplicationEventRead::CheckpointRequired(
+                                ReplicationCheckpointRequired {
                                     epoch: checkpoint.event_epoch,
                                     requested_offset: read.event_from,
-                                    next_offset: read.event_from,
-                                    records: Vec::new(),
+                                    head_offset: checkpoint.event_next_offset,
+                                    next_offset: checkpoint.event_next_offset,
                                 },
-                            }
-                        };
-                        conn.send(try_encode(
-                            Op::ReplicationReadOk,
-                            frame.request_id,
-                            &response,
-                        )?)
-                        .await?;
-                    }
-                    x if x == Op::ReplicationCheckpointExport as u16 => {
-                        let _: ReplicationCheckpointExport = try_decode(&frame)?;
-                        conn.send(try_encode(
-                            Op::ReplicationCheckpointExportOk,
-                            frame.request_id,
-                            &ReplicationCheckpointExportOk {
-                                checkpoint: checkpoint.clone(),
-                            },
-                        )?)
-                        .await?;
-                    }
-                    other => anyhow::bail!("unexpected fake owner opcode {other}"),
+                            ),
+                        }
+                    } else {
+                        ReplicationReadOk {
+                            messages: read_fake_message_batch(
+                                &checkpoint,
+                                &message_records,
+                                read.message_from,
+                                read.max_messages,
+                            ),
+                            events: read_fake_event_batch(
+                                &checkpoint,
+                                &event_records,
+                                read.event_from,
+                                read.max_events,
+                            ),
+                        }
+                    };
+                    conn.send(try_encode(
+                        Op::ReplicationReadOk,
+                        frame.request_id,
+                        &response,
+                    )?)
+                    .await?;
                 }
+                x if x == Op::ReplicationCheckpointExport as u16 => {
+                    let _: ReplicationCheckpointExport = try_decode(&frame)?;
+                    conn.send(try_encode(
+                        Op::ReplicationCheckpointExportOk,
+                        frame.request_id,
+                        &ReplicationCheckpointExportOk {
+                            checkpoint: checkpoint.clone(),
+                        },
+                    )?)
+                    .await?;
+                }
+                other => anyhow::bail!("unexpected fake owner opcode {other}"),
             }
         }
         Ok(())
     });
     (addr, server_task)
+}
+
+fn read_fake_message_batch(
+    checkpoint: &ReplicationStateCheckpoint,
+    message_records: &[ReplicationMessageRecord],
+    from: u64,
+    max: u32,
+) -> ReplicationMessageRead {
+    let records = message_records
+        .iter()
+        .filter(|record| record.offset >= from)
+        .take(max as usize)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_offset = records.last().map_or(from, |record| record.offset + 1);
+    ReplicationMessageRead::Batch {
+        epoch: checkpoint.message_epoch,
+        requested_offset: from,
+        next_offset,
+        records,
+    }
+}
+
+fn read_fake_event_batch(
+    checkpoint: &ReplicationStateCheckpoint,
+    event_records: &[ReplicationEventRecord],
+    from: u64,
+    max: u32,
+) -> ReplicationEventRead {
+    let records = event_records
+        .iter()
+        .filter(|record| record.offset >= from)
+        .take(max as usize)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_offset = records.last().map_or(from, |record| record.offset + 1);
+    ReplicationEventRead::Batch {
+        epoch: checkpoint.event_epoch,
+        requested_offset: from,
+        next_offset,
+        records,
+    }
 }
 
 async fn recv_frame(framed: &mut Framed<TcpStream, ProtoCodec>) -> Frame {
@@ -1442,6 +1473,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
     assert_eq!(messages.records[0].1.payload, b"resolver-payload");
 
     drop(peer);
+    drop(resolver);
     server_task.await.unwrap().unwrap();
 }
 
@@ -1462,6 +1494,32 @@ async fn static_protocol_owner_peer_resolver_returns_none_for_unknown_owner() {
             .unwrap()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn static_protocol_owner_peer_resolver_reuses_peer_for_owner() {
+    let addr = "127.0.0.1:9".parse().unwrap();
+    let resolver =
+        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new("replication.resolver.cached", 0, None),
+        "owner-a",
+        vec![],
+        1,
+    );
+
+    let first = resolver
+        .resolve_owner_peer(&assignment)
+        .await
+        .unwrap()
+        .expect("first owner peer");
+    let second = resolver
+        .resolve_owner_peer(&assignment)
+        .await
+        .unwrap()
+        .expect("second owner peer");
+
+    assert!(Arc::ptr_eq(&first, &second));
 }
 
 #[tokio::test]
@@ -1511,6 +1569,7 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
     assert_eq!(messages.records[0].1.payload, b"auth-payload");
 
     drop(peer);
+    drop(resolver);
     server_task.await.unwrap().unwrap();
 }
 
@@ -1649,11 +1708,14 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         .await
         .unwrap();
     let owner_records = owner_broker
-        .read_owner_replication_records(topic, 0, group.as_deref(), 0, 2, 8, 8)
+        .read_owner_replication_records(topic, 0, group.as_deref(), 0, 0, 8, 8)
         .await
         .unwrap();
     let OwnerReplicationRead::Batch(messages) = owner_records.messages else {
         panic!("expected owner message batch");
+    };
+    let OwnerReplicationRead::Batch(events) = owner_records.events else {
+        panic!("expected owner event batch");
     };
     let message_records = messages
         .records
@@ -1663,6 +1725,14 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
             flags: message.flags,
             headers: message.headers,
             payload: message.payload,
+        })
+        .collect::<Vec<_>>();
+    let event_records = events
+        .records
+        .into_iter()
+        .map(|(offset, event)| ReplicationEventRecord {
+            offset,
+            payload: event.encode().expect("owner event should encode"),
         })
         .collect::<Vec<_>>();
 
@@ -1676,7 +1746,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         state_snapshot: owner_checkpoint.state_snapshot.clone(),
     };
     let (addr, server_task) =
-        start_checkpoint_required_owner_server(checkpoint, message_records).await;
+        start_checkpoint_required_owner_server(checkpoint, message_records, event_records).await;
     let resolver =
         StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
     let resolver = Arc::new(resolver);
@@ -1727,6 +1797,19 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         shutdown.clone(),
     );
     let (_, loop_outcome) = tokio::join!(observer, loop_task);
+
+    let worker_state = follower_broker
+        .follower_replication_worker_snapshot(topic, 0, group.as_deref())
+        .await
+        .expect("follower worker state should exist after checkpoint loop");
+    assert_eq!(
+        worker_state.message_next_offset,
+        owner_checkpoint.message_next_offset
+    );
+    assert_eq!(
+        worker_state.event_next_offset,
+        owner_checkpoint.event_next_offset
+    );
 
     assert_eq!(
         loop_outcome.unwrap(),

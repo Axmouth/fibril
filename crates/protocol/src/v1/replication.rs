@@ -120,22 +120,28 @@ impl ProtocolOwnerPeerResolverConfig {
 
 /// Static owner-peer resolver for early replication wiring and tests.
 ///
-/// It opens a fresh protocol connection per resolve. That is intentionally
-/// simple for now; production wiring should add connection caching, reconnect
-/// policy, and topology-watch integration above this boundary.
+/// It keeps one lazy protocol peer per owner id. Transport failures clear the
+/// peer's current connection, then the next request reconnects through the same
+/// cached peer object. Topology refresh/invalidation belongs above this static
+/// resolver.
 pub struct StaticProtocolOwnerPeerResolver {
     cfg: ProtocolOwnerPeerResolverConfig,
+    peers: Mutex<HashMap<String, Arc<dyn BrokerOwnerReplicationPeer>>>,
 }
 
 impl StaticProtocolOwnerPeerResolver {
     pub fn new(nodes: HashMap<String, SocketAddr>) -> Self {
         Self {
             cfg: ProtocolOwnerPeerResolverConfig::new(nodes),
+            peers: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn with_config(cfg: ProtocolOwnerPeerResolverConfig) -> Self {
-        Self { cfg }
+        Self {
+            cfg,
+            peers: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -152,25 +158,30 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
                 return Ok(None);
             };
 
-            let peer = connect_protocol_owner_peer(
-                addr,
-                self.cfg.auth.as_ref(),
-                &self.cfg.client_name,
-                &self.cfg.client_version,
-            )
-            .await?;
-            let peer: Arc<dyn BrokerOwnerReplicationPeer> = Arc::new(peer);
+            let mut peers = self.peers.lock().await;
+            if let Some(peer) = peers.get(&assignment.owner) {
+                return Ok(Some(peer.clone()));
+            }
+
+            let peer: Arc<dyn BrokerOwnerReplicationPeer> =
+                Arc::new(ProtocolOwnerReplicationPeer::new_reconnecting(
+                    addr,
+                    self.cfg.auth.clone(),
+                    self.cfg.client_name.clone(),
+                    self.cfg.client_version.clone(),
+                ));
+            peers.insert(assignment.owner.clone(), peer.clone());
             Ok(Some(peer))
         })
     }
 }
 
-pub async fn connect_protocol_owner_peer(
+async fn open_protocol_owner_conn(
     addr: SocketAddr,
     auth: Option<&ProtocolOwnerPeerAuth>,
     client_name: &str,
     client_version: &str,
-) -> Result<ProtocolOwnerReplicationPeer, BrokerError> {
+) -> Result<Conn, BrokerError> {
     let stream = TcpStream::connect(addr)
         .await
         .map_err(|err| BrokerError::Unknown(format!("owner peer connect failed: {err}")))?;
@@ -218,7 +229,38 @@ pub async fn connect_protocol_owner_peer(
             .map_err(|err| BrokerError::Unknown(err.to_string()))?;
     }
 
-    Ok(ProtocolOwnerReplicationPeer::new(conn))
+    Ok(conn)
+}
+
+pub async fn connect_protocol_owner_peer(
+    addr: SocketAddr,
+    auth: Option<&ProtocolOwnerPeerAuth>,
+    client_name: &str,
+    client_version: &str,
+) -> Result<ProtocolOwnerReplicationPeer, BrokerError> {
+    Ok(ProtocolOwnerReplicationPeer::new(
+        open_protocol_owner_conn(addr, auth, client_name, client_version).await?,
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct ProtocolOwnerPeerConnectConfig {
+    addr: SocketAddr,
+    auth: Option<ProtocolOwnerPeerAuth>,
+    client_name: String,
+    client_version: String,
+}
+
+impl ProtocolOwnerPeerConnectConfig {
+    async fn open(&self) -> Result<Conn, BrokerError> {
+        open_protocol_owner_conn(
+            self.addr,
+            self.auth.as_ref(),
+            &self.client_name,
+            &self.client_version,
+        )
+        .await
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -241,26 +283,65 @@ pub enum ProtocolReplicationRequestError {
     Decode(String),
 }
 
+impl ProtocolReplicationRequestError {
+    fn invalidates_connection(&self) -> bool {
+        !matches!(self, Self::Protocol { .. } | Self::HeartbeatEncode(_))
+    }
+}
+
 /// Protocol-backed owner replication peer.
 ///
 /// This is the transport adapter for the broker's follower worker boundary. It
 /// owns one already-handshaken protocol connection to an owner and serializes
 /// requests on that connection.
 pub struct ProtocolOwnerReplicationPeer {
-    conn: Mutex<Conn>,
+    conn: Mutex<Option<Conn>>,
     next_request_id: AtomicU64,
+    reconnect: Option<ProtocolOwnerPeerConnectConfig>,
 }
 
 impl ProtocolOwnerReplicationPeer {
     pub fn new(conn: Conn) -> Self {
         Self {
-            conn: Mutex::new(conn),
+            conn: Mutex::new(Some(conn)),
             next_request_id: AtomicU64::new(20_000),
+            reconnect: None,
+        }
+    }
+
+    pub fn new_reconnecting(
+        addr: SocketAddr,
+        auth: Option<ProtocolOwnerPeerAuth>,
+        client_name: String,
+        client_version: String,
+    ) -> Self {
+        Self {
+            conn: Mutex::new(None),
+            next_request_id: AtomicU64::new(20_000),
+            reconnect: Some(ProtocolOwnerPeerConnectConfig {
+                addr,
+                auth,
+                client_name,
+                client_version,
+            }),
         }
     }
 
     fn next_request_id(&self) -> u64 {
         self.next_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    async fn take_conn(&self, guard: &mut Option<Conn>) -> Result<Conn, BrokerError> {
+        if guard.is_none() {
+            let reconnect = self.reconnect.as_ref().ok_or_else(|| {
+                BrokerError::Unknown("protocol owner peer connection is closed".into())
+            })?;
+            *guard = Some(reconnect.open().await?);
+        }
+
+        guard
+            .take()
+            .ok_or_else(|| BrokerError::Unknown("protocol owner peer connection is closed".into()))
     }
 }
 
@@ -283,32 +364,45 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 BrokerError::InvalidArgument("max_events exceeds protocol limit".into())
             })?;
             let request_id = self.next_request_id();
-            let mut conn = self.conn.lock().await;
-            conn.send(
-                try_encode(
-                    Op::ReplicationRead,
-                    request_id,
-                    &ReplicationRead {
-                        topic: topic.to_string(),
-                        group: group.map(str::to_string),
-                        partition,
-                        message_from,
-                        event_from,
-                        max_messages,
-                        max_events,
-                    },
+            let mut conn_guard = self.conn.lock().await;
+            let mut conn = self.take_conn(&mut conn_guard).await?;
+            if let Err(err) = conn
+                .send(
+                    try_encode(
+                        Op::ReplicationRead,
+                        request_id,
+                        &ReplicationRead {
+                            topic: topic.to_string(),
+                            group: group.map(str::to_string),
+                            partition,
+                            message_from,
+                            event_from,
+                            max_messages,
+                            max_events,
+                        },
+                    )
+                    .map_err(protocol_error)?,
                 )
-                .map_err(protocol_error)?,
-            )
-            .await
-            .map_err(|err| BrokerError::Unknown(format!("replication read send failed: {err}")))?;
+                .await
+            {
+                return Err(BrokerError::Unknown(format!(
+                    "replication read send failed: {err}"
+                )));
+            }
 
             let read: ReplicationReadOk =
-                recv_response(&mut conn, request_id, Op::ReplicationReadOk)
-                    .await
-                    .map_err(|err| {
-                        protocol_request_error_to_broker(err, topic, partition, group)
-                    })?;
+                match recv_response(&mut conn, request_id, Op::ReplicationReadOk).await {
+                    Ok(read) => read,
+                    Err(err) => {
+                        if !err.invalidates_connection() {
+                            *conn_guard = Some(conn);
+                        }
+                        return Err(protocol_request_error_to_broker(
+                            err, topic, partition, group,
+                        ));
+                    }
+                };
+            *conn_guard = Some(conn);
             to_broker_owner_replication_records(read)
         })
     }
@@ -321,30 +415,42 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
     ) -> futures::future::BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async move {
             let request_id = self.next_request_id();
-            let mut conn = self.conn.lock().await;
-            conn.send(
-                try_encode(
-                    Op::ReplicationCheckpointExport,
-                    request_id,
-                    &ReplicationCheckpointExport {
-                        topic: topic.to_string(),
-                        group: group.map(str::to_string),
-                        partition,
-                    },
+            let mut conn_guard = self.conn.lock().await;
+            let mut conn = self.take_conn(&mut conn_guard).await?;
+            if let Err(err) = conn
+                .send(
+                    try_encode(
+                        Op::ReplicationCheckpointExport,
+                        request_id,
+                        &ReplicationCheckpointExport {
+                            topic: topic.to_string(),
+                            group: group.map(str::to_string),
+                            partition,
+                        },
+                    )
+                    .map_err(protocol_error)?,
                 )
-                .map_err(protocol_error)?,
-            )
-            .await
-            .map_err(|err| {
-                BrokerError::Unknown(format!("replication checkpoint export send failed: {err}"))
-            })?;
+                .await
+            {
+                return Err(BrokerError::Unknown(format!(
+                    "replication checkpoint export send failed: {err}"
+                )));
+            }
 
             let export: ReplicationCheckpointExportOk =
-                recv_response(&mut conn, request_id, Op::ReplicationCheckpointExportOk)
-                    .await
-                    .map_err(|err| {
-                        protocol_request_error_to_broker(err, topic, partition, group)
-                    })?;
+                match recv_response(&mut conn, request_id, Op::ReplicationCheckpointExportOk).await
+                {
+                    Ok(export) => export,
+                    Err(err) => {
+                        if !err.invalidates_connection() {
+                            *conn_guard = Some(conn);
+                        }
+                        return Err(protocol_request_error_to_broker(
+                            err, topic, partition, group,
+                        ));
+                    }
+                };
+            *conn_guard = Some(conn);
             Ok(OwnerStateCheckpoint {
                 message_epoch: export.checkpoint.message_epoch,
                 event_epoch: export.checkpoint.event_epoch,
@@ -357,7 +463,6 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         })
     }
 }
-
 /// Pull replicated log records from an owner connection and apply them to a
 /// follower connection until both streams return empty or a limit is reached.
 ///
