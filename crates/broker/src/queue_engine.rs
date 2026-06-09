@@ -12,9 +12,9 @@ use stroma_core::{
 pub use stroma_core::{
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KeratinAppendCompletion,
-    KeratinConfig, MessageContentType, MessageHeaders, MessageInspectionPage,
-    MessageInspectionStatus, QueueInspectionState, SnapshotConfig, Stroma, StromaError,
-    StromaKeratinConfig,
+    KeratinConfig, Message, MessageContentType, MessageHeaders, MessageInspectionPage,
+    MessageInspectionStatus, OwnerReplicationRead, QueueInspectionState, SnapshotConfig, Stroma,
+    StromaError, StromaEvent, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -240,6 +240,32 @@ impl StromaEngine {
 
     pub async fn global_store(&self) -> Result<Arc<GlobalStore>, StromaError> {
         self.inner.global_store().await
+    }
+
+    pub async fn read_owner_message_records(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        max: usize,
+    ) -> Result<OwnerReplicationRead<Message>, StromaError> {
+        self.inner
+            .read_owner_message_records(tp, part, group, from, max)
+            .await
+    }
+
+    pub async fn read_owner_event_records(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        max: usize,
+    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
+        self.inner
+            .read_owner_event_records(tp, part, group, from, max)
+            .await
     }
 
     async fn replay_dead_letter(

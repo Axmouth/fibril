@@ -9,7 +9,7 @@ use fibril_broker::{
     },
     queue_engine::{
         Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, MessageHeaders,
-        QueueEngine, ReplayDeadLetterOutcome, ReplayDeadLettersReport,
+        OwnerReplicationRead, QueueEngine, ReplayDeadLetterOutcome, ReplayDeadLettersReport,
         SettleRequest as EngineSettleRequest, StromaEngine,
     },
     test_util::TestState,
@@ -404,6 +404,70 @@ async fn static_ownership_allows_owned_queue() {
         .await
         .expect("owned queue should deliver published message");
     assert_eq!(msg.message.offset, 0);
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn owner_replication_read_returns_published_records() {
+    let (broker, _dir) = open_test_broker().await;
+    let (publisher, _confirms) = broker.get_publisher("replicated", &None).await.unwrap();
+
+    let reply = publisher
+        .publish(
+            b"hello replication".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let records = broker
+        .read_owner_replication_records("replicated", 0, None, 0, 0, 10, 10)
+        .await
+        .unwrap();
+
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("expected message records, got checkpoint required");
+    };
+    assert_eq!(messages.requested_offset, 0);
+    assert_eq!(messages.next_offset, 1);
+    assert_eq!(messages.records.len(), 1);
+    assert_eq!(messages.records[0].0, 0);
+    assert_eq!(messages.records[0].1.payload, b"hello replication");
+
+    let OwnerReplicationRead::Batch(events) = records.events else {
+        panic!("expected event records, got checkpoint required");
+    };
+    assert_eq!(events.requested_offset, 0);
+    assert_eq!(events.next_offset, 1);
+    assert_eq!(events.records.len(), 1);
+
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn owner_replication_read_rejects_unowned_queue_before_materializing() {
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(StdHashSet::new())))
+            .await;
+
+    let err = broker
+        .read_owner_replication_records("unowned", 0, None, 0, 0, 10, 10)
+        .await
+        .expect_err("unowned queue unexpectedly served replication records");
+
+    assert!(matches!(
+        err,
+        BrokerError::NotOwner {
+            topic,
+            partition: 0,
+            group: None,
+        } if topic == "unowned"
+    ));
+    assert!(!broker.is_queue_materialized("unowned", None));
     broker.shutdown().await;
 }
 

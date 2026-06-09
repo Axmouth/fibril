@@ -21,12 +21,12 @@ use fibril_util::unix_millis;
 use uuid::Uuid;
 
 use crate::queue_engine::{
-    EvictOutcome, QueueEngine, SettleKind, SettleRequest as EngineSettleRequest,
+    EvictOutcome, QueueEngine, SettleKind, SettleRequest as EngineSettleRequest, StromaEngine,
 };
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
-    MessageContentType, MessageHeaders, NackEventMeta, StromaError, StromaMetrics, TaskGroup,
-    UnixMillis,
+    Message, MessageContentType, MessageHeaders, NackEventMeta, OwnerReplicationRead, StromaError,
+    StromaEvent, StromaMetrics, TaskGroup, UnixMillis,
 };
 
 #[derive(thiserror::Error, Debug)]
@@ -390,6 +390,12 @@ impl OwnedQueue {
             group: group.map(str::to_string),
         }
     }
+}
+
+#[derive(Debug)]
+pub struct BrokerOwnerReplicationRecords {
+    pub messages: OwnerReplicationRead<Message>,
+    pub events: OwnerReplicationRead<StromaEvent>,
 }
 
 // ---------------- Internal state ----------------
@@ -2178,6 +2184,32 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 );
             }
         });
+    }
+}
+
+impl Broker<StromaEngine> {
+    pub async fn read_owner_replication_records(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+    ) -> Result<BrokerOwnerReplicationRecords, BrokerError> {
+        self.ensure_queue_owner(topic, partition, group)?;
+
+        let messages = self
+            .engine
+            .read_owner_message_records(topic, partition, group, message_from, max_messages)
+            .await?;
+        let events = self
+            .engine
+            .read_owner_event_records(topic, partition, group, event_from, max_events)
+            .await?;
+
+        Ok(BrokerOwnerReplicationRecords { messages, events })
     }
 }
 

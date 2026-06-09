@@ -172,11 +172,28 @@ resume after context compaction.
 10. In progress: prototype follower pull replication and local catch-up loop.
     The Stroma surfaces now compose in tests: owner reads provide message/event
     batches, follower ingest applies them, and checked promotion accepts the
-    follower after exact catch-up. Real broker transport is still pending.
+    follower after exact catch-up. Broker owner-read helpers now provide the
+    first transport-facing boundary: they check broker queue ownership before
+    touching Stroma, then return owner message and event records for a follower
+    pull loop. Real TCP/admin transport and follower scheduling are still
+    pending.
 11. Later: replace static ownership with coordinator-backed ownership, likely
     based on an etcd-style lease/watch model.
 12. Later: admin and metrics visibility for queue role, local offsets,
     replicated offsets, lag, transition state, and refusal reasons.
+
+## Active Implementation Plan
+
+1. Done: add StromaEngine forwarding methods for owner message and event
+   replication reads.
+2. Done: add a broker owner-replication read helper that checks queue ownership
+   before touching storage.
+3. Done: add broker tests for successful owner reads and not-owner
+   rejection before materialization.
+4. Done: run focused broker checks.
+5. In progress: commit this checkpoint if the checks are clean.
+6. Next: start the follower pull catch-up loop using the broker owner-read
+   boundary and Stroma follower-ingest boundary.
 
 ## Pending Decisions
 
