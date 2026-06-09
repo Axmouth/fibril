@@ -519,6 +519,12 @@ Current focus: follower transport boundary, visibility, and role lifecycle.
    reduce boilerplate in future adversarial/concurrency tests without hiding the
    state transition being tested. This is cleanup, not a reason to add more
    abstractions to production code.
+44. Future admin dashboard topology view: once coordination-backed assignments
+   exist, add a topology page to the dashboard. Ideally this is a live diagram
+   showing nodes, partition owners, followers, lag, role transitions, and
+   unhealthy or disconnected links. The first version can be table-first if
+   needed, but the target operator experience should make the cluster shape
+   obvious during incidents.
 
 ## Core Completion Estimate
 
@@ -562,7 +568,7 @@ basic operator visibility:
 - Operator/admin visibility: about 30%. Queue roles and follower worker state
   are visible through broker observability surfaces. Remaining work is
   user-facing replication lag/role display, transition logs, refusal reasons,
-  controller status, and health signals.
+  controller status, health signals, and a live topology view.
 - Testing for replication and sharding: about 40%. Good bottom-up coverage
   exists for storage, Stroma roles, broker assignment, placement, worker ticks,
   and supervision. Remaining work is helper cleanup, adversarial race tests,
