@@ -845,6 +845,7 @@ struct QueueLoopState {
     consumers: DashMap<ConsumerId, Arc<ConsumerState>>,
     activity: Arc<QueueActivity>,
     eviction_lock: AsyncMutex<()>,
+    owner_runtime_shutdown: CancellationToken,
     // used to wake the delivery loop
     notify: tokio::sync::Notify,
     epoch: AtomicU64,
@@ -858,6 +859,7 @@ impl QueueLoopState {
             consumers: DashMap::new(),
             activity: Arc::new(QueueActivity::default()),
             eviction_lock: AsyncMutex::new(()),
+            owner_runtime_shutdown: CancellationToken::new(),
             notify: tokio::sync::Notify::new(),
             epoch: AtomicU64::new(1),
         }
@@ -873,6 +875,11 @@ impl QueueLoopState {
 
     async fn lock_for_eviction(&self) -> AsyncMutexGuard<'_, ()> {
         self.eviction_lock.lock().await
+    }
+
+    fn cancel_owner_runtime(&self) {
+        self.owner_runtime_shutdown.cancel();
+        self.wake();
     }
 }
 
@@ -1141,6 +1148,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         };
         let qs_publish = qs.clone();
         let qs_clone = qs.clone();
+        let owner_runtime_shutdown = qs.owner_runtime_shutdown.clone();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("publisher_sink", async move {
             let _activity_lease = activity_lease;
@@ -1153,6 +1161,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 let first = tokio::select! {
                     biased;
                     _ = shutdown.cancelled() => break,
+                    _ = owner_runtime_shutdown.cancelled() => break,
                     req = rx.recv() => req,
                 };
                 let Some(first) = first else {
@@ -1179,6 +1188,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                                 tokio::select! {
                                     biased;
                                     _ = shutdown.cancelled() => break,
+                                    _ = owner_runtime_shutdown.cancelled() => break,
                                     res = tokio::time::timeout_at(deadline, rx.recv()) => {
                                         match res {
                                             Ok(Some(req)) => batch.push(req),
@@ -1308,6 +1318,29 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .or_insert_with(|| Arc::new(QueueLoopState::new()))
             .value()
             .clone()
+    }
+
+    fn stop_owner_queue_runtime(&self, key: &QueueKey) -> bool {
+        let Some((_, qs)) = self.queues.remove(key) else {
+            return false;
+        };
+
+        qs.cancel_owner_runtime();
+        qs.consumers.clear();
+
+        let mut stale_tags = Vec::new();
+        for entry in self.records_by_tags.iter() {
+            if entry.value().key == *key {
+                stale_tags.push((*entry.key(), entry.value().offset));
+            }
+        }
+
+        for (tag, offset) in stale_tags {
+            self.records_by_tags.remove(&tag);
+            self.tags_by_key_offset.remove(&(key.clone(), offset));
+        }
+
+        true
     }
 
     pub fn queue_activity_snapshot(
@@ -2078,6 +2111,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     fn spawn_delivery_loop(self: &Arc<Self>, key: QueueKey, qs: Arc<QueueLoopState>) {
         let broker = self.clone();
         let metrics = self.metrics.clone();
+        let owner_runtime_shutdown = qs.owner_runtime_shutdown.clone();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("delivery_loop", async move {
             let mut last_epoch_seen = qs.current_epoch();
@@ -2089,6 +2123,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     biased;
 
                     _ = broker.shutdown_consumers.cancelled() => break,
+                    _ = owner_runtime_shutdown.cancelled() => break,
                     _ = qs.notify.notified() => WakeReason::Notify,
                     _ = broker.settings_changed.notified() => WakeReason::SettingsChanged,
                     _ = tokio::time::sleep(poll) => WakeReason::Timer,
@@ -2109,7 +2144,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                 // try deliver until we stall
                 loop {
-                    if broker.shutdown_consumers.is_cancelled() {
+                    if broker.shutdown_consumers.is_cancelled()
+                        || owner_runtime_shutdown.is_cancelled()
+                    {
                         break;
                     }
 
@@ -2544,6 +2581,11 @@ impl Broker<StromaEngine> {
                 self.engine
                     .demote_queue_owner_to_follower(&topic, transition.queue.partition, group)
                     .await?;
+                self.stop_owner_queue_runtime(&QueueKey {
+                    tp: topic.clone(),
+                    part: transition.queue.partition,
+                    group: transition.queue.group.clone(),
+                });
                 self.ensure_follower_replication_worker(&transition.queue);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
@@ -2551,6 +2593,11 @@ impl Broker<StromaEngine> {
                 self.engine
                     .freeze_queue_for_transition(&topic, transition.queue.partition, group)
                     .await?;
+                self.stop_owner_queue_runtime(&QueueKey {
+                    tp: topic.clone(),
+                    part: transition.queue.partition,
+                    group: transition.queue.group.clone(),
+                });
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::PromoteFollowerToOwner => {

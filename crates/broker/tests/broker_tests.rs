@@ -674,6 +674,81 @@ async fn assignment_transition_apply_defers_follower_promotion_without_offsets()
 }
 
 #[tokio::test]
+async fn demote_owner_to_follower_stops_broker_owner_runtime() {
+    let (broker, _dir) = open_test_broker().await;
+    let group = Some("workers".to_string());
+    let (publisher, _confirms) = broker
+        .get_publisher("transition-demote", &group)
+        .await
+        .unwrap();
+
+    let reply = publisher
+        .publish(
+            b"before demote".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+    assert_eq!(
+        broker
+            .queue_activity_snapshot("transition-demote", Some("workers"))
+            .map(|snapshot| snapshot.active_publishers),
+        Some(1)
+    );
+
+    let transition = assignment_transition(
+        "transition-demote",
+        LocalAssignmentIntent::DemoteOwnerToFollower,
+        Some(LocalAssignmentRole::Owner),
+        Some(LocalAssignmentRole::Follower),
+    );
+    let outcome = broker
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::DemoteOwnerToFollower)
+    );
+    assert!(broker.has_follower_replication_worker("transition-demote", 0, Some("workers")));
+    assert_eq!(
+        broker.queue_activity_snapshot("transition-demote", Some("workers")),
+        None
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match publisher
+                .publish(
+                    b"after demote".to_vec(),
+                    unix_millis(),
+                    unix_millis(),
+                    None,
+                    Default::default(),
+                )
+                .await
+            {
+                Err(BrokerError::ChannelClosed) => break,
+                Ok(reply) => {
+                    let _ = reply.await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(err) => panic!("unexpected stale publisher error: {err:?}"),
+            }
+        }
+    })
+    .await
+    .expect("stale publisher should close after demotion");
+
+    broker.shutdown().await;
+}
+
+#[tokio::test]
 async fn owner_replication_read_returns_published_records() {
     let (broker, _dir) = open_test_broker().await;
     let (publisher, _confirms) = broker.get_publisher("replicated", &None).await.unwrap();
