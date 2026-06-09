@@ -337,9 +337,14 @@ Current focus: checkpoint-required follower boundary.
    primitive, not a hot-path background checkpoint.
 24. Done: add broker-facing methods that fetch an owner state checkpoint and
    install it on a follower through the existing Stroma install API.
-25. Next: extend the bounded follower catch-up helper so a checkpoint-required
-   response can drive state checkpoint install, contiguous message catch-up,
-   event catch-up, and promotion checks.
+25. Done: add an explicit checkpoint-aware catch-up helper so a
+   checkpoint-required response can drive owner state checkpoint export, follower
+   state checkpoint install, contiguous message catch-up, event catch-up, and
+   promotion checks. Keep the existing bounded helper unchanged for worker paths
+   that should only report checkpoint-required without pausing the owner.
+26. Next: decide when the follower worker is allowed to call the
+   checkpoint-aware helper. That should likely be policy gated because it pauses
+   the owner briefly while exporting the state checkpoint.
 
 Previous completed implementation checkpoints:
 
@@ -627,6 +632,20 @@ Tests needed before implementing transition:
   the installed state may still reference, from `message_next_offset`, the owner
   message-log tail the follower must reach before promotion. Broker tests now
   cover export, follower install, contiguous message catch-up, and promotion.
+- 2026-06-09: Planned checkpoint-aware catch-up as a separate broker helper,
+  not a silent behavior change to the existing bounded catch-up loop. The old
+  helper is still useful for worker paths that should report
+  checkpoint-required and wait for policy before asking the owner to pause and
+  export a state checkpoint.
+- 2026-06-09: Added the checkpoint-aware broker catch-up helper. It preserves
+  the normal bounded catch-up path, and when the old helper reports
+  checkpoint-required it exports an owner state checkpoint, installs it on the
+  follower, then resumes contiguous catch-up from the checkpoint offsets.
+  Focused broker coverage verifies the normal path, while the actual
+  checkpoint install mechanics remain covered by Stroma checkpoint tests and
+  the broker export/install handoff test. A full branch-triggering broker test
+  would currently need either a slow snapshot-worker wait or a test-only
+  truncation hook, so it is deferred.
 - 2026-06-09: Next design topic is API gatekeeping. Options to evaluate:
   distinct leader/follower Keratin handle types, a capability/token for
   replicated operations, an extension trait only used by replication code, or an

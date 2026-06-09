@@ -2816,6 +2816,75 @@ impl Broker<StromaEngine> {
 
         Ok(BrokerReplicationCatchUp::IterationLimit { progress })
     }
+
+    pub async fn catch_up_replication_follower_from_owner_with_checkpoint(
+        &self,
+        owner: &Broker<StromaEngine>,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+        options: BrokerReplicationCatchUpOptions,
+    ) -> Result<BrokerReplicationCatchUp, BrokerError> {
+        if options.max_messages_per_read == 0
+            || options.max_events_per_read == 0
+            || options.max_iterations == 0
+        {
+            return Err(BrokerError::InvalidArgument(
+                "replication catch-up limits must be greater than zero".into(),
+            ));
+        }
+
+        let mut options = options;
+        for checkpoint_attempts in 0..=1 {
+            let outcome = self
+                .catch_up_replication_follower_from_owner(owner, topic, partition, group, options)
+                .await?;
+
+            let BrokerReplicationCatchUp::CheckpointRequired {
+                progress,
+                messages,
+                events,
+            } = outcome
+            else {
+                return Ok(outcome);
+            };
+
+            if checkpoint_attempts == 1 {
+                return Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                    progress,
+                    messages,
+                    events,
+                });
+            }
+
+            let checkpoint = owner
+                .export_owner_state_checkpoint(topic, partition, group)
+                .await?;
+            self.install_follower_state_checkpoint(
+                topic,
+                partition,
+                group,
+                FollowerStateCheckpointInstall {
+                    message_next_offset: checkpoint.message_checkpoint_offset,
+                    event_next_offset: checkpoint.event_next_offset,
+                    applied_event_offset: checkpoint.applied_event_offset,
+                    state_snapshot: checkpoint.state_snapshot,
+                },
+            )
+            .await?;
+
+            options.message_from = checkpoint.message_checkpoint_offset;
+            options.event_from = checkpoint.event_next_offset;
+        }
+
+        tracing::error!(
+            topic,
+            partition,
+            group,
+            "checkpoint-aware catch-up loop reached an unreachable state"
+        );
+        unreachable!("checkpoint_attempts loop always returns");
+    }
 }
 
 fn checkpoint_required<T>(

@@ -1130,6 +1130,64 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
     follower.shutdown().await;
 }
 
+#[tokio::test]
+async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+
+    follower
+        .become_replication_follower("checkpoint-aware-normal", 0, None)
+        .await
+        .unwrap();
+
+    let (publisher, _confirms) = owner
+        .get_publisher("checkpoint-aware-normal", &None)
+        .await
+        .unwrap();
+    for payload in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()] {
+        let reply = publisher
+            .publish(
+                payload,
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+
+    let outcome = follower
+        .catch_up_replication_follower_from_owner_with_checkpoint(
+            &owner,
+            "checkpoint-aware-normal",
+            0,
+            None,
+            BrokerReplicationCatchUpOptions {
+                max_messages_per_read: 2,
+                max_events_per_read: 2,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress {
+            iterations: 3,
+            applied_message_records: 3,
+            applied_event_records: 3,
+            message_next_offset: 3,
+            event_next_offset: 3,
+        })
+    );
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
 #[test]
 fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
     let cfg = FollowerReplicationWorkerConfig {
