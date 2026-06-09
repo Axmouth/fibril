@@ -214,6 +214,16 @@ resume after context compaction.
    handoff path exists.
 10. Done: add protocol v1 replication read frame definitions and codec
     tests. Keep this as wire shape only before adding handler behavior.
+11. Done: wire protocol handler support for `ReplicationRead`. Keep the
+    conversion at the protocol edge: Stroma and broker return typed owner log
+    records, while protocol responses carry raw message headers, payloads, and
+    raw event bytes.
+12. Done: add handler coverage for owner success and not-owner rejection.
+    Malformed requests use the existing decode-to-400 path, and there is no
+    extra validation yet beyond ordinary frame decoding.
+13. Next: add protocol/admin support for follower apply or a higher-level
+    catch-up command after read behavior is tested. Avoid adding background
+    scheduling until manual pull/apply mechanics are observable and boring.
 
 ## Pending Decisions
 

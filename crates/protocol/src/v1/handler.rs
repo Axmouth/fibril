@@ -17,12 +17,12 @@ use anyhow::Context;
 use arc_swap::ArcSwap;
 use fibril_broker::{
     broker::{
-        Broker, BrokerError, ConsumerConfig, ConsumerHandle, ConsumerLease, PublisherHandle,
-        SettleRequest, SettleType,
+        Broker, BrokerError, BrokerOwnerReplicationRecords, ConsumerConfig, ConsumerHandle,
+        ConsumerLease, PublisherHandle, SettleRequest, SettleType,
     },
     queue_engine::{
-        DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, MessageContentType, QueueEngine,
-        StromaEngine, StromaError,
+        DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, Message, MessageContentType,
+        OwnerReplicationRead, QueueEngine, StromaEngine, StromaError, StromaEvent,
     },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
@@ -138,6 +138,90 @@ fn broker_error_response(err: &BrokerError) -> (u16, String) {
         BrokerError::NotOwner { .. } => (ERR_NOT_OWNER, err.to_string()),
         _ => (500, err.to_string()),
     }
+}
+
+fn replication_checkpoint_required(
+    epoch: u64,
+    requested_offset: u64,
+    head_offset: u64,
+    next_offset: u64,
+) -> ReplicationCheckpointRequired {
+    ReplicationCheckpointRequired {
+        epoch,
+        requested_offset,
+        head_offset,
+        next_offset,
+    }
+}
+
+fn to_replication_message_read(read: OwnerReplicationRead<Message>) -> ReplicationMessageRead {
+    match read {
+        OwnerReplicationRead::Batch(batch) => ReplicationMessageRead::Batch {
+            epoch: batch.epoch,
+            requested_offset: batch.requested_offset,
+            next_offset: batch.next_offset,
+            records: batch
+                .records
+                .into_iter()
+                .map(|(offset, message)| ReplicationMessageRecord {
+                    offset,
+                    headers: message.headers,
+                    payload: message.payload,
+                })
+                .collect(),
+        },
+        OwnerReplicationRead::CheckpointRequired {
+            epoch,
+            requested_offset,
+            head_offset,
+            next_offset,
+        } => ReplicationMessageRead::CheckpointRequired(replication_checkpoint_required(
+            epoch,
+            requested_offset,
+            head_offset,
+            next_offset,
+        )),
+    }
+}
+
+fn to_replication_event_read(
+    read: OwnerReplicationRead<StromaEvent>,
+) -> std::io::Result<ReplicationEventRead> {
+    match read {
+        OwnerReplicationRead::Batch(batch) => {
+            let records = batch
+                .records
+                .into_iter()
+                .map(|(offset, event)| {
+                    let payload = event.encode()?;
+                    Ok(ReplicationEventRecord { offset, payload })
+                })
+                .collect::<std::io::Result<Vec<_>>>()?;
+            Ok(ReplicationEventRead::Batch {
+                epoch: batch.epoch,
+                requested_offset: batch.requested_offset,
+                next_offset: batch.next_offset,
+                records,
+            })
+        }
+        OwnerReplicationRead::CheckpointRequired {
+            epoch,
+            requested_offset,
+            head_offset,
+            next_offset,
+        } => Ok(ReplicationEventRead::CheckpointRequired(
+            replication_checkpoint_required(epoch, requested_offset, head_offset, next_offset),
+        )),
+    }
+}
+
+fn to_replication_read_ok(
+    records: BrokerOwnerReplicationRecords,
+) -> std::io::Result<ReplicationReadOk> {
+    Ok(ReplicationReadOk {
+        messages: to_replication_message_read(records.messages),
+        events: to_replication_event_read(records.events)?,
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1394,6 +1478,64 @@ pub async fn handle_connection(
                 frame_tx_high_prio
                     .send(try_encode(Op::ReconcileResult, frame.request_id, &result)?)
                     .await?;
+            }
+
+            // -------- REPLICATION READ --------------------------------------
+            x if x == Op::ReplicationRead as u16 => {
+                let read: ReplicationRead =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, ReplicationRead);
+
+                match broker
+                    .read_owner_replication_records(
+                        &read.topic,
+                        read.partition,
+                        read.group.as_deref(),
+                        read.message_from,
+                        read.event_from,
+                        read.max_messages as usize,
+                        read.max_events as usize,
+                    )
+                    .await
+                {
+                    Ok(records) => {
+                        let response = match to_replication_read_ok(records) {
+                            Ok(response) => response,
+                            Err(err) => {
+                                tracing::error!(
+                                    error = %err,
+                                    "failed to encode replication read response"
+                                );
+                                send_error_response_and_count(
+                                    &frame_tx_high_prio,
+                                    &metrics,
+                                    frame.request_id,
+                                    500,
+                                    "replication read encoding failed",
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::ReplicationReadOk,
+                                frame.request_id,
+                                &response,
+                            )?)
+                            .await?;
+                    }
+                    Err(err) => {
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
             }
 
             // -------- SUBSCRIBE ---------------------------------------------

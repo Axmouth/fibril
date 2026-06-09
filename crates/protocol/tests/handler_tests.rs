@@ -14,7 +14,8 @@ use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
     Publish, PublishDelayed, QueueDlqPolicy, ReconcileAction, ReconcileClient, ReconcilePolicy,
-    ReconcileResult, ReconcileSubscription, ResumeIdentity, ResumeOutcome, Subscribe,
+    ReconcileResult, ReconcileSubscription, ReplicationEventRead, ReplicationMessageRead,
+    ReplicationRead, ReplicationReadOk, ResumeIdentity, ResumeOutcome, Subscribe,
     frame::{Frame, ProtoCodec},
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
@@ -806,6 +807,105 @@ async fn malformed_publish_returns_error_and_keeps_connection_open() {
         .unwrap();
 
     assert_error_frame(&mut framed, 2, 400).await;
+    assert_connection_still_responds(&mut framed).await;
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn replication_read_returns_owner_log_records() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+    framed_publish(
+        &mut framed,
+        2,
+        "replication.read.tcp",
+        Some("workers"),
+        b"replicated-payload",
+    )
+    .await;
+
+    framed
+        .send(
+            try_encode(
+                Op::ReplicationRead,
+                3,
+                &ReplicationRead {
+                    topic: "replication.read.tcp".into(),
+                    group: Some("workers".into()),
+                    partition: 0,
+                    message_from: 0,
+                    event_from: 0,
+                    max_messages: 10,
+                    max_events: 10,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
+    assert_eq!(frame.request_id, 3);
+    let response: ReplicationReadOk = try_decode(&frame).unwrap();
+
+    match response.messages {
+        ReplicationMessageRead::Batch { records, .. } => {
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].offset, 0);
+            assert_eq!(records[0].payload, b"replicated-payload".to_vec());
+        }
+        ReplicationMessageRead::CheckpointRequired(required) => {
+            panic!("unexpected message checkpoint requirement: {required:?}");
+        }
+    }
+
+    match response.events {
+        ReplicationEventRead::Batch { records, .. } => {
+            assert!(!records.is_empty());
+            assert_eq!(records[0].offset, 0);
+            assert!(!records[0].payload.is_empty());
+        }
+        ReplicationEventRead::CheckpointRequired(required) => {
+            panic!("unexpected event checkpoint requirement: {required:?}");
+        }
+    }
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_open() {
+    let (broker, dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::new()))).await;
+    let (mut framed, server_task, _dir, _broker) =
+        open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::ReplicationRead,
+                2,
+                &ReplicationRead {
+                    topic: "unowned".into(),
+                    group: None,
+                    partition: 0,
+                    message_from: 0,
+                    event_from: 0,
+                    max_messages: 10,
+                    max_events: 10,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_error_frame(&mut framed, 2, 409).await;
     assert_connection_still_responds(&mut framed).await;
 
     drop(framed);
