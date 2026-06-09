@@ -119,9 +119,11 @@ locally, every higher layer would be built on the wrong foundation.
 3. Done: add follower ingest in Stroma. It should use Keratin replicated append,
    reject ordinary owner traffic, apply replicated queue state, and avoid
    owner-only side effects.
-4. Define local promotion and demotion checks. A follower should only become
-   owner once local state is internally consistent and caught up according to
-   Stroma-owned offsets/checkpoints.
+4. In progress: define local promotion and demotion checks. A follower can now
+   be promoted only when its local message and event log tails exactly match the
+   externally supplied expected tails, and its event state is applied through the
+   event tail. Demotion still needs the matching freeze, checkpoint, and handoff
+   contract.
 5. Add the first broker ownership model. Static config is enough at first if the
    broker cleanly routes client traffic to owners and returns clear not-owner
    errors elsewhere.
@@ -318,3 +320,12 @@ Tests needed before implementing transition:
   replicated append, and applies replicated events without running owner-only
   side effects. Focused tests cover normal replicated ingest, rejecting owner
   queues, and source-queue DLQ events not writing the DLQ target queue.
+- 2026-06-09: Added checked Stroma follower promotion. The caller supplies the
+  expected message and event next offsets from the coordination or replication
+  layer. Stroma verifies the queue is a follower, local log tails match exactly,
+  and event state has applied through the event tail before switching the queue
+  and both Keratin logs to owner mode. Outcomes now distinguish behind, ahead,
+  and not-yet-applied states so stale coordination data cannot silently promote
+  unexpected local state. This is only a local readiness check. It does not prove
+  the old owner is fenced, and it does not replace the future ownership election
+  protocol.
