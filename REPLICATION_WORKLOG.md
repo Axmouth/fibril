@@ -1272,3 +1272,12 @@ Tests needed before implementing transition:
   `BrokerError::NotOwner` with the requested queue identity instead of losing
   the condition as an opaque string. Focused protocol coverage verifies this
   through the same TCP handler path.
+- 2026-06-09: Added the first static protocol owner-peer resolver. It maps
+  coordination owner node ids to broker TCP addresses, opens a fresh protocol
+  connection per resolve, performs Hello and optional Auth, then returns the
+  protocol-backed `BrokerOwnerReplicationPeer`. Focused protocol tests cover
+  successful owner reads through the resolver, missing owner id returning
+  `None`, and auth-enabled resolver connections. This intentionally does not
+  cache connections yet; connection reuse, reconnect/backoff, topology-watch
+  refresh, and real coordination-backed address discovery remain follow-up
+  transport work.

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    net::SocketAddr,
     sync::Arc,
     time::Duration,
     time::Instant,
@@ -8,9 +9,10 @@ use std::{
 use bytes::Bytes;
 use fibril_broker::{
     broker::{
-        Broker, BrokerConfig, BrokerOwnerReplicationPeer, QueueEvictionAttempt,
-        StaticQueueOwnership,
+        Broker, BrokerConfig, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
+        QueueEvictionAttempt, StaticQueueOwnership,
     },
+    coordination::{PartitionAssignment, QueueIdentity},
     queue_engine::{
         EvictOutcome, GlobalDLQ, OwnerReplicationRead, QueueEngine, QueuePromotionOutcome,
         StromaEngine,
@@ -30,8 +32,9 @@ use fibril_protocol::v1::{
     handler::{ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
     replication::{
-        ProtocolOwnerReplicationPeer, ProtocolReplicationCatchUp,
-        ProtocolReplicationCatchUpOptions, catch_up_replication_over_protocol,
+        ProtocolOwnerPeerResolverConfig, ProtocolOwnerReplicationPeer, ProtocolReplicationCatchUp,
+        ProtocolReplicationCatchUpOptions, StaticProtocolOwnerPeerResolver,
+        catch_up_replication_over_protocol,
     },
 };
 use fibril_util::{StaticAuthHandler, unix_millis};
@@ -138,6 +141,41 @@ async fn open_protocol_connection_for_broker(
     ));
 
     (Framed::new(client, ProtoCodec), server_task, dir, broker)
+}
+
+async fn start_protocol_listener_for_broker(
+    settings: ConnectionSettings,
+    broker: Arc<Broker<StromaEngine>>,
+    dir: TempDir,
+    auth: Option<StaticAuthHandler>,
+) -> (
+    SocketAddr,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    TempDir,
+    Arc<Broker<StromaEngine>>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_broker = broker.clone();
+
+    let server_task = tokio::spawn(async move {
+        let (server, peer) = listener.accept().await.unwrap();
+        let tcp_stats = TcpStats::new(10);
+        let connection_stats = ConnectionStats::new();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+        handle_connection(
+            server,
+            server_broker,
+            tcp_stats,
+            connection_stats,
+            conn_id,
+            auth,
+            settings,
+        )
+        .await
+    });
+
+    (addr, server_task, dir, broker)
 }
 
 async fn recv_frame(framed: &mut Framed<TcpStream, ProtoCodec>) -> Frame {
@@ -1223,6 +1261,129 @@ async fn protocol_owner_replication_peer_maps_not_owner_error() {
         err,
         fibril_broker::broker::BrokerError::NotOwner { .. }
     ));
+
+    drop(peer);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
+    let topic = "replication.resolver.read";
+    let group = Some("workers".to_string());
+    let (owner_broker, owner_dir) = open_test_broker().await;
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, &group).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"resolver-payload".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let (addr, server_task, _dir, _broker) = start_protocol_listener_for_broker(
+        ConnectionSettings::new(Some(60)),
+        owner_broker,
+        owner_dir,
+        None,
+    )
+    .await;
+    let resolver =
+        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new(topic, 0, group.as_deref()),
+        "owner-a",
+        vec![],
+        1,
+    );
+
+    let peer = resolver
+        .resolve_owner_peer(&assignment)
+        .await
+        .unwrap()
+        .expect("owner peer");
+    let records = peer
+        .read_owner_replication_records(topic, 0, group.as_deref(), 0, 0, 8, 8)
+        .await
+        .unwrap();
+
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("expected message batch");
+    };
+    assert_eq!(messages.records.len(), 1);
+    assert_eq!(messages.records[0].1.payload, b"resolver-payload");
+
+    drop(peer);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn static_protocol_owner_peer_resolver_returns_none_for_unknown_owner() {
+    let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::new());
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new("replication.resolver.missing", 0, None),
+        "missing-owner",
+        vec![],
+        1,
+    );
+
+    assert!(
+        resolver
+            .resolve_owner_peer(&assignment)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn static_protocol_owner_peer_resolver_can_authenticate() {
+    let topic = "replication.resolver.auth";
+    let (owner_broker, owner_dir) = open_test_broker().await;
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, &None).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"auth-payload".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let (addr, server_task, _dir, _broker) = start_protocol_listener_for_broker(
+        ConnectionSettings::new(Some(60)),
+        owner_broker,
+        owner_dir,
+        Some(StaticAuthHandler::new("fibril".into(), "secret".into())),
+    )
+    .await;
+    let resolver = StaticProtocolOwnerPeerResolver::with_config(
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("owner-a".to_string(), addr)]))
+            .with_auth("fibril", "secret"),
+    );
+    let assignment =
+        PartitionAssignment::new(QueueIdentity::new(topic, 0, None), "owner-a", vec![], 1);
+
+    let peer = resolver
+        .resolve_owner_peer(&assignment)
+        .await
+        .unwrap()
+        .expect("owner peer");
+    let records = peer
+        .read_owner_replication_records(topic, 0, None, 0, 0, 8, 8)
+        .await
+        .unwrap();
+
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("expected message batch");
+    };
+    assert_eq!(messages.records[0].1.payload, b"auth-payload");
 
     drop(peer);
     server_task.await.unwrap().unwrap();

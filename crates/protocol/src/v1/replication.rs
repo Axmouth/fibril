@@ -1,21 +1,33 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use anyhow::{Context, bail};
 use fibril_broker::{
     LogId, Offset,
-    broker::{BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationRecords},
+    broker::{
+        BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
+        BrokerOwnerReplicationRecords,
+    },
+    coordination::{NodeInfo, PartitionAssignment},
     queue_engine::{
         Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, StromaEvent,
     },
 };
 use futures::{SinkExt, StreamExt};
-use tokio::sync::Mutex;
+use tokio::{net::TcpStream, sync::Mutex};
 
 use crate::v1::{
-    ERR_NOT_OWNER, ErrorMsg, Op, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
-    ReplicationCheckpointExportOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
-    ReplicationEventRead, ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead,
-    ReplicationReadOk,
+    Auth, ERR_NOT_OWNER, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, ReplicationApply,
+    ReplicationApplyOk, ReplicationCheckpointExport, ReplicationCheckpointExportOk,
+    ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
+    ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead, ReplicationReadOk,
+    frame::ProtoCodec,
     helper::{Conn, try_decode, try_encode},
 };
 
@@ -62,6 +74,151 @@ pub enum ProtocolReplicationCatchUp {
     IterationLimit {
         progress: ProtocolReplicationCatchUpProgress,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtocolOwnerPeerAuth {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolOwnerPeerResolverConfig {
+    pub nodes: HashMap<String, SocketAddr>,
+    pub auth: Option<ProtocolOwnerPeerAuth>,
+    pub client_name: String,
+    pub client_version: String,
+}
+
+impl ProtocolOwnerPeerResolverConfig {
+    pub fn new(nodes: HashMap<String, SocketAddr>) -> Self {
+        Self {
+            nodes,
+            auth: None,
+            client_name: "fibril-replication".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+        }
+    }
+
+    pub fn from_nodes(nodes: impl IntoIterator<Item = NodeInfo>) -> Self {
+        Self::new(
+            nodes
+                .into_iter()
+                .map(|node| (node.node_id, node.broker_addr))
+                .collect(),
+        )
+    }
+
+    pub fn with_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.auth = Some(ProtocolOwnerPeerAuth {
+            username: username.into(),
+            password: password.into(),
+        });
+        self
+    }
+}
+
+/// Static owner-peer resolver for early replication wiring and tests.
+///
+/// It opens a fresh protocol connection per resolve. That is intentionally
+/// simple for now; production wiring should add connection caching, reconnect
+/// policy, and topology-watch integration above this boundary.
+pub struct StaticProtocolOwnerPeerResolver {
+    cfg: ProtocolOwnerPeerResolverConfig,
+}
+
+impl StaticProtocolOwnerPeerResolver {
+    pub fn new(nodes: HashMap<String, SocketAddr>) -> Self {
+        Self {
+            cfg: ProtocolOwnerPeerResolverConfig::new(nodes),
+        }
+    }
+
+    pub fn with_config(cfg: ProtocolOwnerPeerResolverConfig) -> Self {
+        Self { cfg }
+    }
+}
+
+impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
+    fn resolve_owner_peer<'a>(
+        &'a self,
+        assignment: &'a PartitionAssignment,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>,
+    > {
+        Box::pin(async move {
+            let Some(addr) = self.cfg.nodes.get(&assignment.owner).copied() else {
+                return Ok(None);
+            };
+
+            let peer = connect_protocol_owner_peer(
+                addr,
+                self.cfg.auth.as_ref(),
+                &self.cfg.client_name,
+                &self.cfg.client_version,
+            )
+            .await?;
+            let peer: Arc<dyn BrokerOwnerReplicationPeer> = Arc::new(peer);
+            Ok(Some(peer))
+        })
+    }
+}
+
+pub async fn connect_protocol_owner_peer(
+    addr: SocketAddr,
+    auth: Option<&ProtocolOwnerPeerAuth>,
+    client_name: &str,
+    client_version: &str,
+) -> Result<ProtocolOwnerReplicationPeer, BrokerError> {
+    let stream = TcpStream::connect(addr)
+        .await
+        .map_err(|err| BrokerError::Unknown(format!("owner peer connect failed: {err}")))?;
+    let mut conn = tokio_util::codec::Framed::new(stream, ProtoCodec);
+
+    let request_id = 1;
+    conn.send(
+        try_encode(
+            Op::Hello,
+            request_id,
+            &Hello {
+                client_name: client_name.to_string(),
+                client_version: client_version.to_string(),
+                protocol_version: PROTOCOL_V1,
+                resume: None,
+            },
+        )
+        .map_err(protocol_error)?,
+    )
+    .await
+    .map_err(|err| BrokerError::Unknown(format!("owner peer hello send failed: {err}")))?;
+
+    let _: HelloOk = recv_response(&mut conn, request_id, Op::HelloOk)
+        .await
+        .map_err(|err| BrokerError::Unknown(err.to_string()))?;
+
+    if let Some(auth) = auth {
+        let request_id = 2;
+        conn.send(
+            try_encode(
+                Op::Auth,
+                request_id,
+                &Auth {
+                    username: auth.username.clone(),
+                    password: auth.password.clone(),
+                },
+            )
+            .map_err(protocol_error)?,
+        )
+        .await
+        .map_err(|err| BrokerError::Unknown(format!("owner peer auth send failed: {err}")))?;
+
+        let _: () = recv_response(&mut conn, request_id, Op::AuthOk)
+            .await
+            .map_err(|err| BrokerError::Unknown(err.to_string()))?;
+    }
+
+    Ok(ProtocolOwnerReplicationPeer::new(conn))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -341,7 +498,10 @@ where
             });
         }
 
-        if frame.opcode == Op::Error as u16 {
+        if frame.opcode == Op::Error as u16
+            || frame.opcode == Op::HelloErr as u16
+            || frame.opcode == Op::AuthErr as u16
+        {
             let error: ErrorMsg = try_decode(&frame)
                 .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))?;
             return Err(ProtocolReplicationRequestError::Protocol {
