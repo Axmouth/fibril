@@ -20,7 +20,9 @@ use fibril_storage::{
 use fibril_util::unix_millis;
 use uuid::Uuid;
 
-use crate::coordination::{Coordination, StaticCoordination};
+use crate::coordination::{
+    Coordination, LocalAssignmentIntent, LocalAssignmentTransition, StaticCoordination,
+};
 use crate::queue_engine::{
     EvictOutcome, QueueEngine, QueuePromotionOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
     ReplicatedQueueApplyOutcome, SettleKind, SettleRequest as EngineSettleRequest, StromaEngine,
@@ -467,6 +469,16 @@ pub enum BrokerReplicationCatchUp {
     IterationLimit {
         progress: BrokerReplicationCatchUpProgress,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BrokerAssignmentTransitionApply {
+    Applied(LocalAssignmentIntent),
+    Deferred {
+        intent: LocalAssignmentIntent,
+        reason: &'static str,
+    },
+    Noop(LocalAssignmentIntent),
 }
 
 // ---------------- Internal state ----------------
@@ -2259,6 +2271,76 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 }
 
 impl Broker<StromaEngine> {
+    pub async fn apply_assignment_transition(
+        &self,
+        transition: &LocalAssignmentTransition,
+    ) -> Result<BrokerAssignmentTransitionApply, BrokerError> {
+        let topic = transition.queue.topic.to_string();
+        let group = transition.queue.group.as_deref();
+        match transition.intent {
+            LocalAssignmentIntent::Noop => Ok(BrokerAssignmentTransitionApply::Noop(
+                LocalAssignmentIntent::Noop,
+            )),
+            LocalAssignmentIntent::RefreshOwner | LocalAssignmentIntent::RefreshFollower => {
+                Ok(BrokerAssignmentTransitionApply::Noop(transition.intent))
+            }
+            LocalAssignmentIntent::BecomeOwner => {
+                if self
+                    .engine
+                    .is_materialized(&topic, transition.queue.partition, group)
+                {
+                    self.engine
+                        .become_queue_owner(&topic, transition.queue.partition, group)
+                        .await?;
+                    Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+                } else {
+                    Ok(BrokerAssignmentTransitionApply::Noop(transition.intent))
+                }
+            }
+            LocalAssignmentIntent::BecomeFollower => {
+                self.become_replication_follower(&topic, transition.queue.partition, group)
+                    .await?;
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+            }
+            LocalAssignmentIntent::DemoteOwnerToFollower => {
+                self.engine
+                    .demote_queue_owner_to_follower(&topic, transition.queue.partition, group)
+                    .await?;
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+            }
+            LocalAssignmentIntent::FreezeOwner => {
+                self.engine
+                    .freeze_queue_for_transition(&topic, transition.queue.partition, group)
+                    .await?;
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+            }
+            LocalAssignmentIntent::PromoteFollowerToOwner => {
+                tracing::debug!(
+                    topic,
+                    partition = transition.queue.partition,
+                    group = ?group,
+                    "deferring follower promotion until catch-up offsets are known"
+                );
+                Ok(BrokerAssignmentTransitionApply::Deferred {
+                    intent: transition.intent,
+                    reason: "promotion requires verified follower catch-up offsets",
+                })
+            }
+            LocalAssignmentIntent::StopFollower => {
+                tracing::debug!(
+                    topic,
+                    partition = transition.queue.partition,
+                    group = ?group,
+                    "deferring follower stop until follower shutdown semantics are defined"
+                );
+                Ok(BrokerAssignmentTransitionApply::Deferred {
+                    intent: transition.intent,
+                    reason: "stopping a follower requires explicit local shutdown semantics",
+                })
+            }
+        }
+    }
+
     pub async fn read_owner_replication_records(
         &self,
         topic: &str,

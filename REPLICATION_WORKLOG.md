@@ -245,7 +245,7 @@ resume after context compaction.
 
 ## Active Implementation Plan
 
-Current focus: coordination interface and static assignment backend.
+Current focus: broker assignment watcher foundation.
 
 1. Done: replace the old leader-only `Coordination` stub with a cached
    assignment model shaped like the controller spec: nodes, partition
@@ -257,10 +257,23 @@ Current focus: coordination interface and static assignment backend.
    provider so existing owner gates can consume assignment data without waiting
    for the full broker assignment watcher.
 4. Done: add focused coordination tests and run broker checks.
-5. In progress: commit the static coordination checkpoint.
-6. Next: broker assignment watcher that reacts to coordination snapshots and
-   starts owner/follower role transitions.
-7. Later: follower worker scheduling and snapshot install.
+5. Done: commit the static coordination checkpoint.
+6. Done: add a snapshot-diff planner that converts coordination changes
+   into local queue role intents: become owner, become follower, demote owner,
+   freeze/unassign, or no-op.
+7. Done: add tests for assignment transitions, including owner to follower,
+   follower to owner, new follower assignment, and removed assignment.
+8. Done: add a minimal broker-facing apply method that can invoke existing
+   Stroma role transition primitives where enough local information exists.
+   Follower promotion is intentionally deferred until catch-up offsets are
+   known. Follower stop is intentionally deferred until shutdown semantics are
+   defined. New owner assignments do not materialize queues by themselves;
+   sparse queues should stay cold until traffic or an explicit operation loads
+   them.
+9. Done: commit the assignment transition planner/apply checkpoint.
+10. Next: broker assignment watcher task that watches coordination snapshots
+   and applies role transitions.
+11. Later: follower worker scheduling and snapshot install.
 
 Previous completed implementation checkpoints:
 

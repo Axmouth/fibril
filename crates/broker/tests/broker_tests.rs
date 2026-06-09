@@ -8,13 +8,15 @@ use async_trait::async_trait;
 use fibril_broker::{
     CompletionPair,
     broker::{
-        Broker, BrokerConfig, BrokerError, BrokerFollowerReplicationApply,
-        BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
+        Broker, BrokerAssignmentTransitionApply, BrokerConfig, BrokerError,
+        BrokerFollowerReplicationApply, BrokerReplicationCatchUp, BrokerReplicationCatchUpOptions,
         BrokerReplicationCatchUpProgress, ConsumerConfig, OwnedQueue, QueueEvictionAttempt,
         QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
     },
     coordination::{
-        CoordinationSnapshot, NodeInfo, PartitionAssignment, QueueIdentity, StaticCoordination,
+        CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
+        LocalAssignmentTransition, NodeInfo, PartitionAssignment, QueueIdentity,
+        StaticCoordination,
     },
     queue_engine::{
         Deliverable, EvictOutcome, InspectMode, IoError, KeratinAppendCompletion, MessageHeaders,
@@ -492,6 +494,101 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
         } if topic == "coord-followed" && group == "workers"
     ));
     assert!(!broker.is_queue_materialized("coord-followed", Some("workers")));
+    broker.shutdown().await;
+}
+
+fn assignment_transition(
+    topic: &str,
+    intent: LocalAssignmentIntent,
+    previous_role: Option<LocalAssignmentRole>,
+    next_role: Option<LocalAssignmentRole>,
+) -> LocalAssignmentTransition {
+    LocalAssignmentTransition {
+        queue: QueueIdentity::new(topic, 0, Some("workers")),
+        previous_role,
+        next_role,
+        previous: None,
+        next: None,
+        intent,
+    }
+}
+
+#[tokio::test]
+async fn assignment_transition_apply_can_make_queue_follower() {
+    let (broker, _dir) = open_test_broker().await;
+    let transition = assignment_transition(
+        "transition-followed",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+
+    let outcome = broker
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::BecomeFollower)
+    );
+
+    let err = broker
+        .read_owner_replication_records("transition-followed", 0, Some("workers"), 0, 0, 1, 1)
+        .await
+        .expect_err("follower queue should reject owner replication reads");
+    assert!(matches!(
+        err,
+        BrokerError::Engine(StromaError::WrongQueueRole { .. })
+    ));
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn assignment_transition_apply_does_not_materialize_new_owner_queue() {
+    let (broker, _dir) = open_test_broker().await;
+    let transition = assignment_transition(
+        "transition-owned",
+        LocalAssignmentIntent::BecomeOwner,
+        None,
+        Some(LocalAssignmentRole::Owner),
+    );
+
+    let outcome = broker
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerAssignmentTransitionApply::Noop(LocalAssignmentIntent::BecomeOwner)
+    );
+    assert!(!broker.is_queue_materialized("transition-owned", Some("workers")));
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn assignment_transition_apply_defers_follower_promotion_without_offsets() {
+    let (broker, _dir) = open_test_broker().await;
+    let transition = assignment_transition(
+        "transition-promote",
+        LocalAssignmentIntent::PromoteFollowerToOwner,
+        Some(LocalAssignmentRole::Follower),
+        Some(LocalAssignmentRole::Owner),
+    );
+
+    let outcome = broker
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        outcome,
+        BrokerAssignmentTransitionApply::Deferred {
+            intent: LocalAssignmentIntent::PromoteFollowerToOwner,
+            reason: "promotion requires verified follower catch-up offsets",
+        }
+    );
+    assert!(!broker.is_queue_materialized("transition-promote", Some("workers")));
     broker.shutdown().await;
 }
 

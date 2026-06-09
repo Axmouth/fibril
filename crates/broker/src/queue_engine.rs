@@ -279,6 +279,38 @@ impl StromaEngine {
         self.inner.become_queue_follower(tp, part, group).await
     }
 
+    pub async fn freeze_queue_for_transition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .freeze_queue_for_transition(tp, part, group)
+            .await
+    }
+
+    pub async fn demote_queue_owner_to_follower(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .demote_queue_owner_to_follower(tp, part, group)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn become_queue_owner(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner.become_queue_owner(tp, part, group).await
+    }
+
     pub async fn apply_replicated_queue_batch(
         &self,
         tp: &str,

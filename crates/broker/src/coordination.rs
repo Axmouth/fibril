@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::SocketAddr,
     sync::{Arc, RwLock},
 };
@@ -95,6 +95,140 @@ impl CoordinationSnapshot {
             .filter(|assignment| assignment.is_followed_by(node_id))
             .cloned()
             .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalAssignmentRole {
+    Owner,
+    Follower,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalAssignmentIntent {
+    Noop,
+    BecomeOwner,
+    BecomeFollower,
+    PromoteFollowerToOwner,
+    DemoteOwnerToFollower,
+    FreezeOwner,
+    StopFollower,
+    RefreshOwner,
+    RefreshFollower,
+}
+
+impl LocalAssignmentIntent {
+    pub fn requires_role_change(self) -> bool {
+        !matches!(
+            self,
+            Self::Noop | Self::RefreshOwner | Self::RefreshFollower
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAssignmentTransition {
+    pub queue: QueueIdentity,
+    pub previous_role: Option<LocalAssignmentRole>,
+    pub next_role: Option<LocalAssignmentRole>,
+    pub previous: Option<PartitionAssignment>,
+    pub next: Option<PartitionAssignment>,
+    pub intent: LocalAssignmentIntent,
+}
+
+pub fn plan_local_assignment_transitions(
+    node_id: &str,
+    previous: &CoordinationSnapshot,
+    next: &CoordinationSnapshot,
+) -> Vec<LocalAssignmentTransition> {
+    let mut keys: HashSet<QueueIdentity> = previous.assignments.keys().cloned().collect();
+    keys.extend(next.assignments.keys().cloned());
+
+    let mut keys: Vec<_> = keys.into_iter().collect();
+    keys.sort_by(|a, b| {
+        (
+            a.topic.to_string(),
+            a.partition,
+            a.group.as_deref().unwrap_or_default().to_string(),
+        )
+            .cmp(&(
+                b.topic.to_string(),
+                b.partition,
+                b.group.as_deref().unwrap_or_default().to_string(),
+            ))
+    });
+
+    keys.into_iter()
+        .filter_map(|queue| {
+            let previous_assignment = previous.assignments.get(&queue).cloned();
+            let next_assignment = next.assignments.get(&queue).cloned();
+            let previous_role = previous_assignment
+                .as_ref()
+                .and_then(|assignment| local_role_for(node_id, assignment));
+            let next_role = next_assignment
+                .as_ref()
+                .and_then(|assignment| local_role_for(node_id, assignment));
+            let intent = local_assignment_intent(
+                previous_role,
+                next_role,
+                previous_assignment.as_ref(),
+                next_assignment.as_ref(),
+            );
+
+            (intent != LocalAssignmentIntent::Noop).then_some(LocalAssignmentTransition {
+                queue,
+                previous_role,
+                next_role,
+                previous: previous_assignment,
+                next: next_assignment,
+                intent,
+            })
+        })
+        .collect()
+}
+
+fn local_role_for(node_id: &str, assignment: &PartitionAssignment) -> Option<LocalAssignmentRole> {
+    if assignment.is_owned_by(node_id) {
+        Some(LocalAssignmentRole::Owner)
+    } else if assignment.is_followed_by(node_id) {
+        Some(LocalAssignmentRole::Follower)
+    } else {
+        None
+    }
+}
+
+fn local_assignment_intent(
+    previous_role: Option<LocalAssignmentRole>,
+    next_role: Option<LocalAssignmentRole>,
+    previous: Option<&PartitionAssignment>,
+    next: Option<&PartitionAssignment>,
+) -> LocalAssignmentIntent {
+    match (previous_role, next_role) {
+        (None, None) => LocalAssignmentIntent::Noop,
+        (None, Some(LocalAssignmentRole::Owner)) => LocalAssignmentIntent::BecomeOwner,
+        (None, Some(LocalAssignmentRole::Follower)) => LocalAssignmentIntent::BecomeFollower,
+        (Some(LocalAssignmentRole::Owner), None) => LocalAssignmentIntent::FreezeOwner,
+        (Some(LocalAssignmentRole::Follower), None) => LocalAssignmentIntent::StopFollower,
+        (Some(LocalAssignmentRole::Owner), Some(LocalAssignmentRole::Follower)) => {
+            LocalAssignmentIntent::DemoteOwnerToFollower
+        }
+        (Some(LocalAssignmentRole::Follower), Some(LocalAssignmentRole::Owner)) => {
+            LocalAssignmentIntent::PromoteFollowerToOwner
+        }
+        (Some(LocalAssignmentRole::Owner), Some(LocalAssignmentRole::Owner)) => {
+            if previous == next {
+                LocalAssignmentIntent::Noop
+            } else {
+                LocalAssignmentIntent::RefreshOwner
+            }
+        }
+        (Some(LocalAssignmentRole::Follower), Some(LocalAssignmentRole::Follower)) => {
+            if previous == next {
+                LocalAssignmentIntent::Noop
+            } else {
+                LocalAssignmentIntent::RefreshFollower
+            }
+        }
     }
 }
 
@@ -325,6 +459,118 @@ mod tests {
 
         watch.changed().await.unwrap();
         assert_eq!(watch.borrow().generation, 43);
+    }
+
+    fn snapshot_with(
+        assignments: Vec<PartitionAssignment>,
+        generation: u64,
+    ) -> CoordinationSnapshot {
+        let mut snapshot = snapshot();
+        snapshot.assignments = assignments
+            .into_iter()
+            .map(|assignment| (assignment.queue.clone(), assignment))
+            .collect();
+        snapshot.generation = generation;
+        snapshot
+    }
+
+    fn assignment(
+        topic: &str,
+        owner: &str,
+        followers: Vec<&str>,
+        epoch: u64,
+    ) -> PartitionAssignment {
+        PartitionAssignment::new(
+            QueueIdentity::new(topic, 0, Some("workers")),
+            owner,
+            followers.into_iter().map(str::to_string).collect(),
+            epoch,
+        )
+    }
+
+    #[test]
+    fn transition_planner_reports_new_local_owner_and_follower_assignments() {
+        let previous = snapshot_with(Vec::new(), 1);
+        let next = snapshot_with(
+            vec![
+                assignment("owned", "node-a", vec!["node-b"], 2),
+                assignment("followed", "node-b", vec!["node-a"], 2),
+                assignment("remote", "node-b", vec![], 2),
+            ],
+            2,
+        );
+
+        let transitions = plan_local_assignment_transitions("node-a", &previous, &next);
+
+        assert_eq!(transitions.len(), 2);
+        assert_eq!(transitions[0].queue.topic.to_string(), "followed");
+        assert_eq!(transitions[0].intent, LocalAssignmentIntent::BecomeFollower);
+        assert_eq!(transitions[1].queue.topic.to_string(), "owned");
+        assert_eq!(transitions[1].intent, LocalAssignmentIntent::BecomeOwner);
+    }
+
+    #[test]
+    fn transition_planner_reports_owner_demote_and_follower_promote() {
+        let previous = snapshot_with(
+            vec![
+                assignment("demote", "node-a", vec!["node-b"], 1),
+                assignment("promote", "node-b", vec!["node-a"], 1),
+            ],
+            1,
+        );
+        let next = snapshot_with(
+            vec![
+                assignment("demote", "node-b", vec!["node-a"], 2),
+                assignment("promote", "node-a", vec!["node-b"], 2),
+            ],
+            2,
+        );
+
+        let transitions = plan_local_assignment_transitions("node-a", &previous, &next);
+
+        assert_eq!(transitions.len(), 2);
+        assert_eq!(transitions[0].queue.topic.to_string(), "demote");
+        assert_eq!(
+            transitions[0].intent,
+            LocalAssignmentIntent::DemoteOwnerToFollower
+        );
+        assert_eq!(transitions[1].queue.topic.to_string(), "promote");
+        assert_eq!(
+            transitions[1].intent,
+            LocalAssignmentIntent::PromoteFollowerToOwner
+        );
+    }
+
+    #[test]
+    fn transition_planner_reports_removed_local_assignments() {
+        let previous = snapshot_with(
+            vec![
+                assignment("owned", "node-a", vec!["node-b"], 1),
+                assignment("followed", "node-b", vec!["node-a"], 1),
+            ],
+            1,
+        );
+        let next = snapshot_with(Vec::new(), 2);
+
+        let transitions = plan_local_assignment_transitions("node-a", &previous, &next);
+
+        assert_eq!(transitions.len(), 2);
+        assert_eq!(transitions[0].queue.topic.to_string(), "followed");
+        assert_eq!(transitions[0].intent, LocalAssignmentIntent::StopFollower);
+        assert_eq!(transitions[1].queue.topic.to_string(), "owned");
+        assert_eq!(transitions[1].intent, LocalAssignmentIntent::FreezeOwner);
+    }
+
+    #[test]
+    fn transition_planner_reports_same_role_refresh_without_role_change() {
+        let previous = snapshot_with(vec![assignment("owned", "node-a", vec!["node-b"], 1)], 1);
+        let next = snapshot_with(vec![assignment("owned", "node-a", vec!["node-b"], 2)], 2);
+
+        let transitions = plan_local_assignment_transitions("node-a", &previous, &next);
+
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].intent, LocalAssignmentIntent::RefreshOwner);
+        assert!(!transitions[0].intent.requires_role_change());
     }
 
     #[test]
