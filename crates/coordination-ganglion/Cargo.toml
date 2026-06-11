@@ -12,4 +12,5 @@ ganglion-openraft = { path = "../../../ganglion/crates/ganglion-openraft", featu
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "macros"] }
 
 [dev-dependencies]
+fibril-broker = { path = "../broker", features = ["provider-contract-tests"] }
 tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }

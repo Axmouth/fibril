@@ -640,6 +640,134 @@ impl Coordination for NoopCoordination {
     }
 }
 
+/// Reusable contract assertions every `Coordination` provider must satisfy.
+///
+/// Run this against each implementation (static, ganglion, later etcd) so
+/// providers cannot drift apart. The `commit` callback applies a new snapshot
+/// through the provider's own write path and must not return until the
+/// provider's reads observe it (e.g. static: `update_snapshot`; ganglion:
+/// propose through raft and wait on the watch).
+#[cfg(any(test, feature = "provider-contract-tests"))]
+pub mod contract_tests {
+    use super::*;
+
+    fn sample_snapshot(local: &str, generation: u64, owner: &str) -> CoordinationSnapshot {
+        let mut nodes = HashMap::new();
+        for (node_id, port) in [(local, 9101u16), (owner, 9102), ("other-node", 9103)] {
+            nodes.insert(
+                node_id.to_string(),
+                NodeInfo {
+                    node_id: node_id.to_string(),
+                    broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+                    admin_addr: None,
+                },
+            );
+        }
+
+        let owned = QueueIdentity::new("contract-owned", 0, Some("workers"));
+        let followed = QueueIdentity::new("contract-followed", 1, None);
+        let mut assignments = HashMap::new();
+        assignments.insert(
+            owned.clone(),
+            PartitionAssignment::new(owned, owner, vec!["other-node".to_string()], generation),
+        );
+        assignments.insert(
+            followed.clone(),
+            PartitionAssignment::new(followed, "other-node", vec![local.to_string()], 1),
+        );
+
+        CoordinationSnapshot {
+            nodes,
+            assignments,
+            generation,
+        }
+    }
+
+    /// Assert the shared provider contract.
+    ///
+    /// Preconditions: the provider starts on an empty/default snapshot and
+    /// `commit(provider, snapshot)` makes `snapshot` the committed state,
+    /// visible to reads, before returning.
+    pub fn assert_coordination_contract<P, F>(provider: &P, local_node_id: &str, mut commit: F)
+    where
+        P: Coordination,
+        F: FnMut(&P, CoordinationSnapshot),
+    {
+        // Identity is stable.
+        assert_eq!(provider.node_id(), local_node_id);
+
+        // Empty state: queries answer absent, not panic.
+        assert!(
+            provider
+                .assignment_for("contract-owned", 0, Some("workers"))
+                .is_none()
+        );
+        assert!(!provider.owns_queue("contract-owned", 0, Some("workers")));
+        assert!(!provider.follows_queue("contract-followed", 1, None));
+        assert!(
+            provider
+                .owner_for("contract-owned", 0, Some("workers"))
+                .is_none()
+        );
+        assert!(provider.owned_assignments().is_empty());
+        assert!(provider.follower_assignments().is_empty());
+
+        // Subscribe BEFORE the first commit: the stream must deliver the
+        // latest committed value to pre-existing subscribers.
+        let mut stream = provider.watch();
+
+        // Commit a snapshot where the local node owns one queue and follows
+        // another.
+        let first = sample_snapshot(local_node_id, 1, local_node_id);
+        commit(provider, first.clone());
+
+        assert_eq!(provider.snapshot(), first);
+        assert!(provider.owns_queue("contract-owned", 0, Some("workers")));
+        assert!(!provider.follows_queue("contract-owned", 0, Some("workers")));
+        assert!(provider.follows_queue("contract-followed", 1, None));
+        let owner = provider
+            .owner_for("contract-owned", 0, Some("workers"))
+            .expect("owner must resolve from the committed snapshot");
+        assert_eq!(owner.node_id, local_node_id);
+        assert_eq!(provider.owned_assignments().len(), 1);
+        assert_eq!(provider.follower_assignments().len(), 1);
+        let assignment = provider
+            .assignment_for("contract-owned", 0, Some("workers"))
+            .expect("assignment must resolve");
+        assert_eq!(assignment.epoch, 1);
+
+        // Ownership moves away: role queries must flip with the snapshot.
+        let second = sample_snapshot(local_node_id, 2, "other-node");
+        commit(provider, second.clone());
+
+        assert_eq!(provider.snapshot(), second);
+        assert!(!provider.owns_queue("contract-owned", 0, Some("workers")));
+        let moved = provider
+            .assignment_for("contract-owned", 0, Some("workers"))
+            .expect("assignment still present");
+        assert_eq!(moved.owner, "other-node");
+
+        // The pre-commit subscriber observes the latest committed state (the
+        // channel may coalesce intermediate values, but never lose the last).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if stream.borrow_and_update().generation >= 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "watch subscriber never observed the committed snapshot"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(stream.borrow().clone(), second);
+
+        // A fresh subscriber starts at the committed state immediately.
+        let fresh = provider.watch();
+        assert_eq!(fresh.borrow().clone(), second);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,6 +803,23 @@ mod tests {
             assignments,
             generation: 42,
         }
+    }
+
+    #[test]
+    fn static_coordination_passes_provider_contract() {
+        let provider = StaticCoordination::new(
+            "contract-node",
+            CoordinationSnapshot {
+                nodes: HashMap::new(),
+                assignments: HashMap::new(),
+                generation: 0,
+            },
+        );
+        contract_tests::assert_coordination_contract(
+            &provider,
+            "contract-node",
+            |provider, snapshot| provider.update_snapshot(snapshot),
+        );
     }
 
     #[test]

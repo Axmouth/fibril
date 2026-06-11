@@ -1359,3 +1359,17 @@ Tests needed before implementing transition:
   provider must be constructed inside a tokio runtime (watch forwarder task).
   This is a spike: not wired into the broker binary; etcd/static remain the
   v1 path per REPLICATION_PLANNING.md.
+- 2026-06-12: F1 (provider contract suite) done. `fibril_broker::coordination`
+  now exposes `contract_tests::assert_coordination_contract` (under cfg(test)
+  or the new `provider-contract-tests` feature): one reusable assertion suite
+  covering identity stability, empty-state queries, commit visibility, role
+  query/snapshot consistency, epoch passthrough, ownership flips, pre-commit
+  watch subscribers observing the latest committed value, and fresh
+  subscribers starting at committed state. Both `StaticCoordination` (broker
+  tests) and `GanglionCoordination` (coordination-ganglion tests, committing
+  through real raft consensus with wait-for-visibility) pass the same suite.
+  Ganglion-side prerequisites G1-G3 landed in the ganglion repo: epoch fencing
+  rules + guarded CAS proposals (`plan_and_propose_guarded`), durability
+  telemetry + serializable `RaftTopology` (the `GET /topology` JSON contract),
+  and a scripted cluster playground. Next: F2 controller loop on the embedded
+  provider.

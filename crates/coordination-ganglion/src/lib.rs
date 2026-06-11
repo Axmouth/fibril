@@ -27,7 +27,9 @@ const QUEUE_NAMESPACE: &str = "fibril/queue";
 ///
 /// Lossless: queue identity, owner/followers, epoch, durability, and node
 /// endpoints all carry over.
-pub fn to_ganglion_snapshot(snapshot: &CoordinationSnapshot) -> ganglion_core::CoordinationSnapshot {
+pub fn to_ganglion_snapshot(
+    snapshot: &CoordinationSnapshot,
+) -> ganglion_core::CoordinationSnapshot {
     let nodes = snapshot
         .nodes
         .iter()
@@ -227,7 +229,9 @@ where
         &self,
         snapshot: &CoordinationSnapshot,
     ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
-        self.node.write_snapshot(to_ganglion_snapshot(snapshot)).await
+        self.node
+            .write_snapshot(to_ganglion_snapshot(snapshot))
+            .await
     }
 
     /// Whether this node currently leads the coordination raft group.
@@ -379,10 +383,64 @@ mod tests {
             .expect_err("stale generation must be rejected");
         assert!(matches!(err, OpenraftAdapterError::StaleGeneration));
 
-        coordination
-            .raft_node()
-            .shutdown()
+        coordination.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    /// The ganglion provider must satisfy the same contract as every other
+    /// `Coordination` implementation (see `fibril_broker::coordination::contract_tests`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ganglion_provider_passes_provider_contract() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
             .await
-            .expect("shutdown");
+            .expect("raft node should start");
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            ganglion_openraft::openraft::BasicNode::new("contract-node"),
+        );
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+
+        let coordination = GanglionCoordination::new("contract-node", raft_node);
+
+        // The contract callback is sync; bridge each commit through the async
+        // propose + wait-for-visibility path on a separate runtime handle.
+        let handle = tokio::runtime::Handle::current();
+        let provider = coordination;
+        tokio::task::spawn_blocking(move || {
+            fibril_broker::coordination::contract_tests::assert_coordination_contract(
+                &provider,
+                "contract-node",
+                |provider, snapshot| {
+                    let generation = snapshot.generation;
+                    handle.block_on(async {
+                        provider
+                            .propose(&snapshot)
+                            .await
+                            .expect("contract commit should succeed");
+                        let mut watch = provider.watch();
+                        tokio::time::timeout(Duration::from_secs(10), async {
+                            while watch.borrow_and_update().generation < generation {
+                                watch.changed().await.expect("watch open");
+                            }
+                        })
+                        .await
+                        .expect("committed snapshot should become visible");
+                    });
+                },
+            );
+            provider
+        })
+        .await
+        .expect("contract suite should pass")
+        .raft_node()
+        .shutdown()
+        .await
+        .expect("shutdown");
     }
 }
