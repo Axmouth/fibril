@@ -443,3 +443,97 @@ implementation and routing detail.
 - [ ] Metadata: client survives bootstrap broker failure (tries next in list). *(Client work is out of scope for v1; success criterion is the broker-side protocol supports it.)*
 - [ ] Replication lag is observable via metrics before it's a crisis.
 - [ ] Manual failover runbook exists and has been exercised in a test environment.
+
+## Ganglion coordination provider — integration plan (added 2026-06-12)
+
+Status: `fibril-coordination-ganglion` spike exists and passes (raft-backed `Coordination`
+trait, lossless snapshot mapping, sync reads via bridged watch, async leader-only proposals).
+etcd/static remain the v1 default; this plan makes the embedded provider a real option without
+changing that default. Ganglion-side prerequisites live in `ganglion/DESIGN.md` (phases G1–G3:
+guarded CAS proposals + epoch stamping, telemetry + `RaftTopology`, cluster playground).
+
+### F1 — Provider contract test suite
+
+One reusable assertion suite run against every `Coordination` implementation (static, ganglion,
+later etcd), so providers can't drift:
+
+- `crates/broker/src/coordination.rs` gains `pub mod contract_tests` (cfg(any(test, feature =
+  "provider-contract-tests"))) with `fn assert_coordination_contract(make: impl Fn() ->
+  (Provider, UpdateHandle))` covering: initial snapshot visibility; watch sees updates in order
+  with no loss of the latest value; `owns_queue`/`follows_queue`/`owner_for`/`assignment_for`
+  consistency with the snapshot; node identity stability; behavior when a queue is absent.
+- `UpdateHandle` abstracts "how a new snapshot gets committed" (static: `update_snapshot`;
+  ganglion: `propose` + wait-for-watch).
+- Gate: suite passes for `StaticCoordination` and `GanglionCoordination`.
+
+### F2 — Controller loop on the embedded provider
+
+With ganglion, the controller lease collapses into raft leadership: the raft leader IS the
+active controller (no separate lease key, no second consensus). Keep the loop pure-function
+shaped exactly as the "Controller loop" section above:
+
+1. `is_leader()` gate (standbys watch only).
+2. Read committed snapshot (sync, from watch).
+3. Pure planning (existing `plan_local_assignment_transitions` + placement policy).
+4. Epoch stamping via ganglion's pure `stamp_assignment_epochs` (owner change bumps, follower
+   churn does not — matches the fencing principles section).
+5. Propose via guarded CAS (`write_snapshot_guarded` / `plan_and_propose_guarded`); on
+   generation mismatch, re-read and re-plan (another controller won — with raft this only
+   happens across a leadership change, which is exactly when re-reading matters).
+6. Brokers (including the controller) consume committed snapshots only via the watch.
+
+Tests: controller loop drives owner failover on a 3-node in-process cluster (kill owner's
+broker record, loop reassigns with epoch+1, watch delivers); two loops racing across a forced
+leader change never produce interleaved/lost assignments (mirrors ganglion's G1 race test at
+the fibril layer).
+
+### F3 — Broker wiring behind config
+
+- Config enum: `coordination = "static" | "ganglion" | (later) "etcd"`; ganglion variant takes
+  `data_dir`, `raft_node_id: u64`, `peers: map<raft_id, addr>`, `bootstrap: bool` (initialize
+  exactly once on first boot of the bootstrap node; all restarts never re-initialize).
+- Broker constructor accepts `Arc<dyn Coordination>`; provider construction stays outside the
+  broker core (composition root), so the broker itself gains no new deps.
+- Node identity: fibril string node ids remain canonical in snapshots; raft u64 ids are
+  transport-only and live in provider config.
+- Out of scope here: wire transport for raft (in-process router covers single-process clusters
+  and tests; multi-process needs ganglion's long-term gRPC transport item).
+
+### F4 — Topology visibility (CLI now, admin diagram after)
+
+- Admin endpoint `GET /topology` returns one JSON document: fibril coordination snapshot
+  (nodes, assignments with owner/followers/epoch, generation) + optional `raft` block
+  (ganglion `RaftTopology`: leader, voters, learners, last_applied) when the embedded provider
+  is active.
+- CLI: `fibril-cli topology` renders it — nodes table (id, addr, raft role if present), queue
+  table (topic/partition/group → owner, followers, epoch), cluster line (generation, leader).
+  Plain text first; `--json` passthrough for scripts.
+- Admin page: same JSON feeds a diagram (nodes as boxes, owner edges solid / follower edges
+  dashed, epoch + generation badges). Diagram work is last; the JSON contract above is the
+  deliverable that unblocks it.
+
+### F5 — Cluster playground
+
+- `scripts/coordination-playground.sh`: builds a 3-broker single-process playground binary
+  (example in `fibril-coordination-ganglion`) — brokers register NodeInfo, the controller loop
+  assigns a demo queue, stdin commands (`status`, `kill <node>`, `restart <node>`, `move
+  <queue> <owner>`) show reassignment + epoch bumps live via the watch.
+- Non-interactive `--script` mode so a Jepsen-style scenario can smoke it in CI.
+
+### Confidence test suite (cross-repo summary)
+
+| Layer | Where | Status |
+| --- | --- | --- |
+| raft storage contracts (openraft suite) | ganglion | done |
+| state-machine + WAL model fuzz, epoch rules | ganglion | done / G1 |
+| cluster failover/partition/restart/membership | ganglion | done |
+| bounded recovery + atomic persistence | ganglion | done |
+| provider contract suite (static + ganglion) | fibril F1 | planned |
+| controller loop + epoch failover choreography | fibril F2 | planned |
+| replication data path (Keratin/Stroma epochs, pull transport) | fibril (existing phasing §) | in progress |
+| "scenarios that always reveal bugs" matrix | fibril (existing caveats §) | tracked per scenario |
+| playgrounds + scripted smoke | both (G3/F5) | planned |
+
+The replication data path keeps its own phasing (earlier sections of this doc); this plan only
+covers the coordination/metadata plane and its visibility. The two meet at F2 (controller writes
+assignments; Stroma promotion checks consume epochs locally).
