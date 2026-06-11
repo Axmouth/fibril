@@ -1373,3 +1373,16 @@ Tests needed before implementing transition:
   telemetry + serializable `RaftTopology` (the `GET /topology` JSON contract),
   and a scripted cluster playground. Next: F2 controller loop on the embedded
   provider.
+- 2026-06-12: F2 (controller loop on the embedded provider) done.
+  `GanglionCoordination::control_iteration` implements the planning-loop shape:
+  raft-leadership gate (standbys return None and never write), read committed
+  state, run the pure placement planner over a caller-supplied live-node set
+  (liveness mechanisms stay above this layer), stamp fencing epochs via
+  ganglion's rules (owner change bumps, follower churn holds), and propose
+  through a guarded CAS write with bounded retries on generation mismatch.
+  `ControlError` separates planning rejections from consensus failures.
+  Choreography test on a 3-node raft cluster: standby no-op; initial
+  assignment at epoch 1 observed by a follower provider's watch; owner removed
+  from the live set -> next iteration moves ownership with epoch+1; follower
+  watch converges on the failover. Next: F3 broker wiring behind a
+  coordination config enum, then F4 fibrilctl topology + admin endpoint.

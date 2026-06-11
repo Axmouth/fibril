@@ -11,7 +11,8 @@ use std::collections::HashMap;
 
 use fibril_broker::coordination::{
     Coordination, CoordinationSnapshot, CoordinationStream, NodeInfo, PartitionAssignment,
-    QueueIdentity, ReplicationDurabilityPolicy,
+    PartitionPlacementError, PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity,
+    ReplicationDurabilityPolicy,
 };
 use ganglion_openraft::openraft::storage::RaftLogStorage;
 use ganglion_openraft::{
@@ -163,6 +164,26 @@ fn to_fibril_durability(
     }
 }
 
+/// Controller-iteration failure surface.
+#[derive(Debug)]
+pub enum ControlError {
+    /// The pure placement planner refused the input.
+    Planning(PartitionPlacementError),
+    /// Consensus rejected the proposal (leadership loss, retries exhausted, IO).
+    Consensus(OpenraftAdapterError),
+}
+
+impl std::fmt::Display for ControlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Planning(error) => write!(f, "planning failed: {error:?}"),
+            Self::Consensus(error) => write!(f, "consensus rejected proposal: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for ControlError {}
+
 /// Fibril `Coordination` provider backed by a ganglion raft node.
 ///
 /// Reads serve from a fibril-side watch channel fed by ganglion's
@@ -237,6 +258,65 @@ where
     /// Whether this node currently leads the coordination raft group.
     pub async fn is_leader(&self) -> bool {
         self.node.is_leader().await
+    }
+
+    /// One embedded-controller iteration, gated on raft leadership.
+    ///
+    /// Implements the controller-loop shape from `REPLICATION_PLANNING.md`:
+    /// read committed state, run the pure placement planner over the given
+    /// live-node set, stamp fencing epochs (owner change bumps, follower churn
+    /// holds), and propose through a guarded CAS write — retrying when another
+    /// proposal commits in between (with raft this only happens across a
+    /// leadership change).
+    ///
+    /// Liveness is the caller's input on purpose: heartbeat/lease mechanisms
+    /// live above this layer, so the controller stays a pure function of
+    /// (committed state, live nodes, desired queues).
+    ///
+    /// Returns `Ok(None)` when this node is not the leader (standbys watch).
+    pub async fn control_iteration(
+        &self,
+        planner: &dyn PartitionPlacementPolicy,
+        queues: &[QueueIdentity],
+        target_followers: usize,
+        live_nodes: &HashMap<String, NodeInfo>,
+        max_retries: usize,
+    ) -> Result<Option<CoordinationSnapshot>, ControlError> {
+        if !self.node.is_leader().await {
+            return Ok(None);
+        }
+
+        let mut attempts = 0;
+        loop {
+            let committed = self.node.committed_snapshot();
+            let fibril_committed = to_fibril_snapshot(&committed);
+
+            let plan = planner
+                .plan(PartitionPlacementInput {
+                    nodes: live_nodes.clone(),
+                    queues: queues.to_vec(),
+                    existing: fibril_committed.assignments,
+                    target_followers,
+                    generation: committed.generation + 1,
+                })
+                .map_err(ControlError::Planning)?;
+
+            let mut desired = to_ganglion_snapshot(&plan.snapshot);
+            desired.generation = committed.generation + 1;
+            ganglion_core::stamp_assignment_epochs(&committed, &mut desired);
+
+            match self
+                .node
+                .write_snapshot_guarded(committed.generation, desired)
+                .await
+            {
+                Ok(response) => return Ok(Some(to_fibril_snapshot(&response.snapshot))),
+                Err(OpenraftAdapterError::GenerationMismatch { .. }) if attempts < max_retries => {
+                    attempts += 1;
+                }
+                Err(error) => return Err(ControlError::Consensus(error)),
+            }
+        }
     }
 
     /// Access the underlying raft node (membership changes, waits, shutdown).
@@ -384,6 +464,153 @@ mod tests {
         assert!(matches!(err, OpenraftAdapterError::StaleGeneration));
 
         coordination.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    /// F2 choreography: the raft leader IS the controller. The controller
+    /// loop assigns a queue from the live-node set, a follower provider
+    /// observes it, and when the owner drops out of the live set the next
+    /// iteration reassigns ownership with a fencing-epoch bump.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn controller_loop_drives_owner_failover_with_epoch_bump() {
+        use fibril_broker::coordination::DeterministicPartitionPlacement;
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let timeout = Duration::from_secs(10);
+
+        let mut raft_nodes = Vec::new();
+        for id in 1..=3u64 {
+            raft_nodes.push(
+                RaftMetadataNode::start(id, config.clone(), &router)
+                    .await
+                    .expect("raft node should start"),
+            );
+        }
+        let members: BTreeMap<u64, _> = (1..=3u64)
+            .map(|id| {
+                (
+                    id,
+                    ganglion_openraft::openraft::BasicNode::new(format!("broker-{id}")),
+                )
+            })
+            .collect();
+        raft_nodes[0].initialize(members).await.expect("initialize");
+        let leader_raft_id = raft_nodes[0]
+            .wait_for_any_leader(timeout)
+            .await
+            .expect("election");
+
+        let providers: Vec<GanglionCoordination> = raft_nodes
+            .into_iter()
+            .enumerate()
+            .map(|(index, node)| GanglionCoordination::new(format!("broker-{}", index + 1), node))
+            .collect();
+        let controller = providers
+            .iter()
+            .find(|provider| provider.raft_node().node_id() == leader_raft_id)
+            .expect("leader provider");
+        let standby = providers
+            .iter()
+            .find(|provider| provider.raft_node().node_id() != leader_raft_id)
+            .expect("standby provider");
+
+        // Standbys never act as controller.
+        let queue = QueueIdentity::new("orders", 0, Some("workers"));
+        let live_node = |id: &str, port: u16| NodeInfo {
+            node_id: id.to_string(),
+            broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+            admin_addr: None,
+        };
+        let mut live: HashMap<String, NodeInfo> = HashMap::new();
+        live.insert("broker-1".into(), live_node("broker-1", 9001));
+        live.insert("broker-2".into(), live_node("broker-2", 9002));
+        live.insert("broker-3".into(), live_node("broker-3", 9003));
+
+        let standby_result = standby
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                std::slice::from_ref(&queue),
+                1,
+                &live,
+                8,
+            )
+            .await
+            .expect("standby iteration is a no-op");
+        assert!(standby_result.is_none(), "standby must not control");
+
+        // Controller assigns the queue.
+        let assigned = controller
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                std::slice::from_ref(&queue),
+                1,
+                &live,
+                8,
+            )
+            .await
+            .expect("controller iteration should commit")
+            .expect("leader runs the iteration");
+        let first = assigned
+            .assignment_for("orders", 0, Some("workers"))
+            .expect("queue assigned")
+            .clone();
+        assert_eq!(first.epoch, 1, "fresh assignment starts at epoch 1");
+        assert_eq!(first.replica_set_size(), 2);
+
+        // A follower provider observes the committed assignment via watch.
+        let mut stream = standby.watch();
+        tokio::time::timeout(timeout, async {
+            while stream
+                .borrow_and_update()
+                .assignment_for("orders", 0, Some("workers"))
+                .is_none()
+            {
+                stream.changed().await.expect("stream open");
+            }
+        })
+        .await
+        .expect("standby should observe the assignment");
+
+        // The owner dies: drop it from the live set; the next iteration must
+        // move ownership and bump the fencing epoch.
+        live.remove(&first.owner);
+        let reassigned = controller
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                std::slice::from_ref(&queue),
+                1,
+                &live,
+                8,
+            )
+            .await
+            .expect("failover iteration should commit")
+            .expect("leader runs the iteration");
+        let second = reassigned
+            .assignment_for("orders", 0, Some("workers"))
+            .expect("queue still assigned")
+            .clone();
+        assert_ne!(second.owner, first.owner, "ownership must move");
+        assert_eq!(second.epoch, first.epoch + 1, "owner change must fence");
+
+        // The standby's watch converges on the failover assignment.
+        tokio::time::timeout(timeout, async {
+            loop {
+                let epoch = stream
+                    .borrow_and_update()
+                    .assignment_for("orders", 0, Some("workers"))
+                    .map(|assignment| assignment.epoch);
+                if epoch == Some(second.epoch) {
+                    break;
+                }
+                stream.changed().await.expect("stream open");
+            }
+        })
+        .await
+        .expect("standby should observe the failover");
+
+        for provider in &providers {
+            provider.raft_node().shutdown().await.expect("shutdown");
+        }
     }
 
     /// The ganglion provider must satisfy the same contract as every other
