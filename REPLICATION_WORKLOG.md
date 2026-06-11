@@ -1342,3 +1342,20 @@ Tests needed before implementing transition:
   protocol peer per owner id. The historical note above describes the first
   resolver slice; the current behavior is connection reuse with lazy reconnect
   after transport failures.
+- 2026-06-11: Added `fibril-coordination-ganglion` spike crate: a ganglion
+  raft-backed implementation of the broker `Coordination` trait. A ganglion
+  `RaftMetadataNode` replicates the coordination snapshot through real
+  consensus; the crate maps losslessly between fibril and ganglion snapshot
+  models (queue identity <-> namespaced resource identity, socket addrs <->
+  endpoint strings, identical durability/epoch fields) and bridges ganglion's
+  committed-snapshot watch into the `watch::Receiver<CoordinationSnapshot>`
+  the trait serves. Reads stay sync; proposals are async and leader-only
+  (`NotLeader`), with post-consensus stale-generation rejection. Tests cover
+  lossless mapping roundtrip and the full propose -> commit -> watch ->
+  owns_queue/owner_for/assignment_for path against a real raft node. Spike
+  findings: assignment `epoch` already maps 1:1, so the remaining fencing work
+  is controller-side epoch issuance (who increments, CAS semantics), not
+  schema; raft's u64 node ids stay decoupled from fibril string node ids; the
+  provider must be constructed inside a tokio runtime (watch forwarder task).
+  This is a spike: not wired into the broker binary; etcd/static remain the
+  v1 path per REPLICATION_PLANNING.md.

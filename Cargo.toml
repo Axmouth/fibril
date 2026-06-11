@@ -11,6 +11,7 @@ members = [
     "crates/fibril",
     "crates/metrics",
     "crates/tui-example",
+    "crates/coordination-ganglion",
     "benches",
 ]
 
