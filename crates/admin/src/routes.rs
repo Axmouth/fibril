@@ -405,6 +405,72 @@ pub async fn inspect_messages(
     }
 }
 
+/// Cluster topology: the committed coordination snapshot (nodes, assignments
+/// with owner/followers/epoch, generation) plus an optional consensus-internals
+/// block when an embedded provider is active. This JSON is the contract for
+/// `fibrilctl topology` and the admin diagram.
+pub async fn topology(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let coordination = match &server.coordination {
+        Some(coordination) => {
+            let snapshot = coordination.snapshot();
+            let mut nodes: Vec<serde_json::Value> = snapshot
+                .nodes
+                .values()
+                .map(|node| {
+                    serde_json::json!({
+                        "node_id": node.node_id,
+                        "broker_addr": node.broker_addr.to_string(),
+                        "admin_addr": node.admin_addr.map(|addr| addr.to_string()),
+                    })
+                })
+                .collect();
+            nodes.sort_by(|a, b| a["node_id"].as_str().cmp(&b["node_id"].as_str()));
+
+            let mut assignments: Vec<serde_json::Value> = snapshot
+                .assignments
+                .values()
+                .map(|assignment| {
+                    serde_json::json!({
+                        "topic": assignment.queue.topic,
+                        "partition": assignment.queue.partition,
+                        "group": assignment.queue.group,
+                        "owner": assignment.owner,
+                        "followers": assignment.followers,
+                        "epoch": assignment.epoch,
+                    })
+                })
+                .collect();
+            assignments.sort_by(|a, b| {
+                (a["topic"].as_str(), a["partition"].as_u64())
+                    .cmp(&(b["topic"].as_str(), b["partition"].as_u64()))
+            });
+
+            serde_json::json!({
+                "node_id": coordination.node_id(),
+                "generation": snapshot.generation,
+                "nodes": nodes,
+                "assignments": assignments,
+            })
+        }
+        None => serde_json::Value::Null,
+    };
+
+    let raft = match &server.raft_topology {
+        Some(provider) => provider(),
+        None => serde_json::Value::Null,
+    };
+
+    Ok(Json(serde_json::json!({
+        "coordination": coordination,
+        "raft": raft,
+    })))
+}
+
 pub async fn runtime_settings(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use fibril_admin::{AdminConfig, AdminServer, StartupConfigSummary};
 use fibril_broker::{
     broker::{Broker, BrokerConfig},
+    coordination::StaticCoordination,
     queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine},
     runtime_settings::{
         ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, DeliveryRuntimeSettings,
@@ -161,7 +162,14 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(engine.clone()),
         Some(broker_observability),
         Some(runtime_settings),
-    );
+    )
+    // Standalone default: a single-node coordination view so `fibrilctl
+    // topology` reports this broker. A clustered provider (ganglion/etcd)
+    // replaces this when cluster coordination is configured.
+    .with_coordination(Arc::new(StaticCoordination::single_node(
+        "local",
+        config.broker.listener.bind,
+    )));
 
     metrics.start(
         MetricsConfig {

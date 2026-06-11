@@ -27,6 +27,11 @@ use fibril_metrics::Metrics;
 
 pub type BrokerQueueObservability = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
 
+/// Producer of the optional consensus-internals block in `GET /admin/api/topology`
+/// (e.g. ganglion's `RaftTopology` serialized to JSON). Kept as an opaque JSON
+/// callback so the admin crate stays independent of the coordination backend.
+pub type RaftTopologyProvider = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
+
 pub struct AdminConfig {
     // TODO: better type, parse earlier
     pub bind: String,
@@ -53,6 +58,8 @@ pub struct AdminServer {
     pub broker_queue_observability: Option<Arc<BrokerQueueObservability>>,
     pub runtime_settings: Option<Arc<RuntimeSettingsManager>>,
     pub sessions: AdminSessions,
+    pub coordination: Option<Arc<dyn fibril_broker::Coordination>>,
+    pub raft_topology: Option<Arc<RaftTopologyProvider>>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -84,7 +91,21 @@ impl AdminServer {
             broker_queue_observability,
             runtime_settings,
             sessions: AdminSessions::default(),
+            coordination: None,
+            raft_topology: None,
         }
+    }
+
+    /// Attach the coordination provider serving `GET /admin/api/topology`.
+    pub fn with_coordination(mut self, coordination: Arc<dyn fibril_broker::Coordination>) -> Self {
+        self.coordination = Some(coordination);
+        self
+    }
+
+    /// Attach the optional consensus-internals block for the topology endpoint.
+    pub fn with_raft_topology(mut self, provider: Arc<RaftTopologyProvider>) -> Self {
+        self.raft_topology = Some(provider);
+        self
     }
 
     pub async fn run(self) -> anyhow::Result<()> {
@@ -135,6 +156,7 @@ impl AdminServer {
                 get(routes::runtime_settings).put(routes::update_runtime_settings),
             )
             .route("/admin/api/startup-config", get(routes::startup_config))
+            .route("/admin/api/topology", get(routes::topology))
             .route(
                 "/admin/api/global-dlq",
                 get(routes::global_dlq).put(routes::update_global_dlq),
@@ -598,6 +620,86 @@ mod tests {
             .next()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn topology_endpoint_serves_coordination_and_raft_blocks() {
+        use fibril_broker::coordination::{
+            CoordinationSnapshot, NodeInfo, PartitionAssignment, QueueIdentity, StaticCoordination,
+        };
+
+        let base = test_server(RuntimeSettingsLocks::default()).await;
+        let server = Arc::try_unwrap(base).ok().expect("sole owner");
+
+        // Without a provider, both blocks are null.
+        let bare = AdminServer::router(Arc::new(AdminServer { ..server }));
+        let response = bare
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["coordination"].is_null());
+        assert!(body["raft"].is_null());
+
+        // With a provider + raft block attached, the endpoint reports both.
+        let queue = QueueIdentity::new("orders", 0, Some("workers"));
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            "broker-a".to_string(),
+            NodeInfo {
+                node_id: "broker-a".to_string(),
+                broker_addr: "127.0.0.1:9000".parse().unwrap(),
+                admin_addr: Some("127.0.0.1:9100".parse().unwrap()),
+            },
+        );
+        let mut assignments = std::collections::HashMap::new();
+        assignments.insert(
+            queue.clone(),
+            PartitionAssignment::new(queue, "broker-a", vec!["broker-b".to_string()], 3),
+        );
+        let coordination = StaticCoordination::new(
+            "broker-a",
+            CoordinationSnapshot {
+                nodes,
+                assignments,
+                generation: 7,
+            },
+        );
+
+        let wired = test_server(RuntimeSettingsLocks::default()).await;
+        let wired = Arc::try_unwrap(wired).ok().expect("sole owner");
+        let wired = wired
+            .with_coordination(Arc::new(coordination))
+            .with_raft_topology(Arc::new(|| serde_json::json!({"local_id": 1, "leader": 1})));
+        let app = AdminServer::router(Arc::new(wired));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+
+        assert_eq!(body["coordination"]["node_id"], "broker-a");
+        assert_eq!(body["coordination"]["generation"], 7);
+        assert_eq!(body["coordination"]["nodes"][0]["node_id"], "broker-a");
+        let assignment = &body["coordination"]["assignments"][0];
+        assert_eq!(assignment["topic"], "orders");
+        assert_eq!(assignment["owner"], "broker-a");
+        assert_eq!(assignment["epoch"], 3);
+        assert_eq!(assignment["followers"][0], "broker-b");
+        assert_eq!(body["raft"]["leader"], 1);
     }
 
     #[tokio::test]

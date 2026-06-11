@@ -72,6 +72,16 @@ enum AdminCommand {
     Messages(InspectMessagesArgs),
     /// Show queue state and sparse queue activity from the admin API.
     Queues,
+    /// Show cluster topology: nodes, queue assignments, and (when an embedded
+    /// coordinator is active) raft consensus state.
+    Topology(TopologyArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct TopologyArgs {
+    /// Print the raw topology JSON instead of tables.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -256,6 +266,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 },
                 AdminCommand::Messages(args) => print_json(admin.inspect_messages(args).await?)?,
                 AdminCommand::Queues => print_json(admin.queues_debug().await?)?,
+                AdminCommand::Topology(args) => {
+                    let topology = admin.topology().await?;
+                    if args.json {
+                        print_json(topology)?;
+                    } else {
+                        print_topology(&topology);
+                    }
+                }
             }
         }
     }
@@ -437,6 +455,10 @@ impl AdminClient {
         self.get_json("/admin/api/queues_debug", &[]).await
     }
 
+    async fn topology(&self) -> anyhow::Result<serde_json::Value> {
+        self.get_json("/admin/api/topology", &[]).await
+    }
+
     async fn get_json<T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
@@ -511,6 +533,88 @@ fn print_global_dlq(snapshot: GlobalDlqSnapshot) -> anyhow::Result<()> {
 fn print_json(value: impl Serialize) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+fn print_topology(topology: &serde_json::Value) {
+    let coordination = &topology["coordination"];
+    if coordination.is_null() {
+        println!("no coordination provider attached (single-node / static mode)");
+    } else {
+        println!(
+            "cluster: reporting node {} | snapshot generation {}",
+            coordination["node_id"].as_str().unwrap_or("?"),
+            coordination["generation"].as_u64().unwrap_or(0),
+        );
+
+        println!("\nnodes:");
+        println!("  {:<16} {:<22} {:<22}", "NODE", "BROKER", "ADMIN");
+        for node in coordination["nodes"].as_array().into_iter().flatten() {
+            println!(
+                "  {:<16} {:<22} {:<22}",
+                node["node_id"].as_str().unwrap_or("?"),
+                node["broker_addr"].as_str().unwrap_or("?"),
+                node["admin_addr"].as_str().unwrap_or("-"),
+            );
+        }
+
+        println!("\nassignments:");
+        println!(
+            "  {:<20} {:<5} {:<10} {:<16} {:<6} FOLLOWERS",
+            "TOPIC", "PART", "GROUP", "OWNER", "EPOCH"
+        );
+        for assignment in coordination["assignments"].as_array().into_iter().flatten() {
+            let followers = assignment["followers"]
+                .as_array()
+                .map(|followers| {
+                    followers
+                        .iter()
+                        .filter_map(|follower| follower.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            println!(
+                "  {:<20} {:<5} {:<10} {:<16} {:<6} {}",
+                assignment["topic"].as_str().unwrap_or("?"),
+                assignment["partition"].as_u64().unwrap_or(0),
+                assignment["group"].as_str().unwrap_or("-"),
+                assignment["owner"].as_str().unwrap_or("?"),
+                assignment["epoch"].as_u64().unwrap_or(0),
+                followers,
+            );
+        }
+    }
+
+    let raft = &topology["raft"];
+    if !raft.is_null() {
+        let render_ids = |ids: &serde_json::Value| {
+            ids.as_array()
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_u64())
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default()
+        };
+        println!("\nraft (embedded coordinator):");
+        println!(
+            "  local={} leader={} voters=[{}] learners=[{}] applied={} committed_generation={}",
+            raft["local_id"].as_u64().unwrap_or(0),
+            raft["leader"]
+                .as_u64()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            render_ids(&raft["voters"]),
+            render_ids(&raft["learners"]),
+            raft["last_applied_index"]
+                .as_u64()
+                .map(|index| index.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            raft["committed_generation"].as_u64().unwrap_or(0),
+        );
+    }
 }
 
 #[cfg(test)]

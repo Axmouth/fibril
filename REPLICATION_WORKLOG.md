@@ -1386,3 +1386,23 @@ Tests needed before implementing transition:
   from the live set -> next iteration moves ownership with epoch+1; follower
   watch converges on the failover. Next: F3 broker wiring behind a
   coordination config enum, then F4 fibrilctl topology + admin endpoint.
+- 2026-06-12: F4 (topology visibility) + F5 (playgrounds) + tryout docs done.
+  Admin: `GET /admin/api/topology` returns the committed coordination snapshot
+  (sorted nodes + assignments with owner/followers/epoch, generation) plus an
+  optional consensus-internals block via an opaque `RaftTopologyProvider`
+  callback (admin crate stays backend-independent); attached with
+  `AdminServer::with_coordination`/`with_raft_topology`; endpoint test covers
+  bare and fully-wired responses. CLI: `fibrilctl admin topology` renders
+  cluster/nodes/assignments/raft tables, `--json` for scripts. Server binary
+  attaches a single-node StaticCoordination by default so standalone servers
+  report themselves. Playgrounds: `scripts/coordination-playground.sh` (3
+  providers + embedded raft controller; scripted kill/reassign shows the
+  epoch fence: killed owner's partition moved at epoch+1, untouched partition
+  kept its epoch) and `scripts/cluster-tryout.sh` (USER ASK: real processes,
+  no in-process simulation - starts N actual fibril-server binaries on real
+  ports, health-checks them, runs real fibrilctl topology against each, and
+  machine-verifies the reported broker addresses; --keep leaves the cluster
+  up for manual play). `COORDINATION_TRYOUT.md` documents the whole flow.
+  Remaining from the plan: F3 config-driven provider selection (needs the
+  ganglion wire transport to be meaningful across processes) and the admin
+  topology diagram (consumes the same JSON).
