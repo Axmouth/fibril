@@ -11,6 +11,7 @@ ganglion-core = { path = "../../../ganglion/crates/ganglion-core" }
 ganglion-openraft = { path = "../../../ganglion/crates/ganglion-openraft", features = ["openraft"] }
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "macros", "time"] }
 tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 fibril-broker = { path = "../broker", features = ["provider-contract-tests"] }

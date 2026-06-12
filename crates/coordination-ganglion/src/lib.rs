@@ -181,6 +181,38 @@ fn to_fibril_durability(
     }
 }
 
+/// Settings for the embedded controller loop (from server config).
+#[derive(Debug, Clone)]
+pub struct ControllerConfig {
+    pub target_followers: usize,
+    /// Bounded tick interval; the loop also wakes on snapshot changes.
+    pub tick: std::time::Duration,
+    /// Heartbeats older than this mark a broker dead. Must exceed worst-case
+    /// election + retry time (ganglion FAILURE_MODES §4b.6).
+    pub liveness_ttl: std::time::Duration,
+    pub max_cas_retries: usize,
+}
+
+impl Default for ControllerConfig {
+    fn default() -> Self {
+        Self {
+            target_followers: 1,
+            tick: std::time::Duration::from_millis(2000),
+            liveness_ttl: std::time::Duration::from_millis(9000),
+            max_cas_retries: 8,
+        }
+    }
+}
+
+/// Live controller status for observability (topology JSON / admin page).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ControllerStatus {
+    /// Whether the last tick ran as the active controller (raft leader).
+    pub active: bool,
+    pub last_plan_generation: Option<u64>,
+    pub last_error: Option<String>,
+}
+
 /// Controller-iteration failure surface.
 #[derive(Debug)]
 pub enum ControlError {
@@ -374,6 +406,110 @@ where
             .map(|_| ())
     }
 
+    /// Spawn the embedded controller loop: leader-gated placement over the
+    /// cluster catalogue and heartbeat-live brokers. Standbys idle. Returns
+    /// the task handle plus a shared status cell for observability.
+    pub fn spawn_controller(
+        self: &std::sync::Arc<Self>,
+        planner: std::sync::Arc<dyn PartitionPlacementPolicy>,
+        config: ControllerConfig,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<std::sync::RwLock<ControllerStatus>>,
+    )
+    where
+        LS: 'static,
+        NF: 'static,
+    {
+        let provider = std::sync::Arc::clone(self);
+        let status = std::sync::Arc::new(std::sync::RwLock::new(ControllerStatus::default()));
+        let shared_status = status.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut watch = provider.watch();
+            loop {
+                let queues = provider.registered_queues();
+                let live = provider.live_nodes(config.liveness_ttl);
+                let outcome = if queues.is_empty() || live.is_empty() {
+                    // Nothing to place (or no live brokers): a normal idle
+                    // tick, not an error.
+                    Ok(provider.node.is_leader().await.then(|| provider.snapshot()))
+                } else {
+                    provider
+                        .control_iteration(
+                            planner.as_ref(),
+                            &queues,
+                            config.target_followers,
+                            &live,
+                            config.max_cas_retries,
+                        )
+                        .await
+                };
+
+                if let Ok(mut status) = status.write() {
+                    match outcome {
+                        Ok(Some(snapshot)) => {
+                            status.active = true;
+                            status.last_plan_generation = Some(snapshot.generation);
+                            status.last_error = None;
+                        }
+                        Ok(None) => status.active = false,
+                        Err(error) => {
+                            status.active = true;
+                            status.last_error = Some(error.to_string());
+                        }
+                    }
+                }
+
+                tokio::select! {
+                    changed = watch.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                    _ = tokio::time::sleep(config.tick) => {}
+                }
+            }
+        });
+        (handle, shared_status)
+    }
+
+    /// Spawn the catalogue-sync loop: every `interval`, list this broker's
+    /// local queues and register any missing from the cluster catalogue.
+    /// Idempotent diffing keeps idle ticks off the raft log; failures are
+    /// retried next tick (coordination outages never kill the broker). Also
+    /// covers pre-existing on-disk queues after restarts.
+    pub fn spawn_catalogue_sync<ListFn, ListFut>(
+        self: &std::sync::Arc<Self>,
+        list_local_queues: ListFn,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        ListFn: Fn() -> ListFut + Send + 'static,
+        ListFut: std::future::Future<Output = Vec<QueueIdentity>> + Send,
+        LS: 'static,
+        NF: 'static,
+    {
+        let provider = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                let local = list_local_queues().await;
+                if !local.is_empty() {
+                    let known: std::collections::HashSet<QueueIdentity> =
+                        provider.registered_queues().into_iter().collect();
+                    for queue in local {
+                        if !known.contains(&queue) {
+                            if let Err(error) = provider.register_queue(&queue).await {
+                                tracing::debug!(%error, topic = %queue.topic, "catalogue sync deferred");
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(interval).await;
+            }
+        })
+    }
+
     /// Spawn a heartbeat loop registering `info` every `interval`.
     ///
     /// Failures are logged and retried: coordination outages must never kill
@@ -496,11 +632,20 @@ where
 
             let mut desired = to_ganglion_snapshot(&plan.snapshot);
             desired.generation = committed.generation + 1;
-            // Snapshot-replace writes must preserve the catalogue and the
-            // replicated attribute store (the planner knows nothing of them).
+            // Snapshot-replace writes must preserve everything the planner
+            // does not own: the catalogue, the replicated attribute store,
+            // and the node registry (heartbeat labels live there — replacing
+            // the nodes map from planner output would erase liveness data).
             desired.resources = committed.resources.clone();
             desired.attributes = committed.attributes.clone();
+            desired.nodes = committed.nodes.clone();
             ganglion_core::stamp_assignment_epochs(&committed, &mut desired);
+
+            // Anti-churn: when the plan changes nothing, do not write at all.
+            // Keeps idle controller ticks off the raft log entirely.
+            if desired.assignments == committed.assignments {
+                return Ok(Some(to_fibril_snapshot(&committed)));
+            }
 
             match self
                 .node
@@ -891,6 +1036,138 @@ mod tests {
         provider.deregister_queue(&queue).await.expect("deregister");
         assert!(provider.registered_queues().is_empty());
 
+        provider.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    /// Loop-level controller test: assigns catalogue queues for live brokers,
+    /// idle ticks never advance the generation (anti-churn), and a dead
+    /// broker's queues move with an epoch bump on a later tick.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn controller_loop_assigns_idles_and_fails_over() {
+        use fibril_broker::coordination::DeterministicPartitionPlacement;
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = std::sync::Arc::new(GanglionCoordination::new("broker-a", raft_node));
+
+        let broker = |id: &str, port: u16| NodeInfo {
+            node_id: id.to_string(),
+            broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+            admin_addr: None,
+        };
+        provider
+            .register_self(&broker("broker-a", 9000))
+            .await
+            .expect("a");
+        provider
+            .register_self(&broker("broker-b", 9001))
+            .await
+            .expect("b");
+        let queue = QueueIdentity::new("orders", 0, None);
+        provider.register_queue(&queue).await.expect("queue");
+
+        let (controller, status) = provider.spawn_controller(
+            std::sync::Arc::new(DeterministicPartitionPlacement),
+            ControllerConfig {
+                target_followers: 1,
+                tick: Duration::from_millis(100),
+                // Generous TTL first: both brokers count as live.
+                liveness_ttl: Duration::from_secs(30),
+                max_cas_retries: 8,
+            },
+        );
+
+        // Assignment appears.
+        let mut stream = provider.watch();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while stream
+                .borrow_and_update()
+                .assignment_for("orders", 0, None)
+                .is_none()
+            {
+                stream.changed().await.expect("stream open");
+            }
+        })
+        .await
+        .expect("controller assigns the catalogue queue");
+        let first = provider
+            .snapshot()
+            .assignment_for("orders", 0, None)
+            .cloned()
+            .expect("assigned");
+        assert_eq!(first.epoch, 1);
+        assert_eq!(first.replica_set_size(), 2, "owner + follower");
+        // Status updates just after the write returns; poll briefly.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !status.read().unwrap().active {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("controller reports active");
+
+        // Anti-churn: several idle ticks later the generation is unchanged.
+        let settled = provider.snapshot().generation;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(
+            provider.snapshot().generation,
+            settled,
+            "idle controller ticks must not write"
+        );
+
+        // Kill the owner's heartbeats by restarting the controller with a
+        // tiny TTL and only refreshing the survivor.
+        controller.abort();
+        let survivor = if first.owner == "broker-a" {
+            "broker-b"
+        } else {
+            "broker-a"
+        };
+        let survivor_port = if survivor == "broker-a" { 9000 } else { 9001 };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        provider
+            .register_self(&broker(survivor, survivor_port))
+            .await
+            .expect("refresh survivor heartbeat");
+        let (controller, _status) = provider.spawn_controller(
+            std::sync::Arc::new(DeterministicPartitionPlacement),
+            ControllerConfig {
+                target_followers: 1,
+                tick: Duration::from_millis(100),
+                liveness_ttl: Duration::from_millis(900),
+                max_cas_retries: 8,
+            },
+        );
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(assignment) = provider.snapshot().assignment_for("orders", 0, None) {
+                    if assignment.owner == survivor {
+                        assert_eq!(
+                            assignment.epoch,
+                            first.epoch + 1,
+                            "ownership move must fence"
+                        );
+                        return;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("controller moves ownership off the dead broker");
+
+        controller.abort();
         provider.raft_node().shutdown().await.expect("shutdown");
     }
 

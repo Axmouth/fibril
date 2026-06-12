@@ -1182,6 +1182,7 @@ dependencies = [
  "fibril-storage",
  "ganglion-core",
  "ganglion-openraft",
+ "serde",
  "tokio",
  "tracing",
 ]

@@ -685,6 +685,18 @@ N). Enforce `ReplicationDurabilityPolicy` in publish-confirm with per-policy tim
 
 ### R6 — Client topology (unchanged from Medium-Term §8; after R4)
 
+### Decision: one metadata raft group, not per-partition groups (2026-06-12)
+
+Considered and rejected: a raft group per partition deciding its own ownership. Reasons:
+assignment traffic scales with changes (declares/failovers/moves), not partitions×writes, so
+one group is far from any ceiling; per-partition groups multiply election timers, heartbeats,
+and WAL/membership management (only fixable with TiKV-style multi-raft batching) and reintroduce
+the chicken-egg problem (something must still place each group's members); and the availability
+benefit is moot here because data-plane serving already continues without coordination — owners
+keep serving on their epoch, only ownership *changes* pause when the metadata quorum is lost.
+Escape hatch if metadata scale ever demands it: shard the metadata group by partition ranges
+behind the same `Coordination` trait — nothing decided now blocks that.
+
 ### Execution order and gates
 
 R1 (ganglion schema + catalogue) → R2 (controller task) → R3 (ownership switch + e2e test +
