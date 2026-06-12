@@ -144,6 +144,7 @@ mod tests {
             event_from: 17,
             max_messages: 128,
             max_events: 256,
+            reporter_node_id: None,
         };
 
         let frame = try_encode(Op::ReplicationRead, 13, &msg).unwrap();

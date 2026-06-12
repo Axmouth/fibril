@@ -71,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         connection: BrokerConnectionRuntimeSettings {
             reconnect_grace_ms: config.runtime_seed.connection.reconnect_grace_ms,
         },
+        replication: Default::default(),
     };
     let runtime_settings = Arc::new(
         RuntimeSettingsManager::load_from_stroma_engine(

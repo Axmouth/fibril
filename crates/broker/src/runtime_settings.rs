@@ -17,6 +17,8 @@ pub struct RuntimeSettings {
     pub idle_queue_cleanup: IdleQueueCleanupRuntimeSettings,
     #[serde(default)]
     pub connection: ConnectionRuntimeSettings,
+    #[serde(default)]
+    pub replication: ReplicationRuntimeSettings,
 }
 
 impl RuntimeSettings {
@@ -47,6 +49,7 @@ impl Default for RuntimeSettings {
             delivery: DeliveryRuntimeSettings::default(),
             idle_queue_cleanup: IdleQueueCleanupRuntimeSettings::default(),
             connection: ConnectionRuntimeSettings::default(),
+            replication: ReplicationRuntimeSettings::default(),
         }
     }
 }
@@ -58,6 +61,23 @@ pub struct DeliveryRuntimeSettings {
     pub expiry_poll_min_ms: u64,
     pub expiry_batch_max: usize,
     pub delivery_poll_max_ms: u64,
+}
+
+/// Replication-related runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReplicationRuntimeSettings {
+    /// How long a publish confirm may wait for the assignment's replication
+    /// durability policy (replica acks) before failing with a clear error.
+    pub confirm_timeout_ms: u64,
+}
+
+impl Default for ReplicationRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            confirm_timeout_ms: 5_000,
+        }
+    }
 }
 
 impl Default for DeliveryRuntimeSettings {
@@ -275,6 +295,7 @@ impl BrokerConfig {
             delivery_poll_max_ms: settings.delivery.delivery_poll_max_ms,
             queue_idle_evict_after_ms: settings.idle_queue_cleanup.queue_idle_evict_after_ms(),
             queue_idle_sweep_interval_ms: settings.idle_queue_cleanup.sweep_interval_ms,
+            replication_confirm_timeout_ms: settings.replication.confirm_timeout_ms,
         }
     }
 }
@@ -461,6 +482,7 @@ mod tests {
             connection: ConnectionRuntimeSettings {
                 reconnect_grace_ms: Some(8),
             },
+            replication: ReplicationRuntimeSettings::default(),
         };
 
         let decoded = decode_snapshot(GlobalValue {
@@ -496,6 +518,7 @@ mod tests {
             connection: ConnectionRuntimeSettings {
                 reconnect_grace_ms: Some(17),
             },
+            replication: ReplicationRuntimeSettings::default(),
         };
 
         let config = BrokerConfig::from_runtime_settings(&settings);

@@ -1619,3 +1619,28 @@ Tests needed before implementing transition:
   (epoch persist materializes the queue earlier in the transition). All
   suites green: broker 122, protocol 45, provider 9, stroma 162;
   cluster-tryout --ganglion passing.
+- 2026-06-13: R5 core done - publish-confirm durability enforcement is live.
+  Design: followers now apply replicated batches DURABLY
+  (KDurability::AfterFsync), so the offsets they pull from are honest durable
+  watermarks; replication reads carry an optional reporter_node_id
+  (serde-default, wire-compatible; old peers simply do not report), stamped
+  automatically by CoordinationProtocolOwnerPeerResolver with the local node
+  id. The owner-side handler records per-follower durable progress into a
+  per-queue registry with waiter wake-up. The assignment watcher maintains an
+  assignment cache (durability policy + replica set per local queue; removed
+  on unassignment; absent for standalone brokers = local-durable confirms,
+  unchanged behavior). confirm_sink_loop now gates the producer reply: local
+  durable append first, then ReplicationConfirmGate::await_confirm resolves
+  the assignment's durability_requirement (owner counts as one node) against
+  reported follower progress, timing out with a descriptive
+  which-condition-failed error after replication.confirm_timeout_ms - a NEW
+  RUNTIME SETTING (default 5000ms, serde-default so persisted settings
+  documents load unchanged; rides the replicated settings path from R2b).
+  Gate tests: publish under ReplicaDurable{2} times out without any follower
+  report and resolves once recorded progress passes the offset; the R3
+  supervised e2e now also asserts the owner accumulated the follower's
+  progress from real stamped reads over TCP. All suites green (broker 123,
+  protocol 45+13, provider 9); cluster-tryout --ganglion passing. Remaining
+  R5 tail: min_in_sync_replicas refusal knob, surfacing per-follower progress
+  /lag in topology observability, and an e2e confirm-over-wire test with two
+  real brokers under replica_durable policy.

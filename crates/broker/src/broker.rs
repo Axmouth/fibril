@@ -26,7 +26,7 @@ use crate::coordination::{
 };
 use crate::queue_engine::{
     EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome,
-    OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedEventBatch,
+    KDurability, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedEventBatch,
     ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SettleKind,
     SettleRequest as EngineSettleRequest, StromaEngine,
 };
@@ -340,6 +340,7 @@ pub struct BrokerConfig {
     pub delivery_poll_max_ms: u64,
     pub queue_idle_evict_after_ms: Option<u64>,
     pub queue_idle_sweep_interval_ms: u64,
+    pub replication_confirm_timeout_ms: u64,
 }
 impl Default for BrokerConfig {
     fn default() -> Self {
@@ -350,6 +351,7 @@ impl Default for BrokerConfig {
             delivery_poll_max_ms: 500,
             queue_idle_evict_after_ms: None,
             queue_idle_sweep_interval_ms: 60_000,
+            replication_confirm_timeout_ms: 5_000,
         }
     }
 }
@@ -1028,7 +1030,7 @@ impl Drop for FollowerReplicationTickGuard {
 
 // TODO cleanup old?
 pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
-    cfg: ArcSwap<BrokerConfig>,
+    cfg: Arc<ArcSwap<BrokerConfig>>,
     engine: E,
     shutdown_publishers: CancellationToken,
     shutdown_consumers: CancellationToken,
@@ -1055,6 +1057,31 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
 
     metrics: Option<Arc<BrokerStats>>,
     ownership: Arc<dyn QueueOwnership>,
+
+    /// Per-queue durable replication progress reported by followers (from
+    /// stamped replication reads). Drives publish-confirm durability policies.
+    replication_progress: Arc<DashMap<QueueKey, Arc<ReplicationProgressCell>>>,
+    /// Latest assignment applied for each local queue (durability policy +
+    /// replica set source for confirms). Maintained by the assignment watcher;
+    /// empty for standalone brokers (local-durable confirms only).
+    assignment_cache: Arc<DashMap<QueueKey, PartitionAssignment>>,
+}
+
+/// Cheap shared handle for publish-confirm replication waits inside
+/// per-queue confirm loops.
+#[derive(Clone)]
+pub struct ReplicationConfirmGate {
+    progress: Arc<DashMap<QueueKey, Arc<ReplicationProgressCell>>>,
+    assignments: Arc<DashMap<QueueKey, PartitionAssignment>>,
+    cfg: Arc<ArcSwap<BrokerConfig>>,
+}
+
+/// Follower durable progress for one queue, plus a waiter wake-up.
+#[derive(Debug, Default)]
+pub struct ReplicationProgressCell {
+    /// follower node id -> (durable message next-offset, durable event next-offset)
+    followers: std::sync::Mutex<std::collections::HashMap<String, (Offset, Offset)>>,
+    changed: Notify,
 }
 
 impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
@@ -1092,7 +1119,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
 
         let this = Arc::new(Self {
-            cfg: ArcSwap::from_pointee(cfg),
+            cfg: Arc::new(ArcSwap::from_pointee(cfg)),
             engine,
             shutdown_publishers: CancellationToken::new(),
             shutdown_consumers: CancellationToken::new(),
@@ -1106,6 +1133,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             tags_by_key_offset: DashMap::new(),
             queue_eviction_observations: DashMap::new(),
             follower_replication_workers: DashMap::new(),
+            replication_progress: Arc::new(DashMap::new()),
+            assignment_cache: Arc::new(DashMap::new()),
             pending_settles: Arc::new(AtomicUsize::new(0)),
             settle_drained: Arc::new(Notify::new()),
             settings_changed: Arc::new(Notify::new()),
@@ -1134,6 +1163,155 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.cfg.load_full()
     }
 
+    /// Record a follower's durable replication progress (from a stamped
+    /// replication read: followers apply durably, so their pull offsets are
+    /// durable watermarks). Wakes any publish confirms waiting on policy.
+    pub fn record_follower_replication_progress(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+        follower_node_id: &str,
+        durable_message_next: Offset,
+        durable_event_next: Offset,
+    ) {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        let cell = self
+            .replication_progress
+            .entry(key)
+            .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
+            .clone();
+        {
+            let mut followers = cell.followers.lock().expect("progress lock");
+            let entry = followers
+                .entry(follower_node_id.to_string())
+                .or_insert((0, 0));
+            // Monotonic: late/reordered reports never regress progress.
+            entry.0 = entry.0.max(durable_message_next);
+            entry.1 = entry.1.max(durable_event_next);
+        }
+        cell.changed.notify_waiters();
+    }
+
+    /// Reported follower durable progress for one queue (observability/tests).
+    pub fn follower_replication_progress(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+    ) -> Vec<(String, (Offset, Offset))> {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        self.replication_progress
+            .get(&key)
+            .map(|cell| {
+                let followers = cell.followers.lock().expect("progress lock");
+                followers
+                    .iter()
+                    .map(|(node, tails)| (node.clone(), *tails))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Cache the assignment governing a local queue (watcher-maintained).
+    pub fn cache_queue_assignment(&self, assignment: &PartitionAssignment) {
+        self.assignment_cache.insert(
+            QueueKey {
+                tp: assignment.queue.topic.to_string(),
+                part: assignment.queue.partition,
+                group: assignment.queue.group.clone(),
+            },
+            assignment.clone(),
+        );
+    }
+
+    /// Shareable confirm gate for spawned per-queue confirm loops.
+    pub fn replication_confirm_gate(&self) -> ReplicationConfirmGate {
+        ReplicationConfirmGate {
+            progress: self.replication_progress.clone(),
+            assignments: self.assignment_cache.clone(),
+            cfg: self.cfg.clone(),
+        }
+    }
+
+    /// Wait until the queue's assignment durability policy is satisfied for a
+    /// message at `offset` (the owner's own durable write already counts).
+    /// No cached assignment (standalone) or `local_durable` returns
+    /// immediately. Fails with a descriptive error on timeout.
+    pub async fn await_replication_confirm(
+        &self,
+        key: &QueueKey,
+        offset: Offset,
+    ) -> Result<(), BrokerError> {
+        self.replication_confirm_gate()
+            .await_confirm(key, offset)
+            .await
+    }
+}
+
+impl ReplicationConfirmGate {
+    /// See `Broker::await_replication_confirm`.
+    pub async fn await_confirm(&self, key: &QueueKey, offset: Offset) -> Result<(), BrokerError> {
+        let Some(assignment) = self.assignments.get(key).map(|a| a.clone()) else {
+            return Ok(());
+        };
+        let requirement = assignment.durability_requirement().map_err(|error| {
+            BrokerError::InvalidArgument(format!(
+                "replication durability unsatisfiable for {}/{}: {error:?}",
+                key.tp, key.part
+            ))
+        })?;
+        // The owner's local durable write is one of the required nodes.
+        let required_followers = requirement.nodes.saturating_sub(1);
+        if required_followers == 0 {
+            return Ok(());
+        }
+
+        let cell = self
+            .progress
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
+            .clone();
+        let timeout_ms = self.cfg.load().replication_confirm_timeout_ms;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+
+        loop {
+            let satisfied = {
+                let followers = cell.followers.lock().expect("progress lock");
+                assignment
+                    .followers
+                    .iter()
+                    .filter(|follower| {
+                        followers
+                            .get(*follower)
+                            .is_some_and(|(message_next, _)| *message_next > offset)
+                    })
+                    .count()
+                    >= required_followers
+            };
+            if satisfied {
+                return Ok(());
+            }
+            let notified = cell.changed.notified();
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return Err(BrokerError::Unknown(format!(
+                    "publish confirm timed out after {timeout_ms}ms: {:?} requires {} follower acknowledgement(s) past offset {offset} on {}/{}",
+                    assignment.durability, required_followers, key.tp, key.part
+                )));
+            }
+        }
+    }
+}
+
+impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
     pub fn update_config(&self, cfg: BrokerConfig) {
         self.cfg.store(Arc::new(cfg));
         self.settings_epoch.fetch_add(1, Ordering::AcqRel);
@@ -1242,6 +1420,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let group = group.clone();
 
         self.ensure_queue_owner(&tp, part, group.as_deref())?;
+
+        // R5 confirm gate (built early: later closures move `tp`/`group`).
+        let confirm_gate = self.replication_confirm_gate();
+        let confirm_key = QueueKey {
+            tp: tp.clone(),
+            part,
+            group: group.clone(),
+        };
 
         let qs = self
             .queue(&QueueKey {
@@ -1392,6 +1578,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         });
 
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
+
         self.task_group.spawn("confirm_sink_loop", async move {
             while let Some((rx_completion, reply)) = confirm_sink_rx.recv().await {
                 // Wait for durability
@@ -1401,7 +1588,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         if let Err(e) = confirm_tx.send(offset).await {
                             tracing::error!("Failed to send confirm offset: {e:?}");
                         }
-                        let res: Result<u64, BrokerError> = Ok(offset);
+                        // R5: local durability first, then the assignment's
+                        // replication policy (replica/majority acks) before
+                        // the producer sees the confirm.
+                        let res: Result<u64, BrokerError> = confirm_gate
+                            .await_confirm(&confirm_key, offset)
+                            .await
+                            .map(|()| offset);
                         if let Err(e) = reply.send(res) {
                             tracing::error!("Failed to send publish response: {e:?}");
                         }
@@ -2911,6 +3104,17 @@ impl Broker<StromaEngine> {
     ) -> Result<BrokerAssignmentTransitionApply, BrokerError> {
         let topic = transition.queue.topic.to_string();
         let group = transition.queue.group.as_deref();
+        // Confirm policies read the assignment governing this queue.
+        match &transition.next {
+            Some(next) => self.cache_queue_assignment(next),
+            None => {
+                self.assignment_cache.remove(&QueueKey {
+                    tp: topic.clone(),
+                    part: transition.queue.partition,
+                    group: transition.queue.group.clone(),
+                });
+            }
+        }
         // Fencing epoch from the assignment driving this transition. Role
         // changes persist it into the queue logs BEFORE role-specific work
         // (epoch-before-use), so stale-epoch replication is rejected at the
@@ -3184,7 +3388,10 @@ impl Broker<StromaEngine> {
                         .into_iter()
                         .map(|(_, message)| message)
                         .collect(),
-                    durability: None,
+                    // Followers apply durably so their reported pull offsets
+                    // are honest DURABLE progress for owner confirm policies
+                    // (replica_durable/majority_durable).
+                    durability: Some(KDurability::AfterFsync),
                 })
             }
             OwnerReplicationRead::Batch(_) => None,
@@ -3220,7 +3427,10 @@ impl Broker<StromaEngine> {
                     epoch: batch.epoch,
                     first_offset: batch.records[0].0,
                     events: batch.records.into_iter().map(|(_, event)| event).collect(),
-                    durability: None,
+                    // Followers apply durably so their reported pull offsets
+                    // are honest DURABLE progress for owner confirm policies
+                    // (replica_durable/majority_durable).
+                    durability: Some(KDurability::AfterFsync),
                 })
             }
             OwnerReplicationRead::Batch(_) => None,

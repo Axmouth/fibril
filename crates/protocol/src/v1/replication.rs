@@ -88,6 +88,9 @@ pub struct ProtocolOwnerPeerResolverConfig {
     pub auth: Option<ProtocolOwnerPeerAuth>,
     pub client_name: String,
     pub client_version: String,
+    /// This follower's node id, stamped into replication reads so the owner
+    /// can track durable progress per follower (publish-confirm policies).
+    pub reporter_node_id: Option<String>,
 }
 
 impl ProtocolOwnerPeerResolverConfig {
@@ -97,7 +100,15 @@ impl ProtocolOwnerPeerResolverConfig {
             auth: None,
             client_name: "fibril-replication".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            reporter_node_id: None,
         }
+    }
+
+    /// Stamp replication reads with this follower's identity so the owner
+    /// tracks its durable progress (publish-confirm durability policies).
+    pub fn with_reporter(mut self, node_id: impl Into<String>) -> Self {
+        self.reporter_node_id = Some(node_id.into());
+        self
     }
 
     pub fn from_nodes(nodes: impl IntoIterator<Item = NodeInfo>) -> Self {
@@ -163,13 +174,16 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
                 return Ok(Some(peer.clone()));
             }
 
-            let peer: Arc<dyn BrokerOwnerReplicationPeer> =
-                Arc::new(ProtocolOwnerReplicationPeer::new_reconnecting(
-                    addr,
-                    self.cfg.auth.clone(),
-                    self.cfg.client_name.clone(),
-                    self.cfg.client_version.clone(),
-                ));
+            let mut built = ProtocolOwnerReplicationPeer::new_reconnecting(
+                addr,
+                self.cfg.auth.clone(),
+                self.cfg.client_name.clone(),
+                self.cfg.client_version.clone(),
+            );
+            if let Some(reporter) = &self.cfg.reporter_node_id {
+                built = built.with_reporter(reporter.clone());
+            }
+            let peer: Arc<dyn BrokerOwnerReplicationPeer> = Arc::new(built);
             peers.insert(assignment.owner.clone(), peer.clone());
             Ok(Some(peer))
         })
@@ -195,9 +209,12 @@ pub struct CoordinationProtocolOwnerPeerResolver {
 
 impl CoordinationProtocolOwnerPeerResolver {
     pub fn new(coordination: Arc<dyn Coordination>) -> Self {
+        // Report as the local node by default: the owner needs the follower's
+        // identity to track durable progress for publish-confirm policies.
+        let reporter = coordination.node_id().to_string();
         Self::with_config(
             coordination,
-            ProtocolOwnerPeerResolverConfig::new(HashMap::new()),
+            ProtocolOwnerPeerResolverConfig::new(HashMap::new()).with_reporter(reporter),
         )
     }
 
@@ -236,13 +253,16 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
                 }
             }
 
-            let peer: Arc<dyn BrokerOwnerReplicationPeer> =
-                Arc::new(ProtocolOwnerReplicationPeer::new_reconnecting(
-                    addr,
-                    self.cfg.auth.clone(),
-                    self.cfg.client_name.clone(),
-                    self.cfg.client_version.clone(),
-                ));
+            let mut built = ProtocolOwnerReplicationPeer::new_reconnecting(
+                addr,
+                self.cfg.auth.clone(),
+                self.cfg.client_name.clone(),
+                self.cfg.client_version.clone(),
+            );
+            if let Some(reporter) = &self.cfg.reporter_node_id {
+                built = built.with_reporter(reporter.clone());
+            }
+            let peer: Arc<dyn BrokerOwnerReplicationPeer> = Arc::new(built);
             peers.insert(
                 assignment.owner.clone(),
                 CachedProtocolOwnerPeer {
@@ -377,6 +397,8 @@ pub struct ProtocolOwnerReplicationPeer {
     conn: Mutex<Option<Conn>>,
     next_request_id: AtomicU64,
     reconnect: Option<ProtocolOwnerPeerConnectConfig>,
+    /// Stamped into replication reads for owner-side progress tracking.
+    reporter_node_id: Option<String>,
 }
 
 impl ProtocolOwnerReplicationPeer {
@@ -385,7 +407,14 @@ impl ProtocolOwnerReplicationPeer {
             conn: Mutex::new(Some(conn)),
             next_request_id: AtomicU64::new(20_000),
             reconnect: None,
+            reporter_node_id: None,
         }
+    }
+
+    /// Stamp replication reads with this follower's identity.
+    pub fn with_reporter(mut self, node_id: impl Into<String>) -> Self {
+        self.reporter_node_id = Some(node_id.into());
+        self
     }
 
     pub fn new_reconnecting(
@@ -397,6 +426,7 @@ impl ProtocolOwnerReplicationPeer {
         Self {
             conn: Mutex::new(None),
             next_request_id: AtomicU64::new(20_000),
+            reporter_node_id: None,
             reconnect: Some(ProtocolOwnerPeerConnectConfig {
                 addr,
                 auth,
@@ -458,6 +488,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                             event_from,
                             max_messages,
                             max_events,
+                            reporter_node_id: self.reporter_node_id.clone(),
                         },
                     )
                     .map_err(protocol_error)?,
@@ -584,6 +615,7 @@ pub async fn catch_up_replication_over_protocol(
                     event_from: progress.event_next_offset,
                     max_messages: options.max_messages_per_read,
                     max_events: options.max_events_per_read,
+                    reporter_node_id: None,
                 },
             )?)
             .await

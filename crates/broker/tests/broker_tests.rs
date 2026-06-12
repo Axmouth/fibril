@@ -283,6 +283,7 @@ async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
         delivery_poll_max_ms: 100000, // Make tests timeout if they rely on polling to pass, to indicate the issue
         queue_idle_evict_after_ms: None,
         queue_idle_sweep_interval_ms: 60_000,
+        ..Default::default()
     };
     open_test_broker_with_cfg(broker_cfg).await
 }
@@ -744,6 +745,87 @@ async fn refresh_follower_keeps_replication_worker_progress() {
 
     owner.shutdown().await;
     follower.shutdown().await;
+}
+
+/// R5 publish-confirm enforcement: with a replica-durable assignment cached,
+/// the producer's confirm resolves only after a follower's reported durable
+/// progress passes the message offset — and times out with a descriptive
+/// error when no follower reports.
+#[tokio::test]
+async fn publish_confirm_waits_for_follower_durable_progress() {
+    let topic = "confirm-policy";
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        inflight_ttl_ms: 2000,
+        expiry_poll_min_ms: 100,
+        expiry_batch_max: 100,
+        delivery_poll_max_ms: 100_000,
+        queue_idle_evict_after_ms: None,
+        queue_idle_sweep_interval_ms: 60_000,
+        replication_confirm_timeout_ms: 400,
+    })
+    .await;
+
+    // The assignment demands TWO durable nodes: the owner plus one follower.
+    broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, 0, None),
+            "owner-a",
+            vec!["follower-b".to_string()],
+            1,
+        )
+        .with_durability(
+            fibril_broker::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 },
+        ),
+    );
+
+    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+
+    // No follower progress: the confirm must time out with a clear reason.
+    let reply = publisher
+        .publish(
+            b"needs-replica".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let err = reply
+        .await
+        .unwrap()
+        .expect_err("confirm must fail without follower progress");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("timed out") && message.contains("follower"),
+        "descriptive timeout error expected, got: {message}"
+    );
+
+    // With follower progress reported past the offset, the confirm resolves.
+    let progress_broker = broker.clone();
+    let reporter = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Both messages (offsets 0 and 1) durably applied on the follower.
+        progress_broker.record_follower_replication_progress(topic, 0, None, "follower-b", 2, 2);
+    });
+    let reply = publisher
+        .publish(
+            b"replicated".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let offset = reply
+        .await
+        .unwrap()
+        .expect("confirm resolves once the follower reports durable progress");
+    assert_eq!(offset, 1);
+    reporter.await.unwrap();
+
+    broker.shutdown().await;
 }
 
 /// Data-plane epoch fencing (the split-brain last line): a follower fenced at
@@ -3063,6 +3145,7 @@ async fn queue_eviction_worker_leaves_active_publisher_materialized() {
         delivery_poll_max_ms: 100000,
         queue_idle_evict_after_ms: Some(0),
         queue_idle_sweep_interval_ms: 10,
+        ..Default::default()
     })
     .await;
 
@@ -3101,6 +3184,7 @@ async fn active_publisher_does_not_race_idle_cleanup_into_double_open() {
         delivery_poll_max_ms: 100000,
         queue_idle_evict_after_ms: Some(0),
         queue_idle_sweep_interval_ms: 1,
+        ..Default::default()
     })
     .await;
 
@@ -4357,6 +4441,7 @@ async fn expired_after_consumer_drop() -> Result<(), Box<dyn std::error::Error>>
         delivery_poll_max_ms: 100000,
         queue_idle_evict_after_ms: None,
         queue_idle_sweep_interval_ms: 60_000,
+        ..Default::default()
     });
 
     t.start_broker("b1").await?;
@@ -4433,6 +4518,7 @@ async fn expiry_across_restart() -> Result<(), Box<dyn std::error::Error>> {
         delivery_poll_max_ms: 100000,
         queue_idle_evict_after_ms: None,
         queue_idle_sweep_interval_ms: 60_000,
+        ..Default::default()
     });
 
     t.start_broker("b1").await?;
@@ -4514,6 +4600,7 @@ async fn chaos_deterministic_restart_ack_nack() -> Result<(), Box<dyn std::error
         delivery_poll_max_ms: 100000,
         queue_idle_evict_after_ms: None,
         queue_idle_sweep_interval_ms: 60_000,
+        ..Default::default()
     });
     t.start_broker("b1").await?;
 
@@ -4599,6 +4686,7 @@ async fn restart_race_with_ack() -> Result<(), Box<dyn std::error::Error>> {
         delivery_poll_max_ms: 100000,
         queue_idle_evict_after_ms: None,
         queue_idle_sweep_interval_ms: 60_000,
+        ..Default::default()
     });
     t.start_broker("b1").await?;
 
@@ -4636,6 +4724,7 @@ async fn restart_race_with_ack2() -> Result<(), Box<dyn std::error::Error>> {
         delivery_poll_max_ms: 100000,
         queue_idle_evict_after_ms: None,
         queue_idle_sweep_interval_ms: 60_000,
+        ..Default::default()
     });
     t.start_broker("b1").await?;
 

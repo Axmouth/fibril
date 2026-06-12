@@ -1612,6 +1612,19 @@ pub async fn handle_connection(
                 let read: ReplicationRead =
                     decode_or_400!(frame, frame_tx_high_prio, metrics, ReplicationRead);
 
+                // A stamped read doubles as the follower's durable-progress
+                // report (followers apply durably; pull offsets = watermarks).
+                if let Some(reporter) = &read.reporter_node_id {
+                    broker.record_follower_replication_progress(
+                        &read.topic,
+                        read.partition,
+                        read.group.as_deref(),
+                        reporter,
+                        read.message_from,
+                        read.event_from,
+                    );
+                }
+
                 match broker
                     .read_owner_replication_records(
                         &read.topic,

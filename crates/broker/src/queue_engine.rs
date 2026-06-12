@@ -12,12 +12,12 @@ use stroma_core::{
 pub use stroma_core::{
     AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome,
     FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, GlobalDLQ,
-    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KeratinAppendCompletion,
-    KeratinConfig, Message, MessageContentType, MessageHeaders, MessageInspectionPage,
-    MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
-    QueueInspectionState, QueuePromotionOutcome, ReplicatedAppendOutcome, ReplicatedEventBatch,
-    ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SnapshotConfig, Stroma, StromaError,
-    StromaEvent, StromaKeratinConfig,
+    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KDurability,
+    KeratinAppendCompletion, KeratinConfig, Message, MessageContentType, MessageHeaders,
+    MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead,
+    OwnerStateCheckpoint, QueueInspectionState, QueuePromotionOutcome, ReplicatedAppendOutcome,
+    ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SnapshotConfig,
+    Stroma, StromaError, StromaEvent, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 

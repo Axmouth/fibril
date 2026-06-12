@@ -322,6 +322,7 @@ async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
         expiry_poll_min_ms: 10000,
         queue_idle_evict_after_ms: None,
         queue_idle_sweep_interval_ms: 60_000,
+        ..Default::default()
     };
 
     let storage_path = format!(

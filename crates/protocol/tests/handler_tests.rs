@@ -80,6 +80,7 @@ async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
             delivery_poll_max_ms: 50,
             queue_idle_evict_after_ms: None,
             queue_idle_sweep_interval_ms: 60_000,
+            ..Default::default()
         },
         None,
     );
@@ -1049,6 +1050,7 @@ async fn replication_read_returns_owner_log_records() {
                     event_from: 0,
                     max_messages: 10,
                     max_events: 10,
+                    reporter_node_id: None,
                 },
             )
             .unwrap(),
@@ -1109,6 +1111,7 @@ async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_o
                     event_from: 0,
                     max_messages: 10,
                     max_events: 10,
+                    reporter_node_id: None,
                 },
             )
             .unwrap(),
@@ -1882,6 +1885,17 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     })
     .await
     .expect("supervised follower should catch up from the coordination assignment");
+
+    // R5 wire path: the follower's stamped reads reported its durable
+    // progress to the owner.
+    let progress = owner_broker.follower_replication_progress(topic, 0, None);
+    assert!(
+        progress
+            .iter()
+            .any(|(node, (message_next, _))| node == "b-follower"
+                && *message_next >= owner_checkpoint.message_next_offset),
+        "owner must have follower progress from stamped reads: {progress:?}"
+    );
 
     // Replicated tails match the owner checkpoint exactly.
     let promoted = follower_broker
@@ -3316,6 +3330,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
             delivery_poll_max_ms: 10,
             queue_idle_evict_after_ms: Some(5),
             queue_idle_sweep_interval_ms: 5,
+            ..Default::default()
         },
         None,
     );

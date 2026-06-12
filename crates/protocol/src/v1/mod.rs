@@ -285,6 +285,12 @@ pub struct ReplicationRead {
     pub event_from: u64,
     pub max_messages: u32,
     pub max_events: u32,
+    /// Follower identity for owner-side progress tracking (publish-confirm
+    /// durability policies). Followers apply durably, so `message_from` /
+    /// `event_from` are honest durable progress. Optional: old peers simply
+    /// don't report.
+    #[serde(default)]
+    pub reporter_node_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
