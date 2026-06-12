@@ -78,6 +78,10 @@ pub fn to_ganglion_snapshot(
     ganglion_core::CoordinationSnapshot {
         nodes,
         assignments,
+        // fibril's snapshot type does not model these; writers that must
+        // preserve them (control_iteration) copy from the committed snapshot.
+        resources: std::collections::BTreeSet::new(),
+        attributes: std::collections::BTreeMap::new(),
         generation: snapshot.generation,
     }
 }
@@ -285,23 +289,8 @@ where
         node.labels
             .insert(HEARTBEAT_LABEL.to_string(), unix_millis_now().to_string());
 
-        if self.node.is_leader().await {
-            self.node.register_node(node).await?;
-            return Ok(());
-        }
-
-        let topology = self.node.topology();
-        let leader_addr = topology
-            .leader
-            .and_then(|leader| topology.nodes.get(&leader).cloned())
-            .ok_or(OpenraftAdapterError::NotLeader)?;
-        client_write_remote(
-            &leader_addr,
-            MetadataRaftCommand::RegisterNode { node },
-            self.wire_format,
-        )
-        .await
-        .map(|_| ())
+        self.forward_merge(MetadataRaftCommand::RegisterNode { node })
+            .await
     }
 
     /// Whether the watch-forwarder task is still running. A dead forwarder
@@ -316,6 +305,73 @@ where
     /// serve last-committed state; writes will fail until healthy).
     pub fn coordination_healthy(&self) -> bool {
         self.forwarder_alive() && self.node.topology().leader.is_some()
+    }
+
+    /// Add a queue to the cluster catalogue (forwarded merge; idempotent).
+    pub async fn register_queue(&self, queue: &QueueIdentity) -> Result<(), OpenraftAdapterError> {
+        self.forward_merge(MetadataRaftCommand::RegisterResource {
+            resource: to_ganglion_resource(queue),
+        })
+        .await
+    }
+
+    /// Remove a queue from the cluster catalogue (forwarded merge).
+    pub async fn deregister_queue(
+        &self,
+        queue: &QueueIdentity,
+    ) -> Result<(), OpenraftAdapterError> {
+        self.forward_merge(MetadataRaftCommand::DeregisterResource {
+            resource: to_ganglion_resource(queue),
+        })
+        .await
+    }
+
+    /// The committed cluster queue catalogue (fibril-representable entries).
+    pub fn registered_queues(&self) -> Vec<QueueIdentity> {
+        self.node
+            .committed_snapshot()
+            .resources
+            .iter()
+            .filter_map(to_fibril_queue)
+            .collect()
+    }
+
+    /// Read one replicated cluster attribute (e.g. runtime settings).
+    pub fn cluster_attribute(&self, key: &str) -> Option<String> {
+        self.node.committed_snapshot().attributes.get(key).cloned()
+    }
+
+    /// Set one replicated cluster attribute (forwarded merge; same-value
+    /// writes are generation no-ops). Consumers own versioning in the value.
+    pub async fn set_cluster_attribute(
+        &self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Result<(), OpenraftAdapterError> {
+        self.forward_merge(MetadataRaftCommand::SetAttribute {
+            key: key.into(),
+            value: value.into(),
+        })
+        .await
+    }
+
+    /// Leader-or-forwarded merge write (registration, catalogue, attributes).
+    async fn forward_merge(
+        &self,
+        command: MetadataRaftCommand,
+    ) -> Result<(), OpenraftAdapterError> {
+        if self.node.is_leader().await {
+            self.node.submit_merge(command).await?;
+            return Ok(());
+        }
+        let topology = self.node.topology();
+        let leader_addr = topology
+            .leader
+            .and_then(|leader| topology.nodes.get(&leader).cloned())
+            .ok_or(OpenraftAdapterError::NotLeader)?;
+        client_write_remote(&leader_addr, command, self.wire_format)
+            .await
+            .map(|_| ())
     }
 
     /// Spawn a heartbeat loop registering `info` every `interval`.
@@ -440,6 +496,10 @@ where
 
             let mut desired = to_ganglion_snapshot(&plan.snapshot);
             desired.generation = committed.generation + 1;
+            // Snapshot-replace writes must preserve the catalogue and the
+            // replicated attribute store (the planner knows nothing of them).
+            desired.resources = committed.resources.clone();
+            desired.attributes = committed.attributes.clone();
             ganglion_core::stamp_assignment_epochs(&committed, &mut desired);
 
             match self
@@ -750,6 +810,88 @@ mod tests {
         for provider in &providers {
             provider.raft_node().shutdown().await.expect("shutdown");
         }
+    }
+
+    /// Catalogue + attributes: registered queues are cluster-visible, survive
+    /// controller snapshot-replace writes, and attributes roundtrip.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn catalogue_and_attributes_roundtrip_and_survive_controller_writes() {
+        use fibril_broker::coordination::DeterministicPartitionPlacement;
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+
+        let queue = QueueIdentity::new("orders", 0, Some("workers"));
+        provider
+            .register_queue(&queue)
+            .await
+            .expect("register queue");
+        provider.register_queue(&queue).await.expect("idempotent");
+        assert_eq!(provider.registered_queues(), vec![queue.clone()]);
+
+        provider
+            .set_cluster_attribute("fibril/runtime_settings", "{\"v\":1}")
+            .await
+            .expect("set attribute");
+        assert_eq!(
+            provider
+                .cluster_attribute("fibril/runtime_settings")
+                .as_deref(),
+            Some("{\"v\":1}")
+        );
+
+        // A controller snapshot-replace write must preserve both.
+        provider
+            .register_self(&NodeInfo {
+                node_id: "broker-a".into(),
+                broker_addr: "127.0.0.1:9000".parse().expect("addr"),
+                admin_addr: None,
+            })
+            .await
+            .expect("register node for placement");
+        let live = provider.live_nodes(Duration::from_secs(30));
+        provider
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                0,
+                &live,
+                8,
+            )
+            .await
+            .expect("controller iteration")
+            .expect("leader runs it");
+
+        assert_eq!(provider.registered_queues(), vec![queue.clone()]);
+        assert_eq!(
+            provider
+                .cluster_attribute("fibril/runtime_settings")
+                .as_deref(),
+            Some("{\"v\":1}"),
+            "attributes must survive controller writes"
+        );
+        let assigned = provider
+            .snapshot()
+            .assignment_for("orders", 0, Some("workers"))
+            .cloned()
+            .expect("controller assigned the catalogue queue");
+        assert_eq!(assigned.owner, "broker-a");
+
+        provider.deregister_queue(&queue).await.expect("deregister");
+        assert!(provider.registered_queues().is_empty());
+
+        provider.raft_node().shutdown().await.expect("shutdown");
     }
 
     /// Self-registration merges into the shared node table (no clobbering)

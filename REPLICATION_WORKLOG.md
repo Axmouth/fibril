@@ -1479,3 +1479,21 @@ Tests needed before implementing transition:
   Medium-Term §4/§5 for the embedded path; etcd stays possible behind the
   same trait. Decisions flagged: resources-as-separate-set, and
   promote-to-local-tail vs quorum-tails under epoch fencing.
+- 2026-06-12: R1 done (both sides). Ganglion: CoordinationSnapshot gained
+  `resources` (cluster queue catalogue) and `attributes` (opaque replicated
+  KV for e.g. runtime settings), both serde-default so existing WALs/snapshot
+  files load unchanged; merge commands RegisterResource/DeregisterResource/
+  SetAttribute/RemoveAttribute (idempotent; same-value set is a generation
+  no-op; dereg does not touch assignments). Provider: register_queue/
+  deregister_queue/registered_queues, cluster_attribute/set_cluster_attribute,
+  all through a shared leader-or-forwarded merge path (register_self
+  refactored onto it); control_iteration now preserves resources+attributes
+  across its snapshot-replace writes. Test proves the loop: register queue ->
+  visible; set attribute -> visible; controller iteration assigns the
+  catalogue queue AND preserves catalogue+attributes; deregister empties.
+  Catalogue ingestion strategy decided: a broker-side catalogue-sync loop
+  (diff local engine queues vs catalogue each heartbeat tick, register
+  missing) instead of hooking the declare handler - idempotent, and catches
+  pre-existing on-disk queues after restart, which a declare hook would miss.
+  R2b (runtime settings over attributes) planned in REPLICATION_PLANNING.md.
+  Next: R2 controller task + catalogue sync in fibril-server.
