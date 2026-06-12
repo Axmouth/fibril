@@ -12,9 +12,16 @@ topology through the real `fibrilctl` CLI over HTTP:
 ```bash
 scripts/cluster-tryout.sh              # 3 standalone servers, topology-checked, shut down
 scripts/cluster-tryout.sh --ganglion   # 3 servers forming ONE raft coordination cluster
+scripts/cluster-tryout.sh --staggered  # watch the cluster FORM: nodes join one by one
 scripts/cluster-tryout.sh --nodes 5 --ganglion
 scripts/cluster-tryout.sh --ganglion --keep   # leave it running and explore with fibrilctl
 ```
+
+`--staggered` narrates cluster formation in real time — node 1 alone has no quorum
+(`leader:null, healthy:false`), node 2's arrival triggers the election
+(`leader:1, healthy:true`), node 3 joins the running cluster. The `healthy` and
+`listener_serving` flags in the `raft` JSON block are the coordination health surfaces
+(see ganglion FAILURE_MODES §4b).
 
 `--ganglion` starts each server with an embedded raft coordinator (config:
 `[coordination] mode = "ganglion"`, here wired via `FIBRIL_COORDINATION_*` env vars). The

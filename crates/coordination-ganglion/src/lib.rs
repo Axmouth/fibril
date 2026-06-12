@@ -304,6 +304,20 @@ where
         .map(|_| ())
     }
 
+    /// Whether the watch-forwarder task is still running. A dead forwarder
+    /// means fibril-side reads go silently stale (FAILURE_MODES §5.4) —
+    /// include this in broker health checks.
+    pub fn forwarder_alive(&self) -> bool {
+        !self.forwarder.is_finished()
+    }
+
+    /// Coarse coordination health: the forwarder is alive and a raft leader
+    /// is currently known. False during elections/partitions (reads still
+    /// serve last-committed state; writes will fail until healthy).
+    pub fn coordination_healthy(&self) -> bool {
+        self.forwarder_alive() && self.node.topology().leader.is_some()
+    }
+
     /// Spawn a heartbeat loop registering `info` every `interval`.
     ///
     /// Failures are logged and retried: coordination outages must never kill

@@ -204,7 +204,8 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|error| {
                     anyhow::anyhow!("embedded coordinator failed to start: {error}")
                 })?;
-            _raft_server = Some(raft_server);
+            let raft_server = Arc::new(raft_server);
+            _raft_server = Some(raft_server.clone());
 
             if section.bootstrap {
                 let members: std::collections::BTreeMap<u64, BasicNode> = section
@@ -244,8 +245,20 @@ async fn main() -> anyhow::Result<()> {
             admin
                 .with_coordination(coordination)
                 .with_raft_topology(Arc::new(move || {
-                    serde_json::to_value(topology_source.raft_node().topology())
-                        .unwrap_or(serde_json::Value::Null)
+                    let mut value = serde_json::to_value(topology_source.raft_node().topology())
+                        .unwrap_or(serde_json::Value::Null);
+                    if let Some(object) = value.as_object_mut() {
+                        // Health surfaces (ganglion FAILURE_MODES §4b.1/§4b.5).
+                        object.insert(
+                            "healthy".into(),
+                            serde_json::Value::Bool(topology_source.coordination_healthy()),
+                        );
+                        object.insert(
+                            "listener_serving".into(),
+                            serde_json::Value::Bool(raft_server.is_serving()),
+                        );
+                    }
+                    value
                 }))
         }
     };

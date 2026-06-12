@@ -1449,3 +1449,18 @@ Tests needed before implementing transition:
   with epochs; auto-refreshes every 3s. Verified serving (HTTP 200, diagram
   mounted) against a real 3-process ganglion cluster with all brokers
   registered. COORDINATION_TRYOUT.md points at the page.
+- 2026-06-12: Failure-mode backlog worked down (user directive; replication
+  data plane next). Ganglion: six new failure tests (frame-decoder garbage
+  fuzz; lone-node startup/join-without-restart; corrupt snapshot + leftover
+  .tmp; TCP listener-drop/rebind partition; injected-WAL-failure fail-stop
+  with cluster survival; late-joiner snapshot transfer over TCP) - 63 green;
+  FAILURE_MODES.md statuses updated + operator runbook added. Fibril:
+  provider gained forwarder_alive() and coordination_healthy(); the topology
+  raft block now carries "healthy" and "listener_serving" flags (broker
+  health surfaces); cluster-tryout.sh gained --staggered (user ask: demo
+  nodes joining over time) - shows leader:null/healthy:false alone, election
+  on second node, third joining the running cluster, then the standard
+  shared-cluster assertions. Remaining open failure items: asymmetric
+  partition chaos, leader-on-minority end-to-end. NEXT: replication data
+  plane integration (controller assignments consumed by broker queue
+  ownership, Keratin epoch checks per the phasing).
