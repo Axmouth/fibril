@@ -697,6 +697,28 @@ keep serving on their epoch, only ownership *changes* pause when the metadata qu
 Escape hatch if metadata scale ever demands it: shard the metadata group by partition ranges
 behind the same `Coordination` trait — nothing decided now blocks that.
 
+### Design note: ownership granularity and multi-region placement (2026-06-12)
+
+Question raised: should ownership be finer than "a node owns a partition"? Clarification of
+the current model: the assignment unit already IS the individual queue partition
+`(topic, partition, group)` — there is no coupling of same-index partitions across queues, so
+per-queue regional placement is mechanically possible today. Finer than one queue partition
+(split ownership of a single partition) is rejected permanently: single-writer-per-partition
+underpins offset assignment, ordering, and epoch fencing; scale within a hot queue by adding
+partitions.
+
+What multi-region optimization actually needs — placement INPUTS, all additive:
+1. Region/zone labels flowing to the planner: ganglion `NodeInfo.labels` exists; fibril's
+   mapping currently drops labels and `PlacementInput` lacks them. Surface both.
+2. Per-queue placement hints (preferred region, zone-spread minimums): ride the `attributes`
+   KV (`placement/<queue>`) or a future parallel hints map next to the catalogue — both
+   serde-additive, no migration.
+3. Activity signals (per-queue publish rates via heartbeat labels or metrics rollup) so the
+   planner can follow real traffic.
+Then a `region-aware` policy joins the `PlacementStrategy` registry beside
+`deterministic`/`least-loaded`. Extends the existing zone/rack-diversity balancing inputs;
+not scheduled before R3–R5 land.
+
 ### Execution order and gates
 
 R1 (ganglion schema + catalogue) → R2 (controller task) → R3 (ownership switch + e2e test +
