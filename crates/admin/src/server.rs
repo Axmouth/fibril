@@ -60,6 +60,11 @@ pub struct AdminServer {
     pub sessions: AdminSessions,
     pub coordination: Option<Arc<dyn fibril_broker::Coordination>>,
     pub raft_topology: Option<Arc<RaftTopologyProvider>>,
+    /// Notified after a runtime-settings update is stored locally, so the
+    /// composition root can publish it cluster-wide (replicated settings).
+    pub settings_published: Option<
+        tokio::sync::mpsc::UnboundedSender<fibril_broker::runtime_settings::RuntimeSettings>,
+    >,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -93,6 +98,7 @@ impl AdminServer {
             sessions: AdminSessions::default(),
             coordination: None,
             raft_topology: None,
+            settings_published: None,
         }
     }
 
@@ -105,6 +111,17 @@ impl AdminServer {
     /// Attach the optional consensus-internals block for the topology endpoint.
     pub fn with_raft_topology(mut self, provider: Arc<RaftTopologyProvider>) -> Self {
         self.raft_topology = Some(provider);
+        self
+    }
+
+    /// Attach the cluster publish hook for stored runtime-settings updates.
+    pub fn with_settings_publisher(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<
+            fibril_broker::runtime_settings::RuntimeSettings,
+        >,
+    ) -> Self {
+        self.settings_published = Some(sender);
         self
     }
 

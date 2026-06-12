@@ -12,6 +12,7 @@ ganglion-openraft = { path = "../../../ganglion/crates/ganglion-openraft", featu
 tokio = { version = "1", default-features = false, features = ["rt", "sync", "macros", "time"] }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 fibril-broker = { path = "../broker", features = ["provider-contract-tests"] }

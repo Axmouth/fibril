@@ -49,6 +49,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Fail fast if a previous --keep cluster still holds our ports; testing
+# stale servers produces confusing results.
+for i in $(seq 1 "$NODES"); do
+  for port in $((BASE_BROKER_PORT + i)) $((BASE_ADMIN_PORT + i)) $((BASE_RAFT_PORT + i)); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      exec 3>&- 2>/dev/null || true
+      echo "FAIL: port $port already in use (old --keep cluster? pkill -f fibril-server)" >&2
+      exit 1
+    fi
+  done
+done
+
 echo "building fibril-server and fibrilctl..."
 cargo build --quiet -p fibril -p fibril-cli
 SERVER=target/debug/fibril-server
@@ -223,6 +235,32 @@ if [[ "$GANGLION" == true ]]; then
       fi
     done
   fi
+
+  # Replicated runtime settings: PUT on node 1 must become effective on all.
+  echo "updating runtime settings on node-1 and waiting for cluster sync..."
+  current="$(curl -sf "http://127.0.0.1:$((BASE_ADMIN_PORT + 1))/admin/api/runtime-settings")"
+  expected_version="$(echo "$current" | jq -r '.version')"
+  new_ttl="$(( $(echo "$current" | jq -r '.settings.delivery.inflight_ttl_ms') + 111 ))"
+  body="$(echo "$current" | jq -c --argjson v "$expected_version" --argjson ttl "$new_ttl" \
+    '{expected_version: $v, settings: (.settings | .delivery.inflight_ttl_ms = $ttl)}')"
+  curl -sf -X PUT -H 'content-type: application/json' -d "$body" \
+    "http://127.0.0.1:$((BASE_ADMIN_PORT + 1))/admin/api/runtime-settings" >/dev/null \
+    || { echo "FAIL: runtime settings PUT failed" >&2; FAILED=1; }
+  for i in $(seq 2 "$NODES"); do
+    synced=false
+    for attempt in $(seq 1 50); do
+      got="$(curl -sf "http://127.0.0.1:$((BASE_ADMIN_PORT + i))/admin/api/runtime-settings" \
+        | jq -r '.settings.delivery.inflight_ttl_ms')"
+      if [[ "$got" == "$new_ttl" ]]; then synced=true; break; fi
+      sleep 0.3
+    done
+    if [[ "$synced" == true ]]; then
+      echo "  node-$i runtime settings synced (inflight_ttl_ms=$new_ttl)"
+    else
+      echo "FAIL: node-$i never received the replicated settings" >&2
+      FAILED=1
+    fi
+  done
 
   for value in "${LEADERS[@]}"; do
     if [[ "$value" != "${LEADERS[0]}" ]]; then

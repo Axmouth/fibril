@@ -517,15 +517,23 @@ pub async fn update_runtime_settings(
         .update(request.expected_version, request.settings)
         .await
     {
-        Ok(RuntimeSettingsUpdateOutcome::Stored(snapshot)) => Ok((
-            StatusCode::OK,
-            Json(RuntimeSettingsResponse::new(
-                snapshot,
-                locks,
-                runtime_settings.load_issue(),
-            )),
-        )
-            .into_response()),
+        Ok(RuntimeSettingsUpdateOutcome::Stored(snapshot)) => {
+            // Cluster mode: hand the stored settings to the publish hook so
+            // they replicate to every broker (best effort; the sync loop
+            // reconciles either way).
+            if let Some(publisher) = &server.settings_published {
+                let _ = publisher.send(snapshot.settings.clone());
+            }
+            Ok((
+                StatusCode::OK,
+                Json(RuntimeSettingsResponse::new(
+                    snapshot,
+                    locks,
+                    runtime_settings.load_issue(),
+                )),
+            )
+                .into_response())
+        }
         Ok(RuntimeSettingsUpdateOutcome::Conflict(snapshot)) => Ok((
             StatusCode::CONFLICT,
             Json(RuntimeSettingsResponse::new(

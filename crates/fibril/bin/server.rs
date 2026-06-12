@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         }),
         Arc::new(engine.clone()),
         Some(broker_observability),
-        Some(runtime_settings),
+        Some(runtime_settings.clone()),
     );
 
     // Coordination provider selection (config: [coordination] mode = ...).
@@ -270,6 +270,21 @@ async fn main() -> anyhow::Result<()> {
                 std::time::Duration::from_millis(section.heartbeat_interval_ms),
             );
 
+            // Replicated runtime settings: apply cluster documents locally...
+            // (sync loop) and publish locally-stored updates cluster-wide
+            // (publisher task fed by the admin PUT hook).
+            coordination.spawn_runtime_settings_sync(runtime_settings.clone());
+            let (settings_tx, mut settings_rx) = tokio::sync::mpsc::unbounded_channel();
+            let settings_publisher = coordination.clone();
+            tokio::spawn(async move {
+                while let Some(settings) = settings_rx.recv().await {
+                    if let Err(error) = settings_publisher.publish_runtime_settings(&settings).await
+                    {
+                        tracing::warn!(%error, "cluster runtime-settings publish deferred");
+                    }
+                }
+            });
+
             // Embedded controller: the raft leader assigns catalogue queues
             // across heartbeat-live brokers; standbys idle.
             let (_controller, controller_status) = coordination.spawn_controller(
@@ -307,6 +322,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     value
                 }))
+                .with_settings_publisher(settings_tx)
         }
     };
 

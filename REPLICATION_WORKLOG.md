@@ -1519,3 +1519,23 @@ Tests needed before implementing transition:
   declares a queue via the real CLI and asserts the controller assignment
   (owner/follower/epoch) is identical on every node - passing. Next: R2b
   (runtime settings over attributes), then R3 (ownership switch).
+- 2026-06-12: R2b done - runtime settings are cluster-replicated (user
+  requirement). Ganglion grew CompareAndSetAttribute (deterministic in-apply
+  CAS; rejection AttributeMismatch carries the actual value) so concurrent
+  publishers serialize; WireFormat::from_env deleted (settings-discipline
+  audit: no env reads outside the config crate anywhere; legacy replay-profile
+  env constructors remain as explicitly named opt-ins on the legacy node).
+  Provider: ClusterRuntimeSettings document (cluster_version independent of
+  per-node store versions) under the fibril/runtime_settings attribute;
+  publish_runtime_settings (bounded CAS loop); spawn_runtime_settings_sync
+  (applies documents via the manager's versioned update; equal-settings
+  short-circuit so the publishing node does not double-store; locked-field
+  rejections log loudly and are marked seen). forward_command now maps wire
+  rejections to errors on the forwarded path (parity with the local path).
+  Admin PUT hook: settings_published channel on AdminServer feeds a publisher
+  task in the composition root. Gate test: update stored on manager A,
+  published, sync loop converges manager B; second publish bumps the cluster
+  version via CAS. cluster-tryout --ganglion now PUTs settings on node-1 and
+  asserts nodes 2 and 3 converge - passing. Tryout gained a fail-fast port
+  guard after a debugging session was poisoned by a stale --keep cluster
+  answering on the test ports. Next: R3 - the ownership switch.

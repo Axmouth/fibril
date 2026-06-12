@@ -18,12 +18,25 @@ use ganglion_openraft::openraft::storage::RaftLogStorage;
 use ganglion_openraft::openraft::RaftNetworkFactory;
 use ganglion_openraft::{
     client_write_remote, GanglionLogStore, GanglionRaftConfig, InProcessRouter,
-    MetadataRaftCommand, MetadataRaftResponse, OpenraftAdapterError, RaftMetadataNode, WireFormat,
+    MetadataRaftCommand, MetadataRaftResponse, MetadataRejection, OpenraftAdapterError,
+    RaftMetadataNode, WireFormat,
 };
 use tokio::sync::watch;
 
 /// Namespace tag used for fibril queues inside ganglion resource identities.
 const QUEUE_NAMESPACE: &str = "fibril/queue";
+
+/// Attribute key carrying the replicated runtime-settings document.
+pub const RUNTIME_SETTINGS_ATTRIBUTE: &str = "fibril/runtime_settings";
+
+/// Replicated runtime-settings document: the cluster truth. `cluster_version`
+/// is independent of each node's local store version (those differ per node);
+/// CAS on the serialized document makes concurrent publishers race-safe.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ClusterRuntimeSettings {
+    pub cluster_version: u64,
+    pub settings: fibril_broker::runtime_settings::RuntimeSettings,
+}
 
 /// Node label carrying the broker's last heartbeat (unix milliseconds, broker
 /// clock). Liveness compares against the controller's clock — TTLs must
@@ -392,18 +405,133 @@ where
         &self,
         command: MetadataRaftCommand,
     ) -> Result<(), OpenraftAdapterError> {
+        self.forward_command(command).await.map(|_| ())
+    }
+
+    /// Leader-or-forwarded command with state-machine rejections mapped to
+    /// errors on both paths (the wire returns rejections in-band).
+    async fn forward_command(
+        &self,
+        command: MetadataRaftCommand,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
         if self.node.is_leader().await {
-            self.node.submit_merge(command).await?;
-            return Ok(());
+            return self.node.submit_merge(command).await;
         }
         let topology = self.node.topology();
         let leader_addr = topology
             .leader
             .and_then(|leader| topology.nodes.get(&leader).cloned())
             .ok_or(OpenraftAdapterError::NotLeader)?;
-        client_write_remote(&leader_addr, command, self.wire_format)
-            .await
-            .map(|_| ())
+        let response = client_write_remote(&leader_addr, command, self.wire_format).await?;
+        match response.rejection.clone() {
+            None => Ok(response),
+            Some(MetadataRejection::StaleGeneration) => Err(OpenraftAdapterError::StaleGeneration),
+            Some(MetadataRejection::GenerationMismatch { expected, actual }) => {
+                Err(OpenraftAdapterError::GenerationMismatch { expected, actual })
+            }
+            Some(MetadataRejection::AttributeMismatch { key, actual }) => {
+                Err(OpenraftAdapterError::AttributeMismatch { key, actual })
+            }
+        }
+    }
+
+    /// Publish runtime settings as the cluster truth (bounded CAS loop:
+    /// concurrent publishers serialize; last committed wins everywhere).
+    /// Returns the new cluster version.
+    pub async fn publish_runtime_settings(
+        &self,
+        settings: &fibril_broker::runtime_settings::RuntimeSettings,
+    ) -> Result<u64, OpenraftAdapterError> {
+        for _ in 0..8 {
+            let current_raw = self.cluster_attribute(RUNTIME_SETTINGS_ATTRIBUTE);
+            let cluster_version = current_raw
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<ClusterRuntimeSettings>(raw).ok())
+                .map(|doc| doc.cluster_version)
+                .unwrap_or(0);
+            let document = ClusterRuntimeSettings {
+                cluster_version: cluster_version + 1,
+                settings: settings.clone(),
+            };
+            let value = serde_json::to_string(&document)
+                .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: RUNTIME_SETTINGS_ATTRIBUTE.to_string(),
+                    expected: current_raw,
+                    value,
+                })
+                .await
+            {
+                Ok(_) => return Ok(document.cluster_version),
+                Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OpenraftAdapterError::Storage(
+            "runtime settings publish lost the CAS race repeatedly".to_string(),
+        ))
+    }
+
+    /// Spawn the settings-sync loop: applies replicated runtime-settings
+    /// documents to the local manager whenever the cluster document advances.
+    /// The local Stroma store stays the node-local cache; the attribute is the
+    /// cluster truth. Locked-field rejections are logged loudly (that node
+    /// diverges deliberately via its boot locks).
+    pub fn spawn_runtime_settings_sync(
+        self: &std::sync::Arc<Self>,
+        manager: std::sync::Arc<fibril_broker::runtime_settings::RuntimeSettingsManager>,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        LS: 'static,
+        NF: 'static,
+    {
+        let provider = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            let mut watch = provider.node.watch_committed();
+            let mut last_applied_cluster_version = 0u64;
+            loop {
+                let document = watch
+                    .borrow_and_update()
+                    .attributes
+                    .get(RUNTIME_SETTINGS_ATTRIBUTE)
+                    .and_then(|raw| serde_json::from_str::<ClusterRuntimeSettings>(raw).ok());
+
+                if let Some(document) = document {
+                    if document.cluster_version > last_applied_cluster_version {
+                        let current = manager.current();
+                        if current.settings == document.settings {
+                            // Already effective (e.g. this node published it).
+                            last_applied_cluster_version = document.cluster_version;
+                        } else {
+                            match manager
+                                .update(current.version, document.settings.clone())
+                                .await
+                            {
+                                Ok(_) => {
+                                    last_applied_cluster_version = document.cluster_version;
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        cluster_version = document.cluster_version,
+                                        "replicated runtime settings rejected locally"
+                                    );
+                                    // Do not retry a hard rejection (locks);
+                                    // mark seen to avoid a hot loop.
+                                    last_applied_cluster_version = document.cluster_version;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if watch.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
     }
 
     /// Spawn the embedded controller loop: leader-gated placement over the
@@ -1168,6 +1296,100 @@ mod tests {
         .expect("controller moves ownership off the dead broker");
 
         controller.abort();
+        provider.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    /// R2b: a runtime-settings update published on one broker becomes
+    /// effective on another through the replicated attribute + sync loop,
+    /// and concurrent publishers serialize through the attribute CAS.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_settings_replicate_across_brokers() {
+        use fibril_broker::queue_engine::{
+            KeratinConfig, SnapshotConfig, StromaEngine, StromaKeratinConfig,
+        };
+        use fibril_broker::runtime_settings::{
+            RuntimeSettings, RuntimeSettingsLocks, RuntimeSettingsManager,
+        };
+
+        async fn manager(tag: &str) -> std::sync::Arc<RuntimeSettingsManager> {
+            let root = std::env::temp_dir().join(format!(
+                "fibril-settings-sync-{tag}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).expect("dir");
+            let engine = StromaEngine::open(
+                &root,
+                StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+                SnapshotConfig::default(),
+            )
+            .await
+            .expect("engine");
+            std::sync::Arc::new(
+                RuntimeSettingsManager::load_from_stroma_engine(
+                    &engine,
+                    RuntimeSettings::default(),
+                    RuntimeSettingsLocks::default(),
+                )
+                .await
+                .expect("manager"),
+            )
+        }
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = std::sync::Arc::new(GanglionCoordination::new("broker-a", raft_node));
+
+        let manager_a = manager("a").await;
+        let manager_b = manager("b").await;
+        provider.spawn_runtime_settings_sync(manager_b.clone());
+
+        // Broker A stores locally (versioned update), then publishes.
+        let mut settings = manager_a.current().settings.clone();
+        settings.delivery.inflight_ttl_ms = settings.delivery.inflight_ttl_ms.saturating_add(7);
+        let stored = manager_a
+            .update(manager_a.current().version, settings.clone())
+            .await
+            .expect("local update");
+        assert!(matches!(
+            stored,
+            fibril_broker::runtime_settings::RuntimeSettingsUpdateOutcome::Stored(_)
+        ));
+        let version = provider
+            .publish_runtime_settings(&settings)
+            .await
+            .expect("publish");
+        assert_eq!(version, 1);
+
+        // Broker B's manager converges via the sync loop.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while manager_b.current().settings != settings {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .expect("replicated settings become effective on broker B");
+
+        // Second publish bumps the cluster version (CAS over the previous doc).
+        let version = provider
+            .publish_runtime_settings(&settings)
+            .await
+            .expect("republish");
+        assert_eq!(version, 2);
+
         provider.raft_node().shutdown().await.expect("shutdown");
     }
 

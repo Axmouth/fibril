@@ -1183,6 +1183,7 @@ dependencies = [
  "ganglion-core",
  "ganglion-openraft",
  "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
