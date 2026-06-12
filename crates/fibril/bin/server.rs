@@ -188,14 +188,22 @@ async fn main() -> anyhow::Result<()> {
 
             let raft_config = ganglion_openraft::default_raft_config()
                 .map_err(|error| anyhow::anyhow!("raft config: {error}"))?;
-            let (node, raft_server) = ganglion_openraft::RaftMetadataNode::start_durable_tcp(
-                section.raft_node_id,
-                raft_config,
-                section.listen,
-                &data_dir,
-            )
-            .await
-            .map_err(|error| anyhow::anyhow!("embedded coordinator failed to start: {error}"))?;
+            let wire_format: ganglion_openraft::WireFormat = section
+                .wire_format
+                .parse()
+                .map_err(|error| anyhow::anyhow!("coordination.ganglion.wire_format: {error}"))?;
+            let (node, raft_server) =
+                ganglion_openraft::RaftMetadataNode::start_durable_tcp_with_format(
+                    section.raft_node_id,
+                    raft_config,
+                    section.listen,
+                    &data_dir,
+                    wire_format,
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("embedded coordinator failed to start: {error}")
+                })?;
             _raft_server = Some(raft_server);
 
             if section.bootstrap {

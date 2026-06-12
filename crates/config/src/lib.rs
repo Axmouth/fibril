@@ -162,6 +162,9 @@ impl ServerConfig {
             self.coordination.ganglion.bootstrap =
                 parse_env("FIBRIL_COORDINATION_BOOTSTRAP", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_WIRE_FORMAT")? {
+            self.coordination.ganglion.wire_format = value;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_PEERS")? {
             // Comma-separated "raft_id=host:port" pairs.
             let mut peers = std::collections::BTreeMap::new();
@@ -477,6 +480,9 @@ pub struct GanglionCoordinationSection {
     pub bootstrap: bool,
     /// Raft WAL + snapshot directory. Empty = `<server.data_dir>/coordination`.
     pub data_dir: PathBuf,
+    /// Outbound raft frame encoding: `msgpack` (default) or `json` (debugging).
+    /// Inbound frames are self-describing, so mixed clusters interoperate.
+    pub wire_format: String,
 }
 
 impl Default for GanglionCoordinationSection {
@@ -487,6 +493,7 @@ impl Default for GanglionCoordinationSection {
             peers: std::collections::BTreeMap::new(),
             bootstrap: false,
             data_dir: PathBuf::new(),
+            wire_format: "msgpack".into(),
         }
     }
 }
