@@ -15,9 +15,9 @@ pub use stroma_core::{
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KeratinAppendCompletion,
     KeratinConfig, Message, MessageContentType, MessageHeaders, MessageInspectionPage,
     MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
-    QueueInspectionState, QueuePromotionOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
-    ReplicatedQueueApplyOutcome, SnapshotConfig, Stroma, StromaError, StromaEvent,
-    StromaKeratinConfig,
+    QueueInspectionState, QueuePromotionOutcome, ReplicatedAppendOutcome, ReplicatedEventBatch,
+    ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SnapshotConfig, Stroma, StromaError,
+    StromaEvent, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -387,15 +387,55 @@ impl StromaEngine {
             .await
     }
 
-    /// Failover promotion: accept the follower's own tails (epoch-fenced path).
+    /// Failover promotion: accept the follower's own tails, fenced at the
+    /// assignment epoch (persisted before serving).
     pub async fn promote_queue_follower_to_local_tail(
         &self,
         tp: &str,
         part: u32,
         group: Option<&str>,
+        epoch: u64,
     ) -> Result<QueuePromotionOutcome, StromaError> {
         self.inner
-            .promote_queue_follower_to_local_tail(tp, part, group)
+            .promote_queue_follower_to_local_tail(tp, part, group, epoch)
+            .await
+    }
+
+    /// Fence both queue logs at the assignment epoch (persisted, monotonic).
+    pub async fn advance_queue_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<u64, StromaError> {
+        self.inner.advance_queue_epoch(tp, part, group, epoch).await
+    }
+
+    /// `become_queue_owner` fenced at the assignment epoch.
+    pub async fn become_queue_owner_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .become_queue_owner_with_epoch(tp, part, group, epoch)
+            .await
+    }
+
+    /// `become_queue_follower` fenced at the assignment epoch: stale-epoch
+    /// owners' replicated batches are rejected from here on.
+    pub async fn become_queue_follower_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .become_queue_follower_with_epoch(tp, part, group, epoch)
             .await
     }
 

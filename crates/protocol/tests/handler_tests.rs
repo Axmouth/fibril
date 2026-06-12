@@ -1857,6 +1857,13 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         .clone();
     assert_eq!(assignment.owner, "a-owner");
     assert_eq!(assignment.followers, vec!["b-follower".to_string()]);
+    // The owner broker has no watcher in this harness; apply what its
+    // watcher's BecomeOwner would: fence its logs at the assignment epoch so
+    // its replication reads carry the fenced epoch.
+    owner_broker
+        .advance_replication_epoch(topic, 0, None, assignment.epoch)
+        .await
+        .unwrap();
 
     // The watcher must start the worker and replicate to caught-up.
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -2009,6 +2016,12 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         .clone();
     assert_eq!(first.owner, "a-owner");
     assert_eq!(first.epoch, 1);
+    // Watcher-less harness owner: fence at the assignment epoch, as its own
+    // watcher's BecomeOwner would in production.
+    owner_broker
+        .advance_replication_epoch(topic, 0, None, first.epoch)
+        .await
+        .unwrap();
 
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

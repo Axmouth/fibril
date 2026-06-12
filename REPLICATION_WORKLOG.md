@@ -1595,3 +1595,27 @@ Tests needed before implementing transition:
   retry/escalation path, generation-race-under-partition chaos, follower
   restart mid-checkpoint-transfer. Also noted in planning (user): admin UI
   node management + programmatic scale-up/down flows as post-R6 QoL.
+- 2026-06-13: Data-plane epoch fencing wired (the split-brain last line).
+  Stroma grew advance_queue_epoch (both logs, persisted in the Keratin
+  manifest BEFORE use, monotonic), become_queue_owner_with_epoch /
+  become_queue_follower_with_epoch, and promote_queue_follower_to_local_tail
+  now takes the assignment epoch and persists it before serving as owner.
+  Broker transition arms thread transition.next.epoch into every role change:
+  BecomeOwner and PromoteFollowerToOwner fence as owner; BecomeFollower and
+  DemoteOwnerToFollower fence the follower logs so stale-epoch replicated
+  batches are rejected at the storage layer (Keratin already carried epochs
+  in batches and StaleEpoch outcomes - the missing link was role transitions
+  never advancing the log epochs from the assignment). New broker surface
+  advance_replication_epoch (also the substrate for future manual-fence
+  tooling). Gate test epoch_fenced_follower_rejects_stale_owner_batches: a
+  follower fenced at epoch 2 rejects an epoch-0 owner's batches with
+  StaleEpoch{current:2, attempted:0} on BOTH logs and applies the identical
+  records once the owner advances - the planning doc's "even if coordination
+  misbehaves" defense is now real. The fence immediately caught both
+  coordination e2e tests using watcher-less harness owners (epoch 0 reads
+  vs fenced followers) - fixed by applying what the owner's watcher does in
+  production (advance to the assignment epoch). One watcher test updated to
+  poll for the worker instead of insta-asserting after materialization
+  (epoch persist materializes the queue earlier in the transition). All
+  suites green: broker 122, protocol 45, provider 9, stroma 162;
+  cluster-tryout --ganglion passing.

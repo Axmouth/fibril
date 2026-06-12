@@ -746,6 +746,94 @@ async fn refresh_follower_keeps_replication_worker_progress() {
     follower.shutdown().await;
 }
 
+/// Data-plane epoch fencing (the split-brain last line): a follower fenced at
+/// a newer assignment epoch rejects replicated batches from an older-epoch
+/// (stale) owner AT THE STORAGE LAYER; once the owner advances to the fenced
+/// epoch, the same records apply cleanly.
+#[tokio::test]
+async fn epoch_fenced_follower_rejects_stale_owner_batches() {
+    use fibril_broker::queue_engine::ReplicatedAppendOutcome;
+
+    let topic = "epoch-fence";
+
+    // Owner with one committed message; its logs are still at epoch 0.
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (publisher, _confirms) = owner.get_publisher(topic, &None).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"fenced-payload".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+    let stale_records = owner
+        .read_owner_replication_records(topic, 0, None, 0, 0, 10, 10)
+        .await
+        .unwrap();
+
+    // Follower fenced at assignment epoch 2 (epoch persisted before use).
+    let (follower, _follower_dir) = open_test_broker().await;
+    follower
+        .become_replication_follower_with_epoch(topic, 0, None, 2)
+        .await
+        .unwrap();
+
+    // Stale owner's batches (epoch 0) must be rejected, nothing applied.
+    let outcome = follower
+        .apply_follower_replication_records(topic, 0, None, stale_records)
+        .await
+        .unwrap();
+    let BrokerFollowerReplicationApply::Applied(apply) = outcome else {
+        panic!("expected apply outcome, got {outcome:?}");
+    };
+    assert!(
+        matches!(
+            apply.message_log,
+            Some(ReplicatedAppendOutcome::StaleEpoch {
+                current_epoch: 2,
+                attempted_epoch: 0,
+            })
+        ),
+        "stale-epoch message batch must be rejected: {apply:?}"
+    );
+    assert!(
+        matches!(
+            apply.event_log,
+            Some(ReplicatedAppendOutcome::StaleEpoch { .. })
+        ),
+        "stale-epoch event batch must be rejected: {apply:?}"
+    );
+
+    // The owner reaches the fenced epoch (e.g. it holds the new assignment):
+    // identical records now apply.
+    owner
+        .advance_replication_epoch(topic, 0, None, 2)
+        .await
+        .unwrap();
+    let fresh_records = owner
+        .read_owner_replication_records(topic, 0, None, 0, 0, 10, 10)
+        .await
+        .unwrap();
+    let outcome = follower
+        .apply_follower_replication_records(topic, 0, None, fresh_records)
+        .await
+        .unwrap();
+    let BrokerFollowerReplicationApply::Applied(apply) = outcome else {
+        panic!("expected apply outcome, got {outcome:?}");
+    };
+    assert!(
+        matches!(apply.message_log, Some(ReplicatedAppendOutcome::Applied(_))),
+        "fenced-epoch batch must apply: {apply:?}"
+    );
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
 #[tokio::test]
 async fn assignment_watcher_applies_snapshot_update_to_follower_role() {
     let coordination = Arc::new(StaticCoordination::new(
@@ -766,17 +854,20 @@ async fn assignment_watcher_applies_snapshot_update_to_follower_role() {
         2,
     ));
 
+    // Epoch fencing materializes the queue early in the transition, so wait
+    // for the worker (the end of the transition), not just materialization.
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if broker.is_queue_materialized("watched-followed", Some("workers")) {
+            if broker.is_queue_materialized("watched-followed", Some("workers"))
+                && broker.has_follower_replication_worker("watched-followed", 0, Some("workers"))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("assignment watcher should materialize local follower queue");
-    assert!(broker.has_follower_replication_worker("watched-followed", 0, Some("workers")));
+    .expect("assignment watcher should materialize the follower queue and start its worker");
 
     let err = broker
         .engine()

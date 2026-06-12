@@ -2911,6 +2911,15 @@ impl Broker<StromaEngine> {
     ) -> Result<BrokerAssignmentTransitionApply, BrokerError> {
         let topic = transition.queue.topic.to_string();
         let group = transition.queue.group.as_deref();
+        // Fencing epoch from the assignment driving this transition. Role
+        // changes persist it into the queue logs BEFORE role-specific work
+        // (epoch-before-use), so stale-epoch replication is rejected at the
+        // storage layer from that point on.
+        let assignment_epoch = transition
+            .next
+            .as_ref()
+            .map(|assignment| assignment.epoch)
+            .unwrap_or(0);
         match transition.intent {
             LocalAssignmentIntent::Noop => Ok(BrokerAssignmentTransitionApply::Noop(
                 LocalAssignmentIntent::Noop,
@@ -2924,7 +2933,12 @@ impl Broker<StromaEngine> {
                     .is_materialized(&topic, transition.queue.partition, group)
                 {
                     self.engine
-                        .become_queue_owner(&topic, transition.queue.partition, group)
+                        .become_queue_owner_with_epoch(
+                            &topic,
+                            transition.queue.partition,
+                            group,
+                            assignment_epoch,
+                        )
                         .await?;
                     Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
                 } else {
@@ -2932,8 +2946,13 @@ impl Broker<StromaEngine> {
                 }
             }
             LocalAssignmentIntent::BecomeFollower => {
-                self.become_replication_follower(&topic, transition.queue.partition, group)
-                    .await?;
+                self.become_replication_follower_with_epoch(
+                    &topic,
+                    transition.queue.partition,
+                    group,
+                    assignment_epoch,
+                )
+                .await?;
                 self.ensure_follower_replication_worker(&transition.queue);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
@@ -2948,6 +2967,17 @@ impl Broker<StromaEngine> {
                     .await?;
                 self.engine
                     .demote_queue_owner_to_follower(&topic, transition.queue.partition, group)
+                    .await?;
+                // The demoted queue follows under the NEW assignment's epoch:
+                // stale-epoch traffic (its own leftovers or a stale peer) is
+                // fenced at the log layer from here on.
+                self.engine
+                    .advance_queue_epoch(
+                        &topic,
+                        transition.queue.partition,
+                        group,
+                        assignment_epoch,
+                    )
                     .await?;
                 self.ensure_follower_replication_worker(&transition.queue);
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
@@ -2988,7 +3018,12 @@ impl Broker<StromaEngine> {
                     .await;
                 match self
                     .engine
-                    .promote_queue_follower_to_local_tail(&topic, transition.queue.partition, group)
+                    .promote_queue_follower_to_local_tail(
+                        &topic,
+                        transition.queue.partition,
+                        group,
+                        assignment_epoch,
+                    )
                     .await?
                 {
                     QueuePromotionOutcome::Promoted {
@@ -3073,6 +3108,35 @@ impl Broker<StromaEngine> {
     ) -> Result<(), BrokerError> {
         self.engine
             .become_queue_follower(topic, partition, group)
+            .await?;
+        Ok(())
+    }
+
+    /// Fence both queue logs at `epoch` (persisted, monotonic). Also the
+    /// substrate for future manual-fence operator tooling.
+    pub async fn advance_replication_epoch(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<u64, BrokerError> {
+        self.engine
+            .advance_queue_epoch(topic, partition, group, epoch)
+            .await
+            .map_err(BrokerError::from)
+    }
+
+    /// `become_replication_follower` fenced at the assignment epoch.
+    pub async fn become_replication_follower_with_epoch(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), BrokerError> {
+        self.engine
+            .become_queue_follower_with_epoch(topic, partition, group, epoch)
             .await?;
         Ok(())
     }
@@ -3221,9 +3285,10 @@ impl Broker<StromaEngine> {
         topic: &str,
         partition: LogId,
         group: Option<&str>,
+        epoch: u64,
     ) -> Result<QueuePromotionOutcome, BrokerError> {
         self.engine
-            .promote_queue_follower_to_local_tail(topic, partition, group)
+            .promote_queue_follower_to_local_tail(topic, partition, group, epoch)
             .await
             .map_err(BrokerError::from)
     }
