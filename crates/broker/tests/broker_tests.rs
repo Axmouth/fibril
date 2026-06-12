@@ -812,7 +812,10 @@ async fn assignment_transition_apply_does_not_materialize_new_owner_queue() {
 }
 
 #[tokio::test]
-async fn assignment_transition_apply_defers_follower_promotion_without_offsets() {
+async fn assignment_transition_apply_keeps_unmaterialized_promotion_cold() {
+    // R4 semantics: materialized followers promote at local tails (covered by
+    // the protocol-level failover test); a never-materialized queue has no
+    // follower state to promote and must stay cold until real traffic.
     let (broker, _dir) = open_test_broker().await;
     let transition = assignment_transition(
         "transition-promote",
@@ -828,10 +831,7 @@ async fn assignment_transition_apply_defers_follower_promotion_without_offsets()
 
     assert_eq!(
         outcome,
-        BrokerAssignmentTransitionApply::Deferred {
-            intent: LocalAssignmentIntent::PromoteFollowerToOwner,
-            reason: "promotion requires verified follower catch-up offsets",
-        }
+        BrokerAssignmentTransitionApply::Noop(LocalAssignmentIntent::PromoteFollowerToOwner)
     );
     assert!(!broker.is_queue_materialized("transition-promote", Some("workers")));
     broker.shutdown().await;

@@ -1902,6 +1902,207 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     server_task.await.unwrap().unwrap();
 }
 
+/// R4 gate: owner death drives the full failover choreography with no manual
+/// steps — TTL drops the owner from the live set, the controller reassigns
+/// with an epoch bump, and the follower's supervised watcher drains its
+/// worker, promotes at local tails, and starts serving as owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
+    use fibril_coordination_ganglion::GanglionCoordination;
+    use ganglion_openraft::{InProcessRouter, RaftMetadataNode, default_raft_config};
+
+    let topic = "replication.coordination.failover";
+
+    let router = InProcessRouter::new();
+    let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+        .await
+        .unwrap();
+    let mut members = std::collections::BTreeMap::new();
+    members.insert(
+        1u64,
+        ganglion_openraft::openraft::BasicNode::new("coordinator"),
+    );
+    raft_node.initialize(members).await.unwrap();
+    raft_node
+        .wait_for_leader(1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let coordination = Arc::new(GanglionCoordination::new("b-follower", raft_node));
+
+    // Owner broker with two committed messages, serving replication over TCP.
+    let (owner_broker, owner_dir) = open_test_broker().await;
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, &None).await.unwrap();
+    for payload in [b"failover-first".as_slice(), b"failover-second".as_slice()] {
+        let reply = publisher
+            .publish(
+                payload.to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+    let owner_checkpoint = owner_broker
+        .export_owner_state_checkpoint(topic, 0, None)
+        .await
+        .unwrap();
+    let (owner_addr, server_task, _owner_dir, owner_broker) = start_protocol_listener_for_broker(
+        ConnectionSettings::new(Some(60)),
+        owner_broker,
+        owner_dir,
+        None,
+    )
+    .await;
+
+    let node = |id: &str, addr: std::net::SocketAddr| fibril_broker::coordination::NodeInfo {
+        node_id: id.to_string(),
+        broker_addr: addr,
+        admin_addr: None,
+    };
+    coordination
+        .register_self(&node("a-owner", owner_addr))
+        .await
+        .unwrap();
+    coordination
+        .register_self(&node("b-follower", "127.0.0.1:1".parse().unwrap()))
+        .await
+        .unwrap();
+    coordination
+        .register_queue(&QueueIdentity::new(topic, 0, None))
+        .await
+        .unwrap();
+
+    let (follower_broker, _follower_dir) = open_test_broker().await;
+    let resolver = Arc::new(
+        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::new(
+            coordination.clone(),
+        ),
+    );
+    follower_broker.spawn_assignment_watcher_with_follower_replication(
+        coordination.clone(),
+        resolver,
+        FollowerReplicationWorkerConfig {
+            caught_up_poll_ms: 60_000,
+            ..Default::default()
+        },
+    );
+
+    // Phase 1: normal assignment; the follower replicates to caught-up.
+    let live = coordination.live_nodes(Duration::from_secs(30));
+    let committed = coordination
+        .control_iteration(
+            &fibril_broker::coordination::DeterministicPartitionPlacement,
+            &coordination.registered_queues(),
+            1,
+            &live,
+            8,
+        )
+        .await
+        .unwrap()
+        .expect("leader iteration");
+    let first = committed
+        .assignment_for(topic, 0, None)
+        .expect("assigned")
+        .clone();
+    assert_eq!(first.owner, "a-owner");
+    assert_eq!(first.epoch, 1);
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state = follower_broker
+                .follower_replication_worker_snapshot(topic, 0, None)
+                .await;
+            if state
+                .as_ref()
+                .is_some_and(|state| state.status == FollowerReplicationWorkerStatus::CaughtUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("follower catches up before the failover");
+
+    // Phase 2: the owner dies — only the follower stays in the live set.
+    let mut live_after_death = std::collections::HashMap::new();
+    live_after_death.insert(
+        "b-follower".to_string(),
+        node("b-follower", "127.0.0.1:1".parse().unwrap()),
+    );
+    let committed = coordination
+        .control_iteration(
+            &fibril_broker::coordination::DeterministicPartitionPlacement,
+            &coordination.registered_queues(),
+            1,
+            &live_after_death,
+            8,
+        )
+        .await
+        .unwrap()
+        .expect("failover iteration");
+    let moved = committed
+        .assignment_for(topic, 0, None)
+        .expect("still assigned")
+        .clone();
+    assert_eq!(moved.owner, "b-follower", "ownership must move");
+    assert_eq!(moved.epoch, first.epoch + 1, "the move must fence");
+
+    // Phase 3: the watcher promotes the follower at its local tails and the
+    // broker serves as owner — verified by a successful new publish.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if fibril_broker::broker::QueueOwnership::owns_queue(
+                coordination.as_ref(),
+                topic,
+                0,
+                None,
+            ) {
+                if let Ok((publisher, _confirms)) =
+                    follower_broker.get_publisher(topic, &None).await
+                {
+                    let reply = publisher
+                        .publish(
+                            b"post-failover".to_vec(),
+                            unix_millis(),
+                            unix_millis(),
+                            None,
+                            Default::default(),
+                        )
+                        .await;
+                    if let Ok(reply) = reply {
+                        if reply.await.unwrap().is_ok() {
+                            break;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("promoted follower must accept owner traffic after failover");
+
+    // The promoted log continued from exactly the replicated tails.
+    let promoted_checkpoint = follower_broker
+        .export_owner_state_checkpoint(topic, 0, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        promoted_checkpoint.message_next_offset,
+        owner_checkpoint.message_next_offset + 1,
+        "exactly the replicated history plus the post-failover publish"
+    );
+
+    coordination.raft_node().shutdown().await.unwrap();
+    follower_broker.shutdown().await;
+    owner_broker.shutdown().await;
+    server_task.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     let topic = "replication.resolver.loop";

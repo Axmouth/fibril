@@ -1556,3 +1556,22 @@ Tests needed before implementing transition:
   cluster-tryout passes in both modes. Next: R4 failover choreography
   (TTL-driven owner loss -> epoch+1 reassignment -> drain -> checked
   promotion with progress-aware candidate selection) + adversarial suite.
+- 2026-06-12: R4 core done - automatic failover works end to end. Stroma
+  (keratin repo) grew promote_queue_follower_to_local_tail: failover-path
+  promotion at the follower's OWN tails (the dead owner cannot supply
+  expected tails; the bumped assignment epoch fences its unreplicated
+  suffix), keeping the events-applied gate (every locally recorded event must
+  be applied before serving). The broker's PromoteFollowerToOwner transition
+  arm is no longer deferred: it drains the follower worker (no promotion
+  racing a mid-batch ingest), promotes at local tails, and on refusal leaves
+  the queue a follower with a loud warn (explicit refusal over optimism).
+  Never-materialized queues stay cold (Noop, same rule as BecomeOwner) - the
+  old "defers without offsets" test pinned the now-replaced deferred behavior
+  and was updated to pin cold-stays-cold instead. R4 gate test (first-run
+  pass, stable x3): owner dies (drops from live set) -> controller reassigns
+  with epoch+1 -> the follower's supervised watcher drains + promotes -> the
+  promoted broker ACCEPTS A PUBLISH as owner, and its message log continues
+  at exactly replicated-history+1 (nothing lost, nothing duplicated). Full
+  sweeps green (broker 121, protocol 44). Remaining R4 items: progress-aware
+  candidate selection via heartbeat tails (matters only for >1 follower),
+  old-owner-returns demotion e2e, and the rest of the adversarial list.

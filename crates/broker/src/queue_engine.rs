@@ -387,6 +387,18 @@ impl StromaEngine {
             .await
     }
 
+    /// Failover promotion: accept the follower's own tails (epoch-fenced path).
+    pub async fn promote_queue_follower_to_local_tail(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<QueuePromotionOutcome, StromaError> {
+        self.inner
+            .promote_queue_follower_to_local_tail(tp, part, group)
+            .await
+    }
+
     async fn replay_dead_letter(
         &self,
         dlq_tp: &str,

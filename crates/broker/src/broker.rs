@@ -2967,16 +2967,60 @@ impl Broker<StromaEngine> {
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::PromoteFollowerToOwner => {
-                tracing::debug!(
-                    topic,
-                    partition = transition.queue.partition,
-                    group = ?group,
-                    "deferring follower promotion until catch-up offsets are known"
-                );
-                Ok(BrokerAssignmentTransitionApply::Deferred {
-                    intent: transition.intent,
-                    reason: "promotion requires verified follower catch-up offsets",
-                })
+                // Never-materialized queues have no local follower state to
+                // promote: stay cold, become owner lazily on first traffic
+                // (same rule as BecomeOwner).
+                if !self
+                    .engine
+                    .is_materialized(&topic, transition.queue.partition, group)
+                {
+                    return Ok(BrokerAssignmentTransitionApply::Noop(transition.intent));
+                }
+                // Failover promotion (promote-to-local-tail under the epoch
+                // fence): drain the follower worker first so promotion never
+                // races a mid-batch replicated ingest, then promote at this
+                // follower's own tails. The dead owner cannot supply expected
+                // tails; the bumped assignment epoch fences its unreplicated
+                // suffix. Refusals (unapplied local events) leave the queue a
+                // follower — explicit refusal over optimistic serving.
+                let stopped_worker = self
+                    .stop_follower_replication_worker(&transition.queue)
+                    .await;
+                match self
+                    .engine
+                    .promote_queue_follower_to_local_tail(&topic, transition.queue.partition, group)
+                    .await?
+                {
+                    QueuePromotionOutcome::Promoted {
+                        message_next_offset,
+                        event_next_offset,
+                        ..
+                    } => {
+                        tracing::info!(
+                            topic,
+                            partition = transition.queue.partition,
+                            group = ?group,
+                            stopped_worker,
+                            message_next_offset,
+                            event_next_offset,
+                            "promoted follower to owner at local tails"
+                        );
+                        Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+                    }
+                    refused => {
+                        tracing::warn!(
+                            topic,
+                            partition = transition.queue.partition,
+                            group = ?group,
+                            ?refused,
+                            "follower promotion refused; queue stays follower"
+                        );
+                        Ok(BrokerAssignmentTransitionApply::Deferred {
+                            intent: transition.intent,
+                            reason: "local promotion checks refused; queue remains follower",
+                        })
+                    }
+                }
             }
             LocalAssignmentIntent::StopFollower => {
                 let stopped_worker = self
@@ -3166,6 +3210,20 @@ impl Broker<StromaEngine> {
                 expected_message_next_offset,
                 expected_event_next_offset,
             )
+            .await
+            .map_err(BrokerError::from)
+    }
+
+    /// Failover promotion at the follower's own tails (see the
+    /// `PromoteFollowerToOwner` transition arm for the safety argument).
+    pub async fn promote_replication_follower_to_local_tail(
+        &self,
+        topic: &str,
+        partition: LogId,
+        group: Option<&str>,
+    ) -> Result<QueuePromotionOutcome, BrokerError> {
+        self.engine
+            .promote_queue_follower_to_local_tail(topic, partition, group)
             .await
             .map_err(BrokerError::from)
     }
