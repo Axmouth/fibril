@@ -634,11 +634,19 @@ risk: explicit refusal over optimism) and surface status; controller may pick an
 Old owner returning: sees demotion intent (owner→follower transition path with
 release-inflight); its stale writes die at the data plane via epoch checks.
 
-- Gap to close en route: promotion needs expected tails from the *dead* owner — use the
-  follower's own applied tails when the assignment epoch fences the old owner (decide:
-  promotion-by-quorum-of-replicas vs. promote-to-local-tail under epoch fence; plan leans
-  promote-to-local-tail, accepting bounded acked-data loss only under `local_durable` policy,
-  which is the documented contract).
+- DECIDED (2026-06-12): promote-to-local-tail under the epoch fence. The chosen follower is
+  promoted to its own applied tails; the epoch fence guarantees the dead owner's unreplicated
+  suffix can never be partially visible later (its writes are rejected on return). Acked-data
+  loss is bounded to exactly what the durability contract permitted: under `local_durable`
+  the producer accepted single-copy durability; under `replica_*`/`majority_durable` (R5)
+  confirmed writes are on the promoted follower by definition.
+  EXPLORATION FOR LATER (explicitly not a foundation crossroad — switching strategies only
+  changes the promotion gate; storage formats, wire frames, coordination schema, and epoch
+  fencing are unaffected): quorum-tails promotion — query the applied tails of all live
+  replicas and promote the most advanced (or refuse below quorum). Strictly reduces loss for
+  `local_durable` workloads at the cost of a read round to replicas during failover and a
+  liveness dependency on them. Revisit when R5 progress reporting exists, since it provides
+  the replica-tail data for free.
 - Adversarial tests (REPLICATION_PLANNING "scenarios that always reveal bugs"): stale owner
   publish after fence; promote-before-caught-up refused; owner returns mid-failover;
   generation races (CAS already covers); partition during failover.
