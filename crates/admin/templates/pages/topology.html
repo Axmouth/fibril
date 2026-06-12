@@ -1,0 +1,172 @@
+{% extends "layout.html" %}
+{% block content %}
+<h4 class="metrics-header">Cluster Topology</h4>
+<p class="settings-note">
+  Committed coordination view: registered brokers, queue ownership with fencing epochs, and the
+  embedded consensus group when one is active. Solid edges point from queue owners to followers.
+</p>
+
+<section class="overview-panel" aria-label="Cluster summary">
+  <div class="overview-panel-heading">
+    <h5>Summary</h5>
+    <p id="topology-summary">loading…</p>
+  </div>
+</section>
+
+<section class="overview-panel" aria-label="Topology diagram">
+  <div class="overview-panel-heading">
+    <h5>Diagram</h5>
+    <p>Brokers around the ring; the consensus leader is highlighted.</p>
+  </div>
+  <svg id="topology-diagram" viewBox="0 0 860 420" width="100%" height="420"
+       style="background: var(--panel-bg, transparent); border-radius: 8px;"></svg>
+</section>
+
+<section class="overview-panel" aria-label="Assignments">
+  <div class="overview-panel-heading">
+    <h5>Assignments</h5>
+    <p>Queue partition ownership from the committed snapshot.</p>
+  </div>
+  <table class="table table-compact narrow metric-table">
+    <thead>
+      <tr>
+        <th>Topic</th><th>Part</th><th>Group</th><th>Owner</th><th>Followers</th>
+        <th class="text-right">Epoch</th>
+      </tr>
+    </thead>
+    <tbody id="topology-assignments"></tbody>
+  </table>
+</section>
+
+<script src="/static/js/api.js"></script>
+<script>
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function el(name, attrs, text) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function renderSummary(data) {
+  const coordination = data.coordination;
+  const raft = data.raft;
+  const parts = [];
+  if (coordination) {
+    parts.push(`reporting node <b>${coordination.node_id}</b>`);
+    parts.push(`generation <b>${coordination.generation}</b>`);
+    parts.push(`${coordination.nodes.length} broker(s), ${coordination.assignments.length} assignment(s)`);
+  } else {
+    parts.push("no coordination provider attached");
+  }
+  if (raft) {
+    parts.push(`raft: leader <b>${raft.leader ?? "none"}</b>, voters [${raft.voters.join(", ")}]` +
+      (raft.learners.length ? `, learners [${raft.learners.join(", ")}]` : ""));
+  }
+  document.getElementById("topology-summary").innerHTML = parts.join(" · ");
+}
+
+function renderDiagram(data) {
+  const svg = document.getElementById("topology-diagram");
+  svg.replaceChildren();
+  const coordination = data.coordination;
+  if (!coordination || coordination.nodes.length === 0) {
+    svg.appendChild(el("text", { x: 430, y: 210, "text-anchor": "middle",
+      fill: "#8a93a6", "font-size": 15 }, "no registered brokers yet"));
+    return;
+  }
+
+  const raft = data.raft ?? {};
+  // Raft id -> address lets us mark which broker hosts the leader; broker
+  // records and raft members are correlated by admin/broker address when the
+  // deployment registers them (best effort, display only).
+  const nodes = coordination.nodes;
+  const centerX = 430, centerY = 205, radiusX = 320, radiusY = 140;
+  const positions = new Map();
+  nodes.forEach((node, index) => {
+    const angle = (2 * Math.PI * index) / nodes.length - Math.PI / 2;
+    positions.set(node.node_id, {
+      x: centerX + radiusX * Math.cos(angle),
+      y: centerY + radiusY * Math.sin(angle),
+    });
+  });
+
+  // Owner -> follower edges first (under the cards).
+  for (const assignment of coordination.assignments) {
+    const from = positions.get(assignment.owner);
+    if (!from) continue;
+    for (const follower of assignment.followers) {
+      const to = positions.get(follower);
+      if (!to) continue;
+      svg.appendChild(el("line", {
+        x1: from.x, y1: from.y, x2: to.x, y2: to.y,
+        stroke: "#5b8def", "stroke-width": 1.5, "stroke-dasharray": "6 4", opacity: 0.7,
+      }));
+    }
+  }
+
+  const ownedCount = new Map();
+  for (const assignment of coordination.assignments) {
+    ownedCount.set(assignment.owner, (ownedCount.get(assignment.owner) ?? 0) + 1);
+  }
+
+  nodes.forEach((node) => {
+    const pos = positions.get(node.node_id);
+    const owned = ownedCount.get(node.node_id) ?? 0;
+    const group = el("g", {});
+    const width = 180, height = 64;
+    group.appendChild(el("rect", {
+      x: pos.x - width / 2, y: pos.y - height / 2, width, height,
+      rx: 10, fill: "#1d2433", stroke: "#3a4761", "stroke-width": 1.5,
+    }));
+    group.appendChild(el("text", {
+      x: pos.x, y: pos.y - 10, "text-anchor": "middle",
+      fill: "#e8ecf4", "font-size": 15, "font-weight": 600,
+    }, node.node_id));
+    group.appendChild(el("text", {
+      x: pos.x, y: pos.y + 10, "text-anchor": "middle", fill: "#8a93a6", "font-size": 12,
+    }, node.broker_addr));
+    group.appendChild(el("text", {
+      x: pos.x, y: pos.y + 26, "text-anchor": "middle", fill: "#5b8def", "font-size": 11,
+    }, owned ? `owns ${owned} partition(s)` : "no owned partitions"));
+    svg.appendChild(group);
+  });
+
+  // Consensus ring badge: leader + voters (raft ids), drawn in the middle.
+  if (data.raft) {
+    svg.appendChild(el("text", {
+      x: centerX, y: centerY - 6, "text-anchor": "middle",
+      fill: "#e8b65b", "font-size": 13, "font-weight": 600,
+    }, `consensus leader: ${data.raft.leader ?? "none"}`));
+    svg.appendChild(el("text", {
+      x: centerX, y: centerY + 12, "text-anchor": "middle", fill: "#8a93a6", "font-size": 11,
+    }, `voters [${data.raft.voters.join(", ")}] · applied ${data.raft.last_applied_index ?? "-"}`));
+  }
+}
+
+function renderAssignments(data) {
+  const body = document.getElementById("topology-assignments");
+  const assignments = data.coordination?.assignments ?? [];
+  body.innerHTML = assignments.map((assignment) => `
+    <tr>
+      <td>${assignment.topic}</td>
+      <td>${assignment.partition}</td>
+      <td>${assignment.group ?? "-"}</td>
+      <td>${assignment.owner}</td>
+      <td>${assignment.followers.join(", ") || "-"}</td>
+      <td class="text-right">${assignment.epoch}</td>
+    </tr>`).join("") || `<tr><td colspan="6" style="color:#8a93a6">no assignments yet</td></tr>`;
+}
+
+async function refresh() {
+  const data = await api("/admin/api/topology");
+  renderSummary(data);
+  renderDiagram(data);
+  renderAssignments(data);
+}
+
+setInterval(refresh, 3000);
+refresh();
+</script>
+{% endblock %}

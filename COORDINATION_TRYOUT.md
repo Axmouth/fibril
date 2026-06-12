@@ -110,7 +110,10 @@ A standalone server shows itself as the single `local` node; with
 `[coordination] mode = "ganglion"` (see section 0) the raft block appears and all cluster
 members serve the same view.
 
-The same JSON is the contract for the future admin-page topology diagram.
+The same JSON also drives the **admin Topology page**: open
+`http://127.0.0.1:<admin_port>/admin/topology` in a browser for the live diagram — brokers on a
+ring, owner→follower edges per assignment, consensus leader/voters in the middle, plus the
+assignments table. It refreshes every 3 seconds.
 
 ## What is intentionally not here yet
 
@@ -118,4 +121,4 @@ The same JSON is the contract for the future admin-page topology diagram.
   and the controller primitive exists (`control_iteration`, see the coordination playground),
   but the server does not yet run it against declared queues — that lands with the replication
   data-plane integration, so the `assignments` table stays empty in the tryout for now.
-- **Admin page diagram**: in progress; it consumes the `GET /admin/api/topology` JSON unchanged.
+

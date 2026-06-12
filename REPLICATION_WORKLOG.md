@@ -1442,3 +1442,10 @@ Tests needed before implementing transition:
   wrong peer addresses, listener death, forwarded writes during
   leaderlessness) per user ask, with TTL-vs-election-gap guidance baked into
   the heartbeat design.
+- 2026-06-12: Admin Topology page done. New /admin/topology page (nav-linked)
+  renders the cluster live from GET /admin/api/topology: summary line, SVG
+  diagram (brokers on a ring, owner->follower dashed edges per assignment,
+  consensus leader/voters/applied in the center), and the assignments table
+  with epochs; auto-refreshes every 3s. Verified serving (HTTP 200, diagram
+  mounted) against a real 3-process ganglion cluster with all brokers
+  registered. COORDINATION_TRYOUT.md points at the page.

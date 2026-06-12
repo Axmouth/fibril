@@ -144,6 +144,7 @@ impl AdminServer {
             .route("/admin/queues", get(queues_page))
             .route("/admin/messages", get(messages_page))
             .route("/admin/diagnostics", get(diagnostics_page))
+            .route("/admin/topology", get(topology_page))
             .route("/admin/settings", get(settings_page))
             .route("/admin/api/overview", get(routes::overview))
             .route("/admin/api/connections", get(routes::connections))
@@ -277,6 +278,18 @@ async fn diagnostics_page(
     }))
 }
 
+async fn topology_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(TopologyPage {
+        page: "topology",
+        title: "Topology",
+        auth_enabled: server.config.auth.is_some(),
+    }))
+}
+
 async fn settings_page(
     State(server): State<Arc<AdminServer>>,
     headers: HeaderMap,
@@ -385,6 +398,14 @@ struct Messages {
 #[derive(Template)]
 #[template(path = "pages/diagnostics.html")]
 struct Diagnostics {
+    page: &'static str,
+    title: &'static str,
+    auth_enabled: bool,
+}
+
+#[derive(Template)]
+#[template(path = "pages/topology.html")]
+struct TopologyPage {
     page: &'static str,
     title: &'static str,
     auth_enabled: bool,
