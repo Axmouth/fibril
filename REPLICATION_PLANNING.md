@@ -626,9 +626,8 @@ deletion semantics stay clean) vs. encoding unassigned queues as empty assignmen
 ### R4 — Failover orchestration (composes R2 + R3 + epochs)
 
 Sequence on owner death (no new mechanisms — this phase is choreography + tests):
-heartbeat TTL expires → controller tick reassigns (epoch+1, stability-first keeps the
-caught-up follower preferred — extend placement policy input with follower progress later if
-needed) → watcher on the chosen broker: stop follower worker (drain tick), checked promotion
+heartbeat TTL expires → controller tick reassigns (epoch+1) → watcher on the chosen broker:
+stop follower worker (drain tick), checked promotion
 against expected tails; on `CheckpointRequired`/not-caught-up, refuse promotion (worklog §6
 risk: explicit refusal over optimism) and surface status; controller may pick another or wait.
 Old owner returning: sees demotion intent (owner→follower transition path with
@@ -640,13 +639,25 @@ release-inflight); its stale writes die at the data plane via epoch checks.
   loss is bounded to exactly what the durability contract permitted: under `local_durable`
   the producer accepted single-copy durability; under `replica_*`/`majority_durable` (R5)
   confirmed writes are on the promoted follower by definition.
+  CANDIDATE SELECTION REQUIREMENT (R4): with multiple followers the controller must prefer
+  the most caught-up live follower — the dead owner cannot help a behind follower catch up,
+  so promote-to-local-tail on the wrong candidate loses more than necessary. With
+  `target_followers = 1` there is only one candidate and this is moot. Interim mechanism
+  (lands with R4, before full R5): followers piggyback their per-assignment applied tails
+  into the heartbeat labels they already send (e.g.
+  `applied/<topic>/<part>[/group] = <msg_off>:<event_off>`); the failover path in the
+  controller picks the live follower with the highest applied event offset for the moved
+  partition. Labels are advisory/freshness-bounded — the promotion gate (checked promotion on
+  the broker) remains the authority; a stale label at worst picks a slightly worse candidate,
+  never an unsafe one.
   EXPLORATION FOR LATER (explicitly not a foundation crossroad — switching strategies only
   changes the promotion gate; storage formats, wire frames, coordination schema, and epoch
-  fencing are unaffected): quorum-tails promotion — query the applied tails of all live
-  replicas and promote the most advanced (or refuse below quorum). Strictly reduces loss for
-  `local_durable` workloads at the cost of a read round to replicas during failover and a
-  liveness dependency on them. Revisit when R5 progress reporting exists, since it provides
-  the replica-tail data for free.
+  fencing are unaffected): quorum-tails promotion — synchronously query the applied tails of
+  all live replicas at failover time and promote the most advanced (or refuse below quorum).
+  Strictly reduces loss for `local_durable` workloads versus label-freshness-bounded
+  selection, at the cost of a read round to replicas during failover and a liveness
+  dependency on them. Revisit when R5 progress reporting exists, since it provides exact
+  replica-tail data on the owner path for free.
 - Adversarial tests (REPLICATION_PLANNING "scenarios that always reveal bugs"): stale owner
   publish after fence; promote-before-caught-up refused; owner returns mid-failover;
   generation races (CAS already covers); partition during failover.
