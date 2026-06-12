@@ -805,6 +805,23 @@ where
     }
 }
 
+/// Queue-ownership gate view: in cluster mode brokers serve only queues the
+/// committed snapshot assigns to them (R3 ownership switch).
+impl<LS, NF> fibril_broker::broker::QueueOwnership for GanglionCoordination<LS, NF>
+where
+    LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: RaftNetworkFactory<GanglionRaftConfig>,
+{
+    fn owns_queue(
+        &self,
+        topic: &str,
+        partition: fibril_storage::LogId,
+        group: Option<&str>,
+    ) -> bool {
+        Coordination::owns_queue(self, topic, partition, group)
+    }
+}
+
 impl<LS, NF> Coordination for GanglionCoordination<LS, NF>
 where
     LS: RaftLogStorage<GanglionRaftConfig>,

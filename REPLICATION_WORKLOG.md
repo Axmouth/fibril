@@ -1539,3 +1539,20 @@ Tests needed before implementing transition:
   asserts nodes 2 and 3 converge - passing. Tryout gained a fail-fast port
   guard after a debugging session was poisoned by a stale --keep cluster
   answering on the test ports. Next: R3 - the ownership switch.
+- 2026-06-12: R3 done - the ownership switch is live. GanglionCoordination
+  now implements broker QueueOwnership (cluster brokers serve only assigned
+  queues; standalone keeps OwnAllQueues). fibril-server restructured: the
+  embedded coordinator starts BEFORE broker construction so ownership is
+  injected at Broker::new_with_ownership; in ganglion mode the server spawns
+  spawn_assignment_watcher_with_follower_replication with
+  CoordinationProtocolOwnerPeerResolver, so assignment transitions and
+  supervised follower loops run coordination-driven. R3 gate test (protocol
+  crate, passing first run): a controller-written assignment - no manual
+  transitions anywhere - makes the supervised watcher start the follower
+  worker, resolve the owner's broker address from the snapshot node table,
+  replicate two published messages over real protocol TCP to CaughtUp, and
+  checked promotion lands at exactly the owner checkpoint offsets. Full
+  sweeps green (protocol 43, broker 121, coordination-ganglion 8);
+  cluster-tryout passes in both modes. Next: R4 failover choreography
+  (TTL-driven owner loss -> epoch+1 reassignment -> drain -> checked
+  promotion with progress-aware candidate selection) + adversarial suite.

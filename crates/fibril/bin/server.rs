@@ -85,7 +85,180 @@ async fn main() -> anyhow::Result<()> {
     let runtime_snapshot = runtime_settings.current();
     let runtime = &runtime_snapshot.settings;
     let broker_cfg = BrokerConfig::from_runtime_settings(runtime);
-    let broker = Broker::new(engine.clone(), broker_cfg, Some(metrics.broker()));
+
+    // Cluster coordination starts BEFORE the broker so queue ownership can be
+    // injected at construction (R3: in ganglion mode brokers serve only
+    // assigned queues; standalone keeps owning everything).
+    struct GanglionParts {
+        coordination: Arc<
+            fibril_coordination_ganglion::GanglionCoordination<
+                ganglion_openraft::FileRaftLogStore,
+                ganglion_openraft::TcpNetworkFactory,
+            >,
+        >,
+        raft_server: Arc<ganglion_openraft::TcpRaftServer>,
+        settings_tx:
+            tokio::sync::mpsc::UnboundedSender<fibril_broker::runtime_settings::RuntimeSettings>,
+        controller_status: Arc<std::sync::RwLock<fibril_coordination_ganglion::ControllerStatus>>,
+    }
+    let ganglion_parts: Option<GanglionParts> = match config.coordination.mode {
+        CoordinationMode::Static => None,
+        CoordinationMode::Ganglion => {
+            use fibril_coordination_ganglion::GanglionCoordination;
+            use ganglion_openraft::openraft::BasicNode;
+
+            let section = &config.coordination.ganglion;
+            let data_dir = if section.data_dir.as_os_str().is_empty() {
+                config.server.data_dir.join("coordination")
+            } else {
+                section.data_dir.clone()
+            };
+
+            let raft_config = ganglion_openraft::default_raft_config()
+                .map_err(|error| anyhow::anyhow!("raft config: {error}"))?;
+            let wire_format: ganglion_openraft::WireFormat = section
+                .wire_format
+                .parse()
+                .map_err(|error| anyhow::anyhow!("coordination.ganglion.wire_format: {error}"))?;
+            let (node, raft_server) =
+                ganglion_openraft::RaftMetadataNode::start_durable_tcp_with_format(
+                    section.raft_node_id,
+                    raft_config,
+                    section.listen,
+                    &data_dir,
+                    wire_format,
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("embedded coordinator failed to start: {error}")
+                })?;
+            let raft_server = Arc::new(raft_server);
+
+            if section.bootstrap {
+                let members: std::collections::BTreeMap<u64, BasicNode> = section
+                    .peers
+                    .iter()
+                    .map(|(id, addr)| {
+                        Ok((
+                            id.parse::<u64>()
+                                .map_err(|_| anyhow::anyhow!("peer id `{id}` is not a u64"))?,
+                            BasicNode::new(addr.clone()),
+                        ))
+                    })
+                    .collect::<anyhow::Result<_>>()?;
+                // Re-running initialize after first boot is rejected by raft;
+                // that is the expected restart path, not an error.
+                if let Err(error) = node.initialize(members).await {
+                    tracing::info!("coordinator initialize skipped: {error}");
+                }
+            }
+
+            let coordination = Arc::new(GanglionCoordination::new_with_wire_format(
+                config.coordination.node_id.clone(),
+                node,
+                wire_format,
+            ));
+            // Register this broker and keep its heartbeat fresh so it shows up
+            // (and stays live) in the cluster's node table.
+            coordination.spawn_heartbeat(
+                fibril_broker::coordination::NodeInfo {
+                    node_id: config.coordination.node_id.clone(),
+                    broker_addr: config.broker.listener.bind,
+                    admin_addr: Some(config.admin.listener.bind),
+                },
+                std::time::Duration::from_millis(section.heartbeat_interval_ms),
+            );
+
+            // Catalogue sync: local engine queues become cluster-visible so
+            // the controller can assign them (also re-registers pre-existing
+            // on-disk queues after restarts).
+            let catalogue_engine = engine.clone();
+            coordination.spawn_catalogue_sync(
+                move || {
+                    let engine = catalogue_engine.clone();
+                    async move {
+                        use fibril_broker::queue_engine::QueueEngine as _;
+                        match engine.queue_stats_snapshot().await {
+                            Ok(snapshot) => snapshot
+                                .queues
+                                .keys()
+                                .map(|key| {
+                                    fibril_broker::coordination::QueueIdentity::new(
+                                        key.topic.clone(),
+                                        0,
+                                        key.group.as_deref(),
+                                    )
+                                })
+                                .collect(),
+                            Err(_) => Vec::new(),
+                        }
+                    }
+                },
+                std::time::Duration::from_millis(section.heartbeat_interval_ms),
+            );
+
+            // Replicated runtime settings: apply cluster documents locally
+            // (sync loop) and publish locally-stored updates cluster-wide
+            // (publisher task fed by the admin PUT hook).
+            coordination.spawn_runtime_settings_sync(runtime_settings.clone());
+            let (settings_tx, mut settings_rx) = tokio::sync::mpsc::unbounded_channel();
+            let settings_publisher = coordination.clone();
+            tokio::spawn(async move {
+                while let Some(settings) = settings_rx.recv().await {
+                    if let Err(error) = settings_publisher.publish_runtime_settings(&settings).await
+                    {
+                        tracing::warn!(%error, "cluster runtime-settings publish deferred");
+                    }
+                }
+            });
+
+            // Embedded controller: the raft leader assigns catalogue queues
+            // across heartbeat-live brokers; standbys idle.
+            let (_controller, controller_status) = coordination.spawn_controller(
+                Arc::new(fibril_broker::coordination::DeterministicPartitionPlacement),
+                fibril_coordination_ganglion::ControllerConfig {
+                    target_followers: section.target_followers,
+                    tick: std::time::Duration::from_millis(section.controller_tick_ms),
+                    liveness_ttl: std::time::Duration::from_millis(section.liveness_ttl_ms),
+                    max_cas_retries: 8,
+                },
+            );
+
+            Some(GanglionParts {
+                coordination,
+                raft_server,
+                settings_tx,
+                controller_status,
+            })
+        }
+    };
+
+    // R3 ownership switch: assigned-queues-only in cluster mode.
+    let ownership: Arc<dyn fibril_broker::broker::QueueOwnership> = match &ganglion_parts {
+        Some(parts) => parts.coordination.clone(),
+        None => Arc::new(fibril_broker::broker::OwnAllQueues),
+    };
+    let broker = Broker::new_with_ownership(
+        engine.clone(),
+        broker_cfg,
+        Some(metrics.broker()),
+        ownership,
+    );
+
+    // Cluster mode: apply assignment transitions and supervise follower
+    // replication loops, resolving owners from coordination snapshots.
+    if let Some(parts) = &ganglion_parts {
+        let resolver = Arc::new(
+            fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::new(
+                parts.coordination.clone(),
+            ),
+        );
+        broker.spawn_assignment_watcher_with_follower_replication(
+            parts.coordination.clone(),
+            resolver,
+            fibril_broker::broker::FollowerReplicationWorkerConfig::default(),
+        );
+    }
     let connection_settings = ConnectionSettings::new(None)
         .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms)
         .with_reconnect_grace_ms(runtime.connection.reconnect_grace_ms);
@@ -167,139 +340,21 @@ async fn main() -> anyhow::Result<()> {
     // Coordination provider selection (config: [coordination] mode = ...).
     // The raft listener handle must outlive main; hold it here.
     let mut _raft_server = None;
-    let admin = match config.coordination.mode {
-        CoordinationMode::Static => {
+    let admin = match ganglion_parts {
+        None => {
             // Single-node view so `fibrilctl topology` reports this broker.
             admin.with_coordination(Arc::new(StaticCoordination::single_node(
                 config.coordination.node_id.clone(),
                 config.broker.listener.bind,
             )))
         }
-        CoordinationMode::Ganglion => {
-            use fibril_coordination_ganglion::GanglionCoordination;
-            use ganglion_openraft::openraft::BasicNode;
-
-            let section = &config.coordination.ganglion;
-            let data_dir = if section.data_dir.as_os_str().is_empty() {
-                config.server.data_dir.join("coordination")
-            } else {
-                section.data_dir.clone()
-            };
-
-            let raft_config = ganglion_openraft::default_raft_config()
-                .map_err(|error| anyhow::anyhow!("raft config: {error}"))?;
-            let wire_format: ganglion_openraft::WireFormat = section
-                .wire_format
-                .parse()
-                .map_err(|error| anyhow::anyhow!("coordination.ganglion.wire_format: {error}"))?;
-            let (node, raft_server) =
-                ganglion_openraft::RaftMetadataNode::start_durable_tcp_with_format(
-                    section.raft_node_id,
-                    raft_config,
-                    section.listen,
-                    &data_dir,
-                    wire_format,
-                )
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!("embedded coordinator failed to start: {error}")
-                })?;
-            let raft_server = Arc::new(raft_server);
-            _raft_server = Some(raft_server.clone());
-
-            if section.bootstrap {
-                let members: std::collections::BTreeMap<u64, BasicNode> = section
-                    .peers
-                    .iter()
-                    .map(|(id, addr)| {
-                        Ok((
-                            id.parse::<u64>()
-                                .map_err(|_| anyhow::anyhow!("peer id `{id}` is not a u64"))?,
-                            BasicNode::new(addr.clone()),
-                        ))
-                    })
-                    .collect::<anyhow::Result<_>>()?;
-                // Re-running initialize after first boot is rejected by raft;
-                // that is the expected restart path, not an error.
-                if let Err(error) = node.initialize(members).await {
-                    tracing::info!("coordinator initialize skipped: {error}");
-                }
-            }
-
-            let coordination = Arc::new(GanglionCoordination::new_with_wire_format(
-                config.coordination.node_id.clone(),
-                node,
-                wire_format,
-            ));
-            // Register this broker and keep its heartbeat fresh so it shows up
-            // (and stays live) in the cluster's node table.
-            coordination.spawn_heartbeat(
-                fibril_broker::coordination::NodeInfo {
-                    node_id: config.coordination.node_id.clone(),
-                    broker_addr: config.broker.listener.bind,
-                    admin_addr: Some(config.admin.listener.bind),
-                },
-                std::time::Duration::from_millis(section.heartbeat_interval_ms),
-            );
-
-            // Catalogue sync: local engine queues become cluster-visible so
-            // the controller can assign them (also re-registers pre-existing
-            // on-disk queues after restarts).
-            let catalogue_engine = engine.clone();
-            coordination.spawn_catalogue_sync(
-                move || {
-                    let engine = catalogue_engine.clone();
-                    async move {
-                        use fibril_broker::queue_engine::QueueEngine as _;
-                        match engine.queue_stats_snapshot().await {
-                            Ok(snapshot) => snapshot
-                                .queues
-                                .keys()
-                                .map(|key| {
-                                    fibril_broker::coordination::QueueIdentity::new(
-                                        key.topic.clone(),
-                                        0,
-                                        key.group.as_deref(),
-                                    )
-                                })
-                                .collect(),
-                            Err(_) => Vec::new(),
-                        }
-                    }
-                },
-                std::time::Duration::from_millis(section.heartbeat_interval_ms),
-            );
-
-            // Replicated runtime settings: apply cluster documents locally...
-            // (sync loop) and publish locally-stored updates cluster-wide
-            // (publisher task fed by the admin PUT hook).
-            coordination.spawn_runtime_settings_sync(runtime_settings.clone());
-            let (settings_tx, mut settings_rx) = tokio::sync::mpsc::unbounded_channel();
-            let settings_publisher = coordination.clone();
-            tokio::spawn(async move {
-                while let Some(settings) = settings_rx.recv().await {
-                    if let Err(error) = settings_publisher.publish_runtime_settings(&settings).await
-                    {
-                        tracing::warn!(%error, "cluster runtime-settings publish deferred");
-                    }
-                }
-            });
-
-            // Embedded controller: the raft leader assigns catalogue queues
-            // across heartbeat-live brokers; standbys idle.
-            let (_controller, controller_status) = coordination.spawn_controller(
-                Arc::new(fibril_broker::coordination::DeterministicPartitionPlacement),
-                fibril_coordination_ganglion::ControllerConfig {
-                    target_followers: section.target_followers,
-                    tick: std::time::Duration::from_millis(section.controller_tick_ms),
-                    liveness_ttl: std::time::Duration::from_millis(section.liveness_ttl_ms),
-                    max_cas_retries: 8,
-                },
-            );
-
-            let topology_source = coordination.clone();
+        Some(parts) => {
+            _raft_server = Some(parts.raft_server.clone());
+            let topology_source = parts.coordination.clone();
+            let raft_server = parts.raft_server;
+            let controller_status = parts.controller_status;
             admin
-                .with_coordination(coordination)
+                .with_coordination(parts.coordination)
                 .with_raft_topology(Arc::new(move || {
                     let mut value = serde_json::to_value(topology_source.raft_node().topology())
                         .unwrap_or(serde_json::Value::Null);
@@ -322,7 +377,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     value
                 }))
-                .with_settings_publisher(settings_tx)
+                .with_settings_publisher(parts.settings_tx)
         }
     };
 

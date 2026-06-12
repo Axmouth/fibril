@@ -1746,6 +1746,162 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
     server_task.await.unwrap().unwrap();
 }
 
+/// R3 gate: the supervised assignment watcher reacts to a CONTROLLER-written
+/// coordination assignment, starts the follower loop, resolves the owner from
+/// the snapshot's node table, and replicates over real protocol TCP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ganglion_coordination_drives_supervised_follower_replication() {
+    use fibril_coordination_ganglion::GanglionCoordination;
+    use ganglion_openraft::{InProcessRouter, RaftMetadataNode, default_raft_config};
+
+    let topic = "replication.coordination.supervised";
+
+    // Embedded coordinator; this provider belongs to the FOLLOWER broker.
+    let router = InProcessRouter::new();
+    let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+        .await
+        .unwrap();
+    let mut members = std::collections::BTreeMap::new();
+    members.insert(
+        1u64,
+        ganglion_openraft::openraft::BasicNode::new("coordinator"),
+    );
+    raft_node.initialize(members).await.unwrap();
+    raft_node
+        .wait_for_leader(1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    let coordination = Arc::new(GanglionCoordination::new("b-follower", raft_node));
+
+    // Owner broker with data, serving the replication protocol on a real port.
+    let (owner_broker, owner_dir) = open_test_broker().await;
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, &None).await.unwrap();
+    for payload in [b"coord-first".as_slice(), b"coord-second".as_slice()] {
+        let reply = publisher
+            .publish(
+                payload.to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+    let owner_checkpoint = owner_broker
+        .export_owner_state_checkpoint(topic, 0, None)
+        .await
+        .unwrap();
+    let (owner_addr, server_task, _owner_dir, owner_broker) = start_protocol_listener_for_broker(
+        ConnectionSettings::new(Some(60)),
+        owner_broker,
+        owner_dir,
+        None,
+    )
+    .await;
+
+    // Cluster facts: both brokers registered (owner's broker_addr is the real
+    // listener — the resolver dials it from the snapshot), queue in catalogue.
+    let node = |id: &str, addr: std::net::SocketAddr| fibril_broker::coordination::NodeInfo {
+        node_id: id.to_string(),
+        broker_addr: addr,
+        admin_addr: None,
+    };
+    coordination
+        .register_self(&node("a-owner", owner_addr))
+        .await
+        .unwrap();
+    coordination
+        .register_self(&node("b-follower", "127.0.0.1:1".parse().unwrap()))
+        .await
+        .unwrap();
+    coordination
+        .register_queue(&QueueIdentity::new(topic, 0, None))
+        .await
+        .unwrap();
+
+    // Follower broker: ONLY the supervised watcher — no manual transitions.
+    let (follower_broker, _follower_dir) = open_test_broker().await;
+    let resolver = Arc::new(
+        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::new(
+            coordination.clone(),
+        ),
+    );
+    follower_broker.spawn_assignment_watcher_with_follower_replication(
+        coordination.clone(),
+        resolver,
+        FollowerReplicationWorkerConfig {
+            caught_up_poll_ms: 60_000,
+            ..Default::default()
+        },
+    );
+
+    // The controller writes the assignment (deterministic placement: sorted
+    // node order makes a-owner the owner, b-follower the follower).
+    let live = coordination.live_nodes(Duration::from_secs(30));
+    let committed = coordination
+        .control_iteration(
+            &fibril_broker::coordination::DeterministicPartitionPlacement,
+            &coordination.registered_queues(),
+            1,
+            &live,
+            8,
+        )
+        .await
+        .unwrap()
+        .expect("leader iteration");
+    let assignment = committed
+        .assignment_for(topic, 0, None)
+        .expect("assigned")
+        .clone();
+    assert_eq!(assignment.owner, "a-owner");
+    assert_eq!(assignment.followers, vec!["b-follower".to_string()]);
+
+    // The watcher must start the worker and replicate to caught-up.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let state = follower_broker
+                .follower_replication_worker_snapshot(topic, 0, None)
+                .await;
+            if state
+                .as_ref()
+                .is_some_and(|state| state.status == FollowerReplicationWorkerStatus::CaughtUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("supervised follower should catch up from the coordination assignment");
+
+    // Replicated tails match the owner checkpoint exactly.
+    let promoted = follower_broker
+        .promote_replication_follower_if_caught_up(
+            topic,
+            0,
+            None,
+            owner_checkpoint.message_next_offset,
+            owner_checkpoint.event_next_offset,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        promoted,
+        QueuePromotionOutcome::Promoted {
+            message_next_offset: owner_checkpoint.message_next_offset,
+            event_next_offset: owner_checkpoint.event_next_offset,
+            applied_event_offset: Some(owner_checkpoint.applied_event_offset),
+        }
+    );
+
+    coordination.raft_node().shutdown().await.unwrap();
+    follower_broker.shutdown().await;
+    owner_broker.shutdown().await;
+    server_task.await.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     let topic = "replication.resolver.loop";
