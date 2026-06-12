@@ -241,6 +241,47 @@ async fn main() -> anyhow::Result<()> {
                 },
                 std::time::Duration::from_millis(section.heartbeat_interval_ms),
             );
+
+            // Catalogue sync: local engine queues become cluster-visible so
+            // the controller can assign them (also re-registers pre-existing
+            // on-disk queues after restarts).
+            let catalogue_engine = engine.clone();
+            coordination.spawn_catalogue_sync(
+                move || {
+                    let engine = catalogue_engine.clone();
+                    async move {
+                        use fibril_broker::queue_engine::QueueEngine as _;
+                        match engine.queue_stats_snapshot().await {
+                            Ok(snapshot) => snapshot
+                                .queues
+                                .keys()
+                                .map(|key| {
+                                    fibril_broker::coordination::QueueIdentity::new(
+                                        key.topic.clone(),
+                                        0,
+                                        key.group.as_deref(),
+                                    )
+                                })
+                                .collect(),
+                            Err(_) => Vec::new(),
+                        }
+                    }
+                },
+                std::time::Duration::from_millis(section.heartbeat_interval_ms),
+            );
+
+            // Embedded controller: the raft leader assigns catalogue queues
+            // across heartbeat-live brokers; standbys idle.
+            let (_controller, controller_status) = coordination.spawn_controller(
+                Arc::new(fibril_broker::coordination::DeterministicPartitionPlacement),
+                fibril_coordination_ganglion::ControllerConfig {
+                    target_followers: section.target_followers,
+                    tick: std::time::Duration::from_millis(section.controller_tick_ms),
+                    liveness_ttl: std::time::Duration::from_millis(section.liveness_ttl_ms),
+                    max_cas_retries: 8,
+                },
+            );
+
             let topology_source = coordination.clone();
             admin
                 .with_coordination(coordination)
@@ -257,6 +298,12 @@ async fn main() -> anyhow::Result<()> {
                             "listener_serving".into(),
                             serde_json::Value::Bool(raft_server.is_serving()),
                         );
+                        if let Ok(status) = controller_status.read() {
+                            object.insert(
+                                "controller".into(),
+                                serde_json::to_value(&*status).unwrap_or(serde_json::Value::Null),
+                            );
+                        }
                     }
                     value
                 }))

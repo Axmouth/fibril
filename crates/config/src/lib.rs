@@ -485,6 +485,13 @@ pub struct GanglionCoordinationSection {
     pub wire_format: String,
     /// Broker self-registration heartbeat interval (milliseconds).
     pub heartbeat_interval_ms: u64,
+    /// Controller: desired follower count per queue partition.
+    pub target_followers: usize,
+    /// Controller: bounded tick interval (also wakes on snapshot changes).
+    pub controller_tick_ms: u64,
+    /// Controller: heartbeats older than this mark a broker dead. Must exceed
+    /// worst-case election + retry time. Default 3x heartbeat interval.
+    pub liveness_ttl_ms: u64,
 }
 
 impl Default for GanglionCoordinationSection {
@@ -497,6 +504,9 @@ impl Default for GanglionCoordinationSection {
             data_dir: PathBuf::new(),
             wire_format: "msgpack".into(),
             heartbeat_interval_ms: 3000,
+            target_followers: 1,
+            controller_tick_ms: 2000,
+            liveness_ttl_ms: 9000,
         }
     }
 }

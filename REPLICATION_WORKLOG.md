@@ -1497,3 +1497,25 @@ Tests needed before implementing transition:
   pre-existing on-disk queues after restart, which a declare hook would miss.
   R2b (runtime settings over attributes) planned in REPLICATION_PLANNING.md.
   Next: R2 controller task + catalogue sync in fibril-server.
+- 2026-06-12: R2 done - the declare-to-assignment loop works across real
+  processes. Provider grew spawn_controller (leader-gated loop: watch + tick
+  wake-up, live_nodes(ttl) + registered_queues inputs, ControllerStatus cell
+  for observability) and spawn_catalogue_sync (diff local engine queues vs
+  catalogue, register missing; idempotent; covers on-disk queues after
+  restart). control_iteration hardening: preserves the committed NODES map
+  (planner output must not strip heartbeat labels - would have silently
+  broken liveness) and an anti-churn guard (no-op plans never touch the raft
+  log). Config: coordination.ganglion.{target_followers, controller_tick_ms,
+  liveness_ttl_ms}. Server wires catalogue sync (engine queue_stats_snapshot)
+  + controller; controller status rides the topology raft block. Loop test:
+  assign at epoch 1, idle generations frozen, dead-broker failover with
+  epoch+1. REAL BUG found by the tryout: ResourceIdentity-keyed assignment
+  maps cannot be JSON map keys ("key must be a string") - never surfaced
+  before because nothing had written a NON-EMPTY assignments map through the
+  JSON WAL until the controller's first assignment. Fixed in ganglion by
+  serializing assignments as a pair sequence (works in JSON and msgpack);
+  WAL fixture bumped to v2 with the no-migration-needed argument recorded
+  (v1 could only ever contain empty maps). cluster-tryout --ganglion now
+  declares a queue via the real CLI and asserts the controller assignment
+  (owner/follower/epoch) is identical on every node - passing. Next: R2b
+  (runtime settings over attributes), then R3 (ownership switch).

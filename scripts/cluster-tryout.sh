@@ -191,6 +191,39 @@ for i in $(seq 1 "$NODES"); do
 done
 
 if [[ "$GANGLION" == true ]]; then
+  # Declare a queue through the data-plane CLI on node 1; the embedded
+  # controller must assign it (owner + follower + epoch) cluster-wide.
+  echo "declaring queue 'orders' and waiting for controller assignment..."
+  "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + 1))" queue declare orders >/dev/null
+  assigned=""
+  for attempt in $(seq 1 80); do
+    assigned="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + 1))" admin topology --json 2>/dev/null \
+      | jq -c '.coordination.assignments[0] // empty')"
+    [[ -n "$assigned" ]] && break
+    sleep 0.3
+  done
+  if [[ -z "$assigned" ]]; then
+    echo "FAIL: controller never assigned the declared queue" >&2
+    FAILED=1
+  else
+    echo "  assignment: $assigned"
+    owner="$(echo "$assigned" | jq -r '.owner')"
+    epoch="$(echo "$assigned" | jq -r '.epoch')"
+    if [[ -z "$owner" || "$owner" == "null" || "$epoch" -lt 1 ]]; then
+      echo "FAIL: assignment missing owner or epoch: $assigned" >&2
+      FAILED=1
+    fi
+    # Every node serves the same assignment.
+    for i in $(seq 1 "$NODES"); do
+      node_view="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + i))" admin topology --json 2>/dev/null \
+        | jq -c '.coordination.assignments[0] // empty')"
+      if [[ "$node_view" != "$assigned" ]]; then
+        echo "FAIL: node-$i sees a different assignment: $node_view" >&2
+        FAILED=1
+      fi
+    done
+  fi
+
   for value in "${LEADERS[@]}"; do
     if [[ "$value" != "${LEADERS[0]}" ]]; then
       echo "FAIL: nodes disagree on the raft leader: ${LEADERS[*]}" >&2
