@@ -225,10 +225,21 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            let coordination = Arc::new(GanglionCoordination::new(
+            let coordination = Arc::new(GanglionCoordination::new_with_wire_format(
                 config.coordination.node_id.clone(),
                 node,
+                wire_format,
             ));
+            // Register this broker and keep its heartbeat fresh so it shows up
+            // (and stays live) in the cluster's node table.
+            coordination.spawn_heartbeat(
+                fibril_broker::coordination::NodeInfo {
+                    node_id: config.coordination.node_id.clone(),
+                    broker_addr: config.broker.listener.bind,
+                    admin_addr: Some(config.admin.listener.bind),
+                },
+                std::time::Duration::from_millis(section.heartbeat_interval_ms),
+            );
             let topology_source = coordination.clone();
             admin
                 .with_coordination(coordination)

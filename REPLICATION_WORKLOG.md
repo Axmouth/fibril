@@ -1423,3 +1423,22 @@ Tests needed before implementing transition:
   on all 3 nodes". COORDINATION_TRYOUT.md updated. Remaining: broker
   self-registration/liveness loop feeding controller live-node input, and the
   admin topology diagram.
+- 2026-06-12: Broker self-registration + heartbeat liveness done (and wire
+  format now flows config -> argument per user directive; no env reads in
+  libraries). Ganglion grew merge commands (RegisterNode/DeregisterNode -
+  cannot clobber concurrent updates, no CAS needed) and a ClientWrite RPC on
+  the TCP wire so follower processes forward writes to the leader
+  (NotLeader + leader hint when contacted node isn't it). The provider gained
+  register_self (leader-local or forwarded via topology lookup),
+  spawn_heartbeat (log-and-retry on coordination outages - never kills the
+  broker), live_nodes(ttl) (heartbeat labels vs local clock; unlabeled nodes
+  treated as static/live), HEARTBEAT_LABEL const. fibril-server spawns the
+  heartbeat with broker+admin addresses; coordination.ganglion gained
+  heartbeat_interval_ms (default 3000). cluster-tryout --ganglion now also
+  asserts every node sees all N brokers in the shared node table - confirmed:
+  3 real processes, full broker table identical everywhere, registrations from
+  followers travel through the leader. ganglion FAILURE_MODES.md gained the
+  startup/connectivity section (cannot reach peers, missing bootstrap node,
+  wrong peer addresses, listener death, forwarded writes during
+  leaderlessness) per user ask, with TTL-vs-election-gap guidance baked into
+  the heartbeat design.

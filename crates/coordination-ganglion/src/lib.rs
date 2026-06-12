@@ -17,13 +17,25 @@ use fibril_broker::coordination::{
 use ganglion_openraft::openraft::storage::RaftLogStorage;
 use ganglion_openraft::openraft::RaftNetworkFactory;
 use ganglion_openraft::{
-    GanglionLogStore, GanglionRaftConfig, InProcessRouter, MetadataRaftResponse,
-    OpenraftAdapterError, RaftMetadataNode,
+    client_write_remote, GanglionLogStore, GanglionRaftConfig, InProcessRouter,
+    MetadataRaftCommand, MetadataRaftResponse, OpenraftAdapterError, RaftMetadataNode, WireFormat,
 };
 use tokio::sync::watch;
 
 /// Namespace tag used for fibril queues inside ganglion resource identities.
 const QUEUE_NAMESPACE: &str = "fibril/queue";
+
+/// Node label carrying the broker's last heartbeat (unix milliseconds, broker
+/// clock). Liveness compares against the controller's clock — TTLs must
+/// absorb clock skew and election gaps (see ganglion FAILURE_MODES.md §4b.6).
+pub const HEARTBEAT_LABEL: &str = "heartbeat_unix_ms";
+
+fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
+}
 
 /// Convert a fibril snapshot into ganglion's model.
 ///
@@ -199,6 +211,7 @@ where
     node: RaftMetadataNode<LS, NF>,
     tx: watch::Sender<CoordinationSnapshot>,
     forwarder: tokio::task::JoinHandle<()>,
+    wire_format: WireFormat,
 }
 
 impl<LS, NF> std::fmt::Debug for GanglionCoordination<LS, NF>
@@ -226,6 +239,16 @@ where
     ///
     /// Must be called from within a tokio runtime (spawns the watch forwarder).
     pub fn new(node_id: impl Into<String>, node: RaftMetadataNode<LS, NF>) -> Self {
+        Self::new_with_wire_format(node_id, node, WireFormat::default())
+    }
+
+    /// `new` with the wire format used for forwarded writes (registration /
+    /// heartbeats sent to the leader). Pass from startup configuration.
+    pub fn new_with_wire_format(
+        node_id: impl Into<String>,
+        node: RaftMetadataNode<LS, NF>,
+        wire_format: WireFormat,
+    ) -> Self {
         let mut ganglion_rx = node.watch_committed();
         let initial = to_fibril_snapshot(&ganglion_rx.borrow_and_update());
         let (tx, _rx) = watch::channel(initial);
@@ -243,7 +266,103 @@ where
             node,
             tx,
             forwarder,
+            wire_format,
         }
+    }
+
+    /// Register (or refresh) this broker in the committed snapshot.
+    ///
+    /// Leader: applies locally. Follower: forwards to the leader's raft
+    /// address from topology. No-leader and transient failures surface as
+    /// errors the caller should retry with backoff — never crash on them
+    /// (brokers must keep serving while coordination heals).
+    pub async fn register_self(&self, info: &NodeInfo) -> Result<(), OpenraftAdapterError> {
+        let mut node = ganglion_core::NodeInfo::new(
+            info.node_id.clone(),
+            info.broker_addr.to_string(),
+            info.admin_addr.map(|addr| addr.to_string()),
+        );
+        node.labels
+            .insert(HEARTBEAT_LABEL.to_string(), unix_millis_now().to_string());
+
+        if self.node.is_leader().await {
+            self.node.register_node(node).await?;
+            return Ok(());
+        }
+
+        let topology = self.node.topology();
+        let leader_addr = topology
+            .leader
+            .and_then(|leader| topology.nodes.get(&leader).cloned())
+            .ok_or(OpenraftAdapterError::NotLeader)?;
+        client_write_remote(
+            &leader_addr,
+            MetadataRaftCommand::RegisterNode { node },
+            self.wire_format,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Spawn a heartbeat loop registering `info` every `interval`.
+    ///
+    /// Failures are logged and retried: coordination outages must never kill
+    /// a broker (FAILURE_MODES.md §4b.6). Abort the handle to stop.
+    pub fn spawn_heartbeat(
+        self: &std::sync::Arc<Self>,
+        info: NodeInfo,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        LS: 'static,
+        NF: 'static,
+    {
+        let provider = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                if let Err(error) = provider.register_self(&info).await {
+                    tracing::debug!(
+                        node_id = %info.node_id,
+                        %error,
+                        "coordination heartbeat deferred; will retry"
+                    );
+                }
+                tokio::time::sleep(interval).await;
+            }
+        })
+    }
+
+    /// Live brokers: registered nodes whose heartbeat is within `ttl` of this
+    /// process's clock. Nodes without a heartbeat label are treated as live
+    /// (manually registered/static entries).
+    pub fn live_nodes(&self, ttl: std::time::Duration) -> HashMap<String, NodeInfo> {
+        let now = unix_millis_now();
+        let ttl_ms = ttl.as_millis() as u64;
+        self.node
+            .committed_snapshot()
+            .nodes
+            .values()
+            .filter(|node| {
+                node.labels
+                    .get(HEARTBEAT_LABEL)
+                    .and_then(|raw| raw.parse::<u64>().ok())
+                    .is_none_or(|beat| now.saturating_sub(beat) <= ttl_ms)
+            })
+            .filter_map(|node| {
+                let broker_addr = node.endpoint.parse().ok()?;
+                Some((
+                    node.node_id.clone(),
+                    NodeInfo {
+                        node_id: node.node_id.clone(),
+                        broker_addr,
+                        admin_addr: node
+                            .admin_endpoint
+                            .as_ref()
+                            .and_then(|endpoint| endpoint.parse().ok()),
+                    },
+                ))
+            })
+            .collect()
     }
 
     /// Propose a new coordination snapshot through raft consensus.
@@ -617,6 +736,53 @@ mod tests {
         for provider in &providers {
             provider.raft_node().shutdown().await.expect("shutdown");
         }
+    }
+
+    /// Self-registration merges into the shared node table (no clobbering)
+    /// and `live_nodes` filters by heartbeat TTL.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registration_merges_and_liveness_filters() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+
+        let broker = |id: &str, port: u16| NodeInfo {
+            node_id: id.to_string(),
+            broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+            admin_addr: None,
+        };
+        provider
+            .register_self(&broker("broker-a", 9000))
+            .await
+            .expect("register a");
+        // Second registration of a different broker must merge, not replace.
+        provider
+            .register_self(&broker("broker-b", 9001))
+            .await
+            .expect("register b");
+
+        let live = provider.live_nodes(Duration::from_secs(30));
+        assert_eq!(live.len(), 2, "both registrations visible: {live:?}");
+
+        // Zero TTL: heartbeats in the past are dead (allow 5ms of clock step).
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let dead = provider.live_nodes(Duration::from_millis(1));
+        assert!(dead.is_empty(), "expired heartbeats filtered: {dead:?}");
+
+        // The watch/trait surface sees the registrations too.
+        assert_eq!(provider.snapshot().nodes.len(), 2);
+
+        provider.raft_node().shutdown().await.expect("shutdown");
     }
 
     /// The ganglion provider must satisfy the same contract as every other

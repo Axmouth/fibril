@@ -483,6 +483,8 @@ pub struct GanglionCoordinationSection {
     /// Outbound raft frame encoding: `msgpack` (default) or `json` (debugging).
     /// Inbound frames are self-describing, so mixed clusters interoperate.
     pub wire_format: String,
+    /// Broker self-registration heartbeat interval (milliseconds).
+    pub heartbeat_interval_ms: u64,
 }
 
 impl Default for GanglionCoordinationSection {
@@ -494,6 +496,7 @@ impl Default for GanglionCoordinationSection {
             bootstrap: false,
             data_dir: PathBuf::new(),
             wire_format: "msgpack".into(),
+            heartbeat_interval_ms: 3000,
         }
     }
 }

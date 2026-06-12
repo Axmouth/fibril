@@ -100,10 +100,12 @@ for i in $(seq 1 "$NODES"); do
 done
 
 if [[ "$GANGLION" == true ]]; then
-  echo "waiting for raft election..."
-  for attempt in $(seq 1 50); do
-    leader="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + 1))" admin topology --json 2>/dev/null | jq -r '.raft.leader' || echo null)"
-    if [[ "$leader" != "null" && -n "$leader" ]]; then
+  echo "waiting for raft election and broker registration..."
+  for attempt in $(seq 1 80); do
+    json="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + 1))" admin topology --json 2>/dev/null || echo '{}')"
+    leader="$(echo "$json" | jq -r '.raft.leader')"
+    registered="$(echo "$json" | jq -r '.coordination.nodes | length')"
+    if [[ "$leader" != "null" && -n "$leader" && "$registered" -ge "$NODES" ]]; then
       break
     fi
     sleep 0.3
@@ -131,6 +133,12 @@ for i in $(seq 1 "$NODES"); do
     fi
     LEADERS+=("$leader")
     VOTERS+=("$voters")
+    # Every broker must have self-registered into the shared node table.
+    registered="$(echo "$json" | jq -r '.coordination.nodes | length')"
+    if [[ "$registered" -lt "$NODES" ]]; then
+      echo "FAIL: node-$i sees only $registered/$NODES registered brokers" >&2
+      FAILED=1
+    fi
   else
     # Standalone check: the node reports its own broker address.
     reported="$(echo "$json" | jq -r '.coordination.nodes[0].broker_addr')"

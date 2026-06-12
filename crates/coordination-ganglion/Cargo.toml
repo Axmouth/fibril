@@ -9,7 +9,8 @@ fibril-broker = { path = "../broker" }
 fibril-storage = { path = "../storage" }
 ganglion-core = { path = "../../../ganglion/crates/ganglion-core" }
 ganglion-openraft = { path = "../../../ganglion/crates/ganglion-openraft", features = ["openraft"] }
-tokio = { version = "1", default-features = false, features = ["rt", "sync", "macros"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "macros", "time"] }
+tracing = "0.1"
 
 [dev-dependencies]
 fibril-broker = { path = "../broker", features = ["provider-contract-tests"] }
