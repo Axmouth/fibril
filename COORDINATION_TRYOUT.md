@@ -88,16 +88,15 @@ The text view renders three blocks:
 - `raft:` consensus internals (leader, voters, learners, applied index) — only present when an
   embedded ganglion coordinator is attached.
 
-A standalone server shows itself as the single `local` node. The full clustered view appears
-once a clustered provider is wired (`with_coordination` / `with_raft_topology` on
-`AdminServer`; config-driven selection is planned as phase F3 in
-`REPLICATION_PLANNING.md` § "Ganglion coordination provider").
+A standalone server shows itself as the single `local` node; with
+`[coordination] mode = "ganglion"` (see section 0) the raft block appears and all cluster
+members serve the same view.
 
 The same JSON is the contract for the future admin-page topology diagram.
 
 ## What is intentionally not here yet
 
-- **Multi-process raft clusters**: the ganglion transport is in-process today; a wire transport
-  (gRPC) is a planned ganglion item. Playgrounds therefore run all nodes in one process.
-- **Config-driven coordination selection** (`coordination = "static" | "ganglion"`): phase F3.
+- **Broker self-registration/liveness**: the coordination `nodes`/`assignments` tables fill in
+  once brokers heartbeat themselves into the snapshot and the controller loop runs against that
+  live set (the controller primitive exists — see the coordination playground).
 - **Admin page diagram**: planned; it consumes the `GET /admin/api/topology` JSON unchanged.
