@@ -1575,3 +1575,23 @@ Tests needed before implementing transition:
   sweeps green (broker 121, protocol 44). Remaining R4 items: progress-aware
   candidate selection via heartbeat tails (matters only for >1 follower),
   old-owner-returns demotion e2e, and the rest of the adversarial list.
+- 2026-06-12: R4 tail largely done. Progress-aware failover candidate
+  selection: followers advertise per-assignment applied tails in heartbeat
+  labels (applied/<topic>/<part>[/<group>] = msg:event via
+  spawn_heartbeat_with_labels; the server feeds them from
+  sparse_queue_observability_report); control_iteration's failover path
+  prefers the most caught-up LIVE committed follower by event tail when the
+  owner is dead and ownership moves, keeping the displaced planner pick in
+  the replica set. Advisory only - checked promotion remains the authority.
+  Test: b-slow sorts first but c-fast (higher tails) wins ownership at
+  epoch+1, b stays follower. Old-owner-returns adversarial e2e: the previous
+  owner's own watcher sees the fenced assignment, tears down the owner
+  runtime, demotes to follower, and new publishes on it FAIL (no silent
+  stale writes); first-run pass. Promote-before-caught-up note: under the
+  decided promote-to-local-tail policy, mid-catch-up promotion is by-design
+  accepted at the drained local tails (the epoch fences the rest); the only
+  refusal condition is recorded-but-unapplied events, which Stroma's gate
+  covers in its own tests. Remaining R4 niceties: promotion-refusal
+  retry/escalation path, generation-race-under-partition chaos, follower
+  restart mid-checkpoint-transfer. Also noted in planning (user): admin UI
+  node management + programmatic scale-up/down flows as post-R6 QoL.

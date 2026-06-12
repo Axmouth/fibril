@@ -38,6 +38,32 @@ pub struct ClusterRuntimeSettings {
     pub settings: fibril_broker::runtime_settings::RuntimeSettings,
 }
 
+/// Heartbeat label prefix for per-assignment applied tails:
+/// `applied/<topic>/<partition>[/<group>] = "<message_next>:<event_next>"`.
+/// Advisory data for failover candidate selection — the broker-side checked
+/// promotion remains the safety authority (stale labels can only pick a worse
+/// candidate, never an unsafe one).
+pub const APPLIED_TAIL_LABEL_PREFIX: &str = "applied/";
+
+/// Label key for one queue's applied tails.
+pub fn applied_tail_label(queue: &QueueIdentity) -> String {
+    match &queue.group {
+        Some(group) => format!(
+            "{APPLIED_TAIL_LABEL_PREFIX}{}/{}/{group}",
+            queue.topic, queue.partition
+        ),
+        None => format!(
+            "{APPLIED_TAIL_LABEL_PREFIX}{}/{}",
+            queue.topic, queue.partition
+        ),
+    }
+}
+
+fn parse_applied_tail(raw: &str) -> Option<(u64, u64)> {
+    let (message, event) = raw.split_once(':')?;
+    Some((message.parse().ok()?, event.parse().ok()?))
+}
+
 /// Node label carrying the broker's last heartbeat (unix milliseconds, broker
 /// clock). Liveness compares against the controller's clock — TTLs must
 /// absorb clock skew and election gaps (see ganglion FAILURE_MODES.md §4b.6).
@@ -326,11 +352,23 @@ where
     /// errors the caller should retry with backoff — never crash on them
     /// (brokers must keep serving while coordination heals).
     pub async fn register_self(&self, info: &NodeInfo) -> Result<(), OpenraftAdapterError> {
+        self.register_self_with_labels(info, std::collections::BTreeMap::new())
+            .await
+    }
+
+    /// `register_self` carrying extra advisory labels (e.g. applied tails for
+    /// failover candidate selection).
+    pub async fn register_self_with_labels(
+        &self,
+        info: &NodeInfo,
+        labels: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), OpenraftAdapterError> {
         let mut node = ganglion_core::NodeInfo::new(
             info.node_id.clone(),
             info.broker_addr.to_string(),
             info.admin_addr.map(|addr| addr.to_string()),
         );
+        node.labels = labels;
         node.labels
             .insert(HEARTBEAT_LABEL.to_string(), unix_millis_now().to_string());
 
@@ -651,10 +689,25 @@ where
         LS: 'static,
         NF: 'static,
     {
+        self.spawn_heartbeat_with_labels(info, interval, || std::collections::BTreeMap::new())
+    }
+
+    /// Heartbeat loop with per-tick advisory labels (applied tails etc.).
+    pub fn spawn_heartbeat_with_labels<LabelsFn>(
+        self: &std::sync::Arc<Self>,
+        info: NodeInfo,
+        interval: std::time::Duration,
+        labels: LabelsFn,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        LabelsFn: Fn() -> std::collections::BTreeMap<String, String> + Send + 'static,
+        LS: 'static,
+        NF: 'static,
+    {
         let provider = std::sync::Arc::clone(self);
         tokio::spawn(async move {
             loop {
-                if let Err(error) = provider.register_self(&info).await {
+                if let Err(error) = provider.register_self_with_labels(&info, labels()).await {
                     tracing::debug!(
                         node_id = %info.node_id,
                         %error,
@@ -759,6 +812,58 @@ where
                 .map_err(ControlError::Planning)?;
 
             let mut desired = to_ganglion_snapshot(&plan.snapshot);
+
+            // Failover candidate selection: when the committed owner is dead
+            // and the planner moved ownership, prefer the most caught-up LIVE
+            // committed follower (by heartbeat-label applied event tail).
+            // Advisory only — checked promotion on the broker is the safety
+            // gate; with one follower this is a no-op.
+            for (resource, planned) in desired.assignments.iter_mut() {
+                let Some(current) = committed.assignments.get(resource) else {
+                    continue;
+                };
+                let owner_died = !live_nodes.contains_key(&current.owner);
+                if !owner_died || planned.owner == current.owner {
+                    continue;
+                }
+                let queue = match to_fibril_queue(resource) {
+                    Some(queue) => queue,
+                    None => continue,
+                };
+                let label = applied_tail_label(&queue);
+                let best = current
+                    .followers
+                    .iter()
+                    .filter(|follower| live_nodes.contains_key(*follower))
+                    .filter_map(|follower| {
+                        let tails = committed
+                            .nodes
+                            .get(follower)
+                            .and_then(|node| node.labels.get(&label))
+                            .and_then(|raw| parse_applied_tail(raw))?;
+                        Some((follower.clone(), tails.1))
+                    })
+                    .max_by_key(|(_, event_tail)| *event_tail);
+                if let Some((best_follower, _)) = best {
+                    if planned.owner != best_follower {
+                        let displaced =
+                            std::mem::replace(&mut planned.owner, best_follower.clone());
+                        // Keep the replica set coherent: the chosen follower
+                        // leaves the follower list; the planner's displaced
+                        // pick joins it (if live and distinct).
+                        planned
+                            .followers
+                            .retain(|follower| *follower != best_follower);
+                        if displaced != best_follower
+                            && live_nodes.contains_key(&displaced)
+                            && !planned.followers.contains(&displaced)
+                        {
+                            planned.followers.push(displaced);
+                        }
+                    }
+                }
+            }
+
             desired.generation = committed.generation + 1;
             // Snapshot-replace writes must preserve everything the planner
             // does not own: the catalogue, the replicated attribute store,
@@ -1406,6 +1511,107 @@ mod tests {
             .await
             .expect("republish");
         assert_eq!(version, 2);
+
+        provider.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    /// R4 candidate selection: with multiple followers, failover prefers the
+    /// most caught-up live follower by heartbeat-label applied tails — even
+    /// when the planner's sort order would pick another.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failover_prefers_most_caught_up_follower_by_heartbeat_tails() {
+        use fibril_broker::coordination::DeterministicPartitionPlacement;
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("a-owner", raft_node);
+
+        let queue = QueueIdentity::new("orders", 0, None);
+        let info = |id: &str, port: u16| NodeInfo {
+            node_id: id.to_string(),
+            broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+            admin_addr: None,
+        };
+        let tails = |message: u64, event: u64| {
+            let mut labels = std::collections::BTreeMap::new();
+            labels.insert(applied_tail_label(&queue), format!("{message}:{event}"));
+            labels
+        };
+
+        provider
+            .register_self(&info("a-owner", 9000))
+            .await
+            .expect("a");
+        // b-slow sorts FIRST among followers but is behind; c-fast is ahead.
+        provider
+            .register_self_with_labels(&info("b-slow", 9001), tails(5, 5))
+            .await
+            .expect("b");
+        provider
+            .register_self_with_labels(&info("c-fast", 9002), tails(9, 9))
+            .await
+            .expect("c");
+        provider.register_queue(&queue).await.expect("queue");
+
+        // Healthy assignment: a owns, b and c follow.
+        let all_live = provider.live_nodes(Duration::from_secs(30));
+        let committed = provider
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                2,
+                &all_live,
+                8,
+            )
+            .await
+            .expect("assign")
+            .expect("leader");
+        let first = committed
+            .assignment_for("orders", 0, None)
+            .expect("assigned")
+            .clone();
+        assert_eq!(first.owner, "a-owner");
+        assert_eq!(first.replica_set_size(), 3);
+
+        // The owner dies: only b and c stay live. Sort order says b; tails
+        // must say c.
+        let mut live = std::collections::HashMap::new();
+        live.insert("b-slow".to_string(), info("b-slow", 9001));
+        live.insert("c-fast".to_string(), info("c-fast", 9002));
+        let committed = provider
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                2,
+                &live,
+                8,
+            )
+            .await
+            .expect("failover")
+            .expect("leader");
+        let moved = committed
+            .assignment_for("orders", 0, None)
+            .expect("assigned")
+            .clone();
+        assert_eq!(
+            moved.owner, "c-fast",
+            "candidate selection must prefer the most caught-up follower"
+        );
+        assert_eq!(moved.epoch, first.epoch + 1, "the move fences");
+        assert!(
+            moved.followers.contains(&"b-slow".to_string()),
+            "the displaced candidate stays in the replica set: {moved:?}"
+        );
 
         provider.raft_node().shutdown().await.expect("shutdown");
     }

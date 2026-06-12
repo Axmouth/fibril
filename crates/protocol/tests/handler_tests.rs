@@ -2103,6 +2103,164 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
     server_task.await.unwrap().unwrap();
 }
 
+/// R4 adversarial: the OLD owner observes its demotion through its own
+/// watcher when it comes back — owner runtime torn down, queue demoted to
+/// follower, new owner publishes rejected locally.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
+    use fibril_coordination_ganglion::GanglionCoordination;
+    use ganglion_openraft::{InProcessRouter, RaftMetadataNode, default_raft_config};
+
+    let topic = "replication.coordination.old-owner";
+
+    let router = InProcessRouter::new();
+    let raft_node = RaftMetadataNode::start(1, default_raft_config().unwrap(), &router)
+        .await
+        .unwrap();
+    let mut members = std::collections::BTreeMap::new();
+    members.insert(
+        1u64,
+        ganglion_openraft::openraft::BasicNode::new("coordinator"),
+    );
+    raft_node.initialize(members).await.unwrap();
+    raft_node
+        .wait_for_leader(1, Duration::from_secs(10))
+        .await
+        .unwrap();
+    // This provider belongs to the OWNER broker.
+    let coordination = Arc::new(GanglionCoordination::new("a-owner", raft_node));
+
+    let (owner_broker, _owner_dir) = open_test_broker().await;
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, &None).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"pre-fence".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let node = |id: &str, port: u16| fibril_broker::coordination::NodeInfo {
+        node_id: id.to_string(),
+        broker_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+        admin_addr: None,
+    };
+    coordination
+        .register_self(&node("a-owner", 9100))
+        .await
+        .unwrap();
+    coordination
+        .register_self(&node("b-follower", 9101))
+        .await
+        .unwrap();
+    coordination
+        .register_queue(&QueueIdentity::new(topic, 0, None))
+        .await
+        .unwrap();
+
+    // The owner broker runs the supervised watcher (it will see both the
+    // initial ownership and, later, its own demotion).
+    let resolver = Arc::new(
+        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::new(
+            coordination.clone(),
+        ),
+    );
+    owner_broker.spawn_assignment_watcher_with_follower_replication(
+        coordination.clone(),
+        resolver,
+        FollowerReplicationWorkerConfig {
+            caught_up_poll_ms: 60_000,
+            ..Default::default()
+        },
+    );
+
+    let live = coordination.live_nodes(Duration::from_secs(30));
+    let committed = coordination
+        .control_iteration(
+            &fibril_broker::coordination::DeterministicPartitionPlacement,
+            &coordination.registered_queues(),
+            1,
+            &live,
+            8,
+        )
+        .await
+        .unwrap()
+        .expect("leader iteration");
+    let first = committed
+        .assignment_for(topic, 0, None)
+        .expect("assigned")
+        .clone();
+    assert_eq!(first.owner, "a-owner");
+
+    // Failover away from a-owner (simulates: it was partitioned, the cluster
+    // moved on, now its watcher sees the fenced assignment).
+    let mut live_without_owner = std::collections::HashMap::new();
+    live_without_owner.insert("b-follower".to_string(), node("b-follower", 9101));
+    let committed = coordination
+        .control_iteration(
+            &fibril_broker::coordination::DeterministicPartitionPlacement,
+            &coordination.registered_queues(),
+            1,
+            &live_without_owner,
+            8,
+        )
+        .await
+        .unwrap()
+        .expect("failover iteration");
+    let moved = committed
+        .assignment_for(topic, 0, None)
+        .expect("assigned")
+        .clone();
+    assert_eq!(moved.owner, "b-follower");
+    assert_eq!(moved.epoch, first.epoch + 1);
+
+    // The old owner demotes itself: ownership gate flips off and the engine
+    // refuses owner traffic (publish path fails, no silent stale writes).
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let gate_owns = fibril_broker::broker::QueueOwnership::owns_queue(
+                coordination.as_ref(),
+                topic,
+                0,
+                None,
+            );
+            if !gate_owns {
+                let publish_attempt = match owner_broker.get_publisher(topic, &None).await {
+                    Ok((publisher, _confirms)) => {
+                        match publisher
+                            .publish(
+                                b"stale-after-fence".to_vec(),
+                                unix_millis(),
+                                unix_millis(),
+                                None,
+                                Default::default(),
+                            )
+                            .await
+                        {
+                            Ok(reply) => reply.await.map(|inner| inner.is_err()).unwrap_or(true),
+                            Err(_) => true,
+                        }
+                    }
+                    Err(_) => true,
+                };
+                if publish_attempt {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("demoted old owner must refuse new publishes");
+
+    coordination.raft_node().shutdown().await.unwrap();
+    owner_broker.shutdown().await;
+}
+
 #[tokio::test]
 async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     let topic = "replication.resolver.loop";

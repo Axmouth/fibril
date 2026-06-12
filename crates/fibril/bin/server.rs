@@ -158,17 +158,6 @@ async fn main() -> anyhow::Result<()> {
                 node,
                 wire_format,
             ));
-            // Register this broker and keep its heartbeat fresh so it shows up
-            // (and stays live) in the cluster's node table.
-            coordination.spawn_heartbeat(
-                fibril_broker::coordination::NodeInfo {
-                    node_id: config.coordination.node_id.clone(),
-                    broker_addr: config.broker.listener.bind,
-                    admin_addr: Some(config.admin.listener.bind),
-                },
-                std::time::Duration::from_millis(section.heartbeat_interval_ms),
-            );
-
             // Catalogue sync: local engine queues become cluster-visible so
             // the controller can assign them (also re-registers pre-existing
             // on-disk queues after restarts).
@@ -257,6 +246,39 @@ async fn main() -> anyhow::Result<()> {
             parts.coordination.clone(),
             resolver,
             fibril_broker::broker::FollowerReplicationWorkerConfig::default(),
+        );
+
+        // Heartbeat with applied-tail labels: registers this broker as live
+        // AND advertises its follower replication progress, which the
+        // controller uses for progress-aware failover candidate selection.
+        let tails_broker = broker.clone();
+        parts.coordination.spawn_heartbeat_with_labels(
+            fibril_broker::coordination::NodeInfo {
+                node_id: config.coordination.node_id.clone(),
+                broker_addr: config.broker.listener.bind,
+                admin_addr: Some(config.admin.listener.bind),
+            },
+            std::time::Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
+            move || {
+                let mut labels = std::collections::BTreeMap::new();
+                for worker in tails_broker
+                    .sparse_queue_observability_report()
+                    .replication_followers
+                {
+                    if let Some(state) = worker.state {
+                        let queue = fibril_broker::coordination::QueueIdentity::new(
+                            worker.topic,
+                            worker.partition,
+                            worker.group.as_deref(),
+                        );
+                        labels.insert(
+                            fibril_coordination_ganglion::applied_tail_label(&queue),
+                            format!("{}:{}", state.message_next_offset, state.event_next_offset),
+                        );
+                    }
+                }
+                labels
+            },
         );
     }
     let connection_settings = ConnectionSettings::new(None)

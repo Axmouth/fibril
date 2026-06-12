@@ -719,6 +719,14 @@ Then a `region-aware` policy joins the `PlacementStrategy` registry beside
 `deterministic`/`least-loaded`. Extends the existing zone/rack-diversity balancing inputs;
 not scheduled before R3–R5 land.
 
+### Noted for post-R6 (user, 2026-06-12): operator and scaling QoL
+
+- Admin UI node management: add/remove/fence cluster members from the topology page (drives
+  the existing membership + assignment APIs; the JSON contract already carries the state).
+- Programmatic scale up/down: a first-class "join this cluster" / "drain and leave" flow
+  (register -> learner -> voter -> rebalance in; drain assignments -> deregister -> remove
+  voter out), exposed via fibrilctl and the admin API, so autoscalers can drive it.
+
 ### Execution order and gates
 
 R1 (ganglion schema + catalogue) → R2 (controller task) → R3 (ownership switch + e2e test +
