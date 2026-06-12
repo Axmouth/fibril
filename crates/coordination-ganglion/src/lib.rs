@@ -15,9 +15,10 @@ use fibril_broker::coordination::{
     ReplicationDurabilityPolicy,
 };
 use ganglion_openraft::openraft::storage::RaftLogStorage;
+use ganglion_openraft::openraft::RaftNetworkFactory;
 use ganglion_openraft::{
-    GanglionLogStore, GanglionRaftConfig, MetadataRaftResponse, OpenraftAdapterError,
-    RaftMetadataNode,
+    GanglionLogStore, GanglionRaftConfig, InProcessRouter, MetadataRaftResponse,
+    OpenraftAdapterError, RaftMetadataNode,
 };
 use tokio::sync::watch;
 
@@ -189,19 +190,21 @@ impl std::error::Error for ControlError {}
 /// Reads serve from a fibril-side watch channel fed by ganglion's
 /// committed-snapshot stream; a background task forwards updates. Proposals go
 /// through [`GanglionCoordination::propose`], which is leader-only.
-pub struct GanglionCoordination<LS = GanglionLogStore>
+pub struct GanglionCoordination<LS = GanglionLogStore, NF = InProcessRouter<LS>>
 where
     LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: RaftNetworkFactory<GanglionRaftConfig>,
 {
     node_id: String,
-    node: RaftMetadataNode<LS>,
+    node: RaftMetadataNode<LS, NF>,
     tx: watch::Sender<CoordinationSnapshot>,
     forwarder: tokio::task::JoinHandle<()>,
 }
 
-impl<LS> std::fmt::Debug for GanglionCoordination<LS>
+impl<LS, NF> std::fmt::Debug for GanglionCoordination<LS, NF>
 where
     LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: RaftNetworkFactory<GanglionRaftConfig>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GanglionCoordination")
@@ -211,9 +214,10 @@ where
     }
 }
 
-impl<LS> GanglionCoordination<LS>
+impl<LS, NF> GanglionCoordination<LS, NF>
 where
     LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: RaftNetworkFactory<GanglionRaftConfig>,
 {
     /// Wrap a started raft node as a fibril coordination provider.
     ///
@@ -221,7 +225,7 @@ where
     /// (u64) is an internal transport concern and need not match.
     ///
     /// Must be called from within a tokio runtime (spawns the watch forwarder).
-    pub fn new(node_id: impl Into<String>, node: RaftMetadataNode<LS>) -> Self {
+    pub fn new(node_id: impl Into<String>, node: RaftMetadataNode<LS, NF>) -> Self {
         let mut ganglion_rx = node.watch_committed();
         let initial = to_fibril_snapshot(&ganglion_rx.borrow_and_update());
         let (tx, _rx) = watch::channel(initial);
@@ -320,23 +324,25 @@ where
     }
 
     /// Access the underlying raft node (membership changes, waits, shutdown).
-    pub fn raft_node(&self) -> &RaftMetadataNode<LS> {
+    pub fn raft_node(&self) -> &RaftMetadataNode<LS, NF> {
         &self.node
     }
 }
 
-impl<LS> Drop for GanglionCoordination<LS>
+impl<LS, NF> Drop for GanglionCoordination<LS, NF>
 where
     LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: RaftNetworkFactory<GanglionRaftConfig>,
 {
     fn drop(&mut self) {
         self.forwarder.abort();
     }
 }
 
-impl<LS> Coordination for GanglionCoordination<LS>
+impl<LS, NF> Coordination for GanglionCoordination<LS, NF>
 where
     LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: RaftNetworkFactory<GanglionRaftConfig>,
 {
     fn node_id(&self) -> &str {
         &self.node_id

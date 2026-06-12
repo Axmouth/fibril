@@ -10,15 +10,26 @@ Starts N actual `fibril-server` processes (separate ports and data dirs) and che
 topology through the real `fibrilctl` CLI over HTTP:
 
 ```bash
-scripts/cluster-tryout.sh              # 3 servers, topology-checked, then shut down
-scripts/cluster-tryout.sh --nodes 5
-scripts/cluster-tryout.sh --keep       # leave them running and play with fibrilctl yourself
+scripts/cluster-tryout.sh              # 3 standalone servers, topology-checked, shut down
+scripts/cluster-tryout.sh --ganglion   # 3 servers forming ONE raft coordination cluster
+scripts/cluster-tryout.sh --nodes 5 --ganglion
+scripts/cluster-tryout.sh --ganglion --keep   # leave it running and explore with fibrilctl
+```
+
+`--ganglion` starts each server with an embedded raft coordinator (config:
+`[coordination] mode = "ganglion"`, here wired via `FIBRIL_COORDINATION_*` env vars). The
+servers talk raft over real TCP (msgpack frames; set `GANGLION_WIRE_FORMAT=json` to watch the
+wire in plaintext) and the script asserts every node reports the same leader and voter set:
+
+```
+raft (embedded coordinator):
+  local=2 leader=1 voters=[1, 2, 3] learners=[] applied=1 committed_generation=0
+...
+shared cluster confirmed: leader=1 voters=[1,2,3] on all 3 nodes
 ```
 
 With `--keep` it prints ready-to-paste `fibrilctl --admin ... admin topology` commands per
-node, plus where logs and data live. Today each server reports its own single-node topology;
-once cluster coordination is config-wired (phase F3 + a raft wire transport), this same script
-becomes the shared-cluster assertion — the harness is already real-process.
+node, plus where logs and data live.
 
 ## 1. Raft cluster playground (ganglion)
 

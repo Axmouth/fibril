@@ -62,6 +62,7 @@ pub struct ServerConfig {
     pub storage: StorageSection,
     pub runtime_seed: RuntimeSeedSection,
     pub runtime_locks: RuntimeLocksSection,
+    pub coordination: CoordinationSection,
 }
 
 impl Default for ServerConfig {
@@ -73,6 +74,7 @@ impl Default for ServerConfig {
             storage: StorageSection::default(),
             runtime_seed: RuntimeSeedSection::default(),
             runtime_locks: RuntimeLocksSection::default(),
+            coordination: CoordinationSection::default(),
         }
     }
 }
@@ -142,6 +144,34 @@ impl ServerConfig {
         }
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_BIND")? {
             self.admin.listener.bind = parse_env("FIBRIL_ADMIN_BIND", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_MODE")? {
+            self.coordination.mode = parse_env("FIBRIL_COORDINATION_MODE", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_NODE_ID")? {
+            self.coordination.node_id = value;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_RAFT_ID")? {
+            self.coordination.ganglion.raft_node_id =
+                parse_env("FIBRIL_COORDINATION_RAFT_ID", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_LISTEN")? {
+            self.coordination.ganglion.listen = parse_env("FIBRIL_COORDINATION_LISTEN", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_BOOTSTRAP")? {
+            self.coordination.ganglion.bootstrap =
+                parse_env("FIBRIL_COORDINATION_BOOTSTRAP", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_PEERS")? {
+            // Comma-separated "raft_id=host:port" pairs.
+            let mut peers = std::collections::BTreeMap::new();
+            for pair in value.split(',').filter(|pair| !pair.trim().is_empty()) {
+                let (id, addr) = pair.split_once('=').ok_or_else(|| {
+                    anyhow::anyhow!("FIBRIL_COORDINATION_PEERS entry `{pair}` is not id=addr")
+                })?;
+                peers.insert(id.trim().to_string(), addr.trim().to_string());
+            }
+            self.coordination.ganglion.peers = peers;
         }
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_AUTH_ENABLED")? {
             self.admin.auth.enabled = parse_env("FIBRIL_ADMIN_AUTH_ENABLED", &value)?;
@@ -387,6 +417,76 @@ impl Default for AdminAuthSection {
             enabled: false,
             username: "fibril".into(),
             password: None,
+        }
+    }
+}
+
+/// Cluster coordination provider selection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CoordinationSection {
+    /// `static` (single-node, default) or `ganglion` (embedded raft coordinator).
+    pub mode: CoordinationMode,
+    /// This broker's identity in coordination snapshots.
+    pub node_id: String,
+    pub ganglion: GanglionCoordinationSection,
+}
+
+impl Default for CoordinationSection {
+    fn default() -> Self {
+        Self {
+            mode: CoordinationMode::Static,
+            node_id: "local".into(),
+            ganglion: GanglionCoordinationSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationMode {
+    Static,
+    Ganglion,
+}
+
+impl std::str::FromStr for CoordinationMode {
+    type Err = anyhow::Error;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "static" => Ok(Self::Static),
+            "ganglion" => Ok(Self::Ganglion),
+            other => anyhow::bail!("unknown coordination mode `{other}` (static|ganglion)"),
+        }
+    }
+}
+
+/// Embedded ganglion raft coordinator settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GanglionCoordinationSection {
+    /// Raft node id (u64, transport-level; distinct from `node_id`).
+    pub raft_node_id: u64,
+    /// Raft RPC listen address. Must match this node's entry in `peers`.
+    pub listen: SocketAddr,
+    /// Raft id -> "host:port" for every cluster member, including self.
+    /// (String keys because TOML tables require them.)
+    pub peers: std::collections::BTreeMap<String, String>,
+    /// Initialize the cluster on first boot. Exactly one node sets this;
+    /// restarts ignore it once membership exists.
+    pub bootstrap: bool,
+    /// Raft WAL + snapshot directory. Empty = `<server.data_dir>/coordination`.
+    pub data_dir: PathBuf,
+}
+
+impl Default for GanglionCoordinationSection {
+    fn default() -> Self {
+        Self {
+            raft_node_id: 1,
+            listen: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7301)),
+            peers: std::collections::BTreeMap::new(),
+            bootstrap: false,
+            data_dir: PathBuf::new(),
         }
     }
 }

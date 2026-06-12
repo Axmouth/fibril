@@ -1406,3 +1406,20 @@ Tests needed before implementing transition:
   Remaining from the plan: F3 config-driven provider selection (needs the
   ganglion wire transport to be meaningful across processes) and the admin
   topology diagram (consumes the same JSON).
+- 2026-06-12: F3 done - REAL multi-process coordination clusters (user ask: no
+  in-process simulation). Ganglion grew a TCP wire transport (frames =
+  1-byte format tag + u32 length + body; msgpack default, JSON via
+  GANGLION_WIRE_FORMAT=json; receivers decode both, so mixed-format clusters
+  interoperate - the per-payload flag idea). fibril-config gained a
+  [coordination] section (mode static|ganglion; node_id; ganglion.raft_node_id
+  /listen/peers/bootstrap/data_dir) with FIBRIL_COORDINATION_* env overrides.
+  fibril-server's composition root starts the embedded durable coordinator
+  (start_durable_tcp), bootstraps membership once (re-initialize on restart is
+  tolerated), and feeds the admin topology endpoint both blocks.
+  `scripts/cluster-tryout.sh --ganglion` starts 3 actual fibril-server
+  binaries on real ports, waits for the cross-process raft election, and
+  asserts via real fibrilctl calls that ALL nodes report the same leader and
+  voter set - confirmed: "shared cluster confirmed: leader=1 voters=[1,2,3]
+  on all 3 nodes". COORDINATION_TRYOUT.md updated. Remaining: broker
+  self-registration/liveness loop feeding controller live-node input, and the
+  admin topology diagram.

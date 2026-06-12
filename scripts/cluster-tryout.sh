@@ -3,26 +3,28 @@
 # each one's topology through the real fibrilctl CLI over HTTP.
 #
 # Usage:
-#   scripts/cluster-tryout.sh              # 3 nodes, check topology, shut down
+#   scripts/cluster-tryout.sh              # 3 standalone nodes, check topology, shut down
+#   scripts/cluster-tryout.sh --ganglion   # 3 nodes forming ONE raft coordination cluster
 #   scripts/cluster-tryout.sh --nodes 5
 #   scripts/cluster-tryout.sh --keep       # leave the cluster running to play with
 #
-# NOTE: until cluster coordination is config-wired (REPLICATION_PLANNING.md
-# phase F3 + a raft wire transport), each server reports its own single-node
-# topology. This script is the real-process harness; the same checks become a
-# shared-cluster assertion once those land.
+# In --ganglion mode the servers share an embedded raft coordinator over real
+# TCP: the script asserts all nodes agree on one leader and voter set.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 NODES=3
 KEEP=false
+GANGLION=false
 BASE_BROKER_PORT=7180
 BASE_ADMIN_PORT=7190
+BASE_RAFT_PORT=7300
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --nodes) NODES="$2"; shift 2 ;;
     --keep) KEEP=true; shift ;;
+    --ganglion) GANGLION=true; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -48,14 +50,35 @@ cargo build --quiet -p fibril -p fibril-cli
 SERVER=target/debug/fibril-server
 CTL=target/debug/fibrilctl
 
-echo "starting $NODES fibril servers under $RUN_DIR"
+PEERS=""
+if [[ "$GANGLION" == true ]]; then
+  for i in $(seq 1 "$NODES"); do
+    PEERS+="${PEERS:+,}$i=127.0.0.1:$((BASE_RAFT_PORT + i))"
+  done
+fi
+
+echo "starting $NODES fibril servers under $RUN_DIR (ganglion=$GANGLION)"
 for i in $(seq 1 "$NODES"); do
   broker_port=$((BASE_BROKER_PORT + i))
   admin_port=$((BASE_ADMIN_PORT + i))
-  FIBRIL_DATA_DIR="$RUN_DIR/node-$i" \
-  FIBRIL_BROKER_BIND="127.0.0.1:$broker_port" \
-  FIBRIL_ADMIN_BIND="127.0.0.1:$admin_port" \
-    "$SERVER" >"$RUN_DIR/node-$i.log" 2>&1 &
+  env_vars=(
+    "FIBRIL_DATA_DIR=$RUN_DIR/node-$i"
+    "FIBRIL_BROKER_BIND=127.0.0.1:$broker_port"
+    "FIBRIL_ADMIN_BIND=127.0.0.1:$admin_port"
+  )
+  if [[ "$GANGLION" == true ]]; then
+    env_vars+=(
+      "FIBRIL_COORDINATION_MODE=ganglion"
+      "FIBRIL_COORDINATION_NODE_ID=broker-$i"
+      "FIBRIL_COORDINATION_RAFT_ID=$i"
+      "FIBRIL_COORDINATION_LISTEN=127.0.0.1:$((BASE_RAFT_PORT + i))"
+      "FIBRIL_COORDINATION_PEERS=$PEERS"
+    )
+    if [[ "$i" -eq 1 ]]; then
+      env_vars+=("FIBRIL_COORDINATION_BOOTSTRAP=true")
+    fi
+  fi
+  env "${env_vars[@]}" "$SERVER" >"$RUN_DIR/node-$i.log" 2>&1 &
   PIDS+=("$!")
   echo "  node-$i: broker=127.0.0.1:$broker_port admin=127.0.0.1:$admin_port pid=${PIDS[-1]}"
 done
@@ -76,23 +99,66 @@ for i in $(seq 1 "$NODES"); do
   done
 done
 
+if [[ "$GANGLION" == true ]]; then
+  echo "waiting for raft election..."
+  for attempt in $(seq 1 50); do
+    leader="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + 1))" admin topology --json 2>/dev/null | jq -r '.raft.leader' || echo null)"
+    if [[ "$leader" != "null" && -n "$leader" ]]; then
+      break
+    fi
+    sleep 0.3
+  done
+fi
+
 echo
 FAILED=0
+declare -a LEADERS=()
+declare -a VOTERS=()
 for i in $(seq 1 "$NODES"); do
   broker_port=$((BASE_BROKER_PORT + i))
   admin_port=$((BASE_ADMIN_PORT + i))
   echo "=== node-$i topology (fibrilctl --admin 127.0.0.1:$admin_port admin topology) ==="
   "$CTL" --admin "127.0.0.1:$admin_port" admin topology || FAILED=1
 
-  # Machine check: the JSON must report this node's broker address.
   json="$("$CTL" --admin "127.0.0.1:$admin_port" admin topology --json)"
-  reported="$(echo "$json" | jq -r '.coordination.nodes[0].broker_addr')"
-  if [[ "$reported" != "127.0.0.1:$broker_port" ]]; then
-    echo "FAIL: node-$i reported broker_addr=$reported, expected 127.0.0.1:$broker_port" >&2
-    FAILED=1
+  if [[ "$GANGLION" == true ]]; then
+    # Shared-cluster checks: a real raft block with one leader and all voters.
+    leader="$(echo "$json" | jq -r '.raft.leader')"
+    voters="$(echo "$json" | jq -c '.raft.voters')"
+    if [[ "$leader" == "null" ]]; then
+      echo "FAIL: node-$i reports no raft leader" >&2
+      FAILED=1
+    fi
+    LEADERS+=("$leader")
+    VOTERS+=("$voters")
+  else
+    # Standalone check: the node reports its own broker address.
+    reported="$(echo "$json" | jq -r '.coordination.nodes[0].broker_addr')"
+    if [[ "$reported" != "127.0.0.1:$broker_port" ]]; then
+      echo "FAIL: node-$i reported broker_addr=$reported, expected 127.0.0.1:$broker_port" >&2
+      FAILED=1
+    fi
   fi
   echo
 done
+
+if [[ "$GANGLION" == true ]]; then
+  for value in "${LEADERS[@]}"; do
+    if [[ "$value" != "${LEADERS[0]}" ]]; then
+      echo "FAIL: nodes disagree on the raft leader: ${LEADERS[*]}" >&2
+      FAILED=1
+    fi
+  done
+  for value in "${VOTERS[@]}"; do
+    if [[ "$value" != "${VOTERS[0]}" ]]; then
+      echo "FAIL: nodes disagree on the voter set: ${VOTERS[*]}" >&2
+      FAILED=1
+    fi
+  done
+  if [[ "$FAILED" -eq 0 ]]; then
+    echo "shared cluster confirmed: leader=${LEADERS[0]} voters=${VOTERS[0]} on all $NODES nodes"
+  fi
+fi
 
 if [[ "$FAILED" -ne 0 ]]; then
   echo "cluster-tryout: FAILED"

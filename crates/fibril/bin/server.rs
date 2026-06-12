@@ -11,7 +11,7 @@ use fibril_broker::{
         RuntimeSettingsManager,
     },
 };
-use fibril_config::ServerConfig;
+use fibril_config::{CoordinationMode, ServerConfig};
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::{
     ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings, ConnectionSettings, run_server,
@@ -162,14 +162,74 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(engine.clone()),
         Some(broker_observability),
         Some(runtime_settings),
-    )
-    // Standalone default: a single-node coordination view so `fibrilctl
-    // topology` reports this broker. A clustered provider (ganglion/etcd)
-    // replaces this when cluster coordination is configured.
-    .with_coordination(Arc::new(StaticCoordination::single_node(
-        "local",
-        config.broker.listener.bind,
-    )));
+    );
+
+    // Coordination provider selection (config: [coordination] mode = ...).
+    // The raft listener handle must outlive main; hold it here.
+    let mut _raft_server = None;
+    let admin = match config.coordination.mode {
+        CoordinationMode::Static => {
+            // Single-node view so `fibrilctl topology` reports this broker.
+            admin.with_coordination(Arc::new(StaticCoordination::single_node(
+                config.coordination.node_id.clone(),
+                config.broker.listener.bind,
+            )))
+        }
+        CoordinationMode::Ganglion => {
+            use fibril_coordination_ganglion::GanglionCoordination;
+            use ganglion_openraft::openraft::BasicNode;
+
+            let section = &config.coordination.ganglion;
+            let data_dir = if section.data_dir.as_os_str().is_empty() {
+                config.server.data_dir.join("coordination")
+            } else {
+                section.data_dir.clone()
+            };
+
+            let raft_config = ganglion_openraft::default_raft_config()
+                .map_err(|error| anyhow::anyhow!("raft config: {error}"))?;
+            let (node, raft_server) = ganglion_openraft::RaftMetadataNode::start_durable_tcp(
+                section.raft_node_id,
+                raft_config,
+                section.listen,
+                &data_dir,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("embedded coordinator failed to start: {error}"))?;
+            _raft_server = Some(raft_server);
+
+            if section.bootstrap {
+                let members: std::collections::BTreeMap<u64, BasicNode> = section
+                    .peers
+                    .iter()
+                    .map(|(id, addr)| {
+                        Ok((
+                            id.parse::<u64>()
+                                .map_err(|_| anyhow::anyhow!("peer id `{id}` is not a u64"))?,
+                            BasicNode::new(addr.clone()),
+                        ))
+                    })
+                    .collect::<anyhow::Result<_>>()?;
+                // Re-running initialize after first boot is rejected by raft;
+                // that is the expected restart path, not an error.
+                if let Err(error) = node.initialize(members).await {
+                    tracing::info!("coordinator initialize skipped: {error}");
+                }
+            }
+
+            let coordination = Arc::new(GanglionCoordination::new(
+                config.coordination.node_id.clone(),
+                node,
+            ));
+            let topology_source = coordination.clone();
+            admin
+                .with_coordination(coordination)
+                .with_raft_topology(Arc::new(move || {
+                    serde_json::to_value(topology_source.raft_node().topology())
+                        .unwrap_or(serde_json::Value::Null)
+                }))
+        }
+    };
 
     metrics.start(
         MetricsConfig {
