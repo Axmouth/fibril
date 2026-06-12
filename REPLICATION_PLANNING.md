@@ -662,6 +662,19 @@ release-inflight); its stale writes die at the data plane via epoch checks.
   publish after fence; promote-before-caught-up refused; owner returns mid-failover;
   generation races (CAS already covers); partition during failover.
 
+### R2b — Replicated runtime settings (user requirement, 2026-06-12)
+
+Stroma runtime settings must be cluster-consistent. Mechanism: ganglion's generic
+`attributes` KV (opaque values, merge `SetAttribute`, same-value no-op) carries the serialized
+`RuntimeSettings` + version under one key (`fibril/runtime_settings`). Flow: admin PUT on any
+broker → existing `RuntimeSettingsManager` versioned-update check locally → forward
+`SetAttribute` through the provider (leader or forwarded write) → every broker's watch sees
+the attribute change → applies it through the same versioned-update path (idempotent; version
+conflict resolution already exists). Local persistence in the Stroma engine remains the
+node-local cache/bootstrapping source; the attribute is the cluster truth in ganglion mode.
+Tests: settings update on follower broker propagates to all; version conflicts surface as the
+existing Conflict outcome; restart picks up cluster value over stale local.
+
 ### R5 — Replicated publish-confirm enforcement
 
 Design notes only until R3/R4 are solid (Medium-Term §7 stands): follower workers already
