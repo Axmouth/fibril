@@ -18,15 +18,33 @@ scripts/cluster-tryout.sh --ganglion --keep   # leave it running and explore wit
 
 `--ganglion` starts each server with an embedded raft coordinator (config:
 `[coordination] mode = "ganglion"`, here wired via `FIBRIL_COORDINATION_*` env vars). The
-servers talk raft over real TCP (msgpack frames; set `GANGLION_WIRE_FORMAT=json` to watch the
-wire in plaintext) and the script asserts every node reports the same leader and voter set:
+servers talk raft over real TCP — msgpack frames by default; set
+`[coordination.ganglion] wire_format = "json"` (or `FIBRIL_COORDINATION_WIRE_FORMAT=json`) to
+watch the wire in plaintext. Frames are individually tagged, so mixed-format clusters
+interoperate.
+
+Each broker also **registers itself** into the shared node table and keeps a heartbeat fresh
+(`heartbeat_interval_ms`, default 3000): followers forward their registrations through the
+leader automatically. The script asserts every node reports the same leader/voter set AND sees
+all brokers registered:
 
 ```
+nodes:
+  NODE             BROKER                 ADMIN
+  broker-1         127.0.0.1:7181         127.0.0.1:7191
+  broker-2         127.0.0.1:7182         127.0.0.1:7192
+  broker-3         127.0.0.1:7183         127.0.0.1:7193
+
 raft (embedded coordinator):
-  local=2 leader=1 voters=[1, 2, 3] learners=[] applied=1 committed_generation=0
+  local=3 leader=3 voters=[1, 2, 3] learners=[] applied=9 committed_generation=3
 ...
-shared cluster confirmed: leader=1 voters=[1,2,3] on all 3 nodes
+shared cluster confirmed: leader=3 voters=[1,2,3] on all 3 nodes
 ```
+
+While it runs (`--keep`), try killing one server process: its heartbeat stops refreshing, the
+survivors keep one leader, and `live_nodes(ttl)` on the controller side stops counting it.
+Failure behaviors are catalogued in detail in `ganglion/FAILURE_MODES.md` (see §4b for
+startup/connectivity modes: unreachable peers, missing bootstrap node, leaderless heartbeats).
 
 With `--keep` it prints ready-to-paste `fibrilctl --admin ... admin topology` commands per
 node, plus where logs and data live.
@@ -96,7 +114,8 @@ The same JSON is the contract for the future admin-page topology diagram.
 
 ## What is intentionally not here yet
 
-- **Broker self-registration/liveness**: the coordination `nodes`/`assignments` tables fill in
-  once brokers heartbeat themselves into the snapshot and the controller loop runs against that
-  live set (the controller primitive exists — see the coordination playground).
-- **Admin page diagram**: planned; it consumes the `GET /admin/api/topology` JSON unchanged.
+- **Queue assignment control loop in the server**: brokers register and heartbeat themselves,
+  and the controller primitive exists (`control_iteration`, see the coordination playground),
+  but the server does not yet run it against declared queues — that lands with the replication
+  data-plane integration, so the `assignments` table stays empty in the tryout for now.
+- **Admin page diagram**: in progress; it consumes the `GET /admin/api/topology` JSON unchanged.
