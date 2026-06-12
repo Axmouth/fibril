@@ -537,3 +537,126 @@ the fibril layer).
 The replication data path keeps its own phasing (earlier sections of this doc); this plan only
 covers the coordination/metadata plane and its visibility. The two meet at F2 (controller writes
 assignments; Stroma promotion checks consume epochs locally).
+
+## Replication data-plane integration plan — R-phases (added 2026-06-12)
+
+How the coordination plane (ganglion-backed; F-phases complete) connects to the existing
+replication data plane (Stroma roles, follower workers, protocol owner peers — Medium-Term
+§§1–3 largely done). This supersedes the etcd-shaped Medium-Term §4/§5 *for the embedded
+coordinator path*: ganglion already provides the snapshot/watch cache (provider + contract
+suite), CAS assignment writes (guarded generation writes), node registration with TTL
+(heartbeat labels + `live_nodes(ttl)`), and the controller lease (raft leadership IS the
+lease). etcd remains a possible alternative behind the same `Coordination` trait, unchanged.
+
+Inventory of existing seams this plan composes (do not rebuild):
+- `plan_local_assignment_transitions` — snapshot diff → local role intents.
+- `spawn_assignment_watcher_with_follower_replication(coordination, resolver, cfg)` — applies
+  transitions and supervises follower loops; `CoordinationProtocolOwnerPeerResolver` resolves
+  owners from snapshots with peer caching.
+- Owner demotion/freeze with release-inflight; StopFollower with tick-draining; checked
+  promotion; checkpoint export/install over protocol v1.
+- `GanglionCoordination::{control_iteration, live_nodes, register_self, propose}`.
+
+### R1 — Cluster queue catalogue (the controller's missing input)
+
+Problem: the controller needs the desired queue set, but queues are declared dynamically on
+whichever broker a client hits. Declarations must become cluster-visible facts.
+
+Design: the catalogue lives in the coordination snapshot, separate from assignments.
+
+- Ganglion (schema + commands, mirror of node registration):
+  - `CoordinationSnapshot.resources: BTreeSet<ResourceIdentity>` (new field, serde-default so
+    existing WAL/snapshot files load — additive, no migration).
+  - `MetadataRaftCommand::{RegisterResource { resource }, DeregisterResource { resource }}` —
+    merge commands (no CAS), generation bump, same forwarded-write path brokers already use
+    for heartbeats. `stamp_assignment_epochs`/CAS writes ignore `resources` except that
+    snapshot-replace commands carry the field verbatim (controller writes preserve it).
+- Fibril provider: `register_queue(&QueueIdentity)` / `deregister_queue` (forwarded like
+  `register_self`); mapping uses the existing `fibril/queue` namespace.
+- Broker wiring: on successful local `declare_queue` in ganglion mode, fire-and-retry
+  `register_queue` (same never-crash policy as heartbeats). Followers receiving replicated
+  DLQ/declare side effects do NOT register (owner-side only, mirrors "owner decides").
+- Tests: ganglion — merge/dedup/dereg fuzz alongside the SM model (resources join the model);
+  fibril — declare on a follower broker → resource visible in every node's snapshot.
+
+DECISION NEEDED (small): `resources` as a separate set (recommended: catalogue ≠ placement,
+deletion semantics stay clean) vs. encoding unassigned queues as empty assignments.
+
+### R2 — Server controller task (leader-gated assignment loop)
+
+- New task in fibril-server (ganglion mode only), spawned next to the heartbeat:
+  - Wakes on coordination watch changes AND a bounded interval (config:
+    `controller_tick_ms`, default 2000).
+  - Each tick: `live = provider.live_nodes(ttl)` (config: `liveness_ttl_ms`, default
+    3 × heartbeat interval — must exceed worst-case election + retry, FAILURE_MODES §4b.6);
+    `queues` = snapshot catalogue (R1); run
+    `control_iteration(DeterministicPartitionPlacement, queues, target_followers, live, retries)`.
+  - `Ok(None)` (not leader) and planner `NoNodesForQueues` are normal idle outcomes, not errors.
+  - Anti-churn guard: skip the proposal entirely when the planned snapshot equals the committed
+    one modulo generation (placement policy is already stability-first; this makes no-op ticks
+    free and keeps the raft log quiet).
+- Config: `[coordination.controller] target_followers` (default 1), `controller_tick_ms`,
+  `liveness_ttl_ms`.
+- Observability: controller block in the topology JSON (`controller: { active: bool,
+  last_plan_generation, last_error }`) — feeds the admin page and `fibrilctl topology`.
+- Tests: 3 in-process providers — declare → assignment appears with epoch 1; standby never
+  proposes; no-op ticks do not advance generation; owner drop from live set → epoch+1 move
+  (already proven at provider level; re-assert through the server-shaped task fn).
+
+### R3 — Brokers consume assignments (the ownership switch)
+
+- In ganglion mode, fibril-server:
+  - replaces `OwnAllQueues` with the coordination provider as the broker's `QueueOwnership`
+    (gate exists; `StaticCoordination` already implements the trait — add the same impl for
+    `GanglionCoordination`).
+  - starts `spawn_assignment_watcher_with_follower_replication(provider,
+    CoordinationProtocolOwnerPeerResolver::new(provider), worker_cfg)`.
+- Standalone (`mode = "static"`) behavior is untouched.
+- This is the moment cluster brokers refuse unowned traffic (`ERR_NOT_OWNER` already exists);
+  client reroute remains R6.
+- Tests (the confidence core; helpers per worklog item 48):
+  - two-broker TCP cluster: declare on A → controller assigns A owner/B follower → publish N
+    to A → B's follower worker catches up (protocol pull already proven; this proves the
+    *coordination-driven* wiring end to end);
+  - unowned broker rejects publish/subscribe with not-owner;
+  - assignment refresh does not reset follower progress (re-assert through watcher path).
+- Tryout: `cluster-tryout.sh --ganglion` gains a declare + publish step; `fibrilctl topology`
+  and the admin diagram show real assignments with owner/follower edges.
+
+### R4 — Failover orchestration (composes R2 + R3 + epochs)
+
+Sequence on owner death (no new mechanisms — this phase is choreography + tests):
+heartbeat TTL expires → controller tick reassigns (epoch+1, stability-first keeps the
+caught-up follower preferred — extend placement policy input with follower progress later if
+needed) → watcher on the chosen broker: stop follower worker (drain tick), checked promotion
+against expected tails; on `CheckpointRequired`/not-caught-up, refuse promotion (worklog §6
+risk: explicit refusal over optimism) and surface status; controller may pick another or wait.
+Old owner returning: sees demotion intent (owner→follower transition path with
+release-inflight); its stale writes die at the data plane via epoch checks.
+
+- Gap to close en route: promotion needs expected tails from the *dead* owner — use the
+  follower's own applied tails when the assignment epoch fences the old owner (decide:
+  promotion-by-quorum-of-replicas vs. promote-to-local-tail under epoch fence; plan leans
+  promote-to-local-tail, accepting bounded acked-data loss only under `local_durable` policy,
+  which is the documented contract).
+- Adversarial tests (REPLICATION_PLANNING "scenarios that always reveal bugs"): stale owner
+  publish after fence; promote-before-caught-up refused; owner returns mid-failover;
+  generation races (CAS already covers); partition during failover.
+
+### R5 — Replicated publish-confirm enforcement
+
+Design notes only until R3/R4 are solid (Medium-Term §7 stands): follower workers already
+track applied offsets; add owner-side progress reporting over the existing protocol peer
+(piggyback on pull responses — the owner learns follower offsets from the requests
+themselves: a pull at offset N proves application < N; an explicit ack frame confirms durable
+N). Enforce `ReplicationDurabilityPolicy` in publish-confirm with per-policy timeouts.
+
+### R6 — Client topology (unchanged from Medium-Term §8; after R4)
+
+### Execution order and gates
+
+R1 (ganglion schema + catalogue) → R2 (controller task) → R3 (ownership switch + e2e test +
+tryout/diagram payoff) → R4 (failover choreography + adversarial suite) → R5 → R6.
+Each phase lands with its tests green plus one cluster-tryout assertion where applicable;
+FAILURE_MODES.md gains entries for new modes (controller churn, promotion refusal loops,
+catalogue divergence).

@@ -1464,3 +1464,18 @@ Tests needed before implementing transition:
   partition chaos, leader-on-minority end-to-end. NEXT: replication data
   plane integration (controller assignments consumed by broker queue
   ownership, Keratin epoch checks per the phasing).
+- 2026-06-12: Added the R-phase integration plan to REPLICATION_PLANNING.md:
+  connects the completed coordination plane (ganglion F-phases) to the
+  existing replication data plane. R1 cluster queue catalogue (snapshot
+  `resources` set + Register/DeregisterResource merge commands, broker declare
+  forwarding); R2 leader-gated controller task in the server (live_nodes TTL,
+  anti-churn no-op guard, controller observability block); R3 the ownership
+  switch (GanglionCoordination as QueueOwnership + the existing supervised
+  assignment watcher + CoordinationProtocolOwnerPeerResolver; two-broker e2e
+  coordination-driven replication test; tryout/diagram payoff); R4 failover
+  choreography over existing primitives (promotion-tails decision flagged);
+  R5 publish-confirm enforcement design notes (offset reporting piggybacked
+  on pulls); R6 client topology unchanged. Supersedes the etcd-shaped
+  Medium-Term §4/§5 for the embedded path; etcd stays possible behind the
+  same trait. Decisions flagged: resources-as-separate-set, and
+  promote-to-local-tail vs quorum-tails under epoch fencing.
