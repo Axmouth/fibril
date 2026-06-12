@@ -762,6 +762,7 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
         queue_idle_evict_after_ms: None,
         queue_idle_sweep_interval_ms: 60_000,
         replication_confirm_timeout_ms: 400,
+        ..Default::default()
     })
     .await;
 
@@ -1850,6 +1851,7 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
         caught_up_poll_ms: 1000,
         retry_poll_ms: 100,
         checkpoint_retry_poll_ms: 5000,
+        follow_runtime_settings: false,
     };
     let state = FollowerReplicationWorkerState::new(23, 29);
 

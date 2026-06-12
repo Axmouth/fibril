@@ -321,6 +321,22 @@ impl ServerConfig {
         if self.runtime_seed.idle_queue_cleanup.sweep_interval_ms == 0 {
             anyhow::bail!("runtime_seed.idle_queue_cleanup.sweep_interval_ms must be at least 1");
         }
+        if self.runtime_seed.replication.caught_up_poll_ms == 0
+            || self.runtime_seed.replication.retry_poll_ms == 0
+            || self.runtime_seed.replication.checkpoint_retry_poll_ms == 0
+        {
+            anyhow::bail!("runtime_seed.replication poll intervals must be at least 1ms");
+        }
+        if self.coordination.mode == CoordinationMode::Ganglion
+            && self.coordination.ganglion.liveness_ttl_ms
+                < 2 * self.coordination.ganglion.heartbeat_interval_ms
+        {
+            anyhow::bail!(
+                "coordination.ganglion.liveness_ttl_ms must be at least twice \
+                 heartbeat_interval_ms, or healthy nodes will flap dead on a \
+                 single missed heartbeat"
+            );
+        }
         Ok(())
     }
 }
@@ -583,6 +599,29 @@ pub struct RuntimeSeedSection {
     pub delivery: DeliverySettings,
     pub idle_queue_cleanup: IdleQueueCleanupSettings,
     pub connection: ConnectionSettings,
+    pub replication: ReplicationSettings,
+}
+
+/// Seed values for the replication runtime settings (cluster-replicated
+/// after first boot; this section only sets the initial document).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReplicationSettings {
+    pub confirm_timeout_ms: u64,
+    pub caught_up_poll_ms: u64,
+    pub retry_poll_ms: u64,
+    pub checkpoint_retry_poll_ms: u64,
+}
+
+impl Default for ReplicationSettings {
+    fn default() -> Self {
+        Self {
+            confirm_timeout_ms: 5_000,
+            caught_up_poll_ms: 1_000,
+            retry_poll_ms: 100,
+            checkpoint_retry_poll_ms: 5_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

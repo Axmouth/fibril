@@ -70,12 +70,22 @@ pub struct ReplicationRuntimeSettings {
     /// How long a publish confirm may wait for the assignment's replication
     /// durability policy (replica acks) before failing with a clear error.
     pub confirm_timeout_ms: u64,
+    /// Follower pull interval while caught up with the owner. Bounds the
+    /// extra confirm latency of replica-durable publishes.
+    pub caught_up_poll_ms: u64,
+    /// Follower retry interval after a transient error or partial pull.
+    pub retry_poll_ms: u64,
+    /// Follower retry interval while a checkpoint install is required.
+    pub checkpoint_retry_poll_ms: u64,
 }
 
 impl Default for ReplicationRuntimeSettings {
     fn default() -> Self {
         Self {
             confirm_timeout_ms: 5_000,
+            caught_up_poll_ms: 1_000,
+            retry_poll_ms: 100,
+            checkpoint_retry_poll_ms: 5_000,
         }
     }
 }
@@ -296,6 +306,9 @@ impl BrokerConfig {
             queue_idle_evict_after_ms: settings.idle_queue_cleanup.queue_idle_evict_after_ms(),
             queue_idle_sweep_interval_ms: settings.idle_queue_cleanup.sweep_interval_ms,
             replication_confirm_timeout_ms: settings.replication.confirm_timeout_ms,
+            replication_caught_up_poll_ms: settings.replication.caught_up_poll_ms,
+            replication_retry_poll_ms: settings.replication.retry_poll_ms,
+            replication_checkpoint_retry_poll_ms: settings.replication.checkpoint_retry_poll_ms,
         }
     }
 }

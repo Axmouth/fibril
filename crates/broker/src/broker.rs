@@ -341,6 +341,9 @@ pub struct BrokerConfig {
     pub queue_idle_evict_after_ms: Option<u64>,
     pub queue_idle_sweep_interval_ms: u64,
     pub replication_confirm_timeout_ms: u64,
+    pub replication_caught_up_poll_ms: u64,
+    pub replication_retry_poll_ms: u64,
+    pub replication_checkpoint_retry_poll_ms: u64,
 }
 impl Default for BrokerConfig {
     fn default() -> Self {
@@ -352,6 +355,9 @@ impl Default for BrokerConfig {
             queue_idle_evict_after_ms: None,
             queue_idle_sweep_interval_ms: 60_000,
             replication_confirm_timeout_ms: 5_000,
+            replication_caught_up_poll_ms: 1_000,
+            replication_retry_poll_ms: 100,
+            replication_checkpoint_retry_poll_ms: 5_000,
         }
     }
 }
@@ -519,6 +525,10 @@ pub struct FollowerReplicationWorkerConfig {
     pub caught_up_poll_ms: u64,
     pub retry_poll_ms: u64,
     pub checkpoint_retry_poll_ms: u64,
+    /// When true the worker re-reads its poll intervals from the broker's
+    /// runtime settings every tick (the production watcher path). Explicit
+    /// poll values above are then only the pre-first-snapshot fallback.
+    pub follow_runtime_settings: bool,
 }
 
 impl Default for FollowerReplicationWorkerConfig {
@@ -531,6 +541,7 @@ impl Default for FollowerReplicationWorkerConfig {
             caught_up_poll_ms: 1000,
             retry_poll_ms: 100,
             checkpoint_retry_poll_ms: 5000,
+            follow_runtime_settings: false,
         }
     }
 }
@@ -3725,6 +3736,17 @@ impl Broker<StromaEngine> {
     ) -> Result<FollowerReplicationWorkerLoopExit, BrokerError> {
         let mut ticks = 0;
         loop {
+            let cfg = if cfg.follow_runtime_settings {
+                let snap = self.config_snapshot();
+                FollowerReplicationWorkerConfig {
+                    caught_up_poll_ms: snap.replication_caught_up_poll_ms,
+                    retry_poll_ms: snap.replication_retry_poll_ms,
+                    checkpoint_retry_poll_ms: snap.replication_checkpoint_retry_poll_ms,
+                    ..cfg
+                }
+            } else {
+                cfg
+            };
             let Ok(runtime) = self.follower_replication_worker_runtime(&assignment.queue) else {
                 return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
             };

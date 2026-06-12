@@ -1644,3 +1644,35 @@ Tests needed before implementing transition:
   R5 tail: min_in_sync_replicas refusal knob, surfacing per-follower progress
   /lag in topology observability, and an e2e confirm-over-wire test with two
   real brokers under replica_durable policy.
+- 2026-06-13: Settings classification pass over everything replication added.
+  Findings and fixes: (1) replication.confirm_timeout_ms was runtime-only
+  with no startup seed - runtime_seed.replication added to the config crate
+  so first boot can set it like every other runtime section. (2) The
+  follower pull intervals (caught_up_poll_ms / retry_poll_ms /
+  checkpoint_retry_poll_ms) were hardcoded worker defaults that had escaped
+  both settings channels; caught_up_poll_ms directly bounds replica-durable
+  confirm latency. They are now runtime settings (replication section,
+  cluster-replicated, seedable), flowing into BrokerConfig; the production
+  watcher opts its workers into per-tick refresh via
+  FollowerReplicationWorkerConfig.follow_runtime_settings (default false, so
+  tests pinning explicit poll values keep exact behavior). (3) Boot-time
+  ganglion knobs (raft_node_id, listen, peers, bootstrap, data_dir,
+  wire_format) confirmed correctly boot-only. heartbeat_interval_ms /
+  liveness_ttl_ms / controller_tick_ms stay boot-time deliberately (the
+  settings-replication path rides ON coordination - chicken and egg), but
+  config validation now rejects liveness_ttl < 2x heartbeat_interval, the
+  flap-inducing misconfiguration. (4) target_followers is replication-factor
+  POLICY misfiled as per-node boot config (only the controller's copy
+  matters; divergent values = placement depends on who wins the controller
+  race). Backlog: move it into replicated runtime settings together with the
+  programmatic scale-up/down QoL work. Test debt logged: multi-node (5+)
+  topology matrices, unreliable-infra testing (partitions, latency, drops -
+  needs proxy-based fault injection in the tryout harness or in-process
+  transport shims), deterministic-clock abstraction for simulation tests.
+  Clock decision: NO cluster clock synchronization abstraction needed for
+  correctness today - ownership/fencing is epoch+raft based, never
+  wall-clock-lease based. Wall clocks cross nodes only in (a) liveness TTL
+  checks (advisory; worst case an unnecessary failover, which epoch fencing
+  makes safe) and (b) producer-set not_before delays (timing accuracy only).
+  Revisit only if we add client-visible cross-node ordering or wall-clock
+  leases.

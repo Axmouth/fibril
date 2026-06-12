@@ -71,7 +71,12 @@ async fn main() -> anyhow::Result<()> {
         connection: BrokerConnectionRuntimeSettings {
             reconnect_grace_ms: config.runtime_seed.connection.reconnect_grace_ms,
         },
-        replication: Default::default(),
+        replication: fibril_broker::runtime_settings::ReplicationRuntimeSettings {
+            confirm_timeout_ms: config.runtime_seed.replication.confirm_timeout_ms,
+            caught_up_poll_ms: config.runtime_seed.replication.caught_up_poll_ms,
+            retry_poll_ms: config.runtime_seed.replication.retry_poll_ms,
+            checkpoint_retry_poll_ms: config.runtime_seed.replication.checkpoint_retry_poll_ms,
+        },
     };
     let runtime_settings = Arc::new(
         RuntimeSettingsManager::load_from_stroma_engine(
@@ -246,7 +251,10 @@ async fn main() -> anyhow::Result<()> {
         broker.spawn_assignment_watcher_with_follower_replication(
             parts.coordination.clone(),
             resolver,
-            fibril_broker::broker::FollowerReplicationWorkerConfig::default(),
+            fibril_broker::broker::FollowerReplicationWorkerConfig {
+                follow_runtime_settings: true,
+                ..Default::default()
+            },
         );
 
         // Heartbeat with applied-tail labels: registers this broker as live
