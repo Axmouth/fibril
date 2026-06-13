@@ -1973,3 +1973,36 @@ Tests needed before implementing transition:
   Once subscribe is partition-aware, add a true multi-partition publish->subscribe
   e2e test (publish to p0/p1, subscribe to each, assert isolation) to replace the
   replication-read-based proxy used for the publish half.
+- 2026-06-13: B5 subscribe half DONE (server 5a73990 + client fan-in 1711ddf).
+  DECISION (memory subscription-fanin-model): transparent client-side fan-in,
+  per-partition ordering only (ordering opt-ins later); default = consume ALL
+  partitions, but built around an assignment set so a coverage-first
+  consumer-group coordinator can later hand a consumer a SUBSET without changing
+  the surface API. Fits fibril's identity (RabbitMQ-like transparency, not Kafka).
+  SERVER (5a73990): wire Subscribe gained partition (serde default 0); SubKey ->
+  (topic, partition, group) so one conn holds independent per-partition subs;
+  broker.subscribe gained partition param (was hardcoded 0); Ack/Nack/reconcile
+  key by partition (already on wire + SubState). ~45 test/bench subscribe sites +
+  Subscribe literals updated to partition 0.
+  CLIENT (1711ddf): sub_manual_ack/sub_auto_ack resolve partition_set, open one
+  Subscribe per partition (per-partition redirect loop in
+  subscribe_partition_{manual,auto}), merge per-partition mpsc receivers into one
+  Subscription via Subscription::fan_in / AutoAckedSubscription::fan_in (single
+  partition = no-extra-hop fast path; forwarder task per partition otherwise).
+  Acks route via each InflightMessage's own settle channel, so the merge is
+  ack-transparent. partition_set is CACHE-ONLY (default [0]; N>1 only when the
+  topology cache is warm) — subscribe never fetches topology itself (avoids the
+  A5.5-style harness hang + a per-subscribe round-trip). Test
+  subscription_fans_in_all_partitions (redirect.rs mock now answers Subscribe
+  with SubscribeOk + one tagged Deliver per partition). Workspace green (33).
+  FOLLOW-UPS:
+  - Pure-consumer transparency gap: a client that only subscribes (never
+    fetch_topology / never publishes) has a cold cache -> fans in only partition
+    0. Options: warm topology at connect (carefully — some mocks don't answer
+    Op::Topology, would hang), or add partition_count to SubscribeOk so the
+    client expands the fan-in after the first subscribe. Decide before B6.
+  - Consumer-group coverage-first rebalancer feeds partition_set a subset.
+  NEXT — B6: multi-partition publish->subscribe e2e (real broker via protocol
+  listener: publish keyed+keyless across p0..pN, subscribe, assert per-key
+  stickiness + full coverage). Then server.rs refactor "b" (coordination
+  bootstrap/spawns/admin wiring -> fibril lib.rs).
