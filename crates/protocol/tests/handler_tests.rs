@@ -3000,6 +3000,84 @@ async fn stale_partitioning_version_publish_is_fenced() {
     drop(dir);
 }
 
+/// End-to-end through a real broker and the real Stroma logs: publishing to two
+/// partitions of one queue and subscribing to each delivers only that
+/// partition's own message — multi-partition publish and subscribe are isolated
+/// across the full server stack (handler -> broker -> per-partition log ->
+/// delivery), not just in unit tests.
+#[tokio::test]
+async fn multi_partition_publish_subscribe_is_isolated_e2e() {
+    let (broker, dir) = open_test_broker().await;
+    let (addr, server_task, dir, _broker) =
+        start_protocol_listener_for_broker(ConnectionSettings::new(Some(60)), broker, dir, None)
+            .await;
+
+    let client = TcpStream::connect(addr).await.unwrap();
+    let mut framed = Framed::new(client, ProtoCodec);
+    handshake(&mut framed).await;
+
+    let topic = "jobs";
+
+    // One message into each of partitions 0 and 1 (same logical queue).
+    for (req, partition, payload) in [(2u64, 0u32, b"to-p0".to_vec()), (3, 1, b"to-p1".to_vec())] {
+        framed
+            .send(
+                try_encode(
+                    Op::Publish,
+                    req,
+                    &Publish {
+                        topic: topic.into(),
+                        partition: Partition::new(partition),
+                        group: None,
+                        require_confirm: true,
+                        content_type: None,
+                        headers: HashMap::new(),
+                        payload,
+                        published: unix_millis(),
+                        partition_key: None,
+                        partitioning_version: 0,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = recv_frame(&mut framed).await;
+        assert_eq!(resp.opcode, Op::PublishOk as u16);
+    }
+
+    // Subscribe to each partition; each must receive only its own message.
+    for (req, partition, expected) in [(4u64, 0u32, b"to-p0".to_vec()), (5, 1, b"to-p1".to_vec())] {
+        framed
+            .send(
+                try_encode(
+                    Op::Subscribe,
+                    req,
+                    &Subscribe {
+                        topic: topic.into(),
+                        partition: Partition::new(partition),
+                        group: None,
+                        prefetch: 8,
+                        auto_ack: true,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let resp = recv_frame(&mut framed).await;
+        assert_eq!(resp.opcode, Op::SubscribeOk as u16);
+
+        let delivered = recv_delivery_for_topic(&mut framed, topic).await;
+        assert_eq!(delivered.partition, Partition::new(partition));
+        assert_eq!(delivered.payload, expected);
+    }
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+    drop(dir);
+}
+
 /// Declare resolves the partition count (explicit, else the cluster default)
 /// and reports it. Standalone (no coordinator) materializes locally.
 #[tokio::test]
