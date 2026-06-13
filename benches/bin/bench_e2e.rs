@@ -163,7 +163,7 @@ async fn producer_task(
     metrics: Arc<BenchMetrics>,
 ) {
     // tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
-    let (publisher, mut confirm_stream) = broker.get_publisher(&topic, &None).await.unwrap();
+    let (publisher, mut confirm_stream) = broker.get_publisher(&topic, 0, &None).await.unwrap();
 
     let metrics_clone = metrics.clone();
 

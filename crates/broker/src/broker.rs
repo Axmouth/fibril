@@ -1544,6 +1544,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     pub async fn get_publisher(
         self: &Arc<Self>,
         topic: &str,
+        partition: LogId,
         group: &Option<Group>,
     ) -> Result<(PublisherHandle, ConfirmStream), BrokerError> {
         // TODO: make configurable?
@@ -1553,7 +1554,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let engine = self.engine.clone();
         let shutdown = self.shutdown_publishers.clone();
         let tp: Topic = topic.to_string();
-        let part: LogId = 0;
+        let part: LogId = partition;
         let group = group.clone();
 
         self.ensure_queue_owner(&tp, part, group.as_deref())?;

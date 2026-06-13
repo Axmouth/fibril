@@ -133,7 +133,7 @@ impl TestState {
             .ok_or_else(|| BrokerError::Unknown(format!("broker {broker} not started")))?;
 
         let (pubh, _) = broker
-            .get_publisher(topic, &group.map(|s| s.into()))
+            .get_publisher(topic, 0, &group.map(|s| s.into()))
             .await?;
 
         let _off = pubh
@@ -163,7 +163,7 @@ impl TestState {
             .ok_or_else(|| BrokerError::Unknown(format!("broker {broker} not started")))?;
 
         let (pubh, _) = broker
-            .get_publisher(topic, &group.map(|s| s.into()))
+            .get_publisher(topic, 0, &group.map(|s| s.into()))
             .await?;
 
         let mut offsets = Vec::with_capacity(n);

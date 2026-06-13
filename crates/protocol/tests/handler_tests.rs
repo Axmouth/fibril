@@ -1441,7 +1441,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
     let topic = "replication.resolver.read";
     let group = Some("workers".to_string());
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, &group).await.unwrap();
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &group).await.unwrap();
     let reply = publisher
         .publish(
             b"resolver-payload".to_vec(),
@@ -1711,7 +1711,7 @@ async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_m
 async fn static_protocol_owner_peer_resolver_can_authenticate() {
     let topic = "replication.resolver.auth";
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &None).await.unwrap();
     let reply = publisher
         .publish(
             b"auth-payload".to_vec(),
@@ -1787,7 +1787,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
 
     // Owner broker with data, serving the replication protocol on a real port.
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &None).await.unwrap();
     for payload in [b"coord-first".as_slice(), b"coord-second".as_slice()] {
         let reply = publisher
             .publish(
@@ -1961,7 +1961,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
 
     // Owner broker with two committed messages, serving replication over TCP.
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &None).await.unwrap();
     for payload in [b"failover-first".as_slice(), b"failover-second".as_slice()] {
         let reply = publisher
             .publish(
@@ -2098,7 +2098,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
                 None,
             ) {
                 if let Ok((publisher, _confirms)) =
-                    follower_broker.get_publisher(topic, &None).await
+                    follower_broker.get_publisher(topic, 0, &None).await
                 {
                     let reply = publisher
                         .publish(
@@ -2167,7 +2167,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
     let coordination = Arc::new(GanglionCoordination::new("a-owner", raft_node));
 
     let (owner_broker, _owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &None).await.unwrap();
     let reply = publisher
         .publish(
             b"pre-fence".to_vec(),
@@ -2265,7 +2265,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
                 None,
             );
             if !gate_owns {
-                let publish_attempt = match owner_broker.get_publisher(topic, &None).await {
+                let publish_attempt = match owner_broker.get_publisher(topic, 0, &None).await {
                     Ok((publisher, _confirms)) => {
                         match publisher
                             .publish(
@@ -2302,7 +2302,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     let topic = "replication.resolver.loop";
     let group = Some("workers".to_string());
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, &group).await.unwrap();
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &group).await.unwrap();
     for payload in [b"loop-first".as_slice(), b"loop-second".as_slice()] {
         let reply = publisher
             .publish(
@@ -2410,7 +2410,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     let topic = "replication.resolver.checkpoint";
     let group = Some("workers".to_string());
     let (owner_broker, _owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, &group).await.unwrap();
+    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &group).await.unwrap();
     for payload in [
         b"checkpoint-loop-first".as_slice(),
         b"checkpoint-loop-second".as_slice(),
@@ -2625,7 +2625,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     );
 
     let publish_and_check = async {
-        let (publisher, _confirms) = owner_broker.get_publisher(topic, &group).await.unwrap();
+        let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &group).await.unwrap();
         let reply = publisher
             .publish(
                 b"over-the-wire".to_vec(),

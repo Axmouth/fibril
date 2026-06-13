@@ -1177,7 +1177,7 @@ struct ReqIdGenerator {
 }
 
 fn expire_idle_publishers(
-    publishers: &mut HashMap<(Topic, Option<Group>), CachedPublisher>,
+    publishers: &mut HashMap<(Topic, u32, Option<Group>), CachedPublisher>,
     idle_timeout_ms: Option<u64>,
 ) {
     let Some(idle_timeout_ms) = idle_timeout_ms else {
@@ -1554,7 +1554,7 @@ pub async fn handle_connection(
         }
     });
 
-    let mut publishers = HashMap::<(Topic, Option<Group>), CachedPublisher>::new();
+    let mut publishers = HashMap::<(Topic, u32, Option<Group>), CachedPublisher>::new();
 
     // ---- Main reader loop --------------------------------------------------
     // TODO: Make handling more async? Spawn task per frame, or have a task pool
@@ -2264,27 +2264,29 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                let key = (pubreq.topic.clone(), pubreq.group.clone());
+                let key = (pubreq.topic.clone(), pubreq.partition, pubreq.group.clone());
                 let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
-                    let (pubh, mut conf_stream) =
-                        match broker.get_publisher(&pubreq.topic, &pubreq.group).await {
-                            Ok(publisher) => publisher,
-                            Err(err) => {
-                                send_owner_redirect_or_error(
-                                    &frame_tx_low_prio,
-                                    &metrics,
-                                    frame.request_id,
-                                    &topology_source,
-                                    &pubreq.topic,
-                                    0,
-                                    pubreq.group.as_deref(),
-                                    &err,
-                                )
-                                .await;
-                                continue;
-                            }
-                        };
+                    let (pubh, mut conf_stream) = match broker
+                        .get_publisher(&pubreq.topic, pubreq.partition, &pubreq.group)
+                        .await
+                    {
+                        Ok(publisher) => publisher,
+                        Err(err) => {
+                            send_owner_redirect_or_error(
+                                &frame_tx_low_prio,
+                                &metrics,
+                                frame.request_id,
+                                &topology_source,
+                                &pubreq.topic,
+                                pubreq.partition,
+                                pubreq.group.as_deref(),
+                                &err,
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
 
                     // let conf_sink = frame_tx_low_prio.clone();
                     // let req_id_gen_clone = req_id_gen.clone();
@@ -2390,27 +2392,29 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                let key = (pubreq.topic.clone(), pubreq.group.clone());
+                let key = (pubreq.topic.clone(), pubreq.partition, pubreq.group.clone());
                 let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
-                    let (pubh, mut conf_stream) =
-                        match broker.get_publisher(&pubreq.topic, &pubreq.group).await {
-                            Ok(publisher) => publisher,
-                            Err(err) => {
-                                send_owner_redirect_or_error(
-                                    &frame_tx_low_prio,
-                                    &metrics,
-                                    frame.request_id,
-                                    &topology_source,
-                                    &pubreq.topic,
-                                    0,
-                                    pubreq.group.as_deref(),
-                                    &err,
-                                )
-                                .await;
-                                continue;
-                            }
-                        };
+                    let (pubh, mut conf_stream) = match broker
+                        .get_publisher(&pubreq.topic, pubreq.partition, &pubreq.group)
+                        .await
+                    {
+                        Ok(publisher) => publisher,
+                        Err(err) => {
+                            send_owner_redirect_or_error(
+                                &frame_tx_low_prio,
+                                &metrics,
+                                frame.request_id,
+                                &topology_source,
+                                &pubreq.topic,
+                                pubreq.partition,
+                                pubreq.group.as_deref(),
+                                &err,
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
 
                     // let conf_sink = frame_tx_low_prio.clone();
                     // let req_id_gen_clone = req_id_gen.clone();

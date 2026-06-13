@@ -357,7 +357,7 @@ async fn static_ownership_rejects_publisher_for_unowned_queue() {
         open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(StdHashSet::new())))
             .await;
 
-    let err = match broker.get_publisher("unowned", &None).await {
+    let err = match broker.get_publisher("unowned", 0, &None).await {
         Ok(_) => panic!("unowned queue unexpectedly accepted a publisher"),
         Err(err) => err,
     };
@@ -413,7 +413,7 @@ async fn static_ownership_allows_owned_queue() {
         open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
     let group = Some("workers".to_string());
 
-    let (publisher, _confirms) = broker.get_publisher("owned", &group).await.unwrap();
+    let (publisher, _confirms) = broker.get_publisher("owned", 0, &group).await.unwrap();
     let reply = publisher
         .publish(
             b"hello".to_vec(),
@@ -492,7 +492,10 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
     let (broker, _dir) = open_test_broker_with_ownership(Arc::new(coordination)).await;
     let group = Some("workers".to_string());
 
-    let (publisher, _confirms) = broker.get_publisher("coord-owned", &group).await.unwrap();
+    let (publisher, _confirms) = broker
+        .get_publisher("coord-owned", 0, &group)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"hello".to_vec(),
@@ -505,7 +508,7 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
         .unwrap();
     reply.await.unwrap().unwrap();
 
-    let err = match broker.get_publisher("coord-followed", &group).await {
+    let err = match broker.get_publisher("coord-followed", 0, &group).await {
         Ok(_) => panic!("followed queue unexpectedly accepted an owner publisher"),
         Err(err) => err,
     };
@@ -694,7 +697,7 @@ async fn refresh_follower_keeps_replication_worker_progress() {
 
     let group = Some("workers".to_string());
     let (publisher, _confirms) = owner
-        .get_publisher("transition-refresh-follower", &group)
+        .get_publisher("transition-refresh-follower", 0, &group)
         .await
         .unwrap();
     let reply = publisher
@@ -779,7 +782,7 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
         ),
     );
 
-    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
 
     // No follower progress: the confirm must time out with a clear reason.
     let reply = publisher
@@ -857,7 +860,7 @@ async fn publish_refused_when_min_in_sync_exceeds_replica_set() {
         ),
     );
 
-    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
     let reply = publisher
         .publish(
             b"x".to_vec(),
@@ -908,7 +911,7 @@ async fn publish_refused_when_in_sync_replicas_below_floor() {
             fibril_broker::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 },
         ),
     );
-    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
     let reply = publisher
         .publish(
             b"x".to_vec(),
@@ -959,7 +962,7 @@ async fn stale_follower_excluded_from_in_sync_set() {
     // The follower has reported, but with isr_timeout 0 it never counts as fresh.
     broker.record_follower_replication_progress(topic, 0, None, "follower-b", 5, 5);
 
-    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
     let reply = publisher
         .publish(
             b"x".to_vec(),
@@ -1010,7 +1013,7 @@ async fn publish_admitted_once_in_sync_floor_met() {
     // durability requirement.
     broker.record_follower_replication_progress(topic, 0, None, "follower-b", 5, 5);
 
-    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
     let reply = publisher
         .publish(
             b"x".to_vec(),
@@ -1102,7 +1105,7 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
 
     // Owner with one committed message; its logs are still at epoch 0.
     let (owner, _owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner.get_publisher(topic, &None).await.unwrap();
+    let (publisher, _confirms) = owner.get_publisher(topic, 0, &None).await.unwrap();
     let reply = publisher
         .publish(
             b"fenced-payload".to_vec(),
@@ -1277,7 +1280,7 @@ async fn demote_owner_to_follower_stops_broker_owner_runtime() {
     let (broker, _dir) = open_test_broker().await;
     let group = Some("workers".to_string());
     let (publisher, _confirms) = broker
-        .get_publisher("transition-demote", &group)
+        .get_publisher("transition-demote", 0, &group)
         .await
         .unwrap();
 
@@ -1352,7 +1355,7 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
     let (broker, _dir) = open_test_broker().await;
     let group = Some("workers".to_string());
     let (publisher, _confirms) = broker
-        .get_publisher("transition-demote-inflight", &group)
+        .get_publisher("transition-demote-inflight", 0, &group)
         .await
         .unwrap();
 
@@ -1471,7 +1474,7 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
     let (broker, _dir) = open_test_broker().await;
     let group = Some("workers".to_string());
     let (publisher, _confirms) = broker
-        .get_publisher("transition-freeze-inflight", &group)
+        .get_publisher("transition-freeze-inflight", 0, &group)
         .await
         .unwrap();
 
@@ -1590,7 +1593,7 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
 #[tokio::test]
 async fn owner_replication_read_returns_published_records() {
     let (broker, _dir) = open_test_broker().await;
-    let (publisher, _confirms) = broker.get_publisher("replicated", &None).await.unwrap();
+    let (publisher, _confirms) = broker.get_publisher("replicated", 0, &None).await.unwrap();
 
     let reply = publisher
         .publish(
@@ -1628,6 +1631,74 @@ async fn owner_replication_read_returns_published_records() {
     broker.shutdown().await;
 }
 
+/// Publishes to two partitions of the same logical queue land in independent
+/// logs: each partition has its own offset sequence and only its own messages.
+#[tokio::test]
+async fn publishes_route_to_independent_partition_logs() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "multi-part";
+    let group = Some("workers".to_string());
+
+    // One message to partition 0, two to partition 1.
+    let (p0, _c0) = broker.get_publisher(topic, 0, &group).await.unwrap();
+    p0.publish(
+        b"p0-a".to_vec(),
+        unix_millis(),
+        unix_millis(),
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+
+    let (p1, _c1) = broker.get_publisher(topic, 1, &group).await.unwrap();
+    for payload in [b"p1-a".to_vec(), b"p1-b".to_vec()] {
+        p1.publish(
+            payload,
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    let read_partition = |partition| {
+        let broker = broker.clone();
+        let group = group.clone();
+        async move {
+            let records = broker
+                .read_owner_replication_records(topic, partition, group.as_deref(), 0, 0, 10, 10)
+                .await
+                .unwrap();
+            let OwnerReplicationRead::Batch(messages) = records.messages else {
+                panic!("expected message records for partition {partition}");
+            };
+            messages
+        }
+    };
+
+    let part0 = read_partition(0).await;
+    assert_eq!(part0.next_offset, 1, "partition 0 has one message");
+    assert_eq!(part0.records.len(), 1);
+    assert_eq!(part0.records[0].1.payload, b"p0-a");
+
+    let part1 = read_partition(1).await;
+    assert_eq!(part1.next_offset, 2, "partition 1 has two messages");
+    assert_eq!(part1.records.len(), 2);
+    assert_eq!(part1.records[0].1.payload, b"p1-a");
+    assert_eq!(part1.records[1].1.payload, b"p1-b");
+
+    broker.shutdown().await;
+}
+
 #[tokio::test]
 async fn owner_replication_read_rejects_unowned_queue_before_materializing() {
     let (broker, _dir) =
@@ -1661,7 +1732,7 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
         .await
         .unwrap();
 
-    let (publisher, _confirms) = owner.get_publisher("catchup", &None).await.unwrap();
+    let (publisher, _confirms) = owner.get_publisher("catchup", 0, &None).await.unwrap();
     for payload in [b"first".to_vec(), b"second".to_vec()] {
         let reply = publisher
             .publish(
@@ -1745,7 +1816,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     let (owner, _owner_dir) = open_test_broker().await;
     let (follower, _follower_dir) = open_test_broker().await;
 
-    let (publisher, _confirms) = owner.get_publisher("checkpoint", &None).await.unwrap();
+    let (publisher, _confirms) = owner.get_publisher("checkpoint", 0, &None).await.unwrap();
     for payload in [b"first".to_vec(), b"second".to_vec()] {
         let reply = publisher
             .publish(
@@ -1953,7 +2024,7 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
         .await
         .unwrap();
 
-    let (publisher, _confirms) = owner.get_publisher("multi-pass", &None).await.unwrap();
+    let (publisher, _confirms) = owner.get_publisher("multi-pass", 0, &None).await.unwrap();
     for payload in [
         b"one".to_vec(),
         b"two".to_vec(),
@@ -2055,7 +2126,7 @@ async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
         .unwrap();
 
     let (publisher, _confirms) = owner
-        .get_publisher("checkpoint-aware-normal", &None)
+        .get_publisher("checkpoint-aware-normal", 0, &None)
         .await
         .unwrap();
     for payload in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()] {
@@ -2274,7 +2345,7 @@ async fn follower_worker_tick_records_catch_up_progress() {
         .unwrap();
 
     let group = Some("workers".to_string());
-    let (publisher, _confirms) = owner.get_publisher("worker-tick", &group).await.unwrap();
+    let (publisher, _confirms) = owner.get_publisher("worker-tick", 0, &group).await.unwrap();
     for payload in [b"one".to_vec(), b"two".to_vec()] {
         let reply = publisher
             .publish(
@@ -2863,14 +2934,14 @@ async fn queue_activity_tracks_independent_publisher_sinks() {
 
     assert!(broker.queue_activity_snapshot("t", None).is_none());
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 1);
     assert_eq!(snapshot.active_subscribers, 0);
     assert_eq!(snapshot.idle_since_ms, None);
     assert!(broker.is_queue_materialized("t", None));
 
-    let (pubh2, _confirms2) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh2, _confirms2) = broker.get_publisher("t", 0, &None).await.unwrap();
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 2);
     assert_eq!(snapshot.idle_since_ms, None);
@@ -2895,7 +2966,7 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     let sub = broker
         .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
         .await
@@ -2922,7 +2993,7 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
     assert_eq!(snapshot.active_subscribers, 0);
     assert!(snapshot.idle_since_ms.is_some_and(|ts| ts >= before_idle));
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 1);
     assert_eq!(snapshot.active_subscribers, 0);
@@ -2953,7 +3024,7 @@ async fn subscriber_lease_materializes_queue_before_returning() {
 async fn queue_eviction_skips_active_publishers() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (_pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (_pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
 
     let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
 
@@ -3000,7 +3071,7 @@ async fn queue_eviction_skips_active_subscribers() {
 async fn queue_eviction_skips_when_idle_threshold_not_met() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     drop(pubh);
     wait_for_queue_idle(&broker, "t", None).await;
 
@@ -3020,7 +3091,7 @@ async fn queue_eviction_skips_broker_delivery_tags() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3056,7 +3127,7 @@ async fn queue_eviction_skips_broker_delivery_tags() {
 async fn queue_eviction_unmaterializes_idle_publisher_without_messages() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     drop(pubh);
     wait_for_queue_idle(&broker, "t", None).await;
 
@@ -3074,7 +3145,7 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
     let (broker, _dir) =
         open_test_broker_with_metrics(BrokerConfig::default(), metrics.clone()).await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3112,7 +3183,7 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
 async fn queue_eviction_reports_not_materialized_after_previous_unmaterialize() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3143,9 +3214,9 @@ async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (_active_pubh, _confirms) = broker.get_publisher("active", &None).await.unwrap();
+    let (_active_pubh, _confirms) = broker.get_publisher("active", 0, &None).await.unwrap();
     let idle_group = Some("g".to_string());
-    let (idle_pubh, _confirms) = broker.get_publisher("idle", &idle_group).await.unwrap();
+    let (idle_pubh, _confirms) = broker.get_publisher("idle", 0, &idle_group).await.unwrap();
     idle_pubh
         .publish(
             b"x".to_vec(),
@@ -3198,7 +3269,7 @@ async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
 async fn queue_eviction_sweep_unmaterializes_idle_materialized_queue() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3232,7 +3303,7 @@ async fn queue_eviction_sweep_does_not_repeat_already_unloaded_queue() {
     let (broker, _dir) =
         open_test_broker_with_metrics(BrokerConfig::default(), metrics.clone()).await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3270,7 +3341,7 @@ async fn queue_eviction_sweep_does_not_repeat_already_unloaded_queue() {
 async fn queue_eviction_sweep_rechecks_queue_materialized_after_previous_unload() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3337,7 +3408,7 @@ async fn queue_eviction_sweep_unmaterializes_storage_only_materialized_queue() {
 async fn queue_eviction_worker_is_disabled_by_default() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3366,7 +3437,7 @@ async fn queue_eviction_worker_is_disabled_by_default() {
 async fn queue_eviction_worker_can_be_enabled_after_startup() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3415,7 +3486,7 @@ async fn queue_eviction_worker_leaves_active_publisher_materialized() {
     for _ in 0..5 {
         tokio::task::yield_now().await;
     }
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3451,7 +3522,7 @@ async fn active_publisher_does_not_race_idle_cleanup_into_double_open() {
     })
     .await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
 
     for i in 0..50 {
         let reply = pubh
@@ -3480,7 +3551,7 @@ async fn active_publisher_does_not_race_idle_cleanup_into_double_open() {
 async fn broker_delivers_messages_in_order() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     let client_id = Uuid::now_v7();
 
     for _ in 0..5 {
@@ -3519,7 +3590,7 @@ async fn broker_delivers_messages_in_order() {
 async fn delayed_publish_waits_until_deadline() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     let client_id = Uuid::now_v7();
 
     let mut sub = broker
@@ -3565,7 +3636,7 @@ async fn delayed_publish_waits_until_deadline() {
 async fn delayed_retry_waits_until_deadline() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3608,7 +3679,7 @@ async fn delayed_retry_waits_until_deadline() {
 async fn broker_respects_prefetch() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     let client_id = Uuid::now_v7();
 
     for i in 0..10 {
@@ -3651,7 +3722,7 @@ async fn ack_releases_prefetch_slot() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     for i in 0..5 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -3729,7 +3800,7 @@ async fn ack_releases_prefetch_slot2() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     for i in 0..5 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -3802,7 +3873,7 @@ async fn broker_redelivers_after_expiry() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3841,7 +3912,7 @@ async fn broker_distributes_across_consumers() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     for _ in 0..10 {
         pubh.publish(
             b"x".to_vec(),
@@ -3874,7 +3945,7 @@ async fn slow_consumer_does_not_starve_fast_one() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     for _ in 0..5 {
         pubh.publish(
             b"x".to_vec(),
@@ -3918,7 +3989,7 @@ async fn unsubscribe_requeues_prefetched_unacked_messages() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     for i in 0..3 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -3974,7 +4045,7 @@ async fn unsubscribe_redistributes_prefetched_messages_to_active_subscriber() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     for i in 0..3 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -4041,7 +4112,7 @@ async fn unsubscribe_redelivery_survives_if_active_replacement_has_no_capacity_t
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     for i in 0..3 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -4127,7 +4198,7 @@ async fn unsubscribe_does_not_requeue_acked_messages_after_settles_drain() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
     for i in 0..3 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -4222,7 +4293,7 @@ async fn nack_without_requeue_drops_message() -> Result<(), Box<dyn std::error::
 #[tokio::test]
 async fn publish_engine_open_conflict_is_returned_to_publisher() -> anyhow::Result<()> {
     let broker = Broker::new(FailingPublishEngine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("t", &None).await?;
+    let (publisher, _confirms) = broker.get_publisher("t", 0, &None).await?;
     let reply = publisher
         .publish(
             b"conflict".to_vec(),
@@ -4272,7 +4343,7 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
         .await?;
 
     let broker = Broker::new(engine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("source", &None).await?;
+    let (publisher, _confirms) = broker.get_publisher("source", 0, &None).await?;
     publisher
         .publish(
             b"poison".to_vec(),
@@ -4348,7 +4419,7 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
         .await?;
 
     let broker = Broker::new(engine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("source", &None).await?;
+    let (publisher, _confirms) = broker.get_publisher("source", 0, &None).await?;
     publisher
         .publish(
             b"poison".to_vec(),
@@ -4490,7 +4561,7 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
         .await?;
 
     let broker = Broker::new(engine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("source", &None).await?;
+    let (publisher, _confirms) = broker.get_publisher("source", 0, &None).await?;
     publisher
         .publish(
             b"poison".to_vec(),
@@ -4566,7 +4637,7 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
         .await?;
 
     let broker = Broker::new(engine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("source", &None).await?;
+    let (publisher, _confirms) = broker.get_publisher("source", 0, &None).await?;
     publisher
         .publish(
             b"discard".to_vec(),
@@ -5038,7 +5109,7 @@ async fn stress_single_consumer(total: usize) {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, mut confirmer) = broker.get_publisher("t", &None).await.unwrap();
+    let (pubh, mut confirmer) = broker.get_publisher("t", 0, &None).await.unwrap();
 
     let mut to_publish_list = (0..total)
         .map(|i| format!("b{i}").as_bytes().to_vec())
