@@ -997,11 +997,18 @@ automatically.
   (fetch from a bootstrap/any pooled engine if cache misses the queue or is past
   cooldown; replace cache). Additive; not wired into routing yet.
 - A5.5 Routing resolver — FLIP routing on. Add
-  `engine_for(topic, partition, group)`:
+  `engine_for(topic, partition, group)`. DECISION (done): routing is REACTIVE,
+  not eager-fetch-on-miss.
   (1) partition = 0 for now (Phase B routes by key);
-  (2) cache lookup; on miss -> ensure_topology -> lookup again;
-  (3) owner found -> engine_for_endpoint(owner);
-  (4) none (empty topology / standalone) -> engine_for_endpoint(bootstrap[0]).
+  (2) cache lookup; HIT -> engine_for_endpoint(owner);
+  (3) MISS -> engine_for_endpoint(bootstrap[0]) (no fetch on the hot path).
+  The cache is populated by REDIRECTS (A5.6) and by explicit
+  `Client::fetch_topology` warm-up. Rationale: eager fetch-on-miss added a
+  topology round-trip to every first op (pointless in standalone, where
+  topology is empty) AND hung/broke the in-memory unit harness (no responder
+  for `Op::Topology`); the redirect path corrects a misroute precisely. So
+  `ensure_topology` was dropped; `fetch_topology` stays for explicit warm-up
+  (cooldown option reserved for a future warm-up loop).
   Swap the publish/declare/subscribe call sites from `engine_for_operation()`
   to `engine_for(...)` (declare routes to bootstrap; it is topic metadata).
   Standalone tests stay green via the step-4 fallback. COMMIT.
