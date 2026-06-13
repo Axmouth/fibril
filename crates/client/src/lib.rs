@@ -939,13 +939,12 @@ impl<'a> SubscriptionBuilder<'a> {
             auto_ack: false,
         };
 
-        let rx = self
+        let engine = self
             .client
             .shared
-            .engine_for_operation()
-            .await?
-            .subscribe(req)
+            .engine_for(&req.topic, 0, req.group.as_deref())
             .await?;
+        let rx = engine.subscribe(req).await?;
         Ok(Subscription { rx })
     }
 
@@ -962,13 +961,12 @@ impl<'a> SubscriptionBuilder<'a> {
             auto_ack: true,
         };
 
-        let rx = self
+        let engine = self
             .client
             .shared
-            .engine_for_operation()
-            .await?
-            .subscribe_auto_ack(req)
+            .engine_for(&req.topic, 0, req.group.as_deref())
             .await?;
+        let rx = engine.subscribe_auto_ack(req).await?;
         Ok(AutoAckedSubscription { rx })
     }
 }
@@ -1146,7 +1144,11 @@ impl Publisher {
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;
         self.shared
-            .engine_for_operation()
+            .engine_for(
+                self.topic.as_str(),
+                0,
+                self.group.as_ref().map(|group| group.as_str()),
+            )
             .await?
             .publish_unconfirmed(
                 self.topic.as_str().to_string(),
@@ -1182,7 +1184,11 @@ impl Publisher {
     ) -> FibrilResult<PublishConfirmation> {
         let message = payload.into_message()?;
         self.shared
-            .engine_for_operation()
+            .engine_for(
+                self.topic.as_str(),
+                0,
+                self.group.as_ref().map(|group| group.as_str()),
+            )
             .await?
             .publish_with_confirmation(
                 self.topic.as_str().to_string(),
@@ -1207,7 +1213,11 @@ impl Publisher {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
         self.shared
-            .engine_for_operation()
+            .engine_for(
+                self.topic.as_str(),
+                0,
+                self.group.as_ref().map(|group| group.as_str()),
+            )
             .await?
             .publish_unconfirmed_delayed(
                 self.topic.as_str().to_string(),
@@ -1249,7 +1259,11 @@ impl Publisher {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
         self.shared
-            .engine_for_operation()
+            .engine_for(
+                self.topic.as_str(),
+                0,
+                self.group.as_ref().map(|group| group.as_str()),
+            )
             .await?
             .publish_delayed_with_confirmation(
                 self.topic.as_str().to_string(),
@@ -1407,6 +1421,30 @@ impl ClientShared {
 
     async fn engine_for_operation(&self) -> FibrilResult<Arc<EngineHandle>> {
         self.bootstrap_slot().await?.engine_for_operation().await
+    }
+
+    /// Resolve the engine that should serve a queue partition. Routing is
+    /// REACTIVE: a cache hit routes to the owner's pooled connection; a miss
+    /// falls back to the bootstrap connection. The cache is populated by
+    /// redirects (the broker tells us the owner on a misroute) and by explicit
+    /// `Client::fetch_topology`. We deliberately do NOT fetch topology on the
+    /// hot path — that would add a round-trip to every first op (pointless in
+    /// standalone, where topology is empty) and the redirect path corrects a
+    /// misroute precisely.
+    async fn engine_for(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+    ) -> FibrilResult<Arc<EngineHandle>> {
+        if let Some(owner) = self.topology.load().lookup(topic, partition, group) {
+            return self
+                .engine_slot(owner.endpoint)
+                .await?
+                .engine_for_operation()
+                .await;
+        }
+        self.engine_for_operation().await
     }
 }
 
