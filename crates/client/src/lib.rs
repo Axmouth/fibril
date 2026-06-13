@@ -92,6 +92,11 @@ pub enum FibrilError {
     /// The broker rejected a request with a structured error response.
     #[error("Server returned error code {code}: {msg}")]
     Failure { code: u16, msg: String },
+    /// The broker redirected the operation to the current owner. The client
+    /// auto-follows this for confirmed publishes and subscribes; if it surfaces
+    /// to the caller, topology changed mid-operation and the op is retryable.
+    #[error("redirected to owner {} for {}/{}", .0.owner_endpoint, .0.topic, .0.partition)]
+    Redirect(Box<Redirect>),
     /// The connection ended before the expected protocol exchange completed.
     #[error("EOF")]
     Eof,
@@ -939,13 +944,31 @@ impl<'a> SubscriptionBuilder<'a> {
             auto_ack: false,
         };
 
-        let engine = self
-            .client
-            .shared
-            .engine_for(&req.topic, 0, req.group.as_deref())
-            .await?;
-        let rx = engine.subscribe(req).await?;
-        Ok(Subscription { rx })
+        let mut attempts = 0u32;
+        loop {
+            let engine = self
+                .client
+                .shared
+                .engine_for(&req.topic, 0, req.group.as_deref())
+                .await?;
+            match engine.subscribe(req.clone()).await {
+                Ok(rx) => return Ok(Subscription { rx }),
+                Err(FibrilError::Redirect(redirect)) => {
+                    if attempts >= self.client.shared.opts.max_redirects {
+                        return Err(FibrilError::Failure {
+                            code: ERR_NOT_OWNER,
+                            msg: format!(
+                                "exceeded max redirects ({}) subscribing {}",
+                                self.client.shared.opts.max_redirects, req.topic
+                            ),
+                        });
+                    }
+                    self.client.shared.apply_redirect(&redirect);
+                    attempts += 1;
+                }
+                Err(other) => return Err(other),
+            }
+        }
     }
 
     /// Subscribe with client-side automatic acknowledgement.
@@ -961,13 +984,31 @@ impl<'a> SubscriptionBuilder<'a> {
             auto_ack: true,
         };
 
-        let engine = self
-            .client
-            .shared
-            .engine_for(&req.topic, 0, req.group.as_deref())
-            .await?;
-        let rx = engine.subscribe_auto_ack(req).await?;
-        Ok(AutoAckedSubscription { rx })
+        let mut attempts = 0u32;
+        loop {
+            let engine = self
+                .client
+                .shared
+                .engine_for(&req.topic, 0, req.group.as_deref())
+                .await?;
+            match engine.subscribe_auto_ack(req.clone()).await {
+                Ok(rx) => return Ok(AutoAckedSubscription { rx }),
+                Err(FibrilError::Redirect(redirect)) => {
+                    if attempts >= self.client.shared.opts.max_redirects {
+                        return Err(FibrilError::Failure {
+                            code: ERR_NOT_OWNER,
+                            msg: format!(
+                                "exceeded max redirects ({}) subscribing {}",
+                                self.client.shared.opts.max_redirects, req.topic
+                            ),
+                        });
+                    }
+                    self.client.shared.apply_redirect(&redirect);
+                    attempts += 1;
+                }
+                Err(other) => return Err(other),
+            }
+        }
     }
 }
 
@@ -1166,10 +1207,40 @@ impl Publisher {
     /// Resolves with the broker-assigned topic offset.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_confirmed<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
-        self.publish_with_confirmation(payload)
-            .await?
-            .confirmed()
-            .await
+        let message = payload.into_message()?;
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let mut attempts = 0u32;
+        loop {
+            let engine = self.shared.engine_for(topic, 0, group).await?;
+            // Clone per attempt so a redirect can re-send on the new owner.
+            let confirmation = engine
+                .publish_with_confirmation(
+                    topic.to_string(),
+                    group.map(str::to_string),
+                    message.content_type.clone(),
+                    message.headers.clone(),
+                    message.payload.clone(),
+                )
+                .await?;
+            match confirmation.confirmed().await {
+                Ok(offset) => return Ok(offset),
+                Err(FibrilError::Redirect(redirect)) => {
+                    if attempts >= self.shared.opts.max_redirects {
+                        return Err(FibrilError::Failure {
+                            code: ERR_NOT_OWNER,
+                            msg: format!(
+                                "exceeded max redirects ({}) routing {topic}/0",
+                                self.shared.opts.max_redirects
+                            ),
+                        });
+                    }
+                    self.shared.apply_redirect(&redirect);
+                    attempts += 1;
+                }
+                Err(other) => return Err(other),
+            }
+        }
     }
 
     /// Publish and return a handle that can be awaited for broker confirmation.
@@ -1445,6 +1516,16 @@ impl ClientShared {
                 .await;
         }
         self.engine_for_operation().await
+    }
+
+    /// Update the routing cache from a broker redirect (point-update to the new
+    /// owner), so the retry — and subsequent ops — route correctly.
+    fn apply_redirect(&self, redirect: &Redirect) {
+        self.topology.rcu(|old| {
+            let mut updated = (**old).clone();
+            updated.apply_redirect(redirect);
+            updated
+        });
     }
 }
 
@@ -2313,6 +2394,31 @@ where
                                 }
                                 None => {
                                     tracing::error!("Internal error: unexpected TopologyOk")
+                                }
+                            }
+                        }
+                        x if x == Op::Redirect as u16 => {
+                            let redirect: Redirect = match decode_protocol(&frame) {
+                                Ok(redirect) => redirect,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+                            // Surface the redirect on the waiting op so the
+                            // routing layer can update the cache and retry on
+                            // the new owner. Unconfirmed publishes have no
+                            // waiter — best-effort, the cache is corrected by a
+                            // confirmed op or fetch_topology.
+                            match waiters.remove(&frame.request_id) {
+                                Some(waiter) => {
+                                    fail_waiter(waiter, FibrilError::Redirect(Box::new(redirect)));
+                                }
+                                None => {
+                                    tracing::debug!(
+                                        "redirect for uncorrelated request {}; cache unchanged (best-effort path)",
+                                        frame.request_id
+                                    );
                                 }
                             }
                         }
