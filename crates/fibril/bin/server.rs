@@ -76,6 +76,8 @@ async fn main() -> anyhow::Result<()> {
             caught_up_poll_ms: config.runtime_seed.replication.caught_up_poll_ms,
             retry_poll_ms: config.runtime_seed.replication.retry_poll_ms,
             checkpoint_retry_poll_ms: config.runtime_seed.replication.checkpoint_retry_poll_ms,
+            min_in_sync_replicas: config.runtime_seed.replication.min_in_sync_replicas,
+            isr_timeout_ms: config.runtime_seed.replication.isr_timeout_ms,
         },
     };
     let runtime_settings = Arc::new(

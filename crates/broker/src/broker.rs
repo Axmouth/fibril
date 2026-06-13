@@ -57,6 +57,16 @@ pub enum BrokerError {
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 
+    #[error(
+        "not enough in-sync replicas for {topic}/{partition}: {in_sync} in sync, {required} required"
+    )]
+    NotEnoughInSyncReplicas {
+        topic: String,
+        partition: LogId,
+        in_sync: usize,
+        required: usize,
+    },
+
     #[error("unknown: {0}")]
     Unknown(String),
 }
@@ -344,6 +354,11 @@ pub struct BrokerConfig {
     pub replication_caught_up_poll_ms: u64,
     pub replication_retry_poll_ms: u64,
     pub replication_checkpoint_retry_poll_ms: u64,
+    /// Minimum in-sync replicas (owner + healthy followers) required to accept
+    /// a replica-durable publish. 1 (default) disables the floor.
+    pub replication_min_in_sync_replicas: usize,
+    /// How recently a follower must have reported progress to count as in-sync.
+    pub replication_isr_timeout_ms: u64,
 }
 impl Default for BrokerConfig {
     fn default() -> Self {
@@ -358,6 +373,8 @@ impl Default for BrokerConfig {
             replication_caught_up_poll_ms: 1_000,
             replication_retry_poll_ms: 100,
             replication_checkpoint_retry_poll_ms: 5_000,
+            replication_min_in_sync_replicas: 1,
+            replication_isr_timeout_ms: 10_000,
         }
     }
 }
@@ -1087,11 +1104,20 @@ pub struct ReplicationConfirmGate {
     cfg: Arc<ArcSwap<BrokerConfig>>,
 }
 
+/// One follower's last-reported durable progress, with the report time used to
+/// decide in-sync membership (a follower that stopped reporting falls out).
+#[derive(Debug, Clone, Copy)]
+struct FollowerProgress {
+    message_next: Offset,
+    event_next: Offset,
+    last_report: std::time::Instant,
+}
+
 /// Follower durable progress for one queue, plus a waiter wake-up.
 #[derive(Debug, Default)]
 pub struct ReplicationProgressCell {
-    /// follower node id -> (durable message next-offset, durable event next-offset)
-    followers: std::sync::Mutex<std::collections::HashMap<String, (Offset, Offset)>>,
+    /// follower node id -> last-reported durable progress
+    followers: std::sync::Mutex<std::collections::HashMap<String, FollowerProgress>>,
     changed: Notify,
 }
 
@@ -1200,10 +1226,15 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             let mut followers = cell.followers.lock().expect("progress lock");
             let entry = followers
                 .entry(follower_node_id.to_string())
-                .or_insert((0, 0));
+                .or_insert(FollowerProgress {
+                    message_next: 0,
+                    event_next: 0,
+                    last_report: std::time::Instant::now(),
+                });
             // Monotonic: late/reordered reports never regress progress.
-            entry.0 = entry.0.max(durable_message_next);
-            entry.1 = entry.1.max(durable_event_next);
+            entry.message_next = entry.message_next.max(durable_message_next);
+            entry.event_next = entry.event_next.max(durable_event_next);
+            entry.last_report = std::time::Instant::now();
         }
         cell.changed.notify_waiters();
     }
@@ -1226,7 +1257,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 let followers = cell.followers.lock().expect("progress lock");
                 followers
                     .iter()
-                    .map(|(node, tails)| (node.clone(), *tails))
+                    .map(|(node, progress)| {
+                        (node.clone(), (progress.message_next, progress.event_next))
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -1286,12 +1319,58 @@ impl ReplicationConfirmGate {
             return Ok(());
         }
 
+        let cfg = self.cfg.load();
+        let timeout_ms = cfg.replication_confirm_timeout_ms;
+        let min_in_sync = cfg.replication_min_in_sync_replicas;
+        let isr_timeout = std::time::Duration::from_millis(cfg.replication_isr_timeout_ms);
+
         let cell = self
             .progress
             .entry(key.clone())
             .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
             .clone();
-        let timeout_ms = self.cfg.load().replication_confirm_timeout_ms;
+
+        // In-sync replica floor (Kafka min.insync.replicas). Only applies to
+        // replica-durable policies (required_followers > 0). If fewer replicas
+        // are healthy than the floor, refuse the publish fast instead of
+        // letting it hang until the confirm timeout.
+        if min_in_sync > 1 {
+            // Static infeasibility: the assigned replica set can never reach
+            // the floor regardless of health.
+            let replica_set = assignment.replica_set_size();
+            if min_in_sync > replica_set {
+                return Err(BrokerError::NotEnoughInSyncReplicas {
+                    topic: key.tp.clone(),
+                    partition: key.part,
+                    in_sync: replica_set,
+                    required: min_in_sync,
+                });
+            }
+            // Dynamic shortfall: owner plus followers that reported recently.
+            let in_sync = {
+                let followers = cell.followers.lock().expect("progress lock");
+                let now = std::time::Instant::now();
+                let live_followers = assignment
+                    .followers
+                    .iter()
+                    .filter(|follower| {
+                        followers.get(*follower).is_some_and(|progress| {
+                            now.duration_since(progress.last_report) <= isr_timeout
+                        })
+                    })
+                    .count();
+                1 + live_followers
+            };
+            if in_sync < min_in_sync {
+                return Err(BrokerError::NotEnoughInSyncReplicas {
+                    topic: key.tp.clone(),
+                    partition: key.part,
+                    in_sync,
+                    required: min_in_sync,
+                });
+            }
+        }
+
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
         loop {
@@ -1303,7 +1382,7 @@ impl ReplicationConfirmGate {
                     .filter(|follower| {
                         followers
                             .get(*follower)
-                            .is_some_and(|(message_next, _)| *message_next > offset)
+                            .is_some_and(|progress| progress.message_next > offset)
                     })
                     .count()
                     >= required_followers

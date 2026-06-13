@@ -77,6 +77,11 @@ pub struct ReplicationRuntimeSettings {
     pub retry_poll_ms: u64,
     /// Follower retry interval while a checkpoint install is required.
     pub checkpoint_retry_poll_ms: u64,
+    /// Minimum in-sync replicas required to accept a replica-durable publish.
+    /// 1 disables the floor.
+    pub min_in_sync_replicas: usize,
+    /// How recently a follower must have reported to count as in-sync.
+    pub isr_timeout_ms: u64,
 }
 
 impl Default for ReplicationRuntimeSettings {
@@ -86,6 +91,8 @@ impl Default for ReplicationRuntimeSettings {
             caught_up_poll_ms: 1_000,
             retry_poll_ms: 100,
             checkpoint_retry_poll_ms: 5_000,
+            min_in_sync_replicas: 1,
+            isr_timeout_ms: 10_000,
         }
     }
 }
@@ -309,6 +316,8 @@ impl BrokerConfig {
             replication_caught_up_poll_ms: settings.replication.caught_up_poll_ms,
             replication_retry_poll_ms: settings.replication.retry_poll_ms,
             replication_checkpoint_retry_poll_ms: settings.replication.checkpoint_retry_poll_ms,
+            replication_min_in_sync_replicas: settings.replication.min_in_sync_replicas,
+            replication_isr_timeout_ms: settings.replication.isr_timeout_ms,
         }
     }
 }

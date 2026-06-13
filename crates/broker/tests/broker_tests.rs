@@ -829,6 +829,202 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
     broker.shutdown().await;
 }
 
+/// R5 in-sync-replica floor (Kafka min.insync.replicas): when the assigned
+/// replica set is smaller than the configured floor, a replica-durable publish
+/// is refused immediately — it can never satisfy the floor. A long confirm
+/// timeout proves the refusal is fast (not a timeout).
+#[tokio::test]
+async fn publish_refused_when_min_in_sync_exceeds_replica_set() {
+    let topic = "isr-static";
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        replication_confirm_timeout_ms: 60_000,
+        replication_min_in_sync_replicas: 3,
+        ..Default::default()
+    })
+    .await;
+
+    // Owner + one follower = replica set of 2, but the floor demands 3.
+    broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, 0, None),
+            "owner-a",
+            vec!["follower-b".to_string()],
+            1,
+        )
+        .with_durability(
+            fibril_broker::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 },
+        ),
+    );
+
+    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"x".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let err = reply
+        .await
+        .unwrap()
+        .expect_err("must refuse below ISR floor");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("NotEnoughInSyncReplicas") && !message.contains("timed out"),
+        "expected fast ISR refusal, got: {message}"
+    );
+
+    broker.shutdown().await;
+}
+
+/// When the replica set is large enough but too few followers are healthy
+/// (none have reported, or their reports are stale), a replica-durable publish
+/// is refused fast rather than waiting out the confirm timeout.
+#[tokio::test]
+async fn publish_refused_when_in_sync_replicas_below_floor() {
+    let topic = "isr-dynamic";
+
+    // No follower has reported: only the owner is in sync (1 < 2).
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        replication_confirm_timeout_ms: 60_000,
+        replication_min_in_sync_replicas: 2,
+        replication_isr_timeout_ms: 10_000,
+        ..Default::default()
+    })
+    .await;
+    broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, 0, None),
+            "owner-a",
+            vec!["follower-b".to_string()],
+            1,
+        )
+        .with_durability(
+            fibril_broker::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 },
+        ),
+    );
+    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"x".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let err = reply
+        .await
+        .unwrap()
+        .expect_err("must refuse with no healthy follower");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("NotEnoughInSyncReplicas") && !message.contains("timed out"),
+        "expected fast ISR refusal, got: {message}"
+    );
+    broker.shutdown().await;
+}
+
+/// A follower that reported but has gone silent past the ISR timeout falls out
+/// of the in-sync set: with isr_timeout 0 even a just-recorded report is stale,
+/// so the floor is unmet and the publish is refused.
+#[tokio::test]
+async fn stale_follower_excluded_from_in_sync_set() {
+    let topic = "isr-stale";
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        replication_confirm_timeout_ms: 60_000,
+        replication_min_in_sync_replicas: 2,
+        replication_isr_timeout_ms: 0,
+        ..Default::default()
+    })
+    .await;
+    broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, 0, None),
+            "owner-a",
+            vec!["follower-b".to_string()],
+            1,
+        )
+        .with_durability(
+            fibril_broker::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 },
+        ),
+    );
+    // The follower has reported, but with isr_timeout 0 it never counts as fresh.
+    broker.record_follower_replication_progress(topic, 0, None, "follower-b", 5, 5);
+
+    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"x".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let err = reply
+        .await
+        .unwrap()
+        .expect_err("stale follower must not satisfy ISR");
+    let message = format!("{err:?}");
+    assert!(
+        message.contains("NotEnoughInSyncReplicas"),
+        "expected ISR refusal for stale follower, got: {message}"
+    );
+    broker.shutdown().await;
+}
+
+/// With the floor met (a follower reported recently and is past the offset),
+/// the publish is admitted and the confirm resolves normally.
+#[tokio::test]
+async fn publish_admitted_once_in_sync_floor_met() {
+    let topic = "isr-met";
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        replication_confirm_timeout_ms: 2_000,
+        replication_min_in_sync_replicas: 2,
+        replication_isr_timeout_ms: 10_000,
+        ..Default::default()
+    })
+    .await;
+    broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, 0, None),
+            "owner-a",
+            vec!["follower-b".to_string()],
+            1,
+        )
+        .with_durability(
+            fibril_broker::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 },
+        ),
+    );
+    // Fresh report past the first offset satisfies both the ISR floor and the
+    // durability requirement.
+    broker.record_follower_replication_progress(topic, 0, None, "follower-b", 5, 5);
+
+    let (publisher, _confirms) = broker.get_publisher(topic, &None).await.unwrap();
+    let reply = publisher
+        .publish(
+            b"x".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    let offset = reply
+        .await
+        .unwrap()
+        .expect("confirm resolves once ISR floor and durability are met");
+    assert_eq!(offset, 0);
+    broker.shutdown().await;
+}
+
 /// Data-plane epoch fencing (the split-brain last line): a follower fenced at
 /// a newer assignment epoch rejects replicated batches from an older-epoch
 /// (stale) owner AT THE STORAGE LAYER; once the owner advances to the fenced

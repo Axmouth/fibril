@@ -1727,3 +1727,30 @@ Tests needed before implementing transition:
   consistent-hashing/virtual-nodes to soften remaps. Lowering N must drain+
   merge. Recommend: ship fixed-at-create partition_count for R6 multi-
   partition, treat live repartitioning as a separate later milestone.
+- 2026-06-13: R5 min_in_sync_replicas (Kafka min.insync.replicas) landed.
+  An in-sync-replica FLOOR that refuses replica-durable publishes fast when too
+  few replicas are healthy, instead of accepting and hanging until the confirm
+  timeout. Two new runtime settings (replication section, cluster-replicated +
+  seedable like the rest): min_in_sync_replicas (default 1 = OFF, fully
+  preserves prior behavior) and isr_timeout_ms (default 10s, freshness window).
+  In-sync = owner (always) + assigned followers whose last progress report is
+  within isr_timeout_ms; the progress cell now timestamps each report
+  (std::time::Instant) so a silent follower drops out of ISR. The floor is
+  enforced in ReplicationConfirmGate::await_confirm, only for replica-durable
+  policies (required_followers > 0), in two stages before the durability wait:
+  STATIC infeasibility (floor > assigned replica set -> can never satisfy ->
+  refuse) and DYNAMIC shortfall (healthy count < floor -> refuse). New
+  BrokerError::NotEnoughInSyncReplicas {topic, partition, in_sync, required}
+  gives clients a distinct retæable signal vs a generic timeout. Tests
+  (broker_tests, all fast = proving fail-fast not timeout, with a 60s confirm
+  timeout in the refuse cases): floor exceeds replica set; no healthy follower;
+  stale follower excluded (isr_timeout 0 makes even a just-recorded report
+  stale); floor met -> admitted and resolves. Kafka parity notes: the floor
+  only bites replica-durable producers (local-durable/acks=1 bypass it, by
+  design); a cold-start window exists where the first publish before any
+  follower has pulled is refused until ISR forms (followers pull every
+  caught_up_poll_ms ~1s) - matches Kafka's "replica not yet in ISR". All
+  suites green (broker 35 lib + 96 integ, protocol 45+13, provider 9, config
+  8); cluster-tryout --ganglion passing. R5 tail remaining: per-follower
+  lag/ISR in topology observability surfaces; two-real-broker confirm-over-
+  wire e2e. Future: per-topic min_in_sync override (currently broker-wide).

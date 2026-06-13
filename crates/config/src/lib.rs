@@ -327,6 +327,12 @@ impl ServerConfig {
         {
             anyhow::bail!("runtime_seed.replication poll intervals must be at least 1ms");
         }
+        if self.runtime_seed.replication.min_in_sync_replicas == 0 {
+            anyhow::bail!("runtime_seed.replication.min_in_sync_replicas must be at least 1");
+        }
+        if self.runtime_seed.replication.isr_timeout_ms == 0 {
+            anyhow::bail!("runtime_seed.replication.isr_timeout_ms must be at least 1");
+        }
         if self.coordination.mode == CoordinationMode::Ganglion
             && self.coordination.ganglion.liveness_ttl_ms
                 < 2 * self.coordination.ganglion.heartbeat_interval_ms
@@ -611,6 +617,8 @@ pub struct ReplicationSettings {
     pub caught_up_poll_ms: u64,
     pub retry_poll_ms: u64,
     pub checkpoint_retry_poll_ms: u64,
+    pub min_in_sync_replicas: usize,
+    pub isr_timeout_ms: u64,
 }
 
 impl Default for ReplicationSettings {
@@ -620,6 +628,8 @@ impl Default for ReplicationSettings {
             caught_up_poll_ms: 1_000,
             retry_poll_ms: 100,
             checkpoint_retry_poll_ms: 5_000,
+            min_in_sync_replicas: 1,
+            isr_timeout_ms: 10_000,
         }
     }
 }
