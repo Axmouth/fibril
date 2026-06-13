@@ -1086,12 +1086,13 @@ mod tests {
             .collect()
     }
 
-    fn queues_n(count: usize) -> Vec<QueueIdentity> {
+    fn queues_prefixed(prefix: &str, count: usize) -> Vec<QueueIdentity> {
         (0..count)
             .map(|idx| {
                 // Spread across topics, partitions, and groups so the sort/dedup
-                // and round-robin paths see realistic key variety at scale.
-                let topic = format!("topic-{:03}", idx % 64);
+                // and round-robin paths see realistic key variety at scale. The
+                // prefix keeps separate batches from colliding.
+                let topic = format!("{prefix}-{:03}", idx % 64);
                 let partition = (idx % 4) as LogId;
                 let group = if idx % 3 == 0 {
                     None
@@ -1101,6 +1102,30 @@ mod tests {
                 QueueIdentity::new(topic, partition, group.as_deref())
             })
             .collect()
+    }
+
+    fn queues_n(count: usize) -> Vec<QueueIdentity> {
+        queues_prefixed("topic", count)
+    }
+
+    /// Shared invariant check: every queue is placed on a live node with a
+    /// distinct, owner-excluded follower set capped at the available nodes.
+    fn assert_placement_well_formed(
+        assignments: &HashMap<QueueIdentity, PartitionAssignment>,
+        live: &HashMap<String, NodeInfo>,
+        target_followers: usize,
+    ) {
+        let expected_followers = target_followers.min(live.len().saturating_sub(1));
+        for assignment in assignments.values() {
+            assert!(live.contains_key(&assignment.owner));
+            assert_eq!(assignment.followers.len(), expected_followers);
+            let distinct: HashSet<_> = assignment.followers.iter().collect();
+            assert_eq!(distinct.len(), expected_followers);
+            assert!(!assignment.followers.contains(&assignment.owner));
+            for follower in &assignment.followers {
+                assert!(live.contains_key(follower));
+            }
+        }
     }
 
     /// Sanity check that placement stays correct and balanced at cluster sizes
@@ -1201,6 +1226,153 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Much larger than the headline scaling test: a thousand nodes carrying
+    /// several thousand queues. Pure computation, so it stays fast while
+    /// proving the placement math (balance, replica integrity) holds far past
+    /// any realistic deployment.
+    #[test]
+    fn placement_scales_to_very_large_clusters() {
+        const NODE_COUNT: usize = 1000;
+        const TARGET_FOLLOWERS: usize = 2;
+
+        let live = nodes_n(NODE_COUNT);
+        let queues = queues_prefixed("svc", 5000);
+        let unique: HashSet<_> = queues.iter().cloned().collect();
+
+        let plan = DeterministicPartitionPlacement
+            .plan(PartitionPlacementInput {
+                nodes: live.clone(),
+                queues,
+                existing: HashMap::new(),
+                target_followers: TARGET_FOLLOWERS,
+                generation: 1,
+            })
+            .unwrap();
+        let assignments = plan.snapshot.assignments;
+
+        assert_eq!(assignments.len(), unique.len());
+        assert_placement_well_formed(&assignments, &live, TARGET_FOLLOWERS);
+
+        let mut owner_load: HashMap<&str, usize> = HashMap::new();
+        for assignment in assignments.values() {
+            *owner_load.entry(assignment.owner.as_str()).or_default() += 1;
+        }
+        let max_load = owner_load.values().copied().max().unwrap();
+        let min_load = owner_load.values().copied().min().unwrap_or(0);
+        assert!(
+            max_load - min_load <= 1,
+            "owner load imbalance {min_load}..={max_load}"
+        );
+    }
+
+    /// Scaling up the cluster absorbs newly declared queues onto the expanded
+    /// node set without churning the owners or epochs of queues that were
+    /// already placed (the deterministic planner is intentionally sticky:
+    /// adding capacity does not trigger a rebalance of existing ownership).
+    #[test]
+    fn placement_scale_up_absorbs_new_queues_without_churn() {
+        const TARGET_FOLLOWERS: usize = 2;
+
+        let initial_nodes = nodes_n(50);
+        let batch_a = queues_prefixed("a", 400);
+
+        let first = DeterministicPartitionPlacement
+            .plan(PartitionPlacementInput {
+                nodes: initial_nodes.clone(),
+                queues: batch_a.clone(),
+                existing: HashMap::new(),
+                target_followers: TARGET_FOLLOWERS,
+                generation: 1,
+            })
+            .unwrap();
+        let placed_a = first.snapshot.assignments;
+
+        // Grow to 75 nodes and declare a fresh batch of queues.
+        let expanded_nodes = nodes_n(75);
+        let batch_b = queues_prefixed("b", 200);
+        let mut all_queues = batch_a.clone();
+        all_queues.extend(batch_b.iter().cloned());
+
+        let second = DeterministicPartitionPlacement
+            .plan(PartitionPlacementInput {
+                nodes: expanded_nodes.clone(),
+                queues: all_queues,
+                existing: placed_a.clone(),
+                target_followers: TARGET_FOLLOWERS,
+                generation: 2,
+            })
+            .unwrap();
+        let placed_all = second.snapshot.assignments;
+
+        assert_placement_well_formed(&placed_all, &expanded_nodes, TARGET_FOLLOWERS);
+
+        // Existing queues keep their owner and epoch: no churn from scale-up.
+        for queue in &batch_a {
+            let before = &placed_a[queue];
+            let after = &placed_all[queue];
+            assert_eq!(before.owner, after.owner, "owner churned for {queue:?}");
+            assert_eq!(before.epoch, after.epoch, "epoch churned for {queue:?}");
+        }
+
+        // The new nodes are reachable for placement: some replica role lands on
+        // the expanded range (owner or follower of a batch-B queue).
+        let new_node_ids: HashSet<String> = (50..75).map(|idx| format!("node-{idx:04}")).collect();
+        let touches_new_node = batch_b.iter().any(|queue| {
+            let assignment = &placed_all[queue];
+            new_node_ids.contains(&assignment.owner)
+                || assignment
+                    .followers
+                    .iter()
+                    .any(|follower| new_node_ids.contains(follower))
+        });
+        assert!(
+            touches_new_node,
+            "new nodes received no placement after scale-up"
+        );
+    }
+
+    /// Near-total failure: a large cluster collapses to two survivors. Every
+    /// queue must still place, with followers transparently capped at the one
+    /// remaining peer rather than failing or duplicating the owner.
+    #[test]
+    fn placement_survives_collapse_to_two_nodes() {
+        const TARGET_FOLLOWERS: usize = 3;
+
+        let queues = queues_prefixed("svc", 500);
+        let survivors = nodes_n(2);
+
+        // Pretend everything was previously spread across 200 nodes that are
+        // now gone; the existing assignments reference dead owners/followers.
+        let stale = nodes_n(200);
+        let stale_plan = DeterministicPartitionPlacement
+            .plan(PartitionPlacementInput {
+                nodes: stale,
+                queues: queues.clone(),
+                existing: HashMap::new(),
+                target_followers: TARGET_FOLLOWERS,
+                generation: 1,
+            })
+            .unwrap();
+
+        let recovered = DeterministicPartitionPlacement
+            .plan(PartitionPlacementInput {
+                nodes: survivors.clone(),
+                queues: queues.clone(),
+                existing: stale_plan.snapshot.assignments,
+                target_followers: TARGET_FOLLOWERS,
+                generation: 2,
+            })
+            .unwrap();
+
+        let assignments = recovered.snapshot.assignments;
+        assert_eq!(
+            assignments.len(),
+            queues.iter().cloned().collect::<HashSet<_>>().len()
+        );
+        // With two nodes, the follower set caps at one (owner excluded).
+        assert_placement_well_formed(&assignments, &survivors, TARGET_FOLLOWERS);
     }
 
     #[test]
