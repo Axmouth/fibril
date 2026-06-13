@@ -1954,3 +1954,22 @@ Tests needed before implementing transition:
   (topic,partition,group) is its own Stroma log) is the B5/B6 work.
   NEXT — B5: subset-capable subscriptions + multi-owner subscription fan-in, plus
   the server-side per-partition publish routing the fence/topology already assume.
+- 2026-06-13: B5 (publish half) DONE (b62b777). Server-side per-partition publish
+  routing: broker.get_publisher hardcoded `let part: LogId = 0`, collapsing every
+  publish into one log no matter the partition the client routed to and stamped.
+  Broker was already partition-aware below it (QueueKey.part, ensure_queue_owner,
+  engine.materialize all take partition), so: get_publisher gained a `partition:
+  LogId` param; handler keys the publisher cache by (topic, u32, group) and passes
+  pubreq.partition to get_publisher + the not-owner redirect. ~70 test/bench call
+  sites pass partition 0 (single-partition path unchanged). Test
+  publishes_route_to_independent_partition_logs (broker_tests) proves two
+  partitions of one (topic,group) keep independent offset sequences + messages,
+  read back via read_owner_replication_records per partition. Whole workspace
+  green (33 suites).
+  NEXT — B5 (subscribe half): subscribe() is still partition-0-only. Make
+  subscribe partition-aware (each (topic,partition,group) is its own log/cursor),
+  then client-side multi-owner subscription fan-in so one logical subscription
+  consumes all partitions (subset-capable for consumer-group assignment later).
+  Once subscribe is partition-aware, add a true multi-partition publish->subscribe
+  e2e test (publish to p0/p1, subscribe to each, assert isolation) to replace the
+  replication-read-based proxy used for the publish half.
