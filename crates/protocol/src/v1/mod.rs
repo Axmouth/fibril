@@ -70,6 +70,10 @@ pub enum Op {
     ReplicationCheckpointInstall = 86,
     ReplicationCheckpointInstallOk = 87,
 
+    Topology = 90,
+    TopologyOk = 91,
+    Redirect = 92,
+
     Error = 255,
 }
 
@@ -461,3 +465,45 @@ pub const ERR_CONFLICT: u16 = 409;
 // Not-owner is a topology or state conflict, not an auth failure. Retrying
 // against the current owner is valid, so 403-style "forbidden" is misleading.
 pub const ERR_NOT_OWNER: u16 = ERR_CONFLICT;
+
+/// Client request for cluster topology. An empty `topic` filter asks for the
+/// full topology; a set `topic` (optionally with `group`) narrows it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TopologyRequest {
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+/// One queue partition's ownership, as seen by clients for routing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueTopologyEntry {
+    pub topic: String,
+    pub partition: u32,
+    pub group: Option<String>,
+    /// Broker endpoint of the owner, if the owner node is known in the registry.
+    pub owner_endpoint: Option<String>,
+    pub partitioning_version: u64,
+}
+
+/// Topology response: ownership of the requested queue partitions at a given
+/// coordination generation. Clients route from this and refresh on redirects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyOk {
+    pub generation: u64,
+    pub queues: Vec<QueueTopologyEntry>,
+}
+
+/// Control-flow response telling the client to retry against the current owner.
+/// Distinct from an error: it is not a failure, it carries a routing target,
+/// and it must be retried on a DIFFERENT connection, so the client routing
+/// layer (not the per-connection engine) acts on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Redirect {
+    pub topic: String,
+    pub partition: u32,
+    pub group: Option<String>,
+    pub owner_endpoint: String,
+    pub partitioning_version: u64,
+}

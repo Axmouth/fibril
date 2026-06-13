@@ -55,13 +55,14 @@ mod tests {
 
     use super::*;
     use crate::v1::{
-        Hello, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
-        ReconcileSubscription, ReconcileSubscriptionResult, ReplicationApply, ReplicationApplyOk,
-        ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
+        Hello, QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy,
+        ReconcileResult, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
+        ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
+        ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
         ReplicationCheckpointInstallOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
         ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
         ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
-        ReplicationStateCheckpoint,
+        ReplicationStateCheckpoint, TopologyOk,
     };
 
     #[test]
@@ -89,6 +90,48 @@ mod tests {
         let error: ErrorMsg = try_decode(&frame).unwrap();
         assert_eq!(error.code, 400);
         assert_eq!(error.message, "bad request");
+    }
+
+    #[test]
+    fn topology_ok_roundtrips() {
+        let msg = TopologyOk {
+            generation: 7,
+            queues: vec![
+                QueueTopologyEntry {
+                    topic: "orders".into(),
+                    partition: 0,
+                    group: Some("workers".into()),
+                    owner_endpoint: Some("127.0.0.1:9000".into()),
+                    partitioning_version: 0,
+                },
+                QueueTopologyEntry {
+                    topic: "emails".into(),
+                    partition: 1,
+                    group: None,
+                    owner_endpoint: None,
+                    partitioning_version: 0,
+                },
+            ],
+        };
+
+        let frame = try_encode(Op::TopologyOk, 5, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::TopologyOk as u16);
+        assert_eq!(try_decode::<TopologyOk>(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn redirect_roundtrips() {
+        let msg = Redirect {
+            topic: "orders".into(),
+            partition: 2,
+            group: Some("workers".into()),
+            owner_endpoint: "127.0.0.1:9001".into(),
+            partitioning_version: 0,
+        };
+
+        let frame = try_encode(Op::Redirect, 8, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::Redirect as u16);
+        assert_eq!(try_decode::<Redirect>(&frame).unwrap(), msg);
     }
 
     #[test]
