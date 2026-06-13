@@ -143,9 +143,10 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             group: sub.group,
                             partition: sub.partition,
                             offset: 0,
-                            delivery_tag: DeliveryTag {
-                                epoch: sub.partition as u64,
-                            },
+                            // Arbitrary placeholder: deliveries correlate by
+                            // sub_id, and this test never acks (the mock ignores
+                            // acks), so the tag value is irrelevant here.
+                            delivery_tag: DeliveryTag { epoch: 0 },
                             published: 0,
                             publish_received: 0,
                             content_type: None,
@@ -190,12 +191,14 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             };
                             try_encode(Op::TopologyOk, frame.request_id, &topology).unwrap()
                         } else {
-                            match &config.topology {
-                                Some(topology) => {
-                                    try_encode(Op::TopologyOk, frame.request_id, topology).unwrap()
-                                }
-                                None => continue,
-                            }
+                            // Answer an empty topology by default so the client's
+                            // connect-time warm completes promptly instead of
+                            // waiting out its timeout.
+                            let topology = config.topology.clone().unwrap_or(TopologyOk {
+                                generation: 0,
+                                queues: vec![],
+                            });
+                            try_encode(Op::TopologyOk, frame.request_id, &topology).unwrap()
                         }
                     } else if frame.opcode == Op::Publish as u16 {
                         let publish: Publish = try_decode(&frame).unwrap();
@@ -513,9 +516,9 @@ async fn subscription_fans_in_all_partitions() {
     })
     .await;
 
+    // No explicit fetch_topology: connect warms the cache, so a pure consumer
+    // transparently fans in over all partitions.
     let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
-    // Warm the cache so the subscription sees partition_count = 3.
-    client.fetch_topology().await.unwrap();
 
     let mut sub = client
         .subscribe("jobs")

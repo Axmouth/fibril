@@ -1105,7 +1105,8 @@ impl Client {
             Arc::new(EngineSlot::connect(address, opts.clone(), user_shutdown.clone()).await?);
         let mut pool = HashMap::new();
         pool.insert(address, slot);
-        Ok(Client {
+        let warm_timeout_ms = opts.topology_warm_timeout_ms;
+        let client = Client {
             shared: Arc::new(ClientShared {
                 bootstrap: vec![address],
                 opts,
@@ -1114,7 +1115,19 @@ impl Client {
                 topology: ArcSwap::from_pointee(TopologyCache::default()),
                 round_robin: std::sync::atomic::AtomicUsize::new(0),
             }),
-        })
+        };
+        // Warm the topology cache once so the first publish spreads across
+        // partitions and the first subscription fans in over all of them.
+        // Best-effort and bounded: a server that does not answer must not stall
+        // connect, and a cold cache simply degrades to single-partition routing.
+        if let Some(timeout_ms) = warm_timeout_ms {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(timeout_ms),
+                client.fetch_topology(),
+            )
+            .await;
+        }
+        Ok(client)
     }
 
     /// Replace the internal engine with a new connection.
@@ -3044,6 +3057,14 @@ pub struct ClientOptions {
     pub max_redirects: u32,
     /// Minimum interval between client topology refreshes (anti-storm).
     pub topology_refresh_cooldown_ms: u64,
+    /// Warm the topology cache once at connect, bounded by this timeout (ms), so
+    /// the very first publish spreads across partitions and the first
+    /// subscription fans in over all of them. Without it a cold cache funnels
+    /// every publish to partition 0 and leaves other partitions unconsumed.
+    /// `None` disables warming (cache then warms lazily via redirects). Warming
+    /// is best-effort: on timeout or error the client proceeds with a cold
+    /// cache (single-partition behavior).
+    pub topology_warm_timeout_ms: Option<u64>,
 }
 
 impl ClientOptions {
@@ -3061,6 +3082,24 @@ impl ClientOptions {
             reconcile_policy: ReconcilePolicy::Conservative,
             max_redirects: 3,
             topology_refresh_cooldown_ms: 1_000,
+            topology_warm_timeout_ms: Some(5_000),
+        }
+    }
+
+    /// Return a copy with a custom connect-time topology warm timeout (ms).
+    pub fn topology_warm_timeout_ms(self, timeout_ms: u64) -> Self {
+        Self {
+            topology_warm_timeout_ms: Some(timeout_ms),
+            ..self
+        }
+    }
+
+    /// Return a copy with connect-time topology warming disabled. The cache then
+    /// warms lazily via redirects; a cold cache routes/consumes partition 0 only.
+    pub fn disable_topology_warm(self) -> Self {
+        Self {
+            topology_warm_timeout_ms: None,
+            ..self
         }
     }
 
@@ -3443,6 +3482,9 @@ mod tests {
 
         let mut client = ClientOptions::new()
             .reconnect_reconcile_policy(ReconcilePolicy::RestoreClientSubscriptions)
+            // This test's fake server scripts an exact frame sequence and does
+            // not answer a topology warm; keep connect to just the handshake.
+            .disable_topology_warm()
             .connect(addr)
             .await
             .unwrap();
