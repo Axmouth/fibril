@@ -806,3 +806,104 @@ tryout/diagram payoff) → R4 (failover choreography + adversarial suite) → R5
 Each phase lands with its tests green plus one cluster-tryout assertion where applicable;
 FAILURE_MODES.md gains entries for new modes (controller churn, promotion refusal loops,
 catalogue divergence).
+
+## R6 implementation breakdown (codebase-grounded, 2026-06-13)
+
+Plan first; implement after sign-off. Order: Phase A (client topology
+awareness) then Phase B (multi-partition, fixed-at-create + versioned). Each
+item references the real code touchpoint. Gates per item-group: cargo fmt,
+package test sweeps, cluster-tryout where applicable, worklog entry.
+
+### Phase A — Client topology awareness (route to owners; redirect on not-owner)
+
+- A1. [DONE, commit 2b70a41] Coordination client-facing topology view.
+  `GanglionCoordination::client_topology() -> ClientTopology` (queue -> owner
+  node_id + owner_endpoint + partitioning_version + generation), in
+  crates/coordination-ganglion/src/lib.rs.
+- A2. Protocol: client topology op. Add `Op::Topology` / `Op::TopologyOk`
+  (crates/protocol/src/v1/mod.rs Op enum, currently no metadata op). Request:
+  optional topic/group filter. Response: list of {topic, partition, group,
+  owner_endpoint, partitioning_version} + generation — mirror of
+  coordination::ClientTopology. Additive op; relies on existing negotiated
+  protocol version.
+- A3. Protocol: structured not-owner redirect. `ERR_NOT_OWNER`(=409) already
+  exists but `ErrorMsg` is `{code, message}` only. Add optional redirect data
+  so the client can act: either `#[serde(default)] owner_endpoint:
+  Option<String>` + `partitioning_version: Option<u64>` on ErrorMsg (minimal,
+  wire-compatible), or a dedicated `NotOwnerInfo` payload. Lean: extend
+  ErrorMsg with serde-default fields.
+- A4. Handler: topology source + redirect enrichment. `handle_connection`
+  (crates/protocol/src/v1/handler.rs) gains an injected topology provider
+  (Arc closure / trait), mirroring how admin gets `with_coordination` /
+  `with_raft_topology` in server.rs. Answer `Op::Topology` from it; when the
+  broker returns `BrokerError::NotOwner`, look up the current owner endpoint
+  from the provider and fill the redirect fields. server.rs wires
+  `coordination.client_topology()` as the source in ganglion mode; standalone
+  returns a single-node topology (self owns all, no redirects).
+- A5. Client: topology cache + routing + redirect. crates/client/src/lib.rs is
+  currently single-connection with NO topology / not-owner handling.
+  - Bootstrap from N broker addresses; fetch topology via `Op::Topology`.
+  - Cache queue->owner endpoint + generation + partitioning_version.
+  - Connection pool keyed by broker endpoint (multi-owner queues).
+  - Route publish/subscribe to the partition owner.
+  - On `ERR_NOT_OWNER` with redirect: refresh topology, reconnect to new
+    owner, retry (bounded; retry/refresh counts CONFIGURABLE per settings
+    discipline).
+  - Keep partition selection out of the user API.
+- A6. Tests: handler answers topology; not-owner returns redirect payload;
+  client routes + redirects + refreshes (unit + integration in
+  handler_tests/client). cluster-tryout: a client routes across the 3-node
+  cluster and follows a redirect after an ownership move.
+
+### Phase B — Multi-partition (fixed-at-create, versioned for live-repartition compat)
+
+- B1. Topic metadata. Store `{ partition_count, partitioning_version }` per
+  topic in the replicated attribute-CAS store (SetAttribute/CompareAndSet
+  already exist; the attribute store is the right home for topic-level
+  metadata). `declare` sets it (default partition_count=1,
+  partitioning_version=0). NEVER an immutable constant — versioned from day one.
+- B2. Declare fan-out. `DeclareQueue` (mod.rs) gains `#[serde(default=1)]
+  partition_count`. Handler arm (handler.rs ~1889) currently calls
+  `declare_queue(topic, 0, group, meta)` — change to register N partition
+  resources in the catalogue (register_queue per partition 0..N) and write the
+  topic metadata attribute; the controller then assigns owners for all N.
+- B3. Routing. `route(key, partitioning_version) -> partition`
+  (hash(key) % partition_count under the version). Client computes the
+  partition from the message key + topic metadata. First cut may also accept an
+  explicit key; default policy is hash. Publishes STAMP partitioning_version.
+- B4. Owner-side version fence. Owner rejects/redirects a publish stamped with
+  a stale partitioning_version (NotOwner-style with fresh topology) — routing-
+  layer mirror of data-plane epoch-before-use. This is the hook that makes a
+  future live repartition safe without a wire break.
+- B5. Subscribe across partitions. `Subscribe` wire ALREADY carries a partition
+  field (handler.rs uses sub.partition). Support a subscription targeting a
+  partition SUBSET; a logical subscription fans out one stream per owned
+  partition, hidden by the client. (Coverage-first consumer-group assignment is
+  DEFERRED — see [[consumer-partition-assignment-model]] — but the subscribe
+  model must not hardwire "all".)
+- B6. Tests: multi-partition declare -> N catalogue entries + N assignments;
+  client routes distinct keys to distinct partitions/owners; stale-version
+  publish is fenced; a logical subscription covers all partitions.
+
+### Phase C — Deferred (forward-compat hooks only; not built in R6 core)
+
+- Consumer-group partition assignment (coverage-first; capacity-signal limits;
+  under-provisioned alert/autoscale). [[consumer-partition-assignment-model]]
+- Live repartitioning (bump partitioning_version + migration job; per-key
+  ordering handled by drain/freeze or dual-route under the version).
+  [[live-repartitioning-is-a-target]]
+- Geo/locality-aware placement + consumer assignment via node labels
+  (region/zone); follower/nearest-replica reads (topology may grow from "owner
+  endpoint" to "owner + reachable replica endpoints" without a wire break).
+- Per-partition consumer-presence + lag observability (cold-partition
+  visibility); cross-broker replication-lag aggregation into `fibrilctl
+  topology` + admin diagram.
+
+### Production-soundness checks to apply throughout (not just guarantees)
+- Coverage-first: never strand a partition (consumer side) and never leave a
+  partition without a broker owner (controller already ensures owners).
+- Fail-fast over hang for preconditions; bounded retries with CONFIGURABLE
+  limits; visible degradation (redirect storms, refresh loops) surfaced not
+  silent.
+- Forward-compat: nothing assumes partition_count constant; routing/caches keyed
+  by partitioning_version.
