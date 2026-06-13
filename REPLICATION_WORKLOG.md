@@ -1825,3 +1825,61 @@ Tests needed before implementing transition:
   awareness or not-owner handling; protocol has no topology/metadata op; the
   Topology response will carry partitioning_version from day one (constant
   until multi-partition lands) so the wire stays forward-compatible.
+
+- 2026-06-13: R6 Phase B progress + detailed resume state (context-compaction safety).
+  COMMITS so far this phase: B1 per-(topic,group) partitioning via CAS
+  (declare_queue_partitioning/queue_partitioning, key fibril/partitioning/<topic>[/<group>],
+  QueuePartitioning{partition_count,partitioning_version}); attribute-CAS
+  create-once/idempotency test in ganglion; B2 declare fan-out (DeclareQueue.partition_count:
+  Option<u32>, default_partition_count runtime setting through all channels,
+  declare records partitioning + registers N catalogue entries via the injected
+  QueueDeclareCoordinator hook [server.rs CoordinationDeclareCoordinator], standalone
+  materializes N locally, reports effective count; catalogue_sync stays partition-0
+  because metrics QueueKey lacks partition — declare registers the full set);
+  server.rs refactor "c" (extracted runtime_seed_from_config + the two coordination
+  bridges into crates/fibril/src/lib.rs with tests); B3 FOUNDATION (5a22ed0):
+  Publish/PublishDelayed gained partition_key: Option<Vec<u8>> (serde-default),
+  QueueTopologyEntry + coordination ClientQueueTopology gained partition_count
+  (authoritative N read from partitioning metadata in client_topology()).
+
+  DESIGN DECISIONS (settled with user): routing = explicit `partition` override
+  -> else hash(partition_key)%N if key present -> else ROUND-ROBIN/sticky
+  (default; minimal-setup-just-works, key is opt-in). partition_key is purely
+  partition selection (Kafka-style), NOT a RabbitMQ routing key; client-side
+  routing input. Type Vec<u8> (not bytes crate; small, hashed once, consistent
+  with payload). Partitioner choosable + version-parameterized (consistent-hash
+  is the future repartition-friendly upgrade, swappable under partitioning_version).
+  Partition count: explicit-at-declare else default setting; gated auto-create
+  on first publish is a deferred follow-on; NEVER load-based autoscale.
+  Delivery stays OFFSET order (no publish-time sort); cross-partition
+  time-merge is a deferred opt-in client-side best-effort option.
+
+  NEXT — B3a (client routing), all in crates/client/src/lib.rs:
+   1. Add `partition: u32` to the 4 Command::Publish* variants (enum ~line 1560)
+      and use it in the engine frame-build (the `partition: 0` hardcodes ~line
+      2034/2049/2063/2079) instead of 0.
+   2. EngineHandle publish methods (publish_unconfirmed / publish_with_confirmation
+      / publish_unconfirmed_delayed / publish_delayed_with_confirmation, ~2360-2500)
+      take `partition: u32` and pass into the Command.
+   3. TopologyCache: store partition_count per queue (topology replace() now has
+      QueueTopologyEntry.partition_count); add `partition_count(topic, group)->u32`
+      (default 1 when unknown).
+   4. Partitioner fn: route(key: Option<&[u8]>, explicit: Option<u32>, count: u32,
+      rr: &AtomicUsize)->u32. hash%N keyed / round-robin keyless / explicit override.
+      Add a per-client (or per-queue) AtomicUsize round-robin counter in ClientShared.
+   5. Publisher methods (~1116-1240): resolve count from cache, compute partition,
+      pass to engine.publish_*; route via engine_for(topic, partition, group)
+      (already partition-parameterized).
+   6. Tests: partitioner unit test (round-robin spread, hash determinism, explicit
+      override); routing integration via the mock broker (crates/client/tests/redirect.rs
+      style) — keyless spreads across partitions, keyed sticks.
+  THEN B3b: per-message key API (NewMessage.partition_key builder + internal
+  message struct field; default publish() has no key -> round-robin). THEN B4:
+  owner-side version fence (stamp partitioning_version on the publish wire; server
+  rejects/redirects stale-version routing). THEN B5 (subset subscriptions +
+  multi-owner fan-in), B6 (multi-partition tests).
+
+  REFACTOR DEBT: server.rs "b" (extract coordination bootstrap + broker background
+  spawns + admin wiring into fibril lib.rs) deferred to END of Phase B to avoid
+  churn while B3-B5 edit server.rs. Keep new wiring placed cleanly per the
+  fibril/ganglion separation (reusable->ganglion, glue->fibril).
