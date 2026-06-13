@@ -1798,3 +1798,30 @@ Tests needed before implementing transition:
   (enforcement + min-in-sync floor + per-broker lag/ISR observability + this
   wire e2e). Remaining R5-adjacent follow-up: cross-broker lag aggregation into
   `fibrilctl topology` and the admin web diagram.
+- 2026-06-13: R5 closed; retention decided; R6 planned + scoped. R5 is fully
+  done (confirm enforcement, min-in-sync floor, per-broker lag/ISR
+  observability, two-broker confirm-over-wire e2e). Retention/truncation:
+  DECIDED to rely on checkpoint-install fallback, no strict follower floor
+  (see PLANNING "Truncation rules"; the chain is already covered by the
+  stroma truncation->CheckpointRequired test + worker-installs-checkpoint test
+  + checkpoint-install-composes-with-catch-up test). R6 agreed: client
+  topology awareness FIRST, then multi-partition fixed-at-create, with live
+  repartitioning as a forward-compat TARGET (partition_count + partitioning_
+  version versioned in the catalogue; routing parameterized by the version;
+  see PLANNING "R6 partitioning plan").
+  R6 increment breakdown (from code exploration):
+  1. Coordination: client-facing topology view (queue -> owner node_id +
+     broker_addr, + partitioning_version) from committed snapshot + node
+     registry. [foundation, self-contained]
+  2. Protocol: new Topology request/response op; structured not-owner-redirect
+     error carrying the current owner address + partitioning_version.
+  3. Handler: inject a topology source into handle_connection (mirror of how
+     admin gets with_coordination/with_raft_topology); answer Topology queries;
+     enrich NotOwner errors with the owner hint.
+  4. Client: topology cache + route publish/subscribe to owner + refresh on
+     not-owner/stale + multi-connection management; keep partition selection
+     out of the user API. Stamp partitioning_version on publishes.
+  Current state observed: client is single-connection with NO topology
+  awareness or not-owner handling; protocol has no topology/metadata op; the
+  Topology response will carry partitioning_version from day one (constant
+  until multi-partition lands) so the wire stays forward-compatible.
