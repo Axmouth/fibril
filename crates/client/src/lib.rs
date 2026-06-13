@@ -784,6 +784,7 @@ enum Waiter {
     DeclareQueue(oneshot::Sender<FibrilResult<()>>),
     SubscribeManual(oneshot::Sender<FibrilResult<AckableSubChannel>>),
     SubscribeAuto(oneshot::Sender<FibrilResult<AutoAckedSubChannel>>),
+    Topology(oneshot::Sender<FibrilResult<TopologyOk>>),
 }
 
 #[derive(Debug, Clone)]
@@ -1099,6 +1100,29 @@ impl Client {
             .await
     }
 
+    /// Fetch the cluster topology from the broker and refresh the routing
+    /// cache. Returns the topology snapshot. In standalone mode the broker
+    /// returns an empty topology and the client keeps using its direct
+    /// connection.
+    pub async fn fetch_topology(&self) -> FibrilResult<TopologyOk> {
+        let engine = self
+            .shared
+            .bootstrap_slot()
+            .await?
+            .engine_for_operation()
+            .await?;
+        let topology = engine.fetch_topology().await?;
+        let now = unix_millis();
+        let snapshot = topology.clone();
+        self.shared.topology.rcu(|old| {
+            let mut updated = (**old).clone();
+            updated.replace(snapshot.clone());
+            updated.last_refresh_ms = now;
+            updated
+        });
+        Ok(topology)
+    }
+
     /// Gracefully shut down the client.
     ///
     /// This closes the connection engine and wakes subscription receivers.
@@ -1284,7 +1308,7 @@ struct OwnerEntry {
 /// Client-side cache of queue ownership learned from `Op::Topology` /
 /// `Op::Redirect`. Empty (e.g. standalone brokers) means "no routing info";
 /// callers fall back to the bootstrap connection.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 #[allow(dead_code)] // methods used as routing is wired (A5.4-A5.6)
 struct TopologyCache {
     generation: u64,
@@ -1569,6 +1593,9 @@ enum Command {
     DeclareQueue {
         req: DeclareQueue,
         reply: oneshot::Sender<FibrilResult<()>>,
+    },
+    Topology {
+        reply: oneshot::Sender<FibrilResult<TopologyOk>>,
     },
     Ack {
         sub_id: u64,
@@ -1948,6 +1975,11 @@ where
                         waiters.insert(req_id, Waiter::DeclareQueue(reply));
                         send_or_die!(framed, Op::DeclareQueue, req_id, &req, fatal_error)
                     }
+                    Command::Topology { reply } => {
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
+                        waiters.insert(req_id, Waiter::Topology(reply));
+                        send_or_die!(framed, Op::Topology, req_id, &TopologyRequest::default(), fatal_error)
+                    }
                     Command::Ack { sub_id, delivery_tag, request_id } => {
                         if let Some(sub) = subs.get(&sub_id) {
                             let ack = Ack {
@@ -2226,6 +2258,26 @@ where
                                 }
                             }
                         }
+                        x if x == Op::TopologyOk as u16 => {
+                            let ok: TopologyOk = match decode_protocol(&frame) {
+                                Ok(ok) => ok,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+                            match waiters.remove(&frame.request_id) {
+                                Some(Waiter::Topology(tx)) => {
+                                    let _ = tx.send(Ok(ok));
+                                }
+                                Some(_other) => {
+                                    tracing::error!("Internal error: protocol violation: TopologyOk for non-topology request_id")
+                                }
+                                None => {
+                                    tracing::error!("Internal error: unexpected TopologyOk")
+                                }
+                            }
+                        }
                         x if x == Op::Ping as u16 => {
                             let res = send_protocol_frame(&mut framed, Op::Pong, frame.request_id, &()).await;
 
@@ -2271,6 +2323,13 @@ where
                                         }
                                     }
                                     Waiter::SubscribeAuto(tx) => {
+                                        let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
+
+                                        if res.is_err() {
+                                            tracing::warn!("Broken pipe");
+                                        }
+                                    }
+                                    Waiter::Topology(tx) => {
                                         let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
 
                                         if res.is_err() {
@@ -2346,6 +2405,9 @@ fn fail_waiter(waiter: Waiter, err: FibrilError) {
             let _ = tx.send(Err(err));
         }
         Waiter::SubscribeAuto(tx) => {
+            let _ = tx.send(Err(err));
+        }
+        Waiter::Topology(tx) => {
             let _ = tx.send(Err(err));
         }
     }
@@ -2460,6 +2522,15 @@ impl EngineHandle {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::DeclareQueue { req, reply: tx })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_e| FibrilError::BrokenPipe)?
+    }
+
+    async fn fetch_topology(&self) -> FibrilResult<TopologyOk> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::Topology { reply: tx })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
         rx.await.map_err(|_e| FibrilError::BrokenPipe)?
