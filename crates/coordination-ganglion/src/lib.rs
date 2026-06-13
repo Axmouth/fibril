@@ -44,6 +44,56 @@ pub struct ClusterRuntimeSettings {
 /// traffic. Present from day one to keep the wire forward-compatible.
 pub const DEFAULT_PARTITIONING_VERSION: u64 = 0;
 
+/// Attribute-key prefix for per-topic partitioning metadata in the replicated
+/// attribute store. The full key is `fibril/topic/<topic>`.
+pub const TOPIC_METADATA_ATTRIBUTE_PREFIX: &str = "fibril/topic/";
+
+fn topic_metadata_key(topic: &str) -> String {
+    format!("{TOPIC_METADATA_ATTRIBUTE_PREFIX}{topic}")
+}
+
+/// Replicated per-topic partitioning metadata. `partition_count` is fixed at
+/// create for now; `partitioning_version` bumps on a future live repartition so
+/// routing can be fenced. Stored as a CAS attribute so concurrent declares are
+/// race-safe (create-once) and a repartition is a compare-update.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TopicMetadata {
+    pub partition_count: u32,
+    pub partitioning_version: u64,
+}
+
+/// Outcome of declaring a topic's partitioning.
+#[derive(Debug)]
+pub enum DeclareTopicError {
+    /// The topic already exists with a different partition count. Changing the
+    /// count is a repartition, not a re-declare.
+    PartitionCountConflict {
+        topic: String,
+        existing: u32,
+        requested: u32,
+    },
+    /// A coordination/consensus error (not-leader, storage, repeated CAS loss).
+    Coordination(OpenraftAdapterError),
+}
+
+impl std::fmt::Display for DeclareTopicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PartitionCountConflict {
+                topic,
+                existing,
+                requested,
+            } => write!(
+                f,
+                "topic `{topic}` already declared with {existing} partitions (requested {requested}); use repartition to change it"
+            ),
+            Self::Coordination(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for DeclareTopicError {}
+
 /// Client-facing ownership of one queue partition: which node owns it and where
 /// to reach that node, plus the partitioning version the routing was computed
 /// under.
@@ -500,6 +550,78 @@ where
                 Err(OpenraftAdapterError::AttributeMismatch { key, actual })
             }
         }
+    }
+
+    /// Committed partitioning metadata for a topic, if it has been declared.
+    pub fn topic_metadata(&self, topic: &str) -> Option<TopicMetadata> {
+        self.cluster_attribute(&topic_metadata_key(topic))
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+    }
+
+    /// Declare a topic's partitioning, race-safe via create-once CAS.
+    ///
+    /// - absent -> created with `partition_count` at version 0.
+    /// - already declared with the SAME count -> idempotent success.
+    /// - already declared with a DIFFERENT count -> `PartitionCountConflict`
+    ///   (changing the count is a repartition, a separate operation).
+    ///
+    /// Concurrent declares serialize through the CAS: the loser re-reads and
+    /// either succeeds idempotently or surfaces the conflict.
+    pub async fn declare_topic(
+        &self,
+        topic: &str,
+        partition_count: u32,
+    ) -> Result<TopicMetadata, DeclareTopicError> {
+        let partition_count = partition_count.max(1);
+        let key = topic_metadata_key(topic);
+        for _ in 0..8 {
+            let current_raw = self.cluster_attribute(&key);
+            if let Some(raw) = &current_raw {
+                match serde_json::from_str::<TopicMetadata>(raw) {
+                    Ok(existing) if existing.partition_count == partition_count => {
+                        return Ok(existing);
+                    }
+                    Ok(existing) => {
+                        return Err(DeclareTopicError::PartitionCountConflict {
+                            topic: topic.to_string(),
+                            existing: existing.partition_count,
+                            requested: partition_count,
+                        });
+                    }
+                    Err(error) => {
+                        return Err(DeclareTopicError::Coordination(
+                            OpenraftAdapterError::Storage(format!(
+                                "topic `{topic}` metadata is corrupt: {error}"
+                            )),
+                        ));
+                    }
+                }
+            }
+            let metadata = TopicMetadata {
+                partition_count,
+                partitioning_version: DEFAULT_PARTITIONING_VERSION,
+            };
+            let value = serde_json::to_string(&metadata).map_err(|error| {
+                DeclareTopicError::Coordination(OpenraftAdapterError::Storage(error.to_string()))
+            })?;
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: key.clone(),
+                    expected: None,
+                    value,
+                })
+                .await
+            {
+                Ok(_) => return Ok(metadata),
+                // Lost the create race: re-read and resolve (idempotent or conflict).
+                Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
+                Err(error) => return Err(DeclareTopicError::Coordination(error)),
+            }
+        }
+        Err(DeclareTopicError::Coordination(
+            OpenraftAdapterError::Storage("topic declare lost the CAS race repeatedly".to_string()),
+        ))
     }
 
     /// Publish runtime settings as the cluster truth (bounded CAS loop:
@@ -1281,6 +1403,62 @@ mod tests {
         for provider in &providers {
             provider.raft_node().shutdown().await.expect("shutdown");
         }
+    }
+
+    /// Topic declare is create-once + idempotent: first declare creates the
+    /// partitioning metadata, re-declaring the same count is a no-op success,
+    /// and re-declaring a different count is a conflict (repartition is
+    /// separate). Reads return None for undeclared topics.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn declare_topic_is_create_once_and_idempotent() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+
+        assert_eq!(provider.topic_metadata("orders"), None);
+
+        let created = provider.declare_topic("orders", 4).await.expect("declare");
+        assert_eq!(created.partition_count, 4);
+        assert_eq!(created.partitioning_version, DEFAULT_PARTITIONING_VERSION);
+        assert_eq!(provider.topic_metadata("orders"), Some(created.clone()));
+
+        // Idempotent re-declare with the same count.
+        let again = provider
+            .declare_topic("orders", 4)
+            .await
+            .expect("idempotent re-declare");
+        assert_eq!(again, created);
+
+        // A different count is a conflict, not a silent change.
+        let conflict = provider
+            .declare_topic("orders", 8)
+            .await
+            .expect_err("different partition count must conflict");
+        assert!(matches!(
+            conflict,
+            DeclareTopicError::PartitionCountConflict {
+                existing: 4,
+                requested: 8,
+                ..
+            }
+        ));
+        // Metadata is unchanged after the rejected declare.
+        assert_eq!(
+            provider.topic_metadata("orders").map(|m| m.partition_count),
+            Some(4)
+        );
+
+        provider.raft_node().shutdown().await.expect("shutdown");
     }
 
     /// Catalogue + attributes: registered queues are cluster-visible, survive
