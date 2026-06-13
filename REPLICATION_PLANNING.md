@@ -1072,3 +1072,26 @@ paths, each with a test (not just happy path). Cases to cover:
   → treated as owner-unknown (terminal NotOwner), never a panic.
 Plus the real round-trips deferred from earlier: `fetch_topology` against a
 live server, and client reconnect-with-resume end to end.
+
+## Delivery ordering (decided + future options)
+
+DECIDED: deliver in OFFSET (log) order. Within a partition, offset order is
+arrival order at the owner and is the canonical, replay-safe, cross-consumer
+order — do NOT sort delivery batches by producer `published` time (clock-skew
+unreliable; desyncs from offsets/acks/replay; true event-time order needs
+watermarks, which is a downstream concern). This is already the case server-side
+(delivery reads the event log in offset order).
+
+FUTURE OPTIONS to explore (not now):
+- Cross-partition fan-in (multi-partition subscriptions, B5): default to
+  arbitrary interleave of the per-partition offset-ordered streams (lowest
+  latency). Optionally offer an OPT-IN, best-effort, CLIENT-SIDE
+  "approximate time-ordered merge" (k-way merge by a timestamp, bounded
+  lateness buffer). Must be client-side (partitions have different owner
+  brokers; no server sees them all). Best-effort only — a lagging partition
+  breaks true ordering; real event-time order belongs downstream with
+  watermarks, real per-entity order via keyed partitioning.
+- Consider exposing a broker log-append timestamp (monotonic per partition)
+  alongside producer `published`, so any client-side time logic can avoid
+  producer clock skew. (Per-partition log-append time is redundant with offset
+  order; only useful for the cross-partition merge.)
