@@ -833,6 +833,8 @@ pub struct SparseQueueObservabilitySnapshot {
     pub summary: SparseQueueObservabilitySummary,
     pub replication_followers: Vec<FollowerReplicationWorkerObservability>,
     pub replication_summary: FollowerReplicationWorkerSummary,
+    pub owned_replicas: Vec<OwnedQueueReplicaObservability>,
+    pub owned_replica_summary: OwnedQueueReplicaSummary,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -850,6 +852,40 @@ pub struct FollowerReplicationWorkerSummary {
     pub caught_up_count: usize,
     pub pending_retry_count: usize,
     pub checkpoint_required_count: usize,
+}
+
+/// Owner-side view of one follower's replication health for a queue this broker
+/// owns: its last-reported durable offsets, how stale that report is, and
+/// whether it currently counts as in-sync.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FollowerReplicaObservability {
+    pub node_id: String,
+    pub durable_message_next: Offset,
+    pub durable_event_next: Offset,
+    /// Time since the last progress report; `None` if it has never reported.
+    pub last_report_age_ms: Option<u64>,
+    pub in_sync: bool,
+}
+
+/// Owner-side replication health for one owned queue: the durability policy in
+/// force, the in-sync replica count against the configured floor, and the
+/// per-follower detail. Surfaces replication lag and ISR risk in topology views.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OwnedQueueReplicaObservability {
+    pub topic: String,
+    pub partition: LogId,
+    pub group: Option<String>,
+    pub durability: String,
+    pub min_in_sync_replicas: usize,
+    pub in_sync_replicas: usize,
+    pub below_floor: bool,
+    pub followers: Vec<FollowerReplicaObservability>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OwnedQueueReplicaSummary {
+    pub owned_queue_count: usize,
+    pub below_floor_count: usize,
 }
 
 fn eviction_attempt_summary(
@@ -1993,12 +2029,100 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         };
         let (replication_followers, replication_summary) =
             self.follower_replication_observability_report();
+        let (owned_replicas, owned_replica_summary) = self.owned_replica_observability_report();
         SparseQueueObservabilitySnapshot {
             queues,
             summary,
             replication_followers,
             replication_summary,
+            owned_replicas,
+            owned_replica_summary,
         }
+    }
+
+    /// Owner-side replication health: for every queue this broker owns, the
+    /// per-follower durable progress, staleness, and in-sync status against the
+    /// configured floor. Drives replication-lag / ISR-risk topology views.
+    fn owned_replica_observability_report(
+        &self,
+    ) -> (Vec<OwnedQueueReplicaObservability>, OwnedQueueReplicaSummary) {
+        let cfg = self.config_snapshot();
+        let isr_timeout = std::time::Duration::from_millis(cfg.replication_isr_timeout_ms);
+        let min_in_sync = cfg.replication_min_in_sync_replicas;
+
+        let mut below_floor_count = 0;
+        let mut owned: Vec<_> = self
+            .assignment_cache
+            .iter()
+            .filter(|entry| {
+                let key = entry.key();
+                self.ownership
+                    .owns_queue(&key.tp, key.part, key.group.as_deref())
+            })
+            .map(|entry| {
+                let key = entry.key();
+                let assignment = entry.value();
+                let cell = self.replication_progress.get(key).map(|c| c.clone());
+                let now = std::time::Instant::now();
+
+                let followers: Vec<_> = assignment
+                    .followers
+                    .iter()
+                    .map(|node_id| {
+                        let progress = cell.as_ref().and_then(|cell| {
+                            cell.lock_followers().get(node_id).copied()
+                        });
+                        let (durable_message_next, durable_event_next, last_report_age_ms, in_sync) =
+                            match progress {
+                                Some(progress) => {
+                                    let age = now.duration_since(progress.last_report);
+                                    (
+                                        progress.message_next,
+                                        progress.event_next,
+                                        Some(age.as_millis().min(u64::MAX as u128) as u64),
+                                        age <= isr_timeout,
+                                    )
+                                }
+                                None => (0, 0, None, false),
+                            };
+                        FollowerReplicaObservability {
+                            node_id: node_id.clone(),
+                            durable_message_next,
+                            durable_event_next,
+                            last_report_age_ms,
+                            in_sync,
+                        }
+                    })
+                    .collect();
+
+                let in_sync_replicas = 1 + followers.iter().filter(|f| f.in_sync).count();
+                let below_floor = in_sync_replicas < min_in_sync;
+                if below_floor {
+                    below_floor_count += 1;
+                }
+                OwnedQueueReplicaObservability {
+                    topic: key.tp.clone(),
+                    partition: key.part,
+                    group: key.group.clone(),
+                    durability: format!("{:?}", assignment.durability),
+                    min_in_sync_replicas: min_in_sync,
+                    in_sync_replicas,
+                    below_floor,
+                    followers,
+                }
+            })
+            .collect();
+        owned.sort_by(|a, b| {
+            a.group
+                .cmp(&b.group)
+                .then_with(|| a.topic.cmp(&b.topic))
+                .then_with(|| a.partition.cmp(&b.partition))
+        });
+        let summary = OwnedQueueReplicaSummary {
+            owned_queue_count: owned.len(),
+            below_floor_count,
+        };
+        (owned, summary)
     }
 
     pub fn sparse_queue_observability_snapshot(&self) -> Vec<SparseQueueObservability> {

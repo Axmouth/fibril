@@ -1030,6 +1030,66 @@ async fn publish_admitted_once_in_sync_floor_met() {
     broker.shutdown().await;
 }
 
+/// Owner-side replication observability: for an owned queue, the report exposes
+/// each follower's reported durable progress and in-sync status, counts the
+/// in-sync replicas against the floor, and flags queues below it.
+#[tokio::test]
+async fn owner_replica_observability_reports_follower_lag_and_isr() {
+    let topic = "isr-observe";
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        replication_min_in_sync_replicas: 2,
+        replication_isr_timeout_ms: 10_000,
+        ..Default::default()
+    })
+    .await;
+
+    broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, 0, None),
+            "owner-a",
+            vec!["follower-b".to_string(), "follower-c".to_string()],
+            1,
+        )
+        .with_durability(
+            fibril_broker::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 },
+        ),
+    );
+    // Only follower-b has reported; follower-c is silent.
+    broker.record_follower_replication_progress(topic, 0, None, "follower-b", 5, 5);
+
+    let report = broker.sparse_queue_observability_report();
+    assert_eq!(report.owned_replica_summary.owned_queue_count, 1);
+    // Owner + one fresh follower = 2 in-sync, which meets the floor of 2.
+    assert_eq!(report.owned_replica_summary.below_floor_count, 0);
+
+    let owned = report
+        .owned_replicas
+        .iter()
+        .find(|q| q.topic == topic)
+        .expect("owned queue present in report");
+    assert_eq!(owned.in_sync_replicas, 2);
+    assert!(!owned.below_floor);
+
+    let b = owned
+        .followers
+        .iter()
+        .find(|f| f.node_id == "follower-b")
+        .expect("follower-b present");
+    assert!(b.in_sync);
+    assert_eq!(b.durable_message_next, 5);
+    assert!(b.last_report_age_ms.is_some());
+
+    let c = owned
+        .followers
+        .iter()
+        .find(|f| f.node_id == "follower-c")
+        .expect("follower-c present");
+    assert!(!c.in_sync);
+    assert_eq!(c.last_report_age_ms, None);
+
+    broker.shutdown().await;
+}
+
 /// Data-plane epoch fencing (the split-brain last line): a follower fenced at
 /// a newer assignment epoch rejects replicated batches from an older-epoch
 /// (stale) owner AT THE STORAGE LAYER; once the owner advances to the fenced

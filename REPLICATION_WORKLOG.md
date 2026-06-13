@@ -1754,3 +1754,30 @@ Tests needed before implementing transition:
   8); cluster-tryout --ganglion passing. R5 tail remaining: per-follower
   lag/ISR in topology observability surfaces; two-real-broker confirm-over-
   wire e2e. Future: per-topic min_in_sync override (currently broker-wide).
+- 2026-06-13: Owner-side replication-lag / ISR observability + conventions.
+  Added an owner-side view to the broker observability report: for every queue
+  THIS broker owns (filtered via the ownership trait over the assignment
+  cache), per-follower {durable message/event next-offset, last-report age,
+  in_sync} plus per-queue {durability policy, in_sync_replicas vs
+  min_in_sync_replicas floor, below_floor flag} and a summary
+  {owned_queue_count, below_floor_count}. in_sync uses the same freshness rule
+  as the publish gate (reported within isr_timeout_ms); a never-reported
+  follower shows age=None, in_sync=false. Surfaced through the admin debug
+  queues endpoint (owned_replicas / owned_replica_summary cherry-picked
+  alongside the existing replication_followers), so `fibrilctl admin queues`
+  carries it. Test asserts the in-sync count, below-floor flag, fresh vs
+  silent follower. NOTE this is the per-broker (owner's-own-followers) view;
+  cross-broker aggregation into `fibrilctl topology` and the admin web diagram
+  are a follow-up (the topology endpoint is coordination-level and would need
+  to fan out to each broker's observability). Earlier same-day: scrubbed all
+  roadmap phase labels (R3/R4/R5/R2b/F2) out of .rs files (kept in these
+  planning/worklog docs); reworked the min-in-sync floor to a fail-fast
+  PRECONDITION (a degraded cluster errors immediately rather than hanging
+  every publish to the confirm timeout; the durability ack-count stays a
+  bounded wait); locked time bounds into the ISR tests so a fail-fast that
+  secretly waits fails loudly; removed expect() from the progress-cell locks
+  (poison-recovering lock_followers helper).
+  BACKLOG (general, not replication): a codebase-wide pass to remove
+  pre-existing .unwrap()/.expect() from production code (allowed only in
+  tests/benches/demos) - propagate via ? / error types, recover mutex poison
+  via PoisonError::into_inner. New code already follows this.
