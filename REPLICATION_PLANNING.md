@@ -1033,3 +1033,29 @@ change" steps that de-risk the rest. A5.6 (reply-type change to carry Redirect)
 ripples through the Command reply oneshots — keep `OpOutcome` internal. A5.7 is
 the one genuinely large piece (per-connection registry + merge); everything
 before it is mechanical.
+
+#### A9 — in-depth failure-mode pass (after A5/A6 wiring complete)
+
+A dedicated correctness pass over the routing/redirect/pool machinery's failure
+paths, each with a test (not just happy path). Cases to cover:
+- Owner endpoint unreachable (connect fails): error surfaces cleanly; cached
+  entry invalidated so the next op refetches topology; bounded retry honored.
+- Redirect loop / ping-pong (A→B→A) and redirect storms: `max_redirects`
+  caps it and returns a clear terminal error, never spins.
+- Stale topology: cached owner is no longer the owner (NotOwner without a
+  redirect target) → invalidate + refetch; with a redirect target → follow.
+- Topology fetch fails (bootstrap down): publish/subscribe degrade to a clear
+  error; cooldown prevents fetch storms; recovers when a broker returns.
+- Mid-operation ownership move: in-flight confirmed publish gets redirected and
+  retried on the new owner; unconfirmed publish best-effort (documented) +
+  cache invalidated for subsequent ops.
+- Connection drop on a pooled owner: per-endpoint reconnect (graceful, with
+  resume) without disturbing other pool connections; subscriptions on that
+  connection reconcile.
+- Partial cluster outage: some owners reachable, some not — unaffected queues
+  keep working; affected ones error/redirect without taking down the client.
+- Shutdown races: shutdown during an in-flight redirect/fetch/reconnect.
+- (Server side) topology source returns owner with unparseable/empty endpoint
+  → treated as owner-unknown (terminal NotOwner), never a panic.
+Plus the real round-trips deferred from earlier: `fetch_topology` against a
+live server, and client reconnect-with-resume end to end.
