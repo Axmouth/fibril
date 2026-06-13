@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
+use fibril::{
+    CoordinationDeclareCoordinator, CoordinationTopologySource, runtime_seed_from_config,
+};
 use fibril_admin::{AdminConfig, AdminServer, StartupConfigSummary};
 use fibril_broker::{
     broker::{Broker, BrokerConfig},
     coordination::StaticCoordination,
     queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine},
-    runtime_settings::{
-        ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, DeliveryRuntimeSettings,
-        IdleQueueCleanupRuntimeSettings, RuntimeSettings, RuntimeSettingsLocks,
-        RuntimeSettingsManager,
-    },
+    runtime_settings::{RuntimeSettingsLocks, RuntimeSettingsManager},
 };
 use fibril_config::{CoordinationMode, ServerConfig};
 use fibril_metrics::{Metrics, MetricsConfig};
@@ -17,84 +16,11 @@ use fibril_protocol::v1::handler::{
     ClientTopologySource, ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings,
     ConnectionSettings, QueueDeclareCoordinator, run_server,
 };
-use fibril_protocol::v1::{QueueTopologyEntry, TopologyOk};
 use fibril_util::{StaticAuthHandler, init_tracing};
 use mimalloc::MiMalloc;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
-
-/// Bridges the coordination provider's client topology into the protocol
-/// handler's `ClientTopologySource`, keeping coordination-ganglion free of a
-/// protocol dependency. The closure fetches a fresh snapshot each call.
-struct CoordinationTopologySource {
-    fetch: Arc<dyn Fn() -> fibril_coordination_ganglion::ClientTopology + Send + Sync>,
-}
-
-impl ClientTopologySource for CoordinationTopologySource {
-    fn topology(&self) -> TopologyOk {
-        let topology = (self.fetch)();
-        TopologyOk {
-            generation: topology.generation,
-            queues: topology
-                .queues
-                .into_iter()
-                .map(|queue| QueueTopologyEntry {
-                    topic: queue.topic,
-                    partition: queue.partition,
-                    group: queue.group,
-                    owner_endpoint: queue.owner_endpoint,
-                    partitioning_version: queue.partitioning_version,
-                })
-                .collect(),
-        }
-    }
-
-    fn owner_endpoint(
-        &self,
-        topic: &str,
-        partition: u32,
-        group: Option<&str>,
-    ) -> Option<(String, u64)> {
-        (self.fetch)()
-            .queues
-            .into_iter()
-            .find(|queue| {
-                queue.topic == topic
-                    && queue.partition == partition
-                    && queue.group.as_deref() == group
-            })
-            .and_then(|queue| {
-                queue
-                    .owner_endpoint
-                    .map(|endpoint| (endpoint, queue.partitioning_version))
-            })
-    }
-}
-
-/// Bridges queue-declare partitioning writes to the coordination provider. The
-/// boxed-future closure captures the provider, avoiding naming its generic type
-/// and keeping coordination-ganglion free of a protocol dependency.
-type DeclareFut = futures::future::BoxFuture<'static, Result<u32, String>>;
-
-struct CoordinationDeclareCoordinator {
-    declare: Arc<dyn Fn(String, Option<String>, u32) -> DeclareFut + Send + Sync>,
-}
-
-impl QueueDeclareCoordinator for CoordinationDeclareCoordinator {
-    fn declare_partitioning<'a>(
-        &'a self,
-        topic: &'a str,
-        group: Option<&'a str>,
-        partition_count: u32,
-    ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
-        (self.declare)(
-            topic.to_string(),
-            group.map(str::to_string),
-            partition_count,
-        )
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -126,37 +52,7 @@ async fn main() -> anyhow::Result<()> {
         SnapshotConfig::default(),
     )
     .await?;
-    let runtime_seed = RuntimeSettings {
-        delivery: DeliveryRuntimeSettings {
-            inflight_ttl_ms: config.runtime_seed.delivery.inflight_ttl_ms,
-            expiry_poll_min_ms: config.runtime_seed.delivery.expiry_poll_min_ms,
-            expiry_batch_max: config.runtime_seed.delivery.expiry_batch_max,
-            delivery_poll_max_ms: config.runtime_seed.delivery.delivery_poll_max_ms,
-        },
-        idle_queue_cleanup: IdleQueueCleanupRuntimeSettings {
-            enabled: config.runtime_seed.idle_queue_cleanup.enabled,
-            evict_after_ms: config.runtime_seed.idle_queue_cleanup.evict_after_ms,
-            sweep_interval_ms: config.runtime_seed.idle_queue_cleanup.sweep_interval_ms,
-            publisher_idle_timeout_ms: config
-                .runtime_seed
-                .idle_queue_cleanup
-                .publisher_idle_timeout_ms,
-        },
-        connection: BrokerConnectionRuntimeSettings {
-            reconnect_grace_ms: config.runtime_seed.connection.reconnect_grace_ms,
-        },
-        replication: fibril_broker::runtime_settings::ReplicationRuntimeSettings {
-            confirm_timeout_ms: config.runtime_seed.replication.confirm_timeout_ms,
-            caught_up_poll_ms: config.runtime_seed.replication.caught_up_poll_ms,
-            retry_poll_ms: config.runtime_seed.replication.retry_poll_ms,
-            checkpoint_retry_poll_ms: config.runtime_seed.replication.checkpoint_retry_poll_ms,
-            min_in_sync_replicas: config.runtime_seed.replication.min_in_sync_replicas,
-            isr_timeout_ms: config.runtime_seed.replication.isr_timeout_ms,
-        },
-        partitioning: fibril_broker::runtime_settings::PartitioningRuntimeSettings {
-            default_partition_count: config.runtime_seed.partitioning.default_partition_count,
-        },
-    };
+    let runtime_seed = runtime_seed_from_config(&config);
     let runtime_settings = Arc::new(
         RuntimeSettingsManager::load_from_stroma_engine(
             &engine,
