@@ -1931,3 +1931,26 @@ Tests needed before implementing transition:
   stale -> Op::Redirect with the current owner/version so the client re-fetches
   topology and re-routes. Version 0 (default/unknown) should pass when the queue
   is single-partition v0 to keep the in-memory/non-cluster path unchanged.
+- 2026-06-13: B4 DONE (6f7407d). Publish/PublishDelayed wire gained
+  partitioning_version (serde default 0). Client: TopologyCache.counts now stores
+  PartitioningEntry{count,version} (was bare u32); partition_count() ->
+  partitioning(); route_partition returns Route{partition, partitioning_version}
+  (version from the cache entry, 0 when unknown); threaded through the 4
+  Command::Publish* variants + 4 EngineHandle publish_* methods + the engine
+  frame-build (stamps partitioning_version on the wire). Server: handler
+  fence_stale_partitioning() — if topology_source.owner_endpoint() reports a
+  version higher than the publish's, emit Op::Redirect (current owner+version)
+  and skip the publish; checked at the top of both Op::Publish and
+  Op::PublishDelayed arms. Equal/greater client version (incl. standalone v0)
+  proceeds. Cleaned two stale phase-label comments in client lib.rs while there.
+  Tests: handler stale_partitioning_version_publish_is_fenced (server redirects +
+  stamps current version); client publishes_carry_routed_partitioning_version
+  (client stamps the routed version on every frame). Whole workspace green (33
+  suites). Mechanical: partitioning_version:0 added to every Publish literal
+  across protocol/client/admin/tui-example + benches + handler_tests.
+  GAP for B5/B6: the server publish path still keys the broker publisher by
+  (topic, group) and ignores pubreq.partition — multi-partition publishes
+  currently collapse to one log server-side. Per-partition server routing (each
+  (topic,partition,group) is its own Stroma log) is the B5/B6 work.
+  NEXT — B5: subset-capable subscriptions + multi-owner subscription fan-in, plus
+  the server-side per-partition publish routing the fence/topology already assume.
