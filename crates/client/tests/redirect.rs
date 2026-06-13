@@ -30,15 +30,24 @@ enum MockBehavior {
     ConfirmOk,
 }
 
+/// A self-owned multi-partition spread for one queue identity `(topic, group)`.
+#[derive(Clone)]
+struct SelfPartitions {
+    topic: String,
+    group: Option<String>,
+    partition_count: u32,
+}
+
 #[derive(Clone, Default)]
 struct MockConfig {
     publish: Option<MockBehavior>,
     /// If set, answer `Op::Topology` with this.
     topology: Option<TopologyOk>,
-    /// If set, answer `Op::Topology` with a self-owned `(topic, partition_count)`
-    /// spread: one entry per partition, all owned by this mock's own address.
-    /// Takes precedence over `topology`.
-    self_partitions: Option<(String, u32)>,
+    /// If set, answer `Op::Topology` with a self-owned spread for the queue
+    /// `(topic, group)`: one entry per partition (`0..partition_count`), all
+    /// owned by this mock's own address. Group is part of the queue identity, so
+    /// it is carried through. Takes precedence over `topology`.
+    self_partitions: Option<SelfPartitions>,
     /// Records the `partition` field of every `Publish` frame received.
     recorded_partitions: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
     /// Counts handshakes that carried a resume identity.
@@ -107,15 +116,15 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         )
                         .unwrap()
                     } else if frame.opcode == Op::Topology as u16 {
-                        if let Some((topic, count)) = &config.self_partitions {
-                            let queues = (0..*count)
+                        if let Some(spread) = &config.self_partitions {
+                            let queues = (0..spread.partition_count)
                                 .map(|partition| QueueTopologyEntry {
-                                    topic: topic.clone(),
+                                    topic: spread.topic.clone(),
                                     partition,
-                                    group: None,
+                                    group: spread.group.clone(),
                                     owner_endpoint: Some(addr.to_string()),
                                     partitioning_version: 0,
-                                    partition_count: *count,
+                                    partition_count: spread.partition_count,
                                 })
                                 .collect();
                             let topology = TopologyOk {
@@ -320,7 +329,11 @@ async fn keyless_publishes_spread_keyed_publishes_stick() {
     let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mock = spawn_configurable_mock(MockConfig {
         publish: Some(MockBehavior::ConfirmOk),
-        self_partitions: Some(("jobs".into(), 4)),
+        self_partitions: Some(SelfPartitions {
+            topic: "jobs".into(),
+            group: None,
+            partition_count: 4,
+        }),
         recorded_partitions: Some(recorded.clone()),
         ..Default::default()
     })

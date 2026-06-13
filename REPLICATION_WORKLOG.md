@@ -1913,3 +1913,21 @@ Tests needed before implementing transition:
   - B5: subset subscriptions + multi-owner fan-in. B6: multi-partition e2e tests.
   - Then server.rs refactor "b" (coordination bootstrap/spawns/admin wiring ->
     fibril lib.rs).
+- 2026-06-13: B3b DONE (299e988) + B3 tests DONE. B3b added
+  NewMessage.partition_key(impl Into<Vec<u8>>) builder + field, threaded
+  message.partition_key.as_deref() into route_partition in all 5 Publisher
+  methods, fnv1a_is_deterministic_and_distributes unit test. B3 routing
+  integration test DONE (03fed36): crates/client/tests/redirect.rs mock gained
+  self_partitions:(topic,count) (answers Op::Topology with N self-owned entries)
+  + recorded_partitions recorder; keyless_publishes_spread_keyed_publishes_stick
+  asserts keyless fan out (>1 distinct partition) and same-key sticks to one.
+  Client tests green (22 unit + 6 redirect-integration + doctests).
+  NEXT — B4: owner-side version fence. Add partitioning_version:u64 to the
+  Publish/PublishDelayed wire (serde default 0). route_partition must also return
+  the version it routed under (from TopologyCache OwnerEntry/counts) so the
+  client stamps it; thread version through the 4 Command::Publish* variants +
+  EngineHandle publish_* + engine frame-build. Server (protocol handler) compares
+  the frame's partitioning_version against the queue's authoritative version; if
+  stale -> Op::Redirect with the current owner/version so the client re-fetches
+  topology and re-routes. Version 0 (default/unknown) should pass when the queue
+  is single-partition v0 to keep the in-memory/non-cluster path unchanged.
