@@ -2045,35 +2045,42 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     /// configured floor. Drives replication-lag / ISR-risk topology views.
     fn owned_replica_observability_report(
         &self,
-    ) -> (Vec<OwnedQueueReplicaObservability>, OwnedQueueReplicaSummary) {
+    ) -> (
+        Vec<OwnedQueueReplicaObservability>,
+        OwnedQueueReplicaSummary,
+    ) {
         let cfg = self.config_snapshot();
         let isr_timeout = std::time::Duration::from_millis(cfg.replication_isr_timeout_ms);
         let min_in_sync = cfg.replication_min_in_sync_replicas;
 
         let mut below_floor_count = 0;
-        let mut owned: Vec<_> = self
-            .assignment_cache
-            .iter()
-            .filter(|entry| {
-                let key = entry.key();
-                self.ownership
-                    .owns_queue(&key.tp, key.part, key.group.as_deref())
-            })
-            .map(|entry| {
-                let key = entry.key();
-                let assignment = entry.value();
-                let cell = self.replication_progress.get(key).map(|c| c.clone());
-                let now = std::time::Instant::now();
+        let mut owned: Vec<_> =
+            self.assignment_cache
+                .iter()
+                .filter(|entry| {
+                    let key = entry.key();
+                    self.ownership
+                        .owns_queue(&key.tp, key.part, key.group.as_deref())
+                })
+                .map(|entry| {
+                    let key = entry.key();
+                    let assignment = entry.value();
+                    let cell = self.replication_progress.get(key).map(|c| c.clone());
+                    let now = std::time::Instant::now();
 
-                let followers: Vec<_> = assignment
-                    .followers
-                    .iter()
-                    .map(|node_id| {
-                        let progress = cell.as_ref().and_then(|cell| {
-                            cell.lock_followers().get(node_id).copied()
-                        });
-                        let (durable_message_next, durable_event_next, last_report_age_ms, in_sync) =
-                            match progress {
+                    let followers: Vec<_> = assignment
+                        .followers
+                        .iter()
+                        .map(|node_id| {
+                            let progress = cell
+                                .as_ref()
+                                .and_then(|cell| cell.lock_followers().get(node_id).copied());
+                            let (
+                                durable_message_next,
+                                durable_event_next,
+                                last_report_age_ms,
+                                in_sync,
+                            ) = match progress {
                                 Some(progress) => {
                                     let age = now.duration_since(progress.last_report);
                                     (
@@ -2085,33 +2092,33 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                                 }
                                 None => (0, 0, None, false),
                             };
-                        FollowerReplicaObservability {
-                            node_id: node_id.clone(),
-                            durable_message_next,
-                            durable_event_next,
-                            last_report_age_ms,
-                            in_sync,
-                        }
-                    })
-                    .collect();
+                            FollowerReplicaObservability {
+                                node_id: node_id.clone(),
+                                durable_message_next,
+                                durable_event_next,
+                                last_report_age_ms,
+                                in_sync,
+                            }
+                        })
+                        .collect();
 
-                let in_sync_replicas = 1 + followers.iter().filter(|f| f.in_sync).count();
-                let below_floor = in_sync_replicas < min_in_sync;
-                if below_floor {
-                    below_floor_count += 1;
-                }
-                OwnedQueueReplicaObservability {
-                    topic: key.tp.clone(),
-                    partition: key.part,
-                    group: key.group.clone(),
-                    durability: format!("{:?}", assignment.durability),
-                    min_in_sync_replicas: min_in_sync,
-                    in_sync_replicas,
-                    below_floor,
-                    followers,
-                }
-            })
-            .collect();
+                    let in_sync_replicas = 1 + followers.iter().filter(|f| f.in_sync).count();
+                    let below_floor = in_sync_replicas < min_in_sync;
+                    if below_floor {
+                        below_floor_count += 1;
+                    }
+                    OwnedQueueReplicaObservability {
+                        topic: key.tp.clone(),
+                        partition: key.part,
+                        group: key.group.clone(),
+                        durability: format!("{:?}", assignment.durability),
+                        min_in_sync_replicas: min_in_sync,
+                        in_sync_replicas,
+                        below_floor,
+                        followers,
+                    }
+                })
+                .collect();
         owned.sort_by(|a, b| {
             a.group
                 .cmp(&b.group)

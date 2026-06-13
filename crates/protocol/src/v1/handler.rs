@@ -41,6 +41,23 @@ type SubKey = (Topic, Option<Group>); // (topic, group)
 type FrameSink = mpsc::Sender<Frame>;
 const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
 
+/// Server-side source of client-facing topology, injected into the protocol
+/// handler so it can answer `Op::Topology` and emit `Op::Redirect` on not-owner.
+/// Implemented by a coordination adapter in the binary; `None` (standalone)
+/// means there is no routing info and clients use their direct connection.
+pub trait ClientTopologySource: Send + Sync {
+    /// Full client-facing topology snapshot for `Op::Topology`.
+    fn topology(&self) -> TopologyOk;
+    /// Current owner endpoint and partitioning version for one queue partition,
+    /// if known. Used to build an `Op::Redirect`.
+    fn owner_endpoint(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+    ) -> Option<(String, u64)>;
+}
+
 struct ConnState {
     authenticated: bool,
     subs: HashMap<SubKey, SubState>,
@@ -1088,6 +1105,7 @@ pub async fn run_server(
     connection_stats: Arc<ConnectionStats>,
     auth: Option<impl AuthHandler + Send + Sync + Clone + 'static>,
     connection_settings: ConnectionSettings,
+    topology_source: Option<Arc<dyn ClientTopologySource>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     print_banner(&addr);
@@ -1103,6 +1121,7 @@ pub async fn run_server(
         let tcp_stats = tcp_stats.clone();
         let connection_stats = connection_stats.clone();
         let connection_settings = connection_settings.clone();
+        let topology_source = topology_source.clone();
         tokio::spawn(async move {
             tracing::info!("Connection {conn_id} opening..");
             if let Err(e) = handle_connection(
@@ -1113,6 +1132,7 @@ pub async fn run_server(
                 conn_id,
                 auth,
                 connection_settings,
+                topology_source,
             )
             .await
             {
@@ -1145,6 +1165,7 @@ pub async fn handle_connection(
     conn_id: Uuid,
     auth_handler: Option<impl AuthHandler + Send + Sync>,
     connection_settings: ConnectionSettings,
+    topology_source: Option<Arc<dyn ClientTopologySource>>,
 ) -> anyhow::Result<()> {
     let heartbeat_interval = connection_settings
         .heartbeat_interval
@@ -1882,6 +1903,33 @@ pub async fn handle_connection(
 
                 frame_tx_high_prio
                     .send(try_encode(Op::SubscribeOk, frame.request_id, &sub_ok)?)
+                    .await?;
+            }
+
+            // -------- TOPOLOGY ----------------------------------------------
+            x if x == Op::Topology as u16 => {
+                let req: TopologyRequest =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, TopologyRequest);
+                // No source (standalone) => empty topology; the client falls
+                // back to its direct connection.
+                let mut topology = topology_source
+                    .as_ref()
+                    .map(|source| source.topology())
+                    .unwrap_or(TopologyOk {
+                        generation: 0,
+                        queues: Vec::new(),
+                    });
+                if let Some(topic) = &req.topic {
+                    topology.queues.retain(|queue| {
+                        &queue.topic == topic
+                            && req
+                                .group
+                                .as_deref()
+                                .is_none_or(|group| queue.group.as_deref() == Some(group))
+                    });
+                }
+                frame_tx_high_prio
+                    .send(try_encode(Op::TopologyOk, frame.request_id, &topology)?)
                     .await?;
             }
 

@@ -26,15 +26,16 @@ use fibril_broker::{
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
-    Publish, PublishDelayed, QueueDlqPolicy, ReconcileAction, ReconcileClient, ReconcilePolicy,
-    ReconcileResult, ReconcileSubscription, ReplicationApply, ReplicationApplyOk,
+    Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient,
+    ReconcilePolicy, ReconcileResult, ReconcileSubscription, ReplicationApply, ReplicationApplyOk,
     ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
     ReplicationCheckpointInstallOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
     ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
     ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
-    ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, Subscribe,
+    ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, Subscribe, TopologyOk,
+    TopologyRequest,
     frame::{Frame, ProtoCodec},
-    handler::{ConnectionSettings, handle_connection},
+    handler::{ClientTopologySource, ConnectionSettings, handle_connection},
     helper::{try_decode, try_encode},
     replication::{
         CoordinationProtocolOwnerPeerResolver, ProtocolOwnerPeerResolverConfig,
@@ -146,6 +147,7 @@ async fn open_protocol_connection_for_broker(
         conn_id,
         None::<StaticAuthHandler>,
         settings,
+        None,
     ));
 
     (Framed::new(client, ProtoCodec), server_task, dir, broker)
@@ -179,6 +181,7 @@ async fn start_protocol_listener_for_broker(
             conn_id,
             auth,
             settings,
+            None,
         )
         .await
     });
@@ -2642,7 +2645,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
             .find(|(node, _)| node == "follower-a")
             .expect("owner recorded follower progress over the wire");
         assert!(
-            follower.1 .0 > 0,
+            follower.1.0 > 0,
             "follower durable message_next must pass the published offset"
         );
 
@@ -2655,6 +2658,121 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     follower_broker.shutdown().await;
     owner_broker.shutdown().await;
     server_task.await.unwrap().unwrap();
+}
+
+/// The handler answers `Op::Topology` from its injected topology source,
+/// honoring a topic filter.
+#[tokio::test]
+async fn handler_answers_topology_query_from_source() {
+    #[derive(Clone)]
+    struct FixedTopology(TopologyOk);
+    impl ClientTopologySource for FixedTopology {
+        fn topology(&self) -> TopologyOk {
+            self.0.clone()
+        }
+        fn owner_endpoint(
+            &self,
+            topic: &str,
+            partition: u32,
+            group: Option<&str>,
+        ) -> Option<(String, u64)> {
+            self.0
+                .queues
+                .iter()
+                .find(|q| {
+                    q.topic == topic && q.partition == partition && q.group.as_deref() == group
+                })
+                .and_then(|q| {
+                    q.owner_endpoint
+                        .clone()
+                        .map(|e| (e, q.partitioning_version))
+                })
+        }
+    }
+
+    let source = Arc::new(FixedTopology(TopologyOk {
+        generation: 4,
+        queues: vec![
+            QueueTopologyEntry {
+                topic: "orders".into(),
+                partition: 0,
+                group: Some("workers".into()),
+                owner_endpoint: Some("127.0.0.1:9000".into()),
+                partitioning_version: 0,
+            },
+            QueueTopologyEntry {
+                topic: "emails".into(),
+                partition: 0,
+                group: None,
+                owner_endpoint: Some("127.0.0.1:9001".into()),
+                partitioning_version: 0,
+            },
+        ],
+    }));
+
+    let (broker, dir) = open_test_broker().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (server, peer) = listener.accept().await.unwrap();
+        let tcp_stats = TcpStats::new(10);
+        let connection_stats = ConnectionStats::new();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+        handle_connection(
+            server,
+            broker,
+            tcp_stats,
+            connection_stats,
+            conn_id,
+            None::<StaticAuthHandler>,
+            ConnectionSettings::new(Some(60)),
+            Some(source as Arc<dyn ClientTopologySource>),
+        )
+        .await
+    });
+
+    let client = TcpStream::connect(addr).await.unwrap();
+    let mut framed = Framed::new(client, ProtoCodec);
+    handshake(&mut framed).await;
+
+    // Full topology.
+    framed
+        .send(try_encode(Op::Topology, 2, &TopologyRequest::default()).unwrap())
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::TopologyOk as u16);
+    let all: TopologyOk = try_decode(&frame).unwrap();
+    assert_eq!(all.generation, 4);
+    assert_eq!(all.queues.len(), 2);
+
+    // Filtered by topic.
+    framed
+        .send(
+            try_encode(
+                Op::Topology,
+                3,
+                &TopologyRequest {
+                    topic: Some("orders".into()),
+                    group: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    let filtered: TopologyOk = try_decode(&frame).unwrap();
+    assert_eq!(filtered.queues.len(), 1);
+    assert_eq!(filtered.queues[0].topic, "orders");
+    assert_eq!(
+        filtered.queues[0].owner_endpoint.as_deref(),
+        Some("127.0.0.1:9000")
+    );
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+    drop(dir);
 }
 
 #[tokio::test]

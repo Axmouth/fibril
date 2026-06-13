@@ -14,13 +14,63 @@ use fibril_broker::{
 use fibril_config::{CoordinationMode, ServerConfig};
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::{
-    ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings, ConnectionSettings, run_server,
+    ClientTopologySource, ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings,
+    ConnectionSettings, run_server,
 };
+use fibril_protocol::v1::{QueueTopologyEntry, TopologyOk};
 use fibril_util::{StaticAuthHandler, init_tracing};
 use mimalloc::MiMalloc;
 
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
+
+/// Bridges the coordination provider's client topology into the protocol
+/// handler's `ClientTopologySource`, keeping coordination-ganglion free of a
+/// protocol dependency. The closure fetches a fresh snapshot each call.
+struct CoordinationTopologySource {
+    fetch: Arc<dyn Fn() -> fibril_coordination_ganglion::ClientTopology + Send + Sync>,
+}
+
+impl ClientTopologySource for CoordinationTopologySource {
+    fn topology(&self) -> TopologyOk {
+        let topology = (self.fetch)();
+        TopologyOk {
+            generation: topology.generation,
+            queues: topology
+                .queues
+                .into_iter()
+                .map(|queue| QueueTopologyEntry {
+                    topic: queue.topic,
+                    partition: queue.partition,
+                    group: queue.group,
+                    owner_endpoint: queue.owner_endpoint,
+                    partitioning_version: queue.partitioning_version,
+                })
+                .collect(),
+        }
+    }
+
+    fn owner_endpoint(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+    ) -> Option<(String, u64)> {
+        (self.fetch)()
+            .queues
+            .into_iter()
+            .find(|queue| {
+                queue.topic == topic
+                    && queue.partition == partition
+                    && queue.group.as_deref() == group
+            })
+            .and_then(|queue| {
+                queue
+                    .owner_endpoint
+                    .map(|endpoint| (endpoint, queue.partitioning_version))
+            })
+    }
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -329,6 +379,17 @@ async fn main() -> anyhow::Result<()> {
 
     let stroma_metrics = broker.stroma_metrics();
 
+    // In ganglion mode the protocol handler answers Op::Topology and emits
+    // redirects from the committed coordination topology. Standalone has no
+    // routing source (clients use their direct connection).
+    let topology_source: Option<Arc<dyn ClientTopologySource>> =
+        ganglion_parts.as_ref().map(|parts| {
+            let coordination = parts.coordination.clone();
+            Arc::new(CoordinationTopologySource {
+                fetch: Arc::new(move || coordination.client_topology()),
+            }) as Arc<dyn ClientTopologySource>
+        });
+
     let broker_server_fut = run_server(
         config.broker.listener.bind,
         broker.clone(),
@@ -336,6 +397,7 @@ async fn main() -> anyhow::Result<()> {
         metrics.connections(),
         Some(auth_handler.clone()),
         connection_settings,
+        topology_source,
     );
 
     let broker_observability = {
