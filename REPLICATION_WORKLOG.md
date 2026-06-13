@@ -1676,3 +1676,54 @@ Tests needed before implementing transition:
   makes safe) and (b) producer-set not_before delays (timing accuracy only).
   Revisit only if we add client-visible cross-node ordering or wall-clock
   leases.
+- 2026-06-13: Scaling sanity test + design notes from review questions.
+  Added placement_scales_to_large_clusters (broker coordination, 75 nodes /
+  600 queues / target_followers=2): asserts full placement on live nodes with
+  exact replica counts, owner load balanced within one queue, re-plan is a
+  pure no-op (anti-churn stability), and a one-third mass node failure
+  rebalances only orphaned queues while every surviving owner is preserved.
+  This exercises the pure placement axis at scale cheaply. Open follow-up:
+  drive control_iteration / candidate-selection / live_nodes registry at the
+  same node counts (needs a multi-node raft harness, heavier - tracked with
+  unreliable-infra testing). NOTE the realistic scaling axis: a 75-NODE
+  cluster is 3-5 raft VOTERS + ~70 coordination participants (brokers that
+  register/heartbeat and receive assignments), NOT 75 raft voters. Tests
+  should scale the registry/placement/fan-out, not the voter count.
+
+  WIRE FORMAT on-demand switching (review Q): receivers are already per-frame
+  format-agnostic (tag byte -> decode either msgpack or json; mixed clusters
+  already work). The ONLY fixed thing is each sender's outbound choice, taken
+  from startup config at construction. "Transparent switching" therefore needs
+  nothing on the receive path; it would only mean making a sender's outbound
+  WireFormat a runtime-swappable cell (ArcSwap) instead of a constant. Verdict:
+  the real goals (json-for-debug / msgpack-for-prod, flag-day-free migration)
+  are ALREADY met by per-node config + mixed tolerance. Live per-node outbound
+  toggling without restart is a small operator nicety, not a foundation need;
+  cheap to add later as a runtime setting if an operator ever wants it.
+  Not doing it now.
+
+  CLOCK abstraction (review Q): re-confirmed NOT needed for correctness.
+  For tests the honest benefit is moderate and CONCENTRATED in the
+  coordination liveness/failover tests that today burn real wall-time on short
+  TTLs (900ms etc.) + tokio::time::timeout polling - those could become
+  instant+deterministic under tokio::time::pause() with an injectable clock.
+  But it is a cross-cutting refactor (every unix_millis()/SystemTime::now() in
+  coordination + broker), and current tests pass and aren't egregiously slow.
+  Decision: defer, and do it TOGETHER with unreliable-infra/fault-injection
+  testing (same files, same goal of deterministic time control). Not piling it
+  onto the already-huge replication feature now.
+
+  DECLARE / partition count (review Q, brainstorm - R6, not yet built):
+  declare should register the QUEUE (topic + group + config), not hardwire a
+  single partition. Direction to flesh out: (1) topic carries a
+  partition_count in the resource catalogue (replicated attribute or resource
+  field); declare creates the topic with N partitions, fanning out N
+  QueueIdentity placement units to the controller. (2) Partition count is a
+  topic property, not a queue-instance property - groups share the topic's
+  partitioning. (3) Repartitioning (changing N later) is the hard part:
+  message-key->partition routing means raising N remaps keys and breaks
+  per-key ordering for in-flight data. Options to weigh next: fixed-at-create
+  (simplest, ship first); grow-only with explicit rehash/migration job;
+  consistent-hashing/virtual-nodes to soften remaps. Lowering N must drain+
+  merge. Recommend: ship fixed-at-create partition_count for R6 multi-
+  partition, treat live repartitioning as a separate later milestone.
