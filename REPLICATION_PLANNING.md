@@ -278,6 +278,43 @@ Shrinking should be considered a later feature. It is much harder than growth
 because queue partitions can contain live delayed, ready, inflight, and DLQ
 state.
 
+#### R6 partitioning plan (2026-06-13): fixed-at-create first, live repartitioning as a TARGET
+
+First cut is fixed-at-create `partition_count`, but live repartitioning
+(growing, later shrinking) is an explicit TARGET — so the first cut must be
+forward-compatible, not a dead end. Bake these in NOW even though N won't change
+live yet:
+
+- **Partitioning is a VERSIONED topic property, never an immutable constant.**
+  Store `{ partition_count, partitioning_version }` as a topic-level entry in
+  the replicated catalogue/attributes. The first cut just never bumps the
+  version; the data model already supports it changing.
+- **Routing carries the partitioning version.** Key->partition routing is
+  `route(key, partitioning_version) -> partition`. Clients learn the current
+  `partitioning_version` with topology and stamp it on publishes. The owner can
+  then FENCE traffic routed under a stale version (not-owner/redirect with the
+  new topology) — this is the hook that makes a future live repartition safe.
+  Mirror of the data-plane epoch-before-use principle, at the routing layer.
+- **Routing function is swappable behind the version.** First cut can be
+  `hash(key) % N`; a later version may switch to consistent-hashing / virtual
+  nodes to minimize key remapping on resize. Because routing is
+  version-parameterized, swapping it is not a wire break.
+- **Assignment model already supports it.** Assignments are per
+  `(topic, partition, group)`; adding/removing partitions is adding/removing
+  placement units. Catalogue/resources represent partitions individually so the
+  count can grow without a schema change.
+- **Per-key ordering across a resize is the hard semantic, deferred with the
+  feature** — but the version-fencing hook above is what will let the live
+  migration (drain/freeze or dual-route affected keys under the version bump)
+  be implemented without a protocol break. Do NOT design anything in the first
+  cut that assumes N is constant for all time (e.g. no caching partition->owner
+  without the version, no client that ignores `partitioning_version`).
+
+Compatibility rule of thumb for the first cut: any code that maps key->partition
+or caches partition topology MUST be parameterized by `partitioning_version`, so
+that live repartitioning is later a matter of bumping the version + a migration
+job, not a wire/format change.
+
 ### Health score and controller handoff
 
 Health score is an input to placement and optional controller handoff. It should
