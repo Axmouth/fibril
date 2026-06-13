@@ -412,6 +412,7 @@ pub struct NewMessage {
     pub payload: Vec<u8>,
     content_type: Option<ContentType>,
     headers: HashMap<String, String>,
+    partition_key: Option<Vec<u8>>,
 }
 
 impl NewMessage {
@@ -435,6 +436,7 @@ impl NewMessage {
             payload,
             content_type: None,
             headers: HashMap::new(),
+            partition_key: None,
         }
     }
 
@@ -463,6 +465,15 @@ impl NewMessage {
         self.header("content-type", content_type)
     }
 
+    /// Set the partition key: `hash(key) % partition_count` selects the
+    /// partition, co-locating same-key messages for per-key ordering. Without a
+    /// key, publishes round-robin across partitions (the default). Accepts a
+    /// string or raw bytes.
+    pub fn partition_key(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.partition_key = Some(key.into());
+        self
+    }
+
     /// Borrow the extra headers that will be sent with this message.
     pub fn headers(&self) -> &HashMap<String, String> {
         &self.headers
@@ -478,6 +489,7 @@ impl NewMessage {
             payload,
             content_type: Some(ContentType::from_header(content_type)),
             headers: HashMap::new(),
+            partition_key: None,
         }
     }
 }
@@ -1197,7 +1209,9 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self.shared.route_partition(topic, group, None);
+        let partition = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
             .engine_for(topic, partition, group)
             .await?
@@ -1221,7 +1235,9 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self.shared.route_partition(topic, group, None);
+        let partition = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
         let mut attempts = 0u32;
         loop {
             let engine = self.shared.engine_for(topic, partition, group).await?;
@@ -1269,7 +1285,9 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self.shared.route_partition(topic, group, None);
+        let partition = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
             .engine_for(topic, partition, group)
             .await?
@@ -1298,7 +1316,9 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self.shared.route_partition(topic, group, None);
+        let partition = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
             .engine_for(topic, partition, group)
             .await?
@@ -1344,7 +1364,9 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self.shared.route_partition(topic, group, None);
+        let partition = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
             .engine_for(topic, partition, group)
             .await?
@@ -2941,6 +2963,21 @@ impl Default for ClientOptions {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
+
+    #[test]
+    fn fnv1a_is_deterministic_and_distributes() {
+        // Determinism: every client must map a key to the same partition.
+        assert_eq!(fnv1a(b"entity-123"), fnv1a(b"entity-123"));
+        assert_ne!(fnv1a(b"a"), fnv1a(b"b"));
+        // Distribution: distinct keys spread across N partitions (not all one).
+        let partitions: std::collections::HashSet<u64> = (0..32)
+            .map(|i| fnv1a(format!("k{i}").as_bytes()) % 4)
+            .collect();
+        assert!(
+            partitions.len() > 1,
+            "keys should distribute across partitions, got {partitions:?}"
+        );
+    }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     struct TestPayload {
