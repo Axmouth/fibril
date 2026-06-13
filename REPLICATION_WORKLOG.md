@@ -1883,3 +1883,33 @@ Tests needed before implementing transition:
   spawns + admin wiring into fibril lib.rs) deferred to END of Phase B to avoid
   churn while B3-B5 edit server.rs. Keep new wiring placed cleanly per the
   fibril/ganglion separation (reusable->ganglion, glue->fibril).
+
+- 2026-06-13: B3a DONE (5c41067). Client routes publishes by partition:
+  `partition: u32` threaded through the 4 Command::Publish* variants, the 4
+  EngineHandle publish_* methods, and the engine frame-build (was hardcoded 0);
+  TopologyCache gained `counts: HashMap<(topic,group),u32>` + `partition_count()`
+  (populated from QueueTopologyEntry.partition_count in replace()); ClientShared
+  gained `round_robin: AtomicUsize` + `route_partition(topic,group,key)` using a
+  stable inline FNV-1a (`fnv1a`) — explicit-not-yet -> hash%N if key -> round-robin
+  over N; N from the cache (unknown => partition 0). All 5 Publisher publish
+  methods compute the partition and route via engine_for(topic, partition, group).
+  Client tests green (in-memory: empty topology => partition 0 => unchanged).
+  REMAINING:
+  - B3 test: partitioner unit test (fnv1a determinism; round-robin spread;
+    explicit/key behavior) + a mock-broker routing integration test
+    (crates/client/tests/redirect.rs style: keyless spreads across partitions,
+    keyed sticks to one) — the mock would answer Op::Topology with
+    partition_count>1 so the client's route_partition has N>1.
+  - B3b: per-message key API. Add partition_key to NewMessage builder
+    (.partition_key(impl Into<Vec<u8>>)) + the internal message struct; thread
+    message.partition_key into route_partition(.., Some(key)) in the 5 Publisher
+    methods (currently pass None). Default publish() = no key = round-robin.
+    (Wire Publish.partition_key currently sent as None from the engine frame
+    build; populate it from the command if we want server-side use, else leave
+    client-side-only.)
+  - B4: owner-side version fence — stamp partitioning_version on the publish
+    wire (add field; client stamps the version it routed under from the cache);
+    server rejects/redirects publishes carrying a stale partitioning_version.
+  - B5: subset subscriptions + multi-owner fan-in. B6: multi-partition e2e tests.
+  - Then server.rs refactor "b" (coordination bootstrap/spawns/admin wiring ->
+    fibril lib.rs).
