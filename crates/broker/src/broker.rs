@@ -2327,12 +2327,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     pub async fn subscribe(
         self: &Arc<Self>,
         topic: &str,
+        partition: LogId,
         group: Option<&str>,
         client_id: Uuid,
         cfg: ConsumerConfig,
     ) -> Result<ConsumerHandle, BrokerError> {
         let tp: Topic = topic.to_string();
-        let part: LogId = 0;
+        let part: LogId = partition;
         let group: Option<Group> = group.map(|s| s.to_string());
 
         self.ensure_queue_owner(&tp, part, group.as_deref())?;

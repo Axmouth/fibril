@@ -37,7 +37,7 @@ use tokio::{
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
-type SubKey = (Topic, Option<Group>); // (topic, group)
+type SubKey = (Topic, u32, Option<Group>); // (topic, partition, group)
 type FrameSink = mpsc::Sender<Frame>;
 const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
 
@@ -607,7 +607,7 @@ async fn cleanup_connection_state(
         state.subs.drain().collect::<Vec<_>>()
     };
 
-    for ((topic, group), sub) in drained_subs {
+    for ((topic, _partition, group), sub) in drained_subs {
         sub.task.abort();
         if let Err(err) = broker
             .unsubscribe(&topic, group.as_deref(), sub.partition, sub.sub_id)
@@ -624,9 +624,10 @@ async fn remove_subscription(
     connection_stats: &Arc<ConnectionStats>,
     conn_id: &Uuid,
     topic: &str,
+    partition: u32,
     group: Option<&str>,
 ) -> Option<ReconcileSubscription> {
-    let key: SubKey = (topic.to_string(), group.map(str::to_string));
+    let key: SubKey = (topic.to_string(), partition, group.map(str::to_string));
     let sub = {
         let mut state = logical.state.lock().await;
         state.subs.remove(&key)
@@ -663,6 +664,7 @@ struct InstallSubscriptionArgs {
     client_id: Uuid,
     req_id_gen: Arc<ReqIdGenerator>,
     topic: String,
+    partition: u32,
     group: Option<String>,
     prefetch: u32,
     auto_ack: bool,
@@ -671,7 +673,7 @@ struct InstallSubscriptionArgs {
 async fn install_subscription(
     args: InstallSubscriptionArgs,
 ) -> Result<SubscribeOk, InstallSubscriptionError> {
-    let sub_key: SubKey = (args.topic.clone(), args.group.clone());
+    let sub_key: SubKey = (args.topic.clone(), args.partition, args.group.clone());
 
     if args.logical.state.lock().await.subs.contains_key(&sub_key) {
         return Err(InstallSubscriptionError::AlreadySubscribed);
@@ -681,6 +683,7 @@ async fn install_subscription(
         .broker
         .subscribe(
             &args.topic,
+            args.partition,
             args.group.as_deref(),
             args.client_id,
             ConsumerConfig {
@@ -810,7 +813,7 @@ async fn reconcile_subscriptions(
     metrics.reconcile_request();
 
     for client in reconcile.subscriptions {
-        let key: SubKey = (client.topic.clone(), client.group.clone());
+        let key: SubKey = (client.topic.clone(), client.partition, client.group.clone());
         seen.insert(key.clone(), ());
 
         let server = {
@@ -856,6 +859,7 @@ async fn reconcile_subscriptions(
                     client_id,
                     req_id_gen: req_id_gen.clone(),
                     topic: client.topic.clone(),
+                    partition: client.partition,
                     group: client.group.clone(),
                     prefetch: client.prefetch,
                     auto_ack: client.auto_ack,
@@ -911,13 +915,14 @@ async fn reconcile_subscriptions(
             .collect::<Vec<_>>()
     };
 
-    for (topic, group) in server_only {
+    for (topic, partition, group) in server_only {
         if let Some(server) = remove_subscription(
             &broker,
             &logical,
             &connection_stats,
             &conn_id,
             &topic,
+            partition,
             group.as_deref(),
         )
         .await
@@ -1977,12 +1982,10 @@ pub async fn handle_connection(
                 let sub: Subscribe = decode_or_400!(frame, frame_tx_high_prio, metrics, Subscribe);
 
                 // Captured for a possible redirect (the identity is moved into
-                // the install args below). Subscribe is implicitly partition 0
-                // today; an explicit partition on the wire comes with
-                // multi-partition subscriptions.
+                // the install args below).
                 let sub_topic = sub.topic.clone();
                 let sub_group = sub.group.clone();
-                let sub_partition = 0u32;
+                let sub_partition = sub.partition;
 
                 let sub_ok = install_subscription(InstallSubscriptionArgs {
                     broker: broker.clone(),
@@ -1993,6 +1996,7 @@ pub async fn handle_connection(
                     client_id,
                     req_id_gen: req_id_gen.clone(),
                     topic: sub.topic,
+                    partition: sub.partition,
                     group: sub.group,
                     prefetch: sub.prefetch,
                     auto_ack: sub.auto_ack,
@@ -2161,7 +2165,7 @@ pub async fn handle_connection(
                 // TODO: Decline ack when auto ack? Log?
                 let ack: Ack = decode_or_400!(frame, frame_tx_high_prio, metrics, Ack);
 
-                let key: SubKey = (ack.topic.clone(), ack.group.clone());
+                let key: SubKey = (ack.topic.clone(), ack.partition, ack.group.clone());
 
                 let settle_target = {
                     let state = logical.state.lock().await;
@@ -2204,7 +2208,7 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                let key: SubKey = (nack.topic.clone(), nack.group.clone());
+                let key: SubKey = (nack.topic.clone(), nack.partition, nack.group.clone());
 
                 let settle_target = {
                     let state = logical.state.lock().await;

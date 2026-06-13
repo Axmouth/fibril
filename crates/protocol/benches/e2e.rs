@@ -146,6 +146,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                             auto_ack: false,
                             group: None,
                             topic: "Topic1".into(),
+                            partition: 0,
                             prefetch: 1024,
                         },
                     )

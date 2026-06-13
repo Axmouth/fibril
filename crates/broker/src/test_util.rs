@@ -217,6 +217,7 @@ impl SubBuilder<'_> {
         let handle = self.state.brokers[&self.broker]
             .subscribe(
                 &self.topic,
+                0,
                 self.group.as_deref(),
                 client_id,
                 ConsumerConfig {
@@ -249,6 +250,7 @@ impl<'a> SubBuilder<'a> {
         let handle = broker
             .subscribe(
                 &self.topic,
+                0,
                 self.group.as_deref(),
                 client_id,
                 ConsumerConfig {

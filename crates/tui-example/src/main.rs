@@ -644,6 +644,7 @@ pub async fn visual_client(
         next_req_id(),
         &Subscribe {
             topic: "t1".into(),
+            partition: 0,
             group: Some("g1".to_string()),
             prefetch: 100,
             auto_ack: true,

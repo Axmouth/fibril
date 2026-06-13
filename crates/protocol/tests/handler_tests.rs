@@ -453,6 +453,7 @@ async fn framed_subscribe(
                 request_id,
                 &Subscribe {
                     topic: topic.into(),
+                    partition: 0,
                     group: group.map(str::to_string),
                     prefetch: 1,
                     auto_ack,
@@ -544,6 +545,7 @@ async fn reconcile_after_resume_keeps_matching_subscription() {
                 2,
                 &Subscribe {
                     topic: "reconcile.keep".into(),
+                    partition: 0,
                     group: Some("workers".into()),
                     prefetch: 1,
                     auto_ack: false,
@@ -618,6 +620,7 @@ async fn reconcile_after_resume_closes_mismatched_subscription() {
                 2,
                 &Subscribe {
                     topic: "reconcile.recreate".into(),
+                    partition: 0,
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3250,6 +3253,7 @@ async fn unowned_subscribe_returns_not_owner_error_and_keeps_connection_open() {
                 2,
                 &Subscribe {
                     topic: "unowned".into(),
+                    partition: 0,
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3280,6 +3284,7 @@ async fn duplicate_subscribe_returns_conflict_and_keeps_connection_open() {
                 3,
                 &Subscribe {
                     topic: "duplicate.subscribe".into(),
+                    partition: 0,
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3309,6 +3314,7 @@ async fn publish_content_type_header_is_delivered_as_metadata() {
                 2,
                 &Subscribe {
                     topic: "content.type".into(),
+                    partition: 0,
                     group: None,
                     prefetch: 1,
                     auto_ack: true,
@@ -3439,6 +3445,7 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
                 2,
                 &Subscribe {
                     topic: "delayed.tcp".into(),
+                    partition: 0,
                     group: None,
                     prefetch: 1,
                     auto_ack: true,
@@ -3508,6 +3515,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                 2,
                 &Subscribe {
                     topic: "delayed.retry.tcp".into(),
+                    partition: 0,
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3622,6 +3630,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                 3,
                 &Subscribe {
                     topic: "source".into(),
+                    partition: 0,
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3640,6 +3649,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                 4,
                 &Subscribe {
                     topic: "_dlq.source".into(),
+                    partition: 0,
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3883,6 +3893,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
                 2,
                 &Subscribe {
                     topic: "notices".into(),
+                    partition: 0,
                     group: Some("workers".into()),
                     prefetch: 20,
                     auto_ack: true,

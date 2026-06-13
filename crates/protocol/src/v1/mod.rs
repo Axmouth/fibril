@@ -236,6 +236,11 @@ pub struct DeclareQueueOk {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscribe {
     pub topic: String,
+    /// The partition to subscribe to. A multi-partition subscription opens one
+    /// `Subscribe` per partition; single-partition / standalone uses 0. Serde
+    /// default keeps older clients (which omit it) on partition 0.
+    #[serde(default)]
+    pub partition: u32,
     pub group: Option<String>,
     pub prefetch: u32,
     pub auto_ack: bool,

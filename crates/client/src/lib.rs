@@ -961,6 +961,7 @@ impl<'a> SubscriptionBuilder<'a> {
     pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
         let req = Subscribe {
             topic: self.topic.into_string(),
+            partition: 0,
             group: self.group.map(GroupName::into_string),
             prefetch: self.prefetch,
             auto_ack: false,
@@ -1001,6 +1002,7 @@ impl<'a> SubscriptionBuilder<'a> {
     pub async fn sub_auto_ack(self) -> FibrilResult<AutoAckedSubscription> {
         let req = Subscribe {
             topic: self.topic.into_string(),
+            partition: 0,
             group: self.group.map(GroupName::into_string),
             prefetch: self.prefetch,
             auto_ack: true,

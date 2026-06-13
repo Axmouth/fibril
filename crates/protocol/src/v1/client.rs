@@ -53,6 +53,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
         req,
         &Subscribe {
             topic: "t1".into(),
+            partition: 0,
             group: Some("g1".into()),
             prefetch: 100,
             auto_ack: true,

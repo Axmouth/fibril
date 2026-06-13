@@ -383,6 +383,7 @@ async fn static_ownership_rejects_subscriber_for_unowned_queue() {
     let err = match broker
         .subscribe(
             "unowned",
+            0,
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -429,6 +430,7 @@ async fn static_ownership_allows_owned_queue() {
     let mut sub = broker
         .subscribe(
             "owned",
+            0,
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -1374,6 +1376,7 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
     let mut sub = broker
         .subscribe(
             "transition-demote-inflight",
+            0,
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -1440,6 +1443,7 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
     let mut redelivery = broker
         .subscribe(
             "transition-demote-inflight",
+            0,
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -1493,6 +1497,7 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
     let mut sub = broker
         .subscribe(
             "transition-freeze-inflight",
+            0,
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -1576,6 +1581,7 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
     let mut redelivery = broker
         .subscribe(
             "transition-freeze-inflight",
+            0,
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -1792,6 +1798,7 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     let mut sub = follower
         .subscribe(
             "catchup",
+            0,
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 2 },
@@ -1899,6 +1906,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     let mut sub = follower
         .subscribe(
             "checkpoint",
+            0,
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 2 },
@@ -2087,6 +2095,7 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
     let mut sub = follower
         .subscribe(
             "multi-pass",
+            0,
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 5 },
@@ -2968,7 +2977,7 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
 
     let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
     let sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
 
@@ -3008,7 +3017,7 @@ async fn subscriber_lease_materializes_queue_before_returning() {
     let client_id = Uuid::now_v7();
 
     let sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
 
@@ -3055,7 +3064,7 @@ async fn queue_eviction_skips_active_subscribers() {
     let client_id = Uuid::now_v7();
 
     let _sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
 
@@ -3108,7 +3117,7 @@ async fn queue_eviction_skips_broker_delivery_tags() {
     wait_for_queue_activity(&broker, "t", None, 0, 0, true).await;
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
     let _msg = sub.recv().await.unwrap();
@@ -3234,7 +3243,7 @@ async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
     wait_for_queue_idle(&broker, "idle", Some("g")).await;
 
     let sub = broker
-        .subscribe("sub", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("sub", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
 
@@ -3567,7 +3576,7 @@ async fn broker_delivers_messages_in_order() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 10 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 10 })
         .await
         .unwrap();
 
@@ -3594,7 +3603,7 @@ async fn delayed_publish_waits_until_deadline() {
     let client_id = Uuid::now_v7();
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
 
@@ -3651,7 +3660,7 @@ async fn delayed_retry_waits_until_deadline() {
     .unwrap();
 
     let mut sub = broker
-        .subscribe("t", None, Uuid::now_v7(), ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, Uuid::now_v7(), ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
     let msg = sub.recv().await.expect("initial delivery");
@@ -3696,7 +3705,7 @@ async fn broker_respects_prefetch() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
         .await
         .unwrap();
 
@@ -3736,7 +3745,7 @@ async fn ack_releases_prefetch_slot() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 2 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 2 })
         .await
         .unwrap();
 
@@ -3814,7 +3823,7 @@ async fn ack_releases_prefetch_slot2() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 2 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 2 })
         .await
         .unwrap();
 
@@ -3886,7 +3895,7 @@ async fn broker_redelivers_after_expiry() {
     println!("Published message with offset 0");
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
     println!("Receiving first message");
@@ -3926,11 +3935,11 @@ async fn broker_distributes_across_consumers() {
     }
 
     let mut c1 = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
     let mut c2 = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
 
@@ -3959,11 +3968,11 @@ async fn slow_consumer_does_not_starve_fast_one() {
     }
 
     let mut slow = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
     let mut fast = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 5 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 5 })
         .await
         .unwrap();
 
@@ -4003,7 +4012,7 @@ async fn unsubscribe_requeues_prefetched_unacked_messages() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
         .await
         .unwrap();
 
@@ -4019,7 +4028,7 @@ async fn unsubscribe_requeues_prefetched_unacked_messages() {
         .unwrap();
 
     let mut replacement = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
         .await
         .unwrap();
 
@@ -4059,7 +4068,7 @@ async fn unsubscribe_redistributes_prefetched_messages_to_active_subscriber() {
     }
 
     let mut first = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
         .await
         .unwrap();
 
@@ -4071,7 +4080,7 @@ async fn unsubscribe_redistributes_prefetched_messages_to_active_subscriber() {
     assert_eq!(leased, vec![0, 1, 2]);
 
     let mut replacement = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
         .await
         .unwrap();
 
@@ -4126,11 +4135,11 @@ async fn unsubscribe_redelivery_survives_if_active_replacement_has_no_capacity_t
     }
 
     let mut first = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 2 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 2 })
         .await
         .unwrap();
     let mut replacement = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
         .await
         .unwrap();
 
@@ -4172,7 +4181,7 @@ async fn unsubscribe_redelivery_survives_if_active_replacement_has_no_capacity_t
         .unwrap();
 
     let mut final_sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
         .await
         .unwrap();
 
@@ -4212,7 +4221,7 @@ async fn unsubscribe_does_not_requeue_acked_messages_after_settles_drain() {
     }
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
         .await
         .unwrap();
 
@@ -4234,7 +4243,7 @@ async fn unsubscribe_does_not_requeue_acked_messages_after_settles_drain() {
         .unwrap();
 
     let mut replacement = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
         .await
         .unwrap();
 
@@ -4359,6 +4368,7 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
     let mut source = broker
         .subscribe(
             "source",
+            0,
             None,
             source_client,
             ConsumerConfig { prefetch: 1 },
@@ -4379,6 +4389,7 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
     let mut dlq = broker
         .subscribe(
             "_dlq.source",
+            0,
             None,
             dlq_client,
             ConsumerConfig { prefetch: 1 },
@@ -4435,6 +4446,7 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
     let mut source = broker
         .subscribe(
             "source",
+            0,
             None,
             source_client,
             ConsumerConfig { prefetch: 1 },
@@ -4455,6 +4467,7 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
     let mut dlq = broker
         .subscribe(
             "_dlq.source",
+            0,
             None,
             dlq_client,
             ConsumerConfig { prefetch: 1 },
@@ -4576,6 +4589,7 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
     let mut source = broker
         .subscribe(
             "source",
+            0,
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -4600,6 +4614,7 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
     let mut dlq = broker
         .subscribe(
             "_dlq.source",
+            0,
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -4653,6 +4668,7 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
     let mut source = broker
         .subscribe(
             "source",
+            0,
             None,
             source_client,
             ConsumerConfig { prefetch: 1 },
@@ -4673,6 +4689,7 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
     let mut dlq = broker
         .subscribe(
             "_dlq.source",
+            0,
             None,
             dlq_client,
             ConsumerConfig { prefetch: 1 },
@@ -5146,7 +5163,7 @@ async fn stress_single_consumer(total: usize) {
     println!("Confirmed {} messages", total);
 
     let mut sub = broker
-        .subscribe("t", None, client_id, ConsumerConfig { prefetch: 1000 })
+        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1000 })
         .await
         .unwrap();
 

@@ -1745,6 +1745,7 @@ mod tests {
                     2,
                     &Subscribe {
                         topic: "source".into(),
+                        partition: 0,
                         group: None,
                         prefetch: 1,
                         auto_ack: false,
@@ -1763,6 +1764,7 @@ mod tests {
                     3,
                     &Subscribe {
                         topic: "_dlq.source".into(),
+                        partition: 0,
                         group: None,
                         prefetch: 1,
                         auto_ack: false,

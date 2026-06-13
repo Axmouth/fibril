@@ -384,6 +384,7 @@ async fn run_e2e_bench(cmd: E2EBench) {
         let consumer = broker
             .subscribe(
                 &topic,
+                0,
                 None,
                 client_id,
                 ConsumerConfig::default().with_prefetch_count(8192 * 8),
