@@ -1070,6 +1070,139 @@ mod tests {
         assert_eq!(assignment.epoch, 7);
     }
 
+    fn nodes_n(count: usize) -> HashMap<String, NodeInfo> {
+        (0..count)
+            .map(|idx| {
+                let node_id = format!("node-{idx:04}");
+                (
+                    node_id.clone(),
+                    NodeInfo {
+                        node_id,
+                        broker_addr: format!("127.0.0.1:{}", 10_000 + idx).parse().unwrap(),
+                        admin_addr: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn queues_n(count: usize) -> Vec<QueueIdentity> {
+        (0..count)
+            .map(|idx| {
+                // Spread across topics, partitions, and groups so the sort/dedup
+                // and round-robin paths see realistic key variety at scale.
+                let topic = format!("topic-{:03}", idx % 64);
+                let partition = (idx % 4) as LogId;
+                let group = if idx % 3 == 0 {
+                    None
+                } else {
+                    Some(format!("group-{}", idx % 7))
+                };
+                QueueIdentity::new(topic, partition, group.as_deref())
+            })
+            .collect()
+    }
+
+    /// Sanity check that placement stays correct and balanced at cluster sizes
+    /// far beyond the small fixtures: every queue placed on live nodes with the
+    /// requested replica count, owner load balanced within one, re-planning is
+    /// a no-op, and a mass node failure rebalances only the orphaned queues
+    /// while leaving survivors untouched.
+    #[test]
+    fn placement_scales_to_large_clusters() {
+        const NODE_COUNT: usize = 75;
+        const TARGET_FOLLOWERS: usize = 2;
+
+        let live = nodes_n(NODE_COUNT);
+        let queues = queues_n(600);
+        let unique_queues: HashSet<_> = queues.iter().cloned().collect();
+
+        let plan = DeterministicPartitionPlacement
+            .plan(PartitionPlacementInput {
+                nodes: live.clone(),
+                queues: queues.clone(),
+                existing: HashMap::new(),
+                target_followers: TARGET_FOLLOWERS,
+                generation: 1,
+            })
+            .unwrap();
+        let assignments = plan.snapshot.assignments;
+
+        // Every distinct queue is placed exactly once, on live nodes, with the
+        // full replica set: owner excluded from followers, followers distinct.
+        assert_eq!(assignments.len(), unique_queues.len());
+        let mut owner_load: HashMap<String, usize> = HashMap::new();
+        for (queue, assignment) in &assignments {
+            assert!(unique_queues.contains(queue));
+            assert!(live.contains_key(&assignment.owner));
+            assert_eq!(assignment.followers.len(), TARGET_FOLLOWERS);
+            let distinct: HashSet<_> = assignment.followers.iter().collect();
+            assert_eq!(distinct.len(), TARGET_FOLLOWERS);
+            assert!(!assignment.followers.contains(&assignment.owner));
+            for follower in &assignment.followers {
+                assert!(live.contains_key(follower));
+            }
+            *owner_load.entry(assignment.owner.clone()).or_default() += 1;
+        }
+
+        // Round-robin ownership over sorted queues balances within one queue.
+        let max_load = owner_load.values().copied().max().unwrap();
+        let min_load = owner_load.values().copied().min().unwrap();
+        assert!(
+            max_load - min_load <= 1,
+            "owner load imbalance {min_load}..={max_load}"
+        );
+
+        // Re-planning with the produced assignments as the existing state and
+        // an unchanged cluster must be a pure no-op (controller anti-churn
+        // depends on this stability).
+        let replan = DeterministicPartitionPlacement
+            .plan(PartitionPlacementInput {
+                nodes: live.clone(),
+                queues: queues.clone(),
+                existing: assignments.clone(),
+                target_followers: TARGET_FOLLOWERS,
+                generation: 2,
+            })
+            .unwrap();
+        assert_eq!(replan.snapshot.assignments, assignments);
+
+        // Kill a third of the cluster and re-plan: every queue stays placed on
+        // a live node, and any queue whose owner survived keeps that owner.
+        let mut survivors = live.clone();
+        let mut dead = HashSet::new();
+        for idx in 0..NODE_COUNT {
+            if idx % 3 == 0 {
+                let node_id = format!("node-{idx:04}");
+                survivors.remove(&node_id);
+                dead.insert(node_id);
+            }
+        }
+        let rebalanced = DeterministicPartitionPlacement
+            .plan(PartitionPlacementInput {
+                nodes: survivors.clone(),
+                queues: queues.clone(),
+                existing: assignments.clone(),
+                target_followers: TARGET_FOLLOWERS,
+                generation: 3,
+            })
+            .unwrap();
+        for (queue, assignment) in &rebalanced.snapshot.assignments {
+            assert!(survivors.contains_key(&assignment.owner));
+            for follower in &assignment.followers {
+                assert!(survivors.contains_key(follower));
+                assert!(!dead.contains(follower));
+            }
+            let previous = &assignments[queue];
+            if !dead.contains(&previous.owner) {
+                assert_eq!(
+                    &assignment.owner, &previous.owner,
+                    "surviving owner churned for {queue:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn placement_adds_missing_queue_without_churning_existing_assignment() {
         let existing_queue = QueueIdentity::new("emails", 0, None);
