@@ -984,21 +984,18 @@ impl Client {
         opts: ClientOptions,
     ) -> FibrilResult<Self> {
         let address = Self::convert_address(address)?;
-        let stream = TcpStream::connect(address)
-            .await
-            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
-        let framed = Framed::new(stream, ProtoCodec);
-
-        let subscriptions = Arc::new(RwLock::new(HashMap::new()));
-        let engine = start_engine(framed, opts.clone(), subscriptions.clone()).await?;
+        let user_shutdown = Arc::new(AtomicBool::new(false));
+        let slot =
+            Arc::new(EngineSlot::connect(address, opts.clone(), user_shutdown.clone()).await?);
+        let mut pool = HashMap::new();
+        pool.insert(address, slot);
         Ok(Client {
             shared: Arc::new(ClientShared {
-                address,
+                bootstrap: vec![address],
                 opts,
-                engine: Arc::new(EngineSlot::new(engine)),
-                reconnect_lock: Mutex::new(()),
-                user_shutdown: AtomicBool::new(false),
-                subscriptions,
+                user_shutdown,
+                pool: RwLock::new(pool),
+                topology: RwLock::new(TopologyCache::default()),
             }),
         })
     }
@@ -1014,10 +1011,9 @@ impl Client {
     /// resume identity. `ResumeOutcome::Resumed` means the server-side logical
     /// connection was reattached. Any other outcome means the broker treated the
     /// connection as fresh.
-    #[tracing::instrument(fields(address = ?self.shared.address, opts = ?self.shared.opts))]
+    #[tracing::instrument(fields(bootstrap = ?self.shared.bootstrap, opts = ?self.shared.opts))]
     pub async fn reconnect(&mut self) -> FibrilResult<ReconnectOutcome> {
-        let _guard = self.shared.reconnect_lock.lock().await;
-        self.shared.reconnect_once().await
+        self.shared.bootstrap_slot().await?.reconnect().await
     }
 
     /// Reconnect and restore existing handles.
@@ -1026,7 +1022,7 @@ impl Client {
     /// existing publishers can continue afterward, but active subscriptions
     /// should be recreated by the application.
     // TODO: try to handle inflight acks etc (resend?)
-    #[tracing::instrument(fields(address = ?self.shared.address, opts = ?self.shared.opts))]
+    #[tracing::instrument(fields(bootstrap = ?self.shared.bootstrap, opts = ?self.shared.opts))]
     pub async fn reconnect_restore(&mut self) -> FibrilResult<()> {
         todo!()
     }
@@ -1107,7 +1103,15 @@ impl Client {
     /// This closes the connection engine and wakes subscription receivers.
     pub async fn shutdown(&self) {
         self.shared.user_shutdown.store(true, Ordering::Release);
-        self.shared.engine.current().shutdown.notify_waiters();
+        for slot in self
+            .shared
+            .pool
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
+            slot.current().shutdown.notify_waiters();
+        }
     }
 }
 
@@ -1274,19 +1278,186 @@ impl AutoAckedSubscription {
 
 // ===== Engine =================================================================
 
+/// Owner of one queue partition for client routing.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // fields consumed once routing is wired (A5.5/A5.6)
+struct OwnerEntry {
+    endpoint: SocketAddr,
+    partitioning_version: u64,
+}
+
+/// Client-side cache of queue ownership learned from `Op::Topology` /
+/// `Op::Redirect`. Empty (e.g. standalone brokers) means "no routing info";
+/// callers fall back to the bootstrap connection.
+#[derive(Debug, Default)]
+#[allow(dead_code)] // methods used as routing is wired (A5.4-A5.6)
+struct TopologyCache {
+    generation: u64,
+    by_queue: HashMap<(String, u32, Option<String>), OwnerEntry>,
+    last_refresh_ms: u64,
+}
+
+#[allow(dead_code)] // used as routing is wired (A5.4-A5.6)
+impl TopologyCache {
+    fn lookup(&self, topic: &str, partition: u32, group: Option<&str>) -> Option<OwnerEntry> {
+        self.by_queue
+            .get(&(topic.to_string(), partition, group.map(str::to_string)))
+            .cloned()
+    }
+
+    fn replace(&mut self, topology: TopologyOk) {
+        self.generation = topology.generation;
+        self.by_queue.clear();
+        for queue in topology.queues {
+            let Some(endpoint) = queue
+                .owner_endpoint
+                .as_deref()
+                .and_then(|raw| raw.parse::<SocketAddr>().ok())
+            else {
+                continue;
+            };
+            self.by_queue.insert(
+                (queue.topic, queue.partition, queue.group),
+                OwnerEntry {
+                    endpoint,
+                    partitioning_version: queue.partitioning_version,
+                },
+            );
+        }
+    }
+
+    fn apply_redirect(&mut self, redirect: &Redirect) {
+        if let Ok(endpoint) = redirect.owner_endpoint.parse::<SocketAddr>() {
+            self.by_queue.insert(
+                (
+                    redirect.topic.clone(),
+                    redirect.partition,
+                    redirect.group.clone(),
+                ),
+                OwnerEntry {
+                    endpoint,
+                    partitioning_version: redirect.partitioning_version,
+                },
+            );
+        }
+    }
+
+    fn invalidate(&mut self, topic: &str, partition: u32, group: Option<&str>) {
+        self.by_queue
+            .remove(&(topic.to_string(), partition, group.map(str::to_string)));
+    }
+}
+
 #[derive(Debug)]
 struct ClientShared {
-    address: SocketAddr,
+    bootstrap: Vec<SocketAddr>,
     opts: ClientOptions,
-    engine: Arc<EngineSlot>,
-    reconnect_lock: Mutex<()>,
-    user_shutdown: AtomicBool,
-    subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
+    user_shutdown: Arc<AtomicBool>,
+    pool: RwLock<HashMap<SocketAddr, Arc<EngineSlot>>>,
+    topology: RwLock<TopologyCache>,
 }
 
 impl ClientShared {
+    /// Get-or-create the connection slot for an endpoint, connecting on miss.
+    async fn engine_slot(&self, addr: SocketAddr) -> FibrilResult<Arc<EngineSlot>> {
+        if let Some(slot) = self
+            .pool
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&addr)
+            .cloned()
+        {
+            return Ok(slot);
+        }
+        let slot = Arc::new(
+            EngineSlot::connect(addr, self.opts.clone(), self.user_shutdown.clone()).await?,
+        );
+        let mut pool = self.pool.write().unwrap_or_else(|e| e.into_inner());
+        // Another task may have connected the same endpoint concurrently.
+        if let Some(existing) = pool.get(&addr).cloned() {
+            return Ok(existing);
+        }
+        pool.insert(addr, slot.clone());
+        Ok(slot)
+    }
+
+    /// The bootstrap connection slot — the default route until queue-based
+    /// routing is enabled (A5.5).
+    async fn bootstrap_slot(&self) -> FibrilResult<Arc<EngineSlot>> {
+        self.engine_slot(self.bootstrap[0]).await
+    }
+
+    async fn engine_for_operation(&self) -> FibrilResult<Arc<EngineHandle>> {
+        self.bootstrap_slot().await?.engine_for_operation().await
+    }
+}
+
+/// A single reconnectable connection to one broker endpoint. The connection
+/// pool holds one of these per endpoint.
+#[derive(Debug)]
+struct EngineSlot {
+    address: SocketAddr,
+    opts: ClientOptions,
+    user_shutdown: Arc<AtomicBool>,
+    subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
+    engine: RwLock<Arc<EngineHandle>>,
+    reconnect_lock: Mutex<()>,
+}
+
+impl EngineSlot {
+    /// Build a slot around an already-connected engine (after the initial
+    /// handshake, and for tests using an in-memory engine).
+    fn from_engine(
+        address: SocketAddr,
+        opts: ClientOptions,
+        user_shutdown: Arc<AtomicBool>,
+        subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
+        engine: Arc<EngineHandle>,
+    ) -> Self {
+        Self {
+            address,
+            opts,
+            user_shutdown,
+            subscriptions,
+            engine: RwLock::new(engine),
+            reconnect_lock: Mutex::new(()),
+        }
+    }
+
+    /// Connect a fresh slot to `address` (handshake included).
+    async fn connect(
+        address: SocketAddr,
+        opts: ClientOptions,
+        user_shutdown: Arc<AtomicBool>,
+    ) -> FibrilResult<Self> {
+        let subscriptions = Arc::new(RwLock::new(HashMap::new()));
+        let stream = TcpStream::connect(address)
+            .await
+            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+        let framed = Framed::new(stream, ProtoCodec);
+        let engine = start_engine(framed, opts.clone(), subscriptions.clone()).await?;
+        Ok(Self::from_engine(
+            address,
+            opts,
+            user_shutdown,
+            subscriptions,
+            engine,
+        ))
+    }
+
+    fn current(&self) -> Arc<EngineHandle> {
+        self.engine
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn replace(&self, engine: Arc<EngineHandle>) {
+        *self.engine.write().unwrap_or_else(|e| e.into_inner()) = engine;
+    }
+
     async fn reconnect_once(&self) -> FibrilResult<ReconnectOutcome> {
-        let old_engine = self.engine.current();
+        let old_engine = self.current();
         let mut opts = self.opts.clone();
         opts.resume_identity = Some(old_engine.resume_identity.clone());
         let stream = TcpStream::connect(self.address)
@@ -1299,15 +1470,21 @@ impl ClientShared {
             resume_outcome: new_engine.resume_outcome,
         };
 
-        self.engine.replace(new_engine);
+        self.replace(new_engine);
         self.user_shutdown.store(false, Ordering::Release);
         old_engine.shutdown.notify_waiters();
 
         Ok(outcome)
     }
 
+    /// Explicit reconnect (lock-guarded) for `Client::reconnect`.
+    async fn reconnect(&self) -> FibrilResult<ReconnectOutcome> {
+        let _guard = self.reconnect_lock.lock().await;
+        self.reconnect_once().await
+    }
+
     async fn reconnect_if_closed(&self) -> FibrilResult<()> {
-        if !self.engine.current().is_closed() {
+        if !self.current().is_closed() {
             return Ok(());
         }
         if self.user_shutdown.load(Ordering::Acquire) {
@@ -1320,7 +1497,7 @@ impl ClientShared {
         }
 
         let _guard = self.reconnect_lock.lock().await;
-        if !self.engine.current().is_closed() {
+        if !self.current().is_closed() {
             return Ok(());
         }
 
@@ -1337,31 +1514,7 @@ impl ClientShared {
 
     async fn engine_for_operation(&self) -> FibrilResult<Arc<EngineHandle>> {
         self.reconnect_if_closed().await?;
-        Ok(self.engine.current())
-    }
-}
-
-#[derive(Debug)]
-struct EngineSlot {
-    engine: RwLock<Arc<EngineHandle>>,
-}
-
-impl EngineSlot {
-    fn new(engine: Arc<EngineHandle>) -> Self {
-        Self {
-            engine: RwLock::new(engine),
-        }
-    }
-
-    fn current(&self) -> Arc<EngineHandle> {
-        self.engine
-            .read()
-            .expect("client engine slot poisoned")
-            .clone()
-    }
-
-    fn replace(&self, engine: Arc<EngineHandle>) {
-        *self.engine.write().expect("client engine slot poisoned") = engine;
+        Ok(self.current())
     }
 }
 
@@ -2407,6 +2560,10 @@ pub struct ClientOptions {
     pub auto_reconnect: AutoReconnect,
     /// How resumed connections reconcile subscriptions after reconnect.
     pub reconcile_policy: ReconcilePolicy,
+    /// Max times a single operation will follow `Op::Redirect` before failing.
+    pub max_redirects: u32,
+    /// Minimum interval between client topology refreshes (anti-storm).
+    pub topology_refresh_cooldown_ms: u64,
 }
 
 impl ClientOptions {
@@ -2422,6 +2579,8 @@ impl ClientOptions {
             resume_identity: None,
             auto_reconnect: AutoReconnect::default(),
             reconcile_policy: ReconcilePolicy::Conservative,
+            max_redirects: 3,
+            topology_refresh_cooldown_ms: 1_000,
         }
     }
 
@@ -2562,15 +2721,25 @@ mod tests {
         opts: ClientOptions,
     ) -> (Client, mpsc::Receiver<Command>) {
         let (engine, rx) = engine_with_command_rx();
+        let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let user_shutdown = Arc::new(AtomicBool::new(false));
+        let slot = Arc::new(EngineSlot::from_engine(
+            address,
+            opts.clone(),
+            user_shutdown.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            engine,
+        ));
+        let mut pool = HashMap::new();
+        pool.insert(address, slot);
         (
             Client {
                 shared: Arc::new(ClientShared {
-                    address: "127.0.0.1:0".parse().unwrap(),
+                    bootstrap: vec![address],
                     opts,
-                    engine: Arc::new(EngineSlot::new(engine)),
-                    reconnect_lock: Mutex::new(()),
-                    user_shutdown: AtomicBool::new(false),
-                    subscriptions: Arc::new(RwLock::new(HashMap::new())),
+                    user_shutdown,
+                    pool: RwLock::new(pool),
+                    topology: RwLock::new(TopologyCache::default()),
                 }),
             },
             rx,
@@ -2622,7 +2791,16 @@ mod tests {
         let publisher = client.publisher("jobs").unwrap();
         let (new_engine, mut new_rx) = engine_with_command_rx();
 
-        client.shared.engine.replace(new_engine);
+        let slot = client
+            .shared
+            .pool
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        slot.replace(new_engine);
 
         publisher.publish("hello").await.unwrap();
 
