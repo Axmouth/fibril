@@ -1047,6 +1047,7 @@ impl Client {
                 user_shutdown,
                 pool: parking_lot::RwLock::new(pool),
                 topology: ArcSwap::from_pointee(TopologyCache::default()),
+                round_robin: std::sync::atomic::AtomicUsize::new(0),
             }),
         })
     }
@@ -1194,16 +1195,16 @@ impl Publisher {
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let partition = self.shared.route_partition(topic, group, None);
         self.shared
-            .engine_for(
-                self.topic.as_str(),
-                0,
-                self.group.as_ref().map(|group| group.as_str()),
-            )
+            .engine_for(topic, partition, group)
             .await?
             .publish_unconfirmed(
-                self.topic.as_str().to_string(),
-                self.group.as_ref().map(|group| group.as_str().to_string()),
+                topic.to_string(),
+                group.map(str::to_string),
+                partition,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1220,14 +1221,16 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
+        let partition = self.shared.route_partition(topic, group, None);
         let mut attempts = 0u32;
         loop {
-            let engine = self.shared.engine_for(topic, 0, group).await?;
+            let engine = self.shared.engine_for(topic, partition, group).await?;
             // Clone per attempt so a redirect can re-send on the new owner.
             let confirmation = engine
                 .publish_with_confirmation(
                     topic.to_string(),
                     group.map(str::to_string),
+                    partition,
                     message.content_type.clone(),
                     message.headers.clone(),
                     message.payload.clone(),
@@ -1240,7 +1243,7 @@ impl Publisher {
                         return Err(FibrilError::Failure {
                             code: ERR_NOT_OWNER,
                             msg: format!(
-                                "exceeded max redirects ({}) routing {topic}/0",
+                                "exceeded max redirects ({}) routing {topic}/{partition}",
                                 self.shared.opts.max_redirects
                             ),
                         });
@@ -1264,16 +1267,16 @@ impl Publisher {
         payload: T,
     ) -> FibrilResult<PublishConfirmation> {
         let message = payload.into_message()?;
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let partition = self.shared.route_partition(topic, group, None);
         self.shared
-            .engine_for(
-                self.topic.as_str(),
-                0,
-                self.group.as_ref().map(|group| group.as_str()),
-            )
+            .engine_for(topic, partition, group)
             .await?
             .publish_with_confirmation(
-                self.topic.as_str().to_string(),
-                self.group.as_ref().map(|group| group.as_str().to_string()),
+                topic.to_string(),
+                group.map(str::to_string),
+                partition,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1293,16 +1296,16 @@ impl Publisher {
     ) -> FibrilResult<()> {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let partition = self.shared.route_partition(topic, group, None);
         self.shared
-            .engine_for(
-                self.topic.as_str(),
-                0,
-                self.group.as_ref().map(|group| group.as_str()),
-            )
+            .engine_for(topic, partition, group)
             .await?
             .publish_unconfirmed_delayed(
-                self.topic.as_str().to_string(),
-                self.group.as_ref().map(|group| group.as_str().to_string()),
+                topic.to_string(),
+                group.map(str::to_string),
+                partition,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1339,16 +1342,16 @@ impl Publisher {
     ) -> FibrilResult<PublishConfirmation> {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let partition = self.shared.route_partition(topic, group, None);
         self.shared
-            .engine_for(
-                self.topic.as_str(),
-                0,
-                self.group.as_ref().map(|group| group.as_str()),
-            )
+            .engine_for(topic, partition, group)
             .await?
             .publish_delayed_with_confirmation(
-                self.topic.as_str().to_string(),
-                self.group.as_ref().map(|group| group.as_str().to_string()),
+                topic.to_string(),
+                group.map(str::to_string),
+                partition,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1404,14 +1407,16 @@ struct OwnerEntry {
 /// `Op::Redirect`. Empty (e.g. standalone brokers) means "no routing info";
 /// callers fall back to the bootstrap connection.
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)] // methods used as routing is wired (A5.4-A5.6)
+#[allow(dead_code)] // some methods used as routing is wired
 struct TopologyCache {
     generation: u64,
     by_queue: HashMap<(String, u32, Option<String>), OwnerEntry>,
+    /// Authoritative partition count per logical queue `(topic, group)`.
+    counts: HashMap<(String, Option<String>), u32>,
     last_refresh_ms: u64,
 }
 
-#[allow(dead_code)] // used as routing is wired (A5.4-A5.6)
+#[allow(dead_code)] // some methods used as routing is wired
 impl TopologyCache {
     fn lookup(&self, topic: &str, partition: u32, group: Option<&str>) -> Option<OwnerEntry> {
         self.by_queue
@@ -1419,10 +1424,22 @@ impl TopologyCache {
             .cloned()
     }
 
+    /// Authoritative partition count for `(topic, group)`, if known.
+    fn partition_count(&self, topic: &str, group: Option<&str>) -> Option<u32> {
+        self.counts
+            .get(&(topic.to_string(), group.map(str::to_string)))
+            .copied()
+    }
+
     fn replace(&mut self, topology: TopologyOk) {
         self.generation = topology.generation;
         self.by_queue.clear();
+        self.counts.clear();
         for queue in topology.queues {
+            self.counts.insert(
+                (queue.topic.clone(), queue.group.clone()),
+                queue.partition_count.max(1),
+            );
             let Some(endpoint) = queue
                 .owner_endpoint
                 .as_deref()
@@ -1474,9 +1491,47 @@ struct ClientShared {
     // snapshot across awaits, writers update via rcu. last_refresh_ms lives
     // inside so it stays consistent with the swapped map.
     topology: ArcSwap<TopologyCache>,
+    /// Round-robin cursor for keyless publishes (spread across partitions).
+    round_robin: std::sync::atomic::AtomicUsize,
+}
+
+/// Stable FNV-1a hash for partition selection. Must be deterministic across all
+/// clients so a given key always maps to the same partition (per-key ordering).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 impl ClientShared {
+    /// Select the partition for a publish to `(topic, group)`:
+    /// explicit override (none yet) -> `hash(key) % N` if a key is present ->
+    /// round-robin over N. N comes from the authoritative topology cache;
+    /// unknown N (cache cold / standalone) routes to partition 0.
+    fn route_partition(&self, topic: &str, group: Option<&str>, key: Option<&[u8]>) -> u32 {
+        let count = self
+            .topology
+            .load()
+            .partition_count(topic, group)
+            .unwrap_or(1)
+            .max(1);
+        if count == 1 {
+            return 0;
+        }
+        match key {
+            Some(key) => (fnv1a(key) % count as u64) as u32,
+            None => {
+                let next = self
+                    .round_robin
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                (next % count as usize) as u32
+            }
+        }
+    }
+
     /// Get-or-create the connection slot for an endpoint, connecting on miss.
     async fn engine_slot(&self, addr: SocketAddr) -> FibrilResult<Arc<EngineSlot>> {
         if let Some(slot) = self.pool.read().get(&addr).cloned() {
@@ -1678,6 +1733,7 @@ enum Command {
     PublishUnconfirmed {
         topic: String,
         group: Option<String>,
+        partition: u32,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1686,6 +1742,7 @@ enum Command {
     PublishConfirmed {
         topic: String,
         group: Option<String>,
+        partition: u32,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1695,6 +1752,7 @@ enum Command {
     PublishDelayedUnconfirmed {
         topic: String,
         group: Option<String>,
+        partition: u32,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1704,6 +1762,7 @@ enum Command {
     PublishDelayedConfirmed {
         topic: String,
         group: Option<String>,
+        partition: u32,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2029,12 +2088,12 @@ where
                 }
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    Command::PublishUnconfirmed { topic, group, content_type, headers, payload, published } => {
+                    Command::PublishUnconfirmed { topic, group, partition, content_type, headers, payload, published } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = Publish {
                             topic,
                             group,
-                            partition: 0,
+                            partition,
                             require_confirm: false,
                             content_type,
                             headers,
@@ -2044,13 +2103,13 @@ where
                         };
                         send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
-                    Command::PublishConfirmed { topic, group, content_type, headers, payload, published, reply } => {
+                    Command::PublishConfirmed { topic, group, partition, content_type, headers, payload, published, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
                             topic,
                             group,
-                            partition: 0,
+                            partition,
                             require_confirm: true,
                             content_type,
                             headers,
@@ -2060,12 +2119,12 @@ where
                         };
                         send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
-                    Command::PublishDelayedUnconfirmed { topic, group, content_type, headers, payload, published, not_before } => {
+                    Command::PublishDelayedUnconfirmed { topic, group, partition, content_type, headers, payload, published, not_before } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = PublishDelayed {
                             topic,
                             group,
-                            partition: 0,
+                            partition,
                             require_confirm: false,
                             not_before,
                             content_type,
@@ -2076,13 +2135,13 @@ where
                         };
                         send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
                     }
-                    Command::PublishDelayedConfirmed { topic, group, content_type, headers, payload, published, not_before, reply } => {
+                    Command::PublishDelayedConfirmed { topic, group, partition, content_type, headers, payload, published, not_before, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = PublishDelayed {
                             topic,
                             group,
-                            partition: 0,
+                            partition,
                             require_confirm: true,
                             not_before,
                             content_type,
@@ -2580,6 +2639,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        partition: u32,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2589,6 +2649,7 @@ impl EngineHandle {
             .send(Command::PublishUnconfirmed {
                 topic,
                 group,
+                partition,
                 content_type,
                 headers,
                 payload,
@@ -2603,6 +2664,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        partition: u32,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2613,6 +2675,7 @@ impl EngineHandle {
             .send(Command::PublishConfirmed {
                 topic,
                 group,
+                partition,
                 content_type,
                 headers,
                 payload,
@@ -2628,6 +2691,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        partition: u32,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2638,6 +2702,7 @@ impl EngineHandle {
             .send(Command::PublishDelayedUnconfirmed {
                 topic,
                 group,
+                partition,
                 content_type,
                 headers,
                 payload,
@@ -2653,6 +2718,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        partition: u32,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2664,6 +2730,7 @@ impl EngineHandle {
             .send(Command::PublishDelayedConfirmed {
                 topic,
                 group,
+                partition,
                 content_type,
                 headers,
                 payload,
@@ -2963,6 +3030,7 @@ mod tests {
                     user_shutdown,
                     pool: parking_lot::RwLock::new(pool),
                     topology: ArcSwap::from_pointee(TopologyCache::default()),
+                    round_robin: std::sync::atomic::AtomicUsize::new(0),
                 }),
             },
             rx,
