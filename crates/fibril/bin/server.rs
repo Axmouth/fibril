@@ -15,7 +15,7 @@ use fibril_config::{CoordinationMode, ServerConfig};
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::{
     ClientTopologySource, ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings,
-    ConnectionSettings, run_server,
+    ConnectionSettings, QueueDeclareCoordinator, run_server,
 };
 use fibril_protocol::v1::{QueueTopologyEntry, TopologyOk};
 use fibril_util::{StaticAuthHandler, init_tracing};
@@ -69,6 +69,30 @@ impl ClientTopologySource for CoordinationTopologySource {
                     .owner_endpoint
                     .map(|endpoint| (endpoint, queue.partitioning_version))
             })
+    }
+}
+
+/// Bridges queue-declare partitioning writes to the coordination provider. The
+/// boxed-future closure captures the provider, avoiding naming its generic type
+/// and keeping coordination-ganglion free of a protocol dependency.
+type DeclareFut = futures::future::BoxFuture<'static, Result<u32, String>>;
+
+struct CoordinationDeclareCoordinator {
+    declare: Arc<dyn Fn(String, Option<String>, u32) -> DeclareFut + Send + Sync>,
+}
+
+impl QueueDeclareCoordinator for CoordinationDeclareCoordinator {
+    fn declare_partitioning<'a>(
+        &'a self,
+        topic: &'a str,
+        group: Option<&'a str>,
+        partition_count: u32,
+    ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
+        (self.declare)(
+            topic.to_string(),
+            group.map(str::to_string),
+            partition_count,
+        )
     }
 }
 
@@ -233,6 +257,9 @@ async fn main() -> anyhow::Result<()> {
                                 .queues
                                 .keys()
                                 .map(|key| {
+                                    // Queue stats key by (topic, group) only;
+                                    // partition 0 always exists. The full
+                                    // partition set is registered by declare.
                                     fibril_broker::coordination::QueueIdentity::new(
                                         key.topic.clone(),
                                         0,
@@ -393,6 +420,40 @@ async fn main() -> anyhow::Result<()> {
             }) as Arc<dyn ClientTopologySource>
         });
 
+    // In ganglion mode, declare records the queue's partitioning (count +
+    // version) in the replicated store via the coordination provider.
+    let declare_coordinator: Option<Arc<dyn QueueDeclareCoordinator>> =
+        ganglion_parts.as_ref().map(|parts| {
+            let coordination = parts.coordination.clone();
+            Arc::new(CoordinationDeclareCoordinator {
+                declare: Arc::new(move |topic, group, count| {
+                    let coordination = coordination.clone();
+                    Box::pin(async move {
+                        // Record the authoritative partitioning, then register
+                        // all N partitions in the catalogue so the controller
+                        // assigns each one. The metadata count wins (an existing
+                        // queue's count is returned; a conflict errors).
+                        let partitioning = coordination
+                            .declare_queue_partitioning(&topic, group.as_deref(), count)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        for partition in 0..partitioning.partition_count {
+                            let queue = fibril_broker::coordination::QueueIdentity::new(
+                                topic.clone(),
+                                partition,
+                                group.as_deref(),
+                            );
+                            coordination
+                                .register_queue(&queue)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                        }
+                        Ok(partitioning.partition_count)
+                    })
+                }),
+            }) as Arc<dyn QueueDeclareCoordinator>
+        });
+
     let broker_server_fut = run_server(
         config.broker.listener.bind,
         broker.clone(),
@@ -401,6 +462,7 @@ async fn main() -> anyhow::Result<()> {
         Some(auth_handler.clone()),
         connection_settings,
         topology_source,
+        declare_coordinator,
     );
 
     let broker_observability = {

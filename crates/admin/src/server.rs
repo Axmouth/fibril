@@ -582,6 +582,7 @@ mod tests {
             None::<StaticAuthHandler>,
             ConnectionSettings::new(Some(60)),
             None,
+            None,
         ));
 
         (Framed::new(client, ProtoCodec), server_task)

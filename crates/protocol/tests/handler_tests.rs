@@ -25,17 +25,19 @@ use fibril_broker::{
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
-    Ack, ContentType, DeclareQueue, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
-    Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient,
-    ReconcilePolicy, ReconcileResult, ReconcileSubscription, ReplicationApply, ReplicationApplyOk,
-    ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
-    ReplicationCheckpointInstallOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
-    ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
-    ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
-    ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, Subscribe, TopologyOk,
-    TopologyRequest,
+    Ack, ContentType, DeclareQueue, DeclareQueueOk, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op,
+    PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction,
+    ReconcileClient, ReconcilePolicy, ReconcileResult, ReconcileSubscription, ReplicationApply,
+    ReplicationApplyOk, ReplicationCheckpointExport, ReplicationCheckpointExportOk,
+    ReplicationCheckpointInstall, ReplicationCheckpointInstallOk, ReplicationCheckpointRequired,
+    ReplicationEventApplyBatch, ReplicationEventRead, ReplicationEventRecord,
+    ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationMessageRecord,
+    ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome,
+    Subscribe, TopologyOk, TopologyRequest,
     frame::{Frame, ProtoCodec},
-    handler::{ClientTopologySource, ConnectionSettings, handle_connection},
+    handler::{
+        ClientTopologySource, ConnectionSettings, QueueDeclareCoordinator, handle_connection,
+    },
     helper::{try_decode, try_encode},
     replication::{
         CoordinationProtocolOwnerPeerResolver, ProtocolOwnerPeerResolverConfig,
@@ -148,6 +150,7 @@ async fn open_protocol_connection_for_broker(
         None::<StaticAuthHandler>,
         settings,
         None,
+        None,
     ));
 
     (Framed::new(client, ProtoCodec), server_task, dir, broker)
@@ -181,6 +184,7 @@ async fn start_protocol_listener_for_broker(
             conn_id,
             auth,
             settings,
+            None,
             None,
         )
         .await
@@ -2726,6 +2730,7 @@ async fn handler_answers_topology_query_from_source() {
             None::<StaticAuthHandler>,
             ConnectionSettings::new(Some(60)),
             Some(source as Arc<dyn ClientTopologySource>),
+            None,
         )
         .await
     });
@@ -2807,6 +2812,7 @@ async fn unowned_publish_redirects_to_current_owner() {
             None::<StaticAuthHandler>,
             ConnectionSettings::new(Some(60)),
             Some(source as Arc<dyn ClientTopologySource>),
+            None,
         )
         .await
     });
@@ -2841,6 +2847,134 @@ async fn unowned_publish_redirects_to_current_owner() {
     let redirect: fibril_protocol::v1::Redirect = try_decode(&frame).unwrap();
     assert_eq!(redirect.topic, "elsewhere");
     assert_eq!(redirect.owner_endpoint, "127.0.0.1:9999");
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+    drop(dir);
+}
+
+/// Declare resolves the partition count (explicit, else the cluster default)
+/// and reports it. Standalone (no coordinator) materializes locally.
+#[tokio::test]
+async fn declare_fans_out_partitions_standalone() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+
+    // Explicit partition count is honored.
+    framed
+        .send(
+            try_encode(
+                Op::DeclareQueue,
+                2,
+                &DeclareQueue {
+                    topic: "orders".into(),
+                    group: None,
+                    dlq_policy: None,
+                    dlq_max_retries: None,
+                    partition_count: Some(3),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::DeclareQueueOk as u16);
+    let ok: DeclareQueueOk = try_decode(&frame).unwrap();
+    assert_eq!(ok.partition_count, 3);
+
+    // Omitted count falls back to the cluster default (1 in the test broker).
+    framed
+        .send(
+            try_encode(
+                Op::DeclareQueue,
+                3,
+                &DeclareQueue {
+                    topic: "emails".into(),
+                    group: None,
+                    dlq_policy: None,
+                    dlq_max_retries: None,
+                    partition_count: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    let ok: DeclareQueueOk = try_decode(&frame).unwrap();
+    assert_eq!(ok.partition_count, 1);
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+/// In cluster mode the coordinator's effective count is authoritative — it
+/// overrides the requested count (e.g. the queue was already declared).
+#[tokio::test]
+async fn declare_uses_coordinator_effective_count() {
+    struct FixedCoordinator(u32);
+    impl QueueDeclareCoordinator for FixedCoordinator {
+        fn declare_partitioning<'a>(
+            &'a self,
+            _topic: &'a str,
+            _group: Option<&'a str>,
+            _partition_count: u32,
+        ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
+            let effective = self.0;
+            Box::pin(async move { Ok(effective) })
+        }
+    }
+
+    let (broker, dir) = open_test_broker().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let coordinator = Arc::new(FixedCoordinator(5));
+    let server_task = tokio::spawn(async move {
+        let (server, peer) = listener.accept().await.unwrap();
+        let tcp_stats = TcpStats::new(10);
+        let connection_stats = ConnectionStats::new();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+        handle_connection(
+            server,
+            broker,
+            tcp_stats,
+            connection_stats,
+            conn_id,
+            None::<StaticAuthHandler>,
+            ConnectionSettings::new(Some(60)),
+            None,
+            Some(coordinator as Arc<dyn QueueDeclareCoordinator>),
+        )
+        .await
+    });
+
+    let client = TcpStream::connect(addr).await.unwrap();
+    let mut framed = Framed::new(client, ProtoCodec);
+    handshake(&mut framed).await;
+    framed
+        .send(
+            try_encode(
+                Op::DeclareQueue,
+                2,
+                &DeclareQueue {
+                    topic: "orders".into(),
+                    group: None,
+                    dlq_policy: None,
+                    dlq_max_retries: None,
+                    partition_count: Some(3),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    let ok: DeclareQueueOk = try_decode(&frame).unwrap();
+    assert_eq!(
+        ok.partition_count, 5,
+        "coordinator count overrides the request"
+    );
 
     drop(framed);
     server_task.await.unwrap().unwrap();

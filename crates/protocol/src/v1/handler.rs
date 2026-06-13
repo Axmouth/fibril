@@ -58,6 +58,19 @@ pub trait ClientTopologySource: Send + Sync {
     ) -> Option<(String, u64)>;
 }
 
+/// Server-side writer for queue-declaration coordination: records the queue's
+/// partitioning (count + version) in the replicated store, returning the
+/// EFFECTIVE partition count (which may differ from the request if the queue
+/// was already declared). `None` (standalone) means declare is local-only.
+pub trait QueueDeclareCoordinator: Send + Sync {
+    fn declare_partitioning<'a>(
+        &'a self,
+        topic: &'a str,
+        group: Option<&'a str>,
+        partition_count: u32,
+    ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
+}
+
 struct ConnState {
     authenticated: bool,
     subs: HashMap<SubKey, SubState>,
@@ -1156,6 +1169,7 @@ pub async fn run_server(
     auth: Option<impl AuthHandler + Send + Sync + Clone + 'static>,
     connection_settings: ConnectionSettings,
     topology_source: Option<Arc<dyn ClientTopologySource>>,
+    declare_coordinator: Option<Arc<dyn QueueDeclareCoordinator>>,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     print_banner(&addr);
@@ -1172,6 +1186,7 @@ pub async fn run_server(
         let connection_stats = connection_stats.clone();
         let connection_settings = connection_settings.clone();
         let topology_source = topology_source.clone();
+        let declare_coordinator = declare_coordinator.clone();
         tokio::spawn(async move {
             tracing::info!("Connection {conn_id} opening..");
             if let Err(e) = handle_connection(
@@ -1183,6 +1198,7 @@ pub async fn run_server(
                 auth,
                 connection_settings,
                 topology_source,
+                declare_coordinator,
             )
             .await
             {
@@ -1216,6 +1232,7 @@ pub async fn handle_connection(
     auth_handler: Option<impl AuthHandler + Send + Sync>,
     connection_settings: ConnectionSettings,
     topology_source: Option<Arc<dyn ClientTopologySource>>,
+    declare_coordinator: Option<Arc<dyn QueueDeclareCoordinator>>,
 ) -> anyhow::Result<()> {
     let heartbeat_interval = connection_settings
         .heartbeat_interval
@@ -1922,7 +1939,8 @@ pub async fn handle_connection(
 
                 // Captured for a possible redirect (the identity is moved into
                 // the install args below). Subscribe is implicitly partition 0
-                // today; Phase B will add an explicit partition to the wire.
+                // today; an explicit partition on the wire comes with
+                // multi-partition subscriptions.
                 let sub_topic = sub.topic.clone();
                 let sub_group = sub.group.clone();
                 let sub_partition = 0u32;
@@ -2025,45 +2043,78 @@ pub async fn handle_connection(
                     }
                 };
 
-                match broker
-                    .engine()
-                    .declare_queue(&declare.topic, 0, declare.group.as_deref(), meta)
-                    .await
-                {
-                    Ok(()) => {
-                        frame_tx_high_prio
-                            .send(try_encode(
-                                Op::DeclareQueueOk,
+                let requested = declare
+                    .partition_count
+                    .unwrap_or_else(|| broker.config_snapshot().default_partition_count)
+                    .max(1);
+
+                // Record partitioning metadata first (cluster mode): the
+                // returned count is authoritative — an already-declared queue's
+                // count wins, and a conflicting request errors. Standalone uses
+                // the requested count directly.
+                let partition_count = if let Some(coordinator) = &declare_coordinator {
+                    match coordinator
+                        .declare_partitioning(&declare.topic, declare.group.as_deref(), requested)
+                        .await
+                    {
+                        Ok(count) => count,
+                        Err(message) => {
+                            let _ = send_error_response(
+                                &frame_tx_high_prio,
                                 frame.request_id,
-                                &DeclareQueueOk {
-                                    status: "stored".into(),
-                                    // Partition fan-out is wired next; this path
-                                    // still creates a single partition.
-                                    partition_count: 1,
-                                },
-                            )?)
-                            .await?;
+                                ERR_CONFLICT,
+                                &message,
+                            )
+                            .await;
+                            continue;
+                        }
                     }
-                    Err(err @ StromaError::InvalidArgument(_)) => {
-                        let _ = send_error_response(
-                            &frame_tx_high_prio,
-                            frame.request_id,
-                            400,
-                            &err.to_string(),
+                } else {
+                    requested
+                };
+
+                // Materialize the partitions locally; in cluster mode the
+                // controller assigns ownership and catalogue sync registers them.
+                let mut failure: Option<(u16, String)> = None;
+                for partition in 0..partition_count {
+                    match broker
+                        .engine()
+                        .declare_queue(
+                            &declare.topic,
+                            partition,
+                            declare.group.as_deref(),
+                            meta.clone(),
                         )
-                        .await;
-                    }
-                    Err(err) => {
-                        tracing::error!("Declare queue failed: {err}");
-                        let _ = send_error_response(
-                            &frame_tx_high_prio,
-                            frame.request_id,
-                            500,
-                            "declare queue failed",
-                        )
-                        .await;
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(err @ StromaError::InvalidArgument(_)) => {
+                            failure = Some((400, err.to_string()));
+                            break;
+                        }
+                        Err(err) => {
+                            tracing::error!("Declare queue failed: {err}");
+                            failure = Some((500, "declare queue failed".into()));
+                            break;
+                        }
                     }
                 }
+                if let Some((code, message)) = failure {
+                    let _ =
+                        send_error_response(&frame_tx_high_prio, frame.request_id, code, &message)
+                            .await;
+                    continue;
+                }
+                frame_tx_high_prio
+                    .send(try_encode(
+                        Op::DeclareQueueOk,
+                        frame.request_id,
+                        &DeclareQueueOk {
+                            status: "stored".into(),
+                            partition_count,
+                        },
+                    )?)
+                    .await?;
             }
 
             // -------- ACK ----------------------------------------------------
