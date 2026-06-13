@@ -1121,6 +1121,18 @@ pub struct ReplicationProgressCell {
     changed: Notify,
 }
 
+impl ReplicationProgressCell {
+    /// Lock the progress map, recovering the guard if a previous holder panicked
+    /// (a poisoned lock here just means slightly stale progress, never unsafe).
+    fn lock_followers(
+        &self,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, FollowerProgress>> {
+        self.followers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
     pub fn new(engine: E, cfg: BrokerConfig, metrics: Option<Arc<BrokerStats>>) -> Arc<Self> {
         Self::new_with_ownership(engine, cfg, metrics, Arc::new(OwnAllQueues))
@@ -1223,7 +1235,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
             .clone();
         {
-            let mut followers = cell.followers.lock().expect("progress lock");
+            let mut followers = cell.lock_followers();
             let entry = followers
                 .entry(follower_node_id.to_string())
                 .or_insert(FollowerProgress {
@@ -1254,7 +1266,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.replication_progress
             .get(&key)
             .map(|cell| {
-                let followers = cell.followers.lock().expect("progress lock");
+                let followers = cell.lock_followers();
                 followers
                     .iter()
                     .map(|(node, progress)| {
@@ -1330,27 +1342,20 @@ impl ReplicationConfirmGate {
             .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
             .clone();
 
-        // In-sync replica floor (Kafka min.insync.replicas). Only applies to
-        // replica-durable policies (required_followers > 0). If fewer replicas
-        // are healthy than the floor, refuse the publish fast instead of
-        // letting it hang until the confirm timeout.
+        // In-sync replica floor (Kafka min.insync.replicas). A precondition on
+        // current cluster health, NOT something to wait on: if too few replicas
+        // are healthy we refuse fast so a degraded cluster errors immediately
+        // instead of hanging every publish until the confirm timeout. The
+        // briefly-unhealthy cold-start window (a follower that has not pulled
+        // yet) is self-healing — followers report continuously, so a client
+        // retry rides through it. in-sync = owner + followers that reported
+        // within the freshness window. A floor of 1 (the default) is satisfied
+        // by the owner alone, so skip the work entirely.
         if min_in_sync > 1 {
-            // Static infeasibility: the assigned replica set can never reach
-            // the floor regardless of health.
-            let replica_set = assignment.replica_set_size();
-            if min_in_sync > replica_set {
-                return Err(BrokerError::NotEnoughInSyncReplicas {
-                    topic: key.tp.clone(),
-                    partition: key.part,
-                    in_sync: replica_set,
-                    required: min_in_sync,
-                });
-            }
-            // Dynamic shortfall: owner plus followers that reported recently.
             let in_sync = {
-                let followers = cell.followers.lock().expect("progress lock");
+                let followers = cell.lock_followers();
                 let now = std::time::Instant::now();
-                let live_followers = assignment
+                let fresh = assignment
                     .followers
                     .iter()
                     .filter(|follower| {
@@ -1359,7 +1364,7 @@ impl ReplicationConfirmGate {
                         })
                     })
                     .count();
-                1 + live_followers
+                1 + fresh
             };
             if in_sync < min_in_sync {
                 return Err(BrokerError::NotEnoughInSyncReplicas {
@@ -1373,9 +1378,12 @@ impl ReplicationConfirmGate {
 
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
+        // Wait for the durability ack count: enough followers durable past this
+        // offset. Unlike the ISR floor, this IS a wait — the acks are in flight
+        // and just need replication to catch up to the offset.
         loop {
             let satisfied = {
-                let followers = cell.followers.lock().expect("progress lock");
+                let followers = cell.lock_followers();
                 assignment
                     .followers
                     .iter()
@@ -1511,7 +1519,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         self.ensure_queue_owner(&tp, part, group.as_deref())?;
 
-        // R5 confirm gate (built early: later closures move `tp`/`group`).
+        // Confirm gate (built early: later closures move `tp`/`group`).
         let confirm_gate = self.replication_confirm_gate();
         let confirm_key = QueueKey {
             tp: tp.clone(),
@@ -1678,7 +1686,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         if let Err(e) = confirm_tx.send(offset).await {
                             tracing::error!("Failed to send confirm offset: {e:?}");
                         }
-                        // R5: local durability first, then the assignment's
+                        // Local durability first, then the assignment's
                         // replication policy (replica/majority acks) before
                         // the producer sees the confirm.
                         let res: Result<u64, BrokerError> = confirm_gate

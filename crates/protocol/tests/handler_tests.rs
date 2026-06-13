@@ -1749,7 +1749,7 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
     server_task.await.unwrap().unwrap();
 }
 
-/// R3 gate: the supervised assignment watcher reacts to a CONTROLLER-written
+/// Supervised assignment watcher reacts to a CONTROLLER-written
 /// coordination assignment, starts the follower loop, resolves the owner from
 /// the snapshot's node table, and replicates over real protocol TCP.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1886,7 +1886,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     .await
     .expect("supervised follower should catch up from the coordination assignment");
 
-    // R5 wire path: the follower's stamped reads reported its durable
+    // Wire path: the follower's stamped reads reported its durable
     // progress to the owner.
     let progress = owner_broker.follower_replication_progress(topic, 0, None);
     assert!(
@@ -1923,7 +1923,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     server_task.await.unwrap().unwrap();
 }
 
-/// R4 gate: owner death drives the full failover choreography with no manual
+/// Owner death drives the full failover choreography with no manual
 /// steps — TTL drops the owner from the live set, the controller reassigns
 /// with an epoch bump, and the follower's supervised watcher drains its
 /// worker, promotes at local tails, and starts serving as owner.
@@ -2130,7 +2130,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
     server_task.await.unwrap().unwrap();
 }
 
-/// R4 adversarial: the OLD owner observes its demotion through its own
+/// Adversarial: the OLD owner observes its demotion through its own
 /// watcher when it comes back — owner runtime torn down, queue demoted to
 /// follower, new owner publishes rejected locally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

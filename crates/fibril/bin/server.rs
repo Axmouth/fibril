@@ -95,7 +95,7 @@ async fn main() -> anyhow::Result<()> {
     let broker_cfg = BrokerConfig::from_runtime_settings(runtime);
 
     // Cluster coordination starts BEFORE the broker so queue ownership can be
-    // injected at construction (R3: in ganglion mode brokers serve only
+    // injected at construction (in ganglion mode brokers serve only
     // assigned queues; standalone keeps owning everything).
     struct GanglionParts {
         coordination: Arc<
@@ -230,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // R3 ownership switch: assigned-queues-only in cluster mode.
+    // Ownership switch: assigned-queues-only in cluster mode.
     let ownership: Arc<dyn fibril_broker::broker::QueueOwnership> = match &ganglion_parts {
         Some(parts) => parts.coordination.clone(),
         None => Arc::new(fibril_broker::broker::OwnAllQueues),

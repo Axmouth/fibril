@@ -911,7 +911,7 @@ where
 }
 
 /// Queue-ownership gate view: in cluster mode brokers serve only queues the
-/// committed snapshot assigns to them (R3 ownership switch).
+/// committed snapshot assigns to them.
 impl<LS, NF> fibril_broker::broker::QueueOwnership for GanglionCoordination<LS, NF>
 where
     LS: RaftLogStorage<GanglionRaftConfig>,
@@ -1060,7 +1060,7 @@ mod tests {
         coordination.raft_node().shutdown().await.expect("shutdown");
     }
 
-    /// F2 choreography: the raft leader IS the controller. The controller
+    /// Failover choreography: the raft leader IS the controller. The controller
     /// loop assigns a queue from the live-node set, a follower provider
     /// observes it, and when the owner drops out of the live set the next
     /// iteration reassigns ownership with a fencing-epoch bump.
@@ -1421,7 +1421,7 @@ mod tests {
         provider.raft_node().shutdown().await.expect("shutdown");
     }
 
-    /// R2b: a runtime-settings update published on one broker becomes
+    /// A runtime-settings update published on one broker becomes
     /// effective on another through the replicated attribute + sync loop,
     /// and concurrent publishers serialize through the attribute CAS.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1515,7 +1515,7 @@ mod tests {
         provider.raft_node().shutdown().await.expect("shutdown");
     }
 
-    /// R4 candidate selection: with multiple followers, failover prefers the
+    /// Candidate selection: with multiple followers, failover prefers the
     /// most caught-up live follower by heartbeat-label applied tails — even
     /// when the planner's sort order would pick another.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

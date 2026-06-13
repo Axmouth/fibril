@@ -747,7 +747,7 @@ async fn refresh_follower_keeps_replication_worker_progress() {
     follower.shutdown().await;
 }
 
-/// R5 publish-confirm enforcement: with a replica-durable assignment cached,
+/// Publish-confirm enforcement: with a replica-durable assignment cached,
 /// the producer's confirm resolves only after a follower's reported durable
 /// progress passes the message offset — and times out with a descriptive
 /// error when no follower reports.
@@ -829,10 +829,11 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
     broker.shutdown().await;
 }
 
-/// R5 in-sync-replica floor (Kafka min.insync.replicas): when the assigned
+/// In-sync-replica floor (Kafka min.insync.replicas): when the assigned
 /// replica set is smaller than the configured floor, a replica-durable publish
 /// is refused immediately — it can never satisfy the floor. A long confirm
-/// timeout proves the refusal is fast (not a timeout).
+/// timeout combined with the tight time bound proves the refusal is fast (the
+/// floor is a precondition, not a wait).
 #[tokio::test]
 async fn publish_refused_when_min_in_sync_exceeds_replica_set() {
     let topic = "isr-static";
@@ -867,8 +868,9 @@ async fn publish_refused_when_min_in_sync_exceeds_replica_set() {
         )
         .await
         .unwrap();
-    let err = reply
+    let err = tokio::time::timeout(Duration::from_secs(2), reply)
         .await
+        .expect("ISR refusal must be fast, not wait out the confirm timeout")
         .unwrap()
         .expect_err("must refuse below ISR floor");
     let message = format!("{err:?}");
@@ -917,8 +919,9 @@ async fn publish_refused_when_in_sync_replicas_below_floor() {
         )
         .await
         .unwrap();
-    let err = reply
+    let err = tokio::time::timeout(Duration::from_secs(2), reply)
         .await
+        .expect("ISR refusal must be fast, not wait out the confirm timeout")
         .unwrap()
         .expect_err("must refuse with no healthy follower");
     let message = format!("{err:?}");
@@ -967,8 +970,9 @@ async fn stale_follower_excluded_from_in_sync_set() {
         )
         .await
         .unwrap();
-    let err = reply
+    let err = tokio::time::timeout(Duration::from_secs(2), reply)
         .await
+        .expect("ISR refusal must be fast, not wait out the confirm timeout")
         .unwrap()
         .expect_err("stale follower must not satisfy ISR");
     let message = format!("{err:?}");
@@ -1017,8 +1021,9 @@ async fn publish_admitted_once_in_sync_floor_met() {
         )
         .await
         .unwrap();
-    let offset = reply
+    let offset = tokio::time::timeout(Duration::from_secs(2), reply)
         .await
+        .expect("confirm should resolve well within the bound")
         .unwrap()
         .expect("confirm resolves once ISR floor and durability are met");
     assert_eq!(offset, 0);
@@ -1183,7 +1188,7 @@ async fn assignment_transition_apply_does_not_materialize_new_owner_queue() {
 
 #[tokio::test]
 async fn assignment_transition_apply_keeps_unmaterialized_promotion_cold() {
-    // R4 semantics: materialized followers promote at local tails (covered by
+    // Failover semantics: materialized followers promote at local tails (covered by
     // the protocol-level failover test); a never-materialized queue has no
     // follower state to promote and must stay cold until real traffic.
     let (broker, _dir) = open_test_broker().await;
