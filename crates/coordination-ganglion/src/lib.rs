@@ -44,31 +44,40 @@ pub struct ClusterRuntimeSettings {
 /// traffic. Present from day one to keep the wire forward-compatible.
 pub const DEFAULT_PARTITIONING_VERSION: u64 = 0;
 
-/// Attribute-key prefix for per-topic partitioning metadata in the replicated
-/// attribute store. The full key is `fibril/topic/<topic>`.
-pub const TOPIC_METADATA_ATTRIBUTE_PREFIX: &str = "fibril/topic/";
+/// Attribute-key prefix for per-queue partitioning metadata in the replicated
+/// attribute store. A logical queue is identified by `(topic, group)` (group is
+/// part of the identity, like a name prefix), so the key is
+/// `fibril/partitioning/<topic>` (ungrouped) or
+/// `fibril/partitioning/<topic>/<group>`. Topic and group share a validated
+/// charset that excludes `/`, so the separator is unambiguous.
+pub const QUEUE_PARTITIONING_ATTRIBUTE_PREFIX: &str = "fibril/partitioning/";
 
-fn topic_metadata_key(topic: &str) -> String {
-    format!("{TOPIC_METADATA_ATTRIBUTE_PREFIX}{topic}")
+fn queue_partitioning_key(topic: &str, group: Option<&str>) -> String {
+    match group {
+        Some(group) => format!("{QUEUE_PARTITIONING_ATTRIBUTE_PREFIX}{topic}/{group}"),
+        None => format!("{QUEUE_PARTITIONING_ATTRIBUTE_PREFIX}{topic}"),
+    }
 }
 
-/// Replicated per-topic partitioning metadata. `partition_count` is fixed at
-/// create for now; `partitioning_version` bumps on a future live repartition so
-/// routing can be fenced. Stored as a CAS attribute so concurrent declares are
-/// race-safe (create-once) and a repartition is a compare-update.
+/// Replicated partitioning of one logical queue `(topic, group)`.
+/// `partition_count` is fixed at create for now; `partitioning_version` bumps on
+/// a future live repartition so routing can be fenced. Stored as a CAS
+/// attribute so concurrent declares are race-safe (create-once) and a
+/// repartition is a compare-update.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TopicMetadata {
+pub struct QueuePartitioning {
     pub partition_count: u32,
     pub partitioning_version: u64,
 }
 
-/// Outcome of declaring a topic's partitioning.
+/// Outcome of declaring a queue's partitioning.
 #[derive(Debug)]
-pub enum DeclareTopicError {
-    /// The topic already exists with a different partition count. Changing the
+pub enum DeclareQueueError {
+    /// The queue already exists with a different partition count. Changing the
     /// count is a repartition, not a re-declare.
     PartitionCountConflict {
         topic: String,
+        group: Option<String>,
         existing: u32,
         requested: u32,
     },
@@ -76,23 +85,28 @@ pub enum DeclareTopicError {
     Coordination(OpenraftAdapterError),
 }
 
-impl std::fmt::Display for DeclareTopicError {
+impl std::fmt::Display for DeclareQueueError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PartitionCountConflict {
                 topic,
+                group,
                 existing,
                 requested,
             } => write!(
                 f,
-                "topic `{topic}` already declared with {existing} partitions (requested {requested}); use repartition to change it"
+                "queue `{topic}`{} already declared with {existing} partitions (requested {requested}); use repartition to change it",
+                group
+                    .as_deref()
+                    .map(|g| format!("/{g}"))
+                    .unwrap_or_default()
             ),
             Self::Coordination(error) => write!(f, "{error}"),
         }
     }
 }
 
-impl std::error::Error for DeclareTopicError {}
+impl std::error::Error for DeclareQueueError {}
 
 /// Client-facing ownership of one queue partition: which node owns it and where
 /// to reach that node, plus the partitioning version the routing was computed
@@ -552,14 +566,20 @@ where
         }
     }
 
-    /// Committed partitioning metadata for a topic, if it has been declared.
-    pub fn topic_metadata(&self, topic: &str) -> Option<TopicMetadata> {
-        self.cluster_attribute(&topic_metadata_key(topic))
+    /// Committed partitioning for a logical queue `(topic, group)`, if declared.
+    pub fn queue_partitioning(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+    ) -> Option<QueuePartitioning> {
+        self.cluster_attribute(&queue_partitioning_key(topic, group))
             .as_deref()
             .and_then(|raw| serde_json::from_str(raw).ok())
     }
 
-    /// Declare a topic's partitioning, race-safe via create-once CAS.
+    /// Declare a logical queue's partitioning, race-safe via create-once CAS.
+    /// The queue is `(topic, group)` — group is part of its identity, so each
+    /// group is partitioned independently.
     ///
     /// - absent -> created with `partition_count` at version 0.
     /// - already declared with the SAME count -> idempotent success.
@@ -568,42 +588,44 @@ where
     ///
     /// Concurrent declares serialize through the CAS: the loser re-reads and
     /// either succeeds idempotently or surfaces the conflict.
-    pub async fn declare_topic(
+    pub async fn declare_queue_partitioning(
         &self,
         topic: &str,
+        group: Option<&str>,
         partition_count: u32,
-    ) -> Result<TopicMetadata, DeclareTopicError> {
+    ) -> Result<QueuePartitioning, DeclareQueueError> {
         let partition_count = partition_count.max(1);
-        let key = topic_metadata_key(topic);
+        let key = queue_partitioning_key(topic, group);
         for _ in 0..8 {
             let current_raw = self.cluster_attribute(&key);
             if let Some(raw) = &current_raw {
-                match serde_json::from_str::<TopicMetadata>(raw) {
+                match serde_json::from_str::<QueuePartitioning>(raw) {
                     Ok(existing) if existing.partition_count == partition_count => {
                         return Ok(existing);
                     }
                     Ok(existing) => {
-                        return Err(DeclareTopicError::PartitionCountConflict {
+                        return Err(DeclareQueueError::PartitionCountConflict {
                             topic: topic.to_string(),
+                            group: group.map(str::to_string),
                             existing: existing.partition_count,
                             requested: partition_count,
                         });
                     }
                     Err(error) => {
-                        return Err(DeclareTopicError::Coordination(
+                        return Err(DeclareQueueError::Coordination(
                             OpenraftAdapterError::Storage(format!(
-                                "topic `{topic}` metadata is corrupt: {error}"
+                                "queue `{topic}`/{group:?} partitioning is corrupt: {error}"
                             )),
                         ));
                     }
                 }
             }
-            let metadata = TopicMetadata {
+            let partitioning = QueuePartitioning {
                 partition_count,
                 partitioning_version: DEFAULT_PARTITIONING_VERSION,
             };
-            let value = serde_json::to_string(&metadata).map_err(|error| {
-                DeclareTopicError::Coordination(OpenraftAdapterError::Storage(error.to_string()))
+            let value = serde_json::to_string(&partitioning).map_err(|error| {
+                DeclareQueueError::Coordination(OpenraftAdapterError::Storage(error.to_string()))
             })?;
             match self
                 .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
@@ -613,14 +635,14 @@ where
                 })
                 .await
             {
-                Ok(_) => return Ok(metadata),
+                Ok(_) => return Ok(partitioning),
                 // Lost the create race: re-read and resolve (idempotent or conflict).
                 Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
-                Err(error) => return Err(DeclareTopicError::Coordination(error)),
+                Err(error) => return Err(DeclareQueueError::Coordination(error)),
             }
         }
-        Err(DeclareTopicError::Coordination(
-            OpenraftAdapterError::Storage("topic declare lost the CAS race repeatedly".to_string()),
+        Err(DeclareQueueError::Coordination(
+            OpenraftAdapterError::Storage("queue declare lost the CAS race repeatedly".to_string()),
         ))
     }
 
@@ -1405,12 +1427,13 @@ mod tests {
         }
     }
 
-    /// Topic declare is create-once + idempotent: first declare creates the
-    /// partitioning metadata, re-declaring the same count is a no-op success,
-    /// and re-declaring a different count is a conflict (repartition is
-    /// separate). Reads return None for undeclared topics.
+    /// Queue declare is create-once + idempotent per `(topic, group)`: first
+    /// declare creates the partitioning, re-declaring the same count is a no-op
+    /// success, a different count conflicts, and groups partition independently
+    /// (group is part of the queue identity). Reads return None for undeclared
+    /// queues.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn declare_topic_is_create_once_and_idempotent() {
+    async fn declare_queue_partitioning_is_create_once_and_per_group() {
         let router = InProcessRouter::new();
         let config = default_raft_config().expect("config");
         let raft_node = RaftMetadataNode::start(1, config, &router)
@@ -1425,37 +1448,58 @@ mod tests {
             .expect("election");
         let provider = GanglionCoordination::new("broker-a", raft_node);
 
-        assert_eq!(provider.topic_metadata("orders"), None);
+        assert_eq!(provider.queue_partitioning("orders", None), None);
 
-        let created = provider.declare_topic("orders", 4).await.expect("declare");
+        let created = provider
+            .declare_queue_partitioning("orders", None, 4)
+            .await
+            .expect("declare");
         assert_eq!(created.partition_count, 4);
         assert_eq!(created.partitioning_version, DEFAULT_PARTITIONING_VERSION);
-        assert_eq!(provider.topic_metadata("orders"), Some(created.clone()));
+        assert_eq!(
+            provider.queue_partitioning("orders", None),
+            Some(created.clone())
+        );
 
         // Idempotent re-declare with the same count.
         let again = provider
-            .declare_topic("orders", 4)
+            .declare_queue_partitioning("orders", None, 4)
             .await
             .expect("idempotent re-declare");
         assert_eq!(again, created);
 
         // A different count is a conflict, not a silent change.
         let conflict = provider
-            .declare_topic("orders", 8)
+            .declare_queue_partitioning("orders", None, 8)
             .await
             .expect_err("different partition count must conflict");
         assert!(matches!(
             conflict,
-            DeclareTopicError::PartitionCountConflict {
+            DeclareQueueError::PartitionCountConflict {
                 existing: 4,
                 requested: 8,
                 ..
             }
         ));
-        // Metadata is unchanged after the rejected declare.
         assert_eq!(
-            provider.topic_metadata("orders").map(|m| m.partition_count),
+            provider
+                .queue_partitioning("orders", None)
+                .map(|m| m.partition_count),
             Some(4)
+        );
+
+        // A group on the same topic partitions independently (part of identity).
+        let grouped = provider
+            .declare_queue_partitioning("orders", Some("workers"), 2)
+            .await
+            .expect("declare grouped queue");
+        assert_eq!(grouped.partition_count, 2);
+        assert_eq!(
+            provider
+                .queue_partitioning("orders", None)
+                .map(|m| m.partition_count),
+            Some(4),
+            "the ungrouped queue is unaffected by the grouped declare"
         );
 
         provider.raft_node().shutdown().await.expect("shutdown");

@@ -285,10 +285,16 @@ First cut is fixed-at-create `partition_count`, but live repartitioning
 forward-compatible, not a dead end. Bake these in NOW even though N won't change
 live yet:
 
-- **Partitioning is a VERSIONED topic property, never an immutable constant.**
-  Store `{ partition_count, partitioning_version }` as a topic-level entry in
-  the replicated catalogue/attributes. The first cut just never bumps the
-  version; the data model already supports it changing.
+- **Partitioning is a VERSIONED property of the logical queue `(topic, group)`,
+  never an immutable constant.** REVISED 2026-06-13: `group` is part of the
+  queue identity (a name prefix) and each `(topic, group)` is an independent
+  queue with its own message data, so partitioning is per-`(topic, group)`, NOT
+  per-bare-topic. (The earlier "groups share the topic's partitioning" note is
+  superseded — it predated confirming groups have separate logs.) Store
+  `{ partition_count, partitioning_version }` as a CAS attribute keyed
+  `fibril/partitioning/<topic>[/<group>]`. The first cut never bumps the
+  version; the data model already supports it changing. (Implemented in B1:
+  `declare_queue_partitioning(topic, group, count)` / `queue_partitioning`.)
 - **Routing carries the partitioning version.** Key->partition routing is
   `route(key, partitioning_version) -> partition`. Clients learn the current
   `partitioning_version` with topology and stamp it on publishes. The owner can
