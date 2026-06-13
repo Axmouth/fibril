@@ -722,6 +722,7 @@ pub async fn visual_client(
                         headers: HashMap::new(),
                         published: unix_millis(),
                         payload: b"hello".repeat(10000).to_vec(),
+                        partition_key: None,
                     })
                     .await
                     .is_err()

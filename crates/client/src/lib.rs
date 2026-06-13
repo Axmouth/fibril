@@ -2040,6 +2040,7 @@ where
                             headers,
                             payload,
                             published,
+                            partition_key: None,
                         };
                         send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
@@ -2055,6 +2056,7 @@ where
                             headers,
                             payload,
                             published,
+                            partition_key: None,
                         };
                         send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
@@ -2070,6 +2072,7 @@ where
                             headers,
                             payload,
                             published,
+                            partition_key: None,
                         };
                         send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
                     }
@@ -2086,6 +2089,7 @@ where
                             headers,
                             payload,
                             published,
+                            partition_key: None,
                         };
                         send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
                     }

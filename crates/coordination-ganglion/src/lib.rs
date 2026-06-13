@@ -120,6 +120,9 @@ pub struct ClientQueueTopology {
     /// Broker endpoint of the owner, if the node is known in the registry.
     pub owner_endpoint: Option<String>,
     pub partitioning_version: u64,
+    /// Total partition count of this queue `(topic, group)` — authoritative N
+    /// for key routing.
+    pub partition_count: u32,
 }
 
 /// Client-facing topology snapshot: the owner/endpoint of every assigned queue
@@ -938,17 +941,34 @@ where
             .map(|node| (node.node_id.clone(), node.endpoint.clone()))
             .collect();
         let generation = committed.generation;
+        // Authoritative partitioning (count + version) per (topic, group), read
+        // from the committed attributes we already hold.
+        let partitioning = |topic: &str, group: Option<&str>| -> QueuePartitioning {
+            committed
+                .attributes
+                .get(&queue_partitioning_key(topic, group))
+                .and_then(|raw| serde_json::from_str::<QueuePartitioning>(raw).ok())
+                .unwrap_or(QueuePartitioning {
+                    partition_count: 1,
+                    partitioning_version: DEFAULT_PARTITIONING_VERSION,
+                })
+        };
         let fibril = to_fibril_snapshot(&committed);
         let mut queues: Vec<ClientQueueTopology> = fibril
             .assignments
             .values()
-            .map(|assignment| ClientQueueTopology {
-                topic: assignment.queue.topic.to_string(),
-                partition: assignment.queue.partition,
-                group: assignment.queue.group.as_ref().map(ToString::to_string),
-                owner_node_id: assignment.owner.clone(),
-                owner_endpoint: endpoints.get(&assignment.owner).cloned(),
-                partitioning_version: DEFAULT_PARTITIONING_VERSION,
+            .map(|assignment| {
+                let group = assignment.queue.group.as_ref().map(ToString::to_string);
+                let part = partitioning(&assignment.queue.topic, group.as_deref());
+                ClientQueueTopology {
+                    topic: assignment.queue.topic.to_string(),
+                    partition: assignment.queue.partition,
+                    group,
+                    owner_node_id: assignment.owner.clone(),
+                    owner_endpoint: endpoints.get(&assignment.owner).cloned(),
+                    partitioning_version: part.partitioning_version,
+                    partition_count: part.partition_count,
+                }
             })
             .collect();
         queues.sort_by(|a, b| {

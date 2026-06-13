@@ -103,6 +103,7 @@ mod tests {
                     group: Some("workers".into()),
                     owner_endpoint: Some("127.0.0.1:9000".into()),
                     partitioning_version: 0,
+                    partition_count: 1,
                 },
                 QueueTopologyEntry {
                     topic: "emails".into(),
@@ -110,6 +111,7 @@ mod tests {
                     group: None,
                     owner_endpoint: None,
                     partitioning_version: 0,
+                    partition_count: 1,
                 },
             ],
         };

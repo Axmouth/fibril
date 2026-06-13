@@ -255,6 +255,7 @@ async fn fetch_topology_populates_cache_and_routes() {
                 group: None,
                 owner_endpoint: Some(owner.to_string()),
                 partitioning_version: 0,
+                partition_count: 1,
             }],
         }),
         ..Default::default()

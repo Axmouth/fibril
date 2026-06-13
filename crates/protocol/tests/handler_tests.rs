@@ -488,6 +488,7 @@ async fn framed_publish(
                     headers: HashMap::new(),
                     payload: payload.to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -2702,6 +2703,7 @@ async fn handler_answers_topology_query_from_source() {
                 group: Some("workers".into()),
                 owner_endpoint: Some("127.0.0.1:9000".into()),
                 partitioning_version: 0,
+                partition_count: 1,
             },
             QueueTopologyEntry {
                 topic: "emails".into(),
@@ -2709,6 +2711,7 @@ async fn handler_answers_topology_query_from_source() {
                 group: None,
                 owner_endpoint: Some("127.0.0.1:9001".into()),
                 partitioning_version: 0,
+                partition_count: 1,
             },
         ],
     }));
@@ -2793,6 +2796,7 @@ async fn unowned_publish_redirects_to_current_owner() {
             group: None,
             owner_endpoint: Some("127.0.0.1:9999".into()),
             partitioning_version: 0,
+            partition_count: 1,
         }],
     }));
 
@@ -2835,6 +2839,7 @@ async fn unowned_publish_redirects_to_current_owner() {
                     headers: HashMap::new(),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3131,6 +3136,7 @@ async fn unowned_publish_returns_not_owner_error_and_keeps_connection_open() {
                     headers: HashMap::new(),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3245,6 +3251,7 @@ async fn publish_content_type_header_is_delivered_as_metadata() {
                     headers: HashMap::from([("Content-Type".into(), "application/json".into())]),
                     payload: br#"{"ok":true}"#.to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3283,6 +3290,7 @@ async fn publish_with_reserved_header_returns_error_and_keeps_connection_open() 
                     headers: HashMap::from([("fibril.retries".into(), "1".into())]),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3317,6 +3325,7 @@ async fn delayed_publish_with_reserved_header_returns_error_and_keeps_connection
                     headers: HashMap::from([("stroma.source_offset".into(), "1".into())]),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3371,6 +3380,7 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
                     headers: HashMap::new(),
                     payload: b"delayed".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3435,6 +3445,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                     headers: HashMap::new(),
                     payload: b"retry-later".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3565,6 +3576,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     headers: HashMap::from([("x-trace-id".into(), "dlq-flow".into())]),
                     payload: b"poison".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3652,6 +3664,7 @@ async fn publisher_cache_idle_timeout_allows_queue_eviction_while_connection_sta
                     headers: HashMap::new(),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3714,6 +3727,7 @@ async fn publisher_cache_idle_timeout_expires_on_next_frame_without_waiting_for_
                     headers: HashMap::new(),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),
@@ -3805,6 +3819,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
                         headers: HashMap::new(),
                         payload: payload.clone(),
                         published: unix_millis(),
+                        partition_key: None,
                     },
                 )
                 .unwrap(),
@@ -3894,6 +3909,7 @@ async fn publisher_cache_idle_timeout_updates_existing_connection() {
                     headers: HashMap::new(),
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
+                    partition_key: None,
                 },
             )
             .unwrap(),

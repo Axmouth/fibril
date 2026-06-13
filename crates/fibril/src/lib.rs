@@ -72,6 +72,7 @@ impl ClientTopologySource for CoordinationTopologySource {
                     group: queue.group,
                     owner_endpoint: queue.owner_endpoint,
                     partitioning_version: queue.partitioning_version,
+                    partition_count: queue.partition_count,
                 })
                 .collect(),
         }

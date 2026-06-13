@@ -151,7 +151,7 @@ impl ContentType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publish {
     pub topic: String,
-    pub partition: u32, // keep for later, default 0
+    pub partition: u32, // explicit partition override; default 0
     pub group: Option<String>,
     pub require_confirm: bool,
     #[serde(default)]
@@ -159,6 +159,11 @@ pub struct Publish {
     pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
     pub published: u64,
+    /// Optional partition key: `hash(key) % partition_count` selects the
+    /// partition (Kafka-style, for per-key ordering). Absent => round-robin.
+    /// Purely partition selection — NOT a RabbitMQ-style routing key.
+    #[serde(default)]
+    pub partition_key: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +178,11 @@ pub struct PublishDelayed {
     pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
     pub published: u64,
+    /// Optional partition key: `hash(key) % partition_count` selects the
+    /// partition (Kafka-style, for per-key ordering). Absent => round-robin.
+    /// Purely partition selection — NOT a RabbitMQ-style routing key.
+    #[serde(default)]
+    pub partition_key: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -493,6 +503,14 @@ pub struct QueueTopologyEntry {
     /// Broker endpoint of the owner, if the owner node is known in the registry.
     pub owner_endpoint: Option<String>,
     pub partitioning_version: u64,
+    /// Total partition count of this queue `(topic, group)` — authoritative N
+    /// for key routing. Repeated across the queue's partition entries.
+    #[serde(default = "one")]
+    pub partition_count: u32,
+}
+
+fn one() -> u32 {
+    1
 }
 
 /// Topology response: ownership of the requested queue partitions at a given

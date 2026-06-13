@@ -20,6 +20,7 @@ fn publish_frame(
         content_type,
         headers,
         require_confirm: false,
+        partition_key: None,
     }
 }
 
