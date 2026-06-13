@@ -358,6 +358,95 @@ fn queue_sort_key(queue: &QueueIdentity) -> (String, Partition, String) {
     )
 }
 
+// ===== Consumer-group partition assignment ===================================
+//
+// The CONSUMER side: which member of a consumer group reads which partitions of
+// a logical queue. Mirrors `PartitionPlacementPolicy` (partitions->nodes) one
+// level up (partitions->group members). Coverage-first: every partition is
+// assigned to exactly one member whenever the group is non-empty; a per-consumer
+// target is a soft capacity signal, never a coverage cap.
+
+/// Inputs for assigning a queue's partitions across a consumer group's members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerGroupAssignmentInput {
+    /// The partitions to cover (one logical queue's partitions).
+    pub partitions: Vec<Partition>,
+    /// Live group member ids (stable per consumer instance).
+    pub members: Vec<String>,
+    /// Soft per-consumer capacity. If the balanced load `ceil(N/M)` exceeds it,
+    /// partitions are still fully assigned (coverage wins) and
+    /// `under_provisioned` is set. `None` disables the signal.
+    pub target_per_consumer: Option<usize>,
+}
+
+/// The computed assignment of partitions to group members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerGroupAssignment {
+    /// Partitions assigned to each member (every member present, possibly empty).
+    pub by_member: HashMap<String, Vec<Partition>>,
+    /// True when the balanced load exceeds `target_per_consumer` — the group is
+    /// under-provisioned for its target (still fully covered). Feeds
+    /// alert/autoscale, never reduces coverage.
+    pub under_provisioned: bool,
+}
+
+/// Pluggable consumer-group assignment policy (geo/locality- or load-aware
+/// variants can slot in later), mirroring [`PartitionPlacementPolicy`].
+pub trait ConsumerGroupAssignor: std::fmt::Debug + Send + Sync {
+    fn assign(&self, input: ConsumerGroupAssignmentInput) -> ConsumerGroupAssignment;
+}
+
+/// Deterministic, balanced, coverage-first assignor: deals the queue's
+/// partitions round-robin across the sorted members, giving the first `N % M`
+/// members `ceil(N/M)` partitions and the rest `floor(N/M)`. Stickiness
+/// (minimizing moves across rebalances) is a future variant.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BalancedConsumerGroupAssignor;
+
+impl ConsumerGroupAssignor for BalancedConsumerGroupAssignor {
+    fn assign(&self, input: ConsumerGroupAssignmentInput) -> ConsumerGroupAssignment {
+        let mut partitions = input.partitions;
+        partitions.sort();
+        partitions.dedup();
+
+        let mut members = input.members;
+        members.sort();
+        members.dedup();
+
+        // Every member appears in the result, even if it gets no partitions
+        // (more members than partitions => some idle).
+        let mut by_member: HashMap<String, Vec<Partition>> =
+            members.iter().map(|m| (m.clone(), Vec::new())).collect();
+
+        if members.is_empty() {
+            // No members => nothing assigned. The queue is unconsumed (backlog
+            // waits); not "under-provisioned" — there is no target to miss.
+            return ConsumerGroupAssignment {
+                by_member,
+                under_provisioned: false,
+            };
+        }
+
+        let member_count = members.len();
+        for (index, partition) in partitions.iter().enumerate() {
+            let member = &members[index % member_count];
+            if let Some(assigned) = by_member.get_mut(member) {
+                assigned.push(*partition);
+            }
+        }
+
+        let max_load = partitions.len().div_ceil(member_count);
+        let under_provisioned = input
+            .target_per_consumer
+            .is_some_and(|target| target > 0 && max_load > target);
+
+        ConsumerGroupAssignment {
+            by_member,
+            under_provisioned,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalAssignmentRole {
     Owner,
@@ -996,6 +1085,110 @@ mod tests {
         assert_eq!(assignment_owner(&plan.snapshot, "emails"), "node-a");
         assert_eq!(assignment_owner(&plan.snapshot, "orders"), "node-b");
         assert_eq!(assignment_owner(&plan.snapshot, "tasks"), "node-a");
+    }
+
+    #[test]
+    fn placement_spreads_one_queues_partitions_across_distinct_nodes() {
+        // A single queue's partitions must land on distinct nodes (up to the
+        // node count) before any node is reused — so small clusters don't clump
+        // one queue onto a few nodes. See memory placement-spreads-partitions-first.
+        let plan = DeterministicPartitionPlacement
+            .plan(PartitionPlacementInput {
+                nodes: nodes(["node-a", "node-b", "node-c"]),
+                queues: (0..3)
+                    .map(|p| QueueIdentity::new("orders", Partition::new(p), None))
+                    .collect(),
+                existing: HashMap::new(),
+                target_followers: 0,
+                generation: 1,
+            })
+            .unwrap();
+
+        let owners: std::collections::HashSet<String> = (0..3)
+            .map(|p| {
+                plan.snapshot
+                    .assignment_for("orders", Partition::new(p), None)
+                    .expect("assignment")
+                    .owner
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            owners.len(),
+            3,
+            "3 partitions should occupy 3 distinct nodes"
+        );
+    }
+
+    fn assign_balanced(
+        partitions: u32,
+        members: &[&str],
+        target: Option<usize>,
+    ) -> ConsumerGroupAssignment {
+        BalancedConsumerGroupAssignor.assign(ConsumerGroupAssignmentInput {
+            partitions: (0..partitions).map(Partition::new).collect(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            target_per_consumer: target,
+        })
+    }
+
+    #[test]
+    fn group_assignment_is_balanced_and_covers_all_partitions() {
+        let assignment = assign_balanced(9, &["c1", "c2"], None);
+        let mut loads: Vec<usize> = assignment.by_member.values().map(Vec::len).collect();
+        loads.sort();
+        assert_eq!(loads, vec![4, 5], "9 partitions over 2 consumers => 5 + 4");
+
+        // Coverage: every partition assigned exactly once.
+        let mut covered: Vec<u32> = assignment
+            .by_member
+            .values()
+            .flatten()
+            .map(|p| p.id())
+            .collect();
+        covered.sort();
+        assert_eq!(covered, (0..9).collect::<Vec<_>>());
+        assert!(!assignment.under_provisioned);
+    }
+
+    #[test]
+    fn group_assignment_leaves_extra_members_idle() {
+        // More members than partitions => some idle, none over-provisioned.
+        let assignment = assign_balanced(2, &["c1", "c2", "c3"], None);
+        let idle = assignment
+            .by_member
+            .values()
+            .filter(|partitions| partitions.is_empty())
+            .count();
+        assert_eq!(idle, 1);
+        assert!(!assignment.under_provisioned);
+    }
+
+    #[test]
+    fn group_assignment_with_no_members_assigns_nothing() {
+        let assignment = assign_balanced(4, &[], None);
+        assert!(assignment.by_member.is_empty());
+        assert!(!assignment.under_provisioned);
+    }
+
+    #[test]
+    fn group_assignment_covers_then_flags_under_provisioned() {
+        // 9 partitions, target 3/consumer, only 2 consumers: still fully covered
+        // (5 + 4, exceeding the target) and flagged under-provisioned.
+        let assignment = assign_balanced(9, &["c1", "c2"], Some(3));
+        let mut covered: Vec<u32> = assignment
+            .by_member
+            .values()
+            .flatten()
+            .map(|p| p.id())
+            .collect();
+        covered.sort();
+        assert_eq!(
+            covered,
+            (0..9).collect::<Vec<_>>(),
+            "coverage is never capped"
+        );
+        assert!(assignment.under_provisioned);
     }
 
     #[test]

@@ -2044,3 +2044,9 @@ Tests needed before implementing transition:
   4. Cross-broker lag aggregation into fibrilctl topology + admin diagram.
   5. Idempotent-producer dedup decision.
   6. (END) combined Offset + Topic/Group newtype pass.
+  7. (END) DOCS: an explicit explainer of how the whole thing works together
+     (replication + partitioning + consumer groups), and bring the
+     implemented-surface docs page up to date with what's shipped.
+  PLACEMENT (locked in, memory placement-spreads-partitions-first): cluster
+  partition placement already spreads a queue's partitions across distinct nodes
+  before reusing a node (small-cluster balance). Add an explicit test to lock it.
