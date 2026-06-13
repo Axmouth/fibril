@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use fibril_client::{Client, ClientOptions, FibrilError, ReconnectOutcome};
+use fibril_client::{Client, ClientOptions, FibrilError, NewMessage, ReconnectOutcome};
 use fibril_protocol::v1::{
     COMPLIANCE_STRING, Hello, HelloOk, Op, PROTOCOL_V1, Publish, PublishOk, QueueTopologyEntry,
     ReconcileResult, Redirect, ResumeOutcome, TopologyOk,
@@ -35,6 +35,12 @@ struct MockConfig {
     publish: Option<MockBehavior>,
     /// If set, answer `Op::Topology` with this.
     topology: Option<TopologyOk>,
+    /// If set, answer `Op::Topology` with a self-owned `(topic, partition_count)`
+    /// spread: one entry per partition, all owned by this mock's own address.
+    /// Takes precedence over `topology`.
+    self_partitions: Option<(String, u32)>,
+    /// Records the `partition` field of every `Publish` frame received.
+    recorded_partitions: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
     /// Counts handshakes that carried a resume identity.
     resumes: Option<Arc<AtomicUsize>>,
 }
@@ -101,14 +107,37 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         )
                         .unwrap()
                     } else if frame.opcode == Op::Topology as u16 {
-                        match &config.topology {
-                            Some(topology) => {
-                                try_encode(Op::TopologyOk, frame.request_id, topology).unwrap()
+                        if let Some((topic, count)) = &config.self_partitions {
+                            let queues = (0..*count)
+                                .map(|partition| QueueTopologyEntry {
+                                    topic: topic.clone(),
+                                    partition,
+                                    group: None,
+                                    owner_endpoint: Some(addr.to_string()),
+                                    partitioning_version: 0,
+                                    partition_count: *count,
+                                })
+                                .collect();
+                            let topology = TopologyOk {
+                                generation: 1,
+                                queues,
+                            };
+                            try_encode(Op::TopologyOk, frame.request_id, &topology).unwrap()
+                        } else {
+                            match &config.topology {
+                                Some(topology) => {
+                                    try_encode(Op::TopologyOk, frame.request_id, topology).unwrap()
+                                }
+                                None => continue,
                             }
-                            None => continue,
                         }
                     } else if frame.opcode == Op::Publish as u16 {
                         let publish: Publish = try_decode(&frame).unwrap();
+                        if let Some(recorder) = &config.recorded_partitions {
+                            if let Ok(mut partitions) = recorder.lock() {
+                                partitions.push(publish.partition);
+                            }
+                        }
                         match &config.publish {
                             None => continue,
                             Some(MockBehavior::ConfirmOk) => try_encode(
@@ -281,6 +310,73 @@ async fn fetch_topology_populates_cache_and_routes() {
     .expect("publish must route to the fetched owner, not the bootstrap")
     .expect("publish should succeed on the fetched owner");
     assert_eq!(offset, 0);
+}
+
+/// With a multi-partition topology, keyless publishes spread across partitions
+/// (round-robin) while publishes carrying the same partition key all land on a
+/// single partition (stable hash routing).
+#[tokio::test]
+async fn keyless_publishes_spread_keyed_publishes_stick() {
+    let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mock = spawn_configurable_mock(MockConfig {
+        publish: Some(MockBehavior::ConfirmOk),
+        self_partitions: Some(("jobs".into(), 4)),
+        recorded_partitions: Some(recorded.clone()),
+        ..Default::default()
+    })
+    .await;
+
+    let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
+    // Populate the routing cache so the client sees partition_count = 4.
+    let topology = client.fetch_topology().await.unwrap();
+    assert_eq!(topology.queues.len(), 4);
+
+    let publisher = client.publisher("jobs").unwrap();
+
+    // Keyless publishes should fan out across the partitions.
+    let keyless = 16usize;
+    for _ in 0..keyless {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            publisher.publish_confirmed(NewMessage::content("spread")),
+        )
+        .await
+        .expect("keyless publish must not hang")
+        .expect("keyless publish should succeed");
+    }
+
+    let keyless_partitions: Vec<u32> = recorded.lock().unwrap().clone();
+    let distinct: std::collections::HashSet<u32> = keyless_partitions.iter().copied().collect();
+    assert!(
+        distinct.len() > 1,
+        "keyless publishes should spread across partitions, saw only {distinct:?}"
+    );
+
+    // Keyed publishes (same key) should all land on one partition.
+    recorded.lock().unwrap().clear();
+    let keyed = 16usize;
+    for _ in 0..keyed {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            publisher.publish_confirmed(NewMessage::content("sticky").partition_key("order-42")),
+        )
+        .await
+        .expect("keyed publish must not hang")
+        .expect("keyed publish should succeed");
+    }
+
+    let keyed_partitions: Vec<u32> = recorded.lock().unwrap().clone();
+    let keyed_distinct: std::collections::HashSet<u32> =
+        keyed_partitions.iter().copied().collect();
+    assert_eq!(
+        keyed_distinct.len(),
+        1,
+        "same partition key must route to a single partition, saw {keyed_distinct:?}"
+    );
+    assert!(
+        keyed_partitions[0] < 4,
+        "routed partition must be within partition_count"
+    );
 }
 
 /// Reconnect presents the prior resume identity, and the broker reports it as a
