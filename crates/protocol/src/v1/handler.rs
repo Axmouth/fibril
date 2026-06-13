@@ -27,7 +27,7 @@ use fibril_broker::{
     },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
-use fibril_storage::{Group, Topic};
+use fibril_storage::{Group, Partition, Topic};
 use fibril_util::{AuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
 use tokio::{
@@ -37,7 +37,7 @@ use tokio::{
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
-type SubKey = (Topic, u32, Option<Group>); // (topic, partition, group)
+type SubKey = (Topic, Partition, Option<Group>); // (topic, partition, group)
 type FrameSink = mpsc::Sender<Frame>;
 const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
 
@@ -53,7 +53,7 @@ pub trait ClientTopologySource: Send + Sync {
     fn owner_endpoint(
         &self,
         topic: &str,
-        partition: u32,
+        partition: Partition,
         group: Option<&str>,
     ) -> Option<(String, u64)>;
 }
@@ -175,7 +175,7 @@ fn owner_redirect_frame(
     topology_source: &Option<Arc<dyn ClientTopologySource>>,
     request_id: u64,
     topic: &str,
-    partition: u32,
+    partition: Partition,
     group: Option<&str>,
 ) -> Option<Frame> {
     let (owner_endpoint, partitioning_version) = topology_source
@@ -203,7 +203,7 @@ async fn fence_stale_partitioning(
     request_id: u64,
     topology_source: &Option<Arc<dyn ClientTopologySource>>,
     topic: &str,
-    partition: u32,
+    partition: Partition,
     group: Option<&str>,
     client_version: u64,
 ) -> bool {
@@ -239,7 +239,7 @@ async fn send_owner_redirect_or_error(
     request_id: u64,
     topology_source: &Option<Arc<dyn ClientTopologySource>>,
     topic: &str,
-    partition: u32,
+    partition: Partition,
     group: Option<&str>,
     err: &BrokerError,
 ) {
@@ -488,7 +488,7 @@ fn install_subscription_error_response(err: &InstallSubscriptionError) -> (u16, 
 
 struct SubState {
     sub_id: u64,
-    partition: u32,
+    partition: Partition,
     auto_ack: bool,
     prefetch: u32,
     stats_sub_id: Option<Uuid>,
@@ -624,7 +624,7 @@ async fn remove_subscription(
     connection_stats: &Arc<ConnectionStats>,
     conn_id: &Uuid,
     topic: &str,
-    partition: u32,
+    partition: Partition,
     group: Option<&str>,
 ) -> Option<ReconcileSubscription> {
     let key: SubKey = (topic.to_string(), partition, group.map(str::to_string));
@@ -664,7 +664,7 @@ struct InstallSubscriptionArgs {
     client_id: Uuid,
     req_id_gen: Arc<ReqIdGenerator>,
     topic: String,
-    partition: u32,
+    partition: Partition,
     group: Option<String>,
     prefetch: u32,
     auto_ack: bool,
@@ -1182,7 +1182,7 @@ struct ReqIdGenerator {
 }
 
 fn expire_idle_publishers(
-    publishers: &mut HashMap<(Topic, u32, Option<Group>), CachedPublisher>,
+    publishers: &mut HashMap<(Topic, Partition, Option<Group>), CachedPublisher>,
     idle_timeout_ms: Option<u64>,
 ) {
     let Some(idle_timeout_ms) = idle_timeout_ms else {
@@ -1559,7 +1559,7 @@ pub async fn handle_connection(
         }
     });
 
-    let mut publishers = HashMap::<(Topic, u32, Option<Group>), CachedPublisher>::new();
+    let mut publishers = HashMap::<(Topic, Partition, Option<Group>), CachedPublisher>::new();
 
     // ---- Main reader loop --------------------------------------------------
     // TODO: Make handling more async? Spawn task per frame, or have a task pool
@@ -1950,7 +1950,7 @@ pub async fn handle_connection(
                     Ok(BrokerFollowerReplicationApply::CheckpointRequired { .. }) => {
                         tracing::error!(
                             topic,
-                            partition,
+                            partition = partition.id(),
                             group,
                             "plain replication apply unexpectedly required a checkpoint"
                         );

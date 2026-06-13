@@ -15,7 +15,7 @@ use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, mp
 use tokio_util::sync::CancellationToken;
 
 use fibril_storage::{
-    DeliverableMessage, DeliveryTag, Group, LogId, Offset, StorageError, StoredMessage, Topic,
+    DeliverableMessage, DeliveryTag, Group, Offset, Partition, StorageError, StoredMessage, Topic,
 };
 use fibril_util::unix_millis;
 use uuid::Uuid;
@@ -50,7 +50,7 @@ pub enum BrokerError {
     #[error("not owner for queue {topic}/{partition}/{group:?}")]
     NotOwner {
         topic: Topic,
-        partition: LogId,
+        partition: Partition,
         group: Option<Group>,
     },
 
@@ -62,7 +62,7 @@ pub enum BrokerError {
     )]
     NotEnoughInSyncReplicas {
         topic: String,
-        partition: LogId,
+        partition: Partition,
         in_sync: usize,
         required: usize,
     },
@@ -150,7 +150,7 @@ pub struct ConsumerHandle {
     pub config: ConsumerConfig,
     pub group: Option<Box<str>>,
     pub topic: Box<str>,
-    pub partition: LogId,
+    pub partition: Partition,
     pub messages: mpsc::Receiver<DeliverableMessage>,
     pub settler: mpsc::Sender<SettleRequest>,
     pub pending_settles: Arc<AtomicUsize>,
@@ -383,14 +383,14 @@ impl Default for BrokerConfig {
 }
 
 pub trait QueueOwnership: std::fmt::Debug + Send + Sync {
-    fn owns_queue(&self, topic: &str, partition: LogId, group: Option<&str>) -> bool;
+    fn owns_queue(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool;
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct OwnAllQueues;
 
 impl QueueOwnership for OwnAllQueues {
-    fn owns_queue(&self, _topic: &str, _partition: LogId, _group: Option<&str>) -> bool {
+    fn owns_queue(&self, _topic: &str, _partition: Partition, _group: Option<&str>) -> bool {
         true
     }
 }
@@ -407,14 +407,14 @@ impl StaticQueueOwnership {
 }
 
 impl QueueOwnership for StaticQueueOwnership {
-    fn owns_queue(&self, topic: &str, partition: LogId, group: Option<&str>) -> bool {
+    fn owns_queue(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool {
         self.owned
             .contains(&OwnedQueue::new(topic, partition, group))
     }
 }
 
 impl QueueOwnership for StaticCoordination {
-    fn owns_queue(&self, topic: &str, partition: LogId, group: Option<&str>) -> bool {
+    fn owns_queue(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool {
         Coordination::owns_queue(self, topic, partition, group)
     }
 }
@@ -422,12 +422,12 @@ impl QueueOwnership for StaticCoordination {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OwnedQueue {
     pub topic: Topic,
-    pub partition: LogId,
+    pub partition: Partition,
     pub group: Option<Group>,
 }
 
 impl OwnedQueue {
-    pub fn new(topic: impl Into<Topic>, partition: LogId, group: Option<&str>) -> Self {
+    pub fn new(topic: impl Into<Topic>, partition: Partition, group: Option<&str>) -> Self {
         Self {
             topic: topic.into(),
             partition,
@@ -446,7 +446,7 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
     fn read_owner_replication_records<'a>(
         &'a self,
         topic: &'a str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&'a str>,
         message_from: Offset,
         event_from: Offset,
@@ -457,7 +457,7 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>>;
 }
@@ -843,7 +843,7 @@ pub struct SparseQueueObservabilitySnapshot {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FollowerReplicationWorkerObservability {
     pub topic: String,
-    pub partition: LogId,
+    pub partition: Partition,
     pub group: Option<String>,
     pub state: Option<FollowerReplicationWorkerState>,
     pub busy: bool,
@@ -876,7 +876,7 @@ pub struct FollowerReplicaObservability {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OwnedQueueReplicaObservability {
     pub topic: String,
-    pub partition: LogId,
+    pub partition: Partition,
     pub group: Option<String>,
     pub durability: String,
     pub min_in_sync_replicas: usize,
@@ -951,7 +951,7 @@ impl Drop for ConsumerLease {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct QueueKey {
     tp: Topic,
-    part: LogId,
+    part: Partition,
     group: Option<Group>,
 }
 
@@ -1257,7 +1257,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     pub fn record_follower_replication_progress(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         follower_node_id: &str,
         durable_message_next: Offset,
@@ -1294,7 +1294,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     pub fn follower_replication_progress(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
     ) -> Vec<(String, (Offset, Offset))> {
         let key = QueueKey {
@@ -1465,7 +1465,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     fn ensure_queue_owner(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
     ) -> Result<(), BrokerError> {
         if self.ownership.owns_queue(topic, partition, group) {
@@ -1544,7 +1544,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     pub async fn get_publisher(
         self: &Arc<Self>,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: &Option<Group>,
     ) -> Result<(PublisherHandle, ConfirmStream), BrokerError> {
         // TODO: make configurable?
@@ -1554,7 +1554,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let engine = self.engine.clone();
         let shutdown = self.shutdown_publishers.clone();
         let tp: Topic = topic.to_string();
-        let part: LogId = partition;
+        let part: Partition = partition;
         let group = group.clone();
 
         self.ensure_queue_owner(&tp, part, group.as_deref())?;
@@ -1584,7 +1584,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let activity_lease = {
             let eviction_guard = qs.lock_for_eviction().await;
             let lease = qs.activity.add_publisher();
-            if let Err(err) = engine.materialize(&tp, part, group.as_deref()).await {
+            if let Err(err) = engine.materialize(&tp, part.id(), group.as_deref()).await {
                 drop(lease);
                 drop(eviction_guard);
                 return Err(BrokerError::Engine(err));
@@ -1683,7 +1683,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                 let batch_size = items.len();
                 if let Err(err) = engine
-                    .publish_batch(&tp, part, group.as_deref(), items)
+                    .publish_batch(&tp, part.id(), group.as_deref(), items)
                     .await
                 {
                     tracing::error!("publish_batch failed: {err:?}");
@@ -1825,14 +1825,20 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .collect();
         let completion: Box<dyn AppendCompletion<IoError>> = Box::new(SimpleCompletion::new(done));
         self.engine
-            .release_inflight_batch(&key.tp, key.part, key.group.as_deref(), reqs, completion)
+            .release_inflight_batch(
+                &key.tp,
+                key.part.id(),
+                key.group.as_deref(),
+                reqs,
+                completion,
+            )
             .await?;
 
         match done_rx.await {
             Ok(true) => {
                 tracing::debug!(
                     topic = %key.tp,
-                    partition = key.part,
+                    partition = key.part.id(),
                     group = ?key.group,
                     count,
                     "released broker-tracked deliveries before role transition"
@@ -1853,7 +1859,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     ) -> Option<QueueActivitySnapshot> {
         let key = QueueKey {
             tp: topic.to_string(),
-            part: 0,
+            part: Partition::ZERO,
             group: group.map(str::to_string),
         };
         self.queues.get(&key).map(|qs| qs.activity.snapshot())
@@ -1870,7 +1876,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     pub fn has_follower_replication_worker(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
     ) -> bool {
         self.follower_replication_workers
@@ -1882,7 +1888,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     pub async fn follower_replication_worker_snapshot(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
     ) -> Option<FollowerReplicationWorkerState> {
         let worker =
@@ -1972,7 +1978,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         // In that case the previous "unloaded" observation is stale.
         if self
             .engine
-            .is_materialized(&key.tp, key.part, key.group.as_deref())
+            .is_materialized(&key.tp, key.part.id(), key.group.as_deref())
         {
             return false;
         }
@@ -2203,7 +2209,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     ) -> Result<QueueEvictionAttempt, BrokerError> {
         let key = QueueKey {
             tp: topic.to_string(),
-            part: 0,
+            part: Partition::ZERO,
             group: group.map(str::to_string),
         };
 
@@ -2262,7 +2268,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         if self
             .engine
-            .has_inflight(&key.tp, key.part, key.group.as_deref())
+            .has_inflight(&key.tp, key.part.id(), key.group.as_deref())
             .await?
         {
             drop(eviction_guard);
@@ -2274,7 +2280,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         let outcome = self
             .engine
-            .unmaterialize(&key.tp, key.part, key.group.as_deref())
+            .unmaterialize(&key.tp, key.part.id(), key.group.as_deref())
             .await?;
         drop(eviction_guard);
         Ok(self.record_queue_eviction_attempt(&key, QueueEvictionAttempt::Storage(outcome)))
@@ -2301,7 +2307,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             }
             let key = QueueKey {
                 tp: queue.topic,
-                part: queue.partition,
+                part: Partition::new(queue.partition),
                 group: queue.group,
             };
             if seen.insert(key.clone()) {
@@ -2327,13 +2333,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     pub async fn subscribe(
         self: &Arc<Self>,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         client_id: Uuid,
         cfg: ConsumerConfig,
     ) -> Result<ConsumerHandle, BrokerError> {
         let tp: Topic = topic.to_string();
-        let part: LogId = partition;
+        let part: Partition = partition;
         let group: Option<Group> = group.map(|s| s.to_string());
 
         self.ensure_queue_owner(&tp, part, group.as_deref())?;
@@ -2362,7 +2368,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let activity_lease = {
             let eviction_guard = qs.lock_for_eviction().await;
             let lease = qs.activity.add_subscriber();
-            if let Err(err) = self.engine.materialize(&tp, part, group.as_deref()).await {
+            if let Err(err) = self
+                .engine
+                .materialize(&tp, part.id(), group.as_deref())
+                .await
+            {
                 drop(lease);
                 drop(eviction_guard);
                 return Err(BrokerError::Engine(err));
@@ -2407,7 +2417,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         &self,
         topic: &str,
         group: Option<&str>,
-        partition: LogId,
+        partition: Partition,
         sub_id: ConsumerId,
     ) -> Result<(), BrokerError> {
         let key = QueueKey {
@@ -2464,7 +2474,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .collect();
         let completion: Box<dyn AppendCompletion<IoError>> = Box::new(SimpleCompletion::new(done));
         self.engine
-            .nack_batch(&key.tp, key.part, key.group.as_deref(), reqs, completion)
+            .nack_batch(
+                &key.tp,
+                key.part.id(),
+                key.group.as_deref(),
+                reqs,
+                completion,
+            )
             .await?;
 
         match done_rx.await {
@@ -2651,7 +2667,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let _ = engine
             .settle(
                 &tag_rec.key.tp,
-                tag_rec.key.part,
+                tag_rec.key.part.id(),
                 tag_rec.key.group.as_deref(),
                 EngineSettleRequest {
                     offset: tag_rec.offset,
@@ -2759,7 +2775,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 .collect();
             let _ = self
                 .engine
-                .ack_batch(&key.tp, key.part, key.group.as_deref(), reqs, completion)
+                .ack_batch(
+                    &key.tp,
+                    key.part.id(),
+                    key.group.as_deref(),
+                    reqs,
+                    completion,
+                )
                 .await;
         }
 
@@ -2792,7 +2814,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 Box::new(SimpleCompletion::new(done));
             let _ = self
                 .engine
-                .nack_batch(&key.tp, key.part, key.group.as_deref(), items, completion)
+                .nack_batch(
+                    &key.tp,
+                    key.part.id(),
+                    key.group.as_deref(),
+                    items,
+                    completion,
+                )
                 .await;
         }
     }
@@ -2869,7 +2897,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         .engine
                         .poll_ready(
                             &key.tp,
-                            key.part,
+                            key.part.id(),
                             key.group.as_deref(),
                             total_cap,
                             lease_deadline,
@@ -3138,7 +3166,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                 // TODO: windowed iterator and spawn more at a time? perhaps parallelism / 2
                 for (tp, part, group, offset) in expired.iter().cloned() {
-                    let key = QueueKey { tp, part, group };
+                    let key = QueueKey { tp, part: Partition::new(part), group };
 
                     // find the tag for this offset
                     let tag = broker
@@ -3160,7 +3188,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 // Wake each affected queue exactly once
                 let mut touched: HashSet<QueueKey> = HashSet::new();
                 for (tp, part, group, _off) in expired {
-                    touched.insert(QueueKey { tp, part, group });
+                    touched.insert(QueueKey { tp, part: Partition::new(part), group });
                 }
 
                 for key in touched {
@@ -3272,7 +3300,7 @@ impl Broker<StromaEngine> {
             if let Err(err) = &result {
                 tracing::error!(
                     topic = %transition.queue.topic,
-                    partition = transition.queue.partition,
+                    partition = transition.queue.partition.id(),
                     group = ?transition.queue.group,
                     intent = ?transition.intent,
                     "failed to apply assignment transition: {err:?}"
@@ -3308,7 +3336,7 @@ impl Broker<StromaEngine> {
                         ) {
                             tracing::error!(
                                 topic = %transition.queue.topic,
-                                partition = transition.queue.partition,
+                                partition = transition.queue.partition.id(),
                                 group = ?transition.queue.group,
                                 intent = ?transition.intent,
                                 "failed to start follower replication worker: {err:?}"
@@ -3319,7 +3347,7 @@ impl Broker<StromaEngine> {
                 Err(err) => {
                     tracing::error!(
                         topic = %transition.queue.topic,
-                        partition = transition.queue.partition,
+                        partition = transition.queue.partition.id(),
                         group = ?transition.queue.group,
                         intent = ?transition.intent,
                         "failed to apply assignment transition: {err:?}"
@@ -3368,12 +3396,12 @@ impl Broker<StromaEngine> {
             LocalAssignmentIntent::BecomeOwner => {
                 if self
                     .engine
-                    .is_materialized(&topic, transition.queue.partition, group)
+                    .is_materialized(&topic, transition.queue.partition.id(), group)
                 {
                     self.engine
                         .become_queue_owner_with_epoch(
                             &topic,
-                            transition.queue.partition,
+                            transition.queue.partition.id(),
                             group,
                             assignment_epoch,
                         )
@@ -3404,7 +3432,7 @@ impl Broker<StromaEngine> {
                 self.release_offsets_for_role_transition(&key, broker_deliveries)
                     .await?;
                 self.engine
-                    .demote_queue_owner_to_follower(&topic, transition.queue.partition, group)
+                    .demote_queue_owner_to_follower(&topic, transition.queue.partition.id(), group)
                     .await?;
                 // The demoted queue follows under the NEW assignment's epoch:
                 // stale-epoch traffic (its own leftovers or a stale peer) is
@@ -3412,7 +3440,7 @@ impl Broker<StromaEngine> {
                 self.engine
                     .advance_queue_epoch(
                         &topic,
-                        transition.queue.partition,
+                        transition.queue.partition.id(),
                         group,
                         assignment_epoch,
                     )
@@ -3430,7 +3458,7 @@ impl Broker<StromaEngine> {
                 self.release_offsets_for_role_transition(&key, broker_deliveries)
                     .await?;
                 self.engine
-                    .freeze_queue_for_transition(&topic, transition.queue.partition, group)
+                    .freeze_queue_for_transition(&topic, transition.queue.partition.id(), group)
                     .await?;
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
@@ -3440,7 +3468,7 @@ impl Broker<StromaEngine> {
                 // (same rule as BecomeOwner).
                 if !self
                     .engine
-                    .is_materialized(&topic, transition.queue.partition, group)
+                    .is_materialized(&topic, transition.queue.partition.id(), group)
                 {
                     return Ok(BrokerAssignmentTransitionApply::Noop(transition.intent));
                 }
@@ -3458,7 +3486,7 @@ impl Broker<StromaEngine> {
                     .engine
                     .promote_queue_follower_to_local_tail(
                         &topic,
-                        transition.queue.partition,
+                        transition.queue.partition.id(),
                         group,
                         assignment_epoch,
                     )
@@ -3471,7 +3499,7 @@ impl Broker<StromaEngine> {
                     } => {
                         tracing::info!(
                             topic,
-                            partition = transition.queue.partition,
+                            partition = transition.queue.partition.id(),
                             group = ?group,
                             stopped_worker,
                             message_next_offset,
@@ -3483,7 +3511,7 @@ impl Broker<StromaEngine> {
                     refused => {
                         tracing::warn!(
                             topic,
-                            partition = transition.queue.partition,
+                            partition = transition.queue.partition.id(),
                             group = ?group,
                             ?refused,
                             "follower promotion refused; queue stays follower"
@@ -3500,11 +3528,15 @@ impl Broker<StromaEngine> {
                     .stop_follower_replication_worker(&transition.queue)
                     .await;
                 self.engine
-                    .stop_queue_follower_for_transition(&topic, transition.queue.partition, group)
+                    .stop_queue_follower_for_transition(
+                        &topic,
+                        transition.queue.partition.id(),
+                        group,
+                    )
                     .await?;
                 tracing::debug!(
                     topic,
-                    partition = transition.queue.partition,
+                    partition = transition.queue.partition.id(),
                     group = ?group,
                     stopped_worker,
                     "stopped local follower assignment"
@@ -3517,7 +3549,7 @@ impl Broker<StromaEngine> {
     pub async fn read_owner_replication_records(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         message_from: Offset,
         event_from: Offset,
@@ -3528,11 +3560,11 @@ impl Broker<StromaEngine> {
 
         let messages = self
             .engine
-            .read_owner_message_records(topic, partition, group, message_from, max_messages)
+            .read_owner_message_records(topic, partition.id(), group, message_from, max_messages)
             .await?;
         let events = self
             .engine
-            .read_owner_event_records(topic, partition, group, event_from, max_events)
+            .read_owner_event_records(topic, partition.id(), group, event_from, max_events)
             .await?;
 
         Ok(BrokerOwnerReplicationRecords { messages, events })
@@ -3541,11 +3573,11 @@ impl Broker<StromaEngine> {
     pub async fn become_replication_follower(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
     ) -> Result<(), BrokerError> {
         self.engine
-            .become_queue_follower(topic, partition, group)
+            .become_queue_follower(topic, partition.id(), group)
             .await?;
         Ok(())
     }
@@ -3555,12 +3587,12 @@ impl Broker<StromaEngine> {
     pub async fn advance_replication_epoch(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         epoch: u64,
     ) -> Result<u64, BrokerError> {
         self.engine
-            .advance_queue_epoch(topic, partition, group, epoch)
+            .advance_queue_epoch(topic, partition.id(), group, epoch)
             .await
             .map_err(BrokerError::from)
     }
@@ -3569,12 +3601,12 @@ impl Broker<StromaEngine> {
     pub async fn become_replication_follower_with_epoch(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         epoch: u64,
     ) -> Result<(), BrokerError> {
         self.engine
-            .become_queue_follower_with_epoch(topic, partition, group, epoch)
+            .become_queue_follower_with_epoch(topic, partition.id(), group, epoch)
             .await?;
         Ok(())
     }
@@ -3582,33 +3614,33 @@ impl Broker<StromaEngine> {
     pub async fn export_owner_state_checkpoint(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
     ) -> Result<OwnerStateCheckpoint, BrokerError> {
         self.ensure_queue_owner(topic, partition, group)?;
         Ok(self
             .engine
-            .export_owner_state_checkpoint(topic, partition, group)
+            .export_owner_state_checkpoint(topic, partition.id(), group)
             .await?)
     }
 
     pub async fn install_follower_state_checkpoint(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         install: FollowerStateCheckpointInstall,
     ) -> Result<FollowerStateCheckpointInstallOutcome, BrokerError> {
         Ok(self
             .engine
-            .install_follower_state_checkpoint(topic, partition, group, install)
+            .install_follower_state_checkpoint(topic, partition.id(), group, install)
             .await?)
     }
 
     pub async fn apply_follower_replication_records(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         records: BrokerOwnerReplicationRecords,
     ) -> Result<BrokerFollowerReplicationApply, BrokerError> {
@@ -3637,7 +3669,7 @@ impl Broker<StromaEngine> {
             } => {
                 tracing::debug!(
                     topic,
-                    partition,
+                    partition = partition.id(),
                     group,
                     requested_offset,
                     head_offset,
@@ -3676,7 +3708,7 @@ impl Broker<StromaEngine> {
             } => {
                 tracing::debug!(
                     topic,
-                    partition,
+                    partition = partition.id(),
                     group,
                     requested_offset,
                     head_offset,
@@ -3697,7 +3729,7 @@ impl Broker<StromaEngine> {
 
         let outcome = self
             .engine
-            .apply_replicated_queue_batch(topic, partition, group, messages, events)
+            .apply_replicated_queue_batch(topic, partition.id(), group, messages, events)
             .await?;
         Ok(BrokerFollowerReplicationApply::Applied(outcome))
     }
@@ -3705,7 +3737,7 @@ impl Broker<StromaEngine> {
     pub async fn promote_replication_follower_if_caught_up(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         expected_message_next_offset: Offset,
         expected_event_next_offset: Offset,
@@ -3713,7 +3745,7 @@ impl Broker<StromaEngine> {
         self.engine
             .promote_queue_follower_if_caught_up(
                 topic,
-                partition,
+                partition.id(),
                 group,
                 expected_message_next_offset,
                 expected_event_next_offset,
@@ -3727,12 +3759,12 @@ impl Broker<StromaEngine> {
     pub async fn promote_replication_follower_to_local_tail(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         epoch: u64,
     ) -> Result<QueuePromotionOutcome, BrokerError> {
         self.engine
-            .promote_queue_follower_to_local_tail(topic, partition, group, epoch)
+            .promote_queue_follower_to_local_tail(topic, partition.id(), group, epoch)
             .await
             .map_err(BrokerError::from)
     }
@@ -3741,7 +3773,7 @@ impl Broker<StromaEngine> {
         &self,
         owner: &dyn BrokerOwnerReplicationPeer,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         options: BrokerReplicationCatchUpOptions,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
@@ -3802,7 +3834,7 @@ impl Broker<StromaEngine> {
                             BrokerFollowerReplicationApply::Applied(_) => {
                                 tracing::error!(
                                     topic,
-                                    partition,
+                                    partition = partition.id(),
                                     group,
                                     "replication catch-up applied records even though owner read reported checkpoint required"
                                 );
@@ -3846,7 +3878,7 @@ impl Broker<StromaEngine> {
         &self,
         owner: &dyn BrokerOwnerReplicationPeer,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
         options: BrokerReplicationCatchUpOptions,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
@@ -3904,7 +3936,7 @@ impl Broker<StromaEngine> {
 
         tracing::error!(
             topic,
-            partition,
+            partition = partition.id(),
             group,
             "checkpoint-aware catch-up loop reached an unreachable state"
         );
@@ -3981,7 +4013,7 @@ impl Broker<StromaEngine> {
             let Some(owner) = resolver.resolve_owner_peer(&assignment).await? else {
                 tracing::warn!(
                     topic = %assignment.queue.topic,
-                    partition = assignment.queue.partition,
+                    partition = assignment.queue.partition.id(),
                     group = ?assignment.queue.group,
                     owner = %assignment.owner,
                     "follower replication worker could not resolve owner peer"
@@ -4016,7 +4048,7 @@ impl Broker<StromaEngine> {
                 Err(BrokerError::NotOwner { .. }) => {
                     tracing::warn!(
                         topic = %assignment.queue.topic,
-                        partition = assignment.queue.partition,
+                        partition = assignment.queue.partition.id(),
                         group = ?assignment.queue.group,
                         owner = %assignment.owner,
                         "follower replication worker owner peer is no longer owner"
@@ -4026,7 +4058,7 @@ impl Broker<StromaEngine> {
                 Err(err) => {
                     tracing::warn!(
                         topic = %assignment.queue.topic,
-                        partition = assignment.queue.partition,
+                        partition = assignment.queue.partition.id(),
                         group = ?assignment.queue.group,
                         owner = %assignment.owner,
                         "follower replication worker tick failed: {err:?}"
@@ -4073,7 +4105,7 @@ impl Broker<StromaEngine> {
                     Ok(outcome) => {
                         tracing::debug!(
                             topic,
-                            partition,
+                            partition = partition.id(),
                             group = ?group,
                             outcome = ?outcome,
                             "follower replication worker loop exited"
@@ -4082,7 +4114,7 @@ impl Broker<StromaEngine> {
                     Err(err) => {
                         tracing::error!(
                             topic,
-                            partition,
+                            partition = partition.id(),
                             group = ?group,
                             "follower replication worker loop failed: {err:?}"
                         );
@@ -4098,7 +4130,7 @@ impl BrokerOwnerReplicationPeer for Broker<StromaEngine> {
     fn read_owner_replication_records<'a>(
         &'a self,
         topic: &'a str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&'a str>,
         message_from: Offset,
         event_from: Offset,
@@ -4123,7 +4155,7 @@ impl BrokerOwnerReplicationPeer for Broker<StromaEngine> {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async move {
@@ -4140,7 +4172,7 @@ where
     fn read_owner_replication_records<'a>(
         &'a self,
         topic: &'a str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&'a str>,
         message_from: Offset,
         event_from: Offset,
@@ -4161,7 +4193,7 @@ where
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         self.as_ref()

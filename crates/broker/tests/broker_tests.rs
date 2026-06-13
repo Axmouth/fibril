@@ -35,7 +35,7 @@ use fibril_broker::{
     test_util::TestState,
 };
 use fibril_metrics::{Metrics, QueuesStateSnapshot};
-use fibril_storage::{DeliverableMessage, Offset};
+use fibril_storage::{DeliverableMessage, Offset, Partition};
 use fibril_util::unix_millis;
 use futures::future::BoxFuture;
 use hashbrown::HashSet;
@@ -357,7 +357,10 @@ async fn static_ownership_rejects_publisher_for_unowned_queue() {
         open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(StdHashSet::new())))
             .await;
 
-    let err = match broker.get_publisher("unowned", 0, &None).await {
+    let err = match broker
+        .get_publisher("unowned", Partition::new(0), &None)
+        .await
+    {
         Ok(_) => panic!("unowned queue unexpectedly accepted a publisher"),
         Err(err) => err,
     };
@@ -366,7 +369,7 @@ async fn static_ownership_rejects_publisher_for_unowned_queue() {
         err,
         BrokerError::NotOwner {
             topic,
-            partition: 0,
+            partition: _,
             group: None,
         } if topic == "unowned"
     ));
@@ -383,7 +386,7 @@ async fn static_ownership_rejects_subscriber_for_unowned_queue() {
     let err = match broker
         .subscribe(
             "unowned",
-            0,
+            Partition::new(0),
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -398,7 +401,7 @@ async fn static_ownership_rejects_subscriber_for_unowned_queue() {
         err,
         BrokerError::NotOwner {
             topic,
-            partition: 0,
+            partition: _,
             group: None,
         } if topic == "unowned"
     ));
@@ -409,12 +412,15 @@ async fn static_ownership_rejects_subscriber_for_unowned_queue() {
 #[tokio::test]
 async fn static_ownership_allows_owned_queue() {
     let mut owned = StdHashSet::new();
-    owned.insert(OwnedQueue::new("owned", 0, Some("workers")));
+    owned.insert(OwnedQueue::new("owned", Partition::new(0), Some("workers")));
     let (broker, _dir) =
         open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
     let group = Some("workers".to_string());
 
-    let (publisher, _confirms) = broker.get_publisher("owned", 0, &group).await.unwrap();
+    let (publisher, _confirms) = broker
+        .get_publisher("owned", Partition::new(0), &group)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"hello".to_vec(),
@@ -430,7 +436,7 @@ async fn static_ownership_allows_owned_queue() {
     let mut sub = broker
         .subscribe(
             "owned",
-            0,
+            Partition::new(0),
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -466,8 +472,8 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
         },
     );
 
-    let owned_queue = QueueIdentity::new("coord-owned", 0, Some("workers"));
-    let followed_queue = QueueIdentity::new("coord-followed", 0, Some("workers"));
+    let owned_queue = QueueIdentity::new("coord-owned", Partition::new(0), Some("workers"));
+    let followed_queue = QueueIdentity::new("coord-followed", Partition::new(0), Some("workers"));
     let mut assignments = HashMap::new();
     assignments.insert(
         owned_queue.clone(),
@@ -495,7 +501,7 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
     let group = Some("workers".to_string());
 
     let (publisher, _confirms) = broker
-        .get_publisher("coord-owned", 0, &group)
+        .get_publisher("coord-owned", Partition::new(0), &group)
         .await
         .unwrap();
     let reply = publisher
@@ -510,7 +516,10 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
         .unwrap();
     reply.await.unwrap().unwrap();
 
-    let err = match broker.get_publisher("coord-followed", 0, &group).await {
+    let err = match broker
+        .get_publisher("coord-followed", Partition::new(0), &group)
+        .await
+    {
         Ok(_) => panic!("followed queue unexpectedly accepted an owner publisher"),
         Err(err) => err,
     };
@@ -518,7 +527,7 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
         err,
         BrokerError::NotOwner {
             topic,
-            partition: 0,
+            partition: _,
             group: Some(group),
         } if topic == "coord-followed" && group == "workers"
     ));
@@ -533,7 +542,7 @@ fn assignment_transition(
     next_role: Option<LocalAssignmentRole>,
 ) -> LocalAssignmentTransition {
     LocalAssignmentTransition {
-        queue: QueueIdentity::new(topic, 0, Some("workers")),
+        queue: QueueIdentity::new(topic, Partition::new(0), Some("workers")),
         previous_role,
         next_role,
         previous: None,
@@ -595,10 +604,22 @@ async fn assignment_transition_apply_can_make_queue_follower() {
         outcome,
         BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::BecomeFollower)
     );
-    assert!(broker.has_follower_replication_worker("transition-followed", 0, Some("workers")));
+    assert!(broker.has_follower_replication_worker(
+        "transition-followed",
+        Partition::new(0),
+        Some("workers")
+    ));
 
     let err = broker
-        .read_owner_replication_records("transition-followed", 0, Some("workers"), 0, 0, 1, 1)
+        .read_owner_replication_records(
+            "transition-followed",
+            Partition::new(0),
+            Some("workers"),
+            0,
+            0,
+            1,
+            1,
+        )
         .await
         .expect_err("follower queue should reject owner replication reads");
     assert!(matches!(
@@ -621,7 +642,11 @@ async fn assignment_transition_apply_can_stop_follower() {
         .apply_assignment_transition(&become_follower)
         .await
         .unwrap();
-    assert!(broker.has_follower_replication_worker("transition-stop-follower", 0, Some("workers")));
+    assert!(broker.has_follower_replication_worker(
+        "transition-stop-follower",
+        Partition::new(0),
+        Some("workers")
+    ));
 
     let stop = assignment_transition(
         "transition-stop-follower",
@@ -637,7 +662,7 @@ async fn assignment_transition_apply_can_stop_follower() {
     );
     assert!(!broker.has_follower_replication_worker(
         "transition-stop-follower",
-        0,
+        Partition::new(0),
         Some("workers")
     ));
 
@@ -668,7 +693,12 @@ async fn assignment_transition_apply_can_stop_follower() {
         }),
     };
     let err = broker
-        .apply_follower_replication_records("transition-stop-follower", 0, Some("workers"), records)
+        .apply_follower_replication_records(
+            "transition-stop-follower",
+            Partition::new(0),
+            Some("workers"),
+            records,
+        )
         .await
         .expect_err("stopped follower should reject replicated ingest");
     assert!(matches!(
@@ -699,7 +729,7 @@ async fn refresh_follower_keeps_replication_worker_progress() {
 
     let group = Some("workers".to_string());
     let (publisher, _confirms) = owner
-        .get_publisher("transition-refresh-follower", 0, &group)
+        .get_publisher("transition-refresh-follower", Partition::new(0), &group)
         .await
         .unwrap();
     let reply = publisher
@@ -714,7 +744,11 @@ async fn refresh_follower_keeps_replication_worker_progress() {
         .unwrap();
     reply.await.unwrap().unwrap();
 
-    let queue = QueueIdentity::new("transition-refresh-follower", 0, Some("workers"));
+    let queue = QueueIdentity::new(
+        "transition-refresh-follower",
+        Partition::new(0),
+        Some("workers"),
+    );
     follower
         .run_follower_replication_worker_once(
             &owner,
@@ -724,7 +758,11 @@ async fn refresh_follower_keeps_replication_worker_progress() {
         .await
         .unwrap();
     let before = follower
-        .follower_replication_worker_snapshot("transition-refresh-follower", 0, Some("workers"))
+        .follower_replication_worker_snapshot(
+            "transition-refresh-follower",
+            Partition::new(0),
+            Some("workers"),
+        )
         .await
         .unwrap();
 
@@ -743,7 +781,11 @@ async fn refresh_follower_keeps_replication_worker_progress() {
         BrokerAssignmentTransitionApply::Noop(LocalAssignmentIntent::RefreshFollower)
     );
     let after = follower
-        .follower_replication_worker_snapshot("transition-refresh-follower", 0, Some("workers"))
+        .follower_replication_worker_snapshot(
+            "transition-refresh-follower",
+            Partition::new(0),
+            Some("workers"),
+        )
         .await
         .unwrap();
     assert_eq!(after, before);
@@ -774,7 +816,7 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
     // The assignment demands TWO durable nodes: the owner plus one follower.
     broker.cache_queue_assignment(
         &PartitionAssignment::new(
-            QueueIdentity::new(topic, 0, None),
+            QueueIdentity::new(topic, Partition::new(0), None),
             "owner-a",
             vec!["follower-b".to_string()],
             1,
@@ -784,7 +826,10 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
         ),
     );
 
-    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
 
     // No follower progress: the confirm must time out with a clear reason.
     let reply = publisher
@@ -812,7 +857,14 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
     let reporter = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(100)).await;
         // Both messages (offsets 0 and 1) durably applied on the follower.
-        progress_broker.record_follower_replication_progress(topic, 0, None, "follower-b", 2, 2);
+        progress_broker.record_follower_replication_progress(
+            topic,
+            Partition::new(0),
+            None,
+            "follower-b",
+            2,
+            2,
+        );
     });
     let reply = publisher
         .publish(
@@ -852,7 +904,7 @@ async fn publish_refused_when_min_in_sync_exceeds_replica_set() {
     // Owner + one follower = replica set of 2, but the floor demands 3.
     broker.cache_queue_assignment(
         &PartitionAssignment::new(
-            QueueIdentity::new(topic, 0, None),
+            QueueIdentity::new(topic, Partition::new(0), None),
             "owner-a",
             vec!["follower-b".to_string()],
             1,
@@ -862,7 +914,10 @@ async fn publish_refused_when_min_in_sync_exceeds_replica_set() {
         ),
     );
 
-    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"x".to_vec(),
@@ -904,7 +959,7 @@ async fn publish_refused_when_in_sync_replicas_below_floor() {
     .await;
     broker.cache_queue_assignment(
         &PartitionAssignment::new(
-            QueueIdentity::new(topic, 0, None),
+            QueueIdentity::new(topic, Partition::new(0), None),
             "owner-a",
             vec!["follower-b".to_string()],
             1,
@@ -913,7 +968,10 @@ async fn publish_refused_when_in_sync_replicas_below_floor() {
             fibril_broker::coordination::ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 },
         ),
     );
-    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"x".to_vec(),
@@ -952,7 +1010,7 @@ async fn stale_follower_excluded_from_in_sync_set() {
     .await;
     broker.cache_queue_assignment(
         &PartitionAssignment::new(
-            QueueIdentity::new(topic, 0, None),
+            QueueIdentity::new(topic, Partition::new(0), None),
             "owner-a",
             vec!["follower-b".to_string()],
             1,
@@ -962,9 +1020,12 @@ async fn stale_follower_excluded_from_in_sync_set() {
         ),
     );
     // The follower has reported, but with isr_timeout 0 it never counts as fresh.
-    broker.record_follower_replication_progress(topic, 0, None, "follower-b", 5, 5);
+    broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", 5, 5);
 
-    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"x".to_vec(),
@@ -1002,7 +1063,7 @@ async fn publish_admitted_once_in_sync_floor_met() {
     .await;
     broker.cache_queue_assignment(
         &PartitionAssignment::new(
-            QueueIdentity::new(topic, 0, None),
+            QueueIdentity::new(topic, Partition::new(0), None),
             "owner-a",
             vec!["follower-b".to_string()],
             1,
@@ -1013,9 +1074,12 @@ async fn publish_admitted_once_in_sync_floor_met() {
     );
     // Fresh report past the first offset satisfies both the ISR floor and the
     // durability requirement.
-    broker.record_follower_replication_progress(topic, 0, None, "follower-b", 5, 5);
+    broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", 5, 5);
 
-    let (publisher, _confirms) = broker.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"x".to_vec(),
@@ -1050,7 +1114,7 @@ async fn owner_replica_observability_reports_follower_lag_and_isr() {
 
     broker.cache_queue_assignment(
         &PartitionAssignment::new(
-            QueueIdentity::new(topic, 0, None),
+            QueueIdentity::new(topic, Partition::new(0), None),
             "owner-a",
             vec!["follower-b".to_string(), "follower-c".to_string()],
             1,
@@ -1060,7 +1124,7 @@ async fn owner_replica_observability_reports_follower_lag_and_isr() {
         ),
     );
     // Only follower-b has reported; follower-c is silent.
-    broker.record_follower_replication_progress(topic, 0, None, "follower-b", 5, 5);
+    broker.record_follower_replication_progress(topic, Partition::new(0), None, "follower-b", 5, 5);
 
     let report = broker.sparse_queue_observability_report();
     assert_eq!(report.owned_replica_summary.owned_queue_count, 1);
@@ -1107,7 +1171,10 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
 
     // Owner with one committed message; its logs are still at epoch 0.
     let (owner, _owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = owner
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"fenced-payload".to_vec(),
@@ -1120,20 +1187,20 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
         .unwrap();
     reply.await.unwrap().unwrap();
     let stale_records = owner
-        .read_owner_replication_records(topic, 0, None, 0, 0, 10, 10)
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10)
         .await
         .unwrap();
 
     // Follower fenced at assignment epoch 2 (epoch persisted before use).
     let (follower, _follower_dir) = open_test_broker().await;
     follower
-        .become_replication_follower_with_epoch(topic, 0, None, 2)
+        .become_replication_follower_with_epoch(topic, Partition::new(0), None, 2)
         .await
         .unwrap();
 
     // Stale owner's batches (epoch 0) must be rejected, nothing applied.
     let outcome = follower
-        .apply_follower_replication_records(topic, 0, None, stale_records)
+        .apply_follower_replication_records(topic, Partition::new(0), None, stale_records)
         .await
         .unwrap();
     let BrokerFollowerReplicationApply::Applied(apply) = outcome else {
@@ -1160,15 +1227,15 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
     // The owner reaches the fenced epoch (e.g. it holds the new assignment):
     // identical records now apply.
     owner
-        .advance_replication_epoch(topic, 0, None, 2)
+        .advance_replication_epoch(topic, Partition::new(0), None, 2)
         .await
         .unwrap();
     let fresh_records = owner
-        .read_owner_replication_records(topic, 0, None, 0, 0, 10, 10)
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10)
         .await
         .unwrap();
     let outcome = follower
-        .apply_follower_replication_records(topic, 0, None, fresh_records)
+        .apply_follower_replication_records(topic, Partition::new(0), None, fresh_records)
         .await
         .unwrap();
     let BrokerFollowerReplicationApply::Applied(apply) = outcome else {
@@ -1192,7 +1259,7 @@ async fn assignment_watcher_applies_snapshot_update_to_follower_role() {
     let (broker, _dir) = open_test_broker_with_ownership(coordination.clone()).await;
     broker.spawn_assignment_watcher(coordination.clone());
 
-    let queue = QueueIdentity::new("watched-followed", 0, Some("workers"));
+    let queue = QueueIdentity::new("watched-followed", Partition::new(0), Some("workers"));
     coordination.update_snapshot(coordination_snapshot(
         vec![PartitionAssignment::new(
             queue,
@@ -1208,7 +1275,11 @@ async fn assignment_watcher_applies_snapshot_update_to_follower_role() {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if broker.is_queue_materialized("watched-followed", Some("workers"))
-                && broker.has_follower_replication_worker("watched-followed", 0, Some("workers"))
+                && broker.has_follower_replication_worker(
+                    "watched-followed",
+                    Partition::new(0),
+                    Some("workers"),
+                )
             {
                 break;
             }
@@ -1247,7 +1318,11 @@ async fn assignment_transition_apply_does_not_materialize_new_owner_queue() {
         BrokerAssignmentTransitionApply::Noop(LocalAssignmentIntent::BecomeOwner)
     );
     assert!(!broker.is_queue_materialized("transition-owned", Some("workers")));
-    assert!(!broker.has_follower_replication_worker("transition-owned", 0, Some("workers")));
+    assert!(!broker.has_follower_replication_worker(
+        "transition-owned",
+        Partition::new(0),
+        Some("workers")
+    ));
     broker.shutdown().await;
 }
 
@@ -1282,7 +1357,7 @@ async fn demote_owner_to_follower_stops_broker_owner_runtime() {
     let (broker, _dir) = open_test_broker().await;
     let group = Some("workers".to_string());
     let (publisher, _confirms) = broker
-        .get_publisher("transition-demote", 0, &group)
+        .get_publisher("transition-demote", Partition::new(0), &group)
         .await
         .unwrap();
 
@@ -1319,7 +1394,11 @@ async fn demote_owner_to_follower_stops_broker_owner_runtime() {
         outcome,
         BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::DemoteOwnerToFollower)
     );
-    assert!(broker.has_follower_replication_worker("transition-demote", 0, Some("workers")));
+    assert!(broker.has_follower_replication_worker(
+        "transition-demote",
+        Partition::new(0),
+        Some("workers")
+    ));
     assert_eq!(
         broker.queue_activity_snapshot("transition-demote", Some("workers")),
         None
@@ -1357,7 +1436,7 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
     let (broker, _dir) = open_test_broker().await;
     let group = Some("workers".to_string());
     let (publisher, _confirms) = broker
-        .get_publisher("transition-demote-inflight", 0, &group)
+        .get_publisher("transition-demote-inflight", Partition::new(0), &group)
         .await
         .unwrap();
 
@@ -1376,7 +1455,7 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
     let mut sub = broker
         .subscribe(
             "transition-demote-inflight",
-            0,
+            Partition::new(0),
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -1407,7 +1486,7 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
     let promoted = broker
         .promote_replication_follower_if_caught_up(
             "transition-demote-inflight",
-            0,
+            Partition::new(0),
             Some("workers"),
             1,
             2,
@@ -1443,7 +1522,7 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
     let mut redelivery = broker
         .subscribe(
             "transition-demote-inflight",
-            0,
+            Partition::new(0),
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -1478,7 +1557,7 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
     let (broker, _dir) = open_test_broker().await;
     let group = Some("workers".to_string());
     let (publisher, _confirms) = broker
-        .get_publisher("transition-freeze-inflight", 0, &group)
+        .get_publisher("transition-freeze-inflight", Partition::new(0), &group)
         .await
         .unwrap();
 
@@ -1497,7 +1576,7 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
     let mut sub = broker
         .subscribe(
             "transition-freeze-inflight",
-            0,
+            Partition::new(0),
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -1581,7 +1660,7 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
     let mut redelivery = broker
         .subscribe(
             "transition-freeze-inflight",
-            0,
+            Partition::new(0),
             Some("workers"),
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -1599,7 +1678,10 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
 #[tokio::test]
 async fn owner_replication_read_returns_published_records() {
     let (broker, _dir) = open_test_broker().await;
-    let (publisher, _confirms) = broker.get_publisher("replicated", 0, &None).await.unwrap();
+    let (publisher, _confirms) = broker
+        .get_publisher("replicated", Partition::new(0), &None)
+        .await
+        .unwrap();
 
     let reply = publisher
         .publish(
@@ -1614,7 +1696,7 @@ async fn owner_replication_read_returns_published_records() {
     reply.await.unwrap().unwrap();
 
     let records = broker
-        .read_owner_replication_records("replicated", 0, None, 0, 0, 10, 10)
+        .read_owner_replication_records("replicated", Partition::new(0), None, 0, 0, 10, 10)
         .await
         .unwrap();
 
@@ -1646,7 +1728,10 @@ async fn publishes_route_to_independent_partition_logs() {
     let group = Some("workers".to_string());
 
     // One message to partition 0, two to partition 1.
-    let (p0, _c0) = broker.get_publisher(topic, 0, &group).await.unwrap();
+    let (p0, _c0) = broker
+        .get_publisher(topic, Partition::new(0), &group)
+        .await
+        .unwrap();
     p0.publish(
         b"p0-a".to_vec(),
         unix_millis(),
@@ -1660,7 +1745,10 @@ async fn publishes_route_to_independent_partition_logs() {
     .unwrap()
     .unwrap();
 
-    let (p1, _c1) = broker.get_publisher(topic, 1, &group).await.unwrap();
+    let (p1, _c1) = broker
+        .get_publisher(topic, Partition::new(1), &group)
+        .await
+        .unwrap();
     for payload in [b"p1-a".to_vec(), b"p1-b".to_vec()] {
         p1.publish(
             payload,
@@ -1691,12 +1779,12 @@ async fn publishes_route_to_independent_partition_logs() {
         }
     };
 
-    let part0 = read_partition(0).await;
+    let part0 = read_partition(Partition::new(0)).await;
     assert_eq!(part0.next_offset, 1, "partition 0 has one message");
     assert_eq!(part0.records.len(), 1);
     assert_eq!(part0.records[0].1.payload, b"p0-a");
 
-    let part1 = read_partition(1).await;
+    let part1 = read_partition(Partition::new(1)).await;
     assert_eq!(part1.next_offset, 2, "partition 1 has two messages");
     assert_eq!(part1.records.len(), 2);
     assert_eq!(part1.records[0].1.payload, b"p1-a");
@@ -1712,7 +1800,7 @@ async fn owner_replication_read_rejects_unowned_queue_before_materializing() {
             .await;
 
     let err = broker
-        .read_owner_replication_records("unowned", 0, None, 0, 0, 10, 10)
+        .read_owner_replication_records("unowned", Partition::new(0), None, 0, 0, 10, 10)
         .await
         .expect_err("unowned queue unexpectedly served replication records");
 
@@ -1720,7 +1808,7 @@ async fn owner_replication_read_rejects_unowned_queue_before_materializing() {
         err,
         BrokerError::NotOwner {
             topic,
-            partition: 0,
+            partition: _,
             group: None,
         } if topic == "unowned"
     ));
@@ -1734,11 +1822,14 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     let (follower, _follower_dir) = open_test_broker().await;
 
     follower
-        .become_replication_follower("catchup", 0, None)
+        .become_replication_follower("catchup", Partition::new(0), None)
         .await
         .unwrap();
 
-    let (publisher, _confirms) = owner.get_publisher("catchup", 0, &None).await.unwrap();
+    let (publisher, _confirms) = owner
+        .get_publisher("catchup", Partition::new(0), &None)
+        .await
+        .unwrap();
     for payload in [b"first".to_vec(), b"second".to_vec()] {
         let reply = publisher
             .publish(
@@ -1754,7 +1845,7 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     }
 
     let records = owner
-        .read_owner_replication_records("catchup", 0, None, 0, 0, 10, 10)
+        .read_owner_replication_records("catchup", Partition::new(0), None, 0, 0, 10, 10)
         .await
         .unwrap();
     let expected_message_next_offset = match &records.messages {
@@ -1771,7 +1862,7 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     };
 
     let apply = follower
-        .apply_follower_replication_records("catchup", 0, None, records)
+        .apply_follower_replication_records("catchup", Partition::new(0), None, records)
         .await
         .unwrap();
     assert!(matches!(apply, BrokerFollowerReplicationApply::Applied(_)));
@@ -1779,7 +1870,7 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     let promotion = follower
         .promote_replication_follower_if_caught_up(
             "catchup",
-            0,
+            Partition::new(0),
             None,
             expected_message_next_offset,
             expected_event_next_offset,
@@ -1798,7 +1889,7 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     let mut sub = follower
         .subscribe(
             "catchup",
-            0,
+            Partition::new(0),
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 2 },
@@ -1823,7 +1914,10 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     let (owner, _owner_dir) = open_test_broker().await;
     let (follower, _follower_dir) = open_test_broker().await;
 
-    let (publisher, _confirms) = owner.get_publisher("checkpoint", 0, &None).await.unwrap();
+    let (publisher, _confirms) = owner
+        .get_publisher("checkpoint", Partition::new(0), &None)
+        .await
+        .unwrap();
     for payload in [b"first".to_vec(), b"second".to_vec()] {
         let reply = publisher
             .publish(
@@ -1839,7 +1933,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     }
 
     let checkpoint = owner
-        .export_owner_state_checkpoint("checkpoint", 0, None)
+        .export_owner_state_checkpoint("checkpoint", Partition::new(0), None)
         .await
         .unwrap();
     assert_eq!(checkpoint.message_checkpoint_offset, 0);
@@ -1848,13 +1942,13 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     assert_eq!(checkpoint.applied_event_offset, 1);
 
     follower
-        .become_replication_follower("checkpoint", 0, None)
+        .become_replication_follower("checkpoint", Partition::new(0), None)
         .await
         .unwrap();
     follower
         .install_follower_state_checkpoint(
             "checkpoint",
-            0,
+            Partition::new(0),
             None,
             FollowerStateCheckpointInstall {
                 message_next_offset: checkpoint.message_checkpoint_offset,
@@ -1869,7 +1963,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     let records = owner
         .read_owner_replication_records(
             "checkpoint",
-            0,
+            Partition::new(0),
             None,
             checkpoint.message_checkpoint_offset,
             checkpoint.event_next_offset,
@@ -1879,7 +1973,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
         .await
         .unwrap();
     let apply = follower
-        .apply_follower_replication_records("checkpoint", 0, None, records)
+        .apply_follower_replication_records("checkpoint", Partition::new(0), None, records)
         .await
         .unwrap();
     assert!(matches!(apply, BrokerFollowerReplicationApply::Applied(_)));
@@ -1887,7 +1981,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     let promotion = follower
         .promote_replication_follower_if_caught_up(
             "checkpoint",
-            0,
+            Partition::new(0),
             None,
             checkpoint.message_next_offset,
             checkpoint.event_next_offset,
@@ -1906,7 +2000,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     let mut sub = follower
         .subscribe(
             "checkpoint",
-            0,
+            Partition::new(0),
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 2 },
@@ -1945,7 +2039,7 @@ async fn follower_apply_returns_checkpoint_required_without_materializing_queue(
     let apply = follower
         .apply_follower_replication_records(
             "checkpointed",
-            0,
+            Partition::new(0),
             None,
             BrokerOwnerReplicationRecords {
                 messages: OwnerReplicationRead::CheckpointRequired {
@@ -1990,7 +2084,7 @@ async fn follower_apply_returns_event_checkpoint_required_after_empty_message_ba
     let apply = follower
         .apply_follower_replication_records(
             "event-checkpointed",
-            0,
+            Partition::new(0),
             None,
             BrokerOwnerReplicationRecords {
                 messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
@@ -2028,11 +2122,14 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
     let (follower, _follower_dir) = open_test_broker().await;
 
     follower
-        .become_replication_follower("multi-pass", 0, None)
+        .become_replication_follower("multi-pass", Partition::new(0), None)
         .await
         .unwrap();
 
-    let (publisher, _confirms) = owner.get_publisher("multi-pass", 0, &None).await.unwrap();
+    let (publisher, _confirms) = owner
+        .get_publisher("multi-pass", Partition::new(0), &None)
+        .await
+        .unwrap();
     for payload in [
         b"one".to_vec(),
         b"two".to_vec(),
@@ -2057,7 +2154,7 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
         .catch_up_replication_follower_from_owner(
             &owner,
             "multi-pass",
-            0,
+            Partition::new(0),
             None,
             BrokerReplicationCatchUpOptions {
                 max_messages_per_read: 2,
@@ -2080,7 +2177,7 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
     );
 
     let promotion = follower
-        .promote_replication_follower_if_caught_up("multi-pass", 0, None, 5, 5)
+        .promote_replication_follower_if_caught_up("multi-pass", Partition::new(0), None, 5, 5)
         .await
         .unwrap();
     assert!(matches!(
@@ -2095,7 +2192,7 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
     let mut sub = follower
         .subscribe(
             "multi-pass",
-            0,
+            Partition::new(0),
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 5 },
@@ -2130,12 +2227,12 @@ async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
     let (follower, _follower_dir) = open_test_broker().await;
 
     follower
-        .become_replication_follower("checkpoint-aware-normal", 0, None)
+        .become_replication_follower("checkpoint-aware-normal", Partition::new(0), None)
         .await
         .unwrap();
 
     let (publisher, _confirms) = owner
-        .get_publisher("checkpoint-aware-normal", 0, &None)
+        .get_publisher("checkpoint-aware-normal", Partition::new(0), &None)
         .await
         .unwrap();
     for payload in [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()] {
@@ -2156,7 +2253,7 @@ async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
         .catch_up_replication_follower_from_owner_with_checkpoint(
             &owner,
             "checkpoint-aware-normal",
-            0,
+            Partition::new(0),
             None,
             BrokerReplicationCatchUpOptions {
                 max_messages_per_read: 2,
@@ -2340,7 +2437,7 @@ fn follower_worker_checkpoint_install_requires_checkpoint_status() {
 async fn follower_worker_tick_records_catch_up_progress() {
     let (owner, _owner_dir) = open_test_broker().await;
     let (follower, _follower_dir) = open_test_broker().await;
-    let queue = QueueIdentity::new("worker-tick", 0, Some("workers"));
+    let queue = QueueIdentity::new("worker-tick", Partition::new(0), Some("workers"));
 
     let transition = assignment_transition(
         "worker-tick",
@@ -2354,7 +2451,10 @@ async fn follower_worker_tick_records_catch_up_progress() {
         .unwrap();
 
     let group = Some("workers".to_string());
-    let (publisher, _confirms) = owner.get_publisher("worker-tick", 0, &group).await.unwrap();
+    let (publisher, _confirms) = owner
+        .get_publisher("worker-tick", Partition::new(0), &group)
+        .await
+        .unwrap();
     for payload in [b"one".to_vec(), b"two".to_vec()] {
         let reply = publisher
             .publish(
@@ -2394,7 +2494,7 @@ async fn follower_worker_tick_records_catch_up_progress() {
     );
     assert_eq!(
         follower
-            .follower_replication_worker_snapshot("worker-tick", 0, Some("workers"))
+            .follower_replication_worker_snapshot("worker-tick", Partition::new(0), Some("workers"))
             .await,
         Some(FollowerReplicationWorkerState {
             message_next_offset: 1,
@@ -2416,7 +2516,7 @@ async fn follower_worker_tick_records_catch_up_progress() {
     assert_eq!(observability.replication_followers.len(), 1);
     let worker = &observability.replication_followers[0];
     assert_eq!(worker.topic, "worker-tick");
-    assert_eq!(worker.partition, 0);
+    assert_eq!(worker.partition, Partition::new(0));
     assert_eq!(worker.group.as_deref(), Some("workers"));
     assert!(!worker.busy);
     assert_eq!(
@@ -2435,7 +2535,7 @@ impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
     fn read_owner_replication_records<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::LogId,
+        _partition: fibril_storage::Partition,
         _group: Option<&'a str>,
         message_from: Offset,
         event_from: Offset,
@@ -2463,7 +2563,7 @@ impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::LogId,
+        _partition: fibril_storage::Partition,
         _group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async {
@@ -2500,7 +2600,7 @@ impl BrokerOwnerReplicationPeer for NotOwnerPeer {
     fn read_owner_replication_records<'a>(
         &'a self,
         topic: &'a str,
-        partition: fibril_storage::LogId,
+        partition: fibril_storage::Partition,
         group: Option<&'a str>,
         _message_from: Offset,
         _event_from: Offset,
@@ -2519,7 +2619,7 @@ impl BrokerOwnerReplicationPeer for NotOwnerPeer {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::LogId,
+        _partition: fibril_storage::Partition,
         _group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async {
@@ -2555,7 +2655,7 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
     fn read_owner_replication_records<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::LogId,
+        _partition: fibril_storage::Partition,
         _group: Option<&'a str>,
         message_from: Offset,
         event_from: Offset,
@@ -2585,7 +2685,7 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         _topic: &'a str,
-        _partition: fibril_storage::LogId,
+        _partition: fibril_storage::Partition,
         _group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async {
@@ -2599,7 +2699,7 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
 #[tokio::test]
 async fn follower_worker_tick_uses_owner_peer_abstraction() {
     let (follower, _follower_dir) = open_test_broker().await;
-    let queue = QueueIdentity::new("peer-abstraction", 0, Some("workers"));
+    let queue = QueueIdentity::new("peer-abstraction", Partition::new(0), Some("workers"));
     let transition = assignment_transition(
         "peer-abstraction",
         LocalAssignmentIntent::BecomeFollower,
@@ -2629,7 +2729,11 @@ async fn follower_worker_tick_uses_owner_peer_abstraction() {
     );
     assert_eq!(
         follower
-            .follower_replication_worker_snapshot("peer-abstraction", 0, Some("workers"))
+            .follower_replication_worker_snapshot(
+                "peer-abstraction",
+                Partition::new(0),
+                Some("workers")
+            )
             .await
             .map(|state| state.status),
         Some(FollowerReplicationWorkerStatus::CaughtUp)
@@ -2641,7 +2745,7 @@ async fn follower_worker_tick_uses_owner_peer_abstraction() {
 #[tokio::test]
 async fn follower_worker_loop_ticks_until_cancelled() {
     let (follower, _follower_dir) = open_test_broker().await;
-    let queue = QueueIdentity::new("peer-loop", 0, Some("workers"));
+    let queue = QueueIdentity::new("peer-loop", Partition::new(0), Some("workers"));
     let assignment =
         PartitionAssignment::new(queue.clone(), "node-a", vec!["node-b".to_string()], 1);
     let transition = assignment_transition(
@@ -2683,7 +2787,7 @@ async fn follower_worker_loop_ticks_until_cancelled() {
 #[tokio::test]
 async fn follower_worker_loop_exits_when_worker_is_stopped() {
     let (follower, _follower_dir) = open_test_broker().await;
-    let queue = QueueIdentity::new("peer-loop-stopped", 0, Some("workers"));
+    let queue = QueueIdentity::new("peer-loop-stopped", Partition::new(0), Some("workers"));
     let assignment = PartitionAssignment::new(queue, "node-a", vec!["node-b".to_string()], 1);
     let resolver = Arc::new(StaticOwnerPeerResolver::new(Arc::new(EmptyOwnerPeer)));
     let shutdown = CancellationToken::new();
@@ -2709,7 +2813,7 @@ async fn follower_worker_loop_exits_when_worker_is_stopped() {
 #[tokio::test]
 async fn follower_worker_loop_exits_when_owner_peer_is_not_owner() {
     let (follower, _follower_dir) = open_test_broker().await;
-    let queue = QueueIdentity::new("peer-loop-not-owner", 0, Some("workers"));
+    let queue = QueueIdentity::new("peer-loop-not-owner", Partition::new(0), Some("workers"));
     let assignment =
         PartitionAssignment::new(queue.clone(), "node-a", vec!["node-b".to_string()], 1);
     let transition = assignment_transition(
@@ -2746,7 +2850,7 @@ async fn follower_worker_loop_exits_when_owner_peer_is_not_owner() {
 #[tokio::test]
 async fn follower_worker_loop_supervisor_starts_only_once() {
     let (follower, _follower_dir) = open_test_broker().await;
-    let queue = QueueIdentity::new("peer-loop-once", 0, Some("workers"));
+    let queue = QueueIdentity::new("peer-loop-once", Partition::new(0), Some("workers"));
     let assignment =
         PartitionAssignment::new(queue.clone(), "node-a", vec!["node-b".to_string()], 1);
     let transition = assignment_transition(
@@ -2801,7 +2905,7 @@ async fn assignment_watcher_can_start_and_stop_follower_replication_loop() {
     };
     broker.spawn_assignment_watcher_with_follower_replication(coordination.clone(), resolver, cfg);
 
-    let queue = QueueIdentity::new("watched-replicated", 0, Some("workers"));
+    let queue = QueueIdentity::new("watched-replicated", Partition::new(0), Some("workers"));
     coordination.update_snapshot(coordination_snapshot(
         vec![PartitionAssignment::new(
             queue,
@@ -2815,12 +2919,20 @@ async fn assignment_watcher_can_start_and_stop_follower_replication_loop() {
     tokio::time::timeout(Duration::from_secs(2), peer.wait_for_read())
         .await
         .expect("assignment watcher should start follower replication loop");
-    assert!(broker.has_follower_replication_worker("watched-replicated", 0, Some("workers")));
+    assert!(broker.has_follower_replication_worker(
+        "watched-replicated",
+        Partition::new(0),
+        Some("workers")
+    ));
 
     coordination.update_snapshot(coordination_snapshot(Vec::new(), 3));
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if !broker.has_follower_replication_worker("watched-replicated", 0, Some("workers")) {
+            if !broker.has_follower_replication_worker(
+                "watched-replicated",
+                Partition::new(0),
+                Some("workers"),
+            ) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2836,7 +2948,7 @@ async fn assignment_watcher_can_start_and_stop_follower_replication_loop() {
 async fn follower_worker_tick_requires_registered_worker() {
     let (owner, _owner_dir) = open_test_broker().await;
     let (follower, _follower_dir) = open_test_broker().await;
-    let queue = QueueIdentity::new("missing-worker", 0, None);
+    let queue = QueueIdentity::new("missing-worker", Partition::new(0), None);
 
     let err = follower
         .run_follower_replication_worker_once(
@@ -2848,7 +2960,7 @@ async fn follower_worker_tick_requires_registered_worker() {
         .expect_err("worker tick should reject unregistered queues");
 
     assert!(matches!(err, BrokerError::InvalidArgument(_)));
-    assert!(!follower.has_follower_replication_worker("missing-worker", 0, None));
+    assert!(!follower.has_follower_replication_worker("missing-worker", Partition::new(0), None));
 
     owner.shutdown().await;
     follower.shutdown().await;
@@ -2943,14 +3055,20 @@ async fn queue_activity_tracks_independent_publisher_sinks() {
 
     assert!(broker.queue_activity_snapshot("t", None).is_none());
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 1);
     assert_eq!(snapshot.active_subscribers, 0);
     assert_eq!(snapshot.idle_since_ms, None);
     assert!(broker.is_queue_materialized("t", None));
 
-    let (pubh2, _confirms2) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh2, _confirms2) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 2);
     assert_eq!(snapshot.idle_since_ms, None);
@@ -2975,9 +3093,18 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     let sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
 
@@ -3002,7 +3129,10 @@ async fn queue_activity_starts_idle_after_last_publisher_and_subscriber_drop() {
     assert_eq!(snapshot.active_subscribers, 0);
     assert!(snapshot.idle_since_ms.is_some_and(|ts| ts >= before_idle));
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     let snapshot = broker.queue_activity_snapshot("t", None).unwrap();
     assert_eq!(snapshot.active_publishers, 1);
     assert_eq!(snapshot.active_subscribers, 0);
@@ -3017,7 +3147,13 @@ async fn subscriber_lease_materializes_queue_before_returning() {
     let client_id = Uuid::now_v7();
 
     let sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
 
@@ -3033,7 +3169,10 @@ async fn subscriber_lease_materializes_queue_before_returning() {
 async fn queue_eviction_skips_active_publishers() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (_pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (_pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
 
     let attempt = broker.try_evict_inactive_queue("t", None, 0).await.unwrap();
 
@@ -3064,7 +3203,13 @@ async fn queue_eviction_skips_active_subscribers() {
     let client_id = Uuid::now_v7();
 
     let _sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
 
@@ -3080,7 +3225,10 @@ async fn queue_eviction_skips_active_subscribers() {
 async fn queue_eviction_skips_when_idle_threshold_not_met() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     drop(pubh);
     wait_for_queue_idle(&broker, "t", None).await;
 
@@ -3100,7 +3248,10 @@ async fn queue_eviction_skips_broker_delivery_tags() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3117,7 +3268,13 @@ async fn queue_eviction_skips_broker_delivery_tags() {
     wait_for_queue_activity(&broker, "t", None, 0, 0, true).await;
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
     let _msg = sub.recv().await.unwrap();
@@ -3136,7 +3293,10 @@ async fn queue_eviction_skips_broker_delivery_tags() {
 async fn queue_eviction_unmaterializes_idle_publisher_without_messages() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     drop(pubh);
     wait_for_queue_idle(&broker, "t", None).await;
 
@@ -3154,7 +3314,10 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
     let (broker, _dir) =
         open_test_broker_with_metrics(BrokerConfig::default(), metrics.clone()).await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3192,7 +3355,10 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
 async fn queue_eviction_reports_not_materialized_after_previous_unmaterialize() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3223,9 +3389,15 @@ async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (_active_pubh, _confirms) = broker.get_publisher("active", 0, &None).await.unwrap();
+    let (_active_pubh, _confirms) = broker
+        .get_publisher("active", Partition::new(0), &None)
+        .await
+        .unwrap();
     let idle_group = Some("g".to_string());
-    let (idle_pubh, _confirms) = broker.get_publisher("idle", 0, &idle_group).await.unwrap();
+    let (idle_pubh, _confirms) = broker
+        .get_publisher("idle", Partition::new(0), &idle_group)
+        .await
+        .unwrap();
     idle_pubh
         .publish(
             b"x".to_vec(),
@@ -3243,7 +3415,13 @@ async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
     wait_for_queue_idle(&broker, "idle", Some("g")).await;
 
     let sub = broker
-        .subscribe("sub", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "sub",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
 
@@ -3278,7 +3456,10 @@ async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
 async fn queue_eviction_sweep_unmaterializes_idle_materialized_queue() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3312,7 +3493,10 @@ async fn queue_eviction_sweep_does_not_repeat_already_unloaded_queue() {
     let (broker, _dir) =
         open_test_broker_with_metrics(BrokerConfig::default(), metrics.clone()).await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3350,7 +3534,10 @@ async fn queue_eviction_sweep_does_not_repeat_already_unloaded_queue() {
 async fn queue_eviction_sweep_rechecks_queue_materialized_after_previous_unload() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3417,7 +3604,10 @@ async fn queue_eviction_sweep_unmaterializes_storage_only_materialized_queue() {
 async fn queue_eviction_worker_is_disabled_by_default() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3446,7 +3636,10 @@ async fn queue_eviction_worker_is_disabled_by_default() {
 async fn queue_eviction_worker_can_be_enabled_after_startup() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3495,7 +3688,10 @@ async fn queue_eviction_worker_leaves_active_publisher_materialized() {
     for _ in 0..5 {
         tokio::task::yield_now().await;
     }
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3531,7 +3727,10 @@ async fn active_publisher_does_not_race_idle_cleanup_into_double_open() {
     })
     .await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
 
     for i in 0..50 {
         let reply = pubh
@@ -3560,7 +3759,10 @@ async fn active_publisher_does_not_race_idle_cleanup_into_double_open() {
 async fn broker_delivers_messages_in_order() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     let client_id = Uuid::now_v7();
 
     for _ in 0..5 {
@@ -3576,7 +3778,13 @@ async fn broker_delivers_messages_in_order() {
     }
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 10 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 10 },
+        )
         .await
         .unwrap();
 
@@ -3599,11 +3807,20 @@ async fn broker_delivers_messages_in_order() {
 async fn delayed_publish_waits_until_deadline() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     let client_id = Uuid::now_v7();
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
 
@@ -3645,7 +3862,10 @@ async fn delayed_publish_waits_until_deadline() {
 async fn delayed_retry_waits_until_deadline() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _confirms) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _confirms) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3660,7 +3880,13 @@ async fn delayed_retry_waits_until_deadline() {
     .unwrap();
 
     let mut sub = broker
-        .subscribe("t", 0, None, Uuid::now_v7(), ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
     let msg = sub.recv().await.expect("initial delivery");
@@ -3688,7 +3914,10 @@ async fn delayed_retry_waits_until_deadline() {
 async fn broker_respects_prefetch() {
     let (broker, _dir) = open_test_broker().await;
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     let client_id = Uuid::now_v7();
 
     for i in 0..10 {
@@ -3705,7 +3934,13 @@ async fn broker_respects_prefetch() {
     }
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 3 },
+        )
         .await
         .unwrap();
 
@@ -3731,7 +3966,10 @@ async fn ack_releases_prefetch_slot() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     for i in 0..5 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -3745,7 +3983,13 @@ async fn ack_releases_prefetch_slot() {
     }
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 2 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 2 },
+        )
         .await
         .unwrap();
 
@@ -3809,7 +4053,10 @@ async fn ack_releases_prefetch_slot2() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     for i in 0..5 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -3823,7 +4070,13 @@ async fn ack_releases_prefetch_slot2() {
     }
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 2 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 2 },
+        )
         .await
         .unwrap();
 
@@ -3882,7 +4135,10 @@ async fn broker_redelivers_after_expiry() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     pubh.publish(
         b"x".to_vec(),
         Default::default(),
@@ -3895,7 +4151,13 @@ async fn broker_redelivers_after_expiry() {
     println!("Published message with offset 0");
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
     println!("Receiving first message");
@@ -3921,7 +4183,10 @@ async fn broker_distributes_across_consumers() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     for _ in 0..10 {
         pubh.publish(
             b"x".to_vec(),
@@ -3935,11 +4200,23 @@ async fn broker_distributes_across_consumers() {
     }
 
     let mut c1 = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
     let mut c2 = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
 
@@ -3954,7 +4231,10 @@ async fn slow_consumer_does_not_starve_fast_one() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     for _ in 0..5 {
         pubh.publish(
             b"x".to_vec(),
@@ -3968,11 +4248,23 @@ async fn slow_consumer_does_not_starve_fast_one() {
     }
 
     let mut slow = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
     let mut fast = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 5 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 5 },
+        )
         .await
         .unwrap();
 
@@ -3998,7 +4290,10 @@ async fn unsubscribe_requeues_prefetched_unacked_messages() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     for i in 0..3 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -4012,7 +4307,13 @@ async fn unsubscribe_requeues_prefetched_unacked_messages() {
     }
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 3 },
+        )
         .await
         .unwrap();
 
@@ -4028,7 +4329,13 @@ async fn unsubscribe_requeues_prefetched_unacked_messages() {
         .unwrap();
 
     let mut replacement = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 3 },
+        )
         .await
         .unwrap();
 
@@ -4054,7 +4361,10 @@ async fn unsubscribe_redistributes_prefetched_messages_to_active_subscriber() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     for i in 0..3 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -4068,7 +4378,13 @@ async fn unsubscribe_redistributes_prefetched_messages_to_active_subscriber() {
     }
 
     let mut first = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 3 },
+        )
         .await
         .unwrap();
 
@@ -4080,7 +4396,13 @@ async fn unsubscribe_redistributes_prefetched_messages_to_active_subscriber() {
     assert_eq!(leased, vec![0, 1, 2]);
 
     let mut replacement = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 3 },
+        )
         .await
         .unwrap();
 
@@ -4121,7 +4443,10 @@ async fn unsubscribe_redelivery_survives_if_active_replacement_has_no_capacity_t
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     for i in 0..3 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -4135,11 +4460,23 @@ async fn unsubscribe_redelivery_survives_if_active_replacement_has_no_capacity_t
     }
 
     let mut first = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 2 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 2 },
+        )
         .await
         .unwrap();
     let mut replacement = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1 },
+        )
         .await
         .unwrap();
 
@@ -4181,7 +4518,13 @@ async fn unsubscribe_redelivery_survives_if_active_replacement_has_no_capacity_t
         .unwrap();
 
     let mut final_sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 3 },
+        )
         .await
         .unwrap();
 
@@ -4207,7 +4550,10 @@ async fn unsubscribe_does_not_requeue_acked_messages_after_settles_drain() {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, _) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, _) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
     for i in 0..3 {
         pubh.publish(
             format!("x{i}").as_bytes().to_vec(),
@@ -4221,7 +4567,13 @@ async fn unsubscribe_does_not_requeue_acked_messages_after_settles_drain() {
     }
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 3 },
+        )
         .await
         .unwrap();
 
@@ -4243,7 +4595,13 @@ async fn unsubscribe_does_not_requeue_acked_messages_after_settles_drain() {
         .unwrap();
 
     let mut replacement = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 3 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 3 },
+        )
         .await
         .unwrap();
 
@@ -4302,7 +4660,7 @@ async fn nack_without_requeue_drops_message() -> Result<(), Box<dyn std::error::
 #[tokio::test]
 async fn publish_engine_open_conflict_is_returned_to_publisher() -> anyhow::Result<()> {
     let broker = Broker::new(FailingPublishEngine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("t", 0, &None).await?;
+    let (publisher, _confirms) = broker.get_publisher("t", Partition::new(0), &None).await?;
     let reply = publisher
         .publish(
             b"conflict".to_vec(),
@@ -4352,7 +4710,9 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
         .await?;
 
     let broker = Broker::new(engine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("source", 0, &None).await?;
+    let (publisher, _confirms) = broker
+        .get_publisher("source", Partition::new(0), &None)
+        .await?;
     publisher
         .publish(
             b"poison".to_vec(),
@@ -4368,7 +4728,7 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
     let mut source = broker
         .subscribe(
             "source",
-            0,
+            Partition::new(0),
             None,
             source_client,
             ConsumerConfig { prefetch: 1 },
@@ -4389,7 +4749,7 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
     let mut dlq = broker
         .subscribe(
             "_dlq.source",
-            0,
+            Partition::new(0),
             None,
             dlq_client,
             ConsumerConfig { prefetch: 1 },
@@ -4430,7 +4790,9 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
         .await?;
 
     let broker = Broker::new(engine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("source", 0, &None).await?;
+    let (publisher, _confirms) = broker
+        .get_publisher("source", Partition::new(0), &None)
+        .await?;
     publisher
         .publish(
             b"poison".to_vec(),
@@ -4446,7 +4808,7 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
     let mut source = broker
         .subscribe(
             "source",
-            0,
+            Partition::new(0),
             None,
             source_client,
             ConsumerConfig { prefetch: 1 },
@@ -4467,7 +4829,7 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
     let mut dlq = broker
         .subscribe(
             "_dlq.source",
-            0,
+            Partition::new(0),
             None,
             dlq_client,
             ConsumerConfig { prefetch: 1 },
@@ -4574,7 +4936,9 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
         .await?;
 
     let broker = Broker::new(engine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("source", 0, &None).await?;
+    let (publisher, _confirms) = broker
+        .get_publisher("source", Partition::new(0), &None)
+        .await?;
     publisher
         .publish(
             b"poison".to_vec(),
@@ -4589,7 +4953,7 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
     let mut source = broker
         .subscribe(
             "source",
-            0,
+            Partition::new(0),
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -4614,7 +4978,7 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
     let mut dlq = broker
         .subscribe(
             "_dlq.source",
-            0,
+            Partition::new(0),
             None,
             Uuid::now_v7(),
             ConsumerConfig { prefetch: 1 },
@@ -4652,7 +5016,9 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
         .await?;
 
     let broker = Broker::new(engine, BrokerConfig::default(), None);
-    let (publisher, _confirms) = broker.get_publisher("source", 0, &None).await?;
+    let (publisher, _confirms) = broker
+        .get_publisher("source", Partition::new(0), &None)
+        .await?;
     publisher
         .publish(
             b"discard".to_vec(),
@@ -4668,7 +5034,7 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
     let mut source = broker
         .subscribe(
             "source",
-            0,
+            Partition::new(0),
             None,
             source_client,
             ConsumerConfig { prefetch: 1 },
@@ -4689,7 +5055,7 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
     let mut dlq = broker
         .subscribe(
             "_dlq.source",
-            0,
+            Partition::new(0),
             None,
             dlq_client,
             ConsumerConfig { prefetch: 1 },
@@ -5126,7 +5492,10 @@ async fn stress_single_consumer(total: usize) {
     let (broker, _dir) = open_test_broker().await;
     let client_id = Uuid::now_v7();
 
-    let (pubh, mut confirmer) = broker.get_publisher("t", 0, &None).await.unwrap();
+    let (pubh, mut confirmer) = broker
+        .get_publisher("t", Partition::new(0), &None)
+        .await
+        .unwrap();
 
     let mut to_publish_list = (0..total)
         .map(|i| format!("b{i}").as_bytes().to_vec())
@@ -5163,7 +5532,13 @@ async fn stress_single_consumer(total: usize) {
     println!("Confirmed {} messages", total);
 
     let mut sub = broker
-        .subscribe("t", 0, None, client_id, ConsumerConfig { prefetch: 1000 })
+        .subscribe(
+            "t",
+            Partition::new(0),
+            None,
+            client_id,
+            ConsumerConfig { prefetch: 1000 },
+        )
         .await
         .unwrap();
 

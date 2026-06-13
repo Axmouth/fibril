@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fibril_storage::Partition;
 use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 
@@ -53,7 +54,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
         req,
         &Subscribe {
             topic: "t1".into(),
-            partition: 0,
+            partition: Partition::new(0),
             group: Some("g1".into()),
             prefetch: 100,
             auto_ack: true,
@@ -69,7 +70,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
         &Publish {
             topic: "t1".into(),
             group: None,
-            partition: 0,
+            partition: Partition::new(0),
             require_confirm: true,
             content_type: None,
             headers: HashMap::new(),

@@ -46,6 +46,7 @@ use fibril_protocol::v1::{
         catch_up_replication_over_protocol,
     },
 };
+use fibril_storage::Partition;
 use fibril_util::{StaticAuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaEvent, StromaKeratinConfig, TempDir};
@@ -195,7 +196,7 @@ async fn start_protocol_listener_for_broker(
 
 fn follower_assignment_transition(topic: &str, group: Option<&str>) -> LocalAssignmentTransition {
     LocalAssignmentTransition {
-        queue: QueueIdentity::new(topic, 0, group),
+        queue: QueueIdentity::new(topic, Partition::new(0), group),
         previous_role: None,
         next_role: Some(LocalAssignmentRole::Follower),
         previous: None,
@@ -453,7 +454,7 @@ async fn framed_subscribe(
                 request_id,
                 &Subscribe {
                     topic: topic.into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: group.map(str::to_string),
                     prefetch: 1,
                     auto_ack,
@@ -482,7 +483,7 @@ async fn framed_publish(
                 request_id,
                 &Publish {
                     topic: topic.into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: group.map(str::to_string),
                     require_confirm: true,
                     content_type: None,
@@ -545,7 +546,7 @@ async fn reconcile_after_resume_keeps_matching_subscription() {
                 2,
                 &Subscribe {
                     topic: "reconcile.keep".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: Some("workers".into()),
                     prefetch: 1,
                     auto_ack: false,
@@ -620,7 +621,7 @@ async fn reconcile_after_resume_closes_mismatched_subscription() {
                 2,
                 &Subscribe {
                     topic: "reconcile.recreate".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -753,7 +754,7 @@ async fn restore_policy_recreates_client_only_subscription() {
                         sub_id: 99,
                         topic: "reconcile.restore".into(),
                         group: Some("workers".into()),
-                        partition: 0,
+                        partition: Partition::new(0),
                         auto_ack: false,
                         prefetch: 2,
                     }],
@@ -827,7 +828,7 @@ async fn reconnect_grace_accepts_late_ack_after_resume() {
                 &Ack {
                     topic: "grace.ack".into(),
                     group: None,
-                    partition: 0,
+                    partition: Partition::new(0),
                     tags: vec![delivered.delivery_tag],
                 },
             )
@@ -892,7 +893,7 @@ async fn reconnect_grace_runtime_update_affects_future_disconnects() {
                 &Ack {
                     topic: "grace.live".into(),
                     group: None,
-                    partition: 0,
+                    partition: Partition::new(0),
                     tags: vec![delivered.delivery_tag],
                 },
             )
@@ -1057,7 +1058,7 @@ async fn replication_read_returns_owner_log_records() {
                 &ReplicationRead {
                     topic: "replication.read.tcp".into(),
                     group: Some("workers".into()),
-                    partition: 0,
+                    partition: Partition::new(0),
                     message_from: 0,
                     event_from: 0,
                     max_messages: 10,
@@ -1118,7 +1119,7 @@ async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_o
                 &ReplicationRead {
                     topic: "unowned".into(),
                     group: None,
-                    partition: 0,
+                    partition: Partition::new(0),
                     message_from: 0,
                     event_from: 0,
                     max_messages: 10,
@@ -1142,7 +1143,7 @@ async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_o
 async fn replication_apply_writes_follower_log_records() {
     let (broker, dir) = open_test_broker().await;
     broker
-        .become_replication_follower("replication.apply.tcp", 0, None)
+        .become_replication_follower("replication.apply.tcp", Partition::new(0), None)
         .await
         .unwrap();
     let (mut framed, server_task, _dir, broker) =
@@ -1160,7 +1161,7 @@ async fn replication_apply_writes_follower_log_records() {
                 &ReplicationApply {
                     topic: "replication.apply.tcp".into(),
                     group: None,
-                    partition: 0,
+                    partition: Partition::new(0),
                     messages: Some(ReplicationMessageApplyBatch {
                         epoch: 0,
                         records: vec![ReplicationMessageRecord {
@@ -1192,7 +1193,13 @@ async fn replication_apply_writes_follower_log_records() {
     assert!(response.events_applied);
 
     let promoted = broker
-        .promote_replication_follower_if_caught_up("replication.apply.tcp", 0, None, 1, 1)
+        .promote_replication_follower_if_caught_up(
+            "replication.apply.tcp",
+            Partition::new(0),
+            None,
+            1,
+            1,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -1212,7 +1219,7 @@ async fn replication_apply_writes_follower_log_records() {
 async fn replication_apply_rejects_non_contiguous_records_and_keeps_connection_open() {
     let (broker, dir) = open_test_broker().await;
     broker
-        .become_replication_follower("replication.apply.bad", 0, None)
+        .become_replication_follower("replication.apply.bad", Partition::new(0), None)
         .await
         .unwrap();
     let (mut framed, server_task, _dir, _broker) =
@@ -1227,7 +1234,7 @@ async fn replication_apply_rejects_non_contiguous_records_and_keeps_connection_o
                 &ReplicationApply {
                     topic: "replication.apply.bad".into(),
                     group: None,
-                    partition: 0,
+                    partition: Partition::new(0),
                     messages: Some(ReplicationMessageApplyBatch {
                         epoch: 0,
                         records: vec![
@@ -1285,7 +1292,7 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
 
     let (follower_broker, follower_dir) = open_test_broker().await;
     follower_broker
-        .become_replication_follower(topic, 0, group.as_deref())
+        .become_replication_follower(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
     let (mut follower_framed, follower_task, _follower_dir, follower_broker) =
@@ -1301,7 +1308,7 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
         &mut owner_framed,
         &mut follower_framed,
         topic,
-        0,
+        Partition::new(0),
         group.as_deref(),
         ProtocolReplicationCatchUpOptions {
             max_messages_per_read: 1,
@@ -1326,7 +1333,7 @@ async fn replication_read_and_apply_compose_for_manual_catch_up() {
     );
 
     let promoted = follower_broker
-        .promote_replication_follower_if_caught_up(topic, 0, group.as_deref(), 2, 2)
+        .promote_replication_follower_if_caught_up(topic, Partition::new(0), group.as_deref(), 2, 2)
         .await
         .unwrap();
     assert_eq!(
@@ -1361,7 +1368,7 @@ async fn protocol_owner_replication_peer_reads_owner_records() {
 
     let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
     let records = peer
-        .read_owner_replication_records(topic, 0, group.as_deref(), 0, 0, 8, 8)
+        .read_owner_replication_records(topic, Partition::new(0), group.as_deref(), 0, 0, 8, 8)
         .await
         .unwrap();
 
@@ -1402,7 +1409,7 @@ async fn protocol_owner_replication_peer_exports_checkpoint() {
 
     let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
     let checkpoint = peer
-        .export_owner_state_checkpoint(topic, 0, group.as_deref())
+        .export_owner_state_checkpoint(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
 
@@ -1426,7 +1433,7 @@ async fn protocol_owner_replication_peer_maps_not_owner_error() {
 
     let peer = ProtocolOwnerReplicationPeer::new(framed);
     let err = peer
-        .read_owner_replication_records("unowned", 0, None, 0, 0, 8, 8)
+        .read_owner_replication_records("unowned", Partition::new(0), None, 0, 0, 8, 8)
         .await
         .unwrap_err();
 
@@ -1444,7 +1451,10 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
     let topic = "replication.resolver.read";
     let group = Some("workers".to_string());
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &group).await.unwrap();
+    let (publisher, _confirms) = owner_broker
+        .get_publisher(topic, Partition::new(0), &group)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"resolver-payload".to_vec(),
@@ -1467,7 +1477,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
     let resolver =
         StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
     let assignment = PartitionAssignment::new(
-        QueueIdentity::new(topic, 0, group.as_deref()),
+        QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
         "owner-a",
         vec![],
         1,
@@ -1479,7 +1489,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
         .unwrap()
         .expect("owner peer");
     let records = peer
-        .read_owner_replication_records(topic, 0, group.as_deref(), 0, 0, 8, 8)
+        .read_owner_replication_records(topic, Partition::new(0), group.as_deref(), 0, 0, 8, 8)
         .await
         .unwrap();
 
@@ -1498,7 +1508,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
 async fn static_protocol_owner_peer_resolver_returns_none_for_unknown_owner() {
     let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::new());
     let assignment = PartitionAssignment::new(
-        QueueIdentity::new("replication.resolver.missing", 0, None),
+        QueueIdentity::new("replication.resolver.missing", Partition::new(0), None),
         "missing-owner",
         vec![],
         1,
@@ -1519,7 +1529,7 @@ async fn static_protocol_owner_peer_resolver_reuses_peer_for_owner() {
     let resolver =
         StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
     let assignment = PartitionAssignment::new(
-        QueueIdentity::new("replication.resolver.cached", 0, None),
+        QueueIdentity::new("replication.resolver.cached", Partition::new(0), None),
         "owner-a",
         vec![],
         1,
@@ -1566,7 +1576,11 @@ fn protocol_coordination_snapshot(
 #[tokio::test]
 async fn coordination_protocol_owner_peer_resolver_returns_none_for_missing_owner_node() {
     let assignment = PartitionAssignment::new(
-        QueueIdentity::new("replication.resolver.coord.missing", 0, None),
+        QueueIdentity::new(
+            "replication.resolver.coord.missing",
+            Partition::new(0),
+            None,
+        ),
         "owner-a",
         vec![],
         1,
@@ -1589,7 +1603,7 @@ async fn coordination_protocol_owner_peer_resolver_returns_none_for_missing_owne
 #[tokio::test]
 async fn coordination_protocol_owner_peer_resolver_reuses_stable_owner_address() {
     let assignment = PartitionAssignment::new(
-        QueueIdentity::new("replication.resolver.coord.cached", 0, None),
+        QueueIdentity::new("replication.resolver.coord.cached", Partition::new(0), None),
         "owner-a",
         vec![],
         1,
@@ -1621,7 +1635,11 @@ async fn coordination_protocol_owner_peer_resolver_reuses_stable_owner_address()
 #[tokio::test]
 async fn coordination_protocol_owner_peer_resolver_replaces_peer_when_owner_address_changes() {
     let assignment = PartitionAssignment::new(
-        QueueIdentity::new("replication.resolver.coord.changed", 0, None),
+        QueueIdentity::new(
+            "replication.resolver.coord.changed",
+            Partition::new(0),
+            None,
+        ),
         "owner-a",
         vec![],
         1,
@@ -1659,7 +1677,7 @@ async fn coordination_protocol_owner_peer_resolver_replaces_peer_when_owner_addr
 
 #[tokio::test]
 async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_move() {
-    let queue = QueueIdentity::new("replication.resolver.coord.moved", 0, None);
+    let queue = QueueIdentity::new("replication.resolver.coord.moved", Partition::new(0), None);
     let first_assignment = PartitionAssignment::new(queue.clone(), "owner-a", vec![], 1);
     let second_assignment = PartitionAssignment::new(queue.clone(), "owner-b", vec![], 2);
     let mut nodes = HashMap::new();
@@ -1714,7 +1732,10 @@ async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_m
 async fn static_protocol_owner_peer_resolver_can_authenticate() {
     let topic = "replication.resolver.auth";
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = owner_broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"auth-payload".to_vec(),
@@ -1738,8 +1759,12 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
         ProtocolOwnerPeerResolverConfig::new(HashMap::from([("owner-a".to_string(), addr)]))
             .with_auth("fibril", "secret"),
     );
-    let assignment =
-        PartitionAssignment::new(QueueIdentity::new(topic, 0, None), "owner-a", vec![], 1);
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new(topic, Partition::new(0), None),
+        "owner-a",
+        vec![],
+        1,
+    );
 
     let peer = resolver
         .resolve_owner_peer(&assignment)
@@ -1747,7 +1772,7 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
         .unwrap()
         .expect("owner peer");
     let records = peer
-        .read_owner_replication_records(topic, 0, None, 0, 0, 8, 8)
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 8, 8)
         .await
         .unwrap();
 
@@ -1790,7 +1815,10 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
 
     // Owner broker with data, serving the replication protocol on a real port.
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = owner_broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
     for payload in [b"coord-first".as_slice(), b"coord-second".as_slice()] {
         let reply = publisher
             .publish(
@@ -1805,7 +1833,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         reply.await.unwrap().unwrap();
     }
     let owner_checkpoint = owner_broker
-        .export_owner_state_checkpoint(topic, 0, None)
+        .export_owner_state_checkpoint(topic, Partition::new(0), None)
         .await
         .unwrap();
     let (owner_addr, server_task, _owner_dir, owner_broker) = start_protocol_listener_for_broker(
@@ -1832,7 +1860,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         .await
         .unwrap();
     coordination
-        .register_queue(&QueueIdentity::new(topic, 0, None))
+        .register_queue(&QueueIdentity::new(topic, Partition::new(0), None))
         .await
         .unwrap();
 
@@ -1867,7 +1895,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         .unwrap()
         .expect("leader iteration");
     let assignment = committed
-        .assignment_for(topic, 0, None)
+        .assignment_for(topic, Partition::new(0), None)
         .expect("assigned")
         .clone();
     assert_eq!(assignment.owner, "a-owner");
@@ -1876,7 +1904,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     // watcher's BecomeOwner would: fence its logs at the assignment epoch so
     // its replication reads carry the fenced epoch.
     owner_broker
-        .advance_replication_epoch(topic, 0, None, assignment.epoch)
+        .advance_replication_epoch(topic, Partition::new(0), None, assignment.epoch)
         .await
         .unwrap();
 
@@ -1884,7 +1912,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let state = follower_broker
-                .follower_replication_worker_snapshot(topic, 0, None)
+                .follower_replication_worker_snapshot(topic, Partition::new(0), None)
                 .await;
             if state
                 .as_ref()
@@ -1900,7 +1928,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
 
     // Wire path: the follower's stamped reads reported its durable
     // progress to the owner.
-    let progress = owner_broker.follower_replication_progress(topic, 0, None);
+    let progress = owner_broker.follower_replication_progress(topic, Partition::new(0), None);
     assert!(
         progress
             .iter()
@@ -1913,7 +1941,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
             topic,
-            0,
+            Partition::new(0),
             None,
             owner_checkpoint.message_next_offset,
             owner_checkpoint.event_next_offset,
@@ -1964,7 +1992,10 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
 
     // Owner broker with two committed messages, serving replication over TCP.
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = owner_broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
     for payload in [b"failover-first".as_slice(), b"failover-second".as_slice()] {
         let reply = publisher
             .publish(
@@ -1979,7 +2010,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         reply.await.unwrap().unwrap();
     }
     let owner_checkpoint = owner_broker
-        .export_owner_state_checkpoint(topic, 0, None)
+        .export_owner_state_checkpoint(topic, Partition::new(0), None)
         .await
         .unwrap();
     let (owner_addr, server_task, _owner_dir, owner_broker) = start_protocol_listener_for_broker(
@@ -2004,7 +2035,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         .await
         .unwrap();
     coordination
-        .register_queue(&QueueIdentity::new(topic, 0, None))
+        .register_queue(&QueueIdentity::new(topic, Partition::new(0), None))
         .await
         .unwrap();
 
@@ -2037,7 +2068,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         .unwrap()
         .expect("leader iteration");
     let first = committed
-        .assignment_for(topic, 0, None)
+        .assignment_for(topic, Partition::new(0), None)
         .expect("assigned")
         .clone();
     assert_eq!(first.owner, "a-owner");
@@ -2045,14 +2076,14 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
     // Watcher-less harness owner: fence at the assignment epoch, as its own
     // watcher's BecomeOwner would in production.
     owner_broker
-        .advance_replication_epoch(topic, 0, None, first.epoch)
+        .advance_replication_epoch(topic, Partition::new(0), None, first.epoch)
         .await
         .unwrap();
 
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let state = follower_broker
-                .follower_replication_worker_snapshot(topic, 0, None)
+                .follower_replication_worker_snapshot(topic, Partition::new(0), None)
                 .await;
             if state
                 .as_ref()
@@ -2084,7 +2115,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         .unwrap()
         .expect("failover iteration");
     let moved = committed
-        .assignment_for(topic, 0, None)
+        .assignment_for(topic, Partition::new(0), None)
         .expect("still assigned")
         .clone();
     assert_eq!(moved.owner, "b-follower", "ownership must move");
@@ -2097,11 +2128,12 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
             if fibril_broker::broker::QueueOwnership::owns_queue(
                 coordination.as_ref(),
                 topic,
-                0,
+                Partition::new(0),
                 None,
             ) {
-                if let Ok((publisher, _confirms)) =
-                    follower_broker.get_publisher(topic, 0, &None).await
+                if let Ok((publisher, _confirms)) = follower_broker
+                    .get_publisher(topic, Partition::new(0), &None)
+                    .await
                 {
                     let reply = publisher
                         .publish(
@@ -2127,7 +2159,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
 
     // The promoted log continued from exactly the replicated tails.
     let promoted_checkpoint = follower_broker
-        .export_owner_state_checkpoint(topic, 0, None)
+        .export_owner_state_checkpoint(topic, Partition::new(0), None)
         .await
         .unwrap();
     assert_eq!(
@@ -2170,7 +2202,10 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
     let coordination = Arc::new(GanglionCoordination::new("a-owner", raft_node));
 
     let (owner_broker, _owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &None).await.unwrap();
+    let (publisher, _confirms) = owner_broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
     let reply = publisher
         .publish(
             b"pre-fence".to_vec(),
@@ -2197,7 +2232,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
         .await
         .unwrap();
     coordination
-        .register_queue(&QueueIdentity::new(topic, 0, None))
+        .register_queue(&QueueIdentity::new(topic, Partition::new(0), None))
         .await
         .unwrap();
 
@@ -2230,7 +2265,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
         .unwrap()
         .expect("leader iteration");
     let first = committed
-        .assignment_for(topic, 0, None)
+        .assignment_for(topic, Partition::new(0), None)
         .expect("assigned")
         .clone();
     assert_eq!(first.owner, "a-owner");
@@ -2251,7 +2286,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
         .unwrap()
         .expect("failover iteration");
     let moved = committed
-        .assignment_for(topic, 0, None)
+        .assignment_for(topic, Partition::new(0), None)
         .expect("assigned")
         .clone();
     assert_eq!(moved.owner, "b-follower");
@@ -2264,11 +2299,14 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
             let gate_owns = fibril_broker::broker::QueueOwnership::owns_queue(
                 coordination.as_ref(),
                 topic,
-                0,
+                Partition::new(0),
                 None,
             );
             if !gate_owns {
-                let publish_attempt = match owner_broker.get_publisher(topic, 0, &None).await {
+                let publish_attempt = match owner_broker
+                    .get_publisher(topic, Partition::new(0), &None)
+                    .await
+                {
                     Ok((publisher, _confirms)) => {
                         match publisher
                             .publish(
@@ -2305,7 +2343,10 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     let topic = "replication.resolver.loop";
     let group = Some("workers".to_string());
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &group).await.unwrap();
+    let (publisher, _confirms) = owner_broker
+        .get_publisher(topic, Partition::new(0), &group)
+        .await
+        .unwrap();
     for payload in [b"loop-first".as_slice(), b"loop-second".as_slice()] {
         let reply = publisher
             .publish(
@@ -2320,7 +2361,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
         reply.await.unwrap().unwrap();
     }
     let owner_checkpoint = owner_broker
-        .export_owner_state_checkpoint(topic, 0, group.as_deref())
+        .export_owner_state_checkpoint(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
 
@@ -2342,7 +2383,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
         .unwrap();
 
     let assignment = PartitionAssignment::new(
-        QueueIdentity::new(topic, 0, group.as_deref()),
+        QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
         "owner-a",
         vec!["follower-a".to_string()],
         1,
@@ -2357,7 +2398,11 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let state = follower_broker
-                    .follower_replication_worker_snapshot(topic, 0, group.as_deref())
+                    .follower_replication_worker_snapshot(
+                        topic,
+                        Partition::new(0),
+                        group.as_deref(),
+                    )
                     .await;
                 if state
                     .as_ref()
@@ -2387,7 +2432,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
             topic,
-            0,
+            Partition::new(0),
             group.as_deref(),
             owner_checkpoint.message_next_offset,
             owner_checkpoint.event_next_offset,
@@ -2413,7 +2458,10 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     let topic = "replication.resolver.checkpoint";
     let group = Some("workers".to_string());
     let (owner_broker, _owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &group).await.unwrap();
+    let (publisher, _confirms) = owner_broker
+        .get_publisher(topic, Partition::new(0), &group)
+        .await
+        .unwrap();
     for payload in [
         b"checkpoint-loop-first".as_slice(),
         b"checkpoint-loop-second".as_slice(),
@@ -2431,11 +2479,11 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         reply.await.unwrap().unwrap();
     }
     let owner_checkpoint = owner_broker
-        .export_owner_state_checkpoint(topic, 0, group.as_deref())
+        .export_owner_state_checkpoint(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
     let owner_records = owner_broker
-        .read_owner_replication_records(topic, 0, group.as_deref(), 0, 0, 8, 8)
+        .read_owner_replication_records(topic, Partition::new(0), group.as_deref(), 0, 0, 8, 8)
         .await
         .unwrap();
     let OwnerReplicationRead::Batch(messages) = owner_records.messages else {
@@ -2485,7 +2533,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         .unwrap();
 
     let assignment = PartitionAssignment::new(
-        QueueIdentity::new(topic, 0, group.as_deref()),
+        QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
         "owner-a",
         vec!["follower-a".to_string()],
         1,
@@ -2502,7 +2550,11 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let state = follower_broker
-                    .follower_replication_worker_snapshot(topic, 0, group.as_deref())
+                    .follower_replication_worker_snapshot(
+                        topic,
+                        Partition::new(0),
+                        group.as_deref(),
+                    )
                     .await;
                 if state
                     .as_ref()
@@ -2526,7 +2578,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     let (_, loop_outcome) = tokio::join!(observer, loop_task);
 
     let worker_state = follower_broker
-        .follower_replication_worker_snapshot(topic, 0, group.as_deref())
+        .follower_replication_worker_snapshot(topic, Partition::new(0), group.as_deref())
         .await
         .expect("follower worker state should exist after checkpoint loop");
     assert_eq!(
@@ -2545,7 +2597,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
             topic,
-            0,
+            Partition::new(0),
             group.as_deref(),
             owner_checkpoint.message_next_offset,
             owner_checkpoint.event_next_offset,
@@ -2588,7 +2640,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     // plus one follower).
     owner_broker.cache_queue_assignment(
         &PartitionAssignment::new(
-            QueueIdentity::new(topic, 0, group.as_deref()),
+            QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
             "owner-a",
             vec!["follower-a".to_string()],
             1,
@@ -2608,7 +2660,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
             .with_reporter("follower-a"),
     ));
     let assignment = PartitionAssignment::new(
-        QueueIdentity::new(topic, 0, group.as_deref()),
+        QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
         "owner-a",
         vec!["follower-a".to_string()],
         1,
@@ -2628,7 +2680,10 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     );
 
     let publish_and_check = async {
-        let (publisher, _confirms) = owner_broker.get_publisher(topic, 0, &group).await.unwrap();
+        let (publisher, _confirms) = owner_broker
+            .get_publisher(topic, Partition::new(0), &group)
+            .await
+            .unwrap();
         let reply = publisher
             .publish(
                 b"over-the-wire".to_vec(),
@@ -2648,7 +2703,8 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
         assert_eq!(offset, 0);
 
         // And the owner recorded that progress from the stamped reads.
-        let progress = owner_broker.follower_replication_progress(topic, 0, group.as_deref());
+        let progress =
+            owner_broker.follower_replication_progress(topic, Partition::new(0), group.as_deref());
         let follower = progress
             .iter()
             .find(|(node, _)| node == "follower-a")
@@ -2679,7 +2735,7 @@ impl ClientTopologySource for FixedTopology {
     fn owner_endpoint(
         &self,
         topic: &str,
-        partition: u32,
+        partition: Partition,
         group: Option<&str>,
     ) -> Option<(String, u64)> {
         self.0
@@ -2703,7 +2759,7 @@ async fn handler_answers_topology_query_from_source() {
         queues: vec![
             QueueTopologyEntry {
                 topic: "orders".into(),
-                partition: 0,
+                partition: Partition::new(0),
                 group: Some("workers".into()),
                 owner_endpoint: Some("127.0.0.1:9000".into()),
                 partitioning_version: 0,
@@ -2711,7 +2767,7 @@ async fn handler_answers_topology_query_from_source() {
             },
             QueueTopologyEntry {
                 topic: "emails".into(),
-                partition: 0,
+                partition: Partition::new(0),
                 group: None,
                 owner_endpoint: Some("127.0.0.1:9001".into()),
                 partitioning_version: 0,
@@ -2796,7 +2852,7 @@ async fn unowned_publish_redirects_to_current_owner() {
         generation: 2,
         queues: vec![QueueTopologyEntry {
             topic: "elsewhere".into(),
-            partition: 0,
+            partition: Partition::new(0),
             group: None,
             owner_endpoint: Some("127.0.0.1:9999".into()),
             partitioning_version: 0,
@@ -2836,7 +2892,7 @@ async fn unowned_publish_redirects_to_current_owner() {
                 2,
                 &Publish {
                     topic: "elsewhere".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -2874,7 +2930,7 @@ async fn stale_partitioning_version_publish_is_fenced() {
         generation: 7,
         queues: vec![QueueTopologyEntry {
             topic: "jobs".into(),
-            partition: 0,
+            partition: Partition::new(0),
             group: None,
             owner_endpoint: Some("127.0.0.1:9100".into()),
             partitioning_version: 5,
@@ -2915,7 +2971,7 @@ async fn stale_partitioning_version_publish_is_fenced() {
                 2,
                 &Publish {
                     topic: "jobs".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -3103,7 +3159,7 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
                 &ReplicationCheckpointExport {
                     topic: topic.into(),
                     group: group.clone(),
-                    partition: 0,
+                    partition: Partition::new(0),
                 },
             )
             .unwrap(),
@@ -3116,7 +3172,7 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
 
     let (follower_broker, follower_dir) = open_test_broker().await;
     follower_broker
-        .become_replication_follower(topic, 0, group.as_deref())
+        .become_replication_follower(topic, Partition::new(0), group.as_deref())
         .await
         .unwrap();
     let (mut follower_framed, follower_task, _follower_dir, follower_broker) =
@@ -3136,7 +3192,7 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
                 &ReplicationCheckpointInstall {
                     topic: topic.into(),
                     group: group.clone(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     checkpoint: export.checkpoint.clone(),
                 },
             )
@@ -3160,7 +3216,7 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
         &mut owner_framed,
         &mut follower_framed,
         topic,
-        0,
+        Partition::new(0),
         group.as_deref(),
         ProtocolReplicationCatchUpOptions {
             message_from: export.checkpoint.message_checkpoint_offset,
@@ -3178,7 +3234,7 @@ async fn replication_checkpoint_export_install_composes_with_catch_up() {
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
             topic,
-            0,
+            Partition::new(0),
             group.as_deref(),
             export.checkpoint.message_next_offset,
             export.checkpoint.event_next_offset,
@@ -3215,7 +3271,7 @@ async fn unowned_publish_returns_not_owner_error_and_keeps_connection_open() {
                 2,
                 &Publish {
                     topic: "unowned".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -3253,7 +3309,7 @@ async fn unowned_subscribe_returns_not_owner_error_and_keeps_connection_open() {
                 2,
                 &Subscribe {
                     topic: "unowned".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3284,7 +3340,7 @@ async fn duplicate_subscribe_returns_conflict_and_keeps_connection_open() {
                 3,
                 &Subscribe {
                     topic: "duplicate.subscribe".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3314,7 +3370,7 @@ async fn publish_content_type_header_is_delivered_as_metadata() {
                 2,
                 &Subscribe {
                     topic: "content.type".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     prefetch: 1,
                     auto_ack: true,
@@ -3334,7 +3390,7 @@ async fn publish_content_type_header_is_delivered_as_metadata() {
                 3,
                 &Publish {
                     topic: "content.type".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -3374,7 +3430,7 @@ async fn publish_with_reserved_header_returns_error_and_keeps_connection_open() 
                 2,
                 &Publish {
                     topic: "reserved.headers".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -3409,7 +3465,7 @@ async fn delayed_publish_with_reserved_header_returns_error_and_keeps_connection
                 2,
                 &PublishDelayed {
                     topic: "reserved.delayed.headers".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -3445,7 +3501,7 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
                 2,
                 &Subscribe {
                     topic: "delayed.tcp".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     prefetch: 1,
                     auto_ack: true,
@@ -3466,7 +3522,7 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
                 3,
                 &PublishDelayed {
                     topic: "delayed.tcp".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     not_before,
@@ -3515,7 +3571,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                 2,
                 &Subscribe {
                     topic: "delayed.retry.tcp".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3534,7 +3590,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                 3,
                 &Publish {
                     topic: "delayed.retry.tcp".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -3561,7 +3617,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                 &Nack {
                     topic: "delayed.retry.tcp".into(),
                     group: None,
-                    partition: 0,
+                    partition: Partition::new(0),
                     tags: vec![delivered.delivery_tag],
                     requeue: true,
                     not_before: Some(not_before),
@@ -3630,7 +3686,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                 3,
                 &Subscribe {
                     topic: "source".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3649,7 +3705,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                 4,
                 &Subscribe {
                     topic: "_dlq.source".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
@@ -3668,7 +3724,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                 5,
                 &Publish {
                     topic: "source".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -3695,7 +3751,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                 &Nack {
                     topic: "source".into(),
                     group: None,
-                    partition: 0,
+                    partition: Partition::new(0),
                     tags: vec![source.delivery_tag],
                     requeue: true,
                     not_before: None,
@@ -3757,7 +3813,7 @@ async fn publisher_cache_idle_timeout_allows_queue_eviction_while_connection_sta
                 2,
                 &Publish {
                     topic: "publisher.cache.eviction".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -3821,7 +3877,7 @@ async fn publisher_cache_idle_timeout_expires_on_next_frame_without_waiting_for_
                 2,
                 &Publish {
                     topic: "publisher.cache.frame.expiry".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,
@@ -3893,7 +3949,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
                 2,
                 &Subscribe {
                     topic: "notices".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: Some("workers".into()),
                     prefetch: 20,
                     auto_ack: true,
@@ -3915,7 +3971,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
                     request_id,
                     &Publish {
                         topic: "notices".into(),
-                        partition: 0,
+                        partition: Partition::new(0),
                         group: Some("workers".into()),
                         require_confirm: true,
                         content_type: None,
@@ -4006,7 +4062,7 @@ async fn publisher_cache_idle_timeout_updates_existing_connection() {
                 2,
                 &Publish {
                     topic: "publisher.cache.live".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: None,
                     require_confirm: true,
                     content_type: None,

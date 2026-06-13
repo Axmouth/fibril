@@ -5,6 +5,7 @@ use fibril_protocol::v1::{
     ContentType, Op, Publish,
     helper::{try_decode, try_encode},
 };
+use fibril_storage::Partition;
 
 fn publish_frame(
     payload_size: usize,
@@ -14,7 +15,7 @@ fn publish_frame(
     Publish {
         topic: "test".into(),
         group: None,
-        partition: 0,
+        partition: Partition::new(0),
         payload: vec![1u8; payload_size],
         published: 1234567890,
         content_type,

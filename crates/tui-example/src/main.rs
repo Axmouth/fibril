@@ -5,7 +5,7 @@ use crossterm::{
     terminal::{Clear, ClearType, disable_raw_mode},
 };
 use fibril_protocol::v1::{
-    Auth, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Pong, Publish, Subscribe,
+    Auth, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Partition, Pong, Publish, Subscribe,
     SubscribeOk,
     frame::ProtoCodec,
     helper::{Conn, try_decode, try_encode},
@@ -644,7 +644,7 @@ pub async fn visual_client(
         next_req_id(),
         &Subscribe {
             topic: "t1".into(),
-            partition: 0,
+            partition: Partition::new(0),
             group: Some("g1".to_string()),
             prefetch: 100,
             auto_ack: true,
@@ -717,7 +717,7 @@ pub async fn visual_client(
                     .send(Publish {
                         topic: "t1".into(),
                         group: Some("g1".to_string()),
-                        partition: 0,
+                        partition: Partition::new(0),
                         require_confirm: false,
                         content_type: None,
                         headers: HashMap::new(),

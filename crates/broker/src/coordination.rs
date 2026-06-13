@@ -4,18 +4,18 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use fibril_storage::{Group, LogId, Topic};
+use fibril_storage::{Group, Partition, Topic};
 use tokio::sync::watch;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QueueIdentity {
     pub topic: Topic,
-    pub partition: LogId,
+    pub partition: Partition,
     pub group: Option<Group>,
 }
 
 impl QueueIdentity {
-    pub fn new(topic: impl Into<Topic>, partition: LogId, group: Option<&str>) -> Self {
+    pub fn new(topic: impl Into<Topic>, partition: Partition, group: Option<&str>) -> Self {
         Self {
             topic: topic.into(),
             partition,
@@ -177,7 +177,7 @@ impl CoordinationSnapshot {
     pub fn assignment_for(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
     ) -> Option<&PartitionAssignment> {
         self.assignments
@@ -350,7 +350,7 @@ fn plan_followers(
     followers
 }
 
-fn queue_sort_key(queue: &QueueIdentity) -> (String, LogId, String) {
+fn queue_sort_key(queue: &QueueIdentity) -> (String, Partition, String) {
     (
         queue.topic.to_string(),
         queue.partition,
@@ -502,7 +502,7 @@ pub trait Coordination: std::fmt::Debug + Send + Sync {
     fn assignment_for(
         &self,
         topic: &str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&str>,
     ) -> Option<PartitionAssignment> {
         self.snapshot()
@@ -510,17 +510,22 @@ pub trait Coordination: std::fmt::Debug + Send + Sync {
             .cloned()
     }
 
-    fn owns_queue(&self, topic: &str, partition: LogId, group: Option<&str>) -> bool {
+    fn owns_queue(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool {
         self.assignment_for(topic, partition, group)
             .is_some_and(|assignment| assignment.is_owned_by(self.node_id()))
     }
 
-    fn follows_queue(&self, topic: &str, partition: LogId, group: Option<&str>) -> bool {
+    fn follows_queue(&self, topic: &str, partition: Partition, group: Option<&str>) -> bool {
         self.assignment_for(topic, partition, group)
             .is_some_and(|assignment| assignment.is_followed_by(self.node_id()))
     }
 
-    fn owner_for(&self, topic: &str, partition: LogId, group: Option<&str>) -> Option<NodeInfo> {
+    fn owner_for(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Option<NodeInfo> {
         let snapshot = self.snapshot();
         let owner = snapshot
             .assignment_for(topic, partition, group)?
@@ -635,7 +640,7 @@ impl Coordination for NoopCoordination {
         self.inner.watch()
     }
 
-    fn owns_queue(&self, _topic: &str, _partition: LogId, _group: Option<&str>) -> bool {
+    fn owns_queue(&self, _topic: &str, _partition: Partition, _group: Option<&str>) -> bool {
         true
     }
 }
@@ -664,8 +669,8 @@ pub mod contract_tests {
             );
         }
 
-        let owned = QueueIdentity::new("contract-owned", 0, Some("workers"));
-        let followed = QueueIdentity::new("contract-followed", 1, None);
+        let owned = QueueIdentity::new("contract-owned", Partition::new(0), Some("workers"));
+        let followed = QueueIdentity::new("contract-followed", Partition::new(1), None);
         let mut assignments = HashMap::new();
         assignments.insert(
             owned.clone(),
@@ -699,14 +704,14 @@ pub mod contract_tests {
         // Empty state: queries answer absent, not panic.
         assert!(
             provider
-                .assignment_for("contract-owned", 0, Some("workers"))
+                .assignment_for("contract-owned", Partition::new(0), Some("workers"))
                 .is_none()
         );
-        assert!(!provider.owns_queue("contract-owned", 0, Some("workers")));
-        assert!(!provider.follows_queue("contract-followed", 1, None));
+        assert!(!provider.owns_queue("contract-owned", Partition::new(0), Some("workers")));
+        assert!(!provider.follows_queue("contract-followed", Partition::new(1), None));
         assert!(
             provider
-                .owner_for("contract-owned", 0, Some("workers"))
+                .owner_for("contract-owned", Partition::new(0), Some("workers"))
                 .is_none()
         );
         assert!(provider.owned_assignments().is_empty());
@@ -722,17 +727,17 @@ pub mod contract_tests {
         commit(provider, first.clone());
 
         assert_eq!(provider.snapshot(), first);
-        assert!(provider.owns_queue("contract-owned", 0, Some("workers")));
-        assert!(!provider.follows_queue("contract-owned", 0, Some("workers")));
-        assert!(provider.follows_queue("contract-followed", 1, None));
+        assert!(provider.owns_queue("contract-owned", Partition::new(0), Some("workers")));
+        assert!(!provider.follows_queue("contract-owned", Partition::new(0), Some("workers")));
+        assert!(provider.follows_queue("contract-followed", Partition::new(1), None));
         let owner = provider
-            .owner_for("contract-owned", 0, Some("workers"))
+            .owner_for("contract-owned", Partition::new(0), Some("workers"))
             .expect("owner must resolve from the committed snapshot");
         assert_eq!(owner.node_id, local_node_id);
         assert_eq!(provider.owned_assignments().len(), 1);
         assert_eq!(provider.follower_assignments().len(), 1);
         let assignment = provider
-            .assignment_for("contract-owned", 0, Some("workers"))
+            .assignment_for("contract-owned", Partition::new(0), Some("workers"))
             .expect("assignment must resolve");
         assert_eq!(assignment.epoch, 1);
 
@@ -741,9 +746,9 @@ pub mod contract_tests {
         commit(provider, second.clone());
 
         assert_eq!(provider.snapshot(), second);
-        assert!(!provider.owns_queue("contract-owned", 0, Some("workers")));
+        assert!(!provider.owns_queue("contract-owned", Partition::new(0), Some("workers")));
         let moved = provider
-            .assignment_for("contract-owned", 0, Some("workers"))
+            .assignment_for("contract-owned", Partition::new(0), Some("workers"))
             .expect("assignment still present");
         assert_eq!(moved.owner, "other-node");
 
@@ -791,7 +796,7 @@ mod tests {
             },
         );
 
-        let queue = QueueIdentity::new("emails", 0, Some("workers"));
+        let queue = QueueIdentity::new("emails", Partition::new(0), Some("workers"));
         let mut assignments = HashMap::new();
         assignments.insert(
             queue.clone(),
@@ -826,11 +831,11 @@ mod tests {
     fn static_coordination_reports_owner_and_followers() {
         let coordination = StaticCoordination::new("node-a", snapshot());
 
-        assert!(coordination.owns_queue("emails", 0, Some("workers")));
-        assert!(!coordination.follows_queue("emails", 0, Some("workers")));
+        assert!(coordination.owns_queue("emails", Partition::new(0), Some("workers")));
+        assert!(!coordination.follows_queue("emails", Partition::new(0), Some("workers")));
 
         let owner = coordination
-            .owner_for("emails", 0, Some("workers"))
+            .owner_for("emails", Partition::new(0), Some("workers"))
             .expect("owner node");
         assert_eq!(owner.node_id, "node-a");
         assert_eq!(owner.broker_addr, "127.0.0.1:1001".parse().unwrap());
@@ -844,8 +849,8 @@ mod tests {
     fn static_coordination_reports_local_follow_assignments() {
         let coordination = StaticCoordination::new("node-b", snapshot());
 
-        assert!(!coordination.owns_queue("emails", 0, Some("workers")));
-        assert!(coordination.follows_queue("emails", 0, Some("workers")));
+        assert!(!coordination.owns_queue("emails", Partition::new(0), Some("workers")));
+        assert!(coordination.follows_queue("emails", Partition::new(0), Some("workers")));
 
         let followed = coordination.follower_assignments();
         assert_eq!(followed.len(), 1);
@@ -962,7 +967,7 @@ mod tests {
         let err = DeterministicPartitionPlacement
             .plan(PartitionPlacementInput {
                 nodes: HashMap::new(),
-                queues: vec![QueueIdentity::new("emails", 0, None)],
+                queues: vec![QueueIdentity::new("emails", Partition::new(0), None)],
                 existing: HashMap::new(),
                 target_followers: 1,
                 generation: 1,
@@ -978,9 +983,9 @@ mod tests {
             .plan(PartitionPlacementInput {
                 nodes: nodes(["node-b", "node-a"]),
                 queues: vec![
-                    QueueIdentity::new("orders", 0, None),
-                    QueueIdentity::new("emails", 0, None),
-                    QueueIdentity::new("tasks", 0, None),
+                    QueueIdentity::new("orders", Partition::new(0), None),
+                    QueueIdentity::new("emails", Partition::new(0), None),
+                    QueueIdentity::new("tasks", Partition::new(0), None),
                 ],
                 existing: HashMap::new(),
                 target_followers: 0,
@@ -998,7 +1003,7 @@ mod tests {
         let plan = DeterministicPartitionPlacement
             .plan(PartitionPlacementInput {
                 nodes: nodes(["node-a", "node-b", "node-c"]),
-                queues: vec![QueueIdentity::new("emails", 0, None)],
+                queues: vec![QueueIdentity::new("emails", Partition::new(0), None)],
                 existing: HashMap::new(),
                 target_followers: 8,
                 generation: 4,
@@ -1007,7 +1012,7 @@ mod tests {
 
         let assignment = plan
             .snapshot
-            .assignment_for("emails", 0, None)
+            .assignment_for("emails", Partition::new(0), None)
             .expect("assignment");
         assert_eq!(assignment.owner, "node-a");
         assert_eq!(assignment.followers, vec!["node-b", "node-c"]);
@@ -1015,7 +1020,7 @@ mod tests {
 
     #[test]
     fn placement_preserves_existing_owner_and_fills_followers() {
-        let queue = QueueIdentity::new("emails", 0, None);
+        let queue = QueueIdentity::new("emails", Partition::new(0), None);
         let existing_assignment =
             PartitionAssignment::new(queue.clone(), "node-b", vec!["node-c".to_string()], 11)
                 .with_durability(ReplicationDurabilityPolicy::MajorityDurable);
@@ -1033,7 +1038,7 @@ mod tests {
 
         let assignment = plan
             .snapshot
-            .assignment_for("emails", 0, None)
+            .assignment_for("emails", Partition::new(0), None)
             .expect("assignment");
         assert_eq!(assignment.owner, "node-b");
         assert_eq!(assignment.followers, vec!["node-c", "node-d"]);
@@ -1046,7 +1051,7 @@ mod tests {
 
     #[test]
     fn placement_preserves_epoch_when_assignment_does_not_change() {
-        let queue = QueueIdentity::new("emails", 0, None);
+        let queue = QueueIdentity::new("emails", Partition::new(0), None);
         let existing_assignment =
             PartitionAssignment::new(queue.clone(), "node-a", vec!["node-b".to_string()], 7);
         let existing = HashMap::from([(queue.clone(), existing_assignment)]);
@@ -1063,7 +1068,7 @@ mod tests {
 
         let assignment = plan
             .snapshot
-            .assignment_for("emails", 0, None)
+            .assignment_for("emails", Partition::new(0), None)
             .expect("assignment");
         assert_eq!(assignment.owner, "node-a");
         assert_eq!(assignment.followers, vec!["node-b"]);
@@ -1093,7 +1098,7 @@ mod tests {
                 // and round-robin paths see realistic key variety at scale. The
                 // prefix keeps separate batches from colliding.
                 let topic = format!("{prefix}-{:03}", idx % 64);
-                let partition = (idx % 4) as LogId;
+                let partition = Partition::new((idx % 4) as u32);
                 let group = if idx % 3 == 0 {
                     None
                 } else {
@@ -1377,8 +1382,8 @@ mod tests {
 
     #[test]
     fn placement_adds_missing_queue_without_churning_existing_assignment() {
-        let existing_queue = QueueIdentity::new("emails", 0, None);
-        let new_queue = QueueIdentity::new("orders", 0, None);
+        let existing_queue = QueueIdentity::new("emails", Partition::new(0), None);
+        let new_queue = QueueIdentity::new("orders", Partition::new(0), None);
         let existing_assignment = PartitionAssignment::new(
             existing_queue.clone(),
             "node-b",
@@ -1410,7 +1415,7 @@ mod tests {
 
     #[test]
     fn placement_repairs_missing_owner_and_missing_followers() {
-        let queue = QueueIdentity::new("emails", 0, None);
+        let queue = QueueIdentity::new("emails", Partition::new(0), None);
         let existing_assignment = PartitionAssignment::new(
             queue.clone(),
             "node-z",
@@ -1435,7 +1440,7 @@ mod tests {
 
         let assignment = plan
             .snapshot
-            .assignment_for("emails", 0, None)
+            .assignment_for("emails", Partition::new(0), None)
             .expect("assignment");
         assert_eq!(assignment.owner, "node-a");
         assert_eq!(assignment.followers, vec!["node-b", "node-c"]);
@@ -1462,7 +1467,7 @@ mod tests {
         epoch: u64,
     ) -> PartitionAssignment {
         PartitionAssignment::new(
-            QueueIdentity::new(topic, 0, Some("workers")),
+            QueueIdentity::new(topic, Partition::new(0), Some("workers")),
             owner,
             followers.into_iter().map(str::to_string).collect(),
             epoch,
@@ -1488,7 +1493,7 @@ mod tests {
 
     fn assignment_owner(snapshot: &CoordinationSnapshot, topic: &str) -> String {
         snapshot
-            .assignment_for(topic, 0, None)
+            .assignment_for(topic, Partition::new(0), None)
             .expect("assignment")
             .owner
             .clone()
@@ -1583,10 +1588,10 @@ mod tests {
     fn noop_coordination_preserves_standalone_owner_behavior() {
         let coordination = NoopCoordination::default();
 
-        assert!(coordination.owns_queue("anything", 99, Some("group")));
+        assert!(coordination.owns_queue("anything", Partition::new(99), Some("group")));
         assert!(
             coordination
-                .owner_for("anything", 99, Some("group"))
+                .owner_for("anything", Partition::new(99), Some("group"))
                 .is_none()
         );
     }

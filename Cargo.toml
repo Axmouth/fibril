@@ -7,6 +7,7 @@ members = [
     "crates/config",
     "crates/protocol",
     "crates/storage",
+    "crates/common",
     "crates/broker",
     "crates/fibril",
     "crates/metrics",
@@ -25,4 +26,5 @@ policy-url = "https://github.com/axmouth/fibril/blob/main/AI_POLICY.md"
 # dependency lines stay git-sourced for CI, Docker, and release builds.
 [patch."https://github.com/Axmouth/keratin.git"]
 stroma-core = { path = "../keratin/stroma/core" }
+stroma-common = { path = "../keratin/stroma/common" }
 keratin-log = { path = "../keratin/keratin-log" }

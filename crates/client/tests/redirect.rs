@@ -17,7 +17,7 @@ use fibril_protocol::v1::{
     frame::ProtoCodec,
     helper::{try_decode, try_encode},
 };
-use fibril_storage::DeliveryTag;
+use fibril_storage::{DeliveryTag, Partition};
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::Framed;
@@ -119,10 +119,10 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         let sub: Subscribe = try_decode(&frame).unwrap();
                         if let Some(recorder) = &config.subscribe_partitions {
                             if let Ok(mut parts) = recorder.lock() {
-                                parts.push(sub.partition);
+                                parts.push(sub.partition.id());
                             }
                         }
-                        let sub_id = sub.partition as u64;
+                        let sub_id = sub.partition.id() as u64;
                         let ok = SubscribeOk {
                             sub_id,
                             topic: sub.topic.clone(),
@@ -151,7 +151,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             publish_received: 0,
                             content_type: None,
                             headers: HashMap::new(),
-                            payload: vec![sub.partition as u8],
+                            payload: vec![sub.partition.id() as u8],
                         };
                         if framed
                             .send(try_encode(Op::Deliver, 0, &deliver).unwrap())
@@ -178,7 +178,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             let queues = (0..spread.partition_count)
                                 .map(|partition| QueueTopologyEntry {
                                     topic: spread.topic.clone(),
-                                    partition,
+                                    partition: Partition::new(partition),
                                     group: spread.group.clone(),
                                     owner_endpoint: Some(addr.to_string()),
                                     partitioning_version: spread.partitioning_version,
@@ -204,7 +204,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         let publish: Publish = try_decode(&frame).unwrap();
                         if let Some(recorder) = &config.recorded_partitions {
                             if let Ok(mut partitions) = recorder.lock() {
-                                partitions.push(publish.partition);
+                                partitions.push(publish.partition.id());
                             }
                         }
                         if let Some(recorder) = &config.recorded_versions {
@@ -223,7 +223,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             Some(MockBehavior::RedirectTo(target)) => {
                                 let redirect = Redirect {
                                     topic: publish.topic,
-                                    partition: 0,
+                                    partition: Partition::new(0),
                                     group: publish.group,
                                     owner_endpoint: target.to_string(),
                                     partitioning_version: 0,
@@ -233,7 +233,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             Some(MockBehavior::RedirectToSelf) => {
                                 let redirect = Redirect {
                                     topic: publish.topic,
-                                    partition: 0,
+                                    partition: Partition::new(0),
                                     group: publish.group,
                                     owner_endpoint: addr.to_string(),
                                     partitioning_version: 0,
@@ -354,7 +354,7 @@ async fn fetch_topology_populates_cache_and_routes() {
             generation: 1,
             queues: vec![QueueTopologyEntry {
                 topic: "jobs".into(),
-                partition: 0,
+                partition: Partition::new(0),
                 group: None,
                 owner_endpoint: Some(owner.to_string()),
                 partitioning_version: 0,

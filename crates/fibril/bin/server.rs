@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
                                     // partition set is registered by declare.
                                     fibril_broker::coordination::QueueIdentity::new(
                                         key.topic.clone(),
-                                        0,
+                                        fibril_broker::Partition::ZERO,
                                         key.group.as_deref(),
                                     )
                                 })
@@ -336,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
                         for partition in 0..partitioning.partition_count {
                             let queue = fibril_broker::coordination::QueueIdentity::new(
                                 topic.clone(),
-                                partition,
+                                fibril_broker::Partition::new(partition),
                                 group.as_deref(),
                             );
                             coordination

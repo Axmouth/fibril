@@ -493,7 +493,7 @@ mod tests {
     };
     use fibril_metrics::{ConnectionStats, Metrics, TcpStats};
     use fibril_protocol::v1::{
-        Deliver, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish, Subscribe,
+        Deliver, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Partition, Publish, Subscribe,
         frame::{Frame, ProtoCodec},
         handler::{ConnectionSettings, handle_connection},
         helper::{try_decode, try_encode},
@@ -688,7 +688,7 @@ mod tests {
         assert!(body["raft"].is_null());
 
         // With a provider + raft block attached, the endpoint reports both.
-        let queue = QueueIdentity::new("orders", 0, Some("workers"));
+        let queue = QueueIdentity::new("orders", Partition::ZERO, Some("workers"));
         let mut nodes = std::collections::HashMap::new();
         nodes.insert(
             "broker-a".to_string(),
@@ -1745,7 +1745,7 @@ mod tests {
                     2,
                     &Subscribe {
                         topic: "source".into(),
-                        partition: 0,
+                        partition: Partition::new(0),
                         group: None,
                         prefetch: 1,
                         auto_ack: false,
@@ -1764,7 +1764,7 @@ mod tests {
                     3,
                     &Subscribe {
                         topic: "_dlq.source".into(),
-                        partition: 0,
+                        partition: Partition::new(0),
                         group: None,
                         prefetch: 1,
                         auto_ack: false,
@@ -1783,7 +1783,7 @@ mod tests {
                     4,
                     &Publish {
                         topic: "source".into(),
-                        partition: 0,
+                        partition: Partition::new(0),
                         group: None,
                         require_confirm: true,
                         content_type: None,
@@ -1813,7 +1813,7 @@ mod tests {
                     &Nack {
                         topic: "source".into(),
                         group: None,
-                        partition: 0,
+                        partition: Partition::new(0),
                         tags: vec![source.delivery_tag],
                         requeue: true,
                         not_before: None,

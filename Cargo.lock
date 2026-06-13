@@ -1167,6 +1167,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fibril-common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "fibril-config"
 version = "0.1.0"
 dependencies = [
@@ -1248,9 +1255,11 @@ dependencies = [
  "async-trait",
  "bytes",
  "dashmap",
+ "fibril-common",
  "fibril-metrics",
  "fibril-util",
  "serde",
+ "stroma-common",
  "stroma-core",
  "thiserror 2.0.18",
  "tokio",
@@ -3474,6 +3483,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "stroma-common"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "stroma-core"
 version = "0.1.0"
 dependencies = [
@@ -3493,6 +3509,7 @@ dependencies = [
  "rmp-serde",
  "serde",
  "similar-asserts",
+ "stroma-common",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",

@@ -30,7 +30,7 @@
 //! ```
 
 use arc_swap::ArcSwap;
-use fibril_storage::DeliveryTag;
+use fibril_storage::{DeliveryTag, Partition};
 use fibril_util::{UnixMillis, unix_millis};
 use futures::{SinkExt, StreamExt};
 use serde::{Serialize, de::DeserializeOwned};
@@ -1013,7 +1013,7 @@ impl<'a> SubscriptionBuilder<'a> {
 /// own; that would add a round-trip (and could stall harnesses that don't
 /// answer `Op::Topology`). A subset selector for consumer-group assignment will
 /// narrow this set later.
-fn partition_set(client: &Client, topic: &str, group: Option<&str>) -> Vec<u32> {
+fn partition_set(client: &Client, topic: &str, group: Option<&str>) -> Vec<Partition> {
     let count = client
         .shared
         .topology
@@ -1022,7 +1022,7 @@ fn partition_set(client: &Client, topic: &str, group: Option<&str>) -> Vec<u32> 
         .map(|p| p.count)
         .unwrap_or(1)
         .max(1);
-    (0..count).collect()
+    (0..count).map(Partition::new).collect()
 }
 
 /// Subscribe to a single partition (manual ack), following owner redirects.
@@ -1576,7 +1576,7 @@ struct PartitioningEntry {
 /// owner can fence a stale view).
 #[derive(Debug, Clone, Copy)]
 struct Route {
-    partition: u32,
+    partition: Partition,
     partitioning_version: u64,
 }
 
@@ -1587,7 +1587,7 @@ struct Route {
 #[allow(dead_code)] // some methods used as routing is wired
 struct TopologyCache {
     generation: u64,
-    by_queue: HashMap<(String, u32, Option<String>), OwnerEntry>,
+    by_queue: HashMap<(String, Partition, Option<String>), OwnerEntry>,
     /// Authoritative partitioning per logical queue `(topic, group)`.
     counts: HashMap<(String, Option<String>), PartitioningEntry>,
     last_refresh_ms: u64,
@@ -1595,7 +1595,7 @@ struct TopologyCache {
 
 #[allow(dead_code)] // some methods used as routing is wired
 impl TopologyCache {
-    fn lookup(&self, topic: &str, partition: u32, group: Option<&str>) -> Option<OwnerEntry> {
+    fn lookup(&self, topic: &str, partition: Partition, group: Option<&str>) -> Option<OwnerEntry> {
         self.by_queue
             .get(&(topic.to_string(), partition, group.map(str::to_string)))
             .cloned()
@@ -1653,7 +1653,7 @@ impl TopologyCache {
         }
     }
 
-    fn invalidate(&mut self, topic: &str, partition: u32, group: Option<&str>) {
+    fn invalidate(&mut self, topic: &str, partition: Partition, group: Option<&str>) {
         self.by_queue
             .remove(&(topic.to_string(), partition, group.map(str::to_string)));
     }
@@ -1700,11 +1700,11 @@ impl ClientShared {
         let count = partitioning.map(|p| p.count).unwrap_or(1).max(1);
         if count == 1 {
             return Route {
-                partition: 0,
+                partition: Partition::ZERO,
                 partitioning_version: version,
             };
         }
-        let partition = match key {
+        let index = match key {
             Some(key) => (fnv1a(key) % count as u64) as u32,
             None => {
                 let next = self
@@ -1714,7 +1714,7 @@ impl ClientShared {
             }
         };
         Route {
-            partition,
+            partition: Partition::new(index),
             partitioning_version: version,
         }
     }
@@ -1757,7 +1757,7 @@ impl ClientShared {
     async fn engine_for(
         &self,
         topic: &str,
-        partition: u32,
+        partition: Partition,
         group: Option<&str>,
     ) -> FibrilResult<Arc<EngineHandle>> {
         if let Some(owner) = self.topology.load().lookup(topic, partition, group) {
@@ -1920,7 +1920,7 @@ enum Command {
     PublishUnconfirmed {
         topic: String,
         group: Option<String>,
-        partition: u32,
+        partition: Partition,
         partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
@@ -1930,7 +1930,7 @@ enum Command {
     PublishConfirmed {
         topic: String,
         group: Option<String>,
-        partition: u32,
+        partition: Partition,
         partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
@@ -1941,7 +1941,7 @@ enum Command {
     PublishDelayedUnconfirmed {
         topic: String,
         group: Option<String>,
-        partition: u32,
+        partition: Partition,
         partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
@@ -1952,7 +1952,7 @@ enum Command {
     PublishDelayedConfirmed {
         topic: String,
         group: Option<String>,
-        partition: u32,
+        partition: Partition,
         partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
@@ -2010,7 +2010,7 @@ enum SubDelivery {
 struct SubState {
     topic: String,
     group: Option<String>,
-    partition: u32,
+    partition: Partition,
     delivery: SubDelivery,
 }
 
@@ -2834,7 +2834,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
-        partition: u32,
+        partition: Partition,
         partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
@@ -2861,7 +2861,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
-        partition: u32,
+        partition: Partition,
         partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
@@ -2890,7 +2890,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
-        partition: u32,
+        partition: Partition,
         partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
@@ -2919,7 +2919,7 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
-        partition: u32,
+        partition: Partition,
         partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
@@ -3388,7 +3388,7 @@ mod tests {
                             sub_id: 77,
                             topic: req.topic,
                             group: req.group,
-                            partition: 0,
+                            partition: Partition::new(0),
                             prefetch: req.prefetch,
                         },
                     )
@@ -3429,7 +3429,7 @@ mod tests {
                 sub_id: 77,
                 topic: "jobs".into(),
                 group: None,
-                partition: 0,
+                partition: Partition::new(0),
                 auto_ack: false,
                 prefetch: 1,
             };
@@ -3464,7 +3464,7 @@ mod tests {
                             sub_id: 88,
                             topic: "jobs".into(),
                             group: None,
-                            partition: 0,
+                            partition: Partition::new(0),
                             offset: 9,
                             delivery_tag: DeliveryTag { epoch: 123 },
                             published: 1,
@@ -3506,7 +3506,7 @@ mod tests {
                     sub_id: 77,
                     topic: "jobs".into(),
                     group: None,
-                    partition: 0,
+                    partition: Partition::new(0),
                     auto_ack: false,
                     prefetch: 1,
                 }],

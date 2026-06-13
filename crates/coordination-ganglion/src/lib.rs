@@ -14,6 +14,7 @@ use fibril_broker::coordination::{
     PartitionPlacementError, PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity,
     ReplicationDurabilityPolicy,
 };
+use fibril_storage::Partition;
 use ganglion_openraft::openraft::storage::RaftLogStorage;
 use ganglion_openraft::openraft::RaftNetworkFactory;
 use ganglion_openraft::{
@@ -114,7 +115,7 @@ impl std::error::Error for DeclareQueueError {}
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClientQueueTopology {
     pub topic: String,
-    pub partition: fibril_storage::LogId,
+    pub partition: fibril_storage::Partition,
     pub group: Option<String>,
     pub owner_node_id: String,
     /// Broker endpoint of the owner, if the node is known in the registry.
@@ -275,7 +276,7 @@ fn to_ganglion_resource(queue: &QueueIdentity) -> ganglion_core::ResourceIdentit
     ganglion_core::ResourceIdentity::new(
         QUEUE_NAMESPACE,
         queue.topic.clone(),
-        u64::from(queue.partition),
+        u64::from(queue.partition.id()),
         queue.group.clone(),
     )
 }
@@ -284,7 +285,7 @@ fn to_fibril_queue(resource: &ganglion_core::ResourceIdentity) -> Option<QueueId
     if resource.namespace != QUEUE_NAMESPACE {
         return None;
     }
-    let partition = u32::try_from(resource.partition).ok()?;
+    let partition = Partition::new(u32::try_from(resource.partition).ok()?);
     Some(QueueIdentity::new(
         resource.name.clone(),
         partition,
@@ -1148,7 +1149,7 @@ where
     fn owns_queue(
         &self,
         topic: &str,
-        partition: fibril_storage::LogId,
+        partition: fibril_storage::Partition,
         group: Option<&str>,
     ) -> bool {
         Coordination::owns_queue(self, topic, partition, group)
@@ -1200,7 +1201,7 @@ mod tests {
             },
         );
 
-        let queue = QueueIdentity::new("orders", 0, Some("workers"));
+        let queue = QueueIdentity::new("orders", Partition::new(0), Some("workers"));
         let mut assignments = HashMap::new();
         assignments.insert(
             queue.clone(),
@@ -1263,15 +1264,15 @@ mod tests {
 
         // Trait queries answer from the committed state.
         assert_eq!(coordination.snapshot(), proposed);
-        assert!(coordination.owns_queue("orders", 0, Some("workers")));
-        assert!(!coordination.follows_queue("orders", 0, Some("workers")));
+        assert!(coordination.owns_queue("orders", Partition::new(0), Some("workers")));
+        assert!(!coordination.follows_queue("orders", Partition::new(0), Some("workers")));
         let owner = coordination
-            .owner_for("orders", 0, Some("workers"))
+            .owner_for("orders", Partition::new(0), Some("workers"))
             .expect("owner resolves");
         assert_eq!(owner.node_id, "broker-a");
         assert_eq!(
             coordination
-                .assignment_for("orders", 0, Some("workers"))
+                .assignment_for("orders", Partition::new(0), Some("workers"))
                 .expect("assignment resolves")
                 .epoch,
             1
@@ -1283,7 +1284,7 @@ mod tests {
         assert_eq!(topology.queues.len(), 1);
         let queue = &topology.queues[0];
         assert_eq!(queue.topic, "orders");
-        assert_eq!(queue.partition, 0);
+        assert_eq!(queue.partition, Partition::new(0));
         assert_eq!(queue.group.as_deref(), Some("workers"));
         assert_eq!(queue.owner_node_id, "broker-a");
         assert_eq!(queue.owner_endpoint.as_deref(), Some("127.0.0.1:9000"));
@@ -1349,7 +1350,7 @@ mod tests {
             .expect("standby provider");
 
         // Standbys never act as controller.
-        let queue = QueueIdentity::new("orders", 0, Some("workers"));
+        let queue = QueueIdentity::new("orders", Partition::new(0), Some("workers"));
         let live_node = |id: &str, port: u16| NodeInfo {
             node_id: id.to_string(),
             broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
@@ -1385,7 +1386,7 @@ mod tests {
             .expect("controller iteration should commit")
             .expect("leader runs the iteration");
         let first = assigned
-            .assignment_for("orders", 0, Some("workers"))
+            .assignment_for("orders", Partition::new(0), Some("workers"))
             .expect("queue assigned")
             .clone();
         assert_eq!(first.epoch, 1, "fresh assignment starts at epoch 1");
@@ -1396,7 +1397,7 @@ mod tests {
         tokio::time::timeout(timeout, async {
             while stream
                 .borrow_and_update()
-                .assignment_for("orders", 0, Some("workers"))
+                .assignment_for("orders", Partition::new(0), Some("workers"))
                 .is_none()
             {
                 stream.changed().await.expect("stream open");
@@ -1420,7 +1421,7 @@ mod tests {
             .expect("failover iteration should commit")
             .expect("leader runs the iteration");
         let second = reassigned
-            .assignment_for("orders", 0, Some("workers"))
+            .assignment_for("orders", Partition::new(0), Some("workers"))
             .expect("queue still assigned")
             .clone();
         assert_ne!(second.owner, first.owner, "ownership must move");
@@ -1431,7 +1432,7 @@ mod tests {
             loop {
                 let epoch = stream
                     .borrow_and_update()
-                    .assignment_for("orders", 0, Some("workers"))
+                    .assignment_for("orders", Partition::new(0), Some("workers"))
                     .map(|assignment| assignment.epoch);
                 if epoch == Some(second.epoch) {
                     break;
@@ -1545,7 +1546,7 @@ mod tests {
             .expect("election");
         let provider = GanglionCoordination::new("broker-a", raft_node);
 
-        let queue = QueueIdentity::new("orders", 0, Some("workers"));
+        let queue = QueueIdentity::new("orders", Partition::new(0), Some("workers"));
         provider
             .register_queue(&queue)
             .await
@@ -1596,7 +1597,7 @@ mod tests {
         );
         let assigned = provider
             .snapshot()
-            .assignment_for("orders", 0, Some("workers"))
+            .assignment_for("orders", Partition::new(0), Some("workers"))
             .cloned()
             .expect("controller assigned the catalogue queue");
         assert_eq!(assigned.owner, "broker-a");
@@ -1641,7 +1642,7 @@ mod tests {
             .register_self(&broker("broker-b", 9001))
             .await
             .expect("b");
-        let queue = QueueIdentity::new("orders", 0, None);
+        let queue = QueueIdentity::new("orders", Partition::new(0), None);
         provider.register_queue(&queue).await.expect("queue");
 
         let (controller, status) = provider.spawn_controller(
@@ -1660,7 +1661,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), async {
             while stream
                 .borrow_and_update()
-                .assignment_for("orders", 0, None)
+                .assignment_for("orders", Partition::new(0), None)
                 .is_none()
             {
                 stream.changed().await.expect("stream open");
@@ -1670,7 +1671,7 @@ mod tests {
         .expect("controller assigns the catalogue queue");
         let first = provider
             .snapshot()
-            .assignment_for("orders", 0, None)
+            .assignment_for("orders", Partition::new(0), None)
             .cloned()
             .expect("assigned");
         assert_eq!(first.epoch, 1);
@@ -1719,7 +1720,11 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if let Some(assignment) = provider.snapshot().assignment_for("orders", 0, None) {
+                if let Some(assignment) =
+                    provider
+                        .snapshot()
+                        .assignment_for("orders", Partition::new(0), None)
+                {
                     if assignment.owner == survivor {
                         assert_eq!(
                             assignment.epoch,
@@ -1854,7 +1859,7 @@ mod tests {
             .expect("election");
         let provider = GanglionCoordination::new("a-owner", raft_node);
 
-        let queue = QueueIdentity::new("orders", 0, None);
+        let queue = QueueIdentity::new("orders", Partition::new(0), None);
         let info = |id: &str, port: u16| NodeInfo {
             node_id: id.to_string(),
             broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
@@ -1895,7 +1900,7 @@ mod tests {
             .expect("assign")
             .expect("leader");
         let first = committed
-            .assignment_for("orders", 0, None)
+            .assignment_for("orders", Partition::new(0), None)
             .expect("assigned")
             .clone();
         assert_eq!(first.owner, "a-owner");
@@ -1918,7 +1923,7 @@ mod tests {
             .expect("failover")
             .expect("leader");
         let moved = committed
-            .assignment_for("orders", 0, None)
+            .assignment_for("orders", Partition::new(0), None)
             .expect("assigned")
             .clone();
         assert_eq!(

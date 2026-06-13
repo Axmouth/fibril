@@ -52,6 +52,7 @@ pub fn error_frame(req_id: u64, code: u16, message: impl Into<String>) -> Protoc
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use fibril_storage::Partition;
 
     use super::*;
     use crate::v1::{
@@ -99,7 +100,7 @@ mod tests {
             queues: vec![
                 QueueTopologyEntry {
                     topic: "orders".into(),
-                    partition: 0,
+                    partition: Partition::new(0),
                     group: Some("workers".into()),
                     owner_endpoint: Some("127.0.0.1:9000".into()),
                     partitioning_version: 0,
@@ -107,7 +108,7 @@ mod tests {
                 },
                 QueueTopologyEntry {
                     topic: "emails".into(),
-                    partition: 1,
+                    partition: Partition::new(1),
                     group: None,
                     owner_endpoint: None,
                     partitioning_version: 0,
@@ -125,7 +126,7 @@ mod tests {
     fn redirect_roundtrips() {
         let msg = Redirect {
             topic: "orders".into(),
-            partition: 2,
+            partition: Partition::new(2),
             group: Some("workers".into()),
             owner_endpoint: "127.0.0.1:9001".into(),
             partitioning_version: 0,
@@ -144,7 +145,7 @@ mod tests {
                 sub_id: 9,
                 topic: "jobs".into(),
                 group: Some("workers".into()),
-                partition: 0,
+                partition: Partition::new(0),
                 auto_ack: false,
                 prefetch: 32,
             }],
@@ -161,7 +162,7 @@ mod tests {
             sub_id: 9,
             topic: "jobs".into(),
             group: None,
-            partition: 0,
+            partition: Partition::new(0),
             auto_ack: false,
             prefetch: 1,
         };
@@ -184,7 +185,7 @@ mod tests {
         let msg = ReplicationRead {
             topic: "orders".into(),
             group: Some("workers".into()),
-            partition: 3,
+            partition: Partition::new(3),
             message_from: 11,
             event_from: 17,
             max_messages: 128,
@@ -258,7 +259,7 @@ mod tests {
         let msg = ReplicationApply {
             topic: "orders".into(),
             group: Some("workers".into()),
-            partition: 3,
+            partition: Partition::new(3),
             messages: Some(ReplicationMessageApplyBatch {
                 epoch: 4,
                 records: vec![ReplicationMessageRecord {
@@ -299,7 +300,7 @@ mod tests {
         let msg = ReplicationCheckpointExport {
             topic: "orders".into(),
             group: Some("workers".into()),
-            partition: 3,
+            partition: Partition::new(3),
         };
 
         let frame = try_encode(Op::ReplicationCheckpointExport, 19, &msg).unwrap();
@@ -337,7 +338,7 @@ mod tests {
         let msg = ReplicationCheckpointInstall {
             topic: "orders".into(),
             group: Some("workers".into()),
-            partition: 3,
+            partition: Partition::new(3),
             checkpoint: ReplicationStateCheckpoint {
                 message_epoch: 2,
                 event_epoch: 3,

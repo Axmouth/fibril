@@ -6,7 +6,7 @@ pub mod replication;
 
 use std::collections::HashMap;
 
-use fibril_storage::DeliveryTag;
+pub use fibril_storage::{DeliveryTag, Partition};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -151,7 +151,7 @@ impl ContentType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publish {
     pub topic: String,
-    pub partition: u32, // explicit partition override; default 0
+    pub partition: Partition, // explicit partition override; default 0
     pub group: Option<String>,
     pub require_confirm: bool,
     #[serde(default)]
@@ -176,7 +176,7 @@ pub struct Publish {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishDelayed {
     pub topic: String,
-    pub partition: u32,
+    pub partition: Partition,
     pub group: Option<String>,
     pub require_confirm: bool,
     pub not_before: u64,
@@ -240,7 +240,7 @@ pub struct Subscribe {
     /// `Subscribe` per partition; single-partition / standalone uses 0. Serde
     /// default keeps older clients (which omit it) on partition 0.
     #[serde(default)]
-    pub partition: u32,
+    pub partition: Partition,
     pub group: Option<String>,
     pub prefetch: u32,
     pub auto_ack: bool,
@@ -251,7 +251,7 @@ pub struct SubscribeOk {
     pub sub_id: u64,
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub prefetch: u32,
 }
 
@@ -260,7 +260,7 @@ pub struct ReconcileSubscription {
     pub sub_id: u64,
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub auto_ack: bool,
     #[serde(default = "default_prefetch")]
     pub prefetch: u32,
@@ -317,7 +317,7 @@ pub struct ReconcileResult {
 pub struct ReplicationRead {
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub message_from: u64,
     pub event_from: u64,
     pub max_messages: u32,
@@ -398,7 +398,7 @@ pub struct ReplicationEventApplyBatch {
 pub struct ReplicationApply {
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub messages: Option<ReplicationMessageApplyBatch>,
     pub events: Option<ReplicationEventApplyBatch>,
 }
@@ -413,7 +413,7 @@ pub struct ReplicationApplyOk {
 pub struct ReplicationCheckpointExport {
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -436,7 +436,7 @@ pub struct ReplicationCheckpointExportOk {
 pub struct ReplicationCheckpointInstall {
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub checkpoint: ReplicationStateCheckpoint,
 }
 
@@ -452,7 +452,7 @@ pub struct Deliver {
     pub sub_id: u64,
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub offset: u64,
     pub delivery_tag: DeliveryTag,
     pub published: u64,
@@ -467,7 +467,7 @@ pub struct Deliver {
 pub struct Ack {
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub tags: Vec<DeliveryTag>, // batch
 }
 
@@ -475,7 +475,7 @@ pub struct Ack {
 pub struct Nack {
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub tags: Vec<DeliveryTag>, // batch
     pub requeue: bool,
     #[serde(default)]
@@ -513,7 +513,7 @@ pub struct TopologyRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueTopologyEntry {
     pub topic: String,
-    pub partition: u32,
+    pub partition: Partition,
     pub group: Option<String>,
     /// Broker endpoint of the owner, if the owner node is known in the registry.
     pub owner_endpoint: Option<String>,
@@ -543,7 +543,7 @@ pub struct TopologyOk {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Redirect {
     pub topic: String,
-    pub partition: u32,
+    pub partition: Partition,
     pub group: Option<String>,
     pub owner_endpoint: String,
     pub partitioning_version: u64,

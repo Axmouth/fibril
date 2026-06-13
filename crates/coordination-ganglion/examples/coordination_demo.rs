@@ -21,6 +21,7 @@ use std::time::Duration;
 use fibril_broker::coordination::{
     Coordination, DeterministicPartitionPlacement, NodeInfo, QueueIdentity,
 };
+use fibril_broker::Partition;
 use fibril_coordination_ganglion::GanglionCoordination;
 use ganglion_openraft::{
     default_raft_config, openraft::BasicNode, InProcessRouter, RaftMetadataNode,
@@ -80,7 +81,7 @@ impl Playground {
 
     async fn assign(&mut self, topic: &str, partitions: u32) {
         for partition in 0..partitions {
-            let queue = QueueIdentity::new(topic, partition, None);
+            let queue = QueueIdentity::new(topic, Partition::new(partition), None);
             if !self.queues.contains(&queue) {
                 self.queues.push(queue);
             }

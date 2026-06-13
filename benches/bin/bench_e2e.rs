@@ -10,6 +10,7 @@ use std::{
 
 use fibril_broker::broker::{ConsumerConfig, SettleRequest};
 use fibril_broker::{
+    Partition,
     broker::SettleType,
     queue_engine::{KeratinConfig, StromaKeratinConfig},
 };
@@ -163,7 +164,10 @@ async fn producer_task(
     metrics: Arc<BenchMetrics>,
 ) {
     // tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
-    let (publisher, mut confirm_stream) = broker.get_publisher(&topic, 0, &None).await.unwrap();
+    let (publisher, mut confirm_stream) = broker
+        .get_publisher(&topic, Partition::ZERO, &None)
+        .await
+        .unwrap();
 
     let metrics_clone = metrics.clone();
 
@@ -384,7 +388,7 @@ async fn run_e2e_bench(cmd: E2EBench) {
         let consumer = broker
             .subscribe(
                 &topic,
-                0,
+                Partition::ZERO,
                 None,
                 client_id,
                 ConsumerConfig::default().with_prefetch_count(8192 * 8),

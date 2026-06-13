@@ -5,8 +5,10 @@ edition = "2024"
 
 [dependencies]
 fibril-metrics = { path = "../metrics" }
+fibril-common = { path = "../common" }
 fibril-util = { path = "../util" }
 stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
+stroma-common = { git = "https://github.com/Axmouth/keratin.git" }
 anyhow = "1.0"
 async-trait = "0.1"
 bytes = "1"

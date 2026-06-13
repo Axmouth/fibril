@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use fibril_broker::{
-    LogId, Offset,
+    Offset, Partition,
     broker::{
         BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
         BrokerOwnerReplicationRecords,
@@ -458,7 +458,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
     fn read_owner_replication_records<'a>(
         &'a self,
         topic: &'a str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&'a str>,
         message_from: Offset,
         event_from: Offset,
@@ -520,7 +520,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
     fn export_owner_state_checkpoint<'a>(
         &'a self,
         topic: &'a str,
-        partition: LogId,
+        partition: Partition,
         group: Option<&'a str>,
     ) -> futures::future::BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async move {
@@ -582,7 +582,7 @@ pub async fn catch_up_replication_over_protocol(
     owner: &mut Conn,
     follower: &mut Conn,
     topic: &str,
-    partition: u32,
+    partition: Partition,
     group: Option<&str>,
     options: ProtocolReplicationCatchUpOptions,
 ) -> anyhow::Result<ProtocolReplicationCatchUp> {
@@ -807,7 +807,7 @@ fn protocol_error(err: impl std::fmt::Display) -> BrokerError {
 fn protocol_request_error_to_broker(
     err: ProtocolReplicationRequestError,
     topic: &str,
-    partition: LogId,
+    partition: Partition,
     group: Option<&str>,
 ) -> BrokerError {
     match err {

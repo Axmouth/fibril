@@ -13,7 +13,7 @@ use fibril_broker::runtime_settings::{
 use fibril_config::ServerConfig;
 use fibril_coordination_ganglion::ClientTopology;
 use fibril_protocol::v1::handler::{ClientTopologySource, QueueDeclareCoordinator};
-use fibril_protocol::v1::{QueueTopologyEntry, TopologyOk};
+use fibril_protocol::v1::{Partition, QueueTopologyEntry, TopologyOk};
 
 /// Map the startup config's runtime-seed section into the broker's
 /// `RuntimeSettings` (the initial cluster document before replicated overrides).
@@ -81,7 +81,7 @@ impl ClientTopologySource for CoordinationTopologySource {
     fn owner_endpoint(
         &self,
         topic: &str,
-        partition: u32,
+        partition: Partition,
         group: Option<&str>,
     ) -> Option<(String, u64)> {
         (self.fetch)()
