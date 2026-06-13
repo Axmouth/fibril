@@ -2006,3 +2006,41 @@ Tests needed before implementing transition:
   listener: publish keyed+keyless across p0..pN, subscribe, assert per-key
   stickiness + full coverage). Then server.rs refactor "b" (coordination
   bootstrap/spawns/admin wiring -> fibril lib.rs).
+- 2026-06-13: pure-consumer gap RESOLVED via connect-time topology warm
+  (f2e1b80): ClientOptions.topology_warm_timeout_ms (default 5s, None disables,
+  disable_topology_warm() builder); Client::connect does a bounded best-effort
+  fetch_topology so the first publish spreads and the first subscription fans in
+  over all partitions (cold cache funnels everything to p0 = consumer starvation
+  + publish hot-spot). redirect.rs mock now answers empty Op::Topology by default
+  so connect-warm is prompt; reconcile test opts out (scripts exact frames).
+- 2026-06-14: Partition NEWTYPE pass DONE (keratin 81072a8 + fibril befcdcb).
+  stroma-common crate (keratin) owns Partition/Offset (Topic/Group aliases);
+  fibril-common crate owns DeliveryTag; LogId dropped -> Partition newtype
+  end-to-end incl. wire (serde-transparent, no protocol change). `.id()` marks
+  the engine/metrics u32 boundary. See memory newtypes-for-domain-integers.
+  Offset + Topic/Group newtypes deferred to ONE combined pass at the END (user
+  pref: don't touch the same files thrice; fold in Arc<str> for Topic/Group).
+- 2026-06-14: B6 DONE (833fa49). multi_partition_publish_subscribe_is_isolated_e2e
+  in handler_tests: real broker behind a protocol listener, publish one msg to
+  each of partitions 0/1, subscribe to each, assert each gets only its own
+  message with the right partition tag. Full server stack
+  (handler->broker->per-partition Stroma log->delivery). Whole workspace green
+  (35 suites).
+
+  ===== PHASE B (multi-partition) FUNCTIONALLY COMPLETE =====
+  Declare fan-out (N catalogue entries) + per-(topic,group) QueuePartitioning CAS;
+  key->partition routing (round-robin default / hash(key)%N keyed / version-fenced);
+  per-partition server publish logs; partition-aware subscribe + transparent
+  client fan-in (assignment-set ready for groups); connect-time topology warm;
+  e2e isolation test. Remaining within reach but separable:
+  NEXT CANDIDATES (recalc):
+  1. Consumer-group coverage-first rebalancer — distribute partitions across group
+     members so fan-in consumes an assigned SUBSET (not all). The fan-in +
+     partition_set were built for this (see memory consumer-partition-assignment-
+     model + subscription-fanin-model). BIG new sub-project; highest feature value.
+  2. server.rs refactor "b" (coordination bootstrap/spawns/admin wiring ->
+     fibril lib.rs) — organizational, was deferred to end of Phase B (now).
+  3. Gated auto-create-on-first-publish (deferred follow-on).
+  4. Cross-broker lag aggregation into fibrilctl topology + admin diagram.
+  5. Idempotent-producer dedup decision.
+  6. (END) combined Offset + Topic/Group newtype pass.
