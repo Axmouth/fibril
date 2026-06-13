@@ -808,6 +808,7 @@ pub struct QueueConfig {
     group: Option<GroupName>,
     dlq_policy: Option<DeadLetterPolicy>,
     dlq_max_retries: Option<u32>,
+    partition_count: Option<u32>,
 }
 
 impl QueueConfig {
@@ -818,6 +819,7 @@ impl QueueConfig {
             group: None,
             dlq_policy: None,
             dlq_max_retries: None,
+            partition_count: None,
         })
     }
 
@@ -825,6 +827,13 @@ impl QueueConfig {
     pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
         self.group = GroupName::parse_optional(group)?;
         Ok(self)
+    }
+
+    /// Request a specific partition count for this queue. When unset, the
+    /// cluster default applies.
+    pub fn partitions(mut self, partition_count: u32) -> Self {
+        self.partition_count = Some(partition_count);
+        self
     }
 
     /// Set the number of retries before the queue's dead-letter policy applies.
@@ -882,6 +891,7 @@ impl QueueConfig {
             group: self.group.map(GroupName::into_string),
             dlq_policy,
             dlq_max_retries: self.dlq_max_retries,
+            partition_count: self.partition_count,
         }
     }
 }

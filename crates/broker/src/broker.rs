@@ -359,6 +359,8 @@ pub struct BrokerConfig {
     pub replication_min_in_sync_replicas: usize,
     /// How recently a follower must have reported progress to count as in-sync.
     pub replication_isr_timeout_ms: u64,
+    /// Partition count for a queue declared without an explicit count.
+    pub default_partition_count: u32,
 }
 impl Default for BrokerConfig {
     fn default() -> Self {
@@ -375,6 +377,7 @@ impl Default for BrokerConfig {
             replication_checkpoint_retry_poll_ms: 5_000,
             replication_min_in_sync_replicas: 1,
             replication_isr_timeout_ms: 10_000,
+            default_partition_count: 1,
         }
     }
 }

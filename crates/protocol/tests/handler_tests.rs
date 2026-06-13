@@ -3369,6 +3369,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     group: None,
                     dlq_policy: Some(QueueDlqPolicy::Global),
                     dlq_max_retries: Some(0),
+                    partition_count: None,
                 },
             )
             .unwrap(),

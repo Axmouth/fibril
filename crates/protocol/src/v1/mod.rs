@@ -198,11 +198,19 @@ pub struct DeclareQueue {
     pub group: Option<String>,
     pub dlq_policy: Option<QueueDlqPolicy>,
     pub dlq_max_retries: Option<u32>,
+    /// Desired partition count for this `(topic, group)` queue. `None` uses the
+    /// cluster default (`default_partition_count`). Serde-default keeps older
+    /// clients wire-compatible.
+    #[serde(default)]
+    pub partition_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclareQueueOk {
     pub status: String,
+    /// Effective partition count of the declared queue.
+    #[serde(default)]
+    pub partition_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

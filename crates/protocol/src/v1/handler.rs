@@ -2037,6 +2037,9 @@ pub async fn handle_connection(
                                 frame.request_id,
                                 &DeclareQueueOk {
                                     status: "stored".into(),
+                                    // Partition fan-out is wired next; this path
+                                    // still creates a single partition.
+                                    partition_count: 1,
                                 },
                             )?)
                             .await?;

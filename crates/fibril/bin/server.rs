@@ -129,6 +129,9 @@ async fn main() -> anyhow::Result<()> {
             min_in_sync_replicas: config.runtime_seed.replication.min_in_sync_replicas,
             isr_timeout_ms: config.runtime_seed.replication.isr_timeout_ms,
         },
+        partitioning: fibril_broker::runtime_settings::PartitioningRuntimeSettings {
+            default_partition_count: config.runtime_seed.partitioning.default_partition_count,
+        },
     };
     let runtime_settings = Arc::new(
         RuntimeSettingsManager::load_from_stroma_engine(

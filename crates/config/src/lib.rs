@@ -333,6 +333,9 @@ impl ServerConfig {
         if self.runtime_seed.replication.isr_timeout_ms == 0 {
             anyhow::bail!("runtime_seed.replication.isr_timeout_ms must be at least 1");
         }
+        if self.runtime_seed.partitioning.default_partition_count == 0 {
+            anyhow::bail!("runtime_seed.partitioning.default_partition_count must be at least 1");
+        }
         if self.coordination.mode == CoordinationMode::Ganglion
             && self.coordination.ganglion.liveness_ttl_ms
                 < 2 * self.coordination.ganglion.heartbeat_interval_ms
@@ -606,6 +609,22 @@ pub struct RuntimeSeedSection {
     pub idle_queue_cleanup: IdleQueueCleanupSettings,
     pub connection: ConnectionSettings,
     pub replication: ReplicationSettings,
+    pub partitioning: PartitioningSettings,
+}
+
+/// Seed values for the partitioning runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PartitioningSettings {
+    pub default_partition_count: u32,
+}
+
+impl Default for PartitioningSettings {
+    fn default() -> Self {
+        Self {
+            default_partition_count: 1,
+        }
+    }
 }
 
 /// Seed values for the replication runtime settings (cluster-replicated

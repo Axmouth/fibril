@@ -19,6 +19,25 @@ pub struct RuntimeSettings {
     pub connection: ConnectionRuntimeSettings,
     #[serde(default)]
     pub replication: ReplicationRuntimeSettings,
+    #[serde(default)]
+    pub partitioning: PartitioningRuntimeSettings,
+}
+
+/// Partitioning-related runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PartitioningRuntimeSettings {
+    /// Partition count for a queue declared without an explicit count
+    /// (Kafka `num.partitions` equivalent).
+    pub default_partition_count: u32,
+}
+
+impl Default for PartitioningRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            default_partition_count: 1,
+        }
+    }
 }
 
 impl RuntimeSettings {
@@ -50,6 +69,7 @@ impl Default for RuntimeSettings {
             idle_queue_cleanup: IdleQueueCleanupRuntimeSettings::default(),
             connection: ConnectionRuntimeSettings::default(),
             replication: ReplicationRuntimeSettings::default(),
+            partitioning: PartitioningRuntimeSettings::default(),
         }
     }
 }
@@ -318,6 +338,7 @@ impl BrokerConfig {
             replication_checkpoint_retry_poll_ms: settings.replication.checkpoint_retry_poll_ms,
             replication_min_in_sync_replicas: settings.replication.min_in_sync_replicas,
             replication_isr_timeout_ms: settings.replication.isr_timeout_ms,
+            default_partition_count: settings.partitioning.default_partition_count,
         }
     }
 }
@@ -505,6 +526,7 @@ mod tests {
                 reconnect_grace_ms: Some(8),
             },
             replication: ReplicationRuntimeSettings::default(),
+            partitioning: PartitioningRuntimeSettings::default(),
         };
 
         let decoded = decode_snapshot(GlobalValue {
@@ -541,6 +563,7 @@ mod tests {
                 reconnect_grace_ms: Some(17),
             },
             replication: ReplicationRuntimeSettings::default(),
+            partitioning: PartitioningRuntimeSettings::default(),
         };
 
         let config = BrokerConfig::from_runtime_settings(&settings);
