@@ -2660,36 +2660,35 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     server_task.await.unwrap().unwrap();
 }
 
+/// Test topology source returning a fixed snapshot.
+#[derive(Clone)]
+struct FixedTopology(TopologyOk);
+impl ClientTopologySource for FixedTopology {
+    fn topology(&self) -> TopologyOk {
+        self.0.clone()
+    }
+    fn owner_endpoint(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+    ) -> Option<(String, u64)> {
+        self.0
+            .queues
+            .iter()
+            .find(|q| q.topic == topic && q.partition == partition && q.group.as_deref() == group)
+            .and_then(|q| {
+                q.owner_endpoint
+                    .clone()
+                    .map(|e| (e, q.partitioning_version))
+            })
+    }
+}
+
 /// The handler answers `Op::Topology` from its injected topology source,
 /// honoring a topic filter.
 #[tokio::test]
 async fn handler_answers_topology_query_from_source() {
-    #[derive(Clone)]
-    struct FixedTopology(TopologyOk);
-    impl ClientTopologySource for FixedTopology {
-        fn topology(&self) -> TopologyOk {
-            self.0.clone()
-        }
-        fn owner_endpoint(
-            &self,
-            topic: &str,
-            partition: u32,
-            group: Option<&str>,
-        ) -> Option<(String, u64)> {
-            self.0
-                .queues
-                .iter()
-                .find(|q| {
-                    q.topic == topic && q.partition == partition && q.group.as_deref() == group
-                })
-                .and_then(|q| {
-                    q.owner_endpoint
-                        .clone()
-                        .map(|e| (e, q.partitioning_version))
-                })
-        }
-    }
-
     let source = Arc::new(FixedTopology(TopologyOk {
         generation: 4,
         queues: vec![
@@ -2769,6 +2768,79 @@ async fn handler_answers_topology_query_from_source() {
         filtered.queues[0].owner_endpoint.as_deref(),
         Some("127.0.0.1:9000")
     );
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+    drop(dir);
+}
+
+/// A publish to a queue this broker does not own returns an `Op::Redirect` to
+/// the current owner (resolved from the topology source), not a plain error.
+#[tokio::test]
+async fn unowned_publish_redirects_to_current_owner() {
+    let (broker, dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::new()))).await;
+    let source = Arc::new(FixedTopology(TopologyOk {
+        generation: 2,
+        queues: vec![QueueTopologyEntry {
+            topic: "elsewhere".into(),
+            partition: 0,
+            group: None,
+            owner_endpoint: Some("127.0.0.1:9999".into()),
+            partitioning_version: 0,
+        }],
+    }));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (server, peer) = listener.accept().await.unwrap();
+        let tcp_stats = TcpStats::new(10);
+        let connection_stats = ConnectionStats::new();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+        handle_connection(
+            server,
+            broker,
+            tcp_stats,
+            connection_stats,
+            conn_id,
+            None::<StaticAuthHandler>,
+            ConnectionSettings::new(Some(60)),
+            Some(source as Arc<dyn ClientTopologySource>),
+        )
+        .await
+    });
+
+    let client = TcpStream::connect(addr).await.unwrap();
+    let mut framed = Framed::new(client, ProtoCodec);
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                2,
+                &Publish {
+                    topic: "elsewhere".into(),
+                    partition: 0,
+                    group: None,
+                    require_confirm: true,
+                    content_type: None,
+                    headers: HashMap::new(),
+                    payload: b"payload".to_vec(),
+                    published: unix_millis(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::Redirect as u16);
+    let redirect: fibril_protocol::v1::Redirect = try_decode(&frame).unwrap();
+    assert_eq!(redirect.topic, "elsewhere");
+    assert_eq!(redirect.owner_endpoint, "127.0.0.1:9999");
 
     drop(framed);
     server_task.await.unwrap().unwrap();

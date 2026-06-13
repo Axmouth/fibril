@@ -154,6 +154,56 @@ fn broker_error_response(err: &BrokerError) -> (u16, String) {
     }
 }
 
+/// Build an `Op::Redirect` frame for a queue partition if the topology source
+/// can resolve its current owner. Redirect is control flow (not an error): it
+/// tells the client to retry against the right broker. `None` => no source or
+/// owner unknown, so the caller should fall back to its terminal error.
+fn owner_redirect_frame(
+    topology_source: &Option<Arc<dyn ClientTopologySource>>,
+    request_id: u64,
+    topic: &str,
+    partition: u32,
+    group: Option<&str>,
+) -> Option<Frame> {
+    let (owner_endpoint, partitioning_version) = topology_source
+        .as_ref()?
+        .owner_endpoint(topic, partition, group)?;
+    let redirect = Redirect {
+        topic: topic.to_string(),
+        partition,
+        group: group.map(str::to_string),
+        owner_endpoint,
+        partitioning_version,
+    };
+    try_encode(Op::Redirect, request_id, &redirect).ok()
+}
+
+/// Respond to a client-facing operation error. On `NotOwner`, emit a redirect
+/// when the owner is resolvable; otherwise fall back to the plain error
+/// (terminal `ERR_NOT_OWNER` when the owner is unknown).
+async fn send_owner_redirect_or_error(
+    tx: &FrameSink,
+    metrics: &TcpStats,
+    request_id: u64,
+    topology_source: &Option<Arc<dyn ClientTopologySource>>,
+    topic: &str,
+    partition: u32,
+    group: Option<&str>,
+    err: &BrokerError,
+) {
+    if matches!(err, BrokerError::NotOwner { .. }) {
+        if let Some(frame) =
+            owner_redirect_frame(topology_source, request_id, topic, partition, group)
+        {
+            if tx.send(frame).await.is_ok() {
+                return;
+            }
+        }
+    }
+    let (code, message) = broker_error_response(err);
+    send_error_response_and_count(tx, metrics, request_id, code, message).await;
+}
+
 fn replication_checkpoint_required(
     epoch: u64,
     requested_offset: u64,
@@ -1870,6 +1920,13 @@ pub async fn handle_connection(
             x if x == Op::Subscribe as u16 => {
                 let sub: Subscribe = decode_or_400!(frame, frame_tx_high_prio, metrics, Subscribe);
 
+                // Captured for a possible redirect (the identity is moved into
+                // the install args below). Subscribe is implicitly partition 0
+                // today; Phase B will add an explicit partition to the wire.
+                let sub_topic = sub.topic.clone();
+                let sub_group = sub.group.clone();
+                let sub_partition = 0u32;
+
                 let sub_ok = install_subscription(InstallSubscriptionArgs {
                     broker: broker.clone(),
                     logical: logical.clone(),
@@ -1888,6 +1945,23 @@ pub async fn handle_connection(
                 let sub_ok = match sub_ok {
                     Ok(sub_ok) => sub_ok,
                     Err(err) => {
+                        // Not-owner on subscribe redirects to the current owner
+                        // (when resolvable), just like publish.
+                        if matches!(
+                            &err,
+                            InstallSubscriptionError::Broker(BrokerError::NotOwner { .. })
+                        ) {
+                            if let Some(redirect) = owner_redirect_frame(
+                                &topology_source,
+                                frame.request_id,
+                                &sub_topic,
+                                sub_partition,
+                                sub_group.as_deref(),
+                            ) {
+                                frame_tx_high_prio.send(redirect).await?;
+                                continue;
+                            }
+                        }
                         let (code, message) = install_subscription_error_response(&err);
                         frame_tx_high_prio
                             .send(try_encode(
@@ -2091,13 +2165,15 @@ pub async fn handle_connection(
                         match broker.get_publisher(&pubreq.topic, &pubreq.group).await {
                             Ok(publisher) => publisher,
                             Err(err) => {
-                                let (code, message) = broker_error_response(&err);
-                                send_error_response_and_count(
+                                send_owner_redirect_or_error(
                                     &frame_tx_low_prio,
                                     &metrics,
                                     frame.request_id,
-                                    code,
-                                    message,
+                                    &topology_source,
+                                    &pubreq.topic,
+                                    0,
+                                    pubreq.group.as_deref(),
+                                    &err,
                                 )
                                 .await;
                                 continue;
@@ -2202,13 +2278,15 @@ pub async fn handle_connection(
                         match broker.get_publisher(&pubreq.topic, &pubreq.group).await {
                             Ok(publisher) => publisher,
                             Err(err) => {
-                                let (code, message) = broker_error_response(&err);
-                                send_error_response_and_count(
+                                send_owner_redirect_or_error(
                                     &frame_tx_low_prio,
                                     &metrics,
                                     frame.request_id,
-                                    code,
-                                    message,
+                                    &topology_source,
+                                    &pubreq.topic,
+                                    0,
+                                    pubreq.group.as_deref(),
+                                    &err,
                                 )
                                 .await;
                                 continue;

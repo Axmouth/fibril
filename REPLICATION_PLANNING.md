@@ -930,8 +930,10 @@ Concrete shape (first attempt, crates/client/src/lib.rs):
   a stale partitioning_version (NotOwner-style with fresh topology) — routing-
   layer mirror of data-plane epoch-before-use. This is the hook that makes a
   future live repartition safe without a wire break.
-- B5. Subscribe across partitions. `Subscribe` wire ALREADY carries a partition
-  field (handler.rs uses sub.partition). Support a subscription targeting a
+- B5. Subscribe across partitions. NOTE: `Subscribe` wire does NOT carry a
+  partition today (only SubscribeOk/ReconcileSubscription do); subscribe is
+  implicitly partition 0. Phase B adds an explicit partition to the Subscribe
+  wire. Support a subscription targeting a
   partition SUBSET; a logical subscription fans out one stream per owned
   partition, hidden by the client. (Coverage-first consumer-group assignment is
   DEFERRED — see [[consumer-partition-assignment-model]] — but the subscribe
