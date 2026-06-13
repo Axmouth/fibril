@@ -191,6 +191,45 @@ fn owner_redirect_frame(
     try_encode(Op::Redirect, request_id, &redirect).ok()
 }
 
+/// Fence a publish against a stale partitioning view. The client stamps the
+/// partitioning version it routed under; if that lags the queue's authoritative
+/// version, the partition it chose may no longer be correct, so we redirect it
+/// to re-fetch topology and re-route. Returns `true` if a redirect was sent (the
+/// caller must stop processing the publish). A missing topology source, an
+/// unknown owner, or an up-to-date (>=) client version all return `false` so the
+/// publish proceeds — version `0` against a v0 queue is the standalone path.
+async fn fence_stale_partitioning(
+    tx: &FrameSink,
+    request_id: u64,
+    topology_source: &Option<Arc<dyn ClientTopologySource>>,
+    topic: &str,
+    partition: u32,
+    group: Option<&str>,
+    client_version: u64,
+) -> bool {
+    let Some(source) = topology_source.as_ref() else {
+        return false;
+    };
+    let Some((owner_endpoint, current_version)) = source.owner_endpoint(topic, partition, group)
+    else {
+        return false;
+    };
+    if client_version >= current_version {
+        return false;
+    }
+    let redirect = Redirect {
+        topic: topic.to_string(),
+        partition,
+        group: group.map(str::to_string),
+        owner_endpoint,
+        partitioning_version: current_version,
+    };
+    match try_encode(Op::Redirect, request_id, &redirect) {
+        Ok(frame) => tx.send(frame).await.is_ok(),
+        Err(_) => false,
+    }
+}
+
 /// Respond to a client-facing operation error. On `NotOwner`, emit a redirect
 /// when the owner is resolvable; otherwise fall back to the plain error
 /// (terminal `ERR_NOT_OWNER` when the owner is unknown).
@@ -2199,6 +2238,19 @@ pub async fn handle_connection(
             x if x == Op::Publish as u16 => {
                 let publish_received = unix_millis();
                 let pubreq: Publish = decode_or_400!(frame, frame_tx_low_prio, metrics, Publish);
+                if fence_stale_partitioning(
+                    &frame_tx_low_prio,
+                    frame.request_id,
+                    &topology_source,
+                    &pubreq.topic,
+                    pubreq.partition,
+                    pubreq.group.as_deref(),
+                    pubreq.partitioning_version,
+                )
+                .await
+                {
+                    continue;
+                }
                 let mut headers = pubreq.headers;
                 let content_type = normalize_content_type(pubreq.content_type, &mut headers);
                 if has_reserved_headers(&headers) {
@@ -2312,6 +2364,19 @@ pub async fn handle_connection(
                 let publish_received = unix_millis();
                 let pubreq: PublishDelayed =
                     decode_or_400!(frame, frame_tx_low_prio, metrics, PublishDelayed);
+                if fence_stale_partitioning(
+                    &frame_tx_low_prio,
+                    frame.request_id,
+                    &topology_source,
+                    &pubreq.topic,
+                    pubreq.partition,
+                    pubreq.group.as_deref(),
+                    pubreq.partitioning_version,
+                )
+                .await
+                {
+                    continue;
+                }
                 let mut headers = pubreq.headers;
                 let content_type = normalize_content_type(pubreq.content_type, &mut headers);
                 if has_reserved_headers(&headers) {

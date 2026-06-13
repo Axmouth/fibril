@@ -723,6 +723,7 @@ pub async fn visual_client(
                         published: unix_millis(),
                         payload: b"hello".repeat(10000).to_vec(),
                         partition_key: None,
+                        partitioning_version: 0,
                     })
                     .await
                     .is_err()

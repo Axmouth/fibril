@@ -164,6 +164,13 @@ pub struct Publish {
     /// Purely partition selection — NOT a RabbitMQ-style routing key.
     #[serde(default)]
     pub partition_key: Option<Vec<u8>>,
+    /// The partitioning version the client routed under. The owner fences
+    /// against a stale view: if this lags the queue's authoritative version,
+    /// the chosen partition may no longer be correct, so the owner redirects
+    /// the client to re-fetch topology. `0` is the default/unknown version and
+    /// matches a single-partition v0 queue (standalone / non-cluster path).
+    #[serde(default)]
+    pub partitioning_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +190,9 @@ pub struct PublishDelayed {
     /// Purely partition selection — NOT a RabbitMQ-style routing key.
     #[serde(default)]
     pub partition_key: Option<Vec<u8>>,
+    /// The partitioning version the client routed under. See [`Publish`].
+    #[serde(default)]
+    pub partitioning_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

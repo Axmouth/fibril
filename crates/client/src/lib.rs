@@ -1209,7 +1209,10 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
             .shared
             .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
@@ -1219,6 +1222,7 @@ impl Publisher {
                 topic.to_string(),
                 group.map(str::to_string),
                 partition,
+                partitioning_version,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1235,7 +1239,10 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
             .shared
             .route_partition(topic, group, message.partition_key.as_deref());
         let mut attempts = 0u32;
@@ -1247,6 +1254,7 @@ impl Publisher {
                     topic.to_string(),
                     group.map(str::to_string),
                     partition,
+                    partitioning_version,
                     message.content_type.clone(),
                     message.headers.clone(),
                     message.payload.clone(),
@@ -1285,7 +1293,10 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
             .shared
             .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
@@ -1295,6 +1306,7 @@ impl Publisher {
                 topic.to_string(),
                 group.map(str::to_string),
                 partition,
+                partitioning_version,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1316,7 +1328,10 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
             .shared
             .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
@@ -1326,6 +1341,7 @@ impl Publisher {
                 topic.to_string(),
                 group.map(str::to_string),
                 partition,
+                partitioning_version,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1364,7 +1380,10 @@ impl Publisher {
         let message = payload.into_message()?;
         let topic = self.topic.as_str();
         let group = self.group.as_ref().map(|group| group.as_str());
-        let partition = self
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
             .shared
             .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
@@ -1374,6 +1393,7 @@ impl Publisher {
                 topic.to_string(),
                 group.map(str::to_string),
                 partition,
+                partitioning_version,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1419,9 +1439,27 @@ impl AutoAckedSubscription {
 
 /// Owner of one queue partition for client routing.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // fields consumed once routing is wired (A5.5/A5.6)
+#[allow(dead_code)] // fields consumed once routing is wired
 struct OwnerEntry {
     endpoint: SocketAddr,
+    partitioning_version: u64,
+}
+
+/// Authoritative partitioning of one logical queue `(topic, group)`: how many
+/// partitions it has and the version that count was published under. The client
+/// stamps `version` on each publish so the owner can fence stale routing.
+#[derive(Debug, Clone, Copy)]
+struct PartitioningEntry {
+    count: u32,
+    version: u64,
+}
+
+/// The outcome of routing one publish: which partition to send to, and the
+/// partitioning version that choice was made under (stamped on the wire so the
+/// owner can fence a stale view).
+#[derive(Debug, Clone, Copy)]
+struct Route {
+    partition: u32,
     partitioning_version: u64,
 }
 
@@ -1433,8 +1471,8 @@ struct OwnerEntry {
 struct TopologyCache {
     generation: u64,
     by_queue: HashMap<(String, u32, Option<String>), OwnerEntry>,
-    /// Authoritative partition count per logical queue `(topic, group)`.
-    counts: HashMap<(String, Option<String>), u32>,
+    /// Authoritative partitioning per logical queue `(topic, group)`.
+    counts: HashMap<(String, Option<String>), PartitioningEntry>,
     last_refresh_ms: u64,
 }
 
@@ -1446,8 +1484,8 @@ impl TopologyCache {
             .cloned()
     }
 
-    /// Authoritative partition count for `(topic, group)`, if known.
-    fn partition_count(&self, topic: &str, group: Option<&str>) -> Option<u32> {
+    /// Authoritative partitioning (count + version) for `(topic, group)`, if known.
+    fn partitioning(&self, topic: &str, group: Option<&str>) -> Option<PartitioningEntry> {
         self.counts
             .get(&(topic.to_string(), group.map(str::to_string)))
             .copied()
@@ -1460,7 +1498,10 @@ impl TopologyCache {
         for queue in topology.queues {
             self.counts.insert(
                 (queue.topic.clone(), queue.group.clone()),
-                queue.partition_count.max(1),
+                PartitioningEntry {
+                    count: queue.partition_count.max(1),
+                    version: queue.partitioning_version,
+                },
             );
             let Some(endpoint) = queue
                 .owner_endpoint
@@ -1532,18 +1573,21 @@ impl ClientShared {
     /// Select the partition for a publish to `(topic, group)`:
     /// explicit override (none yet) -> `hash(key) % N` if a key is present ->
     /// round-robin over N. N comes from the authoritative topology cache;
-    /// unknown N (cache cold / standalone) routes to partition 0.
-    fn route_partition(&self, topic: &str, group: Option<&str>, key: Option<&[u8]>) -> u32 {
-        let count = self
-            .topology
-            .load()
-            .partition_count(topic, group)
-            .unwrap_or(1)
-            .max(1);
+    /// unknown N (cache cold / standalone) routes to partition 0. Returns the
+    /// chosen partition together with the partitioning version it was computed
+    /// under, so the publish can carry that version for the owner-side fence
+    /// (unknown => version 0, which matches a single-partition v0 queue).
+    fn route_partition(&self, topic: &str, group: Option<&str>, key: Option<&[u8]>) -> Route {
+        let partitioning = self.topology.load().partitioning(topic, group);
+        let version = partitioning.map(|p| p.version).unwrap_or(0);
+        let count = partitioning.map(|p| p.count).unwrap_or(1).max(1);
         if count == 1 {
-            return 0;
+            return Route {
+                partition: 0,
+                partitioning_version: version,
+            };
         }
-        match key {
+        let partition = match key {
             Some(key) => (fnv1a(key) % count as u64) as u32,
             None => {
                 let next = self
@@ -1551,6 +1595,10 @@ impl ClientShared {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 (next % count as usize) as u32
             }
+        };
+        Route {
+            partition,
+            partitioning_version: version,
         }
     }
 
@@ -1756,6 +1804,7 @@ enum Command {
         topic: String,
         group: Option<String>,
         partition: u32,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1765,6 +1814,7 @@ enum Command {
         topic: String,
         group: Option<String>,
         partition: u32,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1775,6 +1825,7 @@ enum Command {
         topic: String,
         group: Option<String>,
         partition: u32,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1785,6 +1836,7 @@ enum Command {
         topic: String,
         group: Option<String>,
         partition: u32,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2110,7 +2162,7 @@ where
                 }
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    Command::PublishUnconfirmed { topic, group, partition, content_type, headers, payload, published } => {
+                    Command::PublishUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = Publish {
                             topic,
@@ -2122,10 +2174,11 @@ where
                             payload,
                             published,
                             partition_key: None,
+                            partitioning_version,
                         };
                         send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
-                    Command::PublishConfirmed { topic, group, partition, content_type, headers, payload, published, reply } => {
+                    Command::PublishConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
@@ -2138,10 +2191,11 @@ where
                             payload,
                             published,
                             partition_key: None,
+                            partitioning_version,
                         };
                         send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
-                    Command::PublishDelayedUnconfirmed { topic, group, partition, content_type, headers, payload, published, not_before } => {
+                    Command::PublishDelayedUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = PublishDelayed {
                             topic,
@@ -2154,10 +2208,11 @@ where
                             payload,
                             published,
                             partition_key: None,
+                            partitioning_version,
                         };
                         send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
                     }
-                    Command::PublishDelayedConfirmed { topic, group, partition, content_type, headers, payload, published, not_before, reply } => {
+                    Command::PublishDelayedConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = PublishDelayed {
@@ -2171,6 +2226,7 @@ where
                             payload,
                             published,
                             partition_key: None,
+                            partitioning_version,
                         };
                         send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
                     }
@@ -2662,6 +2718,7 @@ impl EngineHandle {
         topic: String,
         group: Option<String>,
         partition: u32,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2672,6 +2729,7 @@ impl EngineHandle {
                 topic,
                 group,
                 partition,
+                partitioning_version,
                 content_type,
                 headers,
                 payload,
@@ -2687,6 +2745,7 @@ impl EngineHandle {
         topic: String,
         group: Option<String>,
         partition: u32,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2698,6 +2757,7 @@ impl EngineHandle {
                 topic,
                 group,
                 partition,
+                partitioning_version,
                 content_type,
                 headers,
                 payload,
@@ -2714,6 +2774,7 @@ impl EngineHandle {
         topic: String,
         group: Option<String>,
         partition: u32,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2725,6 +2786,7 @@ impl EngineHandle {
                 topic,
                 group,
                 partition,
+                partitioning_version,
                 content_type,
                 headers,
                 payload,
@@ -2741,6 +2803,7 @@ impl EngineHandle {
         topic: String,
         group: Option<String>,
         partition: u32,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2753,6 +2816,7 @@ impl EngineHandle {
                 topic,
                 group,
                 partition,
+                partitioning_version,
                 content_type,
                 headers,
                 payload,

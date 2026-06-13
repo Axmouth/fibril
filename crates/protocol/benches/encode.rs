@@ -21,6 +21,7 @@ fn publish_frame(
         headers,
         require_confirm: false,
         partition_key: None,
+        partitioning_version: 0,
     }
 }
 

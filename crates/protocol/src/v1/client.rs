@@ -75,6 +75,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             published: unix_millis(),
             payload: b"hello".to_vec(),
             partition_key: None,
+            partitioning_version: 0,
         },
     )?)
     .await?;

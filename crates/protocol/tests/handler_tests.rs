@@ -489,6 +489,7 @@ async fn framed_publish(
                     payload: payload.to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -2840,6 +2841,7 @@ async fn unowned_publish_redirects_to_current_owner() {
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -2852,6 +2854,87 @@ async fn unowned_publish_redirects_to_current_owner() {
     let redirect: fibril_protocol::v1::Redirect = try_decode(&frame).unwrap();
     assert_eq!(redirect.topic, "elsewhere");
     assert_eq!(redirect.owner_endpoint, "127.0.0.1:9999");
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+    drop(dir);
+}
+
+/// A publish stamped with a partitioning version older than the queue's
+/// authoritative version is fenced: the owner redirects the client (with the
+/// current version) so it re-fetches topology and re-routes, instead of writing
+/// into a partition chosen under a stale view.
+#[tokio::test]
+async fn stale_partitioning_version_publish_is_fenced() {
+    let (broker, dir) = open_test_broker().await;
+    let source = Arc::new(FixedTopology(TopologyOk {
+        generation: 7,
+        queues: vec![QueueTopologyEntry {
+            topic: "jobs".into(),
+            partition: 0,
+            group: None,
+            owner_endpoint: Some("127.0.0.1:9100".into()),
+            partitioning_version: 5,
+            partition_count: 4,
+        }],
+    }));
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (server, peer) = listener.accept().await.unwrap();
+        let tcp_stats = TcpStats::new(10);
+        let connection_stats = ConnectionStats::new();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+        handle_connection(
+            server,
+            broker,
+            tcp_stats,
+            connection_stats,
+            conn_id,
+            None::<StaticAuthHandler>,
+            ConnectionSettings::new(Some(60)),
+            Some(source as Arc<dyn ClientTopologySource>),
+            None,
+        )
+        .await
+    });
+
+    let client = TcpStream::connect(addr).await.unwrap();
+    let mut framed = Framed::new(client, ProtoCodec);
+    handshake(&mut framed).await;
+
+    // Client routed under version 2; the queue is now at version 5.
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                2,
+                &Publish {
+                    topic: "jobs".into(),
+                    partition: 0,
+                    group: None,
+                    require_confirm: true,
+                    content_type: None,
+                    headers: HashMap::new(),
+                    payload: b"payload".to_vec(),
+                    published: unix_millis(),
+                    partition_key: None,
+                    partitioning_version: 2,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::Redirect as u16);
+    let redirect: fibril_protocol::v1::Redirect = try_decode(&frame).unwrap();
+    assert_eq!(redirect.topic, "jobs");
+    assert_eq!(redirect.owner_endpoint, "127.0.0.1:9100");
+    // The redirect carries the current version so the client can re-route.
+    assert_eq!(redirect.partitioning_version, 5);
 
     drop(framed);
     server_task.await.unwrap().unwrap();
@@ -3137,6 +3220,7 @@ async fn unowned_publish_returns_not_owner_error_and_keeps_connection_open() {
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -3252,6 +3336,7 @@ async fn publish_content_type_header_is_delivered_as_metadata() {
                     payload: br#"{"ok":true}"#.to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -3291,6 +3376,7 @@ async fn publish_with_reserved_header_returns_error_and_keeps_connection_open() 
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -3326,6 +3412,7 @@ async fn delayed_publish_with_reserved_header_returns_error_and_keeps_connection
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -3381,6 +3468,7 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
                     payload: b"delayed".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -3446,6 +3534,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                     payload: b"retry-later".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -3577,6 +3666,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     payload: b"poison".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -3665,6 +3755,7 @@ async fn publisher_cache_idle_timeout_allows_queue_eviction_while_connection_sta
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -3728,6 +3819,7 @@ async fn publisher_cache_idle_timeout_expires_on_next_frame_without_waiting_for_
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),
@@ -3820,6 +3912,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
                         payload: payload.clone(),
                         published: unix_millis(),
                         partition_key: None,
+                        partitioning_version: 0,
                     },
                 )
                 .unwrap(),
@@ -3910,6 +4003,7 @@ async fn publisher_cache_idle_timeout_updates_existing_connection() {
                     payload: b"payload".to_vec(),
                     published: unix_millis(),
                     partition_key: None,
+                    partitioning_version: 0,
                 },
             )
             .unwrap(),

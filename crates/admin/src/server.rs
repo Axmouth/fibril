@@ -1792,6 +1792,7 @@ mod tests {
                         payload: b"poison".to_vec(),
                         published: unix_millis(),
                         partition_key: None,
+                        partitioning_version: 0,
                     },
                 )
                 .unwrap(),

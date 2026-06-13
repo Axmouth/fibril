@@ -36,6 +36,7 @@ struct SelfPartitions {
     topic: String,
     group: Option<String>,
     partition_count: u32,
+    partitioning_version: u64,
 }
 
 #[derive(Clone, Default)]
@@ -50,6 +51,8 @@ struct MockConfig {
     self_partitions: Option<SelfPartitions>,
     /// Records the `partition` field of every `Publish` frame received.
     recorded_partitions: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
+    /// Records the `partitioning_version` of every `Publish` frame received.
+    recorded_versions: Option<Arc<std::sync::Mutex<Vec<u64>>>>,
     /// Counts handshakes that carried a resume identity.
     resumes: Option<Arc<AtomicUsize>>,
 }
@@ -123,7 +126,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                                     partition,
                                     group: spread.group.clone(),
                                     owner_endpoint: Some(addr.to_string()),
-                                    partitioning_version: 0,
+                                    partitioning_version: spread.partitioning_version,
                                     partition_count: spread.partition_count,
                                 })
                                 .collect();
@@ -145,6 +148,11 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         if let Some(recorder) = &config.recorded_partitions {
                             if let Ok(mut partitions) = recorder.lock() {
                                 partitions.push(publish.partition);
+                            }
+                        }
+                        if let Some(recorder) = &config.recorded_versions {
+                            if let Ok(mut versions) = recorder.lock() {
+                                versions.push(publish.partitioning_version);
                             }
                         }
                         match &config.publish {
@@ -333,6 +341,7 @@ async fn keyless_publishes_spread_keyed_publishes_stick() {
             topic: "jobs".into(),
             group: None,
             partition_count: 4,
+            partitioning_version: 0,
         }),
         recorded_partitions: Some(recorded.clone()),
         ..Default::default()
@@ -379,8 +388,7 @@ async fn keyless_publishes_spread_keyed_publishes_stick() {
     }
 
     let keyed_partitions: Vec<u32> = recorded.lock().unwrap().clone();
-    let keyed_distinct: std::collections::HashSet<u32> =
-        keyed_partitions.iter().copied().collect();
+    let keyed_distinct: std::collections::HashSet<u32> = keyed_partitions.iter().copied().collect();
     assert_eq!(
         keyed_distinct.len(),
         1,
@@ -389,6 +397,47 @@ async fn keyless_publishes_spread_keyed_publishes_stick() {
     assert!(
         keyed_partitions[0] < 4,
         "routed partition must be within partition_count"
+    );
+}
+
+/// The client stamps each publish with the partitioning version it routed
+/// under (learned from the topology cache), so the owner can fence a stale
+/// view. With a topology at version 5, every publish carries version 5.
+#[tokio::test]
+async fn publishes_carry_routed_partitioning_version() {
+    let versions = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mock = spawn_configurable_mock(MockConfig {
+        publish: Some(MockBehavior::ConfirmOk),
+        self_partitions: Some(SelfPartitions {
+            topic: "jobs".into(),
+            group: None,
+            partition_count: 3,
+            partitioning_version: 5,
+        }),
+        recorded_versions: Some(versions.clone()),
+        ..Default::default()
+    })
+    .await;
+
+    let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
+    client.fetch_topology().await.unwrap();
+
+    let publisher = client.publisher("jobs").unwrap();
+    for _ in 0..5 {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            publisher.publish_confirmed(NewMessage::content("v")),
+        )
+        .await
+        .expect("publish must not hang")
+        .expect("publish should succeed");
+    }
+
+    let stamped: Vec<u64> = versions.lock().unwrap().clone();
+    assert_eq!(stamped.len(), 5);
+    assert!(
+        stamped.iter().all(|&v| v == 5),
+        "every publish must carry the routed version 5, saw {stamped:?}"
     );
 }
 
