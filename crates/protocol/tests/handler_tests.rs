@@ -16,7 +16,7 @@ use fibril_broker::{
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
         LocalAssignmentTransition, NodeInfo, PartitionAssignment, QueueIdentity,
-        StaticCoordination,
+        ReplicationDurabilityPolicy, StaticCoordination,
     },
     queue_engine::{
         EvictOutcome, GlobalDLQ, OwnerReplicationRead, QueueEngine, QueuePromotionOutcome,
@@ -2548,6 +2548,109 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
             applied_event_offset: Some(owner_checkpoint.applied_event_offset),
         }
     );
+
+    follower_broker.shutdown().await;
+    owner_broker.shutdown().await;
+    server_task.await.unwrap().unwrap();
+}
+
+/// End-to-end durability contract between two real brokers over TCP: a publish
+/// under a replica-durable policy resolves its confirm ONLY because the
+/// follower replicates the record over the wire and its stamped reads advance
+/// its durable progress past the offset on the owner's confirm gate.
+#[tokio::test]
+async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
+    let topic = "confirm.over.wire";
+    let group: Option<String> = None;
+
+    let (owner_broker, owner_dir) = open_test_broker().await;
+    let (addr, server_task, _owner_dir, owner_broker) = start_protocol_listener_for_broker(
+        ConnectionSettings::new(Some(60)),
+        owner_broker,
+        owner_dir,
+        None,
+    )
+    .await;
+
+    // The owner owns the queue; its assignment demands two durable nodes (owner
+    // plus one follower).
+    owner_broker.cache_queue_assignment(
+        &PartitionAssignment::new(
+            QueueIdentity::new(topic, 0, group.as_deref()),
+            "owner-a",
+            vec!["follower-a".to_string()],
+            1,
+        )
+        .with_durability(ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 }),
+    );
+
+    // The follower materializes the queue and replicates from the owner over
+    // TCP, stamping its reports so the owner's gate can observe its progress.
+    let (follower_broker, _follower_dir) = open_test_broker().await;
+    follower_broker
+        .apply_assignment_transition(&follower_assignment_transition(topic, group.as_deref()))
+        .await
+        .unwrap();
+    let resolver = Arc::new(StaticProtocolOwnerPeerResolver::with_config(
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("owner-a".to_string(), addr)]))
+            .with_reporter("follower-a"),
+    ));
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new(topic, 0, group.as_deref()),
+        "owner-a",
+        vec!["follower-a".to_string()],
+        1,
+    );
+    let shutdown = CancellationToken::new();
+    // Keep polling briskly so the follower picks up the new record promptly.
+    let worker_cfg = FollowerReplicationWorkerConfig {
+        caught_up_poll_ms: 50,
+        retry_poll_ms: 50,
+        ..Default::default()
+    };
+    let loop_task = follower_broker.run_follower_replication_worker_loop(
+        assignment,
+        resolver,
+        worker_cfg,
+        shutdown.clone(),
+    );
+
+    let publish_and_check = async {
+        let (publisher, _confirms) = owner_broker.get_publisher(topic, &group).await.unwrap();
+        let reply = publisher
+            .publish(
+                b"over-the-wire".to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        // The confirm can only resolve via the follower's wire replication.
+        let offset = tokio::time::timeout(Duration::from_secs(8), reply)
+            .await
+            .expect("confirm should resolve well within bound")
+            .unwrap()
+            .expect("replica-durable confirm resolves from follower wire progress");
+        assert_eq!(offset, 0);
+
+        // And the owner recorded that progress from the stamped reads.
+        let progress = owner_broker.follower_replication_progress(topic, 0, group.as_deref());
+        let follower = progress
+            .iter()
+            .find(|(node, _)| node == "follower-a")
+            .expect("owner recorded follower progress over the wire");
+        assert!(
+            follower.1 .0 > 0,
+            "follower durable message_next must pass the published offset"
+        );
+
+        shutdown.cancel();
+    };
+
+    let (_, loop_outcome) = tokio::join!(publish_and_check, loop_task);
+    loop_outcome.unwrap();
 
     follower_broker.shutdown().await;
     owner_broker.shutdown().await;

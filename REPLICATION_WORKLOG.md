@@ -1781,3 +1781,20 @@ Tests needed before implementing transition:
   pre-existing .unwrap()/.expect() from production code (allowed only in
   tests/benches/demos) - propagate via ? / error types, recover mutex poison
   via PoisonError::into_inner. New code already follows this.
+- 2026-06-13: Two-broker confirm-over-wire e2e (R5 tail). New handler test
+  replica_durable_confirm_resolves_over_wire_from_follower_progress drives the
+  full durability contract between two REAL brokers over TCP: owner owns the
+  queue with a ReplicaDurable{2} assignment cached; a second broker materializes
+  the queue and runs the follower replication worker loop against the owner's
+  protocol listener via a StaticProtocolOwnerPeerResolver configured
+  with_reporter("follower-a") so its reads are stamped. A publish to the owner
+  under the replica-durable policy resolves its confirm ONLY because the
+  follower pulls the record over the wire and its stamped reads advance its
+  durable progress past the offset in the owner's progress registry, satisfying
+  the confirm gate; the test also asserts the owner recorded that wire-sourced
+  progress. Brisk follower poll (50ms) keeps it fast; an 8s timeout bound makes
+  a regression fail loudly rather than hang. Proves the confirm path end to end,
+  not just at the in-process gate. This closes the core R5 durability story
+  (enforcement + min-in-sync floor + per-broker lag/ISR observability + this
+  wire e2e). Remaining R5-adjacent follow-up: cross-broker lag aggregation into
+  `fibrilctl topology` and the admin web diagram.
