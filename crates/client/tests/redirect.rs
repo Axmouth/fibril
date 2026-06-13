@@ -3,6 +3,7 @@
 //! force redirect-to-dead-endpoint and redirect ping-pong without a real
 //! cluster.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use std::sync::Arc;
@@ -10,11 +11,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fibril_client::{Client, ClientOptions, FibrilError, NewMessage, ReconnectOutcome};
 use fibril_protocol::v1::{
-    COMPLIANCE_STRING, Hello, HelloOk, Op, PROTOCOL_V1, Publish, PublishOk, QueueTopologyEntry,
-    ReconcileResult, Redirect, ResumeOutcome, TopologyOk,
+    COMPLIANCE_STRING, Deliver, Hello, HelloOk, Op, PROTOCOL_V1, Publish, PublishOk,
+    QueueTopologyEntry, ReconcileResult, Redirect, ResumeOutcome, Subscribe, SubscribeOk,
+    TopologyOk,
     frame::ProtoCodec,
     helper::{try_decode, try_encode},
 };
+use fibril_storage::DeliveryTag;
 use futures::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::Framed;
@@ -53,6 +56,8 @@ struct MockConfig {
     recorded_partitions: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
     /// Records the `partitioning_version` of every `Publish` frame received.
     recorded_versions: Option<Arc<std::sync::Mutex<Vec<u64>>>>,
+    /// Records the `partition` of every `Subscribe` frame received.
+    subscribe_partitions: Option<Arc<std::sync::Mutex<Vec<u32>>>>,
     /// Counts handshakes that carried a resume identity.
     resumes: Option<Arc<AtomicUsize>>,
 }
@@ -107,6 +112,55 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         .await;
                 }
                 while let Some(Ok(frame)) = framed.next().await {
+                    // Subscribe is answered with SubscribeOk plus one tagged
+                    // Deliver per partition (payload = partition), so a fan-in
+                    // subscription receives a message from each partition.
+                    if frame.opcode == Op::Subscribe as u16 {
+                        let sub: Subscribe = try_decode(&frame).unwrap();
+                        if let Some(recorder) = &config.subscribe_partitions {
+                            if let Ok(mut parts) = recorder.lock() {
+                                parts.push(sub.partition);
+                            }
+                        }
+                        let sub_id = sub.partition as u64;
+                        let ok = SubscribeOk {
+                            sub_id,
+                            topic: sub.topic.clone(),
+                            group: sub.group.clone(),
+                            partition: sub.partition,
+                            prefetch: sub.prefetch,
+                        };
+                        if framed
+                            .send(try_encode(Op::SubscribeOk, frame.request_id, &ok).unwrap())
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        let deliver = Deliver {
+                            sub_id,
+                            topic: sub.topic,
+                            group: sub.group,
+                            partition: sub.partition,
+                            offset: 0,
+                            delivery_tag: DeliveryTag {
+                                epoch: sub.partition as u64,
+                            },
+                            published: 0,
+                            publish_received: 0,
+                            content_type: None,
+                            headers: HashMap::new(),
+                            payload: vec![sub.partition as u8],
+                        };
+                        if framed
+                            .send(try_encode(Op::Deliver, 0, &deliver).unwrap())
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        continue;
+                    }
                     let response = if frame.opcode == Op::ReconcileClient as u16 {
                         // Resumed handshakes reconcile subscriptions; answer with
                         // an empty result so the client finishes connecting.
@@ -438,6 +492,59 @@ async fn publishes_carry_routed_partitioning_version() {
     assert!(
         stamped.iter().all(|&v| v == 5),
         "every publish must carry the routed version 5, saw {stamped:?}"
+    );
+}
+
+/// A subscription transparently fans in across all partitions the topology
+/// cache knows about: the client opens one `Subscribe` per partition and the
+/// merged stream yields messages from every partition.
+#[tokio::test]
+async fn subscription_fans_in_all_partitions() {
+    let subscribed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mock = spawn_configurable_mock(MockConfig {
+        self_partitions: Some(SelfPartitions {
+            topic: "jobs".into(),
+            group: None,
+            partition_count: 3,
+            partitioning_version: 0,
+        }),
+        subscribe_partitions: Some(subscribed.clone()),
+        ..Default::default()
+    })
+    .await;
+
+    let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
+    // Warm the cache so the subscription sees partition_count = 3.
+    client.fetch_topology().await.unwrap();
+
+    let mut sub = client
+        .subscribe("jobs")
+        .unwrap()
+        .sub_manual_ack()
+        .await
+        .unwrap();
+
+    // The mock delivers one message per partition (payload = partition).
+    let mut payloads = std::collections::HashSet::new();
+    for _ in 0..3 {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
+            .await
+            .expect("fan-in delivery must not hang")
+            .expect("subscription should yield a message");
+        payloads.insert(msg.payload[0]);
+    }
+    assert_eq!(
+        payloads,
+        std::collections::HashSet::from([0u8, 1, 2]),
+        "fan-in should deliver from every partition"
+    );
+
+    let mut subbed = subscribed.lock().unwrap().clone();
+    subbed.sort();
+    assert_eq!(
+        subbed,
+        vec![0u32, 1, 2],
+        "client should open one subscribe per partition"
     );
 }
 

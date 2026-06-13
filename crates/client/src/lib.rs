@@ -959,39 +959,24 @@ impl<'a> SubscriptionBuilder<'a> {
     /// Each received [`InflightMessage`] must be settled explicitly.
     #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
     pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
-        let req = Subscribe {
-            topic: self.topic.into_string(),
-            partition: 0,
-            group: self.group.map(GroupName::into_string),
-            prefetch: self.prefetch,
-            auto_ack: false,
-        };
-
-        let mut attempts = 0u32;
-        loop {
-            let engine = self
-                .client
-                .shared
-                .engine_for(&req.topic, 0, req.group.as_deref())
-                .await?;
-            match engine.subscribe(req.clone()).await {
-                Ok(rx) => return Ok(Subscription { rx }),
-                Err(FibrilError::Redirect(redirect)) => {
-                    if attempts >= self.client.shared.opts.max_redirects {
-                        return Err(FibrilError::Failure {
-                            code: ERR_NOT_OWNER,
-                            msg: format!(
-                                "exceeded max redirects ({}) subscribing {}",
-                                self.client.shared.opts.max_redirects, req.topic
-                            ),
-                        });
-                    }
-                    self.client.shared.apply_redirect(&redirect);
-                    attempts += 1;
-                }
-                Err(other) => return Err(other),
-            }
+        let topic = self.topic.into_string();
+        let group = self.group.map(GroupName::into_string);
+        let prefetch = self.prefetch;
+        // Fan in across every partition the topology cache knows about
+        // (default: just partition 0 — see `partition_set`).
+        let partitions = partition_set(self.client, &topic, group.as_deref());
+        let mut receivers = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            let req = Subscribe {
+                topic: topic.clone(),
+                partition,
+                group: group.clone(),
+                prefetch,
+                auto_ack: false,
+            };
+            receivers.push(subscribe_partition_manual(self.client, req).await?);
         }
+        Ok(Subscription::fan_in(receivers, prefetch))
     }
 
     /// Subscribe with client-side automatic acknowledgement.
@@ -1000,38 +985,104 @@ impl<'a> SubscriptionBuilder<'a> {
     /// processing correctness matters.
     #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
     pub async fn sub_auto_ack(self) -> FibrilResult<AutoAckedSubscription> {
-        let req = Subscribe {
-            topic: self.topic.into_string(),
-            partition: 0,
-            group: self.group.map(GroupName::into_string),
-            prefetch: self.prefetch,
-            auto_ack: true,
-        };
+        let topic = self.topic.into_string();
+        let group = self.group.map(GroupName::into_string);
+        let prefetch = self.prefetch;
+        let partitions = partition_set(self.client, &topic, group.as_deref());
+        let mut receivers = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            let req = Subscribe {
+                topic: topic.clone(),
+                partition,
+                group: group.clone(),
+                prefetch,
+                auto_ack: true,
+            };
+            receivers.push(subscribe_partition_auto(self.client, req).await?);
+        }
+        Ok(AutoAckedSubscription::fan_in(receivers, prefetch))
+    }
+}
 
-        let mut attempts = 0u32;
-        loop {
-            let engine = self
-                .client
-                .shared
-                .engine_for(&req.topic, 0, req.group.as_deref())
-                .await?;
-            match engine.subscribe_auto_ack(req.clone()).await {
-                Ok(rx) => return Ok(AutoAckedSubscription { rx }),
-                Err(FibrilError::Redirect(redirect)) => {
-                    if attempts >= self.client.shared.opts.max_redirects {
-                        return Err(FibrilError::Failure {
-                            code: ERR_NOT_OWNER,
-                            msg: format!(
-                                "exceeded max redirects ({}) subscribing {}",
-                                self.client.shared.opts.max_redirects, req.topic
-                            ),
-                        });
-                    }
-                    self.client.shared.apply_redirect(&redirect);
-                    attempts += 1;
+/// The partitions a subscription should fan in over for `(topic, group)`.
+///
+/// Cache-only by design: the authoritative count comes from the topology cache
+/// (warmed by [`Client::fetch_topology`] or by redirects). An unknown count
+/// (cold cache, standalone, in-memory) yields just partition 0 — the
+/// single-partition path, unchanged. Subscribe never fetches topology on its
+/// own; that would add a round-trip (and could stall harnesses that don't
+/// answer `Op::Topology`). A subset selector for consumer-group assignment will
+/// narrow this set later.
+fn partition_set(client: &Client, topic: &str, group: Option<&str>) -> Vec<u32> {
+    let count = client
+        .shared
+        .topology
+        .load()
+        .partitioning(topic, group)
+        .map(|p| p.count)
+        .unwrap_or(1)
+        .max(1);
+    (0..count).collect()
+}
+
+/// Subscribe to a single partition (manual ack), following owner redirects.
+async fn subscribe_partition_manual(
+    client: &Client,
+    req: Subscribe,
+) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
+    let mut attempts = 0u32;
+    loop {
+        let engine = client
+            .shared
+            .engine_for(&req.topic, req.partition, req.group.as_deref())
+            .await?;
+        match engine.subscribe(req.clone()).await {
+            Ok(rx) => return Ok(rx),
+            Err(FibrilError::Redirect(redirect)) => {
+                if attempts >= client.shared.opts.max_redirects {
+                    return Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: format!(
+                            "exceeded max redirects ({}) subscribing {}/{}",
+                            client.shared.opts.max_redirects, req.topic, req.partition
+                        ),
+                    });
                 }
-                Err(other) => return Err(other),
+                client.shared.apply_redirect(&redirect);
+                attempts += 1;
             }
+            Err(other) => return Err(other),
+        }
+    }
+}
+
+/// Subscribe to a single partition (auto ack), following owner redirects.
+async fn subscribe_partition_auto(
+    client: &Client,
+    req: Subscribe,
+) -> FibrilResult<mpsc::Receiver<Message>> {
+    let mut attempts = 0u32;
+    loop {
+        let engine = client
+            .shared
+            .engine_for(&req.topic, req.partition, req.group.as_deref())
+            .await?;
+        match engine.subscribe_auto_ack(req.clone()).await {
+            Ok(rx) => return Ok(rx),
+            Err(FibrilError::Redirect(redirect)) => {
+                if attempts >= client.shared.opts.max_redirects {
+                    return Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: format!(
+                            "exceeded max redirects ({}) subscribing {}/{}",
+                            client.shared.opts.max_redirects, req.topic, req.partition
+                        ),
+                    });
+                }
+                client.shared.apply_redirect(&redirect);
+                attempts += 1;
+            }
+            Err(other) => return Err(other),
         }
     }
 }
@@ -1406,6 +1457,33 @@ impl Publisher {
 }
 
 impl Subscription {
+    /// Merge per-partition delivery streams into one subscription. A single
+    /// partition is returned as-is (no extra hop); multiple partitions are
+    /// forwarded into one merged channel by a task per partition. Each
+    /// `InflightMessage` carries its own settle channel, so acks route back to
+    /// the delivering partition's owner regardless of the merge. Ordering is
+    /// preserved within a partition, interleaved across partitions.
+    fn fan_in(mut receivers: Vec<mpsc::Receiver<InflightMessage>>, prefetch: u32) -> Self {
+        if receivers.len() == 1 {
+            if let Some(rx) = receivers.pop() {
+                return Subscription { rx };
+            }
+        }
+        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        for mut part_rx in receivers {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = part_rx.recv().await {
+                    if tx.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Subscription { rx }
+    }
+
     /// Receive the next manual-ack message.
     ///
     /// Returns `None` when the subscription channel closes.
@@ -1422,6 +1500,30 @@ impl Subscription {
 }
 
 impl AutoAckedSubscription {
+    /// Merge per-partition auto-ack streams into one subscription. See
+    /// [`Subscription::fan_in`]; auto-ack settles server-side, so there is no
+    /// ack to route — this is a plain stream merge.
+    fn fan_in(mut receivers: Vec<mpsc::Receiver<Message>>, prefetch: u32) -> Self {
+        if receivers.len() == 1 {
+            if let Some(rx) = receivers.pop() {
+                return AutoAckedSubscription { rx };
+            }
+        }
+        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        for mut part_rx in receivers {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = part_rx.recv().await {
+                    if tx.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        AutoAckedSubscription { rx }
+    }
+
     /// Receive the next auto-ack message.
     ///
     /// Returns `None` when the subscription channel closes.
