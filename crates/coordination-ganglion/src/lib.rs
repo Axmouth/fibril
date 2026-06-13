@@ -38,6 +38,35 @@ pub struct ClusterRuntimeSettings {
     pub settings: fibril_broker::runtime_settings::RuntimeSettings,
 }
 
+/// Partitioning version carried by the client topology. Constant while
+/// partition counts are fixed-at-create; a future live-repartitioning change
+/// bumps it so clients re-fetch routing and owners can fence stale-version
+/// traffic. Present from day one to keep the wire forward-compatible.
+pub const DEFAULT_PARTITIONING_VERSION: u64 = 0;
+
+/// Client-facing ownership of one queue partition: which node owns it and where
+/// to reach that node, plus the partitioning version the routing was computed
+/// under.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClientQueueTopology {
+    pub topic: String,
+    pub partition: fibril_storage::LogId,
+    pub group: Option<String>,
+    pub owner_node_id: String,
+    /// Broker endpoint of the owner, if the node is known in the registry.
+    pub owner_endpoint: Option<String>,
+    pub partitioning_version: u64,
+}
+
+/// Client-facing topology snapshot: the owner/endpoint of every assigned queue
+/// partition at a given coordination generation. Clients route to owners from
+/// this and refresh it on not-owner / stale-topology errors.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClientTopology {
+    pub generation: u64,
+    pub queues: Vec<ClientQueueTopology>,
+}
+
 /// Heartbeat label prefix for per-assignment applied tails:
 /// `applied/<topic>/<partition>[/<group>] = "<message_next>:<event_next>"`.
 /// Advisory data for failover candidate selection — the broker-side checked
@@ -752,6 +781,41 @@ where
             .collect()
     }
 
+    /// Client-facing topology: the owner and reachable endpoint of every
+    /// assigned queue partition in the committed snapshot. Clients route to
+    /// owners from this and refresh on not-owner / stale-topology errors. The
+    /// partitioning version is carried per queue for forward-compatibility with
+    /// live repartitioning (constant today).
+    pub fn client_topology(&self) -> ClientTopology {
+        let committed = self.node.committed_snapshot();
+        let endpoints: HashMap<String, String> = committed
+            .nodes
+            .values()
+            .map(|node| (node.node_id.clone(), node.endpoint.clone()))
+            .collect();
+        let generation = committed.generation;
+        let fibril = to_fibril_snapshot(&committed);
+        let mut queues: Vec<ClientQueueTopology> = fibril
+            .assignments
+            .values()
+            .map(|assignment| ClientQueueTopology {
+                topic: assignment.queue.topic.to_string(),
+                partition: assignment.queue.partition,
+                group: assignment.queue.group.as_ref().map(ToString::to_string),
+                owner_node_id: assignment.owner.clone(),
+                owner_endpoint: endpoints.get(&assignment.owner).cloned(),
+                partitioning_version: DEFAULT_PARTITIONING_VERSION,
+            })
+            .collect();
+        queues.sort_by(|a, b| {
+            a.topic
+                .cmp(&b.topic)
+                .then_with(|| a.group.cmp(&b.group))
+                .then_with(|| a.partition.cmp(&b.partition))
+        });
+        ClientTopology { generation, queues }
+    }
+
     /// Propose a new coordination snapshot through raft consensus.
     ///
     /// Leader-only (`NotLeader` otherwise); stale generations are rejected
@@ -1048,6 +1112,18 @@ mod tests {
                 .epoch,
             1
         );
+
+        // Client-facing topology resolves the owner and its reachable endpoint.
+        let topology = coordination.client_topology();
+        assert_eq!(topology.generation, 1);
+        assert_eq!(topology.queues.len(), 1);
+        let queue = &topology.queues[0];
+        assert_eq!(queue.topic, "orders");
+        assert_eq!(queue.partition, 0);
+        assert_eq!(queue.group.as_deref(), Some("workers"));
+        assert_eq!(queue.owner_node_id, "broker-a");
+        assert_eq!(queue.owner_endpoint.as_deref(), Some("127.0.0.1:9000"));
+        assert_eq!(queue.partitioning_version, DEFAULT_PARTITIONING_VERSION);
 
         // Stale generation is rejected after consensus.
         let stale = sample_snapshot(0, 1);
