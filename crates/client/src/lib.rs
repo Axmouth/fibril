@@ -29,6 +29,7 @@
 //! # }
 //! ```
 
+use arc_swap::ArcSwap;
 use fibril_storage::DeliveryTag;
 use fibril_util::{UnixMillis, unix_millis};
 use futures::{SinkExt, StreamExt};
@@ -994,8 +995,8 @@ impl Client {
                 bootstrap: vec![address],
                 opts,
                 user_shutdown,
-                pool: RwLock::new(pool),
-                topology: RwLock::new(TopologyCache::default()),
+                pool: parking_lot::RwLock::new(pool),
+                topology: ArcSwap::from_pointee(TopologyCache::default()),
             }),
         })
     }
@@ -1103,13 +1104,7 @@ impl Client {
     /// This closes the connection engine and wakes subscription receivers.
     pub async fn shutdown(&self) {
         self.shared.user_shutdown.store(true, Ordering::Release);
-        for slot in self
-            .shared
-            .pool
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-        {
+        for slot in self.shared.pool.read().values() {
             slot.current().shutdown.notify_waiters();
         }
     }
@@ -1353,26 +1348,25 @@ struct ClientShared {
     bootstrap: Vec<SocketAddr>,
     opts: ClientOptions,
     user_shutdown: Arc<AtomicBool>,
-    pool: RwLock<HashMap<SocketAddr, Arc<EngineSlot>>>,
-    topology: RwLock<TopologyCache>,
+    // parking_lot: no poison, faster, and only ever held briefly (get + clone),
+    // never across an await — the connect happens outside the lock.
+    pool: parking_lot::RwLock<HashMap<SocketAddr, Arc<EngineSlot>>>,
+    // ArcSwap: lock-free read-mostly routing snapshot; readers can hold the
+    // snapshot across awaits, writers update via rcu. last_refresh_ms lives
+    // inside so it stays consistent with the swapped map.
+    topology: ArcSwap<TopologyCache>,
 }
 
 impl ClientShared {
     /// Get-or-create the connection slot for an endpoint, connecting on miss.
     async fn engine_slot(&self, addr: SocketAddr) -> FibrilResult<Arc<EngineSlot>> {
-        if let Some(slot) = self
-            .pool
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&addr)
-            .cloned()
-        {
+        if let Some(slot) = self.pool.read().get(&addr).cloned() {
             return Ok(slot);
         }
         let slot = Arc::new(
             EngineSlot::connect(addr, self.opts.clone(), self.user_shutdown.clone()).await?,
         );
-        let mut pool = self.pool.write().unwrap_or_else(|e| e.into_inner());
+        let mut pool = self.pool.write();
         // Another task may have connected the same endpoint concurrently.
         if let Some(existing) = pool.get(&addr).cloned() {
             return Ok(existing);
@@ -2738,8 +2732,8 @@ mod tests {
                     bootstrap: vec![address],
                     opts,
                     user_shutdown,
-                    pool: RwLock::new(pool),
-                    topology: RwLock::new(TopologyCache::default()),
+                    pool: parking_lot::RwLock::new(pool),
+                    topology: ArcSwap::from_pointee(TopologyCache::default()),
                 }),
             },
             rx,
@@ -2791,15 +2785,7 @@ mod tests {
         let publisher = client.publisher("jobs").unwrap();
         let (new_engine, mut new_rx) = engine_with_command_rx();
 
-        let slot = client
-            .shared
-            .pool
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .next()
-            .unwrap()
-            .clone();
+        let slot = client.shared.pool.read().values().next().unwrap().clone();
         slot.replace(new_engine);
 
         publisher.publish("hello").await.unwrap();

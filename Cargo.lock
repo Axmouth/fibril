@@ -1147,6 +1147,7 @@ name = "fibril-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "dashmap",
  "fastrand",
  "fibril-broker",
@@ -1154,6 +1155,7 @@ dependencies = [
  "fibril-storage",
  "fibril-util",
  "futures",
+ "parking_lot",
  "rmp-serde",
  "serde",
  "serde_json",
