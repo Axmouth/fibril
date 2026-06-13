@@ -964,3 +964,72 @@ Concrete shape (first attempt, crates/client/src/lib.rs):
   silent.
 - Forward-compat: nothing assumes partition_count constant; routing/caches keyed
   by partitioning_version.
+
+#### A5 detailed steps (stepwise, each compiles; behavior preserved until routing flips on)
+
+Key seam: every client op is `self.shared.engine_for_operation().await?` then a
+method call on the returned `EngineHandle` (publish_*, declare_queue, subscribe
+via Command::*). Ack/nack stickiness is already free (the per-delivery task
+captured the delivering engine's cmd_tx). Back-compat lever: standalone brokers
+return an EMPTY topology (A4a), so "no owner in cache" must FALL BACK to the
+single bootstrap connection => existing single-connection behavior is preserved
+automatically.
+
+- A5.1 ClientOptions: additive tunables (no behavior change). Add
+  `bootstrap_addresses: Vec<SocketAddr>` (defaults to [connect address]),
+  `max_redirects: u32` (default ~3), `topology_refresh_cooldown_ms` (anti-storm).
+  Per settings-discipline these are client options (no server settings).
+- A5.2 TopologyCache type (additive). `struct TopologyCache { generation: u64,
+  by_queue: HashMap<(String, u32, Option<String>), OwnerEntry> }`,
+  `OwnerEntry { endpoint: SocketAddr, partitioning_version: u64 }`. Methods:
+  `lookup(topic, partition, group) -> Option<OwnerEntry>`, `replace(TopologyOk)`,
+  `invalidate(topic, partition, group)`. Lives in `ClientShared` behind RwLock.
+- A5.3 Pool, NO behavior change yet. Replace `engine: Arc<EngineSlot>` with
+  `pool: RwLock<HashMap<SocketAddr, Arc<EngineSlot>>>` + keep a `bootstrap:
+  Vec<SocketAddr>`. Add `engine_for_endpoint(addr) -> FibrilResult<Arc<EngineHandle>>`
+  (get-or-create pool entry; on miss, start_engine to addr; reuse the existing
+  per-entry reconnect logic). Re-point `engine_for_operation()` to return the
+  bootstrap entry => all existing call sites + tests unchanged. COMMIT here:
+  pure restructure, green.
+- A5.4 Topology fetch. Add `Command::Topology { reply }` + engine arm that
+  sends `Op::Topology` and resolves a waiter on `Op::TopologyOk`; add
+  `EngineHandle::fetch_topology()` and `ClientShared::ensure_topology(topic)`
+  (fetch from a bootstrap/any pooled engine if cache misses the queue or is past
+  cooldown; replace cache). Additive; not wired into routing yet.
+- A5.5 Routing resolver — FLIP routing on. Add
+  `engine_for(topic, partition, group)`:
+  (1) partition = 0 for now (Phase B routes by key);
+  (2) cache lookup; on miss -> ensure_topology -> lookup again;
+  (3) owner found -> engine_for_endpoint(owner);
+  (4) none (empty topology / standalone) -> engine_for_endpoint(bootstrap[0]).
+  Swap the publish/declare/subscribe call sites from `engine_for_operation()`
+  to `engine_for(...)` (declare routes to bootstrap; it is topic metadata).
+  Standalone tests stay green via the step-4 fallback. COMMIT.
+- A5.6 Redirect handling (confirmed/reply-bearing ops). Engine: handle
+  `Op::Redirect` -> resolve that request's waiter with a Redirect OUTCOME
+  (introduce `enum OpOutcome<T> { Ok(T), Redirect(Redirect) }` or a
+  `Result<T, RoutingRedirect>` on the reply oneshots for PublishConfirmed,
+  DeclareQueue, Subscribe). Routing layer (Publisher/Client methods): on
+  Redirect -> `topology.replace_entry(redirect)` -> engine_for_endpoint(new
+  owner) -> retry, bounded by `max_redirects`. Unconfirmed publish has no
+  waiter: a Redirect for an unknown request_id invalidates the cached queue
+  owner (next publish re-routes); the in-flight fire-and-forget message may be
+  lost (documented best-effort). COMMIT.
+- A5.7 Subscription fan-out (HEAVY). A logical `Subscription` resolves owner(s)
+  for its partition(s) (1 partition now), issues Subscribe on each owner's
+  engine, and merges per-connection deliveries into one user-facing mpsc.
+  Per-connection subscription registry + reconcile-on-reconnect move to
+  per-EngineSlot state (today the `subscriptions` map is global; make it
+  per-endpoint). Settlement unchanged. On Redirect during subscribe, re-route
+  that partition's Subscribe to the new owner. COMMIT.
+- A5.8 Tests (with A6): route-to-owner from topology; redirect-follow re-routes
+  and retries a confirmed publish; standalone empty-topology falls back to the
+  single connection (existing tests remain green = the back-compat proof);
+  multi-owner subscription merge. cluster-tryout: client follows a redirect
+  after an ownership move across the 3-node cluster.
+
+Risk notes: A5.3 and A5.5 are the "make storage/routing changes without behavior
+change" steps that de-risk the rest. A5.6 (reply-type change to carry Redirect)
+ripples through the Command reply oneshots — keep `OpOutcome` internal. A5.7 is
+the one genuinely large piece (per-connection registry + merge); everything
+before it is mechanical.
