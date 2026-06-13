@@ -350,10 +350,45 @@ implementation and routing detail.
 
 ## Truncation rules
 
-- **Critical**: leader's truncation floor must include the minimum applied offset across all known followers for the partition. Truncating past a follower's applied position forces that follower into snapshot-resync mode unnecessarily.
-- Followers report their applied offset to the leader (via heartbeat).
-- If a follower is dead/missing, decision needed: wait forever (blocks GC, leaks disk) or drop it from the floor calculation after a timeout (forces it to resync on return). Default: timeout-then-drop, log loudly. Add metric for "events retained beyond leader's local floor due to follower lag."
-- **Don't truncate logs that may have been acked**: once `acks=all` (or your equivalent) has returned to the producer, the data is committed; truncating it loses data. Truncation floor respects commit point as well as follower positions.
+DECISION (2026-06-13): rely on checkpoint-install fallback for correctness;
+do NOT build a strict follower-aware truncation floor. The earlier "Critical
+floor" stance below is superseded — kept for context.
+
+Rationale:
+- Truncation never violates the durability contract. Confirmed data is already
+  on the required followers BEFORE the confirm returned (the confirm gate
+  waited); only unconfirmed/local-only data can be truncated, which the
+  producer was never promised. Local safety (`safe_message_truncate_before` =
+  lowest-not-acked etc.) already protects undelivered messages.
+- A follower that falls behind the truncated log head recovers via the
+  existing `CheckpointRequired` -> install snapshot -> resume post-snapshot
+  event transfer path. So a strict floor would be a pure OPTIMIZATION (avoid
+  occasional checkpoint transfers), not a correctness requirement — and it has
+  a real cost (a slow/dead follower pins the log and leaks disk).
+- Snapshot-loop risk is structurally bounded: the owner truncates events only
+  up to its own `applied_upto` and serves the checkpoint AT that same
+  `applied_upto`, so an installing follower lands exactly there and reads
+  forward into events that, by construction, still exist. A loop needs a
+  follower persistently slower than the snapshot cadence — pathological.
+- Coverage is already piece-by-piece: stroma test (truncation -> owner read
+  returns `CheckpointRequired`), follower worker test (reacts -> installs),
+  and `replication_checkpoint_export_install_composes_with_catch_up`
+  (install -> resume incremental -> CaughtUp -> promote).
+
+Still holds:
+- **Don't truncate acked/committed data**: local truncation floor already
+  respects the commit/settle watermark, so confirmed data is never deleted.
+
+Deferred OPTIONAL optimization (only if checkpoint churn is ever measured as a
+problem): a soft retention floor = min over IN-SYNC followers' durable offsets
+(stale followers drop out and don't pin, à la Kafka ISR), fed fresh from the
+owner's progress registry. Any thresholds must be runtime-configurable per the
+settings discipline.
+
+### Superseded earlier stance (context only)
+- ~~**Critical**: leader's truncation floor must include the minimum applied offset across all known followers.~~ (Superseded: checkpoint fallback handles this; floor is optional optimization.)
+- Followers report their applied offset to the leader — this DOES exist now (stamped replication reads feed the owner's progress registry), and powers the ISR floor / observability, just not a hard truncation floor.
+- Dead-follower handling: with no hard floor, a dead follower simply resyncs via checkpoint on return; it does not pin retention.
 
 ## Snapshot handling
 
@@ -362,7 +397,7 @@ implementation and routing detail.
 - Snapshot transfer: stream the existing snapshot blob format. Add a wire-level checksum (the snapshot already has crc32c, but the wire transfer needs its own framing checksum).
 - During snapshot transfer, leader keeps generating events. After follower installs, it re-requests from `snapshot_offset + 1`; usually the gap is small.
 - If snapshot transfer fails partway, follower stays at its old offset and tries again. No partial-install state.
-- **Snapshot-aware retention**: leader can't delete log segments until all followers needing them are either caught up or have grabbed a snapshot. Snapshot lifecycle ties into retention.
+- **Snapshot-aware retention** (revised 2026-06-13): the leader does NOT block deletion on follower positions. It truncates per local safety; a follower that falls behind the new log head resyncs via checkpoint install + post-snapshot event transfer. See the Truncation rules DECISION above.
 
 ## Msg log and event log coordination
 
