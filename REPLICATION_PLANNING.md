@@ -826,34 +826,89 @@ package test sweeps, cluster-tryout where applicable, worklog entry.
   owner_endpoint, partitioning_version} + generation — mirror of
   coordination::ClientTopology. Additive op; relies on existing negotiated
   protocol version.
-- A3. Protocol: structured not-owner redirect. `ERR_NOT_OWNER`(=409) already
-  exists but `ErrorMsg` is `{code, message}` only. Add optional redirect data
-  so the client can act: either `#[serde(default)] owner_endpoint:
-  Option<String>` + `partitioning_version: Option<u64>` on ErrorMsg (minimal,
-  wire-compatible), or a dedicated `NotOwnerInfo` payload. Lean: extend
-  ErrorMsg with serde-default fields.
-- A4. Handler: topology source + redirect enrichment. `handle_connection`
+- A3. Protocol: DEDICATED redirect frame (revised — was an ErrorMsg
+  extension). Redirect is control flow, not an error: add `Op::Redirect` with a
+  payload `{ topic, partition, group, owner_endpoint, partitioning_version }`.
+  Reasons: it slots into the engine's existing opcode dispatch + request_id
+  correlation; it carries structured topology without making every
+  error-handling path inspect optional fields; and a redirect must be retried
+  on a DIFFERENT connection, so it has to bubble up to the routing layer as a
+  distinct outcome (not a generic error). `ERR_NOT_OWNER`(=409) stays as the
+  terminal error when no redirect target is known.
+- A4. Handler: topology source + redirect emission. `handle_connection`
   (crates/protocol/src/v1/handler.rs) gains an injected topology provider
   (Arc closure / trait), mirroring how admin gets `with_coordination` /
   `with_raft_topology` in server.rs. Answer `Op::Topology` from it; when the
   broker returns `BrokerError::NotOwner`, look up the current owner endpoint
-  from the provider and fill the redirect fields. server.rs wires
+  from the provider and emit an `Op::Redirect` for that request_id (fall back
+  to `ERR_NOT_OWNER` if the owner is unknown). server.rs wires
   `coordination.client_topology()` as the source in ganglion mode; standalone
   returns a single-node topology (self owns all, no redirects).
-- A5. Client: topology cache + routing + redirect. crates/client/src/lib.rs is
-  currently single-connection with NO topology / not-owner handling.
+- A5. Client: connection pool + topology cache + routing layer.
+  crates/client/src/lib.rs is single-connection today (one `EngineSlot` to one
+  `address`); the reshape is a layer ABOVE the engine — see "Client
+  architecture notes" below. Settlement stickiness is already free (each
+  engine's deliveries capture its own `cmd_tx`). Scope:
   - Bootstrap from N broker addresses; fetch topology via `Op::Topology`.
-  - Cache queue->owner endpoint + generation + partitioning_version.
-  - Connection pool keyed by broker endpoint (multi-owner queues).
-  - Route publish/subscribe to the partition owner.
-  - On `ERR_NOT_OWNER` with redirect: refresh topology, reconnect to new
-    owner, retry (bounded; retry/refresh counts CONFIGURABLE per settings
+  - Topology cache: queue/partition -> owner endpoint + generation +
+    partitioning_version.
+  - Connection POOL keyed by owner endpoint, replacing the single EngineSlot.
+    ONE engine task per connection (keep existing per-connection loop model;
+    NOT a single multiplexed loop — see notes).
+  - Route publish/subscribe to the partition owner's pooled engine (connect
+    lazily).
+  - On `Op::Redirect`: resolve the pending request as a redirect outcome that
+    BUBBLES UP to the routing layer (engine can't retry cross-connection);
+    routing layer refreshes topology, re-routes to the new owner's engine,
+    retries (bounded; retry/refresh counts CONFIGURABLE per settings
     discipline).
+  - HEAVY item: multi-owner subscription fan-out — a logical subscription over
+    a multi-partition queue opens one Subscribe per owner-partition across
+    several pooled connections and merges their deliveries into one
+    user-facing stream; reconnect/reconcile becomes per-connection.
   - Keep partition selection out of the user API.
-- A6. Tests: handler answers topology; not-owner returns redirect payload;
-  client routes + redirects + refreshes (unit + integration in
-  handler_tests/client). cluster-tryout: a client routes across the 3-node
-  cluster and follows a redirect after an ownership move.
+- A6. Tests: handler answers topology + emits redirect; client routes +
+  follows redirect + refreshes; multi-owner subscription merges streams (unit +
+  integration in handler_tests/client). cluster-tryout: a client routes across
+  the 3-node cluster and follows a redirect after an ownership move.
+
+#### Client architecture notes (first-attempt code approach)
+
+Loop model: keep MANY loops, one engine task per connection (already the shape
+of `start_engine`). A single multiplexed loop would need a re-armed `select!` /
+`FuturesUnordered` over a changing stream set, become a serialization point, and
+re-implement settle routing by hand. The pool is just `map<endpoint,
+EngineHandle>`; each entry is the existing per-connection engine.
+
+Concrete shape (first attempt, crates/client/src/lib.rs):
+- `ClientShared`: replace `engine: Arc<EngineSlot>` (single) with
+  `pool: RwLock<HashMap<SocketAddr, Arc<EngineSlot>>>` (each EngineSlot is the
+  existing reconnectable single-connection holder) + `topology:
+  RwLock<TopologyCache>` + `bootstrap: Vec<SocketAddr>`.
+- `engine_for_operation()` -> `engine_for(endpoint)`: look up/insert the pooled
+  EngineSlot for an owner endpoint, connecting (start_engine) on miss. Keep the
+  per-endpoint reconnect logic exactly as today, just per pool entry.
+- Routing helpers: `owner_endpoint(topic, partition, group) -> SocketAddr` from
+  the topology cache; `ensure_topology()` fetches via `Op::Topology` from any
+  live pooled/bootstrap connection and populates the cache.
+- Publish edge (`Publisher`): compute partition (Phase B; partition 0 for now)
+  -> owner_endpoint -> `engine_for(owner)` -> send Publish command as today.
+- Redirect handling: the engine's response correlation (the `waiters` map)
+  gains a `Redirect` resolution. Publish/subscribe command results become
+  `Result<T, RoutingOutcome>` where `RoutingOutcome::Redirect{..}` is handled by
+  the routing layer (refresh topology, re-route, retry up to a configurable
+  bound). The engine itself never retries cross-connection.
+- Subscribe edge (`Subscriber` -> `Subscription`): for each owned partition,
+  resolve owner -> `engine_for` -> issue Subscribe on that connection; each
+  per-connection Deliver feeds a SHARED mpsc behind one logical `Subscription`
+  (the user drains one stream). Settlement: the existing per-delivery task that
+  captured the delivering engine's `cmd_tx` already routes acks/nacks home — no
+  change to `Message`/`InflightMessage`. Per-connection subscription registries
+  + reconcile-on-reconnect stay per engine.
+- New tunables (settings discipline): redirect retry bound, topology refresh
+  cooldown/limit. Client-side, so they live in `ClientOptions`.
+- DO NOT change the `Message`/`InflightMessage` settle path — verified the
+  settle oneshot already binds to the delivering engine's `cmd_tx`.
 
 ### Phase B — Multi-partition (fixed-at-create, versioned for live-repartition compat)
 
