@@ -13,6 +13,11 @@ check what is already wired and under what conditions.
 
 ## Recently landed
 
+- Exclusive consumer groups: an opt-in `.exclusive()` subscription gives ordered,
+  balanced, sticky, self-healing consumption of a partitioned queue (one consumer
+  per partition), with reconnect-safe membership and a soft per-consumer target.
+  Single-node works end to end; the cross-broker coordinator is wired (multi-node
+  integration test pending). See [consumer groups](/latest/concepts/consumer-groups/).
 - Runtime broker settings can be read and updated through the admin surface.
 - The global DLQ target is stored as versioned Stroma state and can be edited at runtime.
 - Queue-specific retry and dead-letter policy can be declared from clients and `fibrilctl`.

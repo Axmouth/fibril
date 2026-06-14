@@ -95,6 +95,11 @@ See also: [backpressure](/latest/concepts/backpressure/) and
 | Bounded prefetch | Implemented | Broker delivery path and clients |
 | Backpressure | Implemented | Pull-based delivery bounded by prefetch |
 | Unsubscribe redistribution | Implemented | Broker tests cover prefetched unacked messages returning to active subscribers |
+| Competing consumers (default) | Implemented | Many consumers per queue, fair dispatch, unordered |
+| Exclusive consumer groups | Partial | `.exclusive()` Rust client + TCP protocol; per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
+| Cross-broker cohort coordination | Partial | Member identity + controller (aggregate→plan→publish) + owner apply all wired in cluster bootstrap; multi-node integration test pending |
+
+See [consumer groups](/latest/concepts/consumer-groups/) for the user-facing model.
 
 Conditions and limits:
 
@@ -103,6 +108,8 @@ Conditions and limits:
 - Prefetch limits how many messages a subscription can hold at once.
 - If a subscription ends with prefetched but unsettled messages, those messages are returned for redelivery.
 - A message can be delivered more than once under failure, retry, or lease expiry conditions.
+- Exclusive consumer groups are opt-in; without `.exclusive()`, consumers compete (no ordering). A queue has a single exclusive cohort. The TypeScript client does not yet expose `.exclusive()`.
+- Cross-broker cohort balance is advisory/eventually-consistent (the per-partition delivery gate is always the correctness backstop); single-node is fully covered by tests.
 
 ## Reconnects
 
@@ -365,6 +372,8 @@ does not currently have.
 | Delayed publish | Implemented | Implemented |
 | Manual ack subscription | Implemented | Implemented |
 | Auto ack subscription | Implemented | Implemented |
+| Exclusive consumer group (`.exclusive()`, `.consumer_target()`) | Implemented | Planned |
+| Assignment-change events (`assignment_events()`) | Implemented | Planned |
 | Resume identity handshake | Implemented | Implemented |
 | Explicit reconnect outcome | Implemented | Implemented |
 | Existing publishers after explicit reconnect | Implemented | Implemented |
