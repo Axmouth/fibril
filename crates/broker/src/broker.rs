@@ -21,9 +21,9 @@ use fibril_util::unix_millis;
 use uuid::Uuid;
 
 use crate::coordination::{
-    BalancedConsumerGroupAssignor, ConsumerGroupKey, Coordination, CoordinationSnapshot,
-    ExclusiveConsumerGroups, LocalAssignmentIntent, LocalAssignmentTransition, PartitionAssignment,
-    StaticCoordination, plan_local_assignment_transitions,
+    ConsumerGroupKey, Coordination, CoordinationSnapshot, ExclusiveConsumerGroups,
+    LocalAssignmentIntent, LocalAssignmentTransition, PartitionAssignment, StaticCoordination,
+    StickyConsumerGroupAssignor, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
     EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome,
@@ -1066,7 +1066,9 @@ impl ExclusiveGroupRouter {
     fn new(target_per_consumer: Option<usize>) -> Self {
         Self {
             registry: ExclusiveConsumerGroups::new(
-                Arc::new(BalancedConsumerGroupAssignor),
+                // Sticky by default: a membership change moves the minimum
+                // partitions, avoiding needless drain + cold-start churn.
+                Arc::new(StickyConsumerGroupAssignor),
                 target_per_consumer,
             ),
             subs: HashMap::new(),

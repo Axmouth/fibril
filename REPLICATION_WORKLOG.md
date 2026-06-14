@@ -3,55 +3,57 @@
 Branch: `replication-sharding-plan`
 
 <!-- =================== RESUME HERE (2026-06-14) =================== -->
-## RESUME HERE — Phase 2a DONE; next = per-consumer target override / client assignment push
+## RESUME HERE — Phase 2a DONE + target override DONE + stickiness in progress
 
-STATE: all green (fibril full workspace; broker 49 unit + 99 integration; protocol
-53 handler tests incl. the new e2e). NOTE: keratin commits are LOCAL on branch
-`replication-sharding-plan`, NOT pushed; fibril builds against them via the
-[patch] in fibril/Cargo.toml. Push keratin before CI/others build.
+STATE: all green. Committed on `replication-sharding-plan`: ecc43c3 (2a wiring),
+0257dcc (per-consumer target override). NOTE: keratin commits are LOCAL, NOT
+pushed; fibril builds against them via the [patch] in fibril/Cargo.toml. Push
+keratin before CI/others build.
 
-PHASE 2a (opt-in exclusive consumer groups, single-owner) is COMPLETE. Resolved
-the OPEN DECISION as Model A (client keeps fan-in + passes consumer_group on each
-per-partition Subscribe; server gates each partition to the assigned member).
-What landed this session (not yet committed when this block was written — commit
-it):
-- coordination.rs: ConsumerGroupState::reconcile + ExclusiveConsumerGroups::
-  reconcile (authoritative (partitions, members) -> delta; empties drop the group).
-  +2 unit tests.
-- broker.rs: ExclusiveGroupRouter (registry + `cohort -> member(client_id) ->
-  partition -> sub_id`) behind Broker.exclusive_groups: Mutex<>. Public
-  exclusive_group_join / exclusive_group_leave recompute the union + members and
-  apply per-partition gate updates via set_exclusive_assignee. Ramp-up/drain rule:
-  assignee not-yet-subscribed -> keep existing gate (never reopen); cohort emptied
-  -> reopen. BrokerConfig.default_consumer_target.
-- settings: config ConsumerGroupSettings.default_target_per_consumer -> runtime
-  ConsumerGroupRuntimeSettings -> BrokerConfig (fibril lib mapping).
-- handler.rs: install_subscription calls exclusive_group_join after subscribe;
-  remove_subscription + cleanup_connection_state call exclusive_group_leave;
-  SubState carries the cohort id; InstallSubscriptionArgs.consumer_group.
-- client: SubscriptionBuilder::consumer_group(id) threads it into both sub paths.
-- e2e: exclusive_consumer_group_splits_partitions_and_fails_over_e2e.
+DONE — Phase 2a (opt-in exclusive consumer groups, single-owner), Model A (client
+fan-in + per-partition consumer_group; server gates each partition to the assigned
+member). gate = QueueLoopState.exclusive_assignee; ExclusiveGroupRouter on Broker
+(registry + cohort->member(client_id)->partition->sub_id). join after subscribe,
+leave on unsubscribe/disconnect. e2e splits+failover.
 
-2a LIMITATIONS to revisit (see the brick checklist under NEXT CANDIDATES for the
-full list): one cohort per (topic,group) only (single gate slot); reconnect-
-reconcile rejoins as competing (cohort id not in ReconcileSubscription); client
-still fans in to all partitions (no assignment push yet); no stickiness.
+DONE — Per-consumer soft target override (item 1b, 0257dcc): assignor is a
+deterministic min-load greedy with per-member caps (default + per-member override),
+coverage-first overflow, under_provisioned = member over its own target. Wire
+Subscribe.consumer_target: Option<u32> -> handler -> ExclusiveGroupRouter.targets
+-> reconcile. client SubscriptionBuilder::consumer_target(n). e2e capped=1of3.
 
-NEXT (recalc after committing 2a):
-1. Per-consumer target override (item 1b) — NEAR-TERM, easy, isolated: generalize
-   the assignor's single target_per_consumer into per-member weights (weighted
-   coverage-first deal; still soft under_provisioned signal). See memory
-   load-aware-future-direction and consumer-partition-assignment-model.
-2. (optional 2a polish) Assignment delivery to client: Op::AssignmentChanged
-   {added, revoked, generation} push so the client narrows its fan-in to its
-   assigned partitions instead of subscribing to all (gate stays the correctness
-   backstop). Lets the client also drive graceful drain explicitly.
-3. server.rs refactor "b" (coordination bootstrap/spawns/admin wiring -> fibril
+IN PROGRESS — Stickiness (this is the current task): minimize partition movement
+across rebalances (was: fresh deal each time -> needless churn = drain + cold
+start per moved partition). Plan: add `current` to ConsumerGroupAssignmentInput;
+new StickyConsumerGroupAssignor (retain valid current up to each member's balanced
+target load, then fill free partitions to under-target members — provably hits the
+same balanced loads with maximal retention; first assignment == balanced). Make it
+the broker default. ConsumerGroupState.rebalance passes self.assignment as current.
+
+DECISION (2026-06-14): assignment-push to client (was "limitation #3") is DEFERRED.
+The per-partition gate already gives correctness + ~free failover (standbys stay
+subscribed), so a push buys only awareness/drain-hook, not correctness. Spend the
+budget on stickiness instead. The two client models map onto our two tiers
+(product-philosophy-just-works): gate/informational = high-level "just works"
+client; active narrowing = low-level/advanced client. Crucially the GATE DE-RISKS
+NARROWING (a slow-to-unsubscribe revoked client is gated off -> no double-deliver),
+so narrowing can be added later as an OPT-IN optimization without a stop-the-world
+rebalance. See memory consumer-group-gate-vs-narrowing.
+
+NEXT (after stickiness):
+1. server.rs refactor "b" (coordination bootstrap/spawns/admin wiring -> fibril
    lib.rs) — organizational, deferred since Phase B.
-4. (END) combined Offset + Topic/Group newtype pass (Arc<str> for Topic/Group).
-5. (END) DOCS: replication+partitioning+consumer-groups explainer + bring the
+2. (END) combined Offset + Topic/Group newtype pass (Arc<str> for Topic/Group).
+3. (END) DOCS: replication+partitioning+consumer-groups explainer + bring the
    implemented-surface page up to date.
 Phase 2b (later): cross-broker coordinator (partitions on multiple owners).
+
+FUTURE OPTIMIZATION TARGETS (note for perf/simplicity passes):
+- The exclusive GATE keeps every cohort member subscribed to every partition
+  (standbys). Cheap at small/medium scale; at high partition×consumer counts it is
+  O(members) ConsumerStates per partition + the delivery loop filtering standbys
+  each tick. Optimization = opt-in client narrowing (Kafka-style, each consumer
+  holds ~N/M subs), made safe/incremental by the gate. Pairs with assignment-push.
 
 CODE POINTERS: delivery gate + ExclusiveGroupRouter = crates/broker/src/broker.rs
 (QueueLoopState.exclusive_assignee, spawn_delivery_loop ~consumers.retain,

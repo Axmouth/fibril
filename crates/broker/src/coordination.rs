@@ -382,6 +382,10 @@ pub struct ConsumerGroupAssignmentInput {
     /// when total capacity is below the partition count every partition is still
     /// assigned and `under_provisioned` is set.
     pub member_targets: HashMap<String, usize>,
+    /// The assignment in effect before this rebalance (member -> partitions). A
+    /// sticky assignor uses it to minimize churn; stateless assignors ignore it.
+    /// Empty on first assignment.
+    pub current: HashMap<String, Vec<Partition>>,
 }
 
 impl ConsumerGroupAssignmentInput {
@@ -412,14 +416,59 @@ pub trait ConsumerGroupAssignor: std::fmt::Debug + Send + Sync {
     fn assign(&self, input: ConsumerGroupAssignmentInput) -> ConsumerGroupAssignment;
 }
 
+/// Index of the member to receive the next partition: the least-loaded member
+/// still under its soft cap (ties broken by earliest index, i.e. sorted member
+/// order). When every member is at capacity, overflow to the least-loaded member
+/// overall — coverage always wins over the soft cap.
+fn least_loaded_member(loads: &[usize], caps: &[Option<usize>]) -> usize {
+    let mut pick: Option<usize> = None;
+    for index in 0..loads.len() {
+        let under_cap = caps[index].is_none_or(|cap| loads[index] < cap);
+        if under_cap && pick.is_none_or(|best| loads[index] < loads[best]) {
+            pick = Some(index);
+        }
+    }
+    pick.unwrap_or_else(|| {
+        let mut best = 0;
+        for index in 1..loads.len() {
+            if loads[index] < loads[best] {
+                best = index;
+            }
+        }
+        best
+    })
+}
+
+/// The balanced per-member load (counts only) a fresh capacity-aware deal of
+/// `num_partitions` would produce — the target each member should reach. Sums to
+/// `num_partitions`, so it is both balanced and fully covering.
+fn balanced_target_loads(num_partitions: usize, caps: &[Option<usize>]) -> Vec<usize> {
+    let mut loads = vec![0usize; caps.len()];
+    for _ in 0..num_partitions {
+        let index = least_loaded_member(&loads, caps);
+        loads[index] += 1;
+    }
+    loads
+}
+
+/// True when any member's final load exceeds its set soft target (coverage
+/// forced it over capacity).
+fn flag_under_provisioned(loads: &[usize], caps: &[Option<usize>]) -> bool {
+    loads
+        .iter()
+        .zip(caps)
+        .any(|(load, cap)| cap.is_some_and(|cap| cap > 0 && *load > cap))
+}
+
 /// Deterministic, balanced, coverage-first assignor: deals the queue's
 /// partitions one at a time to the eligible member (load below its soft target)
 /// with the least load, breaking ties by sorted member order. With no targets
 /// this is exactly a round-robin balanced deal (first `N % M` members get
 /// `ceil(N/M)`, the rest `floor(N/M)`); with targets it respects each member's
 /// soft capacity until capacity runs out, then keeps assigning (coverage wins)
-/// and flags `under_provisioned`. Stickiness (minimizing moves across
-/// rebalances) is a future variant.
+/// and flags `under_provisioned`. Stateless — ignores the prior assignment, so it
+/// may reshuffle partitions on every membership change; see
+/// [`StickyConsumerGroupAssignor`] to minimize churn.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BalancedConsumerGroupAssignor;
 
@@ -448,38 +497,112 @@ impl ConsumerGroupAssignor for BalancedConsumerGroupAssignor {
         let mut assigned: Vec<Vec<Partition>> = vec![Vec::new(); member_count];
 
         for partition in &partitions {
-            // Prefer the least-loaded member still under its soft cap (ties ->
-            // earliest sorted member). If every member is at capacity, overflow
-            // to the least-loaded member overall (coverage-first).
-            let mut pick: Option<usize> = None;
-            for index in 0..member_count {
-                let under_cap = caps[index].is_none_or(|cap| loads[index] < cap);
-                if under_cap && pick.is_none_or(|best| loads[index] < loads[best]) {
-                    pick = Some(index);
-                }
-            }
-            let index = pick.unwrap_or_else(|| {
-                let mut best = 0;
-                for index in 1..member_count {
-                    if loads[index] < loads[best] {
-                        best = index;
-                    }
-                }
-                best
-            });
+            let index = least_loaded_member(&loads, &caps);
             assigned[index].push(*partition);
             loads[index] += 1;
         }
 
-        // Under-provisioned when any member ended up above its (set) soft target.
-        let mut under_provisioned = false;
-        let mut by_member = HashMap::with_capacity(member_count);
-        for (index, member) in members.into_iter().enumerate() {
-            if caps[index].is_some_and(|cap| cap > 0 && loads[index] > cap) {
-                under_provisioned = true;
-            }
-            by_member.insert(member, std::mem::take(&mut assigned[index]));
+        let under_provisioned = flag_under_provisioned(&loads, &caps);
+        let by_member = members.into_iter().zip(assigned).collect();
+
+        ConsumerGroupAssignment {
+            by_member,
+            under_provisioned,
         }
+    }
+}
+
+/// Deterministic, balanced, coverage-first **sticky** assignor: reaches the same
+/// per-member loads as [`BalancedConsumerGroupAssignor`] but keeps each member's
+/// current partitions wherever possible, so a membership change only moves the
+/// minimum needed (each move costs a drain on the old owner + a cold start on the
+/// new one). With an empty `current` it is identical to the balanced deal.
+///
+/// Algorithm: (1) compute each member's balanced target load; (2) retain each
+/// member's still-valid current partitions up to that target; (3) deal the
+/// remaining (orphaned / new / over-target-trimmed) partitions to members below
+/// their target. Because the targets sum to the partition count, step 3 fills
+/// every member exactly to its target — balanced, fully covering, max retention.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StickyConsumerGroupAssignor;
+
+impl ConsumerGroupAssignor for StickyConsumerGroupAssignor {
+    fn assign(&self, input: ConsumerGroupAssignmentInput) -> ConsumerGroupAssignment {
+        let mut partitions = input.partitions.clone();
+        partitions.sort();
+        partitions.dedup();
+
+        let mut members = input.members.clone();
+        members.sort();
+        members.dedup();
+
+        if members.is_empty() {
+            return ConsumerGroupAssignment {
+                by_member: HashMap::new(),
+                under_provisioned: false,
+            };
+        }
+
+        let member_count = members.len();
+        let caps: Vec<Option<usize>> = members.iter().map(|m| input.target_for(m)).collect();
+        let target = balanced_target_loads(partitions.len(), &caps);
+        let partition_set: HashSet<Partition> = partitions.iter().copied().collect();
+
+        let mut assigned: Vec<Vec<Partition>> = vec![Vec::new(); member_count];
+        let mut taken: HashSet<Partition> = HashSet::new();
+
+        // (2) Retain still-valid current partitions, up to each member's target.
+        for (index, member) in members.iter().enumerate() {
+            let Some(current) = input.current.get(member) else {
+                continue;
+            };
+            let mut keep: Vec<Partition> = current
+                .iter()
+                .copied()
+                .filter(|partition| partition_set.contains(partition))
+                .collect();
+            keep.sort();
+            keep.dedup();
+            for partition in keep {
+                if assigned[index].len() >= target[index] {
+                    break;
+                }
+                if taken.insert(partition) {
+                    assigned[index].push(partition);
+                }
+            }
+        }
+
+        // (3) Deal the leftover partitions to members still below their target.
+        let free: Vec<Partition> = partitions
+            .iter()
+            .copied()
+            .filter(|partition| !taken.contains(partition))
+            .collect();
+        for partition in free {
+            let mut pick: Option<usize> = None;
+            for index in 0..member_count {
+                if assigned[index].len() < target[index]
+                    && pick.is_none_or(|best| assigned[index].len() < assigned[best].len())
+                {
+                    pick = Some(index);
+                }
+            }
+            // Targets sum to the partition count, so a slot always exists; fall
+            // back to least-loaded overall rather than panic if that ever fails.
+            let index = pick.unwrap_or_else(|| {
+                let loads: Vec<usize> = assigned.iter().map(Vec::len).collect();
+                least_loaded_member(&loads, &caps)
+            });
+            assigned[index].push(partition);
+        }
+
+        for partitions in &mut assigned {
+            partitions.sort();
+        }
+        let loads: Vec<usize> = assigned.iter().map(Vec::len).collect();
+        let under_provisioned = flag_under_provisioned(&loads, &caps);
+        let by_member = members.into_iter().zip(assigned).collect();
 
         ConsumerGroupAssignment {
             by_member,
@@ -611,6 +734,8 @@ impl ConsumerGroupState {
             members: self.members.iter().cloned().collect(),
             default_target_per_consumer: self.default_target_per_consumer,
             member_targets: self.member_targets.clone(),
+            // The assignment in effect before this rebalance drives stickiness.
+            current: self.assignment.clone(),
         });
         let new_assignment = result.by_member;
 
@@ -1466,7 +1591,7 @@ mod tests {
             partitions: (0..partitions).map(Partition::new).collect(),
             members: members.iter().map(|m| m.to_string()).collect(),
             default_target_per_consumer: target,
-            member_targets: HashMap::new(),
+            ..Default::default()
         })
     }
 
@@ -1484,6 +1609,28 @@ mod tests {
                 .iter()
                 .map(|(m, t)| (m.to_string(), *t))
                 .collect(),
+            ..Default::default()
+        })
+    }
+
+    fn assign_sticky(
+        partitions: u32,
+        members: &[&str],
+        current: &[(&str, &[u32])],
+    ) -> ConsumerGroupAssignment {
+        StickyConsumerGroupAssignor.assign(ConsumerGroupAssignmentInput {
+            partitions: (0..partitions).map(Partition::new).collect(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            current: current
+                .iter()
+                .map(|(m, parts)| {
+                    (
+                        m.to_string(),
+                        parts.iter().copied().map(Partition::new).collect(),
+                    )
+                })
+                .collect(),
+            ..Default::default()
         })
     }
 
@@ -1612,6 +1759,92 @@ mod tests {
         covered.sort();
         assert_eq!(covered, vec![0, 1, 2], "coverage wins over capacity");
         assert!(assignment.under_provisioned);
+    }
+
+    #[test]
+    fn sticky_first_assignment_matches_balanced() {
+        // With no prior assignment, sticky == balanced (same loads + coverage).
+        let sticky = assign_sticky(9, &["c1", "c2"], &[]);
+        let mut loads: Vec<usize> = sticky.by_member.values().map(Vec::len).collect();
+        loads.sort();
+        assert_eq!(loads, vec![4, 5]);
+        let mut covered: Vec<u32> = sticky
+            .by_member
+            .values()
+            .flatten()
+            .map(|p| p.id())
+            .collect();
+        covered.sort();
+        assert_eq!(covered, (0..9).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn sticky_join_moves_only_what_balance_requires() {
+        // c1={0,2}, c2={1,3}; c3 joins. Balanced target loads are 2,1,1. Sticky
+        // keeps c1's two, keeps one of c2's, and moves exactly ONE partition to
+        // c3 — versus the stateless deal which would reshuffle more.
+        let sticky = assign_sticky(4, &["c1", "c2", "c3"], &[("c1", &[0, 2]), ("c2", &[1, 3])]);
+        assert_eq!(
+            sorted_ids(&sticky.by_member["c1"]),
+            vec![0, 2],
+            "c1 keeps both"
+        );
+        assert_eq!(sticky.by_member["c2"].len(), 1, "c2 keeps one");
+        assert_eq!(sticky.by_member["c3"].len(), 1, "c3 gets exactly one");
+        // Exactly one partition changed owner (the one c2 gave up went to c3).
+        let moved = sticky.by_member["c3"][0].id();
+        assert!(
+            moved == 1 || moved == 3,
+            "c3 took one of c2's old partitions"
+        );
+    }
+
+    #[test]
+    fn sticky_leave_redistributes_orphans_and_keeps_survivors() {
+        // c2 leaves; its partitions are reassigned to c1/c3 while c1 and c3 keep
+        // every partition they already held (no needless movement).
+        let sticky = assign_sticky(
+            6,
+            &["c1", "c3"],
+            &[("c1", &[0, 1]), ("c2", &[2, 3]), ("c3", &[4, 5])],
+        );
+        // c1 and c3 retain their originals; the orphaned 2,3 are split across them.
+        assert!(sticky.by_member["c1"].contains(&Partition::new(0)));
+        assert!(sticky.by_member["c1"].contains(&Partition::new(1)));
+        assert!(sticky.by_member["c3"].contains(&Partition::new(4)));
+        assert!(sticky.by_member["c3"].contains(&Partition::new(5)));
+        let mut covered: Vec<u32> = sticky
+            .by_member
+            .values()
+            .flatten()
+            .map(|p| p.id())
+            .collect();
+        covered.sort();
+        assert_eq!(
+            covered,
+            (0..6).collect::<Vec<_>>(),
+            "orphans reassigned, full coverage"
+        );
+        let mut loads: Vec<usize> = sticky.by_member.values().map(Vec::len).collect();
+        loads.sort();
+        assert_eq!(loads, vec![3, 3], "balanced across survivors");
+    }
+
+    #[test]
+    fn sticky_trims_over_target_holder_on_rebalance() {
+        // c1 currently holds everything; c2 joins. Sticky trims c1 down to the
+        // balanced target (2) and gives the rest to c2 — c1 keeps its lowest two.
+        let sticky = assign_sticky(4, &["c1", "c2"], &[("c1", &[0, 1, 2, 3])]);
+        assert_eq!(
+            sorted_ids(&sticky.by_member["c1"]),
+            vec![0, 1],
+            "c1 trimmed to target, keeps lowest"
+        );
+        assert_eq!(
+            sorted_ids(&sticky.by_member["c2"]),
+            vec![2, 3],
+            "c2 takes the trimmed remainder"
+        );
     }
 
     fn group_state(partitions: u32) -> ConsumerGroupState {
