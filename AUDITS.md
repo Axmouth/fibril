@@ -35,9 +35,9 @@ their own audit documents so this file stays useful as a status board.
   - Next: audit freeze, drain, role transition, follower ingest, and broker loop
     lifecycle assumptions.
 - [ ] Ganglion integration boundary
-  - Status: Pending
-  - Detail: not started
-  - Next: audit which coordination code belongs in Fibril versus Ganglion.
+  - Status: Audited
+  - Detail: [GANGLION_INTEGRATION_BOUNDARY_AUDIT.md](GANGLION_INTEGRATION_BOUNDARY_AUDIT.md)
+  - Next: defer dedupe until a helper is clearly domain-neutral and reused.
 - [ ] Admin operations surface
   - Status: Pending
   - Detail: not started
