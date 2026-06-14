@@ -30,10 +30,10 @@ their own audit documents so this file stays useful as a status board.
   - Detail: [SINGLE_NODE_GUARDRAIL_AUDIT.md](SINGLE_NODE_GUARDRAIL_AUDIT.md)
   - Next: add a broader single-node scenario runner with the end-to-end harness.
 - [ ] Replication and sharding transition safety
-  - Status: Pending
-  - Detail: use [REPLICATION_WORKLOG.md](REPLICATION_WORKLOG.md) as source context
-  - Next: audit freeze, drain, role transition, follower ingest, and broker loop
-    lifecycle assumptions.
+  - Status: Audited
+  - Detail: [REPLICATION_TRANSITION_SAFETY_AUDIT.md](REPLICATION_TRANSITION_SAFETY_AUDIT.md)
+  - Next: extract cluster bootstrap for multi-node integration tests, then cover
+    cohort coordination and failover adversarial scenarios.
 - [ ] Ganglion integration boundary
   - Status: Audited
   - Detail: [GANGLION_INTEGRATION_BOUNDARY_AUDIT.md](GANGLION_INTEGRATION_BOUNDARY_AUDIT.md)
