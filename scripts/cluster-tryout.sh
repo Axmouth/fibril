@@ -70,9 +70,6 @@ cluster_attempts() {
 if [[ -z "$PORT_OFFSET" ]]; then
   PORT_OFFSET=$(( (RANDOM % 20) * 1000 ))
 fi
-BASE_BROKER_PORT=$((BASE_BROKER_PORT + PORT_OFFSET))
-BASE_ADMIN_PORT=$((BASE_ADMIN_PORT + PORT_OFFSET))
-BASE_RAFT_PORT=$((BASE_RAFT_PORT + PORT_OFFSET))
 
 RUN_DIR="$(mktemp -d /tmp/fibril-cluster-tryout.XXXXXX)"
 declare -a PIDS=()
@@ -80,6 +77,86 @@ EXPECTED_PROCESSES="$NODES"
 if [[ "$DYNAMIC_MEMBERSHIP" == true ]]; then
   EXPECTED_PROCESSES=$((NODES + 1))
 fi
+
+# Pick a single port offset whose whole broker/admin/raft port set is free.
+# Large local clusters routinely collide with stale --keep clusters, overlapping
+# tryouts, or unrelated services, so list the busy ports up front and skip any
+# offset that overlaps them instead of failing outright.
+declare -A USED_PORTS=()
+HAVE_PORT_SNAPSHOT=false
+snapshot_used_ports() {
+  local listing=""
+  if command -v ss >/dev/null 2>&1; then
+    listing="$(ss -Htln 2>/dev/null | awk '{print $4}')"
+  elif command -v netstat >/dev/null 2>&1; then
+    listing="$(netstat -ltn 2>/dev/null | awk 'NR>2 {print $4}')"
+  else
+    return 1
+  fi
+  local addr port
+  while read -r addr; do
+    port="${addr##*:}"
+    [[ "$port" =~ ^[0-9]+$ ]] && USED_PORTS["$port"]=1
+  done <<< "$listing"
+  return 0
+}
+if snapshot_used_ports; then
+  HAVE_PORT_SNAPSHOT=true
+fi
+
+port_busy() {
+  local port="$1"
+  if [[ "$HAVE_PORT_SNAPSHOT" == true ]]; then
+    [[ -n "${USED_PORTS[$port]:-}" ]]
+  else
+    # No listing tool available, probe the port directly.
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      exec 3>&- 2>/dev/null || true
+      return 0
+    fi
+    return 1
+  fi
+}
+
+offset_is_free() {
+  local off="$1" i port
+  for ((i = 1; i <= EXPECTED_PROCESSES; i++)); do
+    for port in $((BASE_BROKER_PORT + off + i)) $((BASE_ADMIN_PORT + off + i)) $((BASE_RAFT_PORT + off + i)); do
+      port_busy "$port" && return 1
+    done
+  done
+  return 0
+}
+
+# Raft sits on the highest base, so it bounds how far the offset can reach
+# before any port would exceed 65535.
+MAX_OFFSET=$((65535 - BASE_RAFT_PORT - EXPECTED_PROCESSES - 1))
+if [[ "$MAX_OFFSET" -lt 0 ]]; then
+  echo "FAIL: $EXPECTED_PROCESSES nodes need more ports than the local range allows" >&2
+  exit 1
+fi
+
+CHOSEN_OFFSET=""
+# Honor the requested offset first when it fits and is free, then sweep aligned
+# offsets from the bottom of the range.
+for candidate in "$PORT_OFFSET" $(seq 0 1000 "$MAX_OFFSET"); do
+  [[ "$candidate" -gt "$MAX_OFFSET" ]] && continue
+  if offset_is_free "$candidate"; then
+    CHOSEN_OFFSET="$candidate"
+    break
+  fi
+done
+if [[ -z "$CHOSEN_OFFSET" ]]; then
+  echo "FAIL: no free port offset for $EXPECTED_PROCESSES nodes near $PORT_OFFSET (local ports too crowded?)" >&2
+  exit 1
+fi
+if [[ "$CHOSEN_OFFSET" != "$PORT_OFFSET" ]]; then
+  echo "note: port_offset $PORT_OFFSET overlapped in-use ports, using $CHOSEN_OFFSET instead"
+fi
+PORT_OFFSET="$CHOSEN_OFFSET"
+BASE_BROKER_PORT=$((BASE_BROKER_PORT + PORT_OFFSET))
+BASE_ADMIN_PORT=$((BASE_ADMIN_PORT + PORT_OFFSET))
+BASE_RAFT_PORT=$((BASE_RAFT_PORT + PORT_OFFSET))
 
 print_resource_summary() {
   if [[ "$RESOURCE_SUMMARY" != true ]]; then
@@ -218,13 +295,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Fail fast if a previous --keep cluster still holds our ports; testing
-# stale servers produces confusing results.
+# The offset search above already cleared this band, so a hit here means a port
+# was claimed in the race between snapshot and start. Fail fast rather than test
+# against a stale server.
 for i in $(seq 1 "$EXPECTED_PROCESSES"); do
   for port in $((BASE_BROKER_PORT + i)) $((BASE_ADMIN_PORT + i)) $((BASE_RAFT_PORT + i)); do
     if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
       exec 3>&- 2>/dev/null || true
-      echo "FAIL: port $port already in use (port_offset=$PORT_OFFSET; old --keep cluster or overlapping tryout?)" >&2
+      echo "FAIL: port $port got claimed after the offset search (port_offset=$PORT_OFFSET; concurrent bind?)" >&2
       exit 1
     fi
   done
