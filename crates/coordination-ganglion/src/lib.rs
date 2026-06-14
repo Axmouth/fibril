@@ -139,6 +139,9 @@ pub const DEFAULT_PARTITIONING_VERSION: u64 = 0;
 /// charset that excludes `/`, so the separator is unambiguous.
 pub const QUEUE_PARTITIONING_ATTRIBUTE_PREFIX: &str = "fibril/partitioning/";
 
+const FORWARDED_WRITE_MAX_ATTEMPTS: usize = 6;
+const FORWARDED_WRITE_RETRY_BACKOFF_MS: u64 = 25;
+
 fn queue_partitioning_key(topic: &str, group: Option<&str>) -> String {
     match group {
         Some(group) => format!("{QUEUE_PARTITIONING_ATTRIBUTE_PREFIX}{topic}/{group}"),
@@ -689,15 +692,45 @@ where
         &self,
         command: MetadataRaftCommand,
     ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
-        if self.node.is_leader().await {
-            return self.node.submit_merge(command).await;
+        for attempt in 0..FORWARDED_WRITE_MAX_ATTEMPTS {
+            let result = if self.node.is_leader().await {
+                self.node.submit_merge(command.clone()).await
+            } else {
+                let topology = self.node.topology();
+                let leader_addr = topology
+                    .leader
+                    .and_then(|leader| topology.nodes.get(&leader).cloned())
+                    .ok_or(OpenraftAdapterError::NotLeader);
+
+                match leader_addr {
+                    Ok(leader_addr) => {
+                        client_write_remote(&leader_addr, command.clone(), self.wire_format).await
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+
+            match result {
+                Ok(response) => return Self::map_forwarded_response(response),
+                // Expected during elections or when this node has a stale
+                // leader view. Normal broker/admin writes should converge
+                // without requiring callers to find the raft leader first.
+                Err(OpenraftAdapterError::NotLeader)
+                    if attempt + 1 < FORWARDED_WRITE_MAX_ATTEMPTS =>
+                {
+                    let delay = FORWARDED_WRITE_RETRY_BACKOFF_MS * (attempt as u64 + 1);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                }
+                Err(error) => return Err(error),
+            }
         }
-        let topology = self.node.topology();
-        let leader_addr = topology
-            .leader
-            .and_then(|leader| topology.nodes.get(&leader).cloned())
-            .ok_or(OpenraftAdapterError::NotLeader)?;
-        let response = client_write_remote(&leader_addr, command, self.wire_format).await?;
+
+        Err(OpenraftAdapterError::NotLeader)
+    }
+
+    fn map_forwarded_response(
+        response: MetadataRaftResponse,
+    ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
         match response.rejection.clone() {
             None => Ok(response),
             Some(MetadataRejection::StaleGeneration) => Err(OpenraftAdapterError::StaleGeneration),
@@ -1504,6 +1537,17 @@ mod tests {
 
     use ganglion_openraft::{default_raft_config, InProcessRouter};
 
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "fibril-ganglion-{tag}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
     fn sample_snapshot(generation: u64, epoch: u64) -> CoordinationSnapshot {
         let mut nodes = HashMap::new();
         nodes.insert(
@@ -1846,6 +1890,100 @@ mod tests {
         );
 
         provider.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    /// A logical queue can be declared through any broker in the raft group,
+    /// not only the current metadata leader. This protects the real operator
+    /// flow used by `scripts/cluster-tryout.sh --ganglion`: the CLI may connect
+    /// to node 1 while node 2 or 3 currently leads coordination.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn declare_queue_partitioning_forwards_from_tcp_standby() {
+        let config = default_raft_config().expect("config");
+        let timeout = Duration::from_secs(10);
+        let mut raft_nodes = Vec::new();
+        let mut servers = Vec::new();
+        let mut dirs = Vec::new();
+
+        for id in 1..=3u64 {
+            let dir = unique_dir(&format!("declare-forward-{id}"));
+            let (node, server) =
+                RaftMetadataNode::start_durable_tcp(id, config.clone(), "127.0.0.1:0", &dir)
+                    .await
+                    .expect("start tcp raft node");
+            raft_nodes.push(node);
+            servers.push(server);
+            dirs.push(dir);
+        }
+
+        let members: BTreeMap<u64, _> = servers
+            .iter()
+            .enumerate()
+            .map(|(index, server)| {
+                (
+                    index as u64 + 1,
+                    ganglion_openraft::openraft::BasicNode::new(server.local_addr().to_string()),
+                )
+            })
+            .collect();
+        raft_nodes[0].initialize(members).await.expect("initialize");
+        let leader_raft_id = raft_nodes[0]
+            .wait_for_any_leader(timeout)
+            .await
+            .expect("election");
+
+        let providers: Vec<GanglionCoordination<_, _>> = raft_nodes
+            .into_iter()
+            .enumerate()
+            .map(|(index, node)| GanglionCoordination::new(format!("broker-{}", index + 1), node))
+            .collect();
+        let standby = providers
+            .iter()
+            .find(|provider| provider.raft_node().node_id() != leader_raft_id)
+            .expect("standby provider");
+
+        let declared = standby
+            .declare_queue_partitioning("orders", None, 3)
+            .await
+            .expect("standby declare should forward to leader");
+        assert_eq!(declared.partition_count, 3);
+
+        for provider in &providers {
+            let mut watch = provider.watch();
+            tokio::time::timeout(timeout, async {
+                loop {
+                    if provider.queue_partitioning("orders", None) == Some(declared.clone()) {
+                        break;
+                    }
+                    watch.changed().await.expect("watch open");
+                }
+            })
+            .await
+            .expect("partitioning should replicate to every provider");
+        }
+
+        // The forwarded path still preserves create-once semantics.
+        let conflict = standby
+            .declare_queue_partitioning("orders", None, 4)
+            .await
+            .expect_err("different partition count must conflict");
+        assert!(matches!(
+            conflict,
+            DeclareQueueError::PartitionCountConflict {
+                existing: 3,
+                requested: 4,
+                ..
+            }
+        ));
+
+        for provider in &providers {
+            provider.raft_node().shutdown().await.expect("shutdown");
+        }
+        for server in &servers {
+            server.shutdown();
+        }
+        for dir in dirs {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     /// Catalogue + attributes: registered queues are cluster-visible, survive

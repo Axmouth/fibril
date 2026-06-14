@@ -3,24 +3,45 @@
 //! (protocol<->coordination adapter bridges, config->settings mapping); the
 //! reusable coordination primitives live in ganglion.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use fibril_admin::{RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome};
-use fibril_broker::runtime_settings::{
-    ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, ConsumerGroupRuntimeSettings,
-    DeliveryRuntimeSettings, IdleQueueCleanupRuntimeSettings, PartitioningRuntimeSettings,
-    ReplicationRuntimeSettings, RuntimeSettings, RuntimeSettingsSnapshot,
+use fibril_admin::{
+    AdminConfig, AdminServer, RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome,
+    StartupConfigSummary,
 };
-use fibril_config::ServerConfig;
+use fibril_broker::{
+    broker::{Broker, BrokerConfig, FollowerReplicationWorkerConfig, OwnAllQueues, QueueOwnership},
+    coordination::{
+        ClusterCohortController, ConsumerGroupKey, Coordination, DeterministicPartitionPlacement,
+        NodeInfo, QueueIdentity, StaticCoordination, StickyConsumerGroupAssignor,
+    },
+    queue_engine::{
+        KeratinConfig, QueueEngine as _, SnapshotConfig, StromaEngine, StromaKeratinConfig,
+    },
+    runtime_settings::{
+        ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, ConsumerGroupRuntimeSettings,
+        DeliveryRuntimeSettings, IdleQueueCleanupRuntimeSettings, PartitioningRuntimeSettings,
+        ReplicationRuntimeSettings, RuntimeSettings, RuntimeSettingsLocks, RuntimeSettingsManager,
+        RuntimeSettingsSnapshot,
+    },
+};
+use fibril_config::{CoordinationMode, ServerConfig};
 use fibril_coordination_ganglion::{
-    ClientTopology, ClusterRuntimeSettingsUpdateOutcome, GanglionCoordination,
+    ClientTopology, ClusterRuntimeSettingsUpdateOutcome, ControllerStatus, GanglionCoordination,
 };
-use fibril_protocol::v1::handler::{ClientTopologySource, QueueDeclareCoordinator};
+use fibril_metrics::{Metrics, MetricsConfig};
+use fibril_protocol::v1::handler::{
+    ClientTopologySource, ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings,
+    ConnectionSettings, QueueDeclareCoordinator, run_server as run_protocol_server,
+};
 use fibril_protocol::v1::{Partition, QueueTopologyEntry, TopologyOk};
+use fibril_util::StaticAuthHandler;
 use ganglion_openraft::{
-    GanglionRaftConfig,
-    openraft::{RaftNetworkFactory, storage::RaftLogStorage},
+    FileRaftLogStore, GanglionRaftConfig, TcpNetworkFactory, TcpRaftServer, WireFormat,
+    openraft::{BasicNode, RaftNetworkFactory, storage::RaftLogStorage},
 };
 
 /// Map the startup config's runtime-seed section into the broker's
@@ -63,6 +84,534 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
                 .default_target_per_consumer,
         },
     }
+}
+
+/// Production Ganglion coordination provider used by `fibril-server`.
+pub type TcpGanglionCoordination = GanglionCoordination<FileRaftLogStore, TcpNetworkFactory>;
+
+/// Started Ganglion coordination pieces for the TCP-backed server path.
+///
+/// The raft server handle must be kept alive for as long as the broker serves.
+/// The controller status is shared with the admin topology endpoint.
+pub struct TcpGanglionParts {
+    pub coordination: Arc<TcpGanglionCoordination>,
+    pub raft_server: Arc<TcpRaftServer>,
+    pub controller_task: tokio::task::JoinHandle<()>,
+    pub controller_status: Arc<RwLock<ControllerStatus>>,
+}
+
+/// Background handles returned by cluster task wiring.
+///
+/// The binary currently lets these tasks run until process shutdown. Tests can
+/// keep the handles and abort them explicitly.
+pub struct GanglionBrokerTaskHandles {
+    pub heartbeat: tokio::task::JoinHandle<()>,
+    pub cohort_controller: tokio::task::JoinHandle<()>,
+    pub cohort_owner_watcher: tokio::task::JoinHandle<()>,
+}
+
+/// Start TCP-backed Ganglion coordination if `[coordination].mode = "ganglion"`.
+///
+/// This owns only the coordination process and embedded placement controller.
+/// Broker-specific wiring is separate so tests can build the broker around the
+/// returned ownership provider.
+pub async fn open_tcp_ganglion_parts(
+    config: &ServerConfig,
+) -> anyhow::Result<Option<TcpGanglionParts>> {
+    match config.coordination.mode {
+        CoordinationMode::Static => Ok(None),
+        CoordinationMode::Ganglion => {
+            let section = &config.coordination.ganglion;
+            let data_dir = if section.data_dir.as_os_str().is_empty() {
+                config.server.data_dir.join("coordination")
+            } else {
+                section.data_dir.clone()
+            };
+
+            let raft_config = ganglion_openraft::default_raft_config()
+                .map_err(|error| anyhow::anyhow!("raft config: {error}"))?;
+            let wire_format: WireFormat = section
+                .wire_format
+                .parse()
+                .map_err(|error| anyhow::anyhow!("coordination.ganglion.wire_format: {error}"))?;
+            let (node, raft_server) =
+                ganglion_openraft::RaftMetadataNode::start_durable_tcp_with_format(
+                    section.raft_node_id,
+                    raft_config,
+                    section.listen,
+                    &data_dir,
+                    wire_format,
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("embedded coordinator failed to start: {error}")
+                })?;
+            let raft_server = Arc::new(raft_server);
+
+            if section.bootstrap {
+                let members: std::collections::BTreeMap<u64, BasicNode> = section
+                    .peers
+                    .iter()
+                    .map(|(id, addr)| {
+                        Ok((
+                            id.parse::<u64>()
+                                .map_err(|_| anyhow::anyhow!("peer id `{id}` is not a u64"))?,
+                            BasicNode::new(addr.clone()),
+                        ))
+                    })
+                    .collect::<anyhow::Result<_>>()?;
+                // Re-running initialize after first boot is rejected by raft.
+                // That is the expected restart path, not a startup failure.
+                if let Err(error) = node.initialize(members).await {
+                    tracing::info!("coordinator initialize skipped: {error}");
+                }
+            }
+
+            let coordination = Arc::new(GanglionCoordination::new_with_wire_format(
+                config.coordination.node_id.clone(),
+                node,
+                wire_format,
+            ));
+            let (controller_task, controller_status) = coordination.spawn_controller(
+                Arc::new(DeterministicPartitionPlacement),
+                fibril_coordination_ganglion::ControllerConfig {
+                    target_followers: section.target_followers,
+                    tick: Duration::from_millis(section.controller_tick_ms),
+                    liveness_ttl: Duration::from_millis(section.liveness_ttl_ms),
+                    max_cas_retries: 8,
+                },
+            );
+
+            Ok(Some(TcpGanglionParts {
+                coordination,
+                raft_server,
+                controller_task,
+                controller_status,
+            }))
+        }
+    }
+}
+
+/// Ownership provider used by the broker: cluster assignments in Ganglion mode,
+/// own-all standalone behavior otherwise.
+pub fn queue_ownership_for_ganglion(parts: Option<&TcpGanglionParts>) -> Arc<dyn QueueOwnership> {
+    match parts {
+        Some(parts) => parts.coordination.clone() as Arc<dyn QueueOwnership>,
+        None => Arc::new(OwnAllQueues),
+    }
+}
+
+/// Static single-node coordination view for admin topology in standalone mode.
+pub fn single_node_admin_coordination(config: &ServerConfig) -> Arc<dyn Coordination> {
+    Arc::new(StaticCoordination::single_node(
+        config.coordination.node_id.clone(),
+        config.broker.listener.bind,
+    ))
+}
+
+/// Register local on-disk queues in the cluster catalogue on a retrying loop.
+pub fn spawn_ganglion_catalogue_sync(
+    parts: &TcpGanglionParts,
+    engine: StromaEngine,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    parts.coordination.spawn_catalogue_sync(
+        move || {
+            let engine = engine.clone();
+            async move {
+                match engine.queue_stats_snapshot().await {
+                    Ok(snapshot) => snapshot
+                        .queues
+                        .keys()
+                        .map(|key| {
+                            // Queue stats key by (topic, group) only.
+                            // Partition 0 always exists; declare registers
+                            // the full partition set.
+                            QueueIdentity::new(
+                                key.topic.clone(),
+                                Partition::ZERO,
+                                key.group.as_deref(),
+                            )
+                        })
+                        .collect(),
+                    Err(_) => Vec::new(),
+                }
+            }
+        },
+        interval,
+    )
+}
+
+/// Replicate cluster runtime settings into the local runtime manager.
+pub fn spawn_ganglion_runtime_settings_sync(
+    parts: &TcpGanglionParts,
+    runtime_settings: Arc<RuntimeSettingsManager>,
+) -> tokio::task::JoinHandle<()> {
+    parts
+        .coordination
+        .spawn_runtime_settings_sync(runtime_settings)
+}
+
+/// Build advisory heartbeat labels from local broker state.
+pub fn broker_heartbeat_labels(broker: &Broker<StromaEngine>) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::new();
+    for worker in broker
+        .sparse_queue_observability_report()
+        .replication_followers
+    {
+        if let Some(state) = worker.state {
+            let queue = QueueIdentity::new(worker.topic, worker.partition, worker.group.as_deref());
+            labels.insert(
+                fibril_coordination_ganglion::applied_tail_label(&queue),
+                format!("{}:{}", state.message_next_offset, state.event_next_offset),
+            );
+        }
+    }
+
+    let cohorts = broker.local_cohort_membership();
+    if !cohorts.is_empty() {
+        labels.insert(
+            fibril_coordination_ganglion::COHORT_MEMBERSHIP_LABEL.to_string(),
+            fibril_coordination_ganglion::encode_cohort_membership(&cohorts),
+        );
+    }
+    labels
+}
+
+/// Wire the broker-side Ganglion tasks: assignment watcher, heartbeat labels,
+/// cohort controller, and owner-side cohort plan application.
+pub fn spawn_ganglion_broker_tasks(
+    parts: &TcpGanglionParts,
+    broker: Arc<Broker<StromaEngine>>,
+    config: &ServerConfig,
+    runtime: &RuntimeSettings,
+) -> GanglionBrokerTaskHandles {
+    let resolver = Arc::new(
+        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::new(
+            parts.coordination.clone(),
+        ),
+    );
+    broker.spawn_assignment_watcher_with_follower_replication(
+        parts.coordination.clone(),
+        resolver,
+        FollowerReplicationWorkerConfig {
+            follow_runtime_settings: true,
+            ..Default::default()
+        },
+    );
+
+    let tails_broker = broker.clone();
+    let heartbeat = parts.coordination.spawn_heartbeat_with_labels(
+        NodeInfo {
+            node_id: config.coordination.node_id.clone(),
+            broker_addr: config.broker.listener.bind,
+            admin_addr: Some(config.admin.listener.bind),
+        },
+        Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
+        move || broker_heartbeat_labels(&tails_broker),
+    );
+
+    let coordination = parts.coordination.clone();
+    let default_target = runtime.consumer_groups.default_target_per_consumer;
+    let tick_ms = config.coordination.ganglion.heartbeat_interval_ms;
+    let cohort_controller = tokio::spawn(async move {
+        let mut controller =
+            ClusterCohortController::new(Arc::new(StickyConsumerGroupAssignor), default_target);
+        loop {
+            tokio::time::sleep(Duration::from_millis(tick_ms)).await;
+            let count_of = |key: &ConsumerGroupKey| {
+                coordination
+                    .queue_partitioning(&key.topic, key.group.as_deref())
+                    .map(|partitioning| partitioning.partition_count)
+                    .unwrap_or(1)
+            };
+            if let Err(error) = coordination
+                .run_cohort_controller_tick(&mut controller, count_of)
+                .await
+            {
+                tracing::debug!(%error, "cohort controller tick deferred; will retry");
+            }
+        }
+    });
+
+    let coordination = parts.coordination.clone();
+    let watch_broker = broker.clone();
+    let mut snapshot = coordination.watch();
+    let cohort_owner_watcher = tokio::spawn(async move {
+        loop {
+            for cohort in watch_broker.local_cohort_membership() {
+                let key = ConsumerGroupKey::new(
+                    cohort.topic.clone(),
+                    cohort.group.as_deref(),
+                    cohort.consumer_group.clone(),
+                );
+                let plan = coordination.cohort_assignment(&key);
+                if !plan.is_empty() {
+                    watch_broker.apply_exclusive_assignment(
+                        &cohort.topic,
+                        cohort.group.as_deref(),
+                        &cohort.consumer_group,
+                        plan,
+                    );
+                }
+            }
+            if snapshot.changed().await.is_err() {
+                break;
+            }
+        }
+    });
+
+    GanglionBrokerTaskHandles {
+        heartbeat,
+        cohort_controller,
+        cohort_owner_watcher,
+    }
+}
+
+/// Protocol topology source for Ganglion-backed routing.
+pub fn topology_source_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn ClientTopologySource> {
+    let coordination = parts.coordination.clone();
+    Arc::new(CoordinationTopologySource {
+        fetch: Arc::new(move || coordination.client_topology()),
+    }) as Arc<dyn ClientTopologySource>
+}
+
+/// Protocol declare coordinator for Ganglion-backed partition metadata and
+/// catalogue registration.
+pub fn declare_coordinator_for_ganglion(
+    parts: &TcpGanglionParts,
+) -> Arc<dyn QueueDeclareCoordinator> {
+    let coordination = parts.coordination.clone();
+    Arc::new(CoordinationDeclareCoordinator {
+        declare: Arc::new(move |topic, group, count| {
+            let coordination = coordination.clone();
+            Box::pin(async move {
+                let partitioning = coordination
+                    .declare_queue_partitioning(&topic, group.as_deref(), count)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for partition in 0..partitioning.partition_count {
+                    let queue = QueueIdentity::new(
+                        topic.clone(),
+                        Partition::new(partition),
+                        group.as_deref(),
+                    );
+                    coordination
+                        .register_queue(&queue)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(partitioning.partition_count)
+            })
+        }),
+    }) as Arc<dyn QueueDeclareCoordinator>
+}
+
+/// Run a Fibril broker/admin server from an already loaded config.
+///
+/// The binary is intentionally a thin wrapper around this function. Keeping the
+/// server composition here lets integration tests reuse production wiring
+/// without shelling out to `fibril-server`.
+pub async fn run_server_from_config(config: ServerConfig) -> anyhow::Result<()> {
+    let metrics = Metrics::new(3 * 60 * 60);
+    let keratin_default = KeratinConfig::default();
+    let keratin_message_cfg = KeratinConfig {
+        fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
+        segment_max_bytes: config.storage.keratin.message_log.segment_max_bytes,
+        ..keratin_default
+    };
+    let keratin_event_cfg = KeratinConfig {
+        fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
+        segment_max_bytes: config.storage.keratin.event_log.segment_max_bytes,
+        flush_target_bytes: keratin_default.flush_target_bytes / 8,
+        max_batch_bytes: keratin_default.max_batch_bytes / 8,
+        index_stride_bytes: keratin_default.index_stride_bytes / 8,
+        ..keratin_default
+    };
+    let engine = StromaEngine::open(
+        &config.server.data_dir,
+        StromaKeratinConfig {
+            message_log: keratin_message_cfg,
+            event_log: keratin_event_cfg,
+        },
+        SnapshotConfig::default(),
+    )
+    .await?;
+
+    let runtime_seed = runtime_seed_from_config(&config);
+    let runtime_settings = Arc::new(
+        RuntimeSettingsManager::load_from_stroma_engine(
+            &engine,
+            runtime_seed,
+            RuntimeSettingsLocks {
+                idle_queue_cleanup: config.runtime_locks.idle_queue_cleanup,
+            },
+        )
+        .await?,
+    );
+    let runtime_snapshot = runtime_settings.current();
+    let runtime = &runtime_snapshot.settings;
+    let broker_cfg = BrokerConfig::from_runtime_settings(runtime);
+
+    let ganglion_parts = open_tcp_ganglion_parts(&config).await?;
+    if let Some(parts) = &ganglion_parts {
+        spawn_ganglion_catalogue_sync(
+            parts,
+            engine.clone(),
+            Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
+        );
+        spawn_ganglion_runtime_settings_sync(parts, runtime_settings.clone());
+    }
+
+    let ownership = queue_ownership_for_ganglion(ganglion_parts.as_ref());
+    let broker = Broker::new_with_ownership(
+        engine.clone(),
+        broker_cfg,
+        Some(metrics.broker()),
+        ownership,
+    );
+
+    let _ganglion_broker_tasks = ganglion_parts
+        .as_ref()
+        .map(|parts| spawn_ganglion_broker_tasks(parts, broker.clone(), &config, runtime));
+
+    let connection_settings = ConnectionSettings::new(None)
+        .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms)
+        .with_reconnect_grace_ms(runtime.connection.reconnect_grace_ms);
+    {
+        let broker = broker.clone();
+        let connection_settings = connection_settings.clone();
+        let mut runtime_updates = runtime_settings.subscribe();
+        tokio::spawn(async move {
+            while runtime_updates.changed().await.is_ok() {
+                let snapshot = runtime_updates.borrow().clone();
+                broker.update_config(BrokerConfig::from_runtime_settings(&snapshot.settings));
+                connection_settings.update_runtime(ProtocolConnectionRuntimeSettings {
+                    publisher_cache_idle_timeout_ms: snapshot
+                        .settings
+                        .idle_queue_cleanup
+                        .publisher_idle_timeout_ms,
+                    reconnect_grace_ms: snapshot.settings.connection.reconnect_grace_ms,
+                });
+            }
+        });
+    }
+
+    let auth_handler = StaticAuthHandler::new("fibril".to_string(), "fibril".to_string());
+    let admin_auth_handler = config.admin.auth.enabled.then(|| {
+        StaticAuthHandler::new(
+            config.admin.auth.username.clone(),
+            config
+                .admin
+                .auth
+                .password
+                .clone()
+                .expect("validated admin auth password"),
+        )
+    });
+
+    let stroma_metrics = broker.stroma_metrics();
+    let topology_source = ganglion_parts.as_ref().map(topology_source_for_ganglion);
+    let declare_coordinator = ganglion_parts
+        .as_ref()
+        .map(declare_coordinator_for_ganglion);
+
+    let broker_server_fut = run_protocol_server(
+        config.broker.listener.bind,
+        broker.clone(),
+        metrics.tcp(),
+        metrics.connections(),
+        Some(auth_handler.clone()),
+        connection_settings,
+        topology_source,
+        declare_coordinator,
+    );
+
+    let broker_observability = {
+        let broker = broker.clone();
+        Arc::new(move || {
+            serde_json::to_value(broker.sparse_queue_observability_report()).unwrap_or_default()
+        })
+    };
+
+    let admin = AdminServer::new(
+        metrics.clone(),
+        stroma_metrics,
+        AdminConfig {
+            bind: config.admin.listener.bind.to_string(),
+            auth: admin_auth_handler,
+        },
+        Some(StartupConfigSummary {
+            data_dir: config.server.data_dir.display().to_string(),
+            broker_bind: config.broker.listener.bind.to_string(),
+            admin_bind: config.admin.listener.bind.to_string(),
+            admin_auth_enabled: config.admin.auth.enabled,
+            keratin_fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
+            keratin_message_log_segment_max_bytes: config
+                .storage
+                .keratin
+                .message_log
+                .segment_max_bytes,
+            keratin_event_log_segment_max_bytes: config.storage.keratin.event_log.segment_max_bytes,
+        }),
+        Arc::new(engine.clone()),
+        Some(broker_observability),
+        Some(runtime_settings.clone()),
+    );
+
+    // The raft listener handle must outlive the server futures.
+    let mut _raft_server = None;
+    let admin = match ganglion_parts {
+        None => admin.with_coordination(single_node_admin_coordination(&config)),
+        Some(parts) => {
+            _raft_server = Some(parts.raft_server.clone());
+            let topology_source = parts.coordination.clone();
+            let raft_server = parts.raft_server;
+            let controller_status = parts.controller_status;
+            admin
+                .with_coordination(parts.coordination.clone())
+                .with_raft_topology(Arc::new(move || {
+                    let mut value = serde_json::to_value(topology_source.raft_node().topology())
+                        .unwrap_or(serde_json::Value::Null);
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "healthy".into(),
+                            serde_json::Value::Bool(topology_source.coordination_healthy()),
+                        );
+                        object.insert(
+                            "listener_serving".into(),
+                            serde_json::Value::Bool(raft_server.is_serving()),
+                        );
+                        if let Ok(status) = controller_status.read() {
+                            object.insert(
+                                "controller".into(),
+                                serde_json::to_value(&*status).unwrap_or(serde_json::Value::Null),
+                            );
+                        }
+                    }
+                    value
+                }))
+                .with_runtime_settings_cluster(Arc::new(GanglionRuntimeSettingsStore::new(
+                    parts.coordination,
+                )))
+        }
+    };
+
+    metrics.start(
+        MetricsConfig {
+            log_broker: true,
+            log_storage: true,
+            log_tcp: true,
+        },
+        Duration::from_secs(10),
+    );
+
+    let admin_server_dut = admin.run();
+    let (broker_res, admin_res) = tokio::join!(broker_server_fut, admin_server_dut);
+    broker_res?;
+    admin_res?;
+
+    Ok(())
 }
 
 pub struct GanglionRuntimeSettingsStore<LS, NF>
@@ -249,5 +798,82 @@ mod tests {
         let seed = runtime_seed_from_config(&config);
         assert_eq!(seed.partitioning.default_partition_count, 7);
         assert_eq!(seed.replication.min_in_sync_replicas, 3);
+    }
+
+    fn temp_root(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "fibril-{tag}-{}-{}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        std::fs::create_dir_all(&root).expect("temp root");
+        root
+    }
+
+    fn free_loopback_addr() -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
+        listener.local_addr().expect("local addr")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tcp_ganglion_bootstrap_exposes_declare_coordinator() {
+        let root = temp_root("tcp-ganglion-bootstrap");
+        let raft_addr = free_loopback_addr();
+        let mut config = ServerConfig::default();
+        config.server.data_dir = root.join("data");
+        config.coordination.mode = CoordinationMode::Ganglion;
+        config.coordination.node_id = "broker-a".into();
+        config.coordination.ganglion.raft_node_id = 1;
+        config.coordination.ganglion.listen = raft_addr;
+        config
+            .coordination
+            .ganglion
+            .peers
+            .insert("1".into(), raft_addr.to_string());
+        config.coordination.ganglion.bootstrap = true;
+        config.coordination.ganglion.data_dir = root.join("coordination");
+        config.coordination.ganglion.heartbeat_interval_ms = 50;
+        config.coordination.ganglion.controller_tick_ms = 50;
+        config.coordination.ganglion.liveness_ttl_ms = 200;
+
+        let parts = open_tcp_ganglion_parts(&config)
+            .await
+            .expect("start ganglion")
+            .expect("ganglion parts");
+        parts
+            .coordination
+            .raft_node()
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("leader");
+
+        let declare = declare_coordinator_for_ganglion(&parts);
+        let count = declare
+            .declare_partitioning("jobs", None, 2)
+            .await
+            .expect("declare partitioning");
+        assert_eq!(count, 2);
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let queues = parts.coordination.registered_queues();
+                let has_zero = queues.contains(&QueueIdentity::new("jobs", Partition::ZERO, None));
+                let has_one = queues.contains(&QueueIdentity::new("jobs", Partition::new(1), None));
+                if has_zero && has_one {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("catalogue registrations");
+
+        parts.controller_task.abort();
+        parts
+            .coordination
+            .raft_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 }

@@ -42,10 +42,37 @@ watcher: on coordination.watch() change, for each local cohort apply
 cohort_assignment -> apply_exclusive_assignment for owned partitions. Cluster-only;
 single-node untouched. The cross-broker cohort coordinator is now FULLY WIRED.
 
-NEXT — multi-node integration test for the coordinator. BLOCKED/PAIR WITH
-"server.rs refactor b": the spawns live in server.rs `main` (not test-reachable);
-extract the cluster bootstrap into the `fibril` lib so a test can stand up 2
-broker+coordination nodes and drive it. Then the e2e (ganglion harness like
+DONE — server bootstrap extraction checkpoint (2026-06-14): cluster startup glue
+is no longer trapped entirely in `crates/fibril/bin/server.rs`. `crates/fibril/src/lib.rs`
+now exposes the production-shaped TCP Ganglion startup (`open_tcp_ganglion_parts`),
+broker ownership selection, catalogue/runtime sync helpers, broker cluster task
+wiring, topology source, declare coordinator, and standalone admin coordination
+helper. `fibril-server` is now a thin wrapper around
+`fibril::run_server_from_config(ServerConfig::load()?)`, so future integration
+tests can spawn production wiring from the library instead of shelling out to
+the binary. Proof test: `tcp_ganglion_bootstrap_exposes_declare_coordinator`
+starts the same TCP-backed Ganglion path, declares a two-partition queue through
+the extracted declare bridge, and observes both catalogue resources. This is the
+first part of server.rs-refactor-b; the next part is a two-broker harness around
+these helpers. `COORDINATION_TRYOUT.md` now matches the current tryout script:
+it documents declare-to-assignment and replicated runtime-settings checks.
+
+DONE — metadata write forwarding regression (2026-06-14): the real
+`scripts/cluster-tryout.sh --ganglion` path exposed that `queue declare` through
+node 1 failed when another raft node was the coordination leader. This was the
+wrong boundary: metadata/admin writes should be accepted at any broker and
+forwarded to the coordination leader internally, while data-plane queue traffic
+continues to use topology/ownership routing. `GanglionCoordination::forward_command`
+now retries briefly across `NotLeader`/stale-leader windows and still maps
+state-machine rejections immediately. Regression test:
+`declare_queue_partitioning_forwards_from_tcp_standby`, plus the existing
+create-once/conflict test keeps repartition conflicts pinned. The real
+three-process tryout now passes again: server startup, raft election, CLI
+declare, controller assignment, and replicated runtime-settings sync.
+
+NEXT — multi-node integration test for the coordinator. Use the extracted
+fibril-lib bootstrap pieces to build a test harness that can stand up 2
+broker+coordination nodes and drive them. Then the e2e (ganglion harness like
 ganglion_coordination_drives_supervised_follower_replication): 2 brokers,
 partitions split across owners, a cohort spanning both -> globally balanced
 (the thing per-broker-local can't do); drop a consumer -> rebalances. Until then

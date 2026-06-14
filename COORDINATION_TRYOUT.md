@@ -56,6 +56,17 @@ startup/connectivity modes: unreachable peers, missing bootstrap node, leaderles
 With `--keep` it prints ready-to-paste `fibrilctl --admin ... admin topology` commands per
 node, plus where logs and data live.
 
+The script also exercises the current server-side integration:
+
+- declares an `orders` queue through node 1, even when another node is the raft leader
+- waits for the embedded controller to assign an owner, follower set, and epoch
+- checks every node sees the same assignment through topology
+- updates runtime settings on node 1
+- waits for the replicated settings document to apply on the other nodes
+
+That makes this a useful smoke test for the coordination path, not only a
+topology display demo.
+
 ## 1. Raft cluster playground (ganglion)
 
 A real openraft cluster — durable WALs, persisted snapshots, election, membership — in one
@@ -124,8 +135,12 @@ assignments table. It refreshes every 3 seconds.
 
 ## What is intentionally not here yet
 
-- **Queue assignment control loop in the server**: brokers register and heartbeat themselves,
-  and the controller primitive exists (`control_iteration`, see the coordination playground),
-  but the server does not yet run it against declared queues — that lands with the replication
-  data-plane integration, so the `assignments` table stays empty in the tryout for now.
-
+- **Cross-broker exclusive cohort e2e**: the cohort coordinator wiring exists,
+  but the scripted tryout does not yet prove one logical exclusive cohort
+  balancing across partition owners.
+- **Adversarial failover runbook**: try killing a process manually with
+  `--keep`, but the script does not yet automate stale-owner return,
+  promotion refusal, or partition scenarios.
+- **Client topology assertions**: the script validates topology through
+  `fibrilctl`; it does not yet run a topology-aware Rust client across multiple
+  owners.
