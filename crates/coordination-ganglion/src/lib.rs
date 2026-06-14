@@ -601,6 +601,40 @@ where
         self.node.committed_snapshot().attributes.get(key).cloned()
     }
 
+    /// Aggregate exclusive-cohort membership across the cluster from every node's
+    /// heartbeat membership label. The controller computes one plan per cohort
+    /// from this. (Advisory: malformed/absent labels just contribute nothing.)
+    pub fn global_cohort_membership(&self) -> Vec<GlobalCohortMembership> {
+        let snapshot = self.node.committed_snapshot();
+        let labels: Vec<&str> = snapshot
+            .nodes
+            .values()
+            .filter_map(|node| node.labels.get(COHORT_MEMBERSHIP_LABEL).map(String::as_str))
+            .collect();
+        aggregate_membership_labels(labels)
+    }
+
+    /// Publish a cohort's computed assignment as a replicated cluster attribute
+    /// for owner brokers to read and apply. Leader-or-forwarded; same-value writes
+    /// are generation no-ops, so re-publishing a stable plan is cheap.
+    pub async fn publish_cohort_assignment(
+        &self,
+        plan: &CohortPlan,
+    ) -> Result<(), OpenraftAdapterError> {
+        self.set_cluster_attribute(
+            cohort_assignment_attribute_key(&plan.key),
+            encode_cohort_assignment(plan),
+        )
+        .await
+    }
+
+    /// Read a cohort's published `partition -> member` assignment (empty if none).
+    pub fn cohort_assignment(&self, key: &ConsumerGroupKey) -> HashMap<Partition, String> {
+        self.cluster_attribute(&cohort_assignment_attribute_key(key))
+            .map(|raw| decode_cohort_assignment(&raw))
+            .unwrap_or_default()
+    }
+
     /// Set one replicated cluster attribute (forwarded merge; same-value
     /// writes are generation no-ops). Consumers own versioning in the value.
     pub async fn set_cluster_attribute(
@@ -2198,5 +2232,54 @@ mod tests {
         .shutdown()
         .await
         .expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cohort_assignment_publishes_and_reads_back() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node should start");
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            ganglion_openraft::openraft::BasicNode::new("coordinator-1"),
+        );
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("single node elects itself");
+
+        let coordination = GanglionCoordination::new("broker-a", raft_node);
+        let key = ConsumerGroupKey::new("jobs", None, "default");
+        let plan = CohortPlan {
+            key: key.clone(),
+            assignment: HashMap::from([
+                (Partition::new(0), "m1".to_string()),
+                (Partition::new(1), "m2".to_string()),
+            ]),
+        };
+
+        coordination
+            .publish_cohort_assignment(&plan)
+            .await
+            .expect("publish");
+
+        // Read back the committed attribute (poll briefly for commit visibility).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if coordination.cohort_assignment(&key) == plan.assignment {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "published cohort assignment never became visible"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        coordination.raft_node().shutdown().await.expect("shutdown");
     }
 }
