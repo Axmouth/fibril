@@ -71,26 +71,32 @@ imbalance, never double-deliver; fits load-aware-future-direction off-raft stanc
   assignee left untouched). Additive: single-node never populates it. 3 white-box
   router tests. This is the owner-side hook the coordinator drives.
 
-REMAINING coordinator bricks (build on apply-path + member identity):
-  A. Global plan computation — reuse the sticky/target assignor over GLOBAL
-     (full partition set, global members+targets, prior global plan for sticky-
-     across-owner-moves) -> partition->member. Mostly reuse; thin.
-  B. Membership aggregation (transport in): each broker's local cohort membership
-     (cohort -> member ids, with targets) must reach the controller. OPEN DECISION
-     (transport): (i) heartbeat node labels (bounded-rate, already replicated via
-     coordination), (ii) replicated cluster attributes (CAS, exists), or (iii) a
-     dedicated off-raft gossip. Membership is high-churn -> prefer bounded-rate/
-     advisory; the gate is the correctness backstop so the plan can be eventually-
-     consistent. Cross-repo (ganglion generic vs fibril glue).
-  C. Distribution (transport out): controller's per-(cohort,partition) assignee
-     -> owner brokers -> apply_exclusive_assignment. Likely rides the same channel
-     as B / the controller loop (spawn_controller already leader-gated).
-  D. Controller integration: run cohort planning in the leader-gated controller
-     tick alongside placement; partition counts from the catalogue/partitioning
-     metadata; live members from B.
-DESIGN: gate remains the correctness backstop, so the global plan is advisory/
-eventually-consistent. Decide the B/C transport before building (see memory
-load-aware-future-direction off-raft stance).
+  TRANSPORT DECISION (2026-06-14): heartbeat labels in + controller computes +
+  plan out (reuses heartbeat/controller/snapshot; advisory, gate backstops; ~1
+  heartbeat lag, acceptable since lag affects balance convergence only, never
+  correctness — a departed member's partitions pause until re-applied, never
+  mis-deliver). Heartbeat interval is the responsiveness knob.
+
+  BRICK A — global plan computation — DONE (8ae9489): coordination.rs
+  ClusterCohortController (holds ExclusiveConsumerGroups for sticky-across-ticks/
+  owner-moves) + aggregate_cohort_membership (union per-broker reports, dedup by
+  cluster member id, keep largest target) + CohortPlan (partition->member). Plus
+  Broker::local_cohort_membership() snapshot (the heartbeat-label payload). 5
+  unit tests (balance/coverage/stickiness/empty/aggregation).
+  BRICK 2 (owner apply) — DONE (a6c52ae). MEMBER IDENTITY — DONE (243a594).
+
+  REMAINING — transport wiring (cross-repo glue; next):
+  B. Heartbeat emit/decode: serialize Broker::local_cohort_membership() into a
+     node heartbeat label (spawn_heartbeat_with_labels); controller decodes node
+     labels from the snapshot -> aggregate_cohort_membership.
+  C. Cohort controller loop (fibril, leader-gated using ganglion leader gate;
+     cohorts are domain so the loop lives in fibril, not generic ganglion):
+     each tick read labels -> aggregate -> partition counts from catalogue/
+     queue_partitioning -> ClusterCohortController.plan -> publish plans.
+  D. Plan distribution + owner apply: publish CohortPlan to the coordination
+     store (attributes/snapshot) the owners watch; owner watcher calls
+     Broker::apply_exclusive_assignment for its partitions. (Sub-decision: plan
+     publish format/keying — defer to build time.)
 
 DONE — Phase 2a (opt-in exclusive consumer groups, single-owner), Model A (client
 fan-in + per-partition consumer_group; server gates each partition to the assigned
