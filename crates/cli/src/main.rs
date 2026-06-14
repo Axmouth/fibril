@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use fibril_client::{ClientOptions, QueueConfig};
+use fibril_client::{ClientOptions, NewMessage, QueueConfig};
 use fibril_config::ServerConfig;
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +54,10 @@ enum Command {
 enum QueueCommand {
     /// Declare or update queue settings.
     Declare(DeclareQueueArgs),
+    /// Publish one UTF-8 text message and wait for confirmation.
+    Publish(PublishMessageArgs),
+    /// Consume and acknowledge messages from a queue.
+    Consume(ConsumeMessagesArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -219,6 +223,50 @@ struct DeclareQueueArgs {
     dlq_group: Option<String>,
 }
 
+#[derive(Debug, Parser)]
+struct PublishMessageArgs {
+    /// Queue topic to publish to.
+    topic: String,
+
+    /// Optional queue group namespace.
+    #[arg(long)]
+    group: Option<String>,
+
+    /// UTF-8 text payload.
+    #[arg(long)]
+    message: String,
+
+    /// Optional partition key for partitioned queues.
+    #[arg(long)]
+    partition_key: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct ConsumeMessagesArgs {
+    /// Queue topic to consume from.
+    topic: String,
+
+    /// Optional queue group namespace.
+    #[arg(long)]
+    group: Option<String>,
+
+    /// Number of messages to consume and acknowledge.
+    #[arg(long, default_value_t = 1)]
+    count: usize,
+
+    /// Subscription prefetch.
+    #[arg(long, default_value_t = 1)]
+    prefetch: u32,
+
+    /// Per-message wait timeout in milliseconds.
+    #[arg(long, default_value_t = 5_000)]
+    timeout_ms: u64,
+
+    /// Fail if any consumed message payload does not equal this text.
+    #[arg(long)]
+    expect: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum DlqPolicyArg {
     Discard,
@@ -248,6 +296,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
             match command {
                 QueueCommand::Declare(args) => declare_queue(&client, args).await?,
+                QueueCommand::Publish(args) => publish_message(&client, args).await?,
+                QueueCommand::Consume(args) => consume_messages(&client, args).await?,
             }
 
             client.shutdown().await;
@@ -360,6 +410,66 @@ async fn declare_queue(
 
     client.declare_queue(config).await?;
     println!("declared queue {topic}");
+    Ok(())
+}
+
+async fn publish_message(
+    client: &fibril_client::Client,
+    args: PublishMessageArgs,
+) -> anyhow::Result<()> {
+    let publisher = match normalize_group_arg(args.group.as_deref()) {
+        Some(group) => client.publisher_grouped(&args.topic, group)?,
+        None => client.publisher(&args.topic)?,
+    };
+    let mut message = NewMessage::content(args.message);
+    if let Some(partition_key) = args.partition_key {
+        message = message.partition_key(partition_key.into_bytes());
+    }
+    let offset = publisher.publish_confirmed(message).await?;
+    println!("published {} at offset {offset}", args.topic);
+    Ok(())
+}
+
+async fn consume_messages(
+    client: &fibril_client::Client,
+    args: ConsumeMessagesArgs,
+) -> anyhow::Result<()> {
+    if args.count == 0 {
+        bail!("--count must be greater than zero");
+    }
+
+    let mut builder = client.subscribe(&args.topic)?.prefetch(args.prefetch);
+    if let Some(group) = normalize_group_arg(args.group.as_deref()) {
+        builder = builder.group(group)?;
+    }
+    let mut subscription = builder.sub_manual_ack().await?;
+
+    for index in 0..args.count {
+        let message = tokio::time::timeout(
+            std::time::Duration::from_millis(args.timeout_ms),
+            subscription.recv(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "timed out after {}ms waiting for message {}",
+                args.timeout_ms,
+                index + 1
+            )
+        })?
+        .with_context(|| format!("subscription closed before message {}", index + 1))?;
+
+        let payload = String::from_utf8_lossy(&message.payload).to_string();
+        if let Some(expected) = &args.expect {
+            if &payload != expected {
+                bail!("expected payload {expected:?}, got {payload:?}");
+            }
+        }
+
+        message.complete().await?;
+        println!("{payload}");
+    }
+
     Ok(())
 }
 
@@ -781,5 +891,66 @@ mod tests {
         else {
             panic!("expected admin queues command");
         };
+    }
+
+    #[test]
+    fn parses_queue_publish_command() {
+        let cli = Cli::try_parse_from([
+            "fibrilctl",
+            "queue",
+            "publish",
+            "orders",
+            "--group",
+            "workers",
+            "--message",
+            "hello",
+            "--partition-key",
+            "customer-7",
+        ])
+        .unwrap();
+
+        let Command::Queue {
+            command: QueueCommand::Publish(args),
+        } = cli.command
+        else {
+            panic!("expected queue publish command");
+        };
+
+        assert_eq!(args.topic, "orders");
+        assert_eq!(args.group.as_deref(), Some("workers"));
+        assert_eq!(args.message, "hello");
+        assert_eq!(args.partition_key.as_deref(), Some("customer-7"));
+    }
+
+    #[test]
+    fn parses_queue_consume_command() {
+        let cli = Cli::try_parse_from([
+            "fibrilctl",
+            "queue",
+            "consume",
+            "orders",
+            "--count",
+            "2",
+            "--prefetch",
+            "4",
+            "--timeout-ms",
+            "250",
+            "--expect",
+            "hello",
+        ])
+        .unwrap();
+
+        let Command::Queue {
+            command: QueueCommand::Consume(args),
+        } = cli.command
+        else {
+            panic!("expected queue consume command");
+        };
+
+        assert_eq!(args.topic, "orders");
+        assert_eq!(args.count, 2);
+        assert_eq!(args.prefetch, 4);
+        assert_eq!(args.timeout_ms, 250);
+        assert_eq!(args.expect.as_deref(), Some("hello"));
     }
 }

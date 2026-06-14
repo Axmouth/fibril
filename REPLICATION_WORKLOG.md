@@ -97,6 +97,17 @@ return to `[1,2,3]`. Smoke passed with
 node remains a running process in this test, which is intentional: the tested
 operation is removing voting membership, not shutting down the broker.
 
+DONE — CLI data-plane smoke in cluster tryout (2026-06-14): `fibrilctl queue
+publish` and `fibrilctl queue consume` now provide a tiny operator/data-plane
+round trip. `scripts/cluster-tryout.sh --ganglion` declares `orders`, waits for
+assignment, publishes one confirmed text message through a non-owner broker when
+possible, then consumes and acknowledges it through another broker when
+possible. This verifies that connecting to an ordinary broker endpoint routes or
+redirects correctly for the simplest public client path. Smoke passed with
+`--nodes 3 --ganglion --summary --resource-summary --admin-wait-secs 5
+--cluster-wait-secs 45 --port-offset 18000 --dynamic-membership`: owner
+`broker-1`, publish through `broker-2`, consume through `broker-3`.
+
 VOTER GUIDANCE: more voters increase tolerated voter failures according to
 quorum math, but they also increase metadata write cost and convergence load.
 Large all-voter local runs are useful stress tests. The intended production

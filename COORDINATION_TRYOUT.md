@@ -91,11 +91,15 @@ The script also exercises the current server-side integration:
 - declares an `orders` queue through node 1, even when another node is the raft leader
 - waits for the embedded controller to assign an owner, follower set, and epoch
 - checks every node sees the same assignment through topology
+- publishes one confirmed message through a non-owner broker when possible
+- consumes and acknowledges that message through another broker when possible
 - updates runtime settings on node 1
 - waits for the replicated settings document to apply on the other nodes
 
 That makes this a useful smoke test for the coordination path, not only a
-topology display demo.
+topology display demo. The publish/consume step intentionally connects to
+ordinary public broker endpoints instead of the owner endpoint where possible,
+so it catches obvious client routing or redirect regressions.
 
 Pass `--dynamic-membership` to add one extra live server after the initial
 cluster is healthy, promote it into the coordination voting set through the

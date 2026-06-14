@@ -554,6 +554,34 @@ if [[ "$GANGLION" == true ]]; then
         FAILED=1
       fi
     done
+
+    owner_node="${owner#broker-}"
+    if ! [[ "$owner_node" =~ ^[0-9]+$ ]]; then
+      echo "FAIL: assignment owner is not a broker-N id: $owner" >&2
+      FAILED=1
+    else
+      publish_node=1
+      if [[ "$publish_node" -eq "$owner_node" && "$NODES" -ge 2 ]]; then
+        publish_node=2
+      fi
+      consume_node="$NODES"
+      if [[ "$consume_node" -eq "$publish_node" && "$NODES" -ge 2 ]]; then
+        consume_node=1
+      fi
+      payload="cluster-smoke-$RANDOM-$RANDOM"
+
+      echo "publishing and consuming one message through public client routing..."
+      echo "  owner=$owner publish_node=broker-$publish_node consume_node=broker-$consume_node"
+      "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + publish_node))" \
+        queue publish orders --message "$payload" >/dev/null \
+        || { echo "FAIL: publish smoke failed" >&2; FAILED=1; }
+      "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + consume_node))" \
+        queue consume orders --timeout-ms 10000 --expect "$payload" >/dev/null \
+        || { echo "FAIL: consume smoke failed" >&2; FAILED=1; }
+      if [[ "$FAILED" -eq 0 ]]; then
+        echo "  data-plane smoke delivered expected payload"
+      fi
+    fi
   fi
 
   # Replicated runtime settings: PUT on node 1 must become effective on all.
