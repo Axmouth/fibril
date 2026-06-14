@@ -2,6 +2,107 @@
 
 Branch: `replication-sharding-plan`
 
+<!-- =================== RESUME HERE (2026-06-14) =================== -->
+## RESUME HERE — Phase 2a consumer-groups, broker/handler wiring
+
+STATE: all green (fibril 35 suites; keratin 158+; broker 146 tests). Recent
+commits on this branch: 6659718 (exclusive-assignee delivery gate),
+b56618f (wire Subscribe.consumer_group), 0228c9c (ExclusiveConsumerGroups
+registry), c28dd68 (ConsumerGroupState), d91a23a (BalancedConsumerGroupAssignor),
+833fa49 (B6 e2e). NOTE: keratin commits are LOCAL on branch
+`replication-sharding-plan`, NOT pushed; fibril builds against them via the
+[patch] in fibril/Cargo.toml. Push keratin before CI/others build.
+
+DONE (consumer-groups data plane + delivery gate, all in fibril_broker::coordination
++ broker.rs):
+- BalancedConsumerGroupAssignor: coverage-first balanced deal (ceil/floor),
+  per-consumer target = soft under_provisioned signal (never caps coverage).
+- ConsumerGroupState: members -> per-member GroupAssignmentDelta {added, revoked,
+  assigned} + generation bump on change.
+- ExclusiveConsumerGroups registry: ConsumerGroupState per ConsumerGroupKey
+  (topic, group, consumer_group-id); join/leave; drops group on last leave.
+- Wire: Subscribe.consumer_group: Option<String> (serde default None). None =
+  competing (unchanged); Some(id) = opt-in exclusive cohort. Handler ignores it
+  so far (no-op).
+- Broker delivery GATE: QueueLoopState.exclusive_assignee (AtomicU64, sentinel
+  NO_EXCLUSIVE_ASSIGNEE). Delivery loop filters consumers to the assignee.
+  Broker::set_exclusive_assignee(topic, partition, group, Some(sub_id)|None).
+  None = competing. Reassign keeps prior assignee's in-flight (drain/standby free).
+
+DESIGN (locked): exclusive groups are OPT-IN; plain subscribe stays competing
+(unchanged). Single-owner scope (Phase 2a). Each partition -> exactly one member
+(ordering). See memories consumer-partition-assignment-model, subscription-fanin-
+model, product-philosophy-just-works.
+
+REMAINING WIRING (the handler/broker glue) — with an OPEN DECISION to resolve first:
+
+OPEN DECISION — how the gate gets fed (pick before coding):
+- Model A (RECOMMENDED): client keeps fan-in (subscribes to ALL partitions) but
+  passes consumer_group=G on each per-partition Subscribe. Server, per exclusive
+  Subscribe, records (group, member, partition)->sub_id in a broker-side map,
+  (re)computes assignment, and sets each partition's gate to the assigned
+  member's sub_id. Reuses existing client fan-in; minimal client change (pass the
+  id). COMPLICATION: incremental ramp-up — a member is "in the group" on its
+  first exclusive Subscribe, but its sub_id for a given partition is only known
+  once it has subscribed there; so when setting a partition's gate, if the
+  assigned member hasn't subscribed to that partition yet, fall back to gating
+  the assigned member only once known (until then, that partition has no eligible
+  exclusive consumer subscribed -> leave it gated to the assignee sub_id once it
+  arrives; do NOT leave it open=competing). Recompute+reset gates on every
+  exclusive Subscribe AND unsubscribe/disconnect.
+- Model B: client sends ONE join (Subscribe consumer_group=G, partition ignored);
+  server fans in server-side. Atomic membership, BUT conflicts with the client's
+  per-subscription sub_id model (server-created sub_ids the client didn't request)
+  -> needs a different client delivery model. More work. Not recommended.
+
+WIRING STEPS (assuming Model A):
+1. Put a shared ExclusiveConsumerGroups on Broker (Arc<Mutex<>>), assignor +
+   target_per_consumer from config/runtime settings (settings-discipline: make
+   default_consumer_target a runtime setting). Plus a broker-side map
+   group -> member -> (partition -> sub_id) (could live next to the registry).
+   Member id = the connection's client_id (Uuid -> String; stable for reconcile).
+2. Partition count for (topic,group): resolve N from the partitioning metadata
+   (same source declare/topology uses) so the server knows the full partition set
+   to assign over.
+3. Handler Op::Subscribe arm: if sub.consumer_group = Some(G), after the normal
+   per-partition subscribe creates the ConsumerState (sub_id), call a broker
+   method exclusive_join(key=(topic,group,G), partition, member, sub_id) that:
+   records sub_id, joins/updates ConsumerGroupState, recomputes assignment, and
+   for EACH partition sets the gate to the assigned member's sub_id (if known).
+   Return assigned set in SubscribeOk (optional now; useful for the client).
+4. Leave: on unsubscribe/disconnect of an exclusive member, broker
+   exclusive_leave(...) removes its sub_ids, recomputes, resets gates (new
+   assignee per revoked partition), drops the group when empty.
+5. GRACEFUL DRAIN: largely free with the gate (revoked member keeps in-flight,
+   gets no new). For full correctness, only consider a revoked partition fully
+   released once the prior assignee's in-flight on it has settled; the new
+   assignee is already gated-in and receiving new. Confirm no double-delivery of
+   the SAME message (it won't: poll_ready leases; the prior assignee's leased
+   in-flight aren't re-polled until lease/TTL). Good enough for 2a; revisit TTL
+   redelivery edge.
+6. e2e (handler_tests, real broker + protocol listener, like
+   multi_partition_publish_subscribe_is_isolated_e2e): two wire connections both
+   Subscribe(consumer_group="g") to a 2-partition queue, publish to both
+   partitions, assert each connection receives only its assigned partition's
+   message (ordered); then disconnect one and assert the other takes over both.
+7. Client: SubscriptionBuilder.consumer_group(id) -> pass on each per-partition
+   Subscribe (fan-in unchanged). Optional: use returned assignment to skip
+   subscribing unassigned partitions (optimization; not required since gate
+   handles correctness).
+
+CODE POINTERS: broker delivery loop + gate = crates/broker/src/broker.rs
+(QueueLoopState, spawn_delivery_loop ~consumers.retain). assignor/state/registry
+= crates/broker/src/coordination.rs. handler subscribe arm =
+crates/protocol/src/v1/handler.rs (Op::Subscribe, install_subscription, SubKey).
+Phase 2a brick checklist is further down under "NEXT CANDIDATES".
+
+AFTER 2a: per-consumer target override (weighted assignor, near-term, easy);
+then load-metadata collection (observability); server.rs refactor "b"; combined
+Offset+Topic/Group newtype pass; docs (replication+partitioning+groups explainer
++ implemented-surface page). Phase 2b = cross-broker coordinator.
+<!-- =================== END RESUME HERE =================== -->
+
+
 This is the running feature log for replication, partition ownership, and
 sharding work. It should record what was tried, what was rejected, what worked,
 and what remains pending.
