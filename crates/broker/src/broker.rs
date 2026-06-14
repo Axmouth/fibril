@@ -1046,6 +1046,20 @@ impl QueueLoopState {
 /// to all competing consumers.
 type GateUpdate = (Partition, Option<ConsumerId>);
 
+/// A member's exclusive-cohort assignment change, pushed to that member's
+/// connection (informational; the gate enforces exclusivity regardless). The
+/// protocol layer turns this into an `AssignmentChanged` frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExclusiveAssignmentUpdate {
+    pub topic: Topic,
+    pub group: Option<Group>,
+    pub consumer_group: String,
+    pub generation: u64,
+    pub assigned: Vec<Partition>,
+    pub added: Vec<Partition>,
+    pub revoked: Vec<Partition>,
+}
+
 /// Broker-side routing for opt-in exclusive consumer groups (Model A): the pure
 /// assignment registry plus the live `member -> partition -> sub_id` map needed
 /// to translate a computed assignment into concrete per-partition delivery-gate
@@ -1060,6 +1074,13 @@ struct ExclusiveGroupRouter {
     /// desired max partitions). Members absent here fall back to the group
     /// default. Fed to the assignor on every recompute.
     targets: HashMap<ConsumerGroupKey, HashMap<String, usize>>,
+    /// cohort -> member -> channel pushing that member's assignment changes to
+    /// its connection. Registered by the handler on the member's first exclusive
+    /// subscribe; dropped when the member leaves (closing the forwarder).
+    notifiers: HashMap<
+        ConsumerGroupKey,
+        HashMap<String, mpsc::UnboundedSender<ExclusiveAssignmentUpdate>>,
+    >,
 }
 
 impl ExclusiveGroupRouter {
@@ -1073,7 +1094,20 @@ impl ExclusiveGroupRouter {
             ),
             subs: HashMap::new(),
             targets: HashMap::new(),
+            notifiers: HashMap::new(),
         }
+    }
+
+    /// Register a member's assignment-change channel (idempotent per member —
+    /// re-registering replaces the sender, closing any prior forwarder).
+    fn register_notifier(
+        &mut self,
+        key: ConsumerGroupKey,
+        member: String,
+    ) -> mpsc::UnboundedReceiver<ExclusiveAssignmentUpdate> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.notifiers.entry(key).or_default().insert(member, tx);
+        rx
     }
 
     /// Record an exclusive member's subscription to one partition (with the broker
@@ -1130,6 +1164,14 @@ impl ExclusiveGroupRouter {
             group_targets.remove(member);
             if group_targets.is_empty() {
                 self.targets.remove(&key);
+            }
+        }
+        // Drop the departed member's notifier (closes its forwarder); survivors
+        // are notified of their new partitions by the recompute below.
+        if let Some(group_notifiers) = self.notifiers.get_mut(&key) {
+            group_notifiers.remove(member);
+            if group_notifiers.is_empty() {
+                self.notifiers.remove(&key);
             }
         }
         self.recompute(&key, &[partition])
@@ -1189,6 +1231,28 @@ impl ExclusiveGroupRouter {
                 None => updates.push((partition, None)),
             }
         }
+
+        // Push assignment-change notifications to members whose set changed and
+        // that have a registered notifier (informational; gate already applied).
+        if let Some(group_notifiers) = self.notifiers.get(key) {
+            for (member, change) in &delta.per_member {
+                if change.added.is_empty() && change.revoked.is_empty() {
+                    continue;
+                }
+                if let Some(tx) = group_notifiers.get(member) {
+                    let _ = tx.send(ExclusiveAssignmentUpdate {
+                        topic: key.topic.clone(),
+                        group: key.group.clone(),
+                        consumer_group: key.consumer_group.clone(),
+                        generation: delta.generation,
+                        assigned: change.assigned.clone(),
+                        added: change.added.clone(),
+                        revoked: change.revoked.clone(),
+                    });
+                }
+            }
+        }
+
         updates
     }
 }
@@ -2626,6 +2690,23 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.exclusive_groups
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Register a channel that receives a member's exclusive-cohort assignment
+    /// changes, to be forwarded to its connection as `AssignmentChanged` pushes.
+    /// Call once per (connection, cohort) before the first `exclusive_group_join`
+    /// so the member observes its initial assignment. The receiver closes when the
+    /// member leaves the cohort.
+    pub fn register_exclusive_member(
+        &self,
+        topic: &str,
+        partition_group: Option<&str>,
+        consumer_group: &str,
+        member: impl Into<String>,
+    ) -> mpsc::UnboundedReceiver<ExclusiveAssignmentUpdate> {
+        let key = ConsumerGroupKey::new(topic, partition_group, consumer_group);
+        self.lock_exclusive_groups()
+            .register_notifier(key, member.into())
     }
 
     /// Register an exclusive consumer-group member's subscription to one

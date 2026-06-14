@@ -50,6 +50,9 @@ pub enum Op {
     Deliver = 40,
     Ack = 41,
     Nack = 42,
+    /// Server->client push: a member's exclusive consumer-group assignment
+    /// changed (informational; the per-partition gate enforces it regardless).
+    AssignmentChanged = 43,
 
     Ping = 50,
     Pong = 51,
@@ -473,6 +476,23 @@ pub struct Deliver {
     pub content_type: Option<ContentType>,
     pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
+}
+
+/// Server->client push notifying an exclusive consumer-group member that its
+/// partition assignment changed. Purely informational: the broker's per-partition
+/// delivery gate enforces exclusivity regardless of whether the client acts on
+/// this. `generation` increases per cohort rebalance so stale notifications can be
+/// fenced. `assigned` is the member's full current set; `added`/`revoked` are the
+/// deltas since its previous assignment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssignmentChanged {
+    pub topic: String,
+    pub group: Option<String>,
+    pub consumer_group: String,
+    pub generation: u64,
+    pub assigned: Vec<Partition>,
+    pub added: Vec<Partition>,
+    pub revoked: Vec<Partition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

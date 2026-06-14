@@ -3156,8 +3156,37 @@ async fn subscribe_exclusive(
         )
         .await
         .unwrap();
-    let frame = recv_frame(framed).await;
-    assert_eq!(frame.opcode, Op::SubscribeOk as u16);
+    // AssignmentChanged pushes may interleave with the SubscribeOk; skip them.
+    loop {
+        let frame = recv_frame(framed).await;
+        if frame.opcode == Op::AssignmentChanged as u16 {
+            continue;
+        }
+        assert_eq!(frame.opcode, Op::SubscribeOk as u16);
+        break;
+    }
+}
+
+/// Read frames until an `AssignmentChanged` satisfying `pred`, returning it
+/// (skipping any other frames, e.g. SubscribeOk / Deliver / earlier assignments).
+async fn recv_assignment_until(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    pred: impl Fn(&fibril_protocol::v1::AssignmentChanged) -> bool,
+) -> fibril_protocol::v1::AssignmentChanged {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let frame = recv_frame(framed).await;
+            if frame.opcode == Op::AssignmentChanged as u16 {
+                let assignment: fibril_protocol::v1::AssignmentChanged =
+                    try_decode(&frame).unwrap();
+                if pred(&assignment) {
+                    break assignment;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap()
 }
 
 async fn publish_to_partition(
@@ -3361,6 +3390,86 @@ async fn exclusive_consumer_group_member_target_shapes_split_e2e() {
     drop(capped);
     drop(flex);
     drop(publisher);
+    drop(dir);
+}
+
+/// The server pushes AssignmentChanged to a cohort member when its partition set
+/// changes: the sole member is assigned both partitions, then a second member
+/// joining revokes one from the first and assigns it to the newcomer.
+#[tokio::test]
+async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
+    let (broker, dir) = open_test_broker().await;
+    let (addr, shutdown) =
+        start_multi_connection_listener(ConnectionSettings::new(None), broker.clone()).await;
+
+    let topic = "exgroup-push";
+    let cohort = "g";
+
+    // Raw subscribe sends (no eager read) so the AssignmentChanged pushes are not
+    // consumed while waiting for SubscribeOk.
+    async fn send_sub(
+        framed: &mut Framed<TcpStream, ProtoCodec>,
+        req: u64,
+        topic: &str,
+        partition: u32,
+        cohort: &str,
+    ) {
+        framed
+            .send(
+                try_encode(
+                    Op::Subscribe,
+                    req,
+                    &Subscribe {
+                        topic: topic.into(),
+                        partition: Partition::new(partition),
+                        group: None,
+                        prefetch: 8,
+                        auto_ack: true,
+                        consumer_group: Some(cohort.into()),
+                        consumer_target: None,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut a).await;
+    send_sub(&mut a, 10, topic, 0, cohort).await;
+    send_sub(&mut a, 11, topic, 1, cohort).await;
+
+    // Sole member: eventually assigned both partitions.
+    let sole = recv_assignment_until(&mut a, |asg| asg.assigned.len() == 2).await;
+    assert_eq!(sole.topic, topic);
+    assert_eq!(sole.consumer_group, cohort);
+    let mut both: Vec<u32> = sole.assigned.iter().map(|p| p.id()).collect();
+    both.sort();
+    assert_eq!(both, vec![0, 1]);
+
+    // Second member joins -> the cohort rebalances to one partition each.
+    let mut b = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut b).await;
+    send_sub(&mut b, 20, topic, 0, cohort).await;
+    send_sub(&mut b, 21, topic, 1, cohort).await;
+
+    // b is told it owns exactly one partition; a is told one was revoked.
+    let b_asg = recv_assignment_until(&mut b, |asg| asg.assigned.len() == 1).await;
+    let a_asg = recv_assignment_until(&mut a, |asg| {
+        asg.assigned.len() == 1 && !asg.revoked.is_empty()
+    })
+    .await;
+    let a_part = a_asg.assigned[0].id();
+    let b_part = b_asg.assigned[0].id();
+    assert_ne!(a_part, b_part, "the two members own different partitions");
+    let mut covered = vec![a_part, b_part];
+    covered.sort();
+    assert_eq!(covered, vec![0, 1], "between them they cover the queue");
+
+    shutdown.cancel();
+    drop(a);
+    drop(b);
     drop(dir);
 }
 

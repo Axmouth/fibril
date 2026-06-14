@@ -18,7 +18,8 @@ use arc_swap::ArcSwap;
 use fibril_broker::{
     broker::{
         Broker, BrokerError, BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords,
-        ConsumerConfig, ConsumerHandle, ConsumerLease, PublisherHandle, SettleRequest, SettleType,
+        ConsumerConfig, ConsumerHandle, ConsumerLease, ExclusiveAssignmentUpdate, PublisherHandle,
+        SettleRequest, SettleType,
     },
     queue_engine::{
         DLQDiscardPolicyWire, DeclareMeta, FollowerStateCheckpointInstall, GlobalDLQ, Message,
@@ -71,9 +72,16 @@ pub trait QueueDeclareCoordinator: Send + Sync {
     ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
 }
 
+/// Identifies an exclusive cohort this connection participates in:
+/// `(topic, group, consumer_group)`.
+type CohortKey = (String, Option<String>, String);
+
 struct ConnState {
     authenticated: bool,
     subs: HashMap<SubKey, SubState>,
+    /// One assignment-change forwarder task per exclusive cohort this connection
+    /// is a member of (pushes `AssignmentChanged` frames). Aborted on cleanup.
+    exclusive_forwarders: HashMap<CohortKey, tokio::task::JoinHandle<()>>,
 }
 
 fn has_reserved_headers(headers: &HashMap<String, String>) -> bool {
@@ -555,6 +563,7 @@ impl LogicalConnection {
             state: Mutex::new(ConnState {
                 authenticated: false,
                 subs: HashMap::new(),
+                exclusive_forwarders: HashMap::new(),
             }),
             transport,
             generation: AtomicU64::new(0),
@@ -605,10 +614,17 @@ async fn cleanup_connection_state(
 ) {
     broker.wait_for_pending_settles().await;
 
-    let drained_subs = {
+    let (drained_subs, drained_forwarders) = {
         let mut state = logical.state.lock().await;
-        state.subs.drain().collect::<Vec<_>>()
+        let subs = state.subs.drain().collect::<Vec<_>>();
+        let forwarders = state.exclusive_forwarders.drain().collect::<Vec<_>>();
+        (subs, forwarders)
     };
+
+    // Stop assignment forwarders (the broker also drops their senders on leave).
+    for (_cohort, handle) in drained_forwarders {
+        handle.abort();
+    }
 
     for ((topic, partition, group), sub) in drained_subs {
         sub.task.abort();
@@ -676,6 +692,45 @@ async fn remove_subscription(
     })
 }
 
+/// Spawn the per-(connection, cohort) task that forwards exclusive-group
+/// assignment changes to the client as `AssignmentChanged` frames. Ends when the
+/// member leaves the cohort (broker drops the sender) or the connection closes.
+fn spawn_assignment_forwarder(
+    logical: Arc<LogicalConnection>,
+    req_id_gen: Arc<ReqIdGenerator>,
+    metrics: Arc<TcpStats>,
+    mut updates: mpsc::UnboundedReceiver<ExclusiveAssignmentUpdate>,
+) -> tokio::task::JoinHandle<()> {
+    let mut transport_rx = logical.transport.subscribe();
+    tokio::spawn(async move {
+        while let Some(update) = updates.recv().await {
+            let msg = AssignmentChanged {
+                topic: update.topic,
+                group: update.group,
+                consumer_group: update.consumer_group,
+                generation: update.generation,
+                assigned: update.assigned,
+                added: update.added,
+                revoked: update.revoked,
+            };
+            let frame = match try_encode(Op::AssignmentChanged, req_id_gen.next_id(), &msg) {
+                Ok(frame) => frame,
+                Err(err) => {
+                    tracing::error!("Failed to encode AssignmentChanged frame: {err}");
+                    metrics.error();
+                    break;
+                }
+            };
+            if send_to_current_transport(&mut transport_rx, frame)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    })
+}
+
 struct InstallSubscriptionArgs {
     broker: Arc<Broker<StromaEngine>>,
     logical: Arc<LogicalConnection>,
@@ -733,6 +788,40 @@ async fn install_subscription(
     // partition so the broker can gate delivery to the assigned member. The
     // queue's delivery loop already exists (subscribe created it).
     if let Some(consumer_group) = args.consumer_group.as_deref() {
+        // Ensure exactly one assignment-change forwarder per (connection, cohort),
+        // registered BEFORE the join so this member sees its initial assignment.
+        let cohort_key: CohortKey = (
+            args.topic.clone(),
+            args.group.clone(),
+            consumer_group.to_string(),
+        );
+        let needs_forwarder = !args
+            .logical
+            .state
+            .lock()
+            .await
+            .exclusive_forwarders
+            .contains_key(&cohort_key);
+        if needs_forwarder {
+            let updates = args.broker.register_exclusive_member(
+                &args.topic,
+                args.group.as_deref(),
+                consumer_group,
+                args.client_id.to_string(),
+            );
+            let handle = spawn_assignment_forwarder(
+                args.logical.clone(),
+                args.req_id_gen.clone(),
+                args.metrics.clone(),
+                updates,
+            );
+            args.logical
+                .state
+                .lock()
+                .await
+                .exclusive_forwarders
+                .insert(cohort_key, handle);
+        }
         args.broker.exclusive_group_join(
             &args.topic,
             args.partition,

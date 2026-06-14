@@ -48,7 +48,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
-    sync::{Mutex, Notify, mpsc, oneshot},
+    sync::{Mutex, Notify, broadcast, mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
 
@@ -61,6 +61,27 @@ use fibril_protocol::v1::{
 // ===== Public API ============================================================
 
 pub use fibril_protocol::v1::ReconcilePolicy;
+
+/// A push from the broker telling this client that its assignment within an
+/// exclusive consumer group changed (see [`SubscriptionBuilder::consumer_group`]).
+///
+/// Purely informational — the broker enforces exclusivity server-side regardless
+/// of whether the app reacts. Use it for partition-affinity processing, metrics,
+/// or to drive an app-level drain on `revoked`. Subscribe via
+/// [`Client::assignment_events`]. `generation` increases per cohort rebalance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentEvent {
+    pub topic: String,
+    pub group: Option<String>,
+    pub consumer_group: String,
+    pub generation: u64,
+    /// The member's full current partition set.
+    pub assigned: Vec<Partition>,
+    /// Partitions newly assigned since the previous event.
+    pub added: Vec<Partition>,
+    /// Partitions taken away since the previous event (drain these).
+    pub revoked: Vec<Partition>,
+}
 
 /// Error type returned by the Fibril Rust client.
 ///
@@ -1130,8 +1151,16 @@ impl Client {
     ) -> FibrilResult<Self> {
         let address = Self::convert_address(address)?;
         let user_shutdown = Arc::new(AtomicBool::new(false));
-        let slot =
-            Arc::new(EngineSlot::connect(address, opts.clone(), user_shutdown.clone()).await?);
+        let (assignment_tx, _) = broadcast::channel(ASSIGNMENT_EVENT_CAPACITY);
+        let slot = Arc::new(
+            EngineSlot::connect(
+                address,
+                opts.clone(),
+                user_shutdown.clone(),
+                assignment_tx.clone(),
+            )
+            .await?,
+        );
         let mut pool = HashMap::new();
         pool.insert(address, slot);
         let warm_timeout_ms = opts.topology_warm_timeout_ms;
@@ -1143,6 +1172,7 @@ impl Client {
                 pool: parking_lot::RwLock::new(pool),
                 topology: ArcSwap::from_pointee(TopologyCache::default()),
                 round_robin: std::sync::atomic::AtomicUsize::new(0),
+                assignment_tx,
             }),
         };
         // Warm the topology cache once so the first publish spreads across
@@ -1229,6 +1259,18 @@ impl Client {
             topic: TopicName::parse(topic)?,
             group: GroupName::parse_optional(group)?,
         })
+    }
+
+    /// Subscribe to exclusive consumer-group assignment changes for this client.
+    ///
+    /// Each [`AssignmentEvent`] reports a cohort the client belongs to (via
+    /// [`SubscriptionBuilder::consumer_group`]) whose partition set changed.
+    /// Purely informational — the broker enforces exclusivity regardless — but
+    /// useful for partition-affinity work, metrics, or app-level drain on
+    /// `revoked`. The stream survives reconnects; a slow consumer may miss events
+    /// (broadcast lag). Returns a fresh receiver each call.
+    pub fn assignment_events(&self) -> broadcast::Receiver<AssignmentEvent> {
+        self.shared.assignment_tx.subscribe()
     }
 
     /// Start building a subscription to a topic.
@@ -1704,7 +1746,14 @@ struct ClientShared {
     topology: ArcSwap<TopologyCache>,
     /// Round-robin cursor for keyless publishes (spread across partitions).
     round_robin: std::sync::atomic::AtomicUsize,
+    /// Fan-out of exclusive consumer-group assignment changes to app subscribers.
+    /// Shared across reconnects so the stream survives a dropped connection.
+    assignment_tx: broadcast::Sender<AssignmentEvent>,
 }
+
+/// Buffer of assignment events retained per [`Client::assignment_events`]
+/// receiver before a slow consumer starts lagging (older events dropped).
+const ASSIGNMENT_EVENT_CAPACITY: usize = 256;
 
 /// Stable FNV-1a hash for partition selection. Must be deterministic across all
 /// clients so a given key always maps to the same partition (per-key ordering).
@@ -1756,7 +1805,13 @@ impl ClientShared {
             return Ok(slot);
         }
         let slot = Arc::new(
-            EngineSlot::connect(addr, self.opts.clone(), self.user_shutdown.clone()).await?,
+            EngineSlot::connect(
+                addr,
+                self.opts.clone(),
+                self.user_shutdown.clone(),
+                self.assignment_tx.clone(),
+            )
+            .await?,
         );
         let mut pool = self.pool.write();
         // Another task may have connected the same endpoint concurrently.
@@ -1822,6 +1877,8 @@ struct EngineSlot {
     subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
     engine: RwLock<Arc<EngineHandle>>,
     reconnect_lock: Mutex<()>,
+    /// Shared assignment-event fan-out (survives reconnects).
+    assignment_tx: broadcast::Sender<AssignmentEvent>,
 }
 
 impl EngineSlot {
@@ -1833,6 +1890,7 @@ impl EngineSlot {
         user_shutdown: Arc<AtomicBool>,
         subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
         engine: Arc<EngineHandle>,
+        assignment_tx: broadcast::Sender<AssignmentEvent>,
     ) -> Self {
         Self {
             address,
@@ -1841,6 +1899,7 @@ impl EngineSlot {
             subscriptions,
             engine: RwLock::new(engine),
             reconnect_lock: Mutex::new(()),
+            assignment_tx,
         }
     }
 
@@ -1849,19 +1908,27 @@ impl EngineSlot {
         address: SocketAddr,
         opts: ClientOptions,
         user_shutdown: Arc<AtomicBool>,
+        assignment_tx: broadcast::Sender<AssignmentEvent>,
     ) -> FibrilResult<Self> {
         let subscriptions = Arc::new(RwLock::new(HashMap::new()));
         let stream = TcpStream::connect(address)
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
         let framed = Framed::new(stream, ProtoCodec);
-        let engine = start_engine(framed, opts.clone(), subscriptions.clone()).await?;
+        let engine = start_engine(
+            framed,
+            opts.clone(),
+            subscriptions.clone(),
+            assignment_tx.clone(),
+        )
+        .await?;
         Ok(Self::from_engine(
             address,
             opts,
             user_shutdown,
             subscriptions,
             engine,
+            assignment_tx,
         ))
     }
 
@@ -1885,7 +1952,13 @@ impl EngineSlot {
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
 
         let framed = Framed::new(stream, ProtoCodec);
-        let new_engine = start_engine(framed, opts, self.subscriptions.clone()).await?;
+        let new_engine = start_engine(
+            framed,
+            opts,
+            self.subscriptions.clone(),
+            self.assignment_tx.clone(),
+        )
+        .await?;
         let outcome = ReconnectOutcome {
             resume_outcome: new_engine.resume_outcome,
         };
@@ -2121,6 +2194,7 @@ async fn start_engine<S>(
     mut framed: Framed<S, ProtoCodec>,
     opts: ClientOptions,
     subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
+    assignment_tx: broadcast::Sender<AssignmentEvent>,
 ) -> FibrilResult<Arc<EngineHandle>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2561,6 +2635,26 @@ where
                                     }
                                 }
                             }
+                        }
+                        x if x == Op::AssignmentChanged as u16 => {
+                            let changed: AssignmentChanged = match decode_protocol(&frame) {
+                                Ok(changed) => changed,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+                            // Best-effort fan-out: no subscribers (or a lagging
+                            // one) just means the app isn't watching assignments.
+                            let _ = assignment_tx.send(AssignmentEvent {
+                                topic: changed.topic,
+                                group: changed.group,
+                                consumer_group: changed.consumer_group,
+                                generation: changed.generation,
+                                assigned: changed.assigned,
+                                added: changed.added,
+                                revoked: changed.revoked,
+                            });
                         }
                         x if x == Op::SubscribeOk as u16 => {
                             let ok: SubscribeOk = match decode_protocol(&frame) {
@@ -3201,6 +3295,7 @@ impl Default for ClientOptions {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
+    use std::time::Duration;
 
     #[test]
     fn fnv1a_is_deterministic_and_distributes() {
@@ -3288,12 +3383,14 @@ mod tests {
         let (engine, rx) = engine_with_command_rx();
         let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let user_shutdown = Arc::new(AtomicBool::new(false));
+        let (assignment_tx, _) = broadcast::channel(ASSIGNMENT_EVENT_CAPACITY);
         let slot = Arc::new(EngineSlot::from_engine(
             address,
             opts.clone(),
             user_shutdown.clone(),
             Arc::new(RwLock::new(HashMap::new())),
             engine,
+            assignment_tx.clone(),
         ));
         let mut pool = HashMap::new();
         pool.insert(address, slot);
@@ -3306,6 +3403,7 @@ mod tests {
                     pool: parking_lot::RwLock::new(pool),
                     topology: ArcSwap::from_pointee(TopologyCache::default()),
                     round_robin: std::sync::atomic::AtomicUsize::new(0),
+                    assignment_tx,
                 }),
             },
             rx,
@@ -3549,6 +3647,84 @@ mod tests {
 
         client.shutdown().await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn assignment_changed_push_reaches_assignment_events() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (go_tx, go_rx) = oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut conn = Framed::new(conn, ProtoCodec);
+            let hello = conn.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            conn.send(
+                try_encode(
+                    Op::HelloOk,
+                    hello.request_id,
+                    &HelloOk {
+                        protocol_version: PROTOCOL_V1,
+                        owner_id: uuid::Uuid::new_v4(),
+                        client_id: uuid::Uuid::new_v4(),
+                        resume_token: uuid::Uuid::new_v4(),
+                        resume_outcome: ResumeOutcome::New,
+                        server_name: "fake".into(),
+                        compliance: COMPLIANCE_STRING.into(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+            // Send the push only once the test is listening (broadcast delivers
+            // only to receivers that exist at send time).
+            go_rx.await.unwrap();
+            conn.send(
+                try_encode(
+                    Op::AssignmentChanged,
+                    0,
+                    &AssignmentChanged {
+                        topic: "jobs".into(),
+                        group: None,
+                        consumer_group: "g".into(),
+                        generation: 7,
+                        assigned: vec![Partition::new(0), Partition::new(2)],
+                        added: vec![Partition::new(2)],
+                        revoked: vec![Partition::new(1)],
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            // Keep the connection alive until the test finishes.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let client = ClientOptions::new()
+            .disable_topology_warm()
+            .connect(addr)
+            .await
+            .unwrap();
+        let mut events = client.assignment_events();
+        go_tx.send(()).unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.topic, "jobs");
+        assert_eq!(event.consumer_group, "g");
+        assert_eq!(event.generation, 7);
+        assert_eq!(event.assigned, vec![Partition::new(0), Partition::new(2)]);
+        assert_eq!(event.added, vec![Partition::new(2)]);
+        assert_eq!(event.revoked, vec![Partition::new(1)]);
+
+        client.shutdown().await;
+        server.abort();
     }
 
     #[tokio::test]
