@@ -3,12 +3,13 @@
 Branch: `replication-sharding-plan`
 
 <!-- =================== RESUME HERE (2026-06-14) =================== -->
-## RESUME HERE — Phase 2a DONE + target override DONE + stickiness in progress
+## RESUME HERE — Phase 2a + target override + stickiness DONE; next = server.rs refactor / newtype pass / docs
 
-STATE: all green. Committed on `replication-sharding-plan`: ecc43c3 (2a wiring),
-0257dcc (per-consumer target override). NOTE: keratin commits are LOCAL, NOT
-pushed; fibril builds against them via the [patch] in fibril/Cargo.toml. Push
-keratin before CI/others build.
+STATE: all green (broker 56 unit + 99 integration; protocol 54 handler tests).
+Committed on `replication-sharding-plan`: ecc43c3 (2a wiring), 0257dcc (target
+override), dfcf54b (sticky assignor). NOTE: keratin commits are LOCAL, NOT pushed;
+fibril builds against them via the [patch] in fibril/Cargo.toml. Push keratin
+before CI/others build.
 
 DONE — Phase 2a (opt-in exclusive consumer groups, single-owner), Model A (client
 fan-in + per-partition consumer_group; server gates each partition to the assigned
@@ -22,13 +23,14 @@ coverage-first overflow, under_provisioned = member over its own target. Wire
 Subscribe.consumer_target: Option<u32> -> handler -> ExclusiveGroupRouter.targets
 -> reconcile. client SubscriptionBuilder::consumer_target(n). e2e capped=1of3.
 
-IN PROGRESS — Stickiness (this is the current task): minimize partition movement
-across rebalances (was: fresh deal each time -> needless churn = drain + cold
-start per moved partition). Plan: add `current` to ConsumerGroupAssignmentInput;
-new StickyConsumerGroupAssignor (retain valid current up to each member's balanced
-target load, then fill free partitions to under-target members — provably hits the
-same balanced loads with maximal retention; first assignment == balanced). Make it
-the broker default. ConsumerGroupState.rebalance passes self.assignment as current.
+DONE — Stickiness (dfcf54b): StickyConsumerGroupAssignor retains valid current
+partitions up to each member's balanced target load, then deals leftovers to
+under-target members (same balanced loads, max retention; first assignment ==
+balanced). `current` added to ConsumerGroupAssignmentInput; rebalance feeds
+self.assignment. Broker default is now Sticky. Shared least_loaded_member /
+balanced_target_loads helpers (Balanced reuses them). NOT done: cooperative
+incremental rebalance protocol (we recompute whole-set each change; fine for
+single-owner 2a).
 
 DECISION (2026-06-14): assignment-push to client (was "limitation #3") is DEFERRED.
 The per-partition gate already gives correctness + ~free failover (standbys stay
