@@ -712,6 +712,14 @@ impl ConsumerGroupState {
         self.rebalance()
     }
 
+    /// Seed the prior assignment used for stickiness, without rebalancing. Only
+    /// meaningful right after construction (before the first reconcile): it lets
+    /// a freshly elected controller carry a previously published plan forward so
+    /// the next reconcile stays sticky to it instead of computing a fresh one.
+    pub fn seed_assignment(&mut self, assignment: HashMap<String, Vec<Partition>>) {
+        self.assignment = assignment;
+    }
+
     /// Replace both the partition set and the membership in one rebalance. Used
     /// when the caller holds the authoritative view of who is in the cohort and
     /// which partitions they cover (the broker-side router), avoiding a
@@ -889,6 +897,25 @@ impl ExclusiveConsumerGroups {
         state.reconcile(partitions, members, member_targets)
     }
 
+    /// Seed a cohort's prior assignment for stickiness, but only if the cohort is
+    /// not already tracked (never clobber live state). A freshly elected
+    /// controller uses this to adopt the last published plan, so its first
+    /// computation keeps the existing assignment rather than churning the cluster.
+    pub fn seed_if_absent(
+        &mut self,
+        key: ConsumerGroupKey,
+        assignment: HashMap<String, Vec<Partition>>,
+    ) {
+        if self.groups.contains_key(&key) {
+            return;
+        }
+        let partitions: Vec<Partition> = assignment.values().flatten().copied().collect();
+        let mut state =
+            ConsumerGroupState::new(partitions, self.default_target_per_consumer, self.assignor.clone());
+        state.seed_assignment(assignment);
+        self.groups.insert(key, state);
+    }
+
     /// Remove `member`; returns the delta, or `None` if the group was unknown.
     /// Drops the group entry once its last member leaves.
     pub fn leave(&mut self, key: &ConsumerGroupKey, member: &str) -> Option<GroupAssignmentDelta> {
@@ -1025,6 +1052,23 @@ impl ClusterCohortController {
         Self {
             groups: ExclusiveConsumerGroups::new(assignor, default_target_per_consumer),
         }
+    }
+
+    /// Adopt a previously published plan as the sticky prior for a cohort, but
+    /// only if the controller has no state for it yet. A freshly elected
+    /// controller seeds from the published plans before its first tick so it
+    /// keeps the existing assignment instead of recomputing a different balanced
+    /// one (which would needlessly churn the cluster on every leader change).
+    pub fn seed_published(
+        &mut self,
+        key: ConsumerGroupKey,
+        assignment: HashMap<Partition, String>,
+    ) {
+        let mut by_member: HashMap<String, Vec<Partition>> = HashMap::new();
+        for (partition, member) in assignment {
+            by_member.entry(member).or_default().push(partition);
+        }
+        self.groups.seed_if_absent(key, by_member);
     }
 
     /// Compute the assignment for every cohort in `cohorts` (already globally
@@ -2255,6 +2299,52 @@ mod tests {
 
     fn plans_key(plans: Vec<CohortPlan>) -> ConsumerGroupKey {
         plans.into_iter().next().unwrap().key
+    }
+
+    #[test]
+    fn seeded_controller_keeps_published_plan_across_leader_change() {
+        let key = ConsumerGroupKey::new("jobs", None, "default");
+        // A previously published plan that a fresh assignor would not necessarily
+        // reproduce on its own.
+        let published = HashMap::from([
+            (Partition::new(0), "m2".to_string()),
+            (Partition::new(1), "m2".to_string()),
+            (Partition::new(2), "m1".to_string()),
+            (Partition::new(3), "m1".to_string()),
+        ]);
+
+        // A freshly elected controller seeds from the published plan before its
+        // first tick, then plans over the same membership.
+        let mut seeded = cluster_controller();
+        seeded.seed_published(key.clone(), published.clone());
+        let plans = seeded.plan(
+            aggregate_cohort_membership(vec![local_report(
+                "jobs",
+                "default",
+                &[("m1", None), ("m2", None)],
+            )]),
+            |_| 4,
+        );
+        assert_eq!(
+            plans[0].assignment, published,
+            "seeded controller keeps the published plan (no leader-change churn)"
+        );
+
+        // Seeding is a no-op once the cohort is tracked: a later seed with a
+        // different plan must not clobber the live assignment.
+        seeded.seed_published(
+            key.clone(),
+            HashMap::from([(Partition::new(0), "m1".to_string())]),
+        );
+        let again = seeded.plan(
+            aggregate_cohort_membership(vec![local_report(
+                "jobs",
+                "default",
+                &[("m1", None), ("m2", None)],
+            )]),
+            |_| 4,
+        );
+        assert_eq!(again[0].assignment, published, "live state is not clobbered");
     }
 
     #[test]

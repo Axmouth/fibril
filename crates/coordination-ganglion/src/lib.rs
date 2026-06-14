@@ -739,6 +739,12 @@ where
     /// per-cohort state across ticks for stickiness), and publish the plans for
     /// owners to apply. Standbys (non-leaders) no-op. `partition_count` resolves a
     /// queue's full partition count (e.g. from `queue_partitioning`).
+    ///
+    /// Before planning, a controller with no state for a cohort seeds itself from
+    /// that cohort's published plan. A freshly elected leader therefore keeps the
+    /// existing assignment instead of recomputing a different balanced one, so a
+    /// leader change does not churn the cluster (the seed is a no-op once the
+    /// controller already tracks the cohort).
     pub async fn run_cohort_controller_tick(
         &self,
         controller: &mut ClusterCohortController,
@@ -748,6 +754,12 @@ where
             return Ok(());
         }
         let membership = self.global_cohort_membership();
+        for cohort in &membership {
+            let published = self.cohort_assignment(&cohort.key);
+            if !published.is_empty() {
+                controller.seed_published(cohort.key.clone(), published);
+            }
+        }
         for plan in controller.plan(membership, partition_count) {
             self.publish_cohort_assignment(&plan).await?;
         }
