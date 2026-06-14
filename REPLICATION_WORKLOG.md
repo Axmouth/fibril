@@ -3,13 +3,31 @@
 Branch: `replication-sharding-plan`
 
 <!-- =================== RESUME HERE (2026-06-14) =================== -->
-## RESUME HERE — Phase 2a + target override + stickiness DONE; next = server.rs refactor / newtype pass / docs
+## RESUME HERE — Phase 2a + target override + stickiness + assignment-push DONE; next = limitations (a)/(b)/(c) brainstorm, then server.rs refactor / newtype pass / docs
 
-STATE: all green (broker 56 unit + 99 integration; protocol 54 handler tests).
-Committed on `replication-sharding-plan`: ecc43c3 (2a wiring), 0257dcc (target
-override), dfcf54b (sticky assignor). NOTE: keratin commits are LOCAL, NOT pushed;
+STATE: all green (broker 59 unit + 99 integration; protocol 55 handler tests;
+client 23 unit). Committed on `replication-sharding-plan`: ecc43c3 (2a wiring),
+0257dcc (target override), dfcf54b (sticky assignor), 4510271 (large-scale sticky
+tests), b4eff77 (assignment push). NOTE: keratin commits are LOCAL, NOT pushed;
 fibril builds against them via the [patch] in fibril/Cargo.toml. Push keratin
 before CI/others build.
+
+DONE — Informational assignment push (b4eff77): the gate REMAINS the correctness
+mechanism; the server additionally pushes Op::AssignmentChanged {assigned, added,
+revoked, generation} to each cohort member on rebalance. ExclusiveGroupRouter holds
+a per-(cohort,member) notifier; handler runs one forwarder task per (connection,
+cohort); client exposes Client::assignment_events() -> broadcast<AssignmentEvent>.
+Client still fans in to all partitions (narrowing remains a future opt-in;
+gate de-risks it). See memory consumer-group-gate-vs-narrowing.
+
+OPEN LIMITATIONS to brainstorm/address next (grouped under the 2a checklist):
+(a) one exclusive cohort per (topic,group) — single gate slot (AtomicU64) keyed
+    (topic,partition,group); a 2nd cohort id on the same queue collides.
+(b) reconnect-reconcile rejoins exclusive subs as COMPETING (ReconcileSubscription
+    carries no cohort id / consumer_target) until the client re-subscribes.
+(c) partial single-partition unsubscribe of a cohort drops the WHOLE member from
+    the router (kept deliberately — better for the dominant full-disconnect
+    failover path; not exposed by the high-level client). Raw-protocol only.
 
 DONE — Phase 2a (opt-in exclusive consumer groups, single-owner), Model A (client
 fan-in + per-partition consumer_group; server gates each partition to the assigned
