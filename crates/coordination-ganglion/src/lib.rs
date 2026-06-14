@@ -69,8 +69,15 @@ pub fn cohort_assignment_attribute_key(key: &ConsumerGroupKey) -> String {
 /// Wire form of a cohort's `partition -> member` assignment. Stored as an entry
 /// SEQUENCE (not a map) so a `Partition` newtype is never used as a JSON map key
 /// (that path has bitten us before — see the v2 WAL pair-sequence fix).
+///
+/// `generation` is the durable plan version. The controller bumps it only when
+/// the assignment content changes, so owners can fence a stale slice and the
+/// cluster has one number to watch for convergence. It lives in the document
+/// (not an in-memory counter) so it survives a controller leader change.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CohortAssignmentDoc {
+    #[serde(default)]
+    pub generation: u64,
     pub entries: Vec<CohortAssignmentEntry>,
 }
 
@@ -80,9 +87,10 @@ pub struct CohortAssignmentEntry {
     pub member: String,
 }
 
-/// Serialize a computed plan's assignment for publishing (entries sorted by
-/// partition for a stable document — same value = generation no-op).
-pub fn encode_cohort_assignment(plan: &CohortPlan) -> String {
+/// A plan's assignment as a stable entry sequence (sorted by partition), so the
+/// same assignment always serializes identically and content comparisons are
+/// order-independent.
+fn cohort_assignment_entries(plan: &CohortPlan) -> Vec<CohortAssignmentEntry> {
     let mut entries: Vec<CohortAssignmentEntry> = plan
         .assignment
         .iter()
@@ -92,15 +100,33 @@ pub fn encode_cohort_assignment(plan: &CohortPlan) -> String {
         })
         .collect();
     entries.sort_by_key(|entry| entry.partition.id());
-    serde_json::to_string(&CohortAssignmentDoc { entries }).unwrap_or_else(|_| {
+    entries
+}
+
+/// Serialize a cohort assignment document for publishing.
+pub fn encode_cohort_assignment_doc(doc: &CohortAssignmentDoc) -> String {
+    serde_json::to_string(doc).unwrap_or_else(|_| {
         // entries are plain data; serialization cannot realistically fail.
-        String::from("{\"entries\":[]}")
+        String::from("{\"generation\":0,\"entries\":[]}")
     })
+}
+
+/// Serialize a computed plan's assignment at `generation` for publishing.
+pub fn encode_cohort_assignment(generation: u64, plan: &CohortPlan) -> String {
+    encode_cohort_assignment_doc(&CohortAssignmentDoc {
+        generation,
+        entries: cohort_assignment_entries(plan),
+    })
+}
+
+/// Parse a published cohort assignment document (generation + entries).
+pub fn decode_cohort_assignment_doc(raw: &str) -> Option<CohortAssignmentDoc> {
+    serde_json::from_str::<CohortAssignmentDoc>(raw).ok()
 }
 
 /// Parse a published cohort assignment into `partition -> member`.
 pub fn decode_cohort_assignment(raw: &str) -> HashMap<Partition, String> {
-    serde_json::from_str::<CohortAssignmentDoc>(raw)
+    decode_cohort_assignment_doc(raw)
         .map(|doc| {
             doc.entries
                 .into_iter()
@@ -664,15 +690,31 @@ where
     }
 
     /// Publish a cohort's computed assignment as a replicated cluster attribute
-    /// for owner brokers to read and apply. Leader-or-forwarded; same-value writes
-    /// are generation no-ops, so re-publishing a stable plan is cheap.
+    /// for owner brokers to read and apply. Leader-or-forwarded.
+    ///
+    /// The durable plan generation bumps only when the assignment content changes
+    /// against what is already published, so re-publishing a stable plan is a
+    /// same-value write (a no-op that keeps the generation). Only the leader runs
+    /// the controller, so this read-then-write needs no CAS. Reading the
+    /// generation back from the committed document also keeps it monotonic across
+    /// a leader change.
     pub async fn publish_cohort_assignment(
         &self,
         plan: &CohortPlan,
     ) -> Result<(), OpenraftAdapterError> {
+        let current = self.cohort_assignment_doc(&plan.key);
+        let entries = cohort_assignment_entries(plan);
+        let generation = match &current {
+            Some(doc) if doc.entries == entries => doc.generation,
+            Some(doc) => doc.generation + 1,
+            None => 0,
+        };
         self.set_cluster_attribute(
             cohort_assignment_attribute_key(&plan.key),
-            encode_cohort_assignment(plan),
+            encode_cohort_assignment_doc(&CohortAssignmentDoc {
+                generation,
+                entries,
+            }),
         )
         .await
     }
@@ -682,6 +724,14 @@ where
         self.cluster_attribute(&cohort_assignment_attribute_key(key))
             .map(|raw| decode_cohort_assignment(&raw))
             .unwrap_or_default()
+    }
+
+    /// Read a cohort's published assignment document (generation + entries), if
+    /// any. Owners use the generation to fence a stale slice and to report which
+    /// plan version they have applied.
+    pub fn cohort_assignment_doc(&self, key: &ConsumerGroupKey) -> Option<CohortAssignmentDoc> {
+        self.cluster_attribute(&cohort_assignment_attribute_key(key))
+            .and_then(|raw| decode_cohort_assignment_doc(&raw))
     }
 
     /// One cohort-controller iteration: as the leader, aggregate cluster-wide
@@ -1594,11 +1644,22 @@ mod cohort_transport_tests {
                 (Partition::new(2), "m2".to_string()),
             ]),
         };
-        let encoded = encode_cohort_assignment(&plan);
+        let encoded = encode_cohort_assignment(7, &plan);
         // Entry sequence, not a map keyed by Partition.
         assert!(encoded.contains("\"entries\""));
         assert_eq!(decode_cohort_assignment(&encoded), plan.assignment);
+        assert_eq!(decode_cohort_assignment_doc(&encoded).unwrap().generation, 7);
         assert!(decode_cohort_assignment("garbage").is_empty());
+        assert!(decode_cohort_assignment_doc("garbage").is_none());
+    }
+
+    #[test]
+    fn assignment_doc_defaults_generation_for_old_documents() {
+        // A document written before the generation field decodes as generation 0.
+        let legacy = r#"{"entries":[{"partition":0,"member":"m1"}]}"#;
+        let doc = decode_cohort_assignment_doc(legacy).expect("legacy doc decodes");
+        assert_eq!(doc.generation, 0);
+        assert_eq!(doc.entries.len(), 1);
     }
 
     #[test]
@@ -2698,6 +2759,96 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+
+        coordination.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cohort_assignment_generation_bumps_only_on_change() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node should start");
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            ganglion_openraft::openraft::BasicNode::new("coordinator-1"),
+        );
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("single node elects itself");
+
+        let coordination = GanglionCoordination::new("broker-a", raft_node);
+        let key = ConsumerGroupKey::new("jobs", None, "default");
+
+        // Wait until a publish becomes visible at the expected generation.
+        let await_generation = |expected: u64, assignment: HashMap<Partition, String>| {
+            let coordination = &coordination;
+            let key = key.clone();
+            async move {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    if let Some(doc) = coordination.cohort_assignment_doc(&key) {
+                        let map: HashMap<Partition, String> = doc
+                            .entries
+                            .iter()
+                            .map(|e| (e.partition, e.member.clone()))
+                            .collect();
+                        if doc.generation == expected && map == assignment {
+                            break;
+                        }
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "cohort assignment never reached generation {expected}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        };
+
+        let plan_a = CohortPlan {
+            key: key.clone(),
+            assignment: HashMap::from([
+                (Partition::new(0), "m1".to_string()),
+                (Partition::new(1), "m2".to_string()),
+            ]),
+        };
+        // First publish: generation 0.
+        coordination
+            .publish_cohort_assignment(&plan_a)
+            .await
+            .expect("publish a");
+        await_generation(0, plan_a.assignment.clone()).await;
+
+        // Republishing the same assignment is a no-op: generation holds at 0.
+        coordination
+            .publish_cohort_assignment(&plan_a)
+            .await
+            .expect("republish a");
+        await_generation(0, plan_a.assignment.clone()).await;
+        assert_eq!(
+            coordination.cohort_assignment_doc(&key).unwrap().generation,
+            0,
+            "stable plan must not bump the generation"
+        );
+
+        // A changed assignment bumps the generation to 1.
+        let plan_b = CohortPlan {
+            key: key.clone(),
+            assignment: HashMap::from([
+                (Partition::new(0), "m1".to_string()),
+                (Partition::new(1), "m1".to_string()),
+            ]),
+        };
+        coordination
+            .publish_cohort_assignment(&plan_b)
+            .await
+            .expect("publish b");
+        await_generation(1, plan_b.assignment.clone()).await;
 
         coordination.raft_node().shutdown().await.expect("shutdown");
     }
