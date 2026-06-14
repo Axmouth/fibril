@@ -458,6 +458,7 @@ async fn framed_subscribe(
                     group: group.map(str::to_string),
                     prefetch: 1,
                     auto_ack,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -550,6 +551,7 @@ async fn reconcile_after_resume_keeps_matching_subscription() {
                     group: Some("workers".into()),
                     prefetch: 1,
                     auto_ack: false,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -625,6 +627,7 @@ async fn reconcile_after_resume_closes_mismatched_subscription() {
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -3059,6 +3062,7 @@ async fn multi_partition_publish_subscribe_is_isolated_e2e() {
                         group: None,
                         prefetch: 8,
                         auto_ack: true,
+                        consumer_group: None,
                     },
                 )
                 .unwrap(),
@@ -3391,6 +3395,7 @@ async fn unowned_subscribe_returns_not_owner_error_and_keeps_connection_open() {
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -3422,6 +3427,7 @@ async fn duplicate_subscribe_returns_conflict_and_keeps_connection_open() {
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -3452,6 +3458,7 @@ async fn publish_content_type_header_is_delivered_as_metadata() {
                     group: None,
                     prefetch: 1,
                     auto_ack: true,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -3583,6 +3590,7 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
                     group: None,
                     prefetch: 1,
                     auto_ack: true,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -3653,6 +3661,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -3768,6 +3777,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -3787,6 +3797,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     group: None,
                     prefetch: 1,
                     auto_ack: false,
+                    consumer_group: None,
                 },
             )
             .unwrap(),
@@ -4031,6 +4042,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
                     group: Some("workers".into()),
                     prefetch: 20,
                     auto_ack: true,
+                    consumer_group: None,
                 },
             )
             .unwrap(),

@@ -58,6 +58,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             group: Some("g1".into()),
             prefetch: 100,
             auto_ack: true,
+            consumer_group: None,
         },
     )?)
     .await?;

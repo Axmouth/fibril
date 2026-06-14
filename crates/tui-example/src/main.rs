@@ -648,6 +648,7 @@ pub async fn visual_client(
             group: Some("g1".to_string()),
             prefetch: 100,
             auto_ack: true,
+            consumer_group: None,
         },
     )?)
     .await?;

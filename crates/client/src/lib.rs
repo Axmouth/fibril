@@ -973,6 +973,7 @@ impl<'a> SubscriptionBuilder<'a> {
                 group: group.clone(),
                 prefetch,
                 auto_ack: false,
+                consumer_group: None,
             };
             receivers.push(subscribe_partition_manual(self.client, req).await?);
         }
@@ -997,6 +998,7 @@ impl<'a> SubscriptionBuilder<'a> {
                 group: group.clone(),
                 prefetch,
                 auto_ack: true,
+                consumer_group: None,
             };
             receivers.push(subscribe_partition_auto(self.client, req).await?);
         }

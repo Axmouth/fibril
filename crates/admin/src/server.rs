@@ -1749,6 +1749,7 @@ mod tests {
                         group: None,
                         prefetch: 1,
                         auto_ack: false,
+                        consumer_group: None,
                     },
                 )
                 .unwrap(),
@@ -1768,6 +1769,7 @@ mod tests {
                         group: None,
                         prefetch: 1,
                         auto_ack: false,
+                        consumer_group: None,
                     },
                 )
                 .unwrap(),

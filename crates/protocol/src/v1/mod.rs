@@ -244,6 +244,13 @@ pub struct Subscribe {
     pub group: Option<String>,
     pub prefetch: u32,
     pub auto_ack: bool,
+    /// Opt-in exclusive consumer-group id. `None` (default) = the normal
+    /// competing-consumer behavior. `Some(id)` joins an exclusive cohort that
+    /// divides the queue's partitions (each partition to one member) for
+    /// per-partition ordering; the server assigns partitions and the wire
+    /// `partition` is ignored for the join.
+    #[serde(default)]
+    pub consumer_group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
