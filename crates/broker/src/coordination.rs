@@ -503,6 +503,16 @@ impl ConsumerGroupState {
         self.generation
     }
 
+    /// The queue's partition set this group is dividing.
+    pub fn partitions(&self) -> &[Partition] {
+        &self.partitions
+    }
+
+    /// True when the group has no members.
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
     /// The member's current partitions (empty if unknown / unassigned).
     pub fn assignment_for(&self, member: &str) -> &[Partition] {
         self.assignment
@@ -586,6 +596,96 @@ impl ConsumerGroupState {
             per_member,
             under_provisioned: result.under_provisioned,
         }
+    }
+}
+
+/// Identifies one exclusive consumer group: a named cohort of consumers that
+/// exclusively divide a logical queue `(topic, group)`'s partitions. The
+/// `consumer_group` id is the opt-in handle (consumers that pass the same id on
+/// the same queue share an exclusive assignment); plain consumers that pass none
+/// keep the default competing-consumer behavior and are not tracked here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConsumerGroupKey {
+    pub topic: Topic,
+    pub group: Option<Group>,
+    pub consumer_group: String,
+}
+
+impl ConsumerGroupKey {
+    pub fn new(
+        topic: impl Into<Topic>,
+        group: Option<&str>,
+        consumer_group: impl Into<String>,
+    ) -> Self {
+        Self {
+            topic: topic.into(),
+            group: group.map(str::to_string),
+            consumer_group: consumer_group.into(),
+        }
+    }
+}
+
+/// Broker-side registry of all live exclusive consumer groups: holds a
+/// [`ConsumerGroupState`] per [`ConsumerGroupKey`] and routes membership changes
+/// to it. Single-owner scope for now (the owner of a queue's partitions hosts
+/// this); a cross-broker coordinator is a later step.
+#[derive(Debug)]
+pub struct ExclusiveConsumerGroups {
+    assignor: Arc<dyn ConsumerGroupAssignor>,
+    target_per_consumer: Option<usize>,
+    groups: HashMap<ConsumerGroupKey, ConsumerGroupState>,
+}
+
+impl ExclusiveConsumerGroups {
+    pub fn new(
+        assignor: Arc<dyn ConsumerGroupAssignor>,
+        target_per_consumer: Option<usize>,
+    ) -> Self {
+        Self {
+            assignor,
+            target_per_consumer,
+            groups: HashMap::new(),
+        }
+    }
+
+    /// Add `member` to the group, (re)setting the queue's current partition set,
+    /// and return the resulting per-member assignment delta.
+    pub fn join(
+        &mut self,
+        key: ConsumerGroupKey,
+        partitions: Vec<Partition>,
+        member: impl Into<String>,
+    ) -> GroupAssignmentDelta {
+        let assignor = self.assignor.clone();
+        let target = self.target_per_consumer;
+        let state = self
+            .groups
+            .entry(key)
+            .or_insert_with(|| ConsumerGroupState::new(partitions.clone(), target, assignor));
+        // Keep the partition set current (e.g. repartitioning) before rebalancing.
+        if state.partitions() != partitions.as_slice() {
+            state.set_partitions(partitions);
+        }
+        state.add_member(member)
+    }
+
+    /// Remove `member`; returns the delta, or `None` if the group was unknown.
+    /// Drops the group entry once its last member leaves.
+    pub fn leave(&mut self, key: &ConsumerGroupKey, member: &str) -> Option<GroupAssignmentDelta> {
+        let state = self.groups.get_mut(key)?;
+        let delta = state.remove_member(member);
+        if state.is_empty() {
+            self.groups.remove(key);
+        }
+        Some(delta)
+    }
+
+    /// The member's currently-assigned partitions (empty if unknown).
+    pub fn assignment_for(&self, key: &ConsumerGroupKey, member: &str) -> &[Partition] {
+        self.groups
+            .get(key)
+            .map(|state| state.assignment_for(member))
+            .unwrap_or(&[])
     }
 }
 
@@ -1403,6 +1503,57 @@ mod tests {
             delta.generation, prev_gen,
             "re-applying the same membership is a no-op"
         );
+    }
+
+    fn exclusive_groups() -> ExclusiveConsumerGroups {
+        ExclusiveConsumerGroups::new(Arc::new(BalancedConsumerGroupAssignor), None)
+    }
+
+    fn parts(n: u32) -> Vec<Partition> {
+        (0..n).map(Partition::new).collect()
+    }
+
+    #[test]
+    fn exclusive_registry_assigns_and_redistributes_within_a_group() {
+        let mut registry = exclusive_groups();
+        let key = ConsumerGroupKey::new("jobs", None, "g1");
+
+        registry.join(key.clone(), parts(2), "c1");
+        assert_eq!(sorted_ids(registry.assignment_for(&key, "c1")), vec![0, 1]);
+
+        // Second member joins -> partitions split across c1 and c2.
+        registry.join(key.clone(), parts(2), "c2");
+        let mut covered = sorted_ids(registry.assignment_for(&key, "c1"));
+        covered.extend(sorted_ids(registry.assignment_for(&key, "c2")));
+        covered.sort();
+        assert_eq!(covered, vec![0, 1], "both partitions still covered");
+        assert_eq!(registry.assignment_for(&key, "c1").len(), 1);
+        assert_eq!(registry.assignment_for(&key, "c2").len(), 1);
+    }
+
+    #[test]
+    fn exclusive_registry_drops_group_when_last_member_leaves() {
+        let mut registry = exclusive_groups();
+        let key = ConsumerGroupKey::new("jobs", None, "g1");
+        registry.join(key.clone(), parts(2), "c1");
+
+        assert!(registry.leave(&key, "c1").is_some());
+        // Group gone: unknown member assignment is empty, and leaving again is None.
+        assert!(registry.assignment_for(&key, "c1").is_empty());
+        assert!(registry.leave(&key, "c1").is_none());
+    }
+
+    #[test]
+    fn exclusive_registry_groups_are_independent() {
+        let mut registry = exclusive_groups();
+        let g1 = ConsumerGroupKey::new("jobs", None, "g1");
+        let g2 = ConsumerGroupKey::new("jobs", None, "g2");
+        registry.join(g1.clone(), parts(2), "c1");
+        registry.join(g2.clone(), parts(2), "c2");
+
+        // Each group independently covers all partitions (separate exclusive cohorts).
+        assert_eq!(sorted_ids(registry.assignment_for(&g1, "c1")), vec![0, 1]);
+        assert_eq!(sorted_ids(registry.assignment_for(&g2, "c2")), vec![0, 1]);
     }
 
     #[test]

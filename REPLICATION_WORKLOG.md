@@ -2039,6 +2039,33 @@ Tests needed before implementing transition:
      narrows fan-in partition_set to its subset -> GRACEFUL DRAIN on revoke/leave
      (pause + settle in-flight before release; see consumer-partition-assignment-
      model). The assignor (Phase 1) + fan-in + partition_set are built for this.
+     DECISION (2026-06-14): exclusive consumer-groups are OPT-IN; plain subscribe
+     stays competing-consumers (current, unchanged). Phase 2a = single-owner.
+     Phase 2a brick sequence:
+       [x] assignor (Phase 1, d91a23a)
+       [x] ConsumerGroupState membership->delta state machine (c28dd68)
+       [x] ExclusiveConsumerGroups registry (broker-side, per group key) — DONE
+       [ ] wire opt-in: Subscribe.consumer_group: Option<String> (serde default)
+           — None = competing (unchanged); Some(id) = exclusive cohort. (Adding a
+           Subscribe field re-breaks all Subscribe literals — budget for it.)
+       [ ] broker subscribe integration (single-owner): an exclusive subscriber is
+           registered ONLY on its assigned partitions (existing per-partition
+           delivery then gives exclusivity+ordering for free — each assigned
+           partition has exactly one consumer). On join/leave, adjust which
+           partitions each member is registered on.
+       [ ] assignment delivery to client: server tells the member its assigned set
+           (in SubscribeOk and/or a push op Op::AssignmentChanged{added,revoked,
+           generation}); client (re)subscribes accordingly instead of fanning in
+           all. Generation fences stale.
+       [ ] GRACEFUL DRAIN on revoke: revoked member stops getting new (pause /
+           prefetch freed) but keeps in-flight until settled, then releases; only
+           then the new owner activates that partition (no double-process). Wire
+           pause/drain signal distinct from unsubscribe. Also drain normal
+           unsubscribe/shutdown.
+       [ ] e2e: two exclusive members on a 2-partition queue each get only their
+           partition (ordered); join/leave rebalances; in-flight not lost on
+           revoke.
+     Phase 2b (later): cross-broker coordinator (partitions on multiple owners).
   1b. Per-consumer target override (NEAR-TERM, easy, isolated): generalize the
      assignor's global target_per_consumer into per-member weights (weighted deal,
      still coverage-first soft-signal). Adjacent to / part of Phase 2. See
