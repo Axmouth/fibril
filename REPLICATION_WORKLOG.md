@@ -2,308 +2,90 @@
 
 Branch: `replication-sharding-plan`
 
-<!-- ===== NEXT SESSION START HERE (compaction-survival handoff, 2026-06-14) ===== -->
-## ▶ START HERE
+<!-- ===== START HERE (post-compaction handoff, refreshed) ===== -->
+## START HERE
 
-STATE: all green, all committed on `replication-sharding-plan`. Branch was rebased
-mid-work so commit HASHES churn — reference commits by MESSAGE, not hash. keratin
-is pushed (origin == local 3bc4347); fibril builds it via `[patch]` in
-fibril/Cargo.toml. Don't add `Co-Authored-By` to commits (memory
-no-coauthor-trailer-in-commits). No roadmap/phase labels in .rs files (memory
-no-phase-labels-in-code) — worklog .md is fine.
+STATE: all green, all committed on branch `replication-sharding-plan`. The branch
+gets rebased between sessions, so reference commits by MESSAGE, not hash. keratin
+is pushed (its replication-sharding-plan origin matches local) and fibril builds
+it via the [patch] in fibril/Cargo.toml. The codebase moved during a background
+interlude (cluster fixes, audits, live-cluster test scripts/smokes, ganglion
+docs, and a server-bootstrap EXTRACTION), so re-grep before trusting old
+locations.
 
-WHAT'S DONE — opt-in exclusive consumer groups (cohorts), single-node fully
-working + cross-broker correctness verified; the cross-broker COORDINATOR is built
-AND fully wired into the server bootstrap. Only remaining: a multi-node e2e (needs
-server.rs-refactor-b to make the bootstrap testable — see NEXT).
-- Mechanism = per-partition delivery GATE (`QueueLoopState.exclusive_assignee`,
-  AtomicU64). Default (no `consumer_group`) = competing consumers, untouched.
-- Client API: `subscribe(t).exclusive()` (id-free) + `.consumer_target(n)`;
-  `Client::assignment_events()` broadcast.
-- Built + tested (fibril-broker::coordination + broker.rs + protocol handler +
-  client): assignor (Balanced + Sticky default, per-member targets), gate,
-  ExclusiveGroupRouter (+ `external` plan override = `apply_exclusive_assignment`),
-  cluster member identity (`member_id` minted by server, client carries via
-  OnceLock), assignment push, reconnect-restore, one-cohort-per-queue guard,
-  membership snapshot, aggregate_cohort_membership, ClusterCohortController (global
-  sticky/target plan).
-- coordination-ganglion: COHORT_MEMBERSHIP_LABEL + encode/decode + aggregate;
-  cohort_assignment_attribute_key + CohortAssignmentDoc (entry sequence, NOT a
-  Partition-keyed map); provider methods global_cohort_membership /
+STYLE + WORKING RULES (memories): prose avoids semicolons, uses em dashes only
+where the visual value is real, and uses plain ASCII apostrophes/quotes
+(prose-style-comments-docs). No roadmap/phase labels in .rs files
+(no-phase-labels-in-code); the .md worklog is fine. No Co-Authored-By trailer on
+commits (no-coauthor-trailer-in-commits). Mutex only on cold paths, prefer
+atomics/CAS/OnceLock/RwLock (concurrency-primitive-discipline). All tunables go
+through config/runtime settings (settings-discipline). By the end of the
+replication work, move replication logic/types into a dedicated per-crate module,
+opportunistically where already separable (replication-module-separation).
+
+THE MODEL (memories fibril-core-model, consumer-cohort-purpose): fibril is a
+RabbitMQ-style durable WORK QUEUE (consumed = gone, lease/ack), not a log. `group`
+is a namespace prefix, not fan-out. Default many-consumers = competing (no
+ordering). An exclusive cohort (opt-in) gives ordered, balanced, sticky,
+self-healing consumption of a partitioned queue, one consumer per partition.
+
+DONE — exclusive consumer groups (cohorts), the whole feature:
+- Single-node: complete and tested (split, failover, target, push, reconnect,
+  one-cohort-per-queue guard). Client API: `subscribe(t).exclusive()` (id-free) +
+  `.consumer_target(n)`, plus `Client::assignment_events()`.
+- Cross-broker correctness: verified (each owner gates its partitions
+  independently, member sets consistent via the cluster member id).
+- Cross-broker COORDINATOR: built and wired. Member identity (server-minted
+  cluster `member_id`, client carries via OnceLock). Per-partition delivery GATE
+  (`QueueLoopState.exclusive_assignee`, AtomicU64) is the correctness backstop.
+  Broker `apply_exclusive_assignment` (external plan override). Membership
+  snapshot + `aggregate_cohort_membership` + `ClusterCohortController` (global
+  sticky/target plan). In coordination-ganglion: COHORT_MEMBERSHIP_LABEL
+  encode/decode, cohort assignment attribute (entry sequence, never a
+  Partition-keyed map), and provider methods global_cohort_membership /
   publish_cohort_assignment / cohort_assignment / run_cohort_controller_tick
-  (leader-gated). Live single-node tests cover roundtrip + full tick.
+  (leader-gated). The 3 bootstrap spawns (heartbeat label, controller tick, owner
+  watcher) now live in `crates/fibril/src/lib.rs` (moved there by the
+  server-bootstrap extraction, NOT server.rs main anymore).
 
-DONE — server-bootstrap spawns (2e5f52a, crates/fibril/bin/server.rs, cluster
-block): (1) heartbeat closure advertises COHORT_MEMBERSHIP_LABEL =
-encode_cohort_membership(broker.local_cohort_membership()); (2) leader-gated
-cohort controller task holding one ClusterCohortController calling
-run_cohort_controller_tick (partition counts from queue_partitioning); (3) owner
-watcher: on coordination.watch() change, for each local cohort apply
-cohort_assignment -> apply_exclusive_assignment for owned partitions. Cluster-only;
-single-node untouched. The cross-broker cohort coordinator is now FULLY WIRED.
+INVARIANTS: the gate enforces one-consumer-per-partition always, so the global
+plan is advisory/eventually-consistent (about one heartbeat of lag affects
+balance only, never correctness; a departed member's partitions pause, never
+mis-deliver). Single-node is unaffected by all coordinator code (no controller ->
+no external plan -> local computation).
 
-DONE — server bootstrap extraction checkpoint (2026-06-14): cluster startup glue
-is no longer trapped entirely in `crates/fibril/bin/server.rs`. `crates/fibril/src/lib.rs`
-now exposes the production-shaped TCP Ganglion startup (`open_tcp_ganglion_parts`),
-broker ownership selection, catalogue/runtime sync helpers, broker cluster task
-wiring, topology source, declare coordinator, and standalone admin coordination
-helper. `fibril-server` is now a thin wrapper around
-`fibril::run_server_from_config(ServerConfig::load()?)`, so future integration
-tests can spawn production wiring from the library instead of shelling out to
-the binary. Proof test: `tcp_ganglion_bootstrap_exposes_declare_coordinator`
-starts the same TCP-backed Ganglion path, declares a two-partition queue through
-the extracted declare bridge, and observes both catalogue resources. This is the
-first part of server.rs-refactor-b; the next part is a two-broker harness around
-these helpers. `COORDINATION_TRYOUT.md` now matches the current tryout script:
-it documents declare-to-assignment and replicated runtime-settings checks.
+IMMEDIATE NEXT (the plan for after compaction): the MULTI-NODE COHORT E2E. It is
+now UNBLOCKED because the bootstrap was extracted into the fibril lib (it used to
+be trapped in server.rs main). Stand up two broker+coordination nodes (lean on
+the existing ganglion multi-node harness, e.g. the
+ganglion_coordination_drives_supervised_follower_replication test in
+crates/protocol/tests, and/or the new coordination membership smoke + live-cluster
+scripts added during the interlude), split a queue's partitions across the two
+owners, run a cohort spanning both, and assert the controller produces a globally
+balanced assignment (the thing per-broker-local cannot). Then drop a consumer and
+assert it rebalances. Verify the cohort wiring survived the extraction (grep
+crates/fibril/src/lib.rs for local_cohort_membership / run_cohort_controller_tick /
+apply_exclusive_assignment).
 
-DONE — metadata write forwarding regression (2026-06-14): the real
-`scripts/cluster-tryout.sh --ganglion` path exposed that `queue declare` through
-node 1 failed when another raft node was the coordination leader. This was the
-wrong boundary: metadata/admin writes should be accepted at any broker and
-forwarded to the coordination leader internally, while data-plane queue traffic
-continues to use topology/ownership routing. `GanglionCoordination::forward_command`
-now retries briefly across `NotLeader`/stale-leader windows and still maps
-state-machine rejections immediately. Regression test:
-`declare_queue_partitioning_forwards_from_tcp_standby`, plus the existing
-create-once/conflict test keeps repartition conflicts pinned. The real
-three-process tryout now passes again: server startup, raft election, CLI
-declare, controller assignment, and replicated runtime-settings sync.
+AFTER THE E2E (user direction): hardening and refactoring. Includes the per-crate
+replication module separation, the combined Offset + Topic/Group newtype pass
+(Arc<str> for Topic/Group), and the broader replication + partitioning docs
+explainer (the consumer-groups docs page already landed).
 
-DONE — high-node local coordination stress cleanup (2026-06-14): cluster tryout
-now has compact summaries, separate admin readiness and cluster convergence
-waits, random or explicit port offsets, and `--resource-summary` for RSS and fd diagnostics. The high-fd
-spike was not raft sockets. `SystemStats` was refreshing every host process and
-kept `/proc/<pid>/stat` descriptors around. It now samples only the current
-process with CPU and memory refreshes. One-node fd count dropped from roughly
-1046 to 23. An 88-node all-voter local stress run passes under `ulimit -n =
-2048`, with about 1704 total fds and 6.5 GiB total RSS. That validates the
-coordination path under local stress, but production shape should still be a
-small voter set plus many registered brokers, clients, or learners. A later
-150-node run showed that admin endpoints bind quickly with a short wait, while
-the slower phase is raft/controller convergence. Keep `--admin-wait-secs` short
-and use `--cluster-wait-secs` for the convergence window.
+DEFERRED (cohort follow-ons, gate de-risks them): opt-in client narrowing (with
+per-partition leave), cooperative incremental rebalance (vs whole-set recompute),
+coordinator-issued member-id validation (currently broker-minted), and a unified
+cross-broker assignment push with one global generation (today each owner pushes
+its own slice).
 
-DONE — live coordination membership smoke (2026-06-14): the public control
-surface is coordination membership rather than a raft-specific admin route.
-Ganglion still uses raft internally behind the adapter. `fibrilctl admin
-coordination add-voting-member` and `remove-voting-member` call the admin API,
-and `scripts/cluster-tryout.sh --dynamic-membership` starts one extra server,
-adds it to the voting set, verifies all nodes including the joiner see
-`[1,2,3,4]`, removes it from the voting set, then verifies the original nodes
-return to `[1,2,3]`. Smoke passed with
-`--nodes 3 --ganglion --summary --resource-summary --admin-wait-secs 5
---cluster-wait-secs 45 --port-offset 17000 --dynamic-membership`. The removed
-node remains a running process in this test, which is intentional: the tested
-operation is removing voting membership, not shutting down the broker.
-
-DONE — CLI data-plane smoke in cluster tryout (2026-06-14): `fibrilctl queue
-publish` and `fibrilctl queue consume` now provide a tiny operator/data-plane
-round trip. `scripts/cluster-tryout.sh --ganglion` declares `orders`, waits for
-assignment, publishes one confirmed text message through a non-owner broker when
-possible, then consumes and acknowledges it through another broker when
-possible. This verifies that connecting to an ordinary broker endpoint routes or
-redirects correctly for the simplest public client path. Smoke passed with
-`--nodes 3 --ganglion --summary --resource-summary --admin-wait-secs 5
---cluster-wait-secs 45 --port-offset 18000 --dynamic-membership`: owner
-`broker-1`, publish through `broker-2`, consume through `broker-3`.
-
-VOTER GUIDANCE: more voters increase tolerated voter failures according to
-quorum math, but they also increase metadata write cost and convergence load.
-Large all-voter local runs are useful stress tests. The intended production
-shape remains a small odd voting set across failure domains plus many registered
-brokers or non-voting participants.
-
-NEXT — multi-node integration test for the coordinator. Use the extracted
-fibril-lib bootstrap pieces to build a test harness that can stand up 2
-broker+coordination nodes and drive them. Then the e2e (ganglion harness like
-ganglion_coordination_drives_supervised_follower_replication): 2 brokers,
-partitions split across owners, a cohort spanning both -> globally balanced
-(the thing per-broker-local can't do); drop a consumer -> rebalances. Until then
-the coordinator's pieces are each unit/integration-tested + the wiring compiles
-and composes them; single-node + cross-broker-correctness paths are covered by
-existing e2es.
-INVARIANTS: gate is the correctness backstop, so the global plan is advisory/
-eventually-consistent (≈1 heartbeat lag affects balance only, never correctness;
-a departed member's partitions pause, never mis-deliver). Single-node unaffected
-(no controller -> no external plan -> local computation). Mutexes cold-path only;
-gate is atomic, member-id is OnceLock (memory concurrency-primitive-discipline).
-AFTER coordinator: server.rs refactor b; combined Offset+Topic/Group newtype pass
-(Arc<str>); docs explainer. Deferred: client narrowing (+per-partition leave),
-cooperative incremental rebalance, coordinator-issued member-id validation.
+CODE POINTERS: cohort assignor/router/controller-brain + membership types =
+crates/broker/src/coordination.rs. Gate + ExclusiveGroupRouter + apply path =
+crates/broker/src/broker.rs. Wire fields + handler join/leave/reconcile =
+crates/protocol/src/v1/{mod.rs,handler.rs}. Client `.exclusive()` + member-id
+cache + assignment_events = crates/client/src/lib.rs. Transport + provider methods
++ controller tick = crates/coordination-ganglion/src/lib.rs. Bootstrap spawns =
+crates/fibril/src/lib.rs.
 <!-- ===== END START HERE ===== -->
-
-<!-- =================== RESUME HERE (2026-06-14) =================== -->
-## RESUME HERE — Phase 2a cohorts COMPLETE (incl. target/stickiness/push/limitations); next = server.rs refactor / newtype pass / docs
-
-STATE: all green. Cohort feature + most of the cross-broker coordinator landed on
-`replication-sharding-plan` (note: branch was rebased mid-work, so exact hashes
-churn — track by commit message). keratin replication-sharding-plan IS pushed
-(origin HEAD == local 3bc4347); fibril builds against it via the [patch] in
-fibril/Cargo.toml (no local upstream ref set, which made earlier status checks
-look unpushed — it isn't).
-
-MODEL (locked, see memories fibril-core-model + consumer-cohort-purpose): fibril is
-a RabbitMQ-style WORK QUEUE (consumed=gone, lease/ack), NOT a log. `group` = a
-namespace prefix (no fan-out, no copies). Default = competing consumers (throughput,
-unordered). A cohort is opt-in machinery giving Kafka-consumer-group ergonomics
-(per-key ordering + balanced sticky assignment + failover). ONE cohort per
-(topic,group); on a 1-partition queue `.exclusive()` == RabbitMQ single-active-
-consumer. Works fully single-node (the only mode today; multi-node = Phase 2b).
-
-DONE — Informational assignment push (b4eff77): gate REMAINS correctness; server
-pushes Op::AssignmentChanged {assigned, added, revoked, generation} per rebalance.
-ExclusiveGroupRouter has a per-(cohort,member) notifier; handler runs one forwarder
-per (connection,cohort); client exposes Client::assignment_events() ->
-broadcast<AssignmentEvent>. Narrowing remains a future opt-in (gate de-risks it).
-
-DONE — Client cohort API + limitations (e37ad47, f51a882):
-- (API) SubscriptionBuilder::exclusive() — id-free opt-in (one cohort per queue, so
-  the id was cosmetic). Sends fixed DEFAULT_COHORT_ID; membership keys on
-  (topic,group). consumer_target(n) is the advanced knob.
-- (a) GUARD: Broker::exclusive_cohort_conflicts rejects a 2nd different cohort id on
-  the same queue (SubscribeErr/ERR_CONFLICT). e2e: second cohort rejected.
-- (b) RECONNECT: SubscribeOk + ReconcileSubscription carry consumer_group +
-  consumer_target; restore path rejoins the cohort (was hardcoded None). e2e via
-  AssignmentChanged push on restore.
-- (c) DOCUMENTED: ExclusiveGroupRouter::leave removes the whole member deliberately
-  (optimal full-disconnect failover; partial single-partition unsubscribe is
-  raw-protocol-only). Revisit per-partition leave WITH narrowing.
-
-CURRENT WORK — Cross-broker cohort coordinator (Phase 2b). VERIFY-FIRST DONE
-(b155083): test exclusive_cohort_works_across_partition_owners_e2e — two brokers
-owning disjoint partitions of one queue, each owner gates its partitions
-independently; per-partition correctness/ordering hold cross-broker today.
-FINDINGS (what the coordinator must add; correctness already holds via local gates,
-so the global plan can be ADVISORY / eventually-consistent — stale = transient
-imbalance, never double-deliver; fits load-aware-future-direction off-raft stance):
-  1. MEMBER IDENTITY (the prerequisite brick) — DONE (243a594): separate
-     server-issued cohort member id (Subscribe/SubscribeOk/ReconcileSubscription
-     member_id: Option<Uuid>). Server mints on first exclusive subscribe + returns;
-     cohort keys on it instead of the per-connection client_id. Client caches it
-     in a lock-free OnceLock on ClientShared (no hot-path mutex — see
-     concurrency-primitive-discipline) and carries it across all broker
-     connections + reconnects. Per-broker client_id/resume untouched. Issuance/
-     validation moves to the coordinator later (wire+client plumbing reused).
-     Cross-broker e2e: one logical consumer carries the SAME id to both owners.
-  2. GLOBAL BALANCE: uneven partition->broker distribution makes independent
-     per-broker deals globally unbalanced; coordinator computes one global deal.
-  3. GLOBAL TARGETS: per-broker can't enforce a cluster-wide per-consumer target.
-  4. UNIFIED ASSIGNMENT VIEW/PUSH: today each owner pushes only its slice + a
-     per-broker generation; coordinator gives one global assignment + generation.
-  5. STICKINESS ACROSS OWNER MOVES: when a partition's owner changes (failover/
-     rebalance) the new owner has no `current` -> cold reassign. Coordinator carries
-     the global assignment so the new owner restores the prior assignee.
-  OWNER APPLY-PATH (brick 2, a6c52ae) — DONE: Broker::apply_exclusive_assignment
-  (topic, group, consumer_group, partition->member id) installs a coordinator plan;
-  ExclusiveGroupRouter.external overrides local computation — join/leave/apply
-  resolve gates from the plan (assigned member -> local sub_id; unsubscribed
-  assignee left untouched). Additive: single-node never populates it. 3 white-box
-  router tests. This is the owner-side hook the coordinator drives.
-
-  TRANSPORT DECISION (2026-06-14): heartbeat labels in + controller computes +
-  plan out (reuses heartbeat/controller/snapshot; advisory, gate backstops; ~1
-  heartbeat lag, acceptable since lag affects balance convergence only, never
-  correctness — a departed member's partitions pause until re-applied, never
-  mis-deliver). Heartbeat interval is the responsiveness knob.
-
-  BRICK A — global plan computation — DONE (8ae9489): coordination.rs
-  ClusterCohortController (holds ExclusiveConsumerGroups for sticky-across-ticks/
-  owner-moves) + aggregate_cohort_membership (union per-broker reports, dedup by
-  cluster member id, keep largest target) + CohortPlan (partition->member). Plus
-  Broker::local_cohort_membership() snapshot (the heartbeat-label payload). 5
-  unit tests (balance/coverage/stickiness/empty/aggregation).
-  BRICK 2 (owner apply) — DONE (a6c52ae). MEMBER IDENTITY — DONE (243a594).
-
-  TRANSPORT SERIALIZATION — DONE (b8e78c0, coordination-ganglion): COHORT_
-  MEMBERSHIP_LABEL + encode/decode(Vec<LocalCohortMembership>) +
-  aggregate_membership_labels; cohort_assignment_attribute_key + CohortAssignment
-  Doc (entry sequence, NOT a Partition-keyed map) + encode/decode_cohort_assignment.
-  4 unit tests. (Substrate confirmed: GanglionCoordination has committed_snapshot
-  with node .labels + .attributes, set_cluster_attribute/cluster_attribute,
-  queue_partitioning, is_leader, live_nodes, spawn_heartbeat_with_labels.)
-
-  PROVIDER TRANSPORT + CONTROLLER TICK — DONE (9bb7d21, 49662d3): on
-  GanglionCoordination: global_cohort_membership() (aggregate node membership
-  labels), publish_cohort_assignment(plan) / cohort_assignment(key) (replicated
-  attribute write/read), and run_cohort_controller_tick(&mut ClusterCohortController,
-  partition_count) — leader-gated aggregate->plan->publish. Live single-node tests:
-  publish/read roundtrip; full tick (register membership label -> tick -> read back
-  balanced plan).
-
-  REMAINING — server-bootstrap spawns (the only thing left; everything they call
-  is built + tested):
-  1. Heartbeat label: where spawn_heartbeat_with_labels is set up (server bootstrap
-     / fibril glue), make the labels closure insert
-     COHORT_MEMBERSHIP_LABEL -> encode_cohort_membership(broker.local_cohort_membership()).
-  2. Controller spawn: a periodic task (own interval, or alongside spawn_controller)
-     holding one ClusterCohortController, calling coordination.run_cohort_controller_
-     tick(&mut controller, |key| queue_partitioning(key).count.unwrap_or(1)).
-  3. Owner watcher: on committed-snapshot change, for each cohort key with a
-     published assignment (cohort_assignment), call broker.apply_exclusive_assignment
-     for the partitions this node owns. (Hook into the existing assignment watcher
-     that reacts to snapshot changes / become-owner.)
-  4. Multi-node integration test (ganglion harness): 2 brokers, partitions split,
-     a cohort spanning both -> controller balances globally; kill one consumer ->
-     rebalances. NOTE bootstrap lives in server.rs (see pending "server.rs refactor
-     b"); explore there. Single-node behavior unaffected (no controller -> no
-     external plan -> local computation, as today).
-
-DONE — Phase 2a (opt-in exclusive consumer groups, single-owner), Model A (client
-fan-in + per-partition consumer_group; server gates each partition to the assigned
-member). gate = QueueLoopState.exclusive_assignee; ExclusiveGroupRouter on Broker
-(registry + cohort->member(client_id)->partition->sub_id). join after subscribe,
-leave on unsubscribe/disconnect. e2e splits+failover.
-
-DONE — Per-consumer soft target override (item 1b, 0257dcc): assignor is a
-deterministic min-load greedy with per-member caps (default + per-member override),
-coverage-first overflow, under_provisioned = member over its own target. Wire
-Subscribe.consumer_target: Option<u32> -> handler -> ExclusiveGroupRouter.targets
--> reconcile. client SubscriptionBuilder::consumer_target(n). e2e capped=1of3.
-
-DONE — Stickiness (dfcf54b): StickyConsumerGroupAssignor retains valid current
-partitions up to each member's balanced target load, then deals leftovers to
-under-target members (same balanced loads, max retention; first assignment ==
-balanced). `current` added to ConsumerGroupAssignmentInput; rebalance feeds
-self.assignment. Broker default is now Sticky. Shared least_loaded_member /
-balanced_target_loads helpers (Balanced reuses them). NOT done: cooperative
-incremental rebalance protocol (we recompute whole-set each change; fine for
-single-owner 2a).
-
-DECISION (2026-06-14): assignment-push to client (was "limitation #3") is DEFERRED.
-The per-partition gate already gives correctness + ~free failover (standbys stay
-subscribed), so a push buys only awareness/drain-hook, not correctness. Spend the
-budget on stickiness instead. The two client models map onto our two tiers
-(product-philosophy-just-works): gate/informational = high-level "just works"
-client; active narrowing = low-level/advanced client. Crucially the GATE DE-RISKS
-NARROWING (a slow-to-unsubscribe revoked client is gated off -> no double-deliver),
-so narrowing can be added later as an OPT-IN optimization without a stop-the-world
-rebalance. See memory consumer-group-gate-vs-narrowing.
-
-NEXT (after stickiness):
-1. server.rs refactor "b" (coordination bootstrap/spawns/admin wiring -> fibril
-   lib.rs) — organizational, deferred since Phase B.
-2. (END) combined Offset + Topic/Group newtype pass (Arc<str> for Topic/Group).
-3. (END) DOCS: replication+partitioning+consumer-groups explainer + bring the
-   implemented-surface page up to date.
-Phase 2b (later): cross-broker coordinator (partitions on multiple owners).
-
-FUTURE OPTIMIZATION TARGETS (note for perf/simplicity passes):
-- The exclusive GATE keeps every cohort member subscribed to every partition
-  (standbys). Cheap at small/medium scale; at high partition×consumer counts it is
-  O(members) ConsumerStates per partition + the delivery loop filtering standbys
-  each tick. Optimization = opt-in client narrowing (Kafka-style, each consumer
-  holds ~N/M subs), made safe/incremental by the gate. Pairs with assignment-push.
-
-CODE POINTERS: delivery gate + ExclusiveGroupRouter = crates/broker/src/broker.rs
-(QueueLoopState.exclusive_assignee, spawn_delivery_loop ~consumers.retain,
-ExclusiveGroupRouter, exclusive_group_join/leave). assignor/state/registry +
-reconcile = crates/broker/src/coordination.rs. handler subscribe/leave =
-crates/protocol/src/v1/handler.rs (install_subscription, remove_subscription,
-cleanup_connection_state, Op::Subscribe). client = crates/client/src/lib.rs
-(SubscriptionBuilder). settings = crates/broker/src/runtime_settings.rs +
-crates/config/src/lib.rs + crates/fibril/src/lib.rs.
-<!-- =================== END RESUME HERE =================== -->
 
 
 This is the running feature log for replication, partition ownership, and
