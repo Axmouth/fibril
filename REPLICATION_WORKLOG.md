@@ -47,17 +47,15 @@ independently; per-partition correctness/ordering hold cross-broker today.
 FINDINGS (what the coordinator must add; correctness already holds via local gates,
 so the global plan can be ADVISORY / eventually-consistent — stale = transient
 imbalance, never double-deliver; fits load-aware-future-direction off-raft stance):
-  1. MEMBER IDENTITY (the prerequisite brick): the cohort member id is the
-     per-connection server-assigned client_id, which is DISTINCT per broker (each
-     EngineSlot does its own Hello). So one logical consumer fanning across brokers
-     looks like several unrelated members -> brokers can't recognize "same consumer"
-     -> global balance/targets/stickiness break. Need a cluster-scoped consumer
-     identity. CONSTRAINT (user, 2026-06-14): server stays the source of truth for
-     identity (no client-minted ids). RECOMMENDATION: a dedicated cluster-issued
-     cohort member id (issued+validated by the coordinator that already owns
-     partition assignment; client echoes it on each per-broker exclusive subscribe;
-     keep per-broker client_id/resume untouched). Alt: promote client_id itself to
-     cluster scope (more unifying, perturbs resume model). DECIDE before building.
+  1. MEMBER IDENTITY (the prerequisite brick) — DONE (243a594): separate
+     server-issued cohort member id (Subscribe/SubscribeOk/ReconcileSubscription
+     member_id: Option<Uuid>). Server mints on first exclusive subscribe + returns;
+     cohort keys on it instead of the per-connection client_id. Client caches it
+     in a lock-free OnceLock on ClientShared (no hot-path mutex — see
+     concurrency-primitive-discipline) and carries it across all broker
+     connections + reconnects. Per-broker client_id/resume untouched. Issuance/
+     validation moves to the coordinator later (wire+client plumbing reused).
+     Cross-broker e2e: one logical consumer carries the SAME id to both owners.
   2. GLOBAL BALANCE: uneven partition->broker distribution makes independent
      per-broker deals globally unbalanced; coordinator computes one global deal.
   3. GLOBAL TARGETS: per-broker can't enforce a cluster-wide per-consumer target.
