@@ -337,6 +337,13 @@ impl ServerConfig {
             anyhow::bail!("runtime_seed.partitioning.default_partition_count must be at least 1");
         }
         if self.coordination.mode == CoordinationMode::Ganglion
+            && self.runtime_locks.idle_queue_cleanup
+        {
+            anyhow::bail!(
+                "runtime_locks are standalone-only; in ganglion mode, runtime settings are cluster-authoritative"
+            );
+        }
+        if self.coordination.mode == CoordinationMode::Ganglion
             && self.coordination.ganglion.liveness_ttl_ms
                 < 2 * self.coordination.ganglion.heartbeat_interval_ms
         {
@@ -849,6 +856,44 @@ mod tests {
         );
         assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, Some(17));
         assert!(config.runtime_locks.idle_queue_cleanup);
+    }
+
+    #[test]
+    fn ganglion_mode_rejects_node_local_runtime_locks() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [coordination]
+            mode = "ganglion"
+
+            [runtime_locks]
+            idle_queue_cleanup = true
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("runtime_locks are standalone-only")
+        );
+    }
+
+    #[test]
+    fn runtime_seed_validation_matches_runtime_settings_rules() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [runtime_seed.partitioning]
+            default_partition_count = 0
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("default_partition_count"));
     }
 
     #[test]

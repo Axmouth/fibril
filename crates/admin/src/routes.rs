@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::check_admin_auth;
-use crate::server::AdminServer;
+use crate::server::{AdminServer, RuntimeSettingsClusterUpdateOutcome};
 
 #[derive(Serialize)]
 pub struct OverviewResponse {
@@ -483,18 +483,38 @@ pub async fn topology(
 pub async fn runtime_settings(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<RuntimeSettingsResponse>, StatusCode> {
+) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
 
     let Some(runtime_settings) = &server.runtime_settings else {
         return Err(StatusCode::NOT_FOUND);
     };
 
+    let snapshot = match &server.runtime_settings_cluster {
+        Some(cluster) => match cluster.current_runtime_settings().await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => RuntimeSettingsSnapshot {
+                version: 0,
+                settings: runtime_settings.current().settings,
+            },
+            Err(error) => {
+                tracing::warn!(%error, "cluster runtime settings read failed");
+                return Ok(admin_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cluster_runtime_settings_unavailable",
+                    "cluster runtime settings are unavailable",
+                ));
+            }
+        },
+        None => runtime_settings.current(),
+    };
+
     Ok(Json(RuntimeSettingsResponse::new(
-        runtime_settings.current(),
+        snapshot,
         runtime_settings.locks().clone(),
         runtime_settings.load_issue(),
     )))
+    .map(IntoResponse::into_response)
 }
 
 pub async fn startup_config(
@@ -522,27 +542,83 @@ pub async fn update_runtime_settings(
     };
 
     let locks = runtime_settings.locks().clone();
+    if let Some(cluster) = &server.runtime_settings_cluster {
+        if let Err(err) = request.settings.validate() {
+            return Ok(match err {
+                RuntimeSettingsError::Invalid(message) => {
+                    admin_error(StatusCode::BAD_REQUEST, "invalid_runtime_settings", message)
+                }
+                other => {
+                    tracing::error!("runtime settings validation failed unexpectedly: {other}");
+                    admin_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "runtime_settings_update_failed",
+                        "runtime settings update failed",
+                    )
+                }
+            });
+        }
+
+        match cluster
+            .update_runtime_settings(request.expected_version, request.settings)
+            .await
+        {
+            Ok(RuntimeSettingsClusterUpdateOutcome::Stored(snapshot)) => {
+                if let Err(error) = runtime_settings
+                    .apply_cluster_settings(snapshot.settings.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        cluster_version = snapshot.version,
+                        "cluster runtime settings committed but local cache update failed"
+                    );
+                }
+                return Ok((
+                    StatusCode::OK,
+                    Json(RuntimeSettingsResponse::new(
+                        snapshot,
+                        locks,
+                        runtime_settings.load_issue(),
+                    )),
+                )
+                    .into_response());
+            }
+            Ok(RuntimeSettingsClusterUpdateOutcome::Conflict(snapshot)) => {
+                return Ok((
+                    StatusCode::CONFLICT,
+                    Json(RuntimeSettingsResponse::new(
+                        snapshot,
+                        locks,
+                        runtime_settings.load_issue(),
+                    )),
+                )
+                    .into_response());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cluster runtime settings update failed");
+                return Ok(admin_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cluster_runtime_settings_update_failed",
+                    "cluster runtime settings update failed",
+                ));
+            }
+        }
+    }
+
     match runtime_settings
         .update(request.expected_version, request.settings)
         .await
     {
-        Ok(RuntimeSettingsUpdateOutcome::Stored(snapshot)) => {
-            // Cluster mode: hand the stored settings to the publish hook so
-            // they replicate to every broker (best effort; the sync loop
-            // reconciles either way).
-            if let Some(publisher) = &server.settings_published {
-                let _ = publisher.send(snapshot.settings.clone());
-            }
-            Ok((
-                StatusCode::OK,
-                Json(RuntimeSettingsResponse::new(
-                    snapshot,
-                    locks,
-                    runtime_settings.load_issue(),
-                )),
-            )
-                .into_response())
-        }
+        Ok(RuntimeSettingsUpdateOutcome::Stored(snapshot)) => Ok((
+            StatusCode::OK,
+            Json(RuntimeSettingsResponse::new(
+                snapshot,
+                locks,
+                runtime_settings.load_issue(),
+            )),
+        )
+            .into_response()),
         Ok(RuntimeSettingsUpdateOutcome::Conflict(snapshot)) => Ok((
             StatusCode::CONFLICT,
             Json(RuntimeSettingsResponse::new(

@@ -119,6 +119,12 @@ pub struct ClusterRuntimeSettings {
     pub settings: fibril_broker::runtime_settings::RuntimeSettings,
 }
 
+#[derive(Debug, Clone)]
+pub enum ClusterRuntimeSettingsUpdateOutcome {
+    Stored(ClusterRuntimeSettings),
+    Conflict(Option<ClusterRuntimeSettings>),
+}
+
 /// Partitioning version carried by the client topology. Constant while
 /// partition counts are fixed-at-create; a future live-repartitioning change
 /// bumps it so clients re-fetch routing and owners can fence stale-version
@@ -784,19 +790,105 @@ where
         ))
     }
 
-    /// Publish runtime settings as the cluster truth (bounded CAS loop:
-    /// concurrent publishers serialize; last committed wins everywhere).
-    /// Returns the new cluster version.
+    pub fn runtime_settings_document(
+        &self,
+    ) -> Result<Option<ClusterRuntimeSettings>, OpenraftAdapterError> {
+        self.cluster_attribute(RUNTIME_SETTINGS_ATTRIBUTE)
+            .as_deref()
+            .map(|raw| {
+                serde_json::from_str::<ClusterRuntimeSettings>(raw).map_err(|error| {
+                    OpenraftAdapterError::Storage(format!(
+                        "decode runtime settings cluster document: {error}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    /// Update runtime settings as the cluster truth. `expected_version` is the
+    /// cluster document version returned by the admin API, where 0 means no
+    /// cluster document exists yet.
+    pub async fn update_runtime_settings(
+        &self,
+        expected_version: u64,
+        settings: &fibril_broker::runtime_settings::RuntimeSettings,
+    ) -> Result<ClusterRuntimeSettingsUpdateOutcome, OpenraftAdapterError> {
+        settings
+            .validate()
+            .map_err(|error| OpenraftAdapterError::Config(error.to_string()))?;
+
+        for _ in 0..8 {
+            let current_raw = self.cluster_attribute(RUNTIME_SETTINGS_ATTRIBUTE);
+            let current_document = current_raw
+                .as_deref()
+                .map(|raw| {
+                    serde_json::from_str::<ClusterRuntimeSettings>(raw).map_err(|error| {
+                        OpenraftAdapterError::Storage(format!(
+                            "decode runtime settings cluster document: {error}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let current_version = current_document
+                .as_ref()
+                .map(|document| document.cluster_version)
+                .unwrap_or(0);
+
+            if current_version != expected_version {
+                return Ok(ClusterRuntimeSettingsUpdateOutcome::Conflict(
+                    current_document,
+                ));
+            }
+
+            let document = ClusterRuntimeSettings {
+                cluster_version: expected_version + 1,
+                settings: settings.clone(),
+            };
+            let value = serde_json::to_string(&document)
+                .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: RUNTIME_SETTINGS_ATTRIBUTE.to_string(),
+                    expected: current_raw,
+                    value,
+                })
+                .await
+            {
+                Ok(_) => return Ok(ClusterRuntimeSettingsUpdateOutcome::Stored(document)),
+                Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(OpenraftAdapterError::Storage(
+            "runtime settings update lost the CAS race repeatedly".to_string(),
+        ))
+    }
+
+    /// Publish runtime settings as the cluster truth using last-committer-wins
+    /// semantics. Prefer `update_runtime_settings` for user/admin writes.
     pub async fn publish_runtime_settings(
         &self,
         settings: &fibril_broker::runtime_settings::RuntimeSettings,
     ) -> Result<u64, OpenraftAdapterError> {
+        settings
+            .validate()
+            .map_err(|error| OpenraftAdapterError::Config(error.to_string()))?;
+
         for _ in 0..8 {
             let current_raw = self.cluster_attribute(RUNTIME_SETTINGS_ATTRIBUTE);
             let cluster_version = current_raw
                 .as_deref()
-                .and_then(|raw| serde_json::from_str::<ClusterRuntimeSettings>(raw).ok())
-                .map(|doc| doc.cluster_version)
+                .map(|raw| {
+                    serde_json::from_str::<ClusterRuntimeSettings>(raw).map_err(|error| {
+                        OpenraftAdapterError::Storage(format!(
+                            "decode runtime settings cluster document: {error}"
+                        ))
+                    })
+                })
+                .transpose()?
+                .map(|document| document.cluster_version)
                 .unwrap_or(0);
             let document = ClusterRuntimeSettings {
                 cluster_version: cluster_version + 1,
@@ -840,12 +932,32 @@ where
         tokio::spawn(async move {
             let mut watch = provider.node.watch_committed();
             let mut last_applied_cluster_version = 0u64;
+            let mut last_bad_raw: Option<String> = None;
             loop {
-                let document = watch
+                let raw_document = watch
                     .borrow_and_update()
                     .attributes
                     .get(RUNTIME_SETTINGS_ATTRIBUTE)
-                    .and_then(|raw| serde_json::from_str::<ClusterRuntimeSettings>(raw).ok());
+                    .cloned();
+                let document = match raw_document.as_deref() {
+                    Some(raw) => match serde_json::from_str::<ClusterRuntimeSettings>(raw) {
+                        Ok(document) => {
+                            last_bad_raw = None;
+                            Some(document)
+                        }
+                        Err(error) => {
+                            if last_bad_raw.as_deref() != Some(raw) {
+                                tracing::warn!(
+                                    %error,
+                                    "replicated runtime settings document is invalid"
+                                );
+                                last_bad_raw = Some(raw.to_string());
+                            }
+                            None
+                        }
+                    },
+                    None => None,
+                };
 
                 if let Some(document) = document {
                     if document.cluster_version > last_applied_cluster_version {
@@ -855,7 +967,7 @@ where
                             last_applied_cluster_version = document.cluster_version;
                         } else {
                             match manager
-                                .update(current.version, document.settings.clone())
+                                .apply_cluster_settings(document.settings.clone())
                                 .await
                             {
                                 Ok(_) => {
@@ -2012,22 +2124,20 @@ mod tests {
         let manager_b = manager("b").await;
         provider.spawn_runtime_settings_sync(manager_b.clone());
 
-        // Broker A stores locally (versioned update), then publishes.
+        // Broker A commits through the cluster document first.
         let mut settings = manager_a.current().settings.clone();
         settings.delivery.inflight_ttl_ms = settings.delivery.inflight_ttl_ms.saturating_add(7);
-        let stored = manager_a
-            .update(manager_a.current().version, settings.clone())
+        let stored = provider
+            .update_runtime_settings(0, &settings)
             .await
-            .expect("local update");
-        assert!(matches!(
-            stored,
-            fibril_broker::runtime_settings::RuntimeSettingsUpdateOutcome::Stored(_)
-        ));
-        let version = provider
-            .publish_runtime_settings(&settings)
+            .expect("cluster update");
+        assert!(
+            matches!(stored, ClusterRuntimeSettingsUpdateOutcome::Stored(document) if document.cluster_version == 1)
+        );
+        manager_a
+            .apply_cluster_settings(settings.clone())
             .await
-            .expect("publish");
-        assert_eq!(version, 1);
+            .expect("local cache update");
 
         // Broker B's manager converges via the sync loop.
         tokio::time::timeout(Duration::from_secs(10), async {
@@ -2038,12 +2148,56 @@ mod tests {
         .await
         .expect("replicated settings become effective on broker B");
 
-        // Second publish bumps the cluster version (CAS over the previous doc).
-        let version = provider
-            .publish_runtime_settings(&settings)
+        let conflict = provider
+            .update_runtime_settings(0, &settings)
             .await
-            .expect("republish");
-        assert_eq!(version, 2);
+            .expect("stale cluster update returns conflict");
+        assert!(matches!(
+            conflict,
+            ClusterRuntimeSettingsUpdateOutcome::Conflict(Some(document))
+                if document.cluster_version == 1
+        ));
+
+        let mut invalid = settings.clone();
+        invalid.partitioning.default_partition_count = 0;
+        let err = provider
+            .publish_runtime_settings(&invalid)
+            .await
+            .expect_err("invalid settings are rejected before cluster publish");
+        assert!(matches!(err, OpenraftAdapterError::Config(_)));
+
+        provider.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_settings_document_reports_malformed_cluster_attribute() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+
+        provider
+            .set_cluster_attribute(RUNTIME_SETTINGS_ATTRIBUTE, "{bad json")
+            .await
+            .expect("set malformed settings attribute");
+
+        let err = provider
+            .runtime_settings_document()
+            .expect_err("malformed settings document must be reported");
+        assert!(matches!(
+            err,
+            OpenraftAdapterError::Storage(message)
+                if message.contains("decode runtime settings cluster document")
+        ));
 
         provider.raft_node().shutdown().await.expect("shutdown");
     }

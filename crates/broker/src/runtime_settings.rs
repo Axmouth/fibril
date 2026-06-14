@@ -64,6 +64,29 @@ impl RuntimeSettings {
                 "idle_queue_cleanup.sweep_interval_ms must be at least 1".into(),
             ));
         }
+        if self.replication.caught_up_poll_ms == 0
+            || self.replication.retry_poll_ms == 0
+            || self.replication.checkpoint_retry_poll_ms == 0
+        {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication poll intervals must be at least 1ms".into(),
+            ));
+        }
+        if self.replication.min_in_sync_replicas == 0 {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication.min_in_sync_replicas must be at least 1".into(),
+            ));
+        }
+        if self.replication.isr_timeout_ms == 0 {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication.isr_timeout_ms must be at least 1".into(),
+            ));
+        }
+        if self.partitioning.default_partition_count == 0 {
+            return Err(RuntimeSettingsError::Invalid(
+                "partitioning.default_partition_count must be at least 1".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -334,6 +357,32 @@ impl RuntimeSettingsManager {
             )),
         }
     }
+
+    /// Apply a cluster-authoritative settings document to the local cache.
+    ///
+    /// Ganglion mode uses the cluster document as the authority, while the
+    /// Stroma global store remains this node's durable local cache. The local
+    /// store version may differ from the cluster document version, so this
+    /// helper retries normal optimistic local updates instead of requiring the
+    /// caller to know the current local version.
+    pub async fn apply_cluster_settings(
+        &self,
+        settings: RuntimeSettings,
+    ) -> Result<RuntimeSettingsSnapshot, RuntimeSettingsError> {
+        settings.validate()?;
+
+        for _ in 0..8 {
+            let current = self.current();
+            match self.update(current.version, settings.clone()).await? {
+                RuntimeSettingsUpdateOutcome::Stored(snapshot) => return Ok(snapshot),
+                RuntimeSettingsUpdateOutcome::Conflict(_) => continue,
+            }
+        }
+
+        Err(RuntimeSettingsError::StoreConflict(
+            "cluster runtime settings raced local cache updates repeatedly".into(),
+        ))
+    }
 }
 
 impl BrokerConfig {
@@ -592,6 +641,42 @@ mod tests {
         assert_eq!(config.queue_idle_sweep_interval_ms, 15);
     }
 
+    #[test]
+    fn runtime_settings_validate_rejects_cluster_runtime_zeroes() {
+        let mut settings = RuntimeSettings::default();
+
+        settings.replication.caught_up_poll_ms = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("replication poll intervals")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.replication.min_in_sync_replicas = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("min_in_sync_replicas")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.replication.isr_timeout_ms = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("isr_timeout_ms")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.partitioning.default_partition_count = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("default_partition_count")
+        ));
+    }
+
     #[tokio::test]
     async fn manager_seeds_missing_store_and_loads_persisted_settings() {
         let dir = test_dir!("runtime_settings_seed");
@@ -838,6 +923,41 @@ mod tests {
                 settings: first_update,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn apply_cluster_settings_retries_against_local_cache_version() {
+        let dir = test_dir!("runtime_settings_apply_cluster");
+        let stroma = Stroma::open(
+            &dir.root,
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let store = stroma.global_store().await.unwrap();
+        let manager = RuntimeSettingsManager::load_from_store(
+            store,
+            RuntimeSettings::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut local = manager.current().settings;
+        local.delivery.inflight_ttl_ms = 111;
+        manager.update(1, local).await.unwrap();
+
+        let mut cluster = RuntimeSettings::default();
+        cluster.delivery.inflight_ttl_ms = 222;
+        let snapshot = manager
+            .apply_cluster_settings(cluster.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.version, 3);
+        assert_eq!(snapshot.settings, cluster);
+        assert_eq!(manager.current().settings.delivery.inflight_ttl_ms, 222);
     }
 
     #[tokio::test]

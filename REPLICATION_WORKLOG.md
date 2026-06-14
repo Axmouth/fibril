@@ -1088,57 +1088,73 @@ Risks:
 
 ## Core Completion Estimate
 
-Rough status as of checkpoint 43, measured against a functional first version
-with external coordination, pull replication, local failover mechanics, and
-basic operator visibility:
+Rough status as of 2026-06-14, measured against a functional first version with
+embedded coordination, pull replication, partition ownership, local failover
+mechanics, partitioned queues, and basic operator visibility. These are not
+additive percentages, and they are not a production-readiness score.
 
-- Keratin replication primitives: about 70%. Caller-assigned append,
-  checkpoint/reset primitives, and role guard direction exist. Remaining work is
-  mostly hardening, warnings/cleanup, and any later range/repair primitives that
-  snapshot-based catch-up proves it needs.
-- Stroma queue replication mechanics: about 65%. Queue roles, owner
-  freeze/drain, follower ingest, state checkpoint export/install, checked
-  promotion, and demotion exist. Remaining work is stronger adversarial tests,
-  role-transition cleanup, possible module split, and more explicit
-  consistency checks around snapshot/message catch-up.
-- Broker ownership and assignment model: about 45%. Static coordination,
-  assignment snapshots, transition planning, owner gates, not-owner protocol
-  errors, and stable placement policy exist. Remaining work is real
-  coordinator-backed watch/cache, owner fencing, controller loop, and promotion
-  orchestration.
-- Follower pull replication worker: about 55%. Worker state, catch-up tick,
-  checkpoint policy, owner-peer boundary, loop scaffold, and loop supervision
-  exist. Remaining work is protocol-backed owner peer, coordination-backed peer
-  resolver, retry/connection management, and end-to-end replication tests over
-  TCP.
-- Replication transport: about 35%. Protocol frames and handler wiring exist
-  for record reads, applies, and state checkpoint export/install. Remaining work
-  is the client/peer implementation, real networked worker wiring, resume/error
-  behavior, and larger transfer handling.
-- Failover and promotion orchestration: about 20%. Local primitives exist, but
-  the real sequence across coordinator leases, catch-up, fencing, promotion,
-  and client reroute is still mostly unimplemented.
-- Sharding and placement: about 25%. Deterministic placement policy exists and
-  preserves stable assignments. Remaining work is queue partition topology,
-  client partition routing, controller-managed balancing, partition scale-out,
-  and eventual shrink/drain behavior.
-- Publish-confirm replication durability: about 15%. The policy model exists,
-  but follower accepted/durable acknowledgements and enforcement in the publish
-  confirm path are still pending.
-- Operator/admin visibility: about 30%. Queue roles and follower worker state
-  are visible through broker observability surfaces. Remaining work is
-  user-facing replication lag/role display, transition logs, refusal reasons,
-  controller status, health signals, and a live topology view.
-- Testing for replication and sharding: about 40%. Good bottom-up coverage
-  exists for storage, Stroma roles, broker assignment, placement, worker ticks,
-  and supervision. Remaining work is helper cleanup, adversarial race tests,
-  TCP end-to-end tests, multi-broker tests, fault-injection tests, and eventually
-  longer chaos/soak tests.
+- Keratin replication primitives: about 85%. Caller-assigned append,
+  checkpoint/reset primitives, epoch fencing, and failover-tail promotion exist.
+  Remaining work is cleanup, warnings, range/repair refinements if checkpoint
+  fallback proves too blunt, and broader corruption/fault coverage.
+- Stroma queue replication mechanics: about 85%. Queue roles, freeze/drain,
+  follower ingest, state checkpoint export/install, checked promotion, demotion,
+  epoch advance, and local-tail failover promotion exist. Remaining work is
+  module split, transition cleanup, and more adversarial role-change coverage.
+- Broker ownership and assignment model: about 80%. Static and Ganglion-backed
+  coordination, assignment planning, owner gates, not-owner redirects,
+  assignment watchers, follower-loop supervision, stable placement, and
+  per-partition ownership are wired. Remaining work is hardening the server
+  bootstrap, retry/escalation policy for promotion refusal, and more failure
+  tests.
+- Follower pull replication worker: about 80%. Worker state, checkpoint policy,
+  protocol-backed owner peer, coordination-backed resolver, supervised loop, and
+  durable progress reporting exist. Remaining work is richer backoff/health
+  observability, restart/partition chaos, and long-running soak coverage.
+- Replication transport: about 75%. Protocol frames, owner reads, follower
+  applies, checkpoint export/install, reporter stamping, connection reuse, and
+  TCP e2e coverage exist. Remaining work is larger-transfer behavior,
+  compression/streaming decisions, and harsher network-fault tests.
+- Coordination and controller: about 75%. Ganglion mode starts real multi-process
+  coordination, registers brokers and queues, runs the placement controller,
+  syncs runtime settings, exposes topology, and drives assignment watches.
+  Remaining work is server bootstrap extraction for testability, node-management
+  flows, and failure-mode hardening.
+- Failover and promotion orchestration: about 65%. TTL-driven owner loss,
+  epoch-bumped reassignment, progress-aware candidate selection, follower drain,
+  local-tail promotion, and stale-owner demotion are wired. Remaining work is
+  promotion-refusal retry/escalation, generation races under partitions,
+  follower restart mid-checkpoint-transfer, and operator controls.
+- Partitioning and sharding: about 70%. Declared partition counts, catalogue
+  entries, client topology, round-robin/keyed routing, partitioning-version
+  fencing, per-partition server publish/subscribe, and client fan-in exist.
+  Remaining work is live repartitioning, auto-create policy if desired, and
+  assignment-narrowed subscriptions for consumer groups.
+- Publish-confirm replication durability: about 75%. Replica-durable confirm
+  gating, follower durable progress, timeout errors, min-in-sync fail-fast
+  refusal, ISR freshness, and two-broker wire e2e exist. Remaining work is
+  cross-broker lag/ISR aggregation in topology surfaces and possible per-topic
+  overrides.
+- Exclusive consumer groups: about 70%. Rust `.exclusive()`, soft targets,
+  sticky assignment, per-partition delivery gate, assignment push, reconnect
+  restore, member identity, and cross-broker coordinator wiring exist. Remaining
+  work is the multi-node coordinator e2e, TypeScript API parity, and optional
+  client narrowing with graceful revoke/drain.
+- Operator/admin visibility: about 65%. Admin topology API/page, CLI topology,
+  queue replication/follower observability, owner-side ISR view, runtime
+  settings, and sparse queue visibility exist. Remaining work is cross-broker
+  lag aggregation, topology diagram enrichment, node-management UI, and clearer
+  incident runbooks.
+- Testing for replication and sharding: about 65%. Storage, Stroma, broker,
+  protocol, client routing, two-broker replication, cluster tryout, Ganglion
+  failure tests, and large placement tests exist. Remaining work is the
+  multi-node cohort coordinator e2e, bootstrap test extraction, proxy/fault
+  injection, longer chaos/soak tests, and helper cleanup.
 
-Overall for a decent first replication/sharding milestone: about 35-40%.
-The foundation is no longer speculative, but the feature is not operationally
-complete until real coordination, protocol-backed follower workers, failover
-orchestration, and end-to-end tests are in place.
+Overall for a decent first replication/sharding milestone: about 65-70%.
+Overall for production-ready clustered HA: closer to 45-50%. The mechanics are
+real now, but production confidence still needs failure injection, runbooks,
+more multi-node e2e coverage, bootstrap cleanup, and operator workflows.
 
 Previous completed implementation checkpoints:
 

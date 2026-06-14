@@ -1,4 +1,5 @@
 use askama::Template;
+use async_trait::async_trait;
 use axum::{
     Form, Router,
     extract::{Path, State},
@@ -7,7 +8,9 @@ use axum::{
     routing::get,
 };
 use fibril_broker::{
-    StromaMetrics, queue_engine::QueueEngine, runtime_settings::RuntimeSettingsManager,
+    StromaMetrics,
+    queue_engine::QueueEngine,
+    runtime_settings::{RuntimeSettings, RuntimeSettingsManager, RuntimeSettingsSnapshot},
 };
 use fibril_util::StaticAuthHandler;
 use rust_embed::RustEmbed;
@@ -31,6 +34,23 @@ pub type BrokerQueueObservability = dyn Fn() -> serde_json::Value + Send + Sync 
 /// (e.g. ganglion's `RaftTopology` serialized to JSON). Kept as an opaque JSON
 /// callback so the admin crate stays independent of the coordination backend.
 pub type RaftTopologyProvider = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSettingsClusterUpdateOutcome {
+    Stored(RuntimeSettingsSnapshot),
+    Conflict(RuntimeSettingsSnapshot),
+}
+
+#[async_trait]
+pub trait RuntimeSettingsClusterStore: Send + Sync + 'static {
+    async fn current_runtime_settings(&self) -> Result<Option<RuntimeSettingsSnapshot>, String>;
+
+    async fn update_runtime_settings(
+        &self,
+        expected_version: u64,
+        settings: RuntimeSettings,
+    ) -> Result<RuntimeSettingsClusterUpdateOutcome, String>;
+}
 
 pub struct AdminConfig {
     // TODO: better type, parse earlier
@@ -60,11 +80,9 @@ pub struct AdminServer {
     pub sessions: AdminSessions,
     pub coordination: Option<Arc<dyn fibril_broker::Coordination>>,
     pub raft_topology: Option<Arc<RaftTopologyProvider>>,
-    /// Notified after a runtime-settings update is stored locally, so the
-    /// composition root can publish it cluster-wide (replicated settings).
-    pub settings_published: Option<
-        tokio::sync::mpsc::UnboundedSender<fibril_broker::runtime_settings::RuntimeSettings>,
-    >,
+    /// Optional cluster-authoritative runtime-settings store. When absent,
+    /// runtime settings are local-only and use the node's Stroma global store.
+    pub runtime_settings_cluster: Option<Arc<dyn RuntimeSettingsClusterStore>>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -98,7 +116,7 @@ impl AdminServer {
             sessions: AdminSessions::default(),
             coordination: None,
             raft_topology: None,
-            settings_published: None,
+            runtime_settings_cluster: None,
         }
     }
 
@@ -114,14 +132,12 @@ impl AdminServer {
         self
     }
 
-    /// Attach the cluster publish hook for stored runtime-settings updates.
-    pub fn with_settings_publisher(
+    /// Attach the cluster-authoritative runtime-settings store.
+    pub fn with_runtime_settings_cluster(
         mut self,
-        sender: tokio::sync::mpsc::UnboundedSender<
-            fibril_broker::runtime_settings::RuntimeSettings,
-        >,
+        store: Arc<dyn RuntimeSettingsClusterStore>,
     ) -> Self {
-        self.settings_published = Some(sender);
+        self.runtime_settings_cluster = Some(store);
         self
     }
 
@@ -474,6 +490,7 @@ pub fn print_admin_banner(bind: &str, auth: bool) {
 mod tests {
     use super::*;
 
+    use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
@@ -501,7 +518,10 @@ mod tests {
     use fibril_util::unix_millis;
     use futures::{SinkExt, StreamExt};
     use serde_json::json;
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::{Arc as StdArc, Mutex as StdMutex},
+        time::{Duration, Instant},
+    };
     use tokio::net::{TcpListener, TcpStream};
     use tokio_util::codec::Framed;
     use tower::ServiceExt;
@@ -556,6 +576,46 @@ mod tests {
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeRuntimeSettingsClusterStore {
+        current: StdMutex<Option<RuntimeSettingsSnapshot>>,
+    }
+
+    #[async_trait]
+    impl RuntimeSettingsClusterStore for FakeRuntimeSettingsClusterStore {
+        async fn current_runtime_settings(
+            &self,
+        ) -> Result<Option<RuntimeSettingsSnapshot>, String> {
+            Ok(self.current.lock().unwrap().clone())
+        }
+
+        async fn update_runtime_settings(
+            &self,
+            expected_version: u64,
+            settings: RuntimeSettings,
+        ) -> Result<RuntimeSettingsClusterUpdateOutcome, String> {
+            let mut current = self.current.lock().unwrap();
+            let current_version = current
+                .as_ref()
+                .map(|snapshot| snapshot.version)
+                .unwrap_or(0);
+            if current_version != expected_version {
+                return Ok(RuntimeSettingsClusterUpdateOutcome::Conflict(
+                    current.clone().unwrap_or(RuntimeSettingsSnapshot {
+                        version: 0,
+                        settings,
+                    }),
+                ));
+            }
+            let snapshot = RuntimeSettingsSnapshot {
+                version: current_version + 1,
+                settings,
+            };
+            *current = Some(snapshot.clone());
+            Ok(RuntimeSettingsClusterUpdateOutcome::Stored(snapshot))
+        }
     }
 
     async fn open_protocol_connection(
@@ -1075,6 +1135,87 @@ mod tests {
         assert_eq!(body["version"], 2);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 12_000);
         assert_eq!(body["settings"]["connection"]["reconnect_grace_ms"], 30_000);
+    }
+
+    #[tokio::test]
+    async fn runtime_settings_put_uses_cluster_store_when_available() {
+        let cluster = StdArc::new(FakeRuntimeSettingsClusterStore::default());
+        let server = Arc::try_unwrap(test_server(RuntimeSettingsLocks::default()).await)
+            .unwrap_or_else(|_| panic!("test server should have one strong reference"))
+            .with_runtime_settings_cluster(cluster.clone());
+        let runtime_settings = server.runtime_settings.as_ref().unwrap().clone();
+        let app = AdminServer::router(Arc::new(server));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/runtime-settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 0,
+                            "settings": {
+                                "delivery": {
+                                    "inflight_ttl_ms": 12_000,
+                                    "expiry_poll_min_ms": 15_000,
+                                    "expiry_batch_max": 8192,
+                                    "delivery_poll_max_ms": 5_000
+                                },
+                                "idle_queue_cleanup": {
+                                    "enabled": false,
+                                    "evict_after_ms": 600_000,
+                                    "sweep_interval_ms": 60_000,
+                                    "publisher_idle_timeout_ms": null
+                                },
+                                "connection": {
+                                    "reconnect_grace_ms": 30_000
+                                },
+                                "replication": {
+                                    "confirm_timeout_ms": 5000,
+                                    "caught_up_poll_ms": 1000,
+                                    "retry_poll_ms": 100,
+                                    "checkpoint_retry_poll_ms": 5000,
+                                    "min_in_sync_replicas": 1,
+                                    "isr_timeout_ms": 10000
+                                },
+                                "partitioning": {
+                                    "default_partition_count": 1
+                                },
+                                "consumer_groups": {
+                                    "default_target_per_consumer": null
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 12_000);
+        assert_eq!(
+            cluster
+                .current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .settings
+                .delivery
+                .inflight_ttl_ms,
+            12_000
+        );
+
+        // The cluster write is applied back to the local manager as a cache.
+        assert_eq!(
+            runtime_settings.current().settings.delivery.inflight_ttl_ms,
+            12_000
+        );
     }
 
     #[tokio::test]

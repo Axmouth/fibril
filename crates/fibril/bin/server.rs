@@ -78,8 +78,6 @@ async fn main() -> anyhow::Result<()> {
             >,
         >,
         raft_server: Arc<ganglion_openraft::TcpRaftServer>,
-        settings_tx:
-            tokio::sync::mpsc::UnboundedSender<fibril_broker::runtime_settings::RuntimeSettings>,
         controller_status: Arc<std::sync::RwLock<fibril_coordination_ganglion::ControllerStatus>>,
     }
     let ganglion_parts: Option<GanglionParts> = match config.coordination.mode {
@@ -170,20 +168,10 @@ async fn main() -> anyhow::Result<()> {
                 std::time::Duration::from_millis(section.heartbeat_interval_ms),
             );
 
-            // Replicated runtime settings: apply cluster documents locally
-            // (sync loop) and publish locally-stored updates cluster-wide
-            // (publisher task fed by the admin PUT hook).
+            // Replicated runtime settings: apply cluster documents locally.
+            // Admin writes go through the cluster document first, via the
+            // runtime-settings cluster store installed below.
             coordination.spawn_runtime_settings_sync(runtime_settings.clone());
-            let (settings_tx, mut settings_rx) = tokio::sync::mpsc::unbounded_channel();
-            let settings_publisher = coordination.clone();
-            tokio::spawn(async move {
-                while let Some(settings) = settings_rx.recv().await {
-                    if let Err(error) = settings_publisher.publish_runtime_settings(&settings).await
-                    {
-                        tracing::warn!(%error, "cluster runtime-settings publish deferred");
-                    }
-                }
-            });
 
             // Embedded controller: the raft leader assigns catalogue queues
             // across heartbeat-live brokers; standbys idle.
@@ -200,7 +188,6 @@ async fn main() -> anyhow::Result<()> {
             Some(GanglionParts {
                 coordination,
                 raft_server,
-                settings_tx,
                 controller_status,
             })
         }
@@ -482,7 +469,7 @@ async fn main() -> anyhow::Result<()> {
             let raft_server = parts.raft_server;
             let controller_status = parts.controller_status;
             admin
-                .with_coordination(parts.coordination)
+                .with_coordination(parts.coordination.clone())
                 .with_raft_topology(Arc::new(move || {
                     let mut value = serde_json::to_value(topology_source.raft_node().topology())
                         .unwrap_or(serde_json::Value::Null);
@@ -505,7 +492,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                     value
                 }))
-                .with_settings_publisher(parts.settings_tx)
+                .with_runtime_settings_cluster(Arc::new(fibril::GanglionRuntimeSettingsStore::new(
+                    parts.coordination,
+                )))
         }
     };
 

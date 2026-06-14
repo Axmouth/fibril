@@ -5,15 +5,23 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use fibril_admin::{RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome};
 use fibril_broker::runtime_settings::{
     ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, ConsumerGroupRuntimeSettings,
     DeliveryRuntimeSettings, IdleQueueCleanupRuntimeSettings, PartitioningRuntimeSettings,
-    ReplicationRuntimeSettings, RuntimeSettings,
+    ReplicationRuntimeSettings, RuntimeSettings, RuntimeSettingsSnapshot,
 };
 use fibril_config::ServerConfig;
-use fibril_coordination_ganglion::ClientTopology;
+use fibril_coordination_ganglion::{
+    ClientTopology, ClusterRuntimeSettingsUpdateOutcome, GanglionCoordination,
+};
 use fibril_protocol::v1::handler::{ClientTopologySource, QueueDeclareCoordinator};
 use fibril_protocol::v1::{Partition, QueueTopologyEntry, TopologyOk};
+use ganglion_openraft::{
+    GanglionRaftConfig,
+    openraft::{RaftNetworkFactory, storage::RaftLogStorage},
+};
 
 /// Map the startup config's runtime-seed section into the broker's
 /// `RuntimeSettings` (the initial cluster document before replicated overrides).
@@ -54,6 +62,75 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
                 .consumer_groups
                 .default_target_per_consumer,
         },
+    }
+}
+
+pub struct GanglionRuntimeSettingsStore<LS, NF>
+where
+    LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: RaftNetworkFactory<GanglionRaftConfig>,
+{
+    coordination: Arc<GanglionCoordination<LS, NF>>,
+}
+
+impl<LS, NF> GanglionRuntimeSettingsStore<LS, NF>
+where
+    LS: RaftLogStorage<GanglionRaftConfig>,
+    NF: RaftNetworkFactory<GanglionRaftConfig>,
+{
+    pub fn new(coordination: Arc<GanglionCoordination<LS, NF>>) -> Self {
+        Self { coordination }
+    }
+}
+
+#[async_trait]
+impl<LS, NF> RuntimeSettingsClusterStore for GanglionRuntimeSettingsStore<LS, NF>
+where
+    LS: RaftLogStorage<GanglionRaftConfig> + 'static,
+    NF: RaftNetworkFactory<GanglionRaftConfig> + 'static,
+{
+    async fn current_runtime_settings(&self) -> Result<Option<RuntimeSettingsSnapshot>, String> {
+        self.coordination
+            .runtime_settings_document()
+            .map(|document| {
+                document.map(|document| RuntimeSettingsSnapshot {
+                    version: document.cluster_version,
+                    settings: document.settings,
+                })
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    async fn update_runtime_settings(
+        &self,
+        expected_version: u64,
+        settings: RuntimeSettings,
+    ) -> Result<RuntimeSettingsClusterUpdateOutcome, String> {
+        match self
+            .coordination
+            .update_runtime_settings(expected_version, &settings)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            ClusterRuntimeSettingsUpdateOutcome::Stored(document) => Ok(
+                RuntimeSettingsClusterUpdateOutcome::Stored(RuntimeSettingsSnapshot {
+                    version: document.cluster_version,
+                    settings: document.settings,
+                }),
+            ),
+            ClusterRuntimeSettingsUpdateOutcome::Conflict(Some(document)) => Ok(
+                RuntimeSettingsClusterUpdateOutcome::Conflict(RuntimeSettingsSnapshot {
+                    version: document.cluster_version,
+                    settings: document.settings,
+                }),
+            ),
+            ClusterRuntimeSettingsUpdateOutcome::Conflict(None) => Ok(
+                RuntimeSettingsClusterUpdateOutcome::Conflict(RuntimeSettingsSnapshot {
+                    version: 0,
+                    settings,
+                }),
+            ),
+        }
     }
 }
 

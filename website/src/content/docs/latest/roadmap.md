@@ -13,6 +13,17 @@ check what is already wired and under what conditions.
 
 ## Recently landed
 
+- Partitioned queues: declare can create multiple partitions, producers can use
+  `partition_key` for stable key routing or rely on round-robin spread, and
+  subscriptions transparently fan in across known partitions.
+- Cluster coordination: Ganglion-backed coordination can register brokers and
+  queues, run the placement controller, expose topology, and drive owner and
+  follower role transitions.
+- Replication data plane: followers pull from owners, install checkpoints when
+  needed, report durable progress, and can be promoted after owner loss under
+  epoch fencing.
+- Replica-durable publish confirms: replica progress can gate confirmed publish
+  replies, with `min_in_sync_replicas` fail-fast behavior and ISR observability.
 - Exclusive consumer groups: an opt-in `.exclusive()` subscription gives ordered,
   balanced, sticky, self-healing consumption of a partitioned queue (one consumer
   per partition), with reconnect-safe membership and a soft per-consumer target.
@@ -45,16 +56,38 @@ check what is already wired and under what conditions.
 
 ## Near term
 
+- Refactor server bootstrap wiring into the `fibril` library enough to make
+  multi-node coordination and cohort-controller tests stand up real brokers
+  without going through `main`.
+- Add the pending multi-node integration test for cross-broker exclusive
+  consumer-group coordination.
+- Finish the combined Offset plus Topic/Group newtype pass after the current
+  partition newtype pass, including the planned `Arc<str>` direction for
+  Topic/Group.
+- Add a user-facing replication, partitioning, and consumer-group explainer that
+  connects the pieces without exposing implementation noise.
 - Improve client feedback for reconnect cases where reconciliation closes a
   subscription stream.
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
 - Add the next storage-level startup/runtime settings where they have clear operational value.
 - Keep refining sparse-queue observability where it helps operators decide why a queue is loaded, idle, or not yet unloaded.
+- Explore cluster-wide immutable runtime policy. Hardware-shaped startup
+  settings such as storage paths and log tuning should stay local, while any
+  cluster-wide runtime locks need a replicated policy rather than node-local
+  boot config.
 - Improve TCP protocol ergonomics and error behavior.
 - Keep Rust and TypeScript client APIs aligned as public-path behavior changes.
 
 ## Medium term
 
+- Add cross-broker replication lag aggregation to `fibrilctl topology` and the
+  admin topology diagram.
+- Add programmatic node management and scale-up or scale-down flows around the
+  Ganglion-backed cluster path.
+- Add fault-injection and unreliable-infrastructure testing for partitions,
+  latency, dropped traffic, and leadership churn.
+- Add consumer-group assignment narrowing so clients can subscribe only to their
+  assigned partition subset instead of relying only on the delivery gate.
 - Continue improving runnable broker images and binaries, including `fibrilctl` in the server image.
 - Add more production deployment guidance for the broker itself.
 - Improve admin interface observability.
@@ -65,8 +98,10 @@ check what is already wired and under what conditions.
 
 ## Longer term
 
-- Replication design and implementation.
-- Clustering and partition ownership.
+- Hardening the experimental replication and clustering path into production
+  guidance and supported defaults.
+- Live repartitioning. The current direction is fixed-at-create partition count
+  first, with live grow or shrink treated as a separate migration feature.
 - Durable broker restart reconciliation. This would let clients reclaim
   persisted session and inflight ownership after a broker process restart,
   using a startup grace window before normal redelivery resumes. Current

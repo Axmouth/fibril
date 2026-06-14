@@ -19,8 +19,10 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Dead lettering | Available | Global and per-queue policy are configurable, replay tooling is still early |
 | Sparse queues | Available | Lazy loading and idle cleanup are wired, observability is still growing |
 | Message inspection | Available | Browse active queue messages from admin tooling, with optional settled offsets and payload previews |
-| Partition ownership | Planned | Future nodes can split active queue traffic by owning different partitions |
-| Replication | Planned | Future followers can keep partition copies for failover and recovery |
+| Partitioned queues | Available | Declared queues can have multiple partitions, with client-side key routing and transparent fan-in |
+| Partition ownership | Experimental | Ganglion-backed coordination can assign owners and followers, with owner fencing and not-owner redirects |
+| Replication | Experimental | Follower pull replication, failover promotion, ISR checks, and replica-durable confirms are wired on this branch |
+| Exclusive consumer groups | Partial | Rust client opt-in for one active consumer per partition, with sticky assignment and cross-broker coordinator wiring |
 | Transactions | Out of scope | Not planned. Transactional publish/consume workflows are intentionally excluded |
 
 ## Early performance observations
@@ -31,4 +33,6 @@ These numbers are architecture sanity checks, not a rigorous benchmark suite. Ha
 
 ## What can move now
 
-The docs can describe current queue semantics, delayed publish and retry, configurable DLQ behavior, deployment shape, sparse-queue behavior, and early benchmarks.
+The docs can describe current queue semantics, delayed publish and retry,
+configurable DLQ behavior, deployment shape, sparse-queue behavior, partitioned
+queues, exclusive consumer groups, and early benchmarks.
