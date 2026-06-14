@@ -975,7 +975,16 @@ struct QueueLoopState {
     // used to wake the delivery loop
     notify: tokio::sync::Notify,
     epoch: AtomicU64,
+    /// Exclusive consumer-group gate: when set, deliver this partition's messages
+    /// ONLY to the assigned consumer (the rest stay subscribed as standbys). The
+    /// sentinel `NO_EXCLUSIVE_ASSIGNEE` means "no gate" — deliver to all
+    /// consumers (the default competing-consumer behavior).
+    exclusive_assignee: AtomicU64,
 }
+
+/// Sentinel for [`QueueLoopState::exclusive_assignee`] meaning "no exclusive
+/// gate" (deliver to all consumers).
+const NO_EXCLUSIVE_ASSIGNEE: u64 = u64::MAX;
 
 impl QueueLoopState {
     fn new() -> Self {
@@ -988,11 +997,28 @@ impl QueueLoopState {
             owner_runtime_shutdown: CancellationToken::new(),
             notify: tokio::sync::Notify::new(),
             epoch: AtomicU64::new(1),
+            exclusive_assignee: AtomicU64::new(NO_EXCLUSIVE_ASSIGNEE),
         }
     }
     fn wake(&self) {
         self.epoch.fetch_add(1, Ordering::Release);
         self.notify.notify_one();
+    }
+
+    /// The current exclusive assignee, or `None` when delivery is open to all.
+    fn exclusive_assignee(&self) -> Option<ConsumerId> {
+        match self.exclusive_assignee.load(Ordering::Acquire) {
+            NO_EXCLUSIVE_ASSIGNEE => None,
+            id => Some(id),
+        }
+    }
+
+    /// Gate delivery to a single consumer (`Some`) or reopen to all (`None`),
+    /// waking the delivery loop so the change takes effect immediately.
+    fn set_exclusive_assignee(&self, assignee: Option<ConsumerId>) {
+        self.exclusive_assignee
+            .store(assignee.unwrap_or(NO_EXCLUSIVE_ASSIGNEE), Ordering::Release);
+        self.wake();
     }
 
     fn current_epoch(&self) -> u64 {
@@ -2413,6 +2439,26 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         })
     }
 
+    /// Gate an exclusive consumer-group partition: deliver only to `assignee`
+    /// (`Some`) or reopen to all competing consumers (`None`). No-op if the
+    /// partition has no delivery loop yet.
+    pub fn set_exclusive_assignee(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        assignee: Option<ConsumerId>,
+    ) {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        if let Some(qs) = self.queues.get(&key).map(|e| e.value().clone()) {
+            qs.set_exclusive_assignee(assignee);
+        }
+    }
+
     pub async fn unsubscribe(
         &self,
         topic: &str,
@@ -2867,8 +2913,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         break;
                     }
 
-                    let consumers: Vec<Arc<ConsumerState>> =
+                    let mut consumers: Vec<Arc<ConsumerState>> =
                         qs.consumers.iter().map(|e| e.value().clone()).collect();
+                    // Exclusive consumer-group gate: when an assignee is set,
+                    // deliver only to it (others stay subscribed as standbys).
+                    if let Some(assignee) = qs.exclusive_assignee() {
+                        consumers.retain(|c| c.sub_id == assignee);
+                    }
                     if consumers.is_empty() {
                         tracing::debug!("No consumers for tp={} part={} group={:?}, skipping delivery", key.tp, key.part, key.group);
                         break;

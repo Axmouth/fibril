@@ -1793,6 +1793,91 @@ async fn publishes_route_to_independent_partition_logs() {
     broker.shutdown().await;
 }
 
+/// The exclusive-assignee gate delivers a partition's messages only to the
+/// assigned consumer; other consumers stay subscribed (standbys) and receive
+/// nothing until reassigned. Reassigning routes new messages to the new
+/// assignee while the prior one keeps its already-delivered in-flight.
+#[tokio::test]
+async fn exclusive_assignee_gate_delivers_only_to_assignee() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "excl";
+
+    let mut a = broker
+        .subscribe(
+            topic,
+            Partition::ZERO,
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 10 },
+        )
+        .await
+        .unwrap();
+    let mut b = broker
+        .subscribe(
+            topic,
+            Partition::ZERO,
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 10 },
+        )
+        .await
+        .unwrap();
+
+    // Gate delivery to `a` before any messages exist.
+    broker.set_exclusive_assignee(topic, Partition::ZERO, None, Some(a.sub_id));
+
+    let (publisher, _c) = broker
+        .get_publisher(topic, Partition::ZERO, &None)
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        publisher
+            .publish(
+                b"m".to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    // `a` receives all four; `b` (gated out, still subscribed) receives nothing.
+    for _ in 0..4 {
+        assert!(recv_with_timeout(&mut a, 1000).await.is_some());
+    }
+    assert!(
+        recv_with_timeout(&mut b, 200).await.is_none(),
+        "gated-out consumer must receive nothing"
+    );
+
+    // Reassign to `b`; a new message reaches `b` (a keeps its in-flight).
+    broker.set_exclusive_assignee(topic, Partition::ZERO, None, Some(b.sub_id));
+    publisher
+        .publish(
+            b"m2".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        recv_with_timeout(&mut b, 1000).await.is_some(),
+        "new assignee should receive after reassignment"
+    );
+
+    broker.shutdown().await;
+}
+
 #[tokio::test]
 async fn owner_replication_read_rejects_unowned_queue_before_materializing() {
     let (broker, _dir) =
