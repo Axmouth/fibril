@@ -10,10 +10,10 @@
 use std::collections::HashMap;
 
 use fibril_broker::coordination::{
-    aggregate_cohort_membership, CohortPlan, ConsumerGroupKey, Coordination, CoordinationSnapshot,
-    CoordinationStream, GlobalCohortMembership, LocalCohortMembership, NodeInfo,
-    PartitionAssignment, PartitionPlacementError, PartitionPlacementInput,
-    PartitionPlacementPolicy, QueueIdentity, ReplicationDurabilityPolicy,
+    aggregate_cohort_membership, ClusterCohortController, CohortPlan, ConsumerGroupKey,
+    Coordination, CoordinationSnapshot, CoordinationStream, GlobalCohortMembership,
+    LocalCohortMembership, NodeInfo, PartitionAssignment, PartitionPlacementError,
+    PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity, ReplicationDurabilityPolicy,
 };
 use fibril_storage::Partition;
 use ganglion_openraft::openraft::storage::RaftLogStorage;
@@ -633,6 +633,26 @@ where
         self.cluster_attribute(&cohort_assignment_attribute_key(key))
             .map(|raw| decode_cohort_assignment(&raw))
             .unwrap_or_default()
+    }
+
+    /// One cohort-controller iteration: as the leader, aggregate cluster-wide
+    /// cohort membership, compute each cohort's global plan (`controller` holds
+    /// per-cohort state across ticks for stickiness), and publish the plans for
+    /// owners to apply. Standbys (non-leaders) no-op. `partition_count` resolves a
+    /// queue's full partition count (e.g. from `queue_partitioning`).
+    pub async fn run_cohort_controller_tick(
+        &self,
+        controller: &mut ClusterCohortController,
+        partition_count: impl Fn(&ConsumerGroupKey) -> u32,
+    ) -> Result<(), OpenraftAdapterError> {
+        if !self.node.is_leader().await {
+            return Ok(());
+        }
+        let membership = self.global_cohort_membership();
+        for plan in controller.plan(membership, partition_count) {
+            self.publish_cohort_assignment(&plan).await?;
+        }
+        Ok(())
     }
 
     /// Set one replicated cluster attribute (forwarded merge; same-value
@@ -2279,6 +2299,93 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+
+        coordination.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cohort_controller_tick_plans_from_membership_label() {
+        use fibril_broker::coordination::{CohortMemberInfo, StickyConsumerGroupAssignor};
+        use std::sync::Arc;
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node should start");
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            ganglion_openraft::openraft::BasicNode::new("coordinator-1"),
+        );
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("single node elects itself");
+
+        let coordination = GanglionCoordination::new("broker-a", raft_node);
+
+        // Register this node with a cohort-membership label: cohort "default"
+        // has members m1 + m2 (as the heartbeat would carry).
+        let info = NodeInfo {
+            node_id: "broker-a".into(),
+            broker_addr: "127.0.0.1:9000".parse().expect("addr"),
+            admin_addr: None,
+        };
+        let membership = vec![LocalCohortMembership {
+            topic: "jobs".into(),
+            group: None,
+            consumer_group: "default".into(),
+            members: vec![
+                CohortMemberInfo {
+                    member: "m1".into(),
+                    target: None,
+                },
+                CohortMemberInfo {
+                    member: "m2".into(),
+                    target: None,
+                },
+            ],
+        }];
+        let mut labels = BTreeMap::new();
+        labels.insert(
+            COHORT_MEMBERSHIP_LABEL.to_string(),
+            encode_cohort_membership(&membership),
+        );
+        coordination
+            .register_self_with_labels(&info, labels)
+            .await
+            .expect("register");
+
+        // Wait until the membership label is committed/visible to the controller.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while coordination.global_cohort_membership().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "membership label never became visible"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Run a controller tick over a 4-partition queue.
+        let mut controller =
+            ClusterCohortController::new(Arc::new(StickyConsumerGroupAssignor), None);
+        coordination
+            .run_cohort_controller_tick(&mut controller, |_| 4)
+            .await
+            .expect("tick");
+
+        // The published plan covers all 4 partitions, balanced 2/2 across m1/m2.
+        let key = ConsumerGroupKey::new("jobs", None, "default");
+        let assignment = coordination.cohort_assignment(&key);
+        assert_eq!(assignment.len(), 4, "all partitions assigned");
+        let mut loads: HashMap<&str, usize> = HashMap::new();
+        for member in assignment.values() {
+            *loads.entry(member.as_str()).or_default() += 1;
+        }
+        assert_eq!(loads.get("m1").copied(), Some(2));
+        assert_eq!(loads.get("m2").copied(), Some(2));
 
         coordination.raft_node().shutdown().await.expect("shutdown");
     }
