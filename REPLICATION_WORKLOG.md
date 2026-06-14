@@ -40,6 +40,37 @@ DONE — Client cohort API + limitations (e37ad47, f51a882):
   (optimal full-disconnect failover; partial single-partition unsubscribe is
   raw-protocol-only). Revisit per-partition leave WITH narrowing.
 
+CURRENT WORK — Cross-broker cohort coordinator (Phase 2b). VERIFY-FIRST DONE
+(b155083): test exclusive_cohort_works_across_partition_owners_e2e — two brokers
+owning disjoint partitions of one queue, each owner gates its partitions
+independently; per-partition correctness/ordering hold cross-broker today.
+FINDINGS (what the coordinator must add; correctness already holds via local gates,
+so the global plan can be ADVISORY / eventually-consistent — stale = transient
+imbalance, never double-deliver; fits load-aware-future-direction off-raft stance):
+  1. MEMBER IDENTITY (the prerequisite brick): the cohort member id is the
+     per-connection server-assigned client_id, which is DISTINCT per broker (each
+     EngineSlot does its own Hello). So one logical consumer fanning across brokers
+     looks like several unrelated members -> brokers can't recognize "same consumer"
+     -> global balance/targets/stickiness break. Need a cluster-scoped consumer
+     identity. CONSTRAINT (user, 2026-06-14): server stays the source of truth for
+     identity (no client-minted ids). RECOMMENDATION: a dedicated cluster-issued
+     cohort member id (issued+validated by the coordinator that already owns
+     partition assignment; client echoes it on each per-broker exclusive subscribe;
+     keep per-broker client_id/resume untouched). Alt: promote client_id itself to
+     cluster scope (more unifying, perturbs resume model). DECIDE before building.
+  2. GLOBAL BALANCE: uneven partition->broker distribution makes independent
+     per-broker deals globally unbalanced; coordinator computes one global deal.
+  3. GLOBAL TARGETS: per-broker can't enforce a cluster-wide per-consumer target.
+  4. UNIFIED ASSIGNMENT VIEW/PUSH: today each owner pushes only its slice + a
+     per-broker generation; coordinator gives one global assignment + generation.
+  5. STICKINESS ACROSS OWNER MOVES: when a partition's owner changes (failover/
+     rebalance) the new owner has no `current` -> cold reassign. Coordinator carries
+     the global assignment so the new owner restores the prior assignee.
+DESIGN: controller aggregates cohort membership off-raft (gossip/heartbeat) keyed by
+the cluster member id, computes global (partition->member) with the sticky/target
+assignor, distributes per-partition assignees to owner brokers which set local
+gates. Gate remains the correctness backstop.
+
 DONE — Phase 2a (opt-in exclusive consumer groups, single-owner), Model A (client
 fan-in + per-partition consumer_group; server gates each partition to the assigned
 member). gate = QueueLoopState.exclusive_assignee; ExclusiveGroupRouter on Broker
