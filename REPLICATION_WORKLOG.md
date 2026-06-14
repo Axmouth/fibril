@@ -56,20 +56,32 @@ balance only, never correctness; a departed member's partitions pause, never
 mis-deliver). Single-node is unaffected by all coordinator code (no controller ->
 no external plan -> local computation).
 
-IMMEDIATE NEXT (the plan for after compaction): the MULTI-NODE COHORT E2E. It is
-now UNBLOCKED because the bootstrap was extracted into the fibril lib (it used to
-be trapped in server.rs main). Stand up two broker+coordination nodes (lean on
-the existing ganglion multi-node harness, e.g. the
-ganglion_coordination_drives_supervised_follower_replication test in
-crates/protocol/tests, and/or the new coordination membership smoke + live-cluster
-scripts added during the interlude), split a queue's partitions across the two
-owners, run a cohort spanning both, and assert the controller produces a globally
-balanced assignment (the thing per-broker-local cannot). Then drop a consumer and
-assert it rebalances. Verify the cohort wiring survived the extraction (grep
-crates/fibril/src/lib.rs for local_cohort_membership / run_cohort_controller_tick /
-apply_exclusive_assignment).
+DONE — multi-node cohort e2e: cohort_controller_aggregates_across_brokers_and_rebalances
+in coordination-ganglion stands up a ganglion node with two brokers each
+reporting only their local member, asserts the controller aggregates both labels
+into one globally balanced plan, then drops a member and asserts the survivor
+absorbs the orphaned partitions. Also fixed a forwarded-write regression found
+along the way (no_leader_retries had defaulted to 0, so a standby whose topology
+had not yet learned the leader failed forwarded writes instantly; restored a
+6-attempt safety-net default, and the standby-forward test now runs at 0 retries
+to prove the deterministic forward + hint-redirect path).
 
-AFTER THE E2E (user direction): hardening and refactoring. Includes the per-crate
+DONE — cohort plan GENERATION (the unified global-generation follow-on): the
+published cohort assignment document carries a durable generation the controller
+bumps only when the assignment content changes (read back from the committed
+attribute before each publish, so it stays monotonic across a leader change).
+Owners fence any plan older than the one they hold (equal generation still
+re-resolves, since local subs may have changed), and apply_exclusive_assignment +
+exclusive_assignment_generation expose the applied version for convergence
+observability. Design choices: generation is PER-COHORT (each cohort doc is its
+own authoritative version, no cross-cohort write amplification), and it lives in
+the durable doc, not an in-memory counter. KNOWN follow-up: a new leader's
+controller starts with empty sticky state, so the first plan after a leader
+change can differ from the prior one (one rebalance, gate keeps correctness).
+Seeding the controller from the published plan would remove that churn and
+overlaps with the cooperative-incremental-rebalance item.
+
+AFTER (user direction): hardening and refactoring. Includes the per-crate
 replication module separation, the combined Offset + Topic/Group newtype pass
 (Arc<str> for Topic/Group), and the broader replication + partitioning docs
 explainer (the consumer-groups docs page already landed).
@@ -81,10 +93,10 @@ keratin README and basic docs a look, and the stroma ones too, for the same
 freshness check.
 
 DEFERRED (cohort follow-ons, gate de-risks them): opt-in client narrowing (with
-per-partition leave), cooperative incremental rebalance (vs whole-set recompute),
-coordinator-issued member-id validation (currently broker-minted), and a unified
-cross-broker assignment push with one global generation (today each owner pushes
-its own slice).
+per-partition leave), cooperative incremental rebalance (vs whole-set recompute,
+includes seeding the controller from the published plan to avoid leader-change
+churn), and coordinator-issued member-id validation (currently broker-minted).
+The unified-global-generation item is now DONE (see above).
 
 CODE POINTERS: cohort assignor/router/controller-brain + membership types =
 crates/broker/src/coordination.rs. Gate + ExclusiveGroupRouter + apply path =
