@@ -92,17 +92,31 @@ imbalance, never double-deliver; fits load-aware-future-direction off-raft stanc
   with node .labels + .attributes, set_cluster_attribute/cluster_attribute,
   queue_partitioning, is_leader, live_nodes, spawn_heartbeat_with_labels.)
 
-  REMAINING — live loop wiring (the integration; next):
-  B(wire). Broker heartbeat includes the membership label: where spawn_heartbeat_
-     with_labels is set up (server/fibril bootstrap), add a labels closure using
-     broker.local_cohort_membership() -> encode_cohort_membership.
-  C(wire). Leader-gated cohort controller loop (fibril side): each tick, if
-     leader, aggregate_membership_labels(committed nodes' labels) -> for each
-     cohort resolve partition_count (queue_partitioning) -> ClusterCohortController
-     .plan -> set_cluster_attribute(cohort_assignment_attribute_key, encode).
-  D(wire). Owner watcher: on committed-snapshot change, for each owned queue read
-     its cohort assignment attribute(s) -> decode -> Broker::apply_exclusive_
-     assignment for the partitions it owns. Then a multi-node integration test.
+  PROVIDER TRANSPORT + CONTROLLER TICK — DONE (9bb7d21, 49662d3): on
+  GanglionCoordination: global_cohort_membership() (aggregate node membership
+  labels), publish_cohort_assignment(plan) / cohort_assignment(key) (replicated
+  attribute write/read), and run_cohort_controller_tick(&mut ClusterCohortController,
+  partition_count) — leader-gated aggregate->plan->publish. Live single-node tests:
+  publish/read roundtrip; full tick (register membership label -> tick -> read back
+  balanced plan).
+
+  REMAINING — server-bootstrap spawns (the only thing left; everything they call
+  is built + tested):
+  1. Heartbeat label: where spawn_heartbeat_with_labels is set up (server bootstrap
+     / fibril glue), make the labels closure insert
+     COHORT_MEMBERSHIP_LABEL -> encode_cohort_membership(broker.local_cohort_membership()).
+  2. Controller spawn: a periodic task (own interval, or alongside spawn_controller)
+     holding one ClusterCohortController, calling coordination.run_cohort_controller_
+     tick(&mut controller, |key| queue_partitioning(key).count.unwrap_or(1)).
+  3. Owner watcher: on committed-snapshot change, for each cohort key with a
+     published assignment (cohort_assignment), call broker.apply_exclusive_assignment
+     for the partitions this node owns. (Hook into the existing assignment watcher
+     that reacts to snapshot changes / become-owner.)
+  4. Multi-node integration test (ganglion harness): 2 brokers, partitions split,
+     a cohort spanning both -> controller balances globally; kill one consumer ->
+     rebalances. NOTE bootstrap lives in server.rs (see pending "server.rs refactor
+     b"); explore there. Single-node behavior unaffected (no controller -> no
+     external plan -> local computation, as today).
 
 DONE — Phase 2a (opt-in exclusive consumer groups, single-owner), Model A (client
 fan-in + per-partition consumer_group; server gates each partition to the assigned
