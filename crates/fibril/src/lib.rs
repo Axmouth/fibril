@@ -436,14 +436,21 @@ pub fn spawn_ganglion_broker_tasks(
                     cohort.group.as_deref(),
                     cohort.consumer_group.clone(),
                 );
-                let plan = coordination.cohort_assignment(&key);
-                if !plan.is_empty() {
-                    watch_broker.apply_exclusive_assignment(
-                        &cohort.topic,
-                        cohort.group.as_deref(),
-                        &cohort.consumer_group,
-                        plan,
-                    );
+                if let Some(doc) = coordination.cohort_assignment_doc(&key) {
+                    let plan: std::collections::HashMap<_, _> = doc
+                        .entries
+                        .into_iter()
+                        .map(|entry| (entry.partition, entry.member))
+                        .collect();
+                    if !plan.is_empty() {
+                        watch_broker.apply_exclusive_assignment(
+                            &cohort.topic,
+                            cohort.group.as_deref(),
+                            &cohort.consumer_group,
+                            doc.generation,
+                            plan,
+                        );
+                    }
                 }
             }
             if snapshot.changed().await.is_err() {

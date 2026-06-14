@@ -1088,6 +1088,11 @@ struct ExclusiveGroupRouter {
     /// sub_id) instead of the broker computing the assignment locally. Empty in
     /// single-node / un-coordinated mode (then local computation applies).
     external: HashMap<ConsumerGroupKey, HashMap<Partition, String>>,
+    /// cohort -> generation of the external plan currently held. A plan whose
+    /// generation is older than this is fenced (ignored), so a late or
+    /// out-of-order slice never overwrites a newer one. Also the value reported
+    /// for convergence observability.
+    external_gen: HashMap<ConsumerGroupKey, u64>,
 }
 
 impl ExclusiveGroupRouter {
@@ -1103,6 +1108,7 @@ impl ExclusiveGroupRouter {
             targets: HashMap::new(),
             notifiers: HashMap::new(),
             external: HashMap::new(),
+            external_gen: HashMap::new(),
         }
     }
 
@@ -1251,16 +1257,32 @@ impl ExclusiveGroupRouter {
             .collect()
     }
 
-    /// Install (or replace) the coordinator's global assignment for a cohort and
-    /// return the gate updates to apply. From now on this cohort's gates follow
-    /// the supplied `partition -> member` plan rather than local computation.
+    /// Install (or replace) the coordinator's global assignment for a cohort at
+    /// `generation` and return the gate updates to apply. From now on this
+    /// cohort's gates follow the supplied `partition -> member` plan rather than
+    /// local computation. A plan older than the one already held is fenced
+    /// (ignored, no gate changes). An equal generation is still re-resolved,
+    /// since local subs may have changed since the last apply (a member finally
+    /// subscribing to its assigned partition).
     fn set_external(
         &mut self,
         key: ConsumerGroupKey,
+        generation: u64,
         assignment: HashMap<Partition, String>,
     ) -> Vec<GateUpdate> {
+        if let Some(&held) = self.external_gen.get(&key) {
+            if generation < held {
+                return Vec::new();
+            }
+        }
+        self.external_gen.insert(key.clone(), generation);
         self.external.insert(key.clone(), assignment);
         self.resolve_external_gates(&key)
+    }
+
+    /// The generation of the external plan currently held for a cohort, if any.
+    fn external_generation(&self, key: &ConsumerGroupKey) -> Option<u64> {
+        self.external_gen.get(key).copied()
     }
 
     /// Resolve the cohort's coordinator-supplied plan into gate updates: gate each
@@ -2888,13 +2910,29 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         topic: &str,
         group: Option<&str>,
         consumer_group: &str,
+        generation: u64,
         assignment: HashMap<Partition, String>,
     ) {
         let key = ConsumerGroupKey::new(topic, group, consumer_group);
-        let updates = self.lock_exclusive_groups().set_external(key, assignment);
+        let updates = self
+            .lock_exclusive_groups()
+            .set_external(key, generation, assignment);
         for (partition, assignee) in updates {
             self.set_exclusive_assignee(topic, partition, group, assignee);
         }
+    }
+
+    /// The generation of the cross-broker plan this owner has applied for a
+    /// cohort, if any. Lets callers observe convergence (an owner sitting on an
+    /// older generation has not yet picked up the latest plan).
+    pub fn exclusive_assignment_generation(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        consumer_group: &str,
+    ) -> Option<u64> {
+        let key = ConsumerGroupKey::new(topic, group, consumer_group);
+        self.lock_exclusive_groups().external_generation(&key)
     }
 
     pub async fn unsubscribe(
@@ -4791,7 +4829,7 @@ mod exclusive_router_tests {
             (Partition::new(0), "m2".to_string()),
             (Partition::new(1), "m1".to_string()),
         ]);
-        let gates = gate_map(router.set_external(key, plan));
+        let gates = gate_map(router.set_external(key, 0, plan));
         assert_eq!(gates[&Partition::new(0)], Some(200));
         assert_eq!(gates[&Partition::new(1)], Some(101));
     }
@@ -4804,7 +4842,7 @@ mod exclusive_router_tests {
         // Plan assigns p0 to m2, who is not subscribed on this broker -> no gate
         // update (the partition is owned/served elsewhere or m2 hasn't arrived).
         let plan = HashMap::from([(Partition::new(0), "m2".to_string())]);
-        assert!(router.set_external(key, plan).is_empty());
+        assert!(router.set_external(key, 0, plan).is_empty());
     }
 
     #[test]
@@ -4842,7 +4880,7 @@ mod exclusive_router_tests {
         let key = cohort();
         // Coordinator plan installed first: p0 -> m2.
         let plan = HashMap::from([(Partition::new(0), "m2".to_string())]);
-        router.set_external(key.clone(), plan);
+        router.set_external(key.clone(), 0, plan);
 
         // m1 subscribes p0 first. Local computation would gate m1, but the plan
         // says m2 (not here yet) -> no gate to m1.
@@ -4854,5 +4892,31 @@ mod exclusive_router_tests {
         // m2 subscribes p0 -> the gate now resolves to m2 per the plan.
         let gates = gate_map(router.join(key, Partition::new(0), "m2".into(), 200, None));
         assert_eq!(gates[&Partition::new(0)], Some(200));
+    }
+
+    #[test]
+    fn external_assignment_fences_stale_generation() {
+        let mut router = ExclusiveGroupRouter::new(None);
+        let key = cohort();
+        router.join(key.clone(), Partition::new(0), "m1".into(), 100, None);
+        router.join(key.clone(), Partition::new(0), "m2".into(), 200, None);
+
+        // Generation 2 assigns p0 -> m2.
+        let plan_v2 = HashMap::from([(Partition::new(0), "m2".to_string())]);
+        let gates = gate_map(router.set_external(key.clone(), 2, plan_v2));
+        assert_eq!(gates[&Partition::new(0)], Some(200));
+        assert_eq!(router.external_generation(&key), Some(2));
+
+        // A late generation-1 slice (p0 -> m1) is fenced: no gate changes, the
+        // held generation stays at 2.
+        let plan_v1 = HashMap::from([(Partition::new(0), "m1".to_string())]);
+        assert!(router.set_external(key.clone(), 1, plan_v1).is_empty());
+        assert_eq!(router.external_generation(&key), Some(2));
+
+        // A newer generation-3 slice (p0 -> m1) is accepted.
+        let plan_v3 = HashMap::from([(Partition::new(0), "m1".to_string())]);
+        let gates = gate_map(router.set_external(key.clone(), 3, plan_v3));
+        assert_eq!(gates[&Partition::new(0)], Some(100));
+        assert_eq!(router.external_generation(&key), Some(3));
     }
 }
