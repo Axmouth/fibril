@@ -2,6 +2,65 @@
 
 Branch: `replication-sharding-plan`
 
+<!-- ===== NEXT SESSION START HERE (compaction-survival handoff, 2026-06-14) ===== -->
+## ▶ START HERE
+
+STATE: all green, all committed on `replication-sharding-plan`. Branch was rebased
+mid-work so commit HASHES churn — reference commits by MESSAGE, not hash. keratin
+is pushed (origin == local 3bc4347); fibril builds it via `[patch]` in
+fibril/Cargo.toml. Don't add `Co-Authored-By` to commits (memory
+no-coauthor-trailer-in-commits). No roadmap/phase labels in .rs files (memory
+no-phase-labels-in-code) — worklog .md is fine.
+
+WHAT'S DONE — opt-in exclusive consumer groups (cohorts), single-node fully
+working + cross-broker correctness verified; the cross-broker COORDINATOR is built
+as composable, tested pieces — ONLY the server-bootstrap spawns remain.
+- Mechanism = per-partition delivery GATE (`QueueLoopState.exclusive_assignee`,
+  AtomicU64). Default (no `consumer_group`) = competing consumers, untouched.
+- Client API: `subscribe(t).exclusive()` (id-free) + `.consumer_target(n)`;
+  `Client::assignment_events()` broadcast.
+- Built + tested (fibril-broker::coordination + broker.rs + protocol handler +
+  client): assignor (Balanced + Sticky default, per-member targets), gate,
+  ExclusiveGroupRouter (+ `external` plan override = `apply_exclusive_assignment`),
+  cluster member identity (`member_id` minted by server, client carries via
+  OnceLock), assignment push, reconnect-restore, one-cohort-per-queue guard,
+  membership snapshot, aggregate_cohort_membership, ClusterCohortController (global
+  sticky/target plan).
+- coordination-ganglion: COHORT_MEMBERSHIP_LABEL + encode/decode + aggregate;
+  cohort_assignment_attribute_key + CohortAssignmentDoc (entry sequence, NOT a
+  Partition-keyed map); provider methods global_cohort_membership /
+  publish_cohort_assignment / cohort_assignment / run_cohort_controller_tick
+  (leader-gated). Live single-node tests cover roundtrip + full tick.
+
+NEXT — 4 server-bootstrap spawns (everything they call is built + tested; explore
+server.rs, where coordination/heartbeat/watcher are wired — also pending
+"server.rs refactor b"):
+  1. Heartbeat label: in the `spawn_heartbeat_with_labels` labels closure, insert
+     `COHORT_MEMBERSHIP_LABEL -> coordination_ganglion::encode_cohort_membership(
+     broker.local_cohort_membership())`.
+  2. Controller spawn: periodic task holding ONE `ClusterCohortController`
+     (Arc<StickyConsumerGroupAssignor>, default target from settings), calling
+     `coordination.run_cohort_controller_tick(&mut ctrl, |key| <partition count
+     from queue_partitioning(key)>)`.
+  3. Owner watcher: on committed-snapshot change, for cohorts with a published
+     `coordination.cohort_assignment(key)`, call
+     `broker.apply_exclusive_assignment(topic, group, consumer_group, plan)` for the
+     partitions this node owns. Hook into the existing become-owner/assignment
+     watcher.
+  4. Multi-node integration test (ganglion harness like
+     ganglion_coordination_drives_supervised_follower_replication): 2 brokers,
+     partitions split, a cohort spanning both -> globally balanced; drop a consumer
+     -> rebalances.
+INVARIANTS: gate is the correctness backstop, so the global plan is advisory/
+eventually-consistent (≈1 heartbeat lag affects balance only, never correctness;
+a departed member's partitions pause, never mis-deliver). Single-node unaffected
+(no controller -> no external plan -> local computation). Mutexes cold-path only;
+gate is atomic, member-id is OnceLock (memory concurrency-primitive-discipline).
+AFTER coordinator: server.rs refactor b; combined Offset+Topic/Group newtype pass
+(Arc<str>); docs explainer. Deferred: client narrowing (+per-partition leave),
+cooperative incremental rebalance, coordinator-issued member-id validation.
+<!-- ===== END START HERE ===== -->
+
 <!-- =================== RESUME HERE (2026-06-14) =================== -->
 ## RESUME HERE — Phase 2a cohorts COMPLETE (incl. target/stickiness/push/limitations); next = server.rs refactor / newtype pass / docs
 
