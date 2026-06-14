@@ -814,6 +814,9 @@ fn reconcile_subscription_from_subscribe_ok(
         partition: ok.partition,
         auto_ack,
         prefetch: ok.prefetch,
+        // Carry exclusive membership so a reconnect rejoins the cohort.
+        consumer_group: ok.consumer_group.clone(),
+        consumer_target: ok.consumer_target,
     }
 }
 
@@ -3528,6 +3531,8 @@ mod tests {
                             group: req.group,
                             partition: Partition::new(0),
                             prefetch: req.prefetch,
+                            consumer_group: None,
+                            consumer_target: None,
                         },
                     )
                     .unwrap(),
@@ -3570,6 +3575,8 @@ mod tests {
                 partition: Partition::new(0),
                 auto_ack: false,
                 prefetch: 1,
+                consumer_group: None,
+                consumer_target: None,
             };
             let restored = ReconcileSubscription {
                 sub_id: 88,
@@ -3647,6 +3654,8 @@ mod tests {
                     partition: Partition::new(0),
                     auto_ack: false,
                     prefetch: 1,
+                    consumer_group: None,
+                    consumer_target: None,
                 }],
             }
         );

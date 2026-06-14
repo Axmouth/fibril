@@ -148,6 +148,8 @@ mod tests {
                 partition: Partition::new(0),
                 auto_ack: false,
                 prefetch: 32,
+                consumer_group: None,
+                consumer_target: None,
             }],
         };
 
@@ -165,6 +167,8 @@ mod tests {
             partition: Partition::new(0),
             auto_ack: false,
             prefetch: 1,
+            consumer_group: None,
+            consumer_target: None,
         };
         let msg = ReconcileResult {
             subscriptions: vec![ReconcileSubscriptionResult {

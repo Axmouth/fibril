@@ -591,6 +591,8 @@ async fn reconcile_after_resume_keeps_matching_subscription() {
                         partition: sub_ok.partition,
                         auto_ack: false,
                         prefetch: sub_ok.prefetch,
+                        consumer_group: None,
+                        consumer_target: None,
                     }],
                 },
             )
@@ -668,6 +670,8 @@ async fn reconcile_after_resume_closes_mismatched_subscription() {
                         partition: sub_ok.partition,
                         auto_ack: false,
                         prefetch: sub_ok.prefetch + 1,
+                        consumer_group: None,
+                        consumer_target: None,
                     }],
                 },
             )
@@ -763,6 +767,8 @@ async fn restore_policy_recreates_client_only_subscription() {
                         partition: Partition::new(0),
                         auto_ack: false,
                         prefetch: 2,
+                        consumer_group: None,
+                        consumer_target: None,
                     }],
                 },
             )
@@ -796,6 +802,50 @@ async fn restore_policy_recreates_client_only_subscription() {
     let delivered = recv_delivery_for_topic(&mut framed, "reconcile.restore").await;
     assert_eq!(delivered.sub_id, restored.sub_id);
     assert_eq!(delivered.payload, Bytes::from_static(b"restored"));
+
+    drop(framed);
+    task.await.unwrap().unwrap();
+    drop(dir);
+}
+
+/// Reconnect-reconcile restores EXCLUSIVE membership (limitation b): a restored
+/// subscription carrying its cohort id rejoins the cohort instead of silently
+/// becoming a plain competing consumer. Proof: only an exclusive member receives
+/// an AssignmentChanged push, so its arrival means exclusivity was restored.
+#[tokio::test]
+async fn reconcile_restores_exclusive_cohort_membership() {
+    let (mut framed, task, dir, _broker) =
+        open_protocol_connection_with_settings(ConnectionSettings::new(Some(60))).await;
+    handshake(&mut framed).await;
+
+    framed
+        .send(
+            try_encode(
+                Op::ReconcileClient,
+                2,
+                &ReconcileClient {
+                    policy: ReconcilePolicy::RestoreClientSubscriptions,
+                    subscriptions: vec![ReconcileSubscription {
+                        sub_id: 99,
+                        topic: "reconcile.exclusive".into(),
+                        group: None,
+                        partition: Partition::new(0),
+                        auto_ack: true,
+                        prefetch: 4,
+                        consumer_group: Some("default".into()),
+                        consumer_target: None,
+                    }],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let assignment =
+        recv_assignment_until(&mut framed, |asg| asg.consumer_group == "default").await;
+    assert_eq!(assignment.topic, "reconcile.exclusive");
+    assert_eq!(assignment.assigned, vec![Partition::new(0)]);
 
     drop(framed);
     task.await.unwrap().unwrap();

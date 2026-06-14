@@ -505,8 +505,10 @@ struct SubState {
     sub_id: u64,
     partition: Partition,
     /// Exclusive cohort id this subscription joined, if any (drives the
-    /// broker-side leave on unsubscribe/disconnect).
+    /// broker-side leave on unsubscribe/disconnect, and reconnect restore).
     consumer_group: Option<String>,
+    /// Soft per-consumer target for the cohort (echoed for reconnect restore).
+    consumer_target: Option<u32>,
     auto_ack: bool,
     prefetch: u32,
     stats_sub_id: Option<Uuid>,
@@ -538,6 +540,8 @@ fn reconcile_subscription_from_state(
         partition: sub.partition,
         auto_ack: sub.auto_ack,
         prefetch: sub.prefetch,
+        consumer_group: sub.consumer_group.clone(),
+        consumer_target: sub.consumer_target,
     }
 }
 
@@ -696,6 +700,8 @@ async fn remove_subscription(
         partition: sub.partition,
         auto_ack: sub.auto_ack,
         prefetch: sub.prefetch,
+        consumer_group: sub.consumer_group.clone(),
+        consumer_target: sub.consumer_target,
     })
 }
 
@@ -930,6 +936,7 @@ async fn install_subscription(
             sub_id,
             partition: consumer.partition,
             consumer_group: args.consumer_group.clone(),
+            consumer_target: args.consumer_target.map(|target| target as u32),
             task: handle,
             auto_ack: args.auto_ack,
             prefetch: args.prefetch,
@@ -946,6 +953,8 @@ async fn install_subscription(
         group: args.group,
         partition: consumer.partition,
         prefetch: args.prefetch,
+        consumer_group: args.consumer_group,
+        consumer_target: args.consumer_target.map(|target| target as u32),
     })
 }
 
@@ -1015,11 +1024,11 @@ async fn reconcile_subscriptions(
                     group: client.group.clone(),
                     prefetch: client.prefetch,
                     auto_ack: client.auto_ack,
-                    // Reconnect reconcile does not carry the exclusive cohort id
-                    // (not part of ReconcileSubscription); restored subs rejoin
-                    // as competing until the client re-subscribes with the id.
-                    consumer_group: None,
-                    consumer_target: None,
+                    // Restore exclusive membership too: the client carries its
+                    // cohort id + target in the reconcile request, so a reconnect
+                    // rejoins the cohort instead of falling back to competing.
+                    consumer_group: client.consumer_group.clone(),
+                    consumer_target: client.consumer_target.map(|target| target as usize),
                 })
                 .await;
 
@@ -1035,6 +1044,8 @@ async fn reconcile_subscriptions(
                                 partition: ok.partition,
                                 auto_ack,
                                 prefetch: ok.prefetch,
+                                consumer_group: ok.consumer_group,
+                                consumer_target: ok.consumer_target,
                             }),
                             action: ReconcileAction::Keep,
                             reason: "server_restored".into(),

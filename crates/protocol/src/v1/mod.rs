@@ -268,6 +268,13 @@ pub struct SubscribeOk {
     pub group: Option<String>,
     pub partition: Partition,
     pub prefetch: u32,
+    /// Echoes the exclusive cohort id this subscription joined (if any), so the
+    /// client can restore exclusive membership on reconnect-reconcile.
+    #[serde(default)]
+    pub consumer_group: Option<String>,
+    /// Echoes the soft per-consumer target (if any).
+    #[serde(default)]
+    pub consumer_target: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -279,6 +286,14 @@ pub struct ReconcileSubscription {
     pub auto_ack: bool,
     #[serde(default = "default_prefetch")]
     pub prefetch: u32,
+    /// Exclusive cohort id to restore this subscription into (if any). Carried so
+    /// a reconnect rejoins the cohort instead of silently falling back to
+    /// competing.
+    #[serde(default)]
+    pub consumer_group: Option<String>,
+    /// Soft per-consumer target to restore (if any).
+    #[serde(default)]
+    pub consumer_target: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
