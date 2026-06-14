@@ -25,7 +25,8 @@ use fibril_broker::{
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
-    Ack, ContentType, DeclareQueue, DeclareQueueOk, Deliver, ErrorMsg, Hello, HelloOk, Nack, Op,
+    Ack, ContentType, DeclareQueue, DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ErrorMsg,
+    Hello, HelloOk, Nack, Op,
     PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction,
     ReconcileClient, ReconcilePolicy, ReconcileResult, ReconcileSubscription, ReplicationApply,
     ReplicationApplyOk, ReplicationCheckpointExport, ReplicationCheckpointExportOk,
@@ -3664,6 +3665,101 @@ async fn exclusive_consumer_group_rejects_second_cohort_e2e() {
     shutdown.cancel();
     drop(a);
     drop(b);
+    drop(dir);
+}
+
+/// A nil cohort member id is malformed and rejected (ERR_INVALID), not silently
+/// accepted or remapped.
+#[tokio::test]
+async fn exclusive_subscribe_rejects_nil_member_id() {
+    let (broker, dir) = open_test_broker().await;
+    let (addr, shutdown) =
+        start_multi_connection_listener(ConnectionSettings::new(None), broker.clone()).await;
+
+    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut a).await;
+    a.send(
+        try_encode(
+            Op::Subscribe,
+            10,
+            &Subscribe {
+                topic: "exgroup-nil".into(),
+                partition: Partition::new(0),
+                group: None,
+                prefetch: 8,
+                auto_ack: true,
+                consumer_group: Some("default".into()),
+                consumer_target: None,
+                member_id: Some(uuid::Uuid::nil()),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let frame = recv_frame(&mut a).await;
+    assert_eq!(frame.opcode, Op::SubscribeErr as u16);
+    let err: ErrorMsg = try_decode(&frame).unwrap();
+    assert_eq!(err.code, ERR_INVALID, "nil member id is a bad request");
+
+    shutdown.cancel();
+    drop(a);
+    drop(dir);
+}
+
+/// One connection cannot present two different cohort member ids: the first
+/// exclusive subscribe establishes the connection's identity, a later subscribe
+/// with a different id is a conflict.
+#[tokio::test]
+async fn exclusive_subscribe_rejects_mismatched_member_id_on_same_connection() {
+    let (broker, dir) = open_test_broker().await;
+    let (addr, shutdown) =
+        start_multi_connection_listener(ConnectionSettings::new(None), broker.clone()).await;
+    let topic = "exgroup-identity";
+
+    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut a).await;
+    // First exclusive subscribe establishes member id `first` on this connection.
+    let first = uuid::Uuid::new_v4();
+    subscribe_exclusive(&mut a, 10, topic, 0, "default", None, first).await;
+
+    // A second exclusive subscribe on the same connection with a DIFFERENT id is
+    // rejected as a conflict.
+    a.send(
+        try_encode(
+            Op::Subscribe,
+            20,
+            &Subscribe {
+                topic: topic.into(),
+                partition: Partition::new(1),
+                group: None,
+                prefetch: 8,
+                auto_ack: true,
+                consumer_group: Some("default".into()),
+                consumer_target: None,
+                member_id: Some(uuid::Uuid::new_v4()),
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    // An assignment push for the first subscribe may interleave; skip to the err.
+    let frame = loop {
+        let frame = recv_frame(&mut a).await;
+        if frame.opcode != Op::AssignmentChanged as u16 {
+            break frame;
+        }
+    };
+    assert_eq!(frame.opcode, Op::SubscribeErr as u16);
+    let err: ErrorMsg = try_decode(&frame).unwrap();
+    assert_eq!(err.code, ERR_CONFLICT, "mismatched member id is a conflict");
+
+    // Re-using the established id (or sending none) on another partition is fine.
+    subscribe_exclusive(&mut a, 30, topic, 1, "default", None, first).await;
+
+    shutdown.cancel();
+    drop(a);
     drop(dir);
 }
 

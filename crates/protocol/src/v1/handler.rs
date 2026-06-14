@@ -491,6 +491,15 @@ enum InstallSubscriptionError {
          use a separate group for an unrelated consumer set)"
     )]
     CohortConflict,
+
+    #[error("cohort member id must not be nil")]
+    InvalidMemberId,
+
+    #[error(
+        "connection already joined this cohort under a different member id (one \
+         member identity per connection)"
+    )]
+    MemberIdConflict,
 }
 
 fn install_subscription_error_response(err: &InstallSubscriptionError) -> (u16, String) {
@@ -498,6 +507,8 @@ fn install_subscription_error_response(err: &InstallSubscriptionError) -> (u16, 
         InstallSubscriptionError::Broker(err) => broker_error_response(err),
         InstallSubscriptionError::AlreadySubscribed => (ERR_CONFLICT, err.to_string()),
         InstallSubscriptionError::CohortConflict => (ERR_CONFLICT, err.to_string()),
+        InstallSubscriptionError::InvalidMemberId => (ERR_INVALID, err.to_string()),
+        InstallSubscriptionError::MemberIdConflict => (ERR_CONFLICT, err.to_string()),
     }
 }
 
@@ -798,13 +809,33 @@ async fn install_subscription(
         }
     }
 
-    // Resolve the cluster cohort member id for an exclusive sub: the id the client
-    // carried, or a freshly minted one (returned in SubscribeOk for the client to
-    // echo on its other brokers / reconnects). `None` for non-exclusive subs.
-    let cohort_member: Option<Uuid> = args
-        .consumer_group
-        .as_ref()
-        .map(|_| args.member_id.unwrap_or_else(Uuid::new_v4));
+    // Resolve the cluster cohort member id for an exclusive sub. The broker is
+    // the source of truth for one member identity per connection: the connection
+    // establishes its id on its first exclusive subscribe (the id the client
+    // carried, else a freshly minted one returned in SubscribeOk to echo on its
+    // other brokers / reconnects), and every later exclusive subscribe on the
+    // same connection must reuse it. A nil id is rejected, a mismatching id is a
+    // conflict. `None` for non-exclusive subs.
+    let cohort_member: Option<Uuid> = if args.consumer_group.is_some() {
+        if matches!(args.member_id, Some(id) if id.is_nil()) {
+            return Err(InstallSubscriptionError::InvalidMemberId);
+        }
+        let established = {
+            let state = args.logical.state.lock().await;
+            state.subs.values().find_map(|sub| sub.cohort_member)
+        };
+        let resolved = match (args.member_id, established) {
+            (Some(id), Some(prev)) if id != prev => {
+                return Err(InstallSubscriptionError::MemberIdConflict);
+            }
+            (Some(id), _) => id,
+            (None, Some(prev)) => prev,
+            (None, None) => Uuid::new_v4(),
+        };
+        Some(resolved)
+    } else {
+        None
+    };
 
     let consumer = args
         .broker

@@ -561,6 +561,9 @@ pub const ERR_CONFLICT: u16 = 409;
 // Not-owner is a topology or state conflict, not an auth failure. Retrying
 // against the current owner is valid, so 403-style "forbidden" is misleading.
 pub const ERR_NOT_OWNER: u16 = ERR_CONFLICT;
+/// Malformed request the client should fix rather than retry (e.g. a nil cohort
+/// member id).
+pub const ERR_INVALID: u16 = 400;
 
 /// Client request for cluster topology. An empty `topic` filter asks for the
 /// full topology; a set `topic` (optionally with `group`) narrows it.
