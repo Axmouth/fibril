@@ -347,11 +347,15 @@ fn read_fake_event_batch(
 }
 
 async fn recv_frame(framed: &mut Framed<TcpStream, ProtoCodec>) -> Frame {
-    tokio::time::timeout(Duration::from_secs(2), framed.next())
+    // A failure-detection bound, not a performance assertion. The whole suite
+    // runs many timing-sensitive cohort/failover tests in parallel, so a loaded
+    // machine is slow, not stuck. Keep this generous so contention does not flake
+    // a correct test (a real hang still fails, just later).
+    tokio::time::timeout(Duration::from_secs(15), framed.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap()
+        .expect("frame did not arrive within the receive timeout")
+        .expect("framed stream ended unexpectedly")
+        .expect("frame decode failed")
 }
 
 async fn handshake(framed: &mut Framed<TcpStream, ProtoCodec>) {
@@ -1023,7 +1027,10 @@ async fn recv_delivery_for_topic(
     framed: &mut Framed<TcpStream, ProtoCodec>,
     topic: &str,
 ) -> Deliver {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // Generous failure-detection bound, see recv_frame. Failover delivery in
+    // particular waits on an async cleanup + gate recompute, which a loaded
+    // parallel run can slow well past a couple seconds.
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let frame = recv_frame(framed).await;
             if frame.opcode == Op::Deliver as u16 {
@@ -1035,7 +1042,7 @@ async fn recv_delivery_for_topic(
         }
     })
     .await
-    .unwrap()
+    .expect("delivery did not arrive within the receive timeout")
 }
 
 async fn wait_for_queue_idle(broker: &Broker<StromaEngine>, topic: &str, group: Option<&str>) {
@@ -3234,7 +3241,8 @@ async fn recv_assignment_until(
     framed: &mut Framed<TcpStream, ProtoCodec>,
     pred: impl Fn(&fibril_protocol::v1::AssignmentChanged) -> bool,
 ) -> fibril_protocol::v1::AssignmentChanged {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // Generous failure-detection bound, see recv_frame.
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             let frame = recv_frame(framed).await;
             if frame.opcode == Op::AssignmentChanged as u16 {
@@ -3247,7 +3255,7 @@ async fn recv_assignment_until(
         }
     })
     .await
-    .unwrap()
+    .expect("assignment did not arrive within the receive timeout")
 }
 
 async fn publish_to_partition(
