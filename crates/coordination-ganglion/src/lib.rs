@@ -10,9 +10,10 @@
 use std::collections::HashMap;
 
 use fibril_broker::coordination::{
-    Coordination, CoordinationSnapshot, CoordinationStream, NodeInfo, PartitionAssignment,
-    PartitionPlacementError, PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity,
-    ReplicationDurabilityPolicy,
+    aggregate_cohort_membership, CohortPlan, ConsumerGroupKey, Coordination, CoordinationSnapshot,
+    CoordinationStream, GlobalCohortMembership, LocalCohortMembership, NodeInfo,
+    PartitionAssignment, PartitionPlacementError, PartitionPlacementInput,
+    PartitionPlacementPolicy, QueueIdentity, ReplicationDurabilityPolicy,
 };
 use fibril_storage::Partition;
 use ganglion_openraft::openraft::storage::RaftLogStorage;
@@ -29,6 +30,85 @@ const QUEUE_NAMESPACE: &str = "fibril/queue";
 
 /// Attribute key carrying the replicated runtime-settings document.
 pub const RUNTIME_SETTINGS_ATTRIBUTE: &str = "fibril/runtime_settings";
+
+/// Heartbeat node-label key carrying a broker's local exclusive-cohort
+/// membership (JSON `Vec<LocalCohortMembership>`). The controller reads every
+/// live node's label, aggregates global membership, and computes one plan per
+/// cohort.
+pub const COHORT_MEMBERSHIP_LABEL: &str = "fibril/cohort_membership";
+
+/// Serialize a broker's local cohort membership for its heartbeat label.
+pub fn encode_cohort_membership(memberships: &[LocalCohortMembership]) -> String {
+    serde_json::to_string(memberships).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Parse a broker's cohort-membership label; malformed/absent -> empty (advisory
+/// data must never break the controller).
+pub fn decode_cohort_membership(raw: &str) -> Vec<LocalCohortMembership> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+/// Aggregate global cohort membership from every node's membership label.
+pub fn aggregate_membership_labels<'a>(
+    labels: impl IntoIterator<Item = &'a str>,
+) -> Vec<GlobalCohortMembership> {
+    let reports = labels.into_iter().flat_map(decode_cohort_membership);
+    aggregate_cohort_membership(reports)
+}
+
+/// Replicated cluster-attribute key carrying a cohort's computed assignment.
+pub fn cohort_assignment_attribute_key(key: &ConsumerGroupKey) -> String {
+    format!(
+        "fibril/cohort_assignment/{}/{}/{}",
+        key.topic,
+        key.group.as_deref().unwrap_or(""),
+        key.consumer_group,
+    )
+}
+
+/// Wire form of a cohort's `partition -> member` assignment. Stored as an entry
+/// SEQUENCE (not a map) so a `Partition` newtype is never used as a JSON map key
+/// (that path has bitten us before — see the v2 WAL pair-sequence fix).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CohortAssignmentDoc {
+    pub entries: Vec<CohortAssignmentEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CohortAssignmentEntry {
+    pub partition: Partition,
+    pub member: String,
+}
+
+/// Serialize a computed plan's assignment for publishing (entries sorted by
+/// partition for a stable document — same value = generation no-op).
+pub fn encode_cohort_assignment(plan: &CohortPlan) -> String {
+    let mut entries: Vec<CohortAssignmentEntry> = plan
+        .assignment
+        .iter()
+        .map(|(partition, member)| CohortAssignmentEntry {
+            partition: *partition,
+            member: member.clone(),
+        })
+        .collect();
+    entries.sort_by_key(|entry| entry.partition.id());
+    serde_json::to_string(&CohortAssignmentDoc { entries }).unwrap_or_else(|_| {
+        // entries are plain data; serialization cannot realistically fail.
+        String::from("{\"entries\":[]}")
+    })
+}
+
+/// Parse a published cohort assignment into `partition -> member`.
+pub fn decode_cohort_assignment(raw: &str) -> HashMap<Partition, String> {
+    serde_json::from_str::<CohortAssignmentDoc>(raw)
+        .map(|doc| {
+            doc.entries
+                .into_iter()
+                .map(|entry| (entry.partition, entry.member))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 /// Replicated runtime-settings document: the cluster truth. `cluster_version`
 /// is independent of each node's local store version (those differ per node);
@@ -1171,6 +1251,82 @@ where
 
     fn watch(&self) -> CoordinationStream {
         self.tx.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod cohort_transport_tests {
+    use super::*;
+    use fibril_broker::coordination::CohortMemberInfo;
+
+    fn membership(
+        consumer_group: &str,
+        members: &[(&str, Option<usize>)],
+    ) -> LocalCohortMembership {
+        LocalCohortMembership {
+            topic: "jobs".into(),
+            group: None,
+            consumer_group: consumer_group.into(),
+            members: members
+                .iter()
+                .map(|(m, t)| CohortMemberInfo {
+                    member: m.to_string(),
+                    target: *t,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn membership_label_roundtrips() {
+        let reports = vec![membership("default", &[("m1", Some(2)), ("m2", None)])];
+        let encoded = encode_cohort_membership(&reports);
+        assert_eq!(decode_cohort_membership(&encoded), reports);
+        // Malformed / empty label decodes to nothing, never panics.
+        assert!(decode_cohort_membership("not json").is_empty());
+        assert!(decode_cohort_membership("").is_empty());
+    }
+
+    #[test]
+    fn aggregate_labels_unions_across_nodes() {
+        // Two nodes' labels for the same cohort: m1 spans both, m2 on one.
+        let node_a = encode_cohort_membership(&[membership("default", &[("m1", Some(2))])]);
+        let node_b =
+            encode_cohort_membership(&[membership("default", &[("m1", None), ("m2", None)])]);
+        let global = aggregate_membership_labels([node_a.as_str(), node_b.as_str()]);
+        assert_eq!(global.len(), 1);
+        let members: Vec<&str> = global[0]
+            .members
+            .iter()
+            .map(|m| m.member.as_str())
+            .collect();
+        assert_eq!(members, vec!["m1", "m2"]);
+    }
+
+    #[test]
+    fn assignment_roundtrips_without_partition_map_keys() {
+        let plan = CohortPlan {
+            key: ConsumerGroupKey::new("jobs", None, "default"),
+            assignment: HashMap::from([
+                (Partition::new(0), "m1".to_string()),
+                (Partition::new(2), "m2".to_string()),
+            ]),
+        };
+        let encoded = encode_cohort_assignment(&plan);
+        // Entry sequence, not a map keyed by Partition.
+        assert!(encoded.contains("\"entries\""));
+        assert_eq!(decode_cohort_assignment(&encoded), plan.assignment);
+        assert!(decode_cohort_assignment("garbage").is_empty());
+    }
+
+    #[test]
+    fn assignment_attribute_key_is_distinct_per_cohort() {
+        let a = cohort_assignment_attribute_key(&ConsumerGroupKey::new("jobs", None, "g1"));
+        let b = cohort_assignment_attribute_key(&ConsumerGroupKey::new("jobs", None, "g2"));
+        let c =
+            cohort_assignment_attribute_key(&ConsumerGroupKey::new("jobs", Some("workers"), "g1"));
+        assert_ne!(a, b);
+        assert_ne!(a, c);
     }
 }
 
