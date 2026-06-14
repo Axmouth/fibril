@@ -74,6 +74,12 @@ replication module separation, the combined Offset + Topic/Group newtype pass
 (Arc<str> for Topic/Group), and the broader replication + partitioning docs
 explainer (the consumer-groups docs page already landed).
 
+DOCS HOUSEKEEPING (at some point, user request): do a relevance pass over all the
+.md files we have collected. We should not keep them all, especially planning and
+handoff docs that go stale. Prune or fold the dead ones. While at it, give the
+keratin README and basic docs a look, and the stroma ones too, for the same
+freshness check.
+
 DEFERRED (cohort follow-ons, gate de-risks them): opt-in client narrowing (with
 per-partition leave), cooperative incremental rebalance (vs whole-set recompute),
 coordinator-issued member-id validation (currently broker-minted), and a unified
