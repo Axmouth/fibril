@@ -3052,6 +3052,12 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        // The first published plan is generation 0.
+        assert_eq!(
+            coordination.cohort_assignment_doc(&key).unwrap().generation,
+            0,
+            "first published plan should be generation 0"
+        );
 
         // broker-b loses its consumer (m2 disconnects), so it re-reports an empty
         // local membership. Re-registration replaces the node's labels.
@@ -3088,6 +3094,12 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        // The rebalance changed the assignment, so the generation bumped to 1.
+        assert_eq!(
+            coordination.cohort_assignment_doc(&key).unwrap().generation,
+            1,
+            "rebalance should bump the plan generation"
+        );
 
         coordination.raft_node().shutdown().await.expect("shutdown");
     }
