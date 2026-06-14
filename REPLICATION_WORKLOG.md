@@ -2045,14 +2045,24 @@ Tests needed before implementing transition:
        [x] assignor (Phase 1, d91a23a)
        [x] ConsumerGroupState membership->delta state machine (c28dd68)
        [x] ExclusiveConsumerGroups registry (broker-side, per group key) — DONE
-       [ ] wire opt-in: Subscribe.consumer_group: Option<String> (serde default)
-           — None = competing (unchanged); Some(id) = exclusive cohort. (Adding a
-           Subscribe field re-breaks all Subscribe literals — budget for it.)
-       [ ] broker subscribe integration (single-owner): an exclusive subscriber is
-           registered ONLY on its assigned partitions (existing per-partition
-           delivery then gives exclusivity+ordering for free — each assigned
-           partition has exactly one consumer). On join/leave, adjust which
-           partitions each member is registered on.
+       [x] wire opt-in: Subscribe.consumer_group: Option<String> (serde default)
+           — None = competing (unchanged); Some(id) = exclusive cohort. DONE
+           (b56618f); handler doesn't consult it yet (no-op).
+       [ ] broker subscribe integration (single-owner) — REFINED DESIGN (use this,
+           NOT cross-connection unsubscribe): keep client fan-in unchanged
+           (members subscribe to ALL partitions); GATE DELIVERY per partition.
+           Add `exclusive_assignee: Option<sub_id>` per (topic,partition,group)
+           QueueState: None = competing (deliver to all, today's behavior);
+           Some(s) = deliver only to consumer s. Delivery loop reads it (hot-path
+           = a field read, no lock). On exclusive subscribe: record (group,member,
+           partition)->sub_id, register member in the shared ExclusiveConsumerGroups
+           registry, recompute, and set each partition's exclusive_assignee to the
+           assigned member's sub_id. Rebalance = per-partition field writes (no
+           cross-connection unsubscribe). GRACEFUL DRAIN is then nearly free: a
+           revoked consumer stops getting NEW (delivery skips it) but its
+           ConsumerState/in-flight stay settleable -> pause+drain naturally; full
+           release when its in-flight drains. Registry lives on the Broker
+           (shared), assignor from config/runtime settings.
        [ ] assignment delivery to client: server tells the member its assigned set
            (in SubscribeOk and/or a push op Op::AssignmentChanged{added,revoked,
            generation}); client (re)subscribes accordingly instead of fanning in
