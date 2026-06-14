@@ -909,6 +909,164 @@ impl ExclusiveConsumerGroups {
     }
 }
 
+// ===== Cross-broker cohort coordination ======================================
+//
+// In a cluster a queue's partitions are owned by different brokers; the gate on
+// each owner enforces one-consumer-per-partition locally (correctness), but the
+// global ASSIGNMENT (balance, targets, stickiness across owner moves) needs a
+// cluster-wide view. The controller aggregates each broker's local cohort
+// membership and computes one plan per cohort, distributed back to owners.
+
+/// One exclusive-cohort member as seen by a broker: the cluster member id plus
+/// its soft target (if any).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CohortMemberInfo {
+    pub member: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<usize>,
+}
+
+/// A broker's local view of one exclusive cohort's membership — the members
+/// (cluster ids) subscribed to this broker's partitions of the queue. Brokers
+/// publish this (e.g. on the heartbeat) for the controller to aggregate.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LocalCohortMembership {
+    pub topic: Topic,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<Group>,
+    pub consumer_group: String,
+    pub members: Vec<CohortMemberInfo>,
+}
+
+impl LocalCohortMembership {
+    fn key(&self) -> ConsumerGroupKey {
+        ConsumerGroupKey::new(
+            self.topic.clone(),
+            self.group.as_deref(),
+            self.consumer_group.clone(),
+        )
+    }
+}
+
+/// The cluster-wide membership of one cohort, aggregated across all brokers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalCohortMembership {
+    pub key: ConsumerGroupKey,
+    pub members: Vec<CohortMemberInfo>,
+}
+
+/// Aggregate per-broker cohort membership into one global view per cohort: union
+/// the members (deduped by cluster id — the same consumer reports the same id on
+/// every broker it spans) and keep the largest reported target. Deterministic
+/// (cohorts and members sorted).
+pub fn aggregate_cohort_membership(
+    reports: impl IntoIterator<Item = LocalCohortMembership>,
+) -> Vec<GlobalCohortMembership> {
+    let mut by_cohort: HashMap<ConsumerGroupKey, HashMap<String, Option<usize>>> = HashMap::new();
+    for report in reports {
+        let key = report.key();
+        let members = by_cohort.entry(key).or_default();
+        for info in report.members {
+            let slot = members.entry(info.member).or_insert(None);
+            // Keep the largest target seen (most capacity); None stays None.
+            *slot = match (*slot, info.target) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (existing, incoming) => existing.or(incoming),
+            };
+        }
+    }
+
+    let mut cohorts: Vec<GlobalCohortMembership> = by_cohort
+        .into_iter()
+        .map(|(key, members)| {
+            let mut members: Vec<CohortMemberInfo> = members
+                .into_iter()
+                .map(|(member, target)| CohortMemberInfo { member, target })
+                .collect();
+            members.sort_by(|a, b| a.member.cmp(&b.member));
+            GlobalCohortMembership { key, members }
+        })
+        .collect();
+    cohorts.sort_by(|a, b| cohort_key_sort(&a.key).cmp(&cohort_key_sort(&b.key)));
+    cohorts
+}
+
+fn cohort_key_sort(key: &ConsumerGroupKey) -> (String, String, String) {
+    (
+        key.topic.to_string(),
+        key.group.as_deref().unwrap_or_default().to_string(),
+        key.consumer_group.clone(),
+    )
+}
+
+/// One cohort's cluster-wide assignment: `partition -> member id`, ready to
+/// distribute to the partitions' owner brokers. Empty when the cohort has no
+/// members.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CohortPlan {
+    pub key: ConsumerGroupKey,
+    pub assignment: HashMap<Partition, String>,
+}
+
+/// Computes cluster-wide cohort assignments from aggregated membership, reusing
+/// the sticky/target assignor. Holds per-cohort state across ticks, so the plan
+/// stays balanced AND minimizes churn across membership changes and across
+/// partition-owner moves (a partition keeps its member even if its owner moves).
+#[derive(Debug)]
+pub struct ClusterCohortController {
+    groups: ExclusiveConsumerGroups,
+}
+
+impl ClusterCohortController {
+    pub fn new(
+        assignor: Arc<dyn ConsumerGroupAssignor>,
+        default_target_per_consumer: Option<usize>,
+    ) -> Self {
+        Self {
+            groups: ExclusiveConsumerGroups::new(assignor, default_target_per_consumer),
+        }
+    }
+
+    /// Compute the assignment for every cohort in `cohorts` (already globally
+    /// aggregated). `partition_count` resolves the queue's full partition count
+    /// for a cohort key (min 1). A cohort with no members yields an empty plan so
+    /// owners can reopen its partitions.
+    pub fn plan(
+        &mut self,
+        cohorts: Vec<GlobalCohortMembership>,
+        partition_count: impl Fn(&ConsumerGroupKey) -> u32,
+    ) -> Vec<CohortPlan> {
+        cohorts
+            .into_iter()
+            .map(|cohort| {
+                let count = partition_count(&cohort.key).max(1);
+                let partitions: Vec<Partition> = (0..count).map(Partition::new).collect();
+                let members: Vec<String> =
+                    cohort.members.iter().map(|m| m.member.clone()).collect();
+                let member_targets: HashMap<String, usize> = cohort
+                    .members
+                    .iter()
+                    .filter_map(|m| m.target.map(|t| (m.member.clone(), t)))
+                    .collect();
+
+                let delta =
+                    self.groups
+                        .reconcile(cohort.key.clone(), partitions, members, member_targets);
+                let mut assignment = HashMap::new();
+                for (member, change) in delta.per_member {
+                    for partition in change.assigned {
+                        assignment.insert(partition, member.clone());
+                    }
+                }
+                CohortPlan {
+                    key: cohort.key,
+                    assignment,
+                }
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalAssignmentRole {
     Owner,
@@ -1992,6 +2150,121 @@ mod tests {
             max - min <= 1,
             "balanced within one partition (got {min}..{max})"
         );
+    }
+
+    fn local_report(
+        topic: &str,
+        consumer_group: &str,
+        members: &[(&str, Option<usize>)],
+    ) -> LocalCohortMembership {
+        LocalCohortMembership {
+            topic: topic.to_string(),
+            group: None,
+            consumer_group: consumer_group.to_string(),
+            members: members
+                .iter()
+                .map(|(m, t)| CohortMemberInfo {
+                    member: m.to_string(),
+                    target: *t,
+                })
+                .collect(),
+        }
+    }
+
+    fn cluster_controller() -> ClusterCohortController {
+        ClusterCohortController::new(Arc::new(StickyConsumerGroupAssignor), None)
+    }
+
+    #[test]
+    fn aggregate_unions_members_across_brokers_and_keeps_largest_target() {
+        // Same cohort reported by two brokers: m1 on both (it spans them), m2 on
+        // one. Deduped by cluster id; largest target wins.
+        let reports = vec![
+            local_report("jobs", "default", &[("m1", Some(2)), ("m2", None)]),
+            local_report("jobs", "default", &[("m1", Some(5))]),
+        ];
+        let global = aggregate_cohort_membership(reports);
+        assert_eq!(global.len(), 1);
+        assert_eq!(
+            global[0].members,
+            vec![
+                CohortMemberInfo {
+                    member: "m1".into(),
+                    target: Some(5),
+                },
+                CohortMemberInfo {
+                    member: "m2".into(),
+                    target: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cluster_plan_balances_globally_and_covers_all_partitions() {
+        let mut controller = cluster_controller();
+        let global = aggregate_cohort_membership(vec![local_report(
+            "jobs",
+            "default",
+            &[("m1", None), ("m2", None)],
+        )]);
+        let plans = controller.plan(global, |_| 4);
+        assert_eq!(plans.len(), 1);
+        let assignment = &plans[0].assignment;
+        // Every partition assigned exactly once, balanced 2/2.
+        let mut covered: Vec<u32> = assignment.keys().map(|p| p.id()).collect();
+        covered.sort();
+        assert_eq!(covered, vec![0, 1, 2, 3]);
+        let mut loads: HashMap<&str, usize> = HashMap::new();
+        for member in assignment.values() {
+            *loads.entry(member.as_str()).or_default() += 1;
+        }
+        assert_eq!(loads["m1"], 2);
+        assert_eq!(loads["m2"], 2);
+    }
+
+    #[test]
+    fn cluster_plan_is_sticky_across_ticks() {
+        let mut controller = cluster_controller();
+        let key = ConsumerGroupKey::new("jobs", None, "default");
+
+        // Tick 1: m1 alone owns all 4 partitions.
+        let first = controller.plan(
+            aggregate_cohort_membership(vec![local_report("jobs", "default", &[("m1", None)])]),
+            |_| 4,
+        );
+        assert_eq!(first[0].assignment.len(), 4);
+
+        // Tick 2: m2 joins. m1 keeps the partitions it still holds (sticky); only
+        // the minimum move to m2.
+        let second = controller.plan(
+            aggregate_cohort_membership(vec![local_report(
+                "jobs",
+                "default",
+                &[("m1", None), ("m2", None)],
+            )]),
+            |_| 4,
+        );
+        let assignment = &second[0].assignment;
+        let m1_kept = assignment.values().filter(|m| *m == "m1").count();
+        let m2_got = assignment.values().filter(|m| *m == "m2").count();
+        assert_eq!(m1_kept, 2, "m1 keeps half (sticky), not reshuffled");
+        assert_eq!(m2_got, 2);
+        assert_eq!(plans_key(second), key);
+    }
+
+    fn plans_key(plans: Vec<CohortPlan>) -> ConsumerGroupKey {
+        plans.into_iter().next().unwrap().key
+    }
+
+    #[test]
+    fn cluster_plan_with_no_members_is_empty() {
+        let mut controller = cluster_controller();
+        let global = aggregate_cohort_membership(vec![local_report("jobs", "default", &[])]);
+        // An empty report still names the cohort; plan yields an empty assignment.
+        let plans = controller.plan(global, |_| 3);
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].assignment.is_empty());
     }
 
     fn sorted_ids(parts: &[Partition]) -> Vec<u32> {

@@ -21,9 +21,10 @@ use fibril_util::unix_millis;
 use uuid::Uuid;
 
 use crate::coordination::{
-    ConsumerGroupKey, Coordination, CoordinationSnapshot, ExclusiveConsumerGroups,
-    LocalAssignmentIntent, LocalAssignmentTransition, PartitionAssignment, StaticCoordination,
-    StickyConsumerGroupAssignor, plan_local_assignment_transitions,
+    CohortMemberInfo, ConsumerGroupKey, Coordination, CoordinationSnapshot,
+    ExclusiveConsumerGroups, LocalAssignmentIntent, LocalAssignmentTransition,
+    LocalCohortMembership, PartitionAssignment, StaticCoordination, StickyConsumerGroupAssignor,
+    plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
     EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome,
@@ -1221,6 +1222,33 @@ impl ExclusiveGroupRouter {
         } else {
             self.recompute(&key, &[partition])
         }
+    }
+
+    /// Snapshot this broker's local cohort membership (cohort -> members+targets)
+    /// for the controller to aggregate. A member appears once per cohort even if
+    /// it subscribed several partitions here; the cluster member id makes it
+    /// dedup-able across brokers.
+    fn local_membership(&self) -> Vec<LocalCohortMembership> {
+        self.subs
+            .iter()
+            .map(|(key, members)| {
+                let targets = self.targets.get(key);
+                let mut members: Vec<CohortMemberInfo> = members
+                    .keys()
+                    .map(|member| CohortMemberInfo {
+                        member: member.clone(),
+                        target: targets.and_then(|targets| targets.get(member).copied()),
+                    })
+                    .collect();
+                members.sort_by(|a, b| a.member.cmp(&b.member));
+                LocalCohortMembership {
+                    topic: key.topic.clone(),
+                    group: key.group.clone(),
+                    consumer_group: key.consumer_group.clone(),
+                    members,
+                }
+            })
+            .collect()
     }
 
     /// Install (or replace) the coordinator's global assignment for a cohort and
@@ -2842,6 +2870,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         for (partition, assignee) in updates {
             self.set_exclusive_assignee(topic, partition, group, assignee);
         }
+    }
+
+    /// This broker's local exclusive-cohort membership, for the controller to
+    /// aggregate into cluster-wide membership (e.g. published on the heartbeat).
+    pub fn local_cohort_membership(&self) -> Vec<LocalCohortMembership> {
+        self.lock_exclusive_groups().local_membership()
     }
 
     /// Install the cross-broker coordinator's global assignment for a cohort: a
@@ -4771,6 +4805,35 @@ mod exclusive_router_tests {
         // update (the partition is owned/served elsewhere or m2 hasn't arrived).
         let plan = HashMap::from([(Partition::new(0), "m2".to_string())]);
         assert!(router.set_external(key, plan).is_empty());
+    }
+
+    #[test]
+    fn local_membership_dedups_members_and_carries_targets() {
+        let mut router = ExclusiveGroupRouter::new(None);
+        let key = cohort();
+        // m1 subscribed both partitions (one member, not two); m2 one, with target.
+        router.join(key.clone(), Partition::new(0), "m1".into(), 100, None);
+        router.join(key.clone(), Partition::new(1), "m1".into(), 101, None);
+        router.join(key.clone(), Partition::new(0), "m2".into(), 200, Some(3));
+
+        let snapshot = router.local_membership();
+        assert_eq!(snapshot.len(), 1);
+        let cohort = &snapshot[0];
+        assert_eq!(cohort.topic, "jobs");
+        assert_eq!(cohort.consumer_group, "default");
+        assert_eq!(
+            cohort.members,
+            vec![
+                CohortMemberInfo {
+                    member: "m1".into(),
+                    target: None,
+                },
+                CohortMemberInfo {
+                    member: "m2".into(),
+                    target: Some(3),
+                },
+            ]
+        );
     }
 
     #[test]
