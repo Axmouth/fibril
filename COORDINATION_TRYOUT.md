@@ -14,6 +14,9 @@ scripts/cluster-tryout.sh              # 3 standalone servers, topology-checked,
 scripts/cluster-tryout.sh --ganglion   # 3 servers forming ONE raft coordination cluster
 scripts/cluster-tryout.sh --staggered  # watch the cluster FORM: nodes join one by one
 scripts/cluster-tryout.sh --nodes 5 --ganglion
+scripts/cluster-tryout.sh --nodes 21 --ganglion --summary
+scripts/cluster-tryout.sh --nodes 88 --ganglion --summary --resource-summary --admin-wait-secs 5 --cluster-wait-secs 90
+scripts/cluster-tryout.sh --nodes 3 --ganglion --dynamic-membership --summary
 scripts/cluster-tryout.sh --ganglion --keep   # leave it running and explore with fibrilctl
 ```
 
@@ -29,6 +32,23 @@ servers talk raft over real TCP — msgpack frames by default; set
 `[coordination.ganglion] wire_format = "json"` (or `FIBRIL_COORDINATION_WIRE_FORMAT=json`) to
 watch the wire in plaintext. Frames are individually tagged, so mixed-format clusters
 interoperate.
+
+The server defaults use conservative raft timings for this metadata workload:
+`coordination.ganglion.raft.heartbeat_interval_ms = 250`,
+`election_timeout_min_ms = 1500`, and `election_timeout_max_ms = 3000`.
+Those values intentionally avoid false elections when many local broker
+processes are competing for scheduler time. The script waits for several
+consecutive stable topology reads before mutating cluster metadata.
+
+For convenience, the script uses wide, randomly offset port bands so repeated
+runs and larger node counts are less likely to collide with a previous local
+cluster. Pass `--port-offset N` when you want deterministic ports. Pass
+`--summary` to print compact topology rows instead of full topology tables.
+Pass `--resource-summary` when stress-testing high local node counts. It prints
+server process count, RSS, file descriptor totals, and a sample breakdown of
+open descriptors before the script shuts the cluster down. `--admin-wait-secs`
+is only for each process binding its admin endpoint; `--cluster-wait-secs`
+controls the slower raft/controller convergence checks.
 
 Each broker also **registers itself** into the shared node table and keeps a heartbeat fresh
 (`heartbeat_interval_ms`, default 3000): followers forward their registrations through the
@@ -48,6 +68,16 @@ raft (embedded coordinator):
 shared cluster confirmed: leader=3 voters=[1,2,3] on all 3 nodes
 ```
 
+Current sanity coverage: 15-node, 21-node, and 88-node local all-voter clusters
+pass with stable leader agreement, queue declaration through node 1, and
+replicated runtime settings sync. Treat larger all-voter runs as stress tests.
+The intended large-cluster shape is a small coordination voter set with many
+brokers participating as registered coordination clients or learners, not every
+broker becoming a raft voter. The 88-node run passed under `ulimit -n = 2048`
+after the system metrics sampler was narrowed to the current process. It used
+roughly 6.5 GiB RSS across 88 full broker processes, which is useful for local
+stress data but not the shape we want users to run in production.
+
 While it runs (`--keep`), try killing one server process: its heartbeat stops refreshing, the
 survivors keep one leader, and `live_nodes(ttl)` on the controller side stops counting it.
 Failure behaviors are catalogued in detail in `ganglion/FAILURE_MODES.md` (see §4b for
@@ -66,6 +96,14 @@ The script also exercises the current server-side integration:
 
 That makes this a useful smoke test for the coordination path, not only a
 topology display demo.
+
+Pass `--dynamic-membership` to add one extra live server after the initial
+cluster is healthy, promote it into the coordination voting set through the
+admin API, verify every node including the joiner sees the enlarged voting set,
+then remove the joiner from the voting set and verify the original nodes
+converge again. The joiner process keeps running after removal in this smoke
+test. The operation being tested is membership removal from the coordination
+voting set, not process shutdown.
 
 ## 1. Raft cluster playground (ganglion)
 

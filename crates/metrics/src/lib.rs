@@ -86,10 +86,10 @@ impl RollingCounter {
 #[inline]
 fn current_epoch_secs() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => 0,
+    }
 }
 
 #[derive(Debug)]
@@ -887,27 +887,40 @@ pub struct TcpStatsSnapshot {
 
 pub struct SystemStats {
     sys: RwLock<System>,
-    pid: sysinfo::Pid,
+    pid: Option<sysinfo::Pid>,
 }
 
 impl SystemStats {
     pub fn new() -> Arc<Self> {
-        let mut sys = System::new_with_specifics(
-            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
-        );
-        sys.refresh_processes(ProcessesToUpdate::All, true);
+        let pid = sysinfo::get_current_pid().ok();
+        let mut sys = System::new_with_specifics(RefreshKind::nothing());
+        if let Some(pid) = pid {
+            sys.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&[pid]),
+                false,
+                process_stats_refresh_kind(),
+            );
+        }
         Arc::new(Self {
             sys: RwLock::new(sys),
-            pid: sysinfo::get_current_pid().unwrap(),
+            pid,
         })
     }
 
     pub fn snapshot(&self) -> SystemSnapshot {
-        self.sys
-            .write()
-            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
+        let Some(pid) = self.pid else {
+            return SystemSnapshot {
+                rss_mb: 0.,
+                cpu: 0.,
+            };
+        };
+        self.sys.write().refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            false,
+            process_stats_refresh_kind(),
+        );
         let sys = self.sys.read();
-        let (rss_mb, cpu) = if let Some(p) = sys.process(self.pid) {
+        let (rss_mb, cpu) = if let Some(p) = sys.process(pid) {
             (p.memory() as f64 / 1024.0, p.cpu_usage())
         } else {
             (0., 0.)
@@ -915,6 +928,10 @@ impl SystemStats {
 
         SystemSnapshot { rss_mb, cpu }
     }
+}
+
+fn process_stats_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing().with_cpu().with_memory()
 }
 
 #[derive(Serialize)]

@@ -7,10 +7,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
+use anyhow::Context;
 use async_trait::async_trait;
 use fibril_admin::{
-    AdminConfig, AdminServer, RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome,
-    StartupConfigSummary,
+    AdminConfig, AdminServer, CoordinationMembershipManager, RuntimeSettingsClusterStore,
+    RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
 };
 use fibril_broker::{
     broker::{Broker, BrokerConfig, FollowerReplicationWorkerConfig, OwnAllQueues, QueueOwnership},
@@ -30,7 +31,8 @@ use fibril_broker::{
 };
 use fibril_config::{CoordinationMode, ServerConfig};
 use fibril_coordination_ganglion::{
-    ClientTopology, ClusterRuntimeSettingsUpdateOutcome, ControllerStatus, GanglionCoordination,
+    ClientTopology, ClusterRuntimeSettingsUpdateOutcome, ControllerStatus, ForwardedWritePolicy,
+    GanglionCoordination,
 };
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::{
@@ -110,6 +112,68 @@ pub struct GanglionBrokerTaskHandles {
     pub cohort_owner_watcher: tokio::task::JoinHandle<()>,
 }
 
+pub struct GanglionCoordinationMembershipManager {
+    coordination: Arc<TcpGanglionCoordination>,
+}
+
+impl GanglionCoordinationMembershipManager {
+    pub fn new(coordination: Arc<TcpGanglionCoordination>) -> Self {
+        Self { coordination }
+    }
+
+    fn topology_json(&self) -> Result<serde_json::Value, String> {
+        serde_json::to_value(self.coordination.raft_node().topology())
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait]
+impl CoordinationMembershipManager for GanglionCoordinationMembershipManager {
+    async fn add_voting_member(&self, id: u64, addr: String) -> Result<serde_json::Value, String> {
+        self.coordination
+            .raft_node()
+            .add_learner(id, BasicNode::new(addr), true)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let mut voters = self.coordination.raft_node().topology().voters;
+        if !voters.contains(&id) {
+            voters.push(id);
+            voters.sort_unstable();
+        }
+
+        self.coordination
+            .raft_node()
+            .change_membership(voters, false)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        self.topology_json()
+    }
+
+    async fn remove_voting_member(&self, id: u64) -> Result<serde_json::Value, String> {
+        let voters = self
+            .coordination
+            .raft_node()
+            .topology()
+            .voters
+            .into_iter()
+            .filter(|voter| *voter != id)
+            .collect::<Vec<_>>();
+        if voters.is_empty() {
+            return Err("refusing to remove the last raft voter".to_string());
+        }
+
+        self.coordination
+            .raft_node()
+            .change_membership(voters, false)
+            .await
+            .map_err(|error| error.to_string())?;
+
+        self.topology_json()
+    }
+}
+
 /// Start TCP-backed Ganglion coordination if `[coordination].mode = "ganglion"`.
 ///
 /// This owns only the coordination process and embedded placement controller.
@@ -128,8 +192,7 @@ pub async fn open_tcp_ganglion_parts(
                 section.data_dir.clone()
             };
 
-            let raft_config = ganglion_openraft::default_raft_config()
-                .map_err(|error| anyhow::anyhow!("raft config: {error}"))?;
+            let raft_config = raft_config_from_config(config)?;
             let wire_format: WireFormat = section
                 .wire_format
                 .parse()
@@ -167,10 +230,11 @@ pub async fn open_tcp_ganglion_parts(
                 }
             }
 
-            let coordination = Arc::new(GanglionCoordination::new_with_wire_format(
+            let coordination = Arc::new(GanglionCoordination::new_with_forwarded_write_policy(
                 config.coordination.node_id.clone(),
                 node,
                 wire_format,
+                forwarded_write_policy_from_config(config),
             ));
             let (controller_task, controller_status) = coordination.spawn_controller(
                 Arc::new(DeterministicPartitionPlacement),
@@ -189,6 +253,33 @@ pub async fn open_tcp_ganglion_parts(
                 controller_status,
             }))
         }
+    }
+}
+
+fn raft_config_from_config(
+    config: &ServerConfig,
+) -> anyhow::Result<Arc<ganglion_openraft::openraft::Config>> {
+    let section = &config.coordination.ganglion.raft;
+    let mut raft_config = ganglion_openraft::default_raft_config()
+        .map_err(|error| anyhow::anyhow!("raft config: {error}"))?
+        .as_ref()
+        .clone();
+    raft_config.heartbeat_interval = section.heartbeat_interval_ms;
+    raft_config.election_timeout_min = section.election_timeout_min_ms;
+    raft_config.election_timeout_max = section.election_timeout_max_ms;
+    raft_config
+        .validate()
+        .map(Arc::new)
+        .map_err(|error| anyhow::anyhow!("raft config: {error}"))
+}
+
+fn forwarded_write_policy_from_config(config: &ServerConfig) -> ForwardedWritePolicy {
+    let section = &config.coordination.ganglion.forwarded_write;
+    ForwardedWritePolicy {
+        redirect_limit: section.redirect_limit,
+        no_leader_retries: section.no_leader_retries,
+        no_leader_base_backoff: Duration::from_millis(section.no_leader_base_backoff_ms),
+        no_leader_max_backoff: Duration::from_millis(section.no_leader_max_backoff_ms),
     }
 }
 
@@ -498,34 +589,23 @@ pub async fn run_server_from_config(config: ServerConfig) -> anyhow::Result<()> 
     }
 
     let auth_handler = StaticAuthHandler::new("fibril".to_string(), "fibril".to_string());
-    let admin_auth_handler = config.admin.auth.enabled.then(|| {
-        StaticAuthHandler::new(
+    let admin_auth_handler = if config.admin.auth.enabled {
+        let password = config.admin.auth.password.clone().ok_or_else(|| {
+            anyhow::anyhow!("admin.auth.password must be set when admin auth is enabled")
+        })?;
+        Some(StaticAuthHandler::new(
             config.admin.auth.username.clone(),
-            config
-                .admin
-                .auth
-                .password
-                .clone()
-                .expect("validated admin auth password"),
-        )
-    });
+            password,
+        ))
+    } else {
+        None
+    };
 
     let stroma_metrics = broker.stroma_metrics();
     let topology_source = ganglion_parts.as_ref().map(topology_source_for_ganglion);
     let declare_coordinator = ganglion_parts
         .as_ref()
         .map(declare_coordinator_for_ganglion);
-
-    let broker_server_fut = run_protocol_server(
-        config.broker.listener.bind,
-        broker.clone(),
-        metrics.tcp(),
-        metrics.connections(),
-        Some(auth_handler.clone()),
-        connection_settings,
-        topology_source,
-        declare_coordinator,
-    );
 
     let broker_observability = {
         let broker = broker.clone();
@@ -591,12 +671,17 @@ pub async fn run_server_from_config(config: ServerConfig) -> anyhow::Result<()> 
                     }
                     value
                 }))
+                .with_coordination_membership(Arc::new(GanglionCoordinationMembershipManager::new(
+                    parts.coordination.clone(),
+                )))
                 .with_runtime_settings_cluster(Arc::new(GanglionRuntimeSettingsStore::new(
                     parts.coordination,
                 )))
         }
     };
 
+    let tcp_metrics = metrics.tcp();
+    let connection_metrics = metrics.connections();
     metrics.start(
         MetricsConfig {
             log_broker: true,
@@ -606,10 +691,23 @@ pub async fn run_server_from_config(config: ServerConfig) -> anyhow::Result<()> 
         Duration::from_secs(10),
     );
 
-    let admin_server_dut = admin.run();
-    let (broker_res, admin_res) = tokio::join!(broker_server_fut, admin_server_dut);
-    broker_res?;
-    admin_res?;
+    let broker_server_fut = async move {
+        run_protocol_server(
+            config.broker.listener.bind,
+            broker.clone(),
+            tcp_metrics,
+            connection_metrics,
+            Some(auth_handler.clone()),
+            connection_settings,
+            topology_source,
+            declare_coordinator,
+        )
+        .await
+        .context("broker listener failed")
+    };
+    let admin_server_fut = async move { admin.run().await.context("admin listener failed") };
+
+    tokio::try_join!(broker_server_fut, admin_server_fut)?;
 
     Ok(())
 }
@@ -813,6 +911,27 @@ mod tests {
     fn free_loopback_addr() -> std::net::SocketAddr {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind free port");
         listener.local_addr().expect("local addr")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_startup_fails_fast_when_admin_bind_fails() {
+        let root = temp_root("admin-bind-fails-fast");
+        let occupied_admin =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind occupied admin port");
+        let occupied_admin_addr = occupied_admin.local_addr().expect("occupied admin addr");
+
+        let mut config = ServerConfig::default();
+        config.server.data_dir = root.join("data");
+        config.broker.listener.bind = free_loopback_addr();
+        config.admin.listener.bind = occupied_admin_addr;
+
+        let result = tokio::time::timeout(Duration::from_secs(5), run_server_from_config(config))
+            .await
+            .expect("startup should fail instead of serving broker forever")
+            .expect_err("occupied admin port should fail startup");
+
+        let error = format!("{result:#}");
+        assert!(error.contains("admin listener failed"), "{error}");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

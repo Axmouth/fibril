@@ -70,6 +70,39 @@ create-once/conflict test keeps repartition conflicts pinned. The real
 three-process tryout now passes again: server startup, raft election, CLI
 declare, controller assignment, and replicated runtime-settings sync.
 
+DONE — high-node local coordination stress cleanup (2026-06-14): cluster tryout
+now has compact summaries, separate admin readiness and cluster convergence
+waits, random or explicit port offsets, and `--resource-summary` for RSS and fd diagnostics. The high-fd
+spike was not raft sockets. `SystemStats` was refreshing every host process and
+kept `/proc/<pid>/stat` descriptors around. It now samples only the current
+process with CPU and memory refreshes. One-node fd count dropped from roughly
+1046 to 23. An 88-node all-voter local stress run passes under `ulimit -n =
+2048`, with about 1704 total fds and 6.5 GiB total RSS. That validates the
+coordination path under local stress, but production shape should still be a
+small voter set plus many registered brokers, clients, or learners. A later
+150-node run showed that admin endpoints bind quickly with a short wait, while
+the slower phase is raft/controller convergence. Keep `--admin-wait-secs` short
+and use `--cluster-wait-secs` for the convergence window.
+
+DONE — live coordination membership smoke (2026-06-14): the public control
+surface is coordination membership rather than a raft-specific admin route.
+Ganglion still uses raft internally behind the adapter. `fibrilctl admin
+coordination add-voting-member` and `remove-voting-member` call the admin API,
+and `scripts/cluster-tryout.sh --dynamic-membership` starts one extra server,
+adds it to the voting set, verifies all nodes including the joiner see
+`[1,2,3,4]`, removes it from the voting set, then verifies the original nodes
+return to `[1,2,3]`. Smoke passed with
+`--nodes 3 --ganglion --summary --resource-summary --admin-wait-secs 5
+--cluster-wait-secs 45 --port-offset 17000 --dynamic-membership`. The removed
+node remains a running process in this test, which is intentional: the tested
+operation is removing voting membership, not shutting down the broker.
+
+VOTER GUIDANCE: more voters increase tolerated voter failures according to
+quorum math, but they also increase metadata write cost and convergence load.
+Large all-voter local runs are useful stress tests. The intended production
+shape remains a small odd voting set across failure domains plus many registered
+brokers or non-voting participants.
+
 NEXT — multi-node integration test for the coordinator. Use the extracted
 fibril-lib bootstrap pieces to build a test harness that can stand up 2
 broker+coordination nodes and drive them. Then the e2e (ganglion harness like

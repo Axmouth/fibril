@@ -35,6 +35,13 @@ pub type BrokerQueueObservability = dyn Fn() -> serde_json::Value + Send + Sync 
 /// callback so the admin crate stays independent of the coordination backend.
 pub type RaftTopologyProvider = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
 
+#[async_trait]
+pub trait CoordinationMembershipManager: Send + Sync + 'static {
+    async fn add_voting_member(&self, id: u64, addr: String) -> Result<serde_json::Value, String>;
+
+    async fn remove_voting_member(&self, id: u64) -> Result<serde_json::Value, String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSettingsClusterUpdateOutcome {
     Stored(RuntimeSettingsSnapshot),
@@ -80,6 +87,7 @@ pub struct AdminServer {
     pub sessions: AdminSessions,
     pub coordination: Option<Arc<dyn fibril_broker::Coordination>>,
     pub raft_topology: Option<Arc<RaftTopologyProvider>>,
+    pub coordination_membership: Option<Arc<dyn CoordinationMembershipManager>>,
     /// Optional cluster-authoritative runtime-settings store. When absent,
     /// runtime settings are local-only and use the node's Stroma global store.
     pub runtime_settings_cluster: Option<Arc<dyn RuntimeSettingsClusterStore>>,
@@ -116,6 +124,7 @@ impl AdminServer {
             sessions: AdminSessions::default(),
             coordination: None,
             raft_topology: None,
+            coordination_membership: None,
             runtime_settings_cluster: None,
         }
     }
@@ -129,6 +138,15 @@ impl AdminServer {
     /// Attach the optional consensus-internals block for the topology endpoint.
     pub fn with_raft_topology(mut self, provider: Arc<RaftTopologyProvider>) -> Self {
         self.raft_topology = Some(provider);
+        self
+    }
+
+    /// Attach the optional coordination membership manager.
+    pub fn with_coordination_membership(
+        mut self,
+        manager: Arc<dyn CoordinationMembershipManager>,
+    ) -> Self {
+        self.coordination_membership = Some(manager);
         self
     }
 
@@ -191,6 +209,14 @@ impl AdminServer {
             )
             .route("/admin/api/startup-config", get(routes::startup_config))
             .route("/admin/api/topology", get(routes::topology))
+            .route(
+                "/admin/api/coordination/membership/add-voting-member",
+                axum::routing::post(routes::add_coordination_voting_member),
+            )
+            .route(
+                "/admin/api/coordination/membership/remove-voting-member",
+                axum::routing::post(routes::remove_coordination_voting_member),
+            )
             .route(
                 "/admin/api/global-dlq",
                 get(routes::global_dlq).put(routes::update_global_dlq),
@@ -618,6 +644,34 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct FakeCoordinationMembershipManager {
+        calls: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CoordinationMembershipManager for FakeCoordinationMembershipManager {
+        async fn add_voting_member(
+            &self,
+            id: u64,
+            addr: String,
+        ) -> Result<serde_json::Value, String> {
+            self.calls.lock().unwrap().push(format!("add:{id}:{addr}"));
+            Ok(json!({
+                "voters": [1, id],
+                "added": id,
+            }))
+        }
+
+        async fn remove_voting_member(&self, id: u64) -> Result<serde_json::Value, String> {
+            self.calls.lock().unwrap().push(format!("remove:{id}"));
+            Ok(json!({
+                "voters": [1],
+                "removed": id,
+            }))
+        }
+    }
+
     async fn open_protocol_connection(
         broker: Arc<Broker<StromaEngine>>,
     ) -> (
@@ -800,6 +854,120 @@ mod tests {
         assert_eq!(assignment["epoch"], 3);
         assert_eq!(assignment["followers"][0], "broker-b");
         assert_eq!(body["raft"]["leader"], 1);
+    }
+
+    #[tokio::test]
+    async fn coordination_membership_routes_report_unavailable_without_manager() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/coordination/membership/add-voting-member")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": 2,
+                            "addr": "127.0.0.1:9202"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "coordination_membership_unavailable");
+    }
+
+    #[tokio::test]
+    async fn coordination_membership_add_rejects_invalid_addr() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/coordination/membership/add-voting-member")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": 2,
+                            "addr": "not a socket address"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_coordination_member_addr");
+    }
+
+    #[tokio::test]
+    async fn coordination_membership_routes_call_manager() {
+        let manager = StdArc::new(FakeCoordinationMembershipManager::default());
+        let server = Arc::try_unwrap(test_server(RuntimeSettingsLocks::default()).await)
+            .unwrap_or_else(|_| panic!("test server should have one strong reference"))
+            .with_coordination_membership(manager.clone());
+        let app = AdminServer::router(Arc::new(server));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/coordination/membership/add-voting-member")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": 2,
+                            "addr": "127.0.0.1:9202"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["coordination"]["added"], 2);
+        assert_eq!(body["coordination"]["voters"][1], 2);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/coordination/membership/remove-voting-member")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": 2
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["coordination"]["removed"], 2);
+        assert_eq!(
+            manager.calls.lock().unwrap().as_slice(),
+            ["add:2:127.0.0.1:9202", "remove:2"]
+        );
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@
 //! (trait-compatible); proposals are async and leader-only, matching the
 //! controller-loop model from `REPLICATION_PLANNING.md`.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use fibril_broker::coordination::{
     aggregate_cohort_membership, ClusterCohortController, CohortPlan, ConsumerGroupKey,
@@ -19,9 +19,9 @@ use fibril_storage::Partition;
 use ganglion_openraft::openraft::storage::RaftLogStorage;
 use ganglion_openraft::openraft::RaftNetworkFactory;
 use ganglion_openraft::{
-    client_write_remote, GanglionLogStore, GanglionRaftConfig, InProcessRouter,
+    client_write_remote_with_hint, GanglionLogStore, GanglionRaftConfig, InProcessRouter,
     MetadataRaftCommand, MetadataRaftResponse, MetadataRejection, OpenraftAdapterError,
-    RaftMetadataNode, WireFormat,
+    RaftMetadataNode, RemoteWriteError, WireFormat,
 };
 use tokio::sync::watch;
 
@@ -139,8 +139,30 @@ pub const DEFAULT_PARTITIONING_VERSION: u64 = 0;
 /// charset that excludes `/`, so the separator is unambiguous.
 pub const QUEUE_PARTITIONING_ATTRIBUTE_PREFIX: &str = "fibril/partitioning/";
 
-const FORWARDED_WRITE_MAX_ATTEMPTS: usize = 6;
-const FORWARDED_WRITE_RETRY_BACKOFF_MS: u64 = 25;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForwardedWritePolicy {
+    /// Maximum deterministic remote leader redirects for one forwarded write.
+    /// Redirects do not sleep; they follow explicit leader hints returned by
+    /// contacted raft peers.
+    pub redirect_limit: usize,
+    /// Number of blind waits after a write sees no leader and no remote leader
+    /// hint. Zero is useful for tests because it proves the deterministic
+    /// leader-hint path is doing the work.
+    pub no_leader_retries: usize,
+    pub no_leader_base_backoff: Duration,
+    pub no_leader_max_backoff: Duration,
+}
+
+impl Default for ForwardedWritePolicy {
+    fn default() -> Self {
+        Self {
+            redirect_limit: 16,
+            no_leader_retries: 0,
+            no_leader_base_backoff: Duration::from_millis(25),
+            no_leader_max_backoff: Duration::from_millis(250),
+        }
+    }
+}
 
 fn queue_partitioning_key(topic: &str, group: Option<&str>) -> String {
     match group {
@@ -473,6 +495,7 @@ where
     tx: watch::Sender<CoordinationSnapshot>,
     forwarder: tokio::task::JoinHandle<()>,
     wire_format: WireFormat,
+    forwarded_write_policy: ForwardedWritePolicy,
 }
 
 impl<LS, NF> std::fmt::Debug for GanglionCoordination<LS, NF>
@@ -510,6 +533,20 @@ where
         node: RaftMetadataNode<LS, NF>,
         wire_format: WireFormat,
     ) -> Self {
+        Self::new_with_forwarded_write_policy(
+            node_id,
+            node,
+            wire_format,
+            ForwardedWritePolicy::default(),
+        )
+    }
+
+    pub fn new_with_forwarded_write_policy(
+        node_id: impl Into<String>,
+        node: RaftMetadataNode<LS, NF>,
+        wire_format: WireFormat,
+        forwarded_write_policy: ForwardedWritePolicy,
+    ) -> Self {
         let mut ganglion_rx = node.watch_committed();
         let initial = to_fibril_snapshot(&ganglion_rx.borrow_and_update());
         let (tx, _rx) = watch::channel(initial);
@@ -528,6 +565,7 @@ where
             tx,
             forwarder,
             wire_format,
+            forwarded_write_policy,
         }
     }
 
@@ -692,40 +730,83 @@ where
         &self,
         command: MetadataRaftCommand,
     ) -> Result<MetadataRaftResponse, OpenraftAdapterError> {
-        for attempt in 0..FORWARDED_WRITE_MAX_ATTEMPTS {
-            let result = if self.node.is_leader().await {
-                self.node.submit_merge(command.clone()).await
-            } else {
-                let topology = self.node.topology();
-                let leader_addr = topology
-                    .leader
-                    .and_then(|leader| topology.nodes.get(&leader).cloned())
-                    .ok_or(OpenraftAdapterError::NotLeader);
+        let mut next_remote_addr: Option<String> = None;
+        let mut redirects = 0usize;
+        let mut no_leader_waits = 0usize;
 
-                match leader_addr {
-                    Ok(leader_addr) => {
-                        client_write_remote(&leader_addr, command.clone(), self.wire_format).await
-                    }
-                    Err(error) => Err(error),
-                }
-            };
-
-            match result {
-                Ok(response) => return Self::map_forwarded_response(response),
-                // Expected during elections or when this node has a stale
-                // leader view. Normal broker/admin writes should converge
-                // without requiring callers to find the raft leader first.
-                Err(OpenraftAdapterError::NotLeader)
-                    if attempt + 1 < FORWARDED_WRITE_MAX_ATTEMPTS =>
+        loop {
+            if let Some(addr) = next_remote_addr.take() {
+                match client_write_remote_with_hint(&addr, command.clone(), self.wire_format).await
                 {
-                    let delay = FORWARDED_WRITE_RETRY_BACKOFF_MS * (attempt as u64 + 1);
-                    tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    Ok(response) => return Self::map_forwarded_response(response),
+                    Err(RemoteWriteError::NotLeader {
+                        leader_addr: Some(addr),
+                    }) => {
+                        redirects += 1;
+                        if redirects > self.forwarded_write_policy.redirect_limit {
+                            return Err(OpenraftAdapterError::NotLeader);
+                        }
+                        next_remote_addr = Some(addr);
+                    }
+                    Err(RemoteWriteError::NotLeader { leader_addr: None }) => {
+                        if let Some(addr) = self.leader_addr_from_topology() {
+                            next_remote_addr = Some(addr);
+                        } else if !self.wait_for_no_leader_hint(&mut no_leader_waits).await {
+                            return Err(OpenraftAdapterError::NotLeader);
+                        }
+                    }
+                    Err(RemoteWriteError::Other(message)) => {
+                        return Err(OpenraftAdapterError::Storage(message));
+                    }
                 }
-                Err(error) => return Err(error),
+                continue;
+            }
+
+            if self.node.is_leader().await {
+                match self.node.submit_merge(command.clone()).await {
+                    Ok(response) => return Self::map_forwarded_response(response),
+                    Err(OpenraftAdapterError::NotLeader) => {
+                        if let Some(addr) = self.leader_addr_from_topology() {
+                            next_remote_addr = Some(addr);
+                        } else if !self.wait_for_no_leader_hint(&mut no_leader_waits).await {
+                            return Err(OpenraftAdapterError::NotLeader);
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+                continue;
+            }
+
+            match self.leader_addr_from_topology() {
+                Some(addr) => next_remote_addr = Some(addr),
+                None => {
+                    if !self.wait_for_no_leader_hint(&mut no_leader_waits).await {
+                        return Err(OpenraftAdapterError::NotLeader);
+                    }
+                }
             }
         }
+    }
 
-        Err(OpenraftAdapterError::NotLeader)
+    async fn wait_for_no_leader_hint(&self, waits: &mut usize) -> bool {
+        if *waits >= self.forwarded_write_policy.no_leader_retries {
+            return false;
+        }
+        *waits += 1;
+        let delay = self
+            .forwarded_write_policy
+            .no_leader_base_backoff
+            .saturating_mul(*waits as u32)
+            .min(self.forwarded_write_policy.no_leader_max_backoff);
+        tokio::time::sleep(delay).await;
+        true
+    }
+
+    fn leader_addr_from_topology(&self) -> Option<String> {
+        let topology = self.node.topology();
+        topology
+            .leader
+            .and_then(|leader| topology.nodes.get(&leader).cloned())
     }
 
     fn map_forwarded_response(

@@ -75,6 +75,11 @@ enum AdminCommand {
     /// Show cluster topology: nodes, queue assignments, and (when an embedded
     /// coordinator is active) raft consensus state.
     Topology(TopologyArgs),
+    /// Coordination membership operations.
+    Coordination {
+        #[command(subcommand)]
+        command: CoordinationCommand,
+    },
 }
 
 #[derive(Debug, clap::Args)]
@@ -82,6 +87,29 @@ struct TopologyArgs {
     /// Print the raw topology JSON instead of tables.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum CoordinationCommand {
+    /// Add a node as a voting coordination member.
+    AddVotingMember(CoordinationAddVotingMemberArgs),
+    /// Remove a node from the voting coordination member set.
+    RemoveVotingMember(CoordinationRemoveVotingMemberArgs),
+}
+
+#[derive(Debug, Parser)]
+struct CoordinationAddVotingMemberArgs {
+    /// Coordination node id to add.
+    id: u64,
+
+    /// Coordination TCP address for the new node.
+    addr: SocketAddr,
+}
+
+#[derive(Debug, Parser)]
+struct CoordinationRemoveVotingMemberArgs {
+    /// Coordination node id to remove.
+    id: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -274,6 +302,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         print_topology(&topology);
                     }
                 }
+                AdminCommand::Coordination { command } => match command {
+                    CoordinationCommand::AddVotingMember(args) => {
+                        print_json(admin.add_coordination_voting_member(args).await?)?
+                    }
+                    CoordinationCommand::RemoveVotingMember(args) => {
+                        print_json(admin.remove_coordination_voting_member(args).await?)?
+                    }
+                },
             }
         }
     }
@@ -392,6 +428,17 @@ struct ReplayDlqRequest {
     offsets: Vec<u64>,
 }
 
+#[derive(Debug, Serialize)]
+struct AddCoordinationVotingMemberRequest {
+    id: u64,
+    addr: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoveCoordinationVotingMemberRequest {
+    id: u64,
+}
+
 impl AdminClient {
     async fn get_global_dlq(&self) -> anyhow::Result<GlobalDlqSnapshot> {
         self.get_json("/admin/api/global-dlq", &[]).await
@@ -457,6 +504,31 @@ impl AdminClient {
 
     async fn topology(&self) -> anyhow::Result<serde_json::Value> {
         self.get_json("/admin/api/topology", &[]).await
+    }
+
+    async fn add_coordination_voting_member(
+        &self,
+        args: CoordinationAddVotingMemberArgs,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.post_json(
+            "/admin/api/coordination/membership/add-voting-member",
+            &AddCoordinationVotingMemberRequest {
+                id: args.id,
+                addr: args.addr.to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn remove_coordination_voting_member(
+        &self,
+        args: CoordinationRemoveVotingMemberArgs,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.post_json(
+            "/admin/api/coordination/membership/remove-voting-member",
+            &RemoveCoordinationVotingMemberRequest { id: args.id },
+        )
+        .await
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(

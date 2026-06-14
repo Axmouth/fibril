@@ -81,6 +81,17 @@ pub struct ReplayDeadLettersRequest {
     pub offsets: Vec<u64>,
 }
 
+#[derive(Deserialize)]
+pub struct AddCoordinationVotingMemberRequest {
+    pub id: u64,
+    pub addr: String,
+}
+
+#[derive(Deserialize)]
+pub struct RemoveCoordinationVotingMemberRequest {
+    pub id: u64,
+}
+
 #[derive(Serialize)]
 pub struct QueueDlqResponse {
     pub status: &'static str,
@@ -478,6 +489,68 @@ pub async fn topology(
         "coordination": coordination,
         "raft": raft,
     })))
+}
+
+pub async fn add_coordination_voting_member(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<AddCoordinationVotingMemberRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    if request.addr.parse::<std::net::SocketAddr>().is_err() {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_coordination_member_addr",
+            "addr must be a socket address",
+        ));
+    }
+
+    let Some(manager) = &server.coordination_membership else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "coordination_membership_unavailable",
+            "coordination membership management is not available",
+        ));
+    };
+
+    match manager.add_voting_member(request.id, request.addr).await {
+        Ok(coordination) => {
+            Ok(Json(serde_json::json!({ "coordination": coordination })).into_response())
+        }
+        Err(error) => Ok(admin_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "coordination_membership_update_failed",
+            error,
+        )),
+    }
+}
+
+pub async fn remove_coordination_voting_member(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<RemoveCoordinationVotingMemberRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let Some(manager) = &server.coordination_membership else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "coordination_membership_unavailable",
+            "coordination membership management is not available",
+        ));
+    };
+
+    match manager.remove_voting_member(request.id).await {
+        Ok(coordination) => {
+            Ok(Json(serde_json::json!({ "coordination": coordination })).into_response())
+        }
+        Err(error) => Ok(admin_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "coordination_membership_update_failed",
+            error,
+        )),
+    }
 }
 
 pub async fn runtime_settings(

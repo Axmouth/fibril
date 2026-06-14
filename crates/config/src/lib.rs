@@ -165,6 +165,63 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_WIRE_FORMAT")? {
             self.coordination.ganglion.wire_format = value;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_RAFT_HEARTBEAT_INTERVAL_MS")?
+        {
+            self.coordination.ganglion.raft.heartbeat_interval_ms =
+                parse_env("FIBRIL_COORDINATION_RAFT_HEARTBEAT_INTERVAL_MS", &value)?;
+        }
+        if let Some(value) =
+            env_value(&mut get, "FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MIN_MS")?
+        {
+            self.coordination.ganglion.raft.election_timeout_min_ms =
+                parse_env("FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MIN_MS", &value)?;
+        }
+        if let Some(value) =
+            env_value(&mut get, "FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MAX_MS")?
+        {
+            self.coordination.ganglion.raft.election_timeout_max_ms =
+                parse_env("FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MAX_MS", &value)?;
+        }
+        if let Some(value) = env_value(
+            &mut get,
+            "FIBRIL_COORDINATION_FORWARDED_WRITE_REDIRECT_LIMIT",
+        )? {
+            self.coordination.ganglion.forwarded_write.redirect_limit =
+                parse_env("FIBRIL_COORDINATION_FORWARDED_WRITE_REDIRECT_LIMIT", &value)?;
+        }
+        if let Some(value) = env_value(
+            &mut get,
+            "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_RETRIES",
+        )? {
+            self.coordination.ganglion.forwarded_write.no_leader_retries = parse_env(
+                "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_RETRIES",
+                &value,
+            )?;
+        }
+        if let Some(value) = env_value(
+            &mut get,
+            "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_BASE_BACKOFF_MS",
+        )? {
+            self.coordination
+                .ganglion
+                .forwarded_write
+                .no_leader_base_backoff_ms = parse_env(
+                "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_BASE_BACKOFF_MS",
+                &value,
+            )?;
+        }
+        if let Some(value) = env_value(
+            &mut get,
+            "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_MAX_BACKOFF_MS",
+        )? {
+            self.coordination
+                .ganglion
+                .forwarded_write
+                .no_leader_max_backoff_ms = parse_env(
+                "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_MAX_BACKOFF_MS",
+                &value,
+            )?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_PEERS")? {
             // Comma-separated "raft_id=host:port" pairs.
             let mut peers = std::collections::BTreeMap::new();
@@ -353,6 +410,36 @@ impl ServerConfig {
                  single missed heartbeat"
             );
         }
+        let raft = &self.coordination.ganglion.raft;
+        if raft.heartbeat_interval_ms == 0 {
+            anyhow::bail!("coordination.ganglion.raft.heartbeat_interval_ms must be at least 1");
+        }
+        if raft.election_timeout_min_ms <= raft.heartbeat_interval_ms {
+            anyhow::bail!(
+                "coordination.ganglion.raft.election_timeout_min_ms must be greater than heartbeat_interval_ms"
+            );
+        }
+        if raft.election_timeout_min_ms >= raft.election_timeout_max_ms {
+            anyhow::bail!(
+                "coordination.ganglion.raft.election_timeout_min_ms must be less than election_timeout_max_ms"
+            );
+        }
+        let forwarded = &self.coordination.ganglion.forwarded_write;
+        if forwarded.redirect_limit == 0 {
+            anyhow::bail!(
+                "coordination.ganglion.forwarded_write.redirect_limit must be at least 1"
+            );
+        }
+        if forwarded.no_leader_base_backoff_ms == 0 || forwarded.no_leader_max_backoff_ms == 0 {
+            anyhow::bail!(
+                "coordination.ganglion.forwarded_write backoff values must be at least 1ms"
+            );
+        }
+        if forwarded.no_leader_base_backoff_ms > forwarded.no_leader_max_backoff_ms {
+            anyhow::bail!(
+                "coordination.ganglion.forwarded_write.no_leader_base_backoff_ms must be <= no_leader_max_backoff_ms"
+            );
+        }
         Ok(())
     }
 }
@@ -515,6 +602,11 @@ pub struct GanglionCoordinationSection {
     /// Outbound raft frame encoding: `msgpack` (default) or `json` (debugging).
     /// Inbound frames are self-describing, so mixed clusters interoperate.
     pub wire_format: String,
+    /// Raft timing. Boot-time only: changing it requires node restart.
+    pub raft: GanglionRaftSection,
+    /// Policy for forwarding metadata writes from followers to the current
+    /// raft leader. Boot-time only.
+    pub forwarded_write: GanglionForwardedWriteSection,
     /// Broker self-registration heartbeat interval (milliseconds).
     pub heartbeat_interval_ms: u64,
     /// Controller: desired follower count per queue partition.
@@ -535,10 +627,52 @@ impl Default for GanglionCoordinationSection {
             bootstrap: false,
             data_dir: PathBuf::new(),
             wire_format: "msgpack".into(),
+            raft: GanglionRaftSection::default(),
+            forwarded_write: GanglionForwardedWriteSection::default(),
             heartbeat_interval_ms: 3000,
             target_followers: 1,
             controller_tick_ms: 2000,
             liveness_ttl_ms: 9000,
+        }
+    }
+}
+
+/// Embedded raft consensus timing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GanglionRaftSection {
+    pub heartbeat_interval_ms: u64,
+    pub election_timeout_min_ms: u64,
+    pub election_timeout_max_ms: u64,
+}
+
+impl Default for GanglionRaftSection {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_ms: 250,
+            election_timeout_min_ms: 1500,
+            election_timeout_max_ms: 3000,
+        }
+    }
+}
+
+/// Metadata write forwarding policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GanglionForwardedWriteSection {
+    pub redirect_limit: usize,
+    pub no_leader_retries: usize,
+    pub no_leader_base_backoff_ms: u64,
+    pub no_leader_max_backoff_ms: u64,
+}
+
+impl Default for GanglionForwardedWriteSection {
+    fn default() -> Self {
+        Self {
+            redirect_limit: 16,
+            no_leader_retries: 0,
+            no_leader_base_backoff_ms: 25,
+            no_leader_max_backoff_ms: 250,
         }
     }
 }
@@ -762,6 +896,23 @@ mod tests {
         assert_eq!(config.runtime_seed.delivery.expiry_poll_min_ms, 15_000);
         assert_eq!(config.runtime_seed.delivery.expiry_batch_max, 8192);
         assert_eq!(config.runtime_seed.delivery.delivery_poll_max_ms, 5_000);
+        assert_eq!(
+            config.coordination.ganglion.raft,
+            GanglionRaftSection {
+                heartbeat_interval_ms: 250,
+                election_timeout_min_ms: 1500,
+                election_timeout_max_ms: 3000,
+            }
+        );
+        assert_eq!(
+            config.coordination.ganglion.forwarded_write,
+            GanglionForwardedWriteSection {
+                redirect_limit: 16,
+                no_leader_retries: 0,
+                no_leader_base_backoff_ms: 25,
+                no_leader_max_backoff_ms: 250,
+            }
+        );
         assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, None);
         assert_eq!(
             config.idle_queue_cleanup_internal(),
@@ -815,6 +966,17 @@ mod tests {
             [runtime_seed.connection]
             reconnect_grace_ms = 17
 
+            [coordination.ganglion.raft]
+            heartbeat_interval_ms = 300
+            election_timeout_min_ms = 1800
+            election_timeout_max_ms = 3600
+
+            [coordination.ganglion.forwarded_write]
+            redirect_limit = 20
+            no_leader_retries = 2
+            no_leader_base_backoff_ms = 30
+            no_leader_max_backoff_ms = 300
+
             [runtime_locks]
             idle_queue_cleanup = true
             "#,
@@ -841,6 +1003,23 @@ mod tests {
         assert_eq!(
             config.storage.keratin.event_log.segment_max_bytes,
             16_777_216
+        );
+        assert_eq!(
+            config.coordination.ganglion.raft,
+            GanglionRaftSection {
+                heartbeat_interval_ms: 300,
+                election_timeout_min_ms: 1800,
+                election_timeout_max_ms: 3600,
+            }
+        );
+        assert_eq!(
+            config.coordination.ganglion.forwarded_write,
+            GanglionForwardedWriteSection {
+                redirect_limit: 20,
+                no_leader_retries: 2,
+                no_leader_base_backoff_ms: 30,
+                no_leader_max_backoff_ms: 300,
+            }
         );
         assert_eq!(config.runtime_seed.delivery.inflight_ttl_ms, 10);
         assert_eq!(config.runtime_seed.delivery.expiry_poll_min_ms, 11);
@@ -914,6 +1093,40 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("default_partition_count"));
+    }
+
+    #[test]
+    fn ganglion_raft_timing_validation_rejects_unstable_ordering() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [coordination.ganglion.raft]
+            heartbeat_interval_ms = 300
+            election_timeout_min_ms = 300
+            election_timeout_max_ms = 400
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("election_timeout_min_ms"));
+    }
+
+    #[test]
+    fn forwarded_write_validation_rejects_zero_redirect_limit() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [coordination.ganglion.forwarded_write]
+            redirect_limit = 0
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("redirect_limit"));
     }
 
     #[test]
