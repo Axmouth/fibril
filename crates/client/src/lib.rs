@@ -968,23 +968,26 @@ impl<'a> SubscriptionBuilder<'a> {
         Ok(self)
     }
 
-    /// Join an exclusive consumer group (cohort) identified by `id`.
+    /// Consume this queue as part of its **exclusive cohort**: each partition is
+    /// delivered to exactly one cohort member at a time, preserving per-key
+    /// ordering, with partitions balanced (and sticky) across members and
+    /// automatic failover when a member disconnects.
     ///
-    /// Members sharing the same `id` on the same queue exclusively divide its
-    /// partitions: each partition is delivered to exactly one member, preserving
-    /// per-partition ordering, and a member's partitions fail over to the rest of
-    /// the cohort when it disconnects. Without this, consumers compete for the
-    /// queue (many per partition, unordered) — the default. Fan-in is unchanged:
-    /// the client still subscribes to every partition and the broker gates
+    /// Just run several instances that all call `.exclusive()` on the same queue
+    /// — they self-organize into the one cohort; there is nothing to name or
+    /// coordinate (a queue has a single exclusive cohort). Without this,
+    /// consumers compete for the queue (many per partition, unordered) — the
+    /// default, and the right choice when you don't need ordering. Fan-in is
+    /// transparent: the client subscribes to every partition and the broker gates
     /// delivery to the assigned member.
-    pub fn consumer_group(mut self, id: impl Into<String>) -> Self {
-        self.consumer_group = Some(id.into());
+    pub fn exclusive(mut self) -> Self {
+        self.consumer_group = Some(DEFAULT_COHORT_ID.to_string());
         self
     }
 
     /// Set this consumer's soft partition target within its exclusive cohort —
     /// the max partitions it would prefer to own. Only meaningful together with
-    /// [`Self::consumer_group`]; coverage always wins, so a member may still be
+    /// [`Self::exclusive`]; coverage always wins, so a member may still be
     /// assigned more than its target when the cohort is under-provisioned.
     pub fn consumer_target(mut self, max_partitions: u32) -> Self {
         self.consumer_target = Some(max_partitions);
@@ -1754,6 +1757,12 @@ struct ClientShared {
 /// Buffer of assignment events retained per [`Client::assignment_events`]
 /// receiver before a slow consumer starts lagging (older events dropped).
 const ASSIGNMENT_EVENT_CAPACITY: usize = 256;
+
+/// Wire cohort id sent for [`SubscriptionBuilder::exclusive`]. A queue has a
+/// single exclusive cohort, so the id is a fixed constant — membership is keyed
+/// by `(topic, group)` server-side; the string only needs to be stable and
+/// shared, never user-chosen.
+const DEFAULT_COHORT_ID: &str = "default";
 
 /// Stable FNV-1a hash for partition selection. Must be deterministic across all
 /// clients so a given key always maps to the same partition (per-key ordering).

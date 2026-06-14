@@ -3473,6 +3473,55 @@ async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
     drop(dir);
 }
 
+/// A queue has a single exclusive cohort: subscribing with a second, different
+/// cohort id on the same queue is rejected (one cohort per queue).
+#[tokio::test]
+async fn exclusive_consumer_group_rejects_second_cohort_e2e() {
+    let (broker, dir) = open_test_broker().await;
+    let (addr, shutdown) =
+        start_multi_connection_listener(ConnectionSettings::new(None), broker.clone()).await;
+
+    let topic = "exgroup-conflict";
+
+    // First cohort claims the queue.
+    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut a).await;
+    subscribe_exclusive(&mut a, 10, topic, 0, "cohort-one", None).await;
+
+    // A different cohort id on the same queue is refused.
+    let mut b = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut b).await;
+    b.send(
+        try_encode(
+            Op::Subscribe,
+            20,
+            &Subscribe {
+                topic: topic.into(),
+                partition: Partition::new(0),
+                group: None,
+                prefetch: 8,
+                auto_ack: true,
+                consumer_group: Some("cohort-two".into()),
+                consumer_target: None,
+            },
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let frame = recv_frame(&mut b).await;
+    assert_eq!(
+        frame.opcode,
+        Op::SubscribeErr as u16,
+        "second cohort rejected"
+    );
+
+    shutdown.cancel();
+    drop(a);
+    drop(b);
+    drop(dir);
+}
+
 /// Declare resolves the partition count (explicit, else the cluster default)
 /// and reports it. Standalone (no coordinator) materializes locally.
 #[tokio::test]

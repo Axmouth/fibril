@@ -1098,6 +1098,19 @@ impl ExclusiveGroupRouter {
         }
     }
 
+    /// True if a *different* exclusive cohort already has live members on the
+    /// same `(topic, group)`. A queue supports a single cohort (the gate has one
+    /// assignee slot, and there is no fan-out), so a second distinct cohort id
+    /// would silently fight over the gate.
+    fn has_conflicting_cohort(&self, key: &ConsumerGroupKey) -> bool {
+        self.subs.iter().any(|(existing, members)| {
+            existing.topic == key.topic
+                && existing.group == key.group
+                && existing.consumer_group != key.consumer_group
+                && !members.is_empty()
+        })
+    }
+
     /// Register a member's assignment-change channel (idempotent per member —
     /// re-registering replaces the sender, closing any prior forwarder).
     fn register_notifier(
@@ -1143,10 +1156,21 @@ impl ExclusiveGroupRouter {
         self.recompute(&key, &[partition])
     }
 
-    /// Drop a member from the cohort (connection closed or unsubscribed) and
-    /// return the gate updates to apply. `partition` scopes the affected set so a
-    /// partition the leaver solely served is reopened even if it falls out of the
-    /// remaining union.
+    /// Drop a member from the cohort and return the gate updates to apply.
+    /// `partition` scopes the affected set so a partition the leaver solely served
+    /// is reopened even if it falls out of the remaining union.
+    ///
+    /// DELIBERATE: this removes the member ENTIRELY (all its partitions), not just
+    /// `partition`. The dominant caller is full-connection cleanup, which calls
+    /// `leave` once per drained sub; whole-member removal makes the FIRST call
+    /// reassign all the member's partitions to survivors at once (clean, instant
+    /// failover — no transient stall while later per-partition calls trickle in).
+    /// The cost is that a *partial* single-partition unsubscribe of a cohort
+    /// (raw-protocol only — the high-level client subscribes/unsubscribes a cohort
+    /// as a whole) also drops the whole member, briefly losing exclusivity on its
+    /// other partitions until it re-subscribes. Acceptable for single-owner scope;
+    /// revisit (per-partition leave) if/when client narrowing lands, where partial
+    /// unsubscribe becomes a normal operation. See REPLICATION_WORKLOG limitation (c).
     fn leave(
         &mut self,
         key: ConsumerGroupKey,
@@ -2690,6 +2714,19 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.exclusive_groups
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether subscribing to `consumer_group` on `(topic, group)` would conflict
+    /// with a different exclusive cohort already live on the same queue. Callers
+    /// should reject the subscribe (a queue has a single exclusive cohort).
+    pub fn exclusive_cohort_conflicts(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        consumer_group: &str,
+    ) -> bool {
+        let key = ConsumerGroupKey::new(topic, group, consumer_group);
+        self.lock_exclusive_groups().has_conflicting_cohort(&key)
     }
 
     /// Register a channel that receives a member's exclusive-cohort assignment

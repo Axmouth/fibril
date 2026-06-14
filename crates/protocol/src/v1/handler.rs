@@ -485,12 +485,19 @@ enum InstallSubscriptionError {
 
     #[error("already subscribed")]
     AlreadySubscribed,
+
+    #[error(
+        "queue already has a different exclusive cohort (one cohort per queue; \
+         use a separate group for an unrelated consumer set)"
+    )]
+    CohortConflict,
 }
 
 fn install_subscription_error_response(err: &InstallSubscriptionError) -> (u16, String) {
     match err {
         InstallSubscriptionError::Broker(err) => broker_error_response(err),
         InstallSubscriptionError::AlreadySubscribed => (ERR_CONFLICT, err.to_string()),
+        InstallSubscriptionError::CohortConflict => (ERR_CONFLICT, err.to_string()),
     }
 }
 
@@ -760,6 +767,18 @@ async fn install_subscription(
 
     if args.logical.state.lock().await.subs.contains_key(&sub_key) {
         return Err(InstallSubscriptionError::AlreadySubscribed);
+    }
+
+    // A queue has a single exclusive cohort; reject a conflicting second cohort
+    // id before creating any subscription state.
+    if let Some(consumer_group) = args.consumer_group.as_deref() {
+        if args.broker.exclusive_cohort_conflicts(
+            &args.topic,
+            args.group.as_deref(),
+            consumer_group,
+        ) {
+            return Err(InstallSubscriptionError::CohortConflict);
+        }
     }
 
     let consumer = args
