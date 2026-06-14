@@ -19,9 +19,11 @@ where the visual value is real, and uses plain ASCII apostrophes/quotes
 (no-phase-labels-in-code); the .md worklog is fine. No Co-Authored-By trailer on
 commits (no-coauthor-trailer-in-commits). Mutex only on cold paths, prefer
 atomics/CAS/OnceLock/RwLock (concurrency-primitive-discipline). All tunables go
-through config/runtime settings (settings-discipline). By the end of the
-replication work, move replication logic/types into a dedicated per-crate module,
-opportunistically where already separable (replication-module-separation).
+through config/runtime settings (settings-discipline). By the end, move the whole
+CLUSTERING concern (partitioning + replication + cohorts/coordination) into a
+dedicated module in every stack crate except ganglion (ganglion is all clustering
+already), opportunistically where already separable. Name likely `clustering`,
+final TBD (replication-module-separation).
 
 THE MODEL (memories fibril-core-model, consumer-cohort-purpose): fibril is a
 RabbitMQ-style durable WORK QUEUE (consumed = gone, lease/ack), not a log. `group`
