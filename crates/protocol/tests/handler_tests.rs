@@ -11,7 +11,7 @@ use fibril_broker::{
     broker::{
         Broker, BrokerConfig, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
         FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
-        FollowerReplicationWorkerStatus, QueueEvictionAttempt, StaticQueueOwnership,
+        FollowerReplicationWorkerStatus, OwnedQueue, QueueEvictionAttempt, StaticQueueOwnership,
     },
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
@@ -3521,6 +3521,66 @@ async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
     drop(a);
     drop(b);
     drop(dir);
+}
+
+/// An exclusive cohort still gates and delivers correctly when the queue's
+/// partitions are owned by DIFFERENT brokers. Each owner runs its own router over
+/// the partitions it owns and gates them independently; together they serve the
+/// cohort. Per-partition correctness holds across owners; cluster-wide balance
+/// across owners is handled by the cross-broker coordinator.
+#[tokio::test]
+async fn exclusive_cohort_works_across_partition_owners_e2e() {
+    let topic = "exgroup-cluster";
+
+    // Broker A owns partition 0; broker B owns partition 1.
+    let (broker_a, dir_a) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::from([
+            OwnedQueue::new(topic, Partition::new(0), None),
+        ]))))
+        .await;
+    let (broker_b, dir_b) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(HashSet::from([
+            OwnedQueue::new(topic, Partition::new(1), None),
+        ]))))
+        .await;
+    let (addr_a, shutdown_a) =
+        start_multi_connection_listener(ConnectionSettings::new(None), broker_a.clone()).await;
+    let (addr_b, shutdown_b) =
+        start_multi_connection_listener(ConnectionSettings::new(None), broker_b.clone()).await;
+
+    // The cohort member subscribes to each partition on its owner (the fan-in the
+    // client performs after topology routing).
+    let mut a = Framed::new(TcpStream::connect(addr_a).await.unwrap(), ProtoCodec);
+    let mut b = Framed::new(TcpStream::connect(addr_b).await.unwrap(), ProtoCodec);
+    handshake(&mut a).await;
+    handshake(&mut b).await;
+    subscribe_exclusive(&mut a, 10, topic, 0, "default", None).await;
+    subscribe_exclusive(&mut b, 20, topic, 1, "default", None).await;
+
+    // Publish to each partition on its owner.
+    let mut pa = Framed::new(TcpStream::connect(addr_a).await.unwrap(), ProtoCodec);
+    let mut pb = Framed::new(TcpStream::connect(addr_b).await.unwrap(), ProtoCodec);
+    handshake(&mut pa).await;
+    handshake(&mut pb).await;
+    publish_to_partition(&mut pa, 100, topic, 0, b"p0".to_vec()).await;
+    publish_to_partition(&mut pb, 101, topic, 1, b"p1".to_vec()).await;
+
+    // Each owner gated its partition to the cohort member and delivered it.
+    let da = recv_delivery_for_topic(&mut a, topic).await;
+    assert_eq!(da.partition, Partition::new(0));
+    assert_eq!(da.payload, b"p0");
+    let db = recv_delivery_for_topic(&mut b, topic).await;
+    assert_eq!(db.partition, Partition::new(1));
+    assert_eq!(db.payload, b"p1");
+
+    shutdown_a.cancel();
+    shutdown_b.cancel();
+    drop(a);
+    drop(b);
+    drop(pa);
+    drop(pb);
+    drop(dir_a);
+    drop(dir_b);
 }
 
 /// A queue has a single exclusive cohort: subscribing with a second, different
