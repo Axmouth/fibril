@@ -1081,6 +1081,12 @@ struct ExclusiveGroupRouter {
         ConsumerGroupKey,
         HashMap<String, mpsc::UnboundedSender<ExclusiveAssignmentUpdate>>,
     >,
+    /// cohort -> partition -> assigned member id, supplied by the cross-broker
+    /// coordinator. When present for a cohort, gates are resolved from this global
+    /// plan (each owner gates its partitions to the assigned member's local
+    /// sub_id) instead of the broker computing the assignment locally. Empty in
+    /// single-node / un-coordinated mode (then local computation applies).
+    external: HashMap<ConsumerGroupKey, HashMap<Partition, String>>,
 }
 
 impl ExclusiveGroupRouter {
@@ -1095,6 +1101,7 @@ impl ExclusiveGroupRouter {
             subs: HashMap::new(),
             targets: HashMap::new(),
             notifiers: HashMap::new(),
+            external: HashMap::new(),
         }
     }
 
@@ -1153,7 +1160,14 @@ impl ExclusiveGroupRouter {
                 }
             }
         }
-        self.recompute(&key, &[partition])
+        // A coordinator-supplied global plan, when present, decides the gates
+        // (this owner just resolves the assigned member to a local sub_id);
+        // otherwise the broker computes the assignment locally.
+        if self.external.contains_key(&key) {
+            self.resolve_external_gates(&key)
+        } else {
+            self.recompute(&key, &[partition])
+        }
     }
 
     /// Drop a member from the cohort and return the gate updates to apply.
@@ -1198,7 +1212,49 @@ impl ExclusiveGroupRouter {
                 self.notifiers.remove(&key);
             }
         }
-        self.recompute(&key, &[partition])
+        // Coordinator-driven cohorts keep their gates from the global plan until
+        // the coordinator re-applies (a departed member's partitions just pause —
+        // the gate points at a now-absent sub_id, never mis-delivers); otherwise
+        // recompute locally.
+        if self.external.contains_key(&key) {
+            self.resolve_external_gates(&key)
+        } else {
+            self.recompute(&key, &[partition])
+        }
+    }
+
+    /// Install (or replace) the coordinator's global assignment for a cohort and
+    /// return the gate updates to apply. From now on this cohort's gates follow
+    /// the supplied `partition -> member` plan rather than local computation.
+    fn set_external(
+        &mut self,
+        key: ConsumerGroupKey,
+        assignment: HashMap<Partition, String>,
+    ) -> Vec<GateUpdate> {
+        self.external.insert(key.clone(), assignment);
+        self.resolve_external_gates(&key)
+    }
+
+    /// Resolve the cohort's coordinator-supplied plan into gate updates: gate each
+    /// planned partition to the assigned member's LOCAL sub_id. Partitions whose
+    /// assignee is not subscribed on this broker (owned elsewhere, or not yet
+    /// arrived) are left as-is — never reopened.
+    fn resolve_external_gates(&self, key: &ConsumerGroupKey) -> Vec<GateUpdate> {
+        let Some(plan) = self.external.get(key) else {
+            return Vec::new();
+        };
+        let group_subs = self.subs.get(key);
+        let mut updates = Vec::new();
+        for (partition, member) in plan {
+            if let Some(sub_id) = group_subs
+                .and_then(|subs| subs.get(member))
+                .and_then(|parts| parts.get(partition))
+                .copied()
+            {
+                updates.push((*partition, Some(sub_id)));
+            }
+        }
+        updates
     }
 
     /// Recompute the cohort's assignment from the authoritative `subs` view and
@@ -2783,6 +2839,25 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     ) {
         let key = ConsumerGroupKey::new(topic, group, consumer_group);
         let updates = self.lock_exclusive_groups().leave(key, partition, member);
+        for (partition, assignee) in updates {
+            self.set_exclusive_assignee(topic, partition, group, assignee);
+        }
+    }
+
+    /// Install the cross-broker coordinator's global assignment for a cohort: a
+    /// `partition -> member id` plan covering the whole queue. This owner gates
+    /// each partition it owns to the assigned member's local sub_id and, from now
+    /// on, follows the plan instead of computing the assignment locally. The
+    /// member ids are the cluster cohort member ids the clients carry.
+    pub fn apply_exclusive_assignment(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        consumer_group: &str,
+        assignment: HashMap<Partition, String>,
+    ) {
+        let key = ConsumerGroupKey::new(topic, group, consumer_group);
+        let updates = self.lock_exclusive_groups().set_external(key, assignment);
         for (partition, assignee) in updates {
             self.set_exclusive_assignee(topic, partition, group, assignee);
         }
@@ -4651,5 +4726,70 @@ impl AppendCompletion<IoError> for SimpleCompletion {
         if let Some(f) = self.f.take() {
             f(ok);
         }
+    }
+}
+
+#[cfg(test)]
+mod exclusive_router_tests {
+    use super::*;
+    use crate::coordination::ConsumerGroupKey;
+
+    fn cohort() -> ConsumerGroupKey {
+        ConsumerGroupKey::new("jobs", None, "default")
+    }
+
+    fn gate_map(updates: Vec<GateUpdate>) -> HashMap<Partition, Option<ConsumerId>> {
+        updates.into_iter().collect()
+    }
+
+    #[test]
+    fn external_assignment_overrides_local_and_resolves_member_sub_ids() {
+        let mut router = ExclusiveGroupRouter::new(None);
+        let key = cohort();
+        // Two members each subscribed (fan-in) to both partitions, with sub_ids.
+        router.join(key.clone(), Partition::new(0), "m1".into(), 100, None);
+        router.join(key.clone(), Partition::new(1), "m1".into(), 101, None);
+        router.join(key.clone(), Partition::new(0), "m2".into(), 200, None);
+        router.join(key.clone(), Partition::new(1), "m2".into(), 201, None);
+
+        // The coordinator decides p0->m2, p1->m1; gates resolve to local sub_ids.
+        let plan = HashMap::from([
+            (Partition::new(0), "m2".to_string()),
+            (Partition::new(1), "m1".to_string()),
+        ]);
+        let gates = gate_map(router.set_external(key, plan));
+        assert_eq!(gates[&Partition::new(0)], Some(200));
+        assert_eq!(gates[&Partition::new(1)], Some(101));
+    }
+
+    #[test]
+    fn external_assignment_leaves_unsubscribed_assignee_untouched() {
+        let mut router = ExclusiveGroupRouter::new(None);
+        let key = cohort();
+        router.join(key.clone(), Partition::new(0), "m1".into(), 100, None);
+        // Plan assigns p0 to m2, who is not subscribed on this broker -> no gate
+        // update (the partition is owned/served elsewhere or m2 hasn't arrived).
+        let plan = HashMap::from([(Partition::new(0), "m2".to_string())]);
+        assert!(router.set_external(key, plan).is_empty());
+    }
+
+    #[test]
+    fn external_mode_join_follows_plan_not_local_compute() {
+        let mut router = ExclusiveGroupRouter::new(None);
+        let key = cohort();
+        // Coordinator plan installed first: p0 -> m2.
+        let plan = HashMap::from([(Partition::new(0), "m2".to_string())]);
+        router.set_external(key.clone(), plan);
+
+        // m1 subscribes p0 first. Local computation would gate m1, but the plan
+        // says m2 (not here yet) -> no gate to m1.
+        assert!(
+            router
+                .join(key.clone(), Partition::new(0), "m1".into(), 100, None)
+                .is_empty()
+        );
+        // m2 subscribes p0 -> the gate now resolves to m2 per the plan.
+        let gates = gate_map(router.join(key, Partition::new(0), "m2".into(), 200, None));
+        assert_eq!(gates[&Partition::new(0)], Some(200));
     }
 }
