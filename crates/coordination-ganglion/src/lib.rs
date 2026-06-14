@@ -146,8 +146,10 @@ pub struct ForwardedWritePolicy {
     /// contacted raft peers.
     pub redirect_limit: usize,
     /// Number of blind waits after a write sees no leader and no remote leader
-    /// hint. Zero is useful for tests because it proves the deterministic
-    /// leader-hint path is doing the work.
+    /// hint, the case of a freshly started or churning standby whose topology
+    /// has not yet learned the leader. Each wait backs off, giving the local
+    /// leader view time to converge before the write gives up. Tests that want
+    /// to prove the deterministic leader-hint path can set this to zero.
     pub no_leader_retries: usize,
     pub no_leader_base_backoff: Duration,
     pub no_leader_max_backoff: Duration,
@@ -157,7 +159,7 @@ impl Default for ForwardedWritePolicy {
     fn default() -> Self {
         Self {
             redirect_limit: 16,
-            no_leader_retries: 0,
+            no_leader_retries: 6,
             no_leader_base_backoff: Duration::from_millis(25),
             no_leader_max_backoff: Duration::from_millis(250),
         }
@@ -2012,15 +2014,39 @@ mod tests {
             .await
             .expect("election");
 
+        // Run the forwarded write with ZERO blind no-leader retries on purpose.
+        // This proves the deterministic path carries the write (forward to the
+        // known leader, follow explicit leader hints on redirect) rather than
+        // leaning on retry-spam to paper over a stale leader view.
+        let zero_retry = ForwardedWritePolicy {
+            no_leader_retries: 0,
+            ..ForwardedWritePolicy::default()
+        };
         let providers: Vec<GanglionCoordination<_, _>> = raft_nodes
             .into_iter()
             .enumerate()
-            .map(|(index, node)| GanglionCoordination::new(format!("broker-{}", index + 1), node))
+            .map(|(index, node)| {
+                GanglionCoordination::new_with_forwarded_write_policy(
+                    format!("broker-{}", index + 1),
+                    node,
+                    WireFormat::default(),
+                    zero_retry,
+                )
+            })
             .collect();
         let standby = providers
             .iter()
             .find(|provider| provider.raft_node().node_id() != leader_raft_id)
             .expect("standby provider");
+
+        // The standby must observe the elected leader before it can forward
+        // deterministically, since with zero blind retries there is no fallback
+        // wait while its leader view converges.
+        standby
+            .raft_node()
+            .wait_for_any_leader(timeout)
+            .await
+            .expect("standby observes the leader");
 
         let declared = standby
             .declare_queue_partitioning("orders", None, 3)

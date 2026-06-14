@@ -670,7 +670,7 @@ impl Default for GanglionForwardedWriteSection {
     fn default() -> Self {
         Self {
             redirect_limit: 16,
-            no_leader_retries: 0,
+            no_leader_retries: 6,
             no_leader_base_backoff_ms: 25,
             no_leader_max_backoff_ms: 250,
         }
@@ -908,7 +908,7 @@ mod tests {
             config.coordination.ganglion.forwarded_write,
             GanglionForwardedWriteSection {
                 redirect_limit: 16,
-                no_leader_retries: 0,
+                no_leader_retries: 6,
                 no_leader_base_backoff_ms: 25,
                 no_leader_max_backoff_ms: 250,
             }
