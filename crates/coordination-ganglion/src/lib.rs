@@ -2762,4 +2762,156 @@ mod tests {
 
         coordination.raft_node().shutdown().await.expect("shutdown");
     }
+
+    /// The end-to-end cross-broker case the single-node label test cannot show:
+    /// two separate brokers each report only their LOCAL cohort member via the
+    /// heartbeat label. The leader's controller aggregates both labels into one
+    /// global membership, plans a globally balanced assignment (the thing a
+    /// per-broker-local computation cannot reach), and publishes it. Then one
+    /// broker loses its consumer and the next tick rebalances onto the survivor.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cohort_controller_aggregates_across_brokers_and_rebalances() {
+        use fibril_broker::coordination::{CohortMemberInfo, StickyConsumerGroupAssignor};
+        use std::sync::Arc;
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node should start");
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            ganglion_openraft::openraft::BasicNode::new("coordinator-1"),
+        );
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("single node elects itself");
+
+        let coordination = GanglionCoordination::new("broker-a", raft_node);
+
+        // One cohort "default" on topic "jobs", spread across two brokers. Each
+        // broker reports only the member connected to it (its local view).
+        let register = |node_id: &'static str, port: u16, member: Option<&'static str>| {
+            let coordination = &coordination;
+            async move {
+                let info = NodeInfo {
+                    node_id: node_id.into(),
+                    broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+                    admin_addr: None,
+                };
+                let mut labels = BTreeMap::new();
+                if let Some(member) = member {
+                    let membership = vec![LocalCohortMembership {
+                        topic: "jobs".into(),
+                        group: None,
+                        consumer_group: "default".into(),
+                        members: vec![CohortMemberInfo {
+                            member: member.into(),
+                            target: None,
+                        }],
+                    }];
+                    labels.insert(
+                        COHORT_MEMBERSHIP_LABEL.to_string(),
+                        encode_cohort_membership(&membership),
+                    );
+                }
+                coordination
+                    .register_self_with_labels(&info, labels)
+                    .await
+                    .expect("register");
+            }
+        };
+
+        register("broker-a", 9000, Some("m1")).await;
+        register("broker-b", 9001, Some("m2")).await;
+
+        let key = ConsumerGroupKey::new("jobs", None, "default");
+        let loads = |coordination: &GanglionCoordination| {
+            let assignment = coordination.cohort_assignment(&key);
+            let mut loads: HashMap<String, usize> = HashMap::new();
+            for member in assignment.values() {
+                *loads.entry(member.clone()).or_default() += 1;
+            }
+            (assignment.len(), loads)
+        };
+
+        // Wait until both brokers' labels are aggregated into the global view.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let global = coordination.global_cohort_membership();
+            let combined: usize = global.iter().map(|cohort| cohort.members.len()).sum();
+            if combined == 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "both brokers' membership labels never aggregated: {global:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let mut controller =
+            ClusterCohortController::new(Arc::new(StickyConsumerGroupAssignor), None);
+
+        // First plan: balanced 2/2 across the two brokers' members. A
+        // per-broker-local planner could not produce this, neither broker sees
+        // the other's member.
+        coordination
+            .run_cohort_controller_tick(&mut controller, |_| 4)
+            .await
+            .expect("tick");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let (covered, loads) = loads(&coordination);
+            if covered == 4 && loads.get("m1") == Some(&2) && loads.get("m2") == Some(&2) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cross-broker plan never became balanced 2/2: {loads:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // broker-b loses its consumer (m2 disconnects), so it re-reports an empty
+        // local membership. Re-registration replaces the node's labels.
+        register("broker-b", 9001, None).await;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let global = coordination.global_cohort_membership();
+            let combined: usize = global.iter().map(|cohort| cohort.members.len()).sum();
+            if combined == 1 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dropped member never left the global view: {global:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Next tick rebalances: coverage-first, m1 keeps its two sticky
+        // partitions and absorbs the orphaned two, so all four land on m1.
+        coordination
+            .run_cohort_controller_tick(&mut controller, |_| 4)
+            .await
+            .expect("rebalance tick");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let (covered, loads) = loads(&coordination);
+            if covered == 4 && loads.get("m1") == Some(&4) && !loads.contains_key("m2") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "plan never rebalanced onto the survivor: {loads:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        coordination.raft_node().shutdown().await.expect("shutdown");
+    }
 }
