@@ -21,6 +21,8 @@ pub struct RuntimeSettings {
     pub replication: ReplicationRuntimeSettings,
     #[serde(default)]
     pub partitioning: PartitioningRuntimeSettings,
+    #[serde(default)]
+    pub consumer_groups: ConsumerGroupRuntimeSettings,
 }
 
 /// Partitioning-related runtime settings.
@@ -38,6 +40,16 @@ impl Default for PartitioningRuntimeSettings {
             default_partition_count: 1,
         }
     }
+}
+
+/// Exclusive consumer-group runtime settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConsumerGroupRuntimeSettings {
+    /// Soft target partitions-per-consumer for an exclusive cohort. Exceeding it
+    /// flags the cohort under-provisioned (an alert/autoscale signal); coverage
+    /// is never reduced. `None` disables the signal.
+    pub default_target_per_consumer: Option<usize>,
 }
 
 impl RuntimeSettings {
@@ -70,6 +82,7 @@ impl Default for RuntimeSettings {
             connection: ConnectionRuntimeSettings::default(),
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
+            consumer_groups: ConsumerGroupRuntimeSettings::default(),
         }
     }
 }
@@ -339,6 +352,7 @@ impl BrokerConfig {
             replication_min_in_sync_replicas: settings.replication.min_in_sync_replicas,
             replication_isr_timeout_ms: settings.replication.isr_timeout_ms,
             default_partition_count: settings.partitioning.default_partition_count,
+            default_consumer_target: settings.consumer_groups.default_target_per_consumer,
         }
     }
 }
@@ -527,6 +541,7 @@ mod tests {
             },
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
+            consumer_groups: ConsumerGroupRuntimeSettings::default(),
         };
 
         let decoded = decode_snapshot(GlobalValue {
@@ -564,6 +579,7 @@ mod tests {
             },
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
+            consumer_groups: ConsumerGroupRuntimeSettings::default(),
         };
 
         let config = BrokerConfig::from_runtime_settings(&settings);

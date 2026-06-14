@@ -545,6 +545,20 @@ impl ConsumerGroupState {
         self.rebalance()
     }
 
+    /// Replace both the partition set and the membership in one rebalance. Used
+    /// when the caller holds the authoritative view of who is in the cohort and
+    /// which partitions they cover (the broker-side router), avoiding a
+    /// double-rebalance from separate `set_partitions` + `set_members` calls.
+    pub fn reconcile(
+        &mut self,
+        partitions: Vec<Partition>,
+        members: Vec<String>,
+    ) -> GroupAssignmentDelta {
+        self.partitions = partitions;
+        self.members = members.into_iter().collect();
+        self.rebalance()
+    }
+
     fn rebalance(&mut self) -> GroupAssignmentDelta {
         let result = self.assignor.assign(ConsumerGroupAssignmentInput {
             partitions: self.partitions.clone(),
@@ -667,6 +681,38 @@ impl ExclusiveConsumerGroups {
             state.set_partitions(partitions);
         }
         state.add_member(member)
+    }
+
+    /// Reconcile a group to an authoritative `(partitions, members)` view and
+    /// return the resulting delta. When `members` is empty the group is dropped
+    /// (its last member left); the returned delta reports everything revoked so
+    /// the caller can release any gates. This is the broker-side entry point: the
+    /// router recomputes the union of subscribed partitions and live members on
+    /// every change rather than tracking incremental join/leave.
+    pub fn reconcile(
+        &mut self,
+        key: ConsumerGroupKey,
+        partitions: Vec<Partition>,
+        members: Vec<String>,
+    ) -> GroupAssignmentDelta {
+        if members.is_empty() {
+            // Last member gone: tear the group down, reporting full revocation.
+            return match self.groups.remove(&key) {
+                Some(mut state) => state.set_members(std::iter::empty::<String>()),
+                None => GroupAssignmentDelta {
+                    generation: 0,
+                    per_member: HashMap::new(),
+                    under_provisioned: false,
+                },
+            };
+        }
+        let assignor = self.assignor.clone();
+        let target = self.target_per_consumer;
+        let state = self
+            .groups
+            .entry(key)
+            .or_insert_with(|| ConsumerGroupState::new(partitions.clone(), target, assignor));
+        state.reconcile(partitions, members)
     }
 
     /// Remove `member`; returns the delta, or `None` if the group was unknown.
@@ -1541,6 +1587,46 @@ mod tests {
         // Group gone: unknown member assignment is empty, and leaving again is None.
         assert!(registry.assignment_for(&key, "c1").is_empty());
         assert!(registry.leave(&key, "c1").is_none());
+    }
+
+    #[test]
+    fn exclusive_registry_reconcile_recomputes_from_authoritative_view() {
+        let mut registry = exclusive_groups();
+        let key = ConsumerGroupKey::new("jobs", None, "g1");
+
+        // One member covers everything.
+        registry.reconcile(key.clone(), parts(4), vec!["c1".to_string()]);
+        assert_eq!(
+            sorted_ids(registry.assignment_for(&key, "c1")),
+            vec![0, 1, 2, 3]
+        );
+
+        // Second member joins -> balanced split, full coverage preserved.
+        registry.reconcile(
+            key.clone(),
+            parts(4),
+            vec!["c1".to_string(), "c2".to_string()],
+        );
+        let mut covered = sorted_ids(registry.assignment_for(&key, "c1"));
+        covered.extend(sorted_ids(registry.assignment_for(&key, "c2")));
+        covered.sort();
+        assert_eq!(covered, vec![0, 1, 2, 3]);
+        assert_eq!(registry.assignment_for(&key, "c1").len(), 2);
+        assert_eq!(registry.assignment_for(&key, "c2").len(), 2);
+    }
+
+    #[test]
+    fn exclusive_registry_reconcile_to_no_members_drops_group() {
+        let mut registry = exclusive_groups();
+        let key = ConsumerGroupKey::new("jobs", None, "g1");
+        registry.reconcile(key.clone(), parts(2), vec!["c1".to_string()]);
+
+        // Emptying membership reports full revocation and drops the group.
+        let delta = registry.reconcile(key.clone(), parts(2), Vec::new());
+        let c1 = &delta.per_member["c1"];
+        assert!(c1.assigned.is_empty());
+        assert_eq!(sorted_ids(&c1.revoked), vec![0, 1]);
+        assert!(registry.assignment_for(&key, "c1").is_empty());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -21,8 +21,9 @@ use fibril_util::unix_millis;
 use uuid::Uuid;
 
 use crate::coordination::{
-    Coordination, CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentTransition,
-    PartitionAssignment, StaticCoordination, plan_local_assignment_transitions,
+    BalancedConsumerGroupAssignor, ConsumerGroupKey, Coordination, CoordinationSnapshot,
+    ExclusiveConsumerGroups, LocalAssignmentIntent, LocalAssignmentTransition, PartitionAssignment,
+    StaticCoordination, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
     EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome,
@@ -361,6 +362,10 @@ pub struct BrokerConfig {
     pub replication_isr_timeout_ms: u64,
     /// Partition count for a queue declared without an explicit count.
     pub default_partition_count: u32,
+    /// Soft target partitions-per-consumer for exclusive consumer groups. When
+    /// the balanced load exceeds it the group is flagged under-provisioned
+    /// (coverage is never reduced). `None` disables the signal.
+    pub default_consumer_target: Option<usize>,
 }
 impl Default for BrokerConfig {
     fn default() -> Self {
@@ -378,6 +383,7 @@ impl Default for BrokerConfig {
             replication_min_in_sync_replicas: 1,
             replication_isr_timeout_ms: 10_000,
             default_partition_count: 1,
+            default_consumer_target: None,
         }
     }
 }
@@ -1035,6 +1041,127 @@ impl QueueLoopState {
     }
 }
 
+/// One per-partition delivery-gate update produced by recomputing an exclusive
+/// cohort: `Some(sub_id)` gates the partition to that consumer, `None` reopens it
+/// to all competing consumers.
+type GateUpdate = (Partition, Option<ConsumerId>);
+
+/// Broker-side routing for opt-in exclusive consumer groups (Model A): the pure
+/// assignment registry plus the live `member -> partition -> sub_id` map needed
+/// to translate a computed assignment into concrete per-partition delivery-gate
+/// targets. The broker holds the authoritative view (which member subscribed
+/// which partition under which connection), so on every change it recomputes the
+/// union of subscribed partitions and live members and re-derives every gate.
+struct ExclusiveGroupRouter {
+    registry: ExclusiveConsumerGroups,
+    /// cohort -> member (connection client_id) -> partition -> broker sub_id.
+    subs: HashMap<ConsumerGroupKey, HashMap<String, HashMap<Partition, ConsumerId>>>,
+}
+
+impl ExclusiveGroupRouter {
+    fn new(target_per_consumer: Option<usize>) -> Self {
+        Self {
+            registry: ExclusiveConsumerGroups::new(
+                Arc::new(BalancedConsumerGroupAssignor),
+                target_per_consumer,
+            ),
+            subs: HashMap::new(),
+        }
+    }
+
+    /// Record an exclusive member's subscription to one partition (with the broker
+    /// sub_id it was assigned) and return the gate updates to apply.
+    fn join(
+        &mut self,
+        key: ConsumerGroupKey,
+        partition: Partition,
+        member: String,
+        sub_id: ConsumerId,
+    ) -> Vec<GateUpdate> {
+        self.subs
+            .entry(key.clone())
+            .or_default()
+            .entry(member)
+            .or_default()
+            .insert(partition, sub_id);
+        self.recompute(&key, &[partition])
+    }
+
+    /// Drop a member from the cohort (connection closed or unsubscribed) and
+    /// return the gate updates to apply. `partition` scopes the affected set so a
+    /// partition the leaver solely served is reopened even if it falls out of the
+    /// remaining union.
+    fn leave(
+        &mut self,
+        key: ConsumerGroupKey,
+        partition: Partition,
+        member: &str,
+    ) -> Vec<GateUpdate> {
+        let Some(group_subs) = self.subs.get_mut(&key) else {
+            return Vec::new();
+        };
+        group_subs.remove(member);
+        if group_subs.is_empty() {
+            self.subs.remove(&key);
+        }
+        self.recompute(&key, &[partition])
+    }
+
+    /// Recompute the cohort's assignment from the authoritative `subs` view and
+    /// derive a gate update for every affected partition. A partition whose
+    /// assigned member has not (yet) subscribed to it keeps its existing gate
+    /// (ramp-up / drain); one with no assignee at all (cohort emptied) reopens.
+    fn recompute(&mut self, key: &ConsumerGroupKey, affected: &[Partition]) -> Vec<GateUpdate> {
+        let group_subs = self.subs.get(key);
+        let mut union: BTreeSet<Partition> = BTreeSet::new();
+        let mut members: Vec<String> = Vec::new();
+        if let Some(group_subs) = group_subs {
+            members.reserve(group_subs.len());
+            for (member, parts) in group_subs {
+                members.push(member.clone());
+                union.extend(parts.keys().copied());
+            }
+        }
+        let union: Vec<Partition> = union.into_iter().collect();
+
+        let delta = self.registry.reconcile(key.clone(), union.clone(), members);
+
+        // partition -> assigned member (from the full per-member assignment).
+        let mut assignee_of: HashMap<Partition, &String> = HashMap::new();
+        for (member, change) in &delta.per_member {
+            for partition in &change.assigned {
+                assignee_of.insert(*partition, member);
+            }
+        }
+
+        let mut targets: BTreeSet<Partition> = union.iter().copied().collect();
+        targets.extend(affected.iter().copied());
+
+        let mut updates = Vec::new();
+        for partition in targets {
+            match assignee_of.get(&partition) {
+                Some(member) => {
+                    if let Some(sub_id) = self
+                        .subs
+                        .get(key)
+                        .and_then(|group_subs| group_subs.get(*member))
+                        .and_then(|parts| parts.get(&partition))
+                        .copied()
+                    {
+                        updates.push((partition, Some(sub_id)));
+                    }
+                    // else: assignee hasn't subscribed here yet — leave the gate
+                    // as-is (prior assignee keeps draining; never reopen).
+                }
+                // No exclusive owner (cohort emptied or partition fell out) —
+                // reopen to competing consumers.
+                None => updates.push((partition, None)),
+            }
+        }
+        updates
+    }
+}
+
 #[derive(Debug, Clone)]
 enum WakeReason {
     Notify,
@@ -1158,6 +1285,9 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     /// replica set source for confirms). Maintained by the assignment watcher;
     /// empty for standalone brokers (local-durable confirms only).
     assignment_cache: Arc<DashMap<QueueKey, PartitionAssignment>>,
+    /// Opt-in exclusive consumer-group routing: maps cohort membership to the
+    /// per-partition delivery gate. Absent cohorts leave delivery competing.
+    exclusive_groups: Mutex<ExclusiveGroupRouter>,
 }
 
 /// Cheap shared handle for publish-confirm replication waits inside
@@ -1232,6 +1362,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             })));
         }
 
+        let default_consumer_target = cfg.default_consumer_target;
         let this = Arc::new(Self {
             cfg: Arc::new(ArcSwap::from_pointee(cfg)),
             engine,
@@ -1249,6 +1380,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             follower_replication_workers: DashMap::new(),
             replication_progress: Arc::new(DashMap::new()),
             assignment_cache: Arc::new(DashMap::new()),
+            exclusive_groups: Mutex::new(ExclusiveGroupRouter::new(default_consumer_target)),
             pending_settles: Arc::new(AtomicUsize::new(0)),
             settle_drained: Arc::new(Notify::new()),
             settings_changed: Arc::new(Notify::new()),
@@ -2456,6 +2588,52 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         };
         if let Some(qs) = self.queues.get(&key).map(|e| e.value().clone()) {
             qs.set_exclusive_assignee(assignee);
+        }
+    }
+
+    fn lock_exclusive_groups(&self) -> std::sync::MutexGuard<'_, ExclusiveGroupRouter> {
+        self.exclusive_groups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Register an exclusive consumer-group member's subscription to one
+    /// partition and re-apply the cohort's per-partition delivery gates. `member`
+    /// is the connection's stable client id; `sub_id` is the broker consumer id
+    /// just created for this partition subscription. Called after `subscribe`.
+    pub fn exclusive_group_join(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        consumer_group: &str,
+        member: impl Into<String>,
+        sub_id: ConsumerId,
+    ) {
+        let key = ConsumerGroupKey::new(topic, group, consumer_group);
+        let updates = self
+            .lock_exclusive_groups()
+            .join(key, partition, member.into(), sub_id);
+        for (partition, assignee) in updates {
+            self.set_exclusive_assignee(topic, partition, group, assignee);
+        }
+    }
+
+    /// Remove an exclusive member (connection closed or unsubscribed) and
+    /// re-apply the cohort's gates: revoked partitions move to their new assignee,
+    /// or reopen to competing consumers once the cohort is empty.
+    pub fn exclusive_group_leave(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        consumer_group: &str,
+        member: &str,
+    ) {
+        let key = ConsumerGroupKey::new(topic, group, consumer_group);
+        let updates = self.lock_exclusive_groups().leave(key, partition, member);
+        for (partition, assignee) in updates {
+            self.set_exclusive_assignee(topic, partition, group, assignee);
         }
     }
 

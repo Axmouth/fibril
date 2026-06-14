@@ -3082,6 +3082,204 @@ async fn multi_partition_publish_subscribe_is_isolated_e2e() {
     drop(dir);
 }
 
+/// Accept many client connections against one broker, each on its own handler
+/// task, so two connections become two distinct logical members of a cohort.
+async fn start_multi_connection_listener(
+    settings: ConnectionSettings,
+    broker: Arc<Broker<StromaEngine>>,
+) -> (SocketAddr, CancellationToken) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = CancellationToken::new();
+    let accept_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        loop {
+            let (server, peer) = tokio::select! {
+                _ = accept_shutdown.cancelled() => break,
+                accepted = listener.accept() => match accepted {
+                    Ok(value) => value,
+                    Err(_) => break,
+                },
+            };
+            let broker = broker.clone();
+            let settings = settings.clone();
+            tokio::spawn(async move {
+                let tcp_stats = TcpStats::new(10);
+                let connection_stats = ConnectionStats::new();
+                let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+                let _ = handle_connection(
+                    server,
+                    broker,
+                    tcp_stats,
+                    connection_stats,
+                    conn_id,
+                    None::<StaticAuthHandler>,
+                    settings,
+                    None,
+                    None,
+                )
+                .await;
+            });
+        }
+    });
+    (addr, shutdown)
+}
+
+async fn subscribe_exclusive(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    request_id: u64,
+    topic: &str,
+    partition: u32,
+    consumer_group: &str,
+) {
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                request_id,
+                &Subscribe {
+                    topic: topic.into(),
+                    partition: Partition::new(partition),
+                    group: None,
+                    prefetch: 8,
+                    auto_ack: true,
+                    consumer_group: Some(consumer_group.into()),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(framed).await;
+    assert_eq!(frame.opcode, Op::SubscribeOk as u16);
+}
+
+async fn publish_to_partition(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    request_id: u64,
+    topic: &str,
+    partition: u32,
+    payload: Vec<u8>,
+) {
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                request_id,
+                &Publish {
+                    topic: topic.into(),
+                    partition: Partition::new(partition),
+                    group: None,
+                    require_confirm: true,
+                    content_type: None,
+                    headers: HashMap::new(),
+                    payload,
+                    published: unix_millis(),
+                    partition_key: None,
+                    partitioning_version: 0,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let resp = recv_frame(framed).await;
+    assert_eq!(resp.opcode, Op::PublishOk as u16);
+}
+
+/// Read `count` deliveries for `topic` and return the distinct partitions seen.
+async fn collected_partitions(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    topic: &str,
+    count: usize,
+) -> HashSet<u32> {
+    let mut partitions = HashSet::new();
+    for _ in 0..count {
+        partitions.insert(recv_delivery_for_topic(framed, topic).await.partition.id());
+    }
+    partitions
+}
+
+/// An opt-in exclusive consumer group exclusively divides a 2-partition queue
+/// between two members (each fanned in to both partitions, Model A), and on a
+/// member's disconnect the survivor takes over the revoked partition.
+#[tokio::test]
+async fn exclusive_consumer_group_splits_partitions_and_fails_over_e2e() {
+    let (broker, dir) = open_test_broker().await;
+    let (addr, shutdown) =
+        start_multi_connection_listener(ConnectionSettings::new(None), broker.clone()).await;
+
+    let topic = "exgroup";
+    let cohort = "g";
+
+    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut b = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut a).await;
+    handshake(&mut b).await;
+
+    // Both members fan in to BOTH partitions under the same cohort id. After all
+    // four SubscribeOks the per-partition gates have settled to the split.
+    subscribe_exclusive(&mut a, 10, topic, 0, cohort).await;
+    subscribe_exclusive(&mut a, 11, topic, 1, cohort).await;
+    subscribe_exclusive(&mut b, 20, topic, 0, cohort).await;
+    subscribe_exclusive(&mut b, 21, topic, 1, cohort).await;
+
+    // Publisher connection: two messages into each partition.
+    let mut publisher = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut publisher).await;
+    for round in 0..2u64 {
+        for partition in 0..2u32 {
+            publish_to_partition(
+                &mut publisher,
+                100 + round * 10 + partition as u64,
+                topic,
+                partition,
+                format!("r{round}-p{partition}").into_bytes(),
+            )
+            .await;
+        }
+    }
+
+    // Each member receives ONLY its assigned partition's messages, and together
+    // they cover both partitions (exclusive split).
+    let a_parts = collected_partitions(&mut a, topic, 2).await;
+    let b_parts = collected_partitions(&mut b, topic, 2).await;
+    assert_eq!(a_parts.len(), 1, "member A is exclusive to one partition");
+    assert_eq!(b_parts.len(), 1, "member B is exclusive to one partition");
+    assert_ne!(a_parts, b_parts, "the cohort splits the partitions");
+    let mut covered: Vec<u32> = a_parts.union(&b_parts).copied().collect();
+    covered.sort();
+    assert_eq!(covered, vec![0, 1], "both partitions are covered");
+
+    // Failover: drop member A; the survivor must take over A's partition too.
+    drop(a);
+    for partition in 0..2u32 {
+        publish_to_partition(
+            &mut publisher,
+            200 + partition as u64,
+            topic,
+            partition,
+            format!("after-p{partition}").into_bytes(),
+        )
+        .await;
+    }
+    let mut after: Vec<u32> = collected_partitions(&mut b, topic, 2)
+        .await
+        .into_iter()
+        .collect();
+    after.sort();
+    assert_eq!(
+        after,
+        vec![0, 1],
+        "survivor takes over the revoked partition"
+    );
+
+    shutdown.cancel();
+    drop(b);
+    drop(publisher);
+    drop(dir);
+}
+
 /// Declare resolves the partition count (explicit, else the cluster default)
 /// and reports it. Standalone (no coordinator) materializes locally.
 #[tokio::test]

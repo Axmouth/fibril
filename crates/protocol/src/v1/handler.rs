@@ -489,6 +489,9 @@ fn install_subscription_error_response(err: &InstallSubscriptionError) -> (u16, 
 struct SubState {
     sub_id: u64,
     partition: Partition,
+    /// Exclusive cohort id this subscription joined, if any (drives the
+    /// broker-side leave on unsubscribe/disconnect).
+    consumer_group: Option<String>,
     auto_ack: bool,
     prefetch: u32,
     stats_sub_id: Option<Uuid>,
@@ -607,13 +610,22 @@ async fn cleanup_connection_state(
         state.subs.drain().collect::<Vec<_>>()
     };
 
-    for ((topic, _partition, group), sub) in drained_subs {
+    for ((topic, partition, group), sub) in drained_subs {
         sub.task.abort();
         if let Err(err) = broker
             .unsubscribe(&topic, group.as_deref(), sub.partition, sub.sub_id)
             .await
         {
             tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
+        }
+        if let Some(consumer_group) = sub.consumer_group.as_deref() {
+            broker.exclusive_group_leave(
+                &topic,
+                partition,
+                group.as_deref(),
+                consumer_group,
+                &logical.client_id.to_string(),
+            );
         }
     }
 }
@@ -644,6 +656,15 @@ async fn remove_subscription(
     {
         tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
     }
+    if let Some(consumer_group) = sub.consumer_group.as_deref() {
+        broker.exclusive_group_leave(
+            topic,
+            sub.partition,
+            group,
+            consumer_group,
+            &logical.client_id.to_string(),
+        );
+    }
 
     Some(ReconcileSubscription {
         sub_id: sub.sub_id,
@@ -668,6 +689,10 @@ struct InstallSubscriptionArgs {
     group: Option<String>,
     prefetch: u32,
     auto_ack: bool,
+    /// Opt-in exclusive consumer-group id. `None` keeps the default competing
+    /// behavior; `Some(id)` joins the cohort that exclusively divides the
+    /// queue's partitions.
+    consumer_group: Option<String>,
 }
 
 async fn install_subscription(
@@ -700,6 +725,20 @@ async fn install_subscription(
         activity_lease,
         ..
     } = consumer;
+
+    // Opt-in exclusive cohort: register this connection (member) on this
+    // partition so the broker can gate delivery to the assigned member. The
+    // queue's delivery loop already exists (subscribe created it).
+    if let Some(consumer_group) = args.consumer_group.as_deref() {
+        args.broker.exclusive_group_join(
+            &args.topic,
+            args.partition,
+            args.group.as_deref(),
+            consumer_group,
+            args.client_id.to_string(),
+            sub_id,
+        );
+    }
 
     let mut transport_rx = args.logical.transport.subscribe();
 
@@ -778,6 +817,7 @@ async fn install_subscription(
         SubState {
             sub_id,
             partition: consumer.partition,
+            consumer_group: args.consumer_group.clone(),
             task: handle,
             auto_ack: args.auto_ack,
             prefetch: args.prefetch,
@@ -863,6 +903,10 @@ async fn reconcile_subscriptions(
                     group: client.group.clone(),
                     prefetch: client.prefetch,
                     auto_ack: client.auto_ack,
+                    // Reconnect reconcile does not carry the exclusive cohort id
+                    // (not part of ReconcileSubscription); restored subs rejoin
+                    // as competing until the client re-subscribes with the id.
+                    consumer_group: None,
                 })
                 .await;
 
@@ -2000,6 +2044,7 @@ pub async fn handle_connection(
                     group: sub.group,
                     prefetch: sub.prefetch,
                     auto_ack: sub.auto_ack,
+                    consumer_group: sub.consumer_group,
                 })
                 .await;
 

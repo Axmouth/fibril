@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use fibril_broker::runtime_settings::{
-    ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, DeliveryRuntimeSettings,
-    IdleQueueCleanupRuntimeSettings, PartitioningRuntimeSettings, ReplicationRuntimeSettings,
-    RuntimeSettings,
+    ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, ConsumerGroupRuntimeSettings,
+    DeliveryRuntimeSettings, IdleQueueCleanupRuntimeSettings, PartitioningRuntimeSettings,
+    ReplicationRuntimeSettings, RuntimeSettings,
 };
 use fibril_config::ServerConfig;
 use fibril_coordination_ganglion::ClientTopology;
@@ -47,6 +47,12 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
         },
         partitioning: PartitioningRuntimeSettings {
             default_partition_count: config.runtime_seed.partitioning.default_partition_count,
+        },
+        consumer_groups: ConsumerGroupRuntimeSettings {
+            default_target_per_consumer: config
+                .runtime_seed
+                .consumer_groups
+                .default_target_per_consumer,
         },
     }
 }

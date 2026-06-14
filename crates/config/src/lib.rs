@@ -610,6 +610,7 @@ pub struct RuntimeSeedSection {
     pub connection: ConnectionSettings,
     pub replication: ReplicationSettings,
     pub partitioning: PartitioningSettings,
+    pub consumer_groups: ConsumerGroupSettings,
 }
 
 /// Seed values for the partitioning runtime settings.
@@ -625,6 +626,15 @@ impl Default for PartitioningSettings {
             default_partition_count: 1,
         }
     }
+}
+
+/// Seed values for exclusive consumer-group runtime settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConsumerGroupSettings {
+    /// Soft target partitions-per-consumer for an exclusive cohort (alert/
+    /// autoscale signal; never reduces coverage). `None` disables it.
+    pub default_target_per_consumer: Option<usize>,
 }
 
 /// Seed values for the replication runtime settings (cluster-replicated

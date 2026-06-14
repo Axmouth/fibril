@@ -934,6 +934,7 @@ pub struct SubscriptionBuilder<'a> {
     topic: TopicName,
     group: Option<GroupName>,
     prefetch: u32,
+    consumer_group: Option<String>,
 }
 
 impl<'a> SubscriptionBuilder<'a> {
@@ -943,6 +944,20 @@ impl<'a> SubscriptionBuilder<'a> {
     pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
         self.group = GroupName::parse_optional(group)?;
         Ok(self)
+    }
+
+    /// Join an exclusive consumer group (cohort) identified by `id`.
+    ///
+    /// Members sharing the same `id` on the same queue exclusively divide its
+    /// partitions: each partition is delivered to exactly one member, preserving
+    /// per-partition ordering, and a member's partitions fail over to the rest of
+    /// the cohort when it disconnects. Without this, consumers compete for the
+    /// queue (many per partition, unordered) — the default. Fan-in is unchanged:
+    /// the client still subscribes to every partition and the broker gates
+    /// delivery to the assigned member.
+    pub fn consumer_group(mut self, id: impl Into<String>) -> Self {
+        self.consumer_group = Some(id.into());
+        self
     }
 
     /// Set the maximum number of messages the broker may lease ahead.
@@ -973,7 +988,7 @@ impl<'a> SubscriptionBuilder<'a> {
                 group: group.clone(),
                 prefetch,
                 auto_ack: false,
-                consumer_group: None,
+                consumer_group: self.consumer_group.clone(),
             };
             receivers.push(subscribe_partition_manual(self.client, req).await?);
         }
@@ -998,7 +1013,7 @@ impl<'a> SubscriptionBuilder<'a> {
                 group: group.clone(),
                 prefetch,
                 auto_ack: true,
-                consumer_group: None,
+                consumer_group: self.consumer_group.clone(),
             };
             receivers.push(subscribe_partition_auto(self.client, req).await?);
         }
@@ -1214,6 +1229,7 @@ impl Client {
             topic: TopicName::parse(topic)?,
             group: None,
             prefetch: 1, // sensible default
+            consumer_group: None,
         })
     }
 
