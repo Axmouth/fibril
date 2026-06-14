@@ -42,13 +42,45 @@ re-resolved, because local subscriptions may have changed since the last apply
 `exclusive_assignment_generation` exposes the applied version so convergence is
 observable (an owner sitting on an older generation has not caught up yet).
 
-### Known limitation: leader-change rebalance churn
+### Leader changes are generation-stable (controller seeding)
 
-A new leader's controller starts with empty sticky state, so the first plan it
-computes after a leader change can differ from the prior plan even with the same
-membership. That is one rebalance (the gate keeps delivery correct throughout).
-Seeding the new controller from the published plan would remove the churn. This
-is tracked with the cooperative-incremental-rebalance follow-up.
+A new leader's controller would otherwise start with empty sticky state, so its
+first plan could differ from the prior one even with unchanged membership,
+causing a needless rebalance on every leader change. The controller seeds itself
+from each cohort's published plan before planning, so it keeps the existing
+assignment. With the per-cohort generation, this makes a leader change
+generation-stable: the reconstructed plan matches what is published, so the
+generation does not bump and owners see no change.
+
+### Member-id validation is scoped to the trusted-client model
+
+Cohort member ids are validated with a local guard: the broker rejects a
+malformed id and enforces one member identity per connection per broker
+(reconnect-safe). This is sufficient under the current trust model, where broker
+connections have optional auth (a post-auth client is a trusted principal), the
+client uses one connection per broker with a single shared member id, and v4
+uuids make accidental cross-client collision negligible.
+
+Reconnect is already safe without a cross-connection takeover: a normal reconnect
+resumes the session (the server keeps the LogicalConnection and its subscriptions
+and just reattaches the transport), so no member re-registration happens and
+nothing is clobbered. The reconcile path (server lost state, client re-pushes
+subs) also cannot clobber, since the old registration is already gone. The only
+residual race is a client abandoning its session and opening a fresh connection
+that re-subscribes with the same member id while the old session's cleanup is
+still pending. There the broker's whole-member `leave` could drop the new
+connection's registration. Impact is bounded to a transient pause (the gate keeps
+delivery correct, never double-delivers), so this is left as a follow-up: make
+`leave` sub_id-scoped so a stale connection's cleanup only removes its own
+registration. That reworks `leave`'s whole-member failover atomicity, so it is
+its own brick.
+
+REVISIT when the broker port is exposed to untrusted or multi-tenant clients. A
+malicious authenticated tenant could otherwise spoof another tenant's member id
+to hijack delivery, which the local guard does not prevent. The next steps then
+are a cluster-issued signed token (HMAC over the id with a shared cluster secret,
+verified locally on any broker, no per-subscribe round-trip) or full
+coordinator-issued identity.
 
 ## Forwarded writes (coordination)
 

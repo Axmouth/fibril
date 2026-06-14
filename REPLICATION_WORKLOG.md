@@ -92,11 +92,27 @@ handoff docs that go stale. Prune or fold the dead ones. While at it, give the
 keratin README and basic docs a look, and the stroma ones too, for the same
 freshness check.
 
+DONE — controller seeding + member-id validation:
+- Controller seeding: a freshly elected controller seeds from each cohort's
+  published plan before its first tick (seed_published -> seed_if_absent), so a
+  leader change keeps the existing assignment instead of churning. With the
+  generation work, leader changes are now generation-stable.
+- Member-id validation (LOCAL GUARD, trusted-client model): the broker rejects a
+  nil member id (ERR_INVALID) and enforces one member identity per connection
+  (first exclusive subscribe establishes it, later ones must reuse it, else
+  ERR_CONFLICT). Scoped to the current trusted/authed-client model. See
+  DESIGN_NOTES.md for the threat-model assumption and when to revisit (signed
+  token / coordinator issuance for untrusted multi-tenant).
+
 DEFERRED (cohort follow-ons, gate de-risks them): opt-in client narrowing (with
-per-partition leave), cooperative incremental rebalance (vs whole-set recompute,
-includes seeding the controller from the published plan to avoid leader-change
-churn), and coordinator-issued member-id validation (currently broker-minted).
-The unified-global-generation item is now DONE (see above).
+per-partition leave), cooperative incremental rebalance (vs whole-set recompute;
+note controller seeding already removed the leader-change churn piece), and
+sub_id-scoped `leave` for cross-connection reconnect takeover (today a stale
+connection's whole-member leave can clobber a member that re-subscribed on a new
+connection; impact is a transient pause, gate stays correct; reworks leave's
+failover atomicity so it is its own brick). The unified-global-generation and
+coordinator-issued-member-id items are addressed (generation DONE, member-id done
+as a local guard).
 
 CODE POINTERS: cohort assignor/router/controller-brain + membership types =
 crates/broker/src/coordination.rs. Gate + ExclusiveGroupRouter + apply path =
