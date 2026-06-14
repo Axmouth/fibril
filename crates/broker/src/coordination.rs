@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddr,
     sync::{Arc, RwLock},
 };
@@ -443,6 +443,148 @@ impl ConsumerGroupAssignor for BalancedConsumerGroupAssignor {
         ConsumerGroupAssignment {
             by_member,
             under_provisioned,
+        }
+    }
+}
+
+/// How one member's assignment changed across a rebalance.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MemberAssignmentChange {
+    /// The member's full partition set after the rebalance.
+    pub assigned: Vec<Partition>,
+    /// Partitions newly assigned to the member (start consuming these).
+    pub added: Vec<Partition>,
+    /// Partitions taken away from the member (drain in-flight, then release —
+    /// the new owner must not double-process). See graceful-drain requirement.
+    pub revoked: Vec<Partition>,
+}
+
+/// The outcome of a membership change: a new generation and the per-member
+/// deltas to apply. The `generation` lets stale assignments be fenced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupAssignmentDelta {
+    pub generation: u64,
+    pub per_member: HashMap<String, MemberAssignmentChange>,
+    pub under_provisioned: bool,
+}
+
+/// Tracks one consumer group's live members for a logical queue and the current
+/// partition assignment, recomputing it (via a [`ConsumerGroupAssignor`]) on each
+/// membership change and reporting per-member added/revoked partitions. `added`
+/// drives new subscriptions; `revoked` drives graceful drain. Pure state — where
+/// this is hosted and how deltas are delivered are separate (later) concerns.
+#[derive(Debug)]
+pub struct ConsumerGroupState {
+    partitions: Vec<Partition>,
+    members: BTreeSet<String>,
+    assignment: HashMap<String, Vec<Partition>>,
+    generation: u64,
+    target_per_consumer: Option<usize>,
+    assignor: Arc<dyn ConsumerGroupAssignor>,
+}
+
+impl ConsumerGroupState {
+    pub fn new(
+        partitions: Vec<Partition>,
+        target_per_consumer: Option<usize>,
+        assignor: Arc<dyn ConsumerGroupAssignor>,
+    ) -> Self {
+        Self {
+            partitions,
+            members: BTreeSet::new(),
+            assignment: HashMap::new(),
+            generation: 0,
+            target_per_consumer,
+            assignor,
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The member's current partitions (empty if unknown / unassigned).
+    pub fn assignment_for(&self, member: &str) -> &[Partition] {
+        self.assignment
+            .get(member)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn add_member(&mut self, member: impl Into<String>) -> GroupAssignmentDelta {
+        self.members.insert(member.into());
+        self.rebalance()
+    }
+
+    pub fn remove_member(&mut self, member: &str) -> GroupAssignmentDelta {
+        self.members.remove(member);
+        self.rebalance()
+    }
+
+    pub fn set_members<I: IntoIterator<Item = String>>(
+        &mut self,
+        members: I,
+    ) -> GroupAssignmentDelta {
+        self.members = members.into_iter().collect();
+        self.rebalance()
+    }
+
+    /// Update the queue's partition set (e.g. repartitioning) and rebalance.
+    pub fn set_partitions(&mut self, partitions: Vec<Partition>) -> GroupAssignmentDelta {
+        self.partitions = partitions;
+        self.rebalance()
+    }
+
+    fn rebalance(&mut self) -> GroupAssignmentDelta {
+        let result = self.assignor.assign(ConsumerGroupAssignmentInput {
+            partitions: self.partitions.clone(),
+            members: self.members.iter().cloned().collect(),
+            target_per_consumer: self.target_per_consumer,
+        });
+        let new_assignment = result.by_member;
+
+        // Per-member delta over the union of old + new members (a departed member
+        // reports everything revoked so its partitions can be reclaimed).
+        let mut members: BTreeSet<&String> = new_assignment.keys().collect();
+        members.extend(self.assignment.keys());
+
+        let mut per_member = HashMap::with_capacity(members.len());
+        for member in members {
+            let old = self
+                .assignment
+                .get(member)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let new = new_assignment.get(member).map(Vec::as_slice).unwrap_or(&[]);
+            let old_set: HashSet<Partition> = old.iter().copied().collect();
+            let new_set: HashSet<Partition> = new.iter().copied().collect();
+            per_member.insert(
+                member.clone(),
+                MemberAssignmentChange {
+                    assigned: new.to_vec(),
+                    added: new
+                        .iter()
+                        .copied()
+                        .filter(|p| !old_set.contains(p))
+                        .collect(),
+                    revoked: old
+                        .iter()
+                        .copied()
+                        .filter(|p| !new_set.contains(p))
+                        .collect(),
+                },
+            );
+        }
+
+        if new_assignment != self.assignment {
+            self.generation += 1;
+        }
+        self.assignment = new_assignment;
+
+        GroupAssignmentDelta {
+            generation: self.generation,
+            per_member,
+            under_provisioned: result.under_provisioned,
         }
     }
 }
@@ -1189,6 +1331,78 @@ mod tests {
             "coverage is never capped"
         );
         assert!(assignment.under_provisioned);
+    }
+
+    fn group_state(partitions: u32) -> ConsumerGroupState {
+        ConsumerGroupState::new(
+            (0..partitions).map(Partition::new).collect(),
+            None,
+            Arc::new(BalancedConsumerGroupAssignor),
+        )
+    }
+
+    fn sorted_ids(parts: &[Partition]) -> Vec<u32> {
+        let mut ids: Vec<u32> = parts.iter().map(|p| p.id()).collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn group_state_first_member_gets_all_partitions() {
+        let mut state = group_state(4);
+        let delta = state.add_member("c1");
+        assert_eq!(delta.generation, 1);
+        let change = &delta.per_member["c1"];
+        assert_eq!(sorted_ids(&change.assigned), vec![0, 1, 2, 3]);
+        assert_eq!(sorted_ids(&change.added), vec![0, 1, 2, 3]);
+        assert!(change.revoked.is_empty());
+    }
+
+    #[test]
+    fn group_state_join_revokes_from_existing_and_keeps_coverage() {
+        let mut state = group_state(4);
+        state.add_member("c1");
+        let delta = state.add_member("c2");
+        assert_eq!(delta.generation, 2);
+
+        // c1 gives some up; c2 receives them; union still covers all 4.
+        let c1 = &delta.per_member["c1"];
+        let c2 = &delta.per_member["c2"];
+        assert!(!c1.revoked.is_empty(), "c1 should yield partitions to c2");
+        assert_eq!(sorted_ids(&c2.added), sorted_ids(&c2.assigned));
+        let mut covered = sorted_ids(&c1.assigned);
+        covered.extend(sorted_ids(&c2.assigned));
+        covered.sort();
+        assert_eq!(covered, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn group_state_leave_redistributes_revoked_partitions() {
+        let mut state = group_state(4);
+        state.add_member("c1");
+        state.add_member("c2");
+        let delta = state.remove_member("c1");
+
+        // c1 loses everything; c2 ends up covering all 4.
+        let c1 = &delta.per_member["c1"];
+        assert!(c1.assigned.is_empty());
+        assert_eq!(sorted_ids(&c1.revoked).len(), 2);
+        assert_eq!(
+            sorted_ids(&state.assignment_for("c2").to_vec()),
+            vec![0, 1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn group_state_noop_rebalance_does_not_bump_generation() {
+        let mut state = group_state(4);
+        state.add_member("c1");
+        let prev_gen = state.generation();
+        let delta = state.set_members(["c1".to_string()]);
+        assert_eq!(
+            delta.generation, prev_gen,
+            "re-applying the same membership is a no-op"
+        );
     }
 
     #[test]
