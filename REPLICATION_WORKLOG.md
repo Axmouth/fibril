@@ -5,13 +5,12 @@ Branch: `replication-sharding-plan`
 <!-- =================== RESUME HERE (2026-06-14) =================== -->
 ## RESUME HERE — Phase 2a cohorts COMPLETE (incl. target/stickiness/push/limitations); next = server.rs refactor / newtype pass / docs
 
-STATE: all green (broker 59 unit + 99 integration; protocol 57 handler tests;
-client 23 unit). Committed on `replication-sharding-plan`: ecc43c3 (2a wiring),
-0257dcc (target override), dfcf54b (sticky assignor), 4510271 (large-scale sticky
-tests), b4eff77 (assignment push), e37ad47 (.exclusive() API + cohort guard + docs),
-f51a882 (reconnect restores exclusivity). NOTE: keratin commits are LOCAL, NOT
-pushed; fibril builds against them via the [patch] in fibril/Cargo.toml. Push
-keratin before CI/others build.
+STATE: all green. Cohort feature + most of the cross-broker coordinator landed on
+`replication-sharding-plan` (note: branch was rebased mid-work, so exact hashes
+churn — track by commit message). keratin replication-sharding-plan IS pushed
+(origin HEAD == local 3bc4347); fibril builds against it via the [patch] in
+fibril/Cargo.toml (no local upstream ref set, which made earlier status checks
+look unpushed — it isn't).
 
 MODEL (locked, see memories fibril-core-model + consumer-cohort-purpose): fibril is
 a RabbitMQ-style WORK QUEUE (consumed=gone, lease/ack), NOT a log. `group` = a
@@ -85,18 +84,25 @@ imbalance, never double-deliver; fits load-aware-future-direction off-raft stanc
   unit tests (balance/coverage/stickiness/empty/aggregation).
   BRICK 2 (owner apply) — DONE (a6c52ae). MEMBER IDENTITY — DONE (243a594).
 
-  REMAINING — transport wiring (cross-repo glue; next):
-  B. Heartbeat emit/decode: serialize Broker::local_cohort_membership() into a
-     node heartbeat label (spawn_heartbeat_with_labels); controller decodes node
-     labels from the snapshot -> aggregate_cohort_membership.
-  C. Cohort controller loop (fibril, leader-gated using ganglion leader gate;
-     cohorts are domain so the loop lives in fibril, not generic ganglion):
-     each tick read labels -> aggregate -> partition counts from catalogue/
-     queue_partitioning -> ClusterCohortController.plan -> publish plans.
-  D. Plan distribution + owner apply: publish CohortPlan to the coordination
-     store (attributes/snapshot) the owners watch; owner watcher calls
-     Broker::apply_exclusive_assignment for its partitions. (Sub-decision: plan
-     publish format/keying — defer to build time.)
+  TRANSPORT SERIALIZATION — DONE (b8e78c0, coordination-ganglion): COHORT_
+  MEMBERSHIP_LABEL + encode/decode(Vec<LocalCohortMembership>) +
+  aggregate_membership_labels; cohort_assignment_attribute_key + CohortAssignment
+  Doc (entry sequence, NOT a Partition-keyed map) + encode/decode_cohort_assignment.
+  4 unit tests. (Substrate confirmed: GanglionCoordination has committed_snapshot
+  with node .labels + .attributes, set_cluster_attribute/cluster_attribute,
+  queue_partitioning, is_leader, live_nodes, spawn_heartbeat_with_labels.)
+
+  REMAINING — live loop wiring (the integration; next):
+  B(wire). Broker heartbeat includes the membership label: where spawn_heartbeat_
+     with_labels is set up (server/fibril bootstrap), add a labels closure using
+     broker.local_cohort_membership() -> encode_cohort_membership.
+  C(wire). Leader-gated cohort controller loop (fibril side): each tick, if
+     leader, aggregate_membership_labels(committed nodes' labels) -> for each
+     cohort resolve partition_count (queue_partitioning) -> ClusterCohortController
+     .plan -> set_cluster_attribute(cohort_assignment_attribute_key, encode).
+  D(wire). Owner watcher: on committed-snapshot change, for each owned queue read
+     its cohort assignment attribute(s) -> decode -> Broker::apply_exclusive_
+     assignment for the partitions it owns. Then a multi-node integration test.
 
 DONE — Phase 2a (opt-in exclusive consumer groups, single-owner), Model A (client
 fan-in + per-partition consumer_group; server gates each partition to the assigned
