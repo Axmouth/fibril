@@ -650,6 +650,7 @@ pub async fn visual_client(
             auto_ack: true,
             consumer_group: None,
             consumer_target: None,
+            member_id: None,
         },
     )?)
     .await?;

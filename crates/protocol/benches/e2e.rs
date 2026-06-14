@@ -150,6 +150,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                             prefetch: 1024,
                             consumer_group: None,
                             consumer_target: None,
+                            member_id: None,
                         },
                     )
                     .unwrap(),

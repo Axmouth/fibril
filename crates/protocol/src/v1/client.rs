@@ -60,6 +60,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             auto_ack: true,
             consumer_group: None,
             consumer_target: None,
+            member_id: None,
         },
     )?)
     .await?;

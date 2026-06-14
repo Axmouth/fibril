@@ -1751,6 +1751,7 @@ mod tests {
                         auto_ack: false,
                         consumer_group: None,
                         consumer_target: None,
+                        member_id: None,
                     },
                 )
                 .unwrap(),
@@ -1772,6 +1773,7 @@ mod tests {
                         auto_ack: false,
                         consumer_group: None,
                         consumer_target: None,
+                        member_id: None,
                     },
                 )
                 .unwrap(),

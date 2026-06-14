@@ -131,6 +131,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             prefetch: sub.prefetch,
                             consumer_group: sub.consumer_group.clone(),
                             consumer_target: sub.consumer_target,
+                            member_id: None,
                         };
                         if framed
                             .send(try_encode(Op::SubscribeOk, frame.request_id, &ok).unwrap())

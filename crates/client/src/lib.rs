@@ -51,6 +51,7 @@ use tokio::{
     sync::{Mutex, Notify, broadcast, mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
+use uuid::Uuid;
 
 use fibril_protocol::v1::{
     frame::{Frame, ProtoCodec},
@@ -817,6 +818,7 @@ fn reconcile_subscription_from_subscribe_ok(
         // Carry exclusive membership so a reconnect rejoins the cohort.
         consumer_group: ok.consumer_group.clone(),
         consumer_target: ok.consumer_target,
+        member_id: ok.member_id,
     }
 }
 
@@ -1027,6 +1029,10 @@ impl<'a> SubscriptionBuilder<'a> {
                 auto_ack: false,
                 consumer_group: self.consumer_group.clone(),
                 consumer_target: self.consumer_target,
+                member_id: self
+                    .consumer_group
+                    .as_ref()
+                    .and_then(|_| self.client.shared.cohort_member_id.get().copied()),
             };
             receivers.push(subscribe_partition_manual(self.client, req).await?);
         }
@@ -1053,6 +1059,10 @@ impl<'a> SubscriptionBuilder<'a> {
                 auto_ack: true,
                 consumer_group: self.consumer_group.clone(),
                 consumer_target: self.consumer_target,
+                member_id: self
+                    .consumer_group
+                    .as_ref()
+                    .and_then(|_| self.client.shared.cohort_member_id.get().copied()),
             };
             receivers.push(subscribe_partition_auto(self.client, req).await?);
         }
@@ -1158,12 +1168,14 @@ impl Client {
         let address = Self::convert_address(address)?;
         let user_shutdown = Arc::new(AtomicBool::new(false));
         let (assignment_tx, _) = broadcast::channel(ASSIGNMENT_EVENT_CAPACITY);
+        let cohort_member_id = Arc::new(std::sync::OnceLock::new());
         let slot = Arc::new(
             EngineSlot::connect(
                 address,
                 opts.clone(),
                 user_shutdown.clone(),
                 assignment_tx.clone(),
+                cohort_member_id.clone(),
             )
             .await?,
         );
@@ -1179,6 +1191,7 @@ impl Client {
                 topology: ArcSwap::from_pointee(TopologyCache::default()),
                 round_robin: std::sync::atomic::AtomicUsize::new(0),
                 assignment_tx,
+                cohort_member_id,
             }),
         };
         // Warm the topology cache once so the first publish spreads across
@@ -1755,6 +1768,10 @@ struct ClientShared {
     /// Fan-out of exclusive consumer-group assignment changes to app subscribers.
     /// Shared across reconnects so the stream survives a dropped connection.
     assignment_tx: broadcast::Sender<AssignmentEvent>,
+    /// This consumer's cluster cohort member id, minted by the server on the first
+    /// exclusive subscribe and then carried on every other exclusive subscribe
+    /// (across brokers) and across reconnects, so the cohort sees one member.
+    cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
 }
 
 /// Buffer of assignment events retained per [`Client::assignment_events`]
@@ -1822,6 +1839,7 @@ impl ClientShared {
                 self.opts.clone(),
                 self.user_shutdown.clone(),
                 self.assignment_tx.clone(),
+                self.cohort_member_id.clone(),
             )
             .await?,
         );
@@ -1891,6 +1909,9 @@ struct EngineSlot {
     reconnect_lock: Mutex<()>,
     /// Shared assignment-event fan-out (survives reconnects).
     assignment_tx: broadcast::Sender<AssignmentEvent>,
+    /// Shared cohort member id cache (survives reconnects); the read loop fills it
+    /// from the first exclusive SubscribeOk.
+    cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
 }
 
 impl EngineSlot {
@@ -1903,6 +1924,7 @@ impl EngineSlot {
         subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
         engine: Arc<EngineHandle>,
         assignment_tx: broadcast::Sender<AssignmentEvent>,
+        cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
     ) -> Self {
         Self {
             address,
@@ -1912,6 +1934,7 @@ impl EngineSlot {
             engine: RwLock::new(engine),
             reconnect_lock: Mutex::new(()),
             assignment_tx,
+            cohort_member_id,
         }
     }
 
@@ -1921,6 +1944,7 @@ impl EngineSlot {
         opts: ClientOptions,
         user_shutdown: Arc<AtomicBool>,
         assignment_tx: broadcast::Sender<AssignmentEvent>,
+        cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
     ) -> FibrilResult<Self> {
         let subscriptions = Arc::new(RwLock::new(HashMap::new()));
         let stream = TcpStream::connect(address)
@@ -1932,6 +1956,7 @@ impl EngineSlot {
             opts.clone(),
             subscriptions.clone(),
             assignment_tx.clone(),
+            cohort_member_id.clone(),
         )
         .await?;
         Ok(Self::from_engine(
@@ -1941,6 +1966,7 @@ impl EngineSlot {
             subscriptions,
             engine,
             assignment_tx,
+            cohort_member_id,
         ))
     }
 
@@ -1969,6 +1995,7 @@ impl EngineSlot {
             opts,
             self.subscriptions.clone(),
             self.assignment_tx.clone(),
+            self.cohort_member_id.clone(),
         )
         .await?;
         let outcome = ReconnectOutcome {
@@ -2207,6 +2234,7 @@ async fn start_engine<S>(
     opts: ClientOptions,
     subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
     assignment_tx: broadcast::Sender<AssignmentEvent>,
+    cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
 ) -> FibrilResult<Arc<EngineHandle>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -2676,6 +2704,13 @@ where
                                     break;
                                 }
                             };
+
+                            // Cache the server-minted cohort member id (write-once)
+                            // so subsequent exclusive subscribes — including to
+                            // other brokers — carry the same identity.
+                            if let Some(member_id) = ok.member_id {
+                                let _ = cohort_member_id.set(member_id);
+                            }
 
                             if let Some(waiter) = waiters.remove(&frame.request_id) {
                                 match waiter {
@@ -3396,6 +3431,7 @@ mod tests {
         let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let user_shutdown = Arc::new(AtomicBool::new(false));
         let (assignment_tx, _) = broadcast::channel(ASSIGNMENT_EVENT_CAPACITY);
+        let cohort_member_id = Arc::new(std::sync::OnceLock::new());
         let slot = Arc::new(EngineSlot::from_engine(
             address,
             opts.clone(),
@@ -3403,6 +3439,7 @@ mod tests {
             Arc::new(RwLock::new(HashMap::new())),
             engine,
             assignment_tx.clone(),
+            cohort_member_id.clone(),
         ));
         let mut pool = HashMap::new();
         pool.insert(address, slot);
@@ -3416,6 +3453,7 @@ mod tests {
                     topology: ArcSwap::from_pointee(TopologyCache::default()),
                     round_robin: std::sync::atomic::AtomicUsize::new(0),
                     assignment_tx,
+                    cohort_member_id,
                 }),
             },
             rx,
@@ -3533,6 +3571,7 @@ mod tests {
                             prefetch: req.prefetch,
                             consumer_group: None,
                             consumer_target: None,
+                            member_id: None,
                         },
                     )
                     .unwrap(),
@@ -3577,6 +3616,7 @@ mod tests {
                 prefetch: 1,
                 consumer_group: None,
                 consumer_target: None,
+                member_id: None,
             };
             let restored = ReconcileSubscription {
                 sub_id: 88,
@@ -3656,6 +3696,7 @@ mod tests {
                     prefetch: 1,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 }],
             }
         );

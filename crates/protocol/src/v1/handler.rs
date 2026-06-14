@@ -509,6 +509,9 @@ struct SubState {
     consumer_group: Option<String>,
     /// Soft per-consumer target for the cohort (echoed for reconnect restore).
     consumer_target: Option<u32>,
+    /// Resolved cluster cohort member id for this subscription (the cohort key);
+    /// `Some` iff exclusive. Used for leave and echoed for reconnect.
+    cohort_member: Option<Uuid>,
     auto_ack: bool,
     prefetch: u32,
     stats_sub_id: Option<Uuid>,
@@ -542,6 +545,7 @@ fn reconcile_subscription_from_state(
         prefetch: sub.prefetch,
         consumer_group: sub.consumer_group.clone(),
         consumer_target: sub.consumer_target,
+        member_id: sub.cohort_member,
     }
 }
 
@@ -645,13 +649,15 @@ async fn cleanup_connection_state(
         {
             tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
         }
-        if let Some(consumer_group) = sub.consumer_group.as_deref() {
+        if let (Some(consumer_group), Some(member)) =
+            (sub.consumer_group.as_deref(), sub.cohort_member)
+        {
             broker.exclusive_group_leave(
                 &topic,
                 partition,
                 group.as_deref(),
                 consumer_group,
-                &logical.client_id.to_string(),
+                &member.to_string(),
             );
         }
     }
@@ -683,13 +689,14 @@ async fn remove_subscription(
     {
         tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
     }
-    if let Some(consumer_group) = sub.consumer_group.as_deref() {
+    if let (Some(consumer_group), Some(member)) = (sub.consumer_group.as_deref(), sub.cohort_member)
+    {
         broker.exclusive_group_leave(
             topic,
             sub.partition,
             group,
             consumer_group,
-            &logical.client_id.to_string(),
+            &member.to_string(),
         );
     }
 
@@ -702,6 +709,7 @@ async fn remove_subscription(
         prefetch: sub.prefetch,
         consumer_group: sub.consumer_group.clone(),
         consumer_target: sub.consumer_target,
+        member_id: sub.cohort_member,
     })
 }
 
@@ -764,6 +772,9 @@ struct InstallSubscriptionArgs {
     /// Soft per-consumer target for the exclusive cohort (member's desired max
     /// partitions). Ignored without `consumer_group`.
     consumer_target: Option<usize>,
+    /// Cluster cohort member id the client carries; `None` mints a fresh one.
+    /// Ignored without `consumer_group`.
+    member_id: Option<Uuid>,
 }
 
 async fn install_subscription(
@@ -786,6 +797,14 @@ async fn install_subscription(
             return Err(InstallSubscriptionError::CohortConflict);
         }
     }
+
+    // Resolve the cluster cohort member id for an exclusive sub: the id the client
+    // carried, or a freshly minted one (returned in SubscribeOk for the client to
+    // echo on its other brokers / reconnects). `None` for non-exclusive subs.
+    let cohort_member: Option<Uuid> = args
+        .consumer_group
+        .as_ref()
+        .map(|_| args.member_id.unwrap_or_else(Uuid::new_v4));
 
     let consumer = args
         .broker
@@ -812,7 +831,8 @@ async fn install_subscription(
     // Opt-in exclusive cohort: register this connection (member) on this
     // partition so the broker can gate delivery to the assigned member. The
     // queue's delivery loop already exists (subscribe created it).
-    if let Some(consumer_group) = args.consumer_group.as_deref() {
+    if let (Some(consumer_group), Some(member)) = (args.consumer_group.as_deref(), cohort_member) {
+        let member = member.to_string();
         // Ensure exactly one assignment-change forwarder per (connection, cohort),
         // registered BEFORE the join so this member sees its initial assignment.
         let cohort_key: CohortKey = (
@@ -832,7 +852,7 @@ async fn install_subscription(
                 &args.topic,
                 args.group.as_deref(),
                 consumer_group,
-                args.client_id.to_string(),
+                member.clone(),
             );
             let handle = spawn_assignment_forwarder(
                 args.logical.clone(),
@@ -852,7 +872,7 @@ async fn install_subscription(
             args.partition,
             args.group.as_deref(),
             consumer_group,
-            args.client_id.to_string(),
+            member,
             sub_id,
             args.consumer_target,
         );
@@ -937,6 +957,7 @@ async fn install_subscription(
             partition: consumer.partition,
             consumer_group: args.consumer_group.clone(),
             consumer_target: args.consumer_target.map(|target| target as u32),
+            cohort_member,
             task: handle,
             auto_ack: args.auto_ack,
             prefetch: args.prefetch,
@@ -955,6 +976,7 @@ async fn install_subscription(
         prefetch: args.prefetch,
         consumer_group: args.consumer_group,
         consumer_target: args.consumer_target.map(|target| target as u32),
+        member_id: cohort_member,
     })
 }
 
@@ -1029,6 +1051,7 @@ async fn reconcile_subscriptions(
                     // rejoins the cohort instead of falling back to competing.
                     consumer_group: client.consumer_group.clone(),
                     consumer_target: client.consumer_target.map(|target| target as usize),
+                    member_id: client.member_id,
                 })
                 .await;
 
@@ -1046,6 +1069,7 @@ async fn reconcile_subscriptions(
                                 prefetch: ok.prefetch,
                                 consumer_group: ok.consumer_group,
                                 consumer_target: ok.consumer_target,
+                                member_id: ok.member_id,
                             }),
                             action: ReconcileAction::Keep,
                             reason: "server_restored".into(),
@@ -2170,6 +2194,7 @@ pub async fn handle_connection(
                     auto_ack: sub.auto_ack,
                     consumer_group: sub.consumer_group,
                     consumer_target: sub.consumer_target.map(|target| target as usize),
+                    member_id: sub.member_id,
                 })
                 .await;
 

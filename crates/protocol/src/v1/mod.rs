@@ -259,6 +259,13 @@ pub struct Subscribe {
     /// alongside `consumer_group`; coverage always wins over the target.
     #[serde(default)]
     pub consumer_target: Option<u32>,
+    /// Cluster-scoped cohort member identity. A consumer that spans brokers
+    /// carries the SAME id on every exclusive subscribe so the cohort recognizes
+    /// it as one member across owners. `None` on the first exclusive subscribe —
+    /// the server mints one and returns it in `SubscribeOk`; the client then
+    /// echoes it. Ignored without `consumer_group`.
+    #[serde(default)]
+    pub member_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -275,6 +282,11 @@ pub struct SubscribeOk {
     /// Echoes the soft per-consumer target (if any).
     #[serde(default)]
     pub consumer_target: Option<u32>,
+    /// The cluster-scoped cohort member id in effect for this subscription
+    /// (server-minted on the first exclusive subscribe). The client caches it and
+    /// echoes it on its other exclusive subscribes and across reconnects.
+    #[serde(default)]
+    pub member_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,6 +306,10 @@ pub struct ReconcileSubscription {
     /// Soft per-consumer target to restore (if any).
     #[serde(default)]
     pub consumer_target: Option<u32>,
+    /// Cohort member id to restore under, so a reconnect keeps the same cluster
+    /// identity rather than being minted a new one.
+    #[serde(default)]
+    pub member_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

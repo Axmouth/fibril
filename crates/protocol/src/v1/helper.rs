@@ -150,6 +150,7 @@ mod tests {
                 prefetch: 32,
                 consumer_group: None,
                 consumer_target: None,
+                member_id: None,
             }],
         };
 
@@ -169,6 +170,7 @@ mod tests {
             prefetch: 1,
             consumer_group: None,
             consumer_target: None,
+            member_id: None,
         };
         let msg = ReconcileResult {
             subscriptions: vec![ReconcileSubscriptionResult {

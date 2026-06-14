@@ -460,6 +460,7 @@ async fn framed_subscribe(
                     auto_ack,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -554,6 +555,7 @@ async fn reconcile_after_resume_keeps_matching_subscription() {
                     auto_ack: false,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -593,6 +595,7 @@ async fn reconcile_after_resume_keeps_matching_subscription() {
                         prefetch: sub_ok.prefetch,
                         consumer_group: None,
                         consumer_target: None,
+                        member_id: None,
                     }],
                 },
             )
@@ -633,6 +636,7 @@ async fn reconcile_after_resume_closes_mismatched_subscription() {
                     auto_ack: false,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -672,6 +676,7 @@ async fn reconcile_after_resume_closes_mismatched_subscription() {
                         prefetch: sub_ok.prefetch + 1,
                         consumer_group: None,
                         consumer_target: None,
+                        member_id: None,
                     }],
                 },
             )
@@ -769,6 +774,7 @@ async fn restore_policy_recreates_client_only_subscription() {
                         prefetch: 2,
                         consumer_group: None,
                         consumer_target: None,
+                        member_id: None,
                     }],
                 },
             )
@@ -834,6 +840,7 @@ async fn reconcile_restores_exclusive_cohort_membership() {
                         prefetch: 4,
                         consumer_group: Some("default".into()),
                         consumer_target: None,
+                        member_id: None,
                     }],
                 },
             )
@@ -3117,6 +3124,7 @@ async fn multi_partition_publish_subscribe_is_isolated_e2e() {
                         auto_ack: true,
                         consumer_group: None,
                         consumer_target: None,
+                        member_id: None,
                     },
                 )
                 .unwrap(),
@@ -3186,6 +3194,7 @@ async fn subscribe_exclusive(
     partition: u32,
     consumer_group: &str,
     consumer_target: Option<u32>,
+    member_id: uuid::Uuid,
 ) {
     framed
         .send(
@@ -3200,6 +3209,7 @@ async fn subscribe_exclusive(
                     auto_ack: true,
                     consumer_group: Some(consumer_group.into()),
                     consumer_target,
+                    member_id: Some(member_id),
                 },
             )
             .unwrap(),
@@ -3304,10 +3314,14 @@ async fn exclusive_consumer_group_splits_partitions_and_fails_over_e2e() {
 
     // Both members fan in to BOTH partitions under the same cohort id. After all
     // four SubscribeOks the per-partition gates have settled to the split.
-    subscribe_exclusive(&mut a, 10, topic, 0, cohort, None).await;
-    subscribe_exclusive(&mut a, 11, topic, 1, cohort, None).await;
-    subscribe_exclusive(&mut b, 20, topic, 0, cohort, None).await;
-    subscribe_exclusive(&mut b, 21, topic, 1, cohort, None).await;
+    // Each connection is one cohort member, carrying a stable member id across
+    // its per-partition subscribes (as the real client does).
+    let member_a = uuid::Uuid::new_v4();
+    let member_b = uuid::Uuid::new_v4();
+    subscribe_exclusive(&mut a, 10, topic, 0, cohort, None, member_a).await;
+    subscribe_exclusive(&mut a, 11, topic, 1, cohort, None, member_a).await;
+    subscribe_exclusive(&mut b, 20, topic, 0, cohort, None, member_b).await;
+    subscribe_exclusive(&mut b, 21, topic, 1, cohort, None, member_b).await;
 
     // Publisher connection: two messages into each partition.
     let mut publisher = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
@@ -3384,6 +3398,8 @@ async fn exclusive_consumer_group_member_target_shapes_split_e2e() {
     handshake(&mut capped).await;
     handshake(&mut flex).await;
 
+    let member_capped = uuid::Uuid::new_v4();
+    let member_flex = uuid::Uuid::new_v4();
     for partition in 0..3u32 {
         subscribe_exclusive(
             &mut capped,
@@ -3392,6 +3408,7 @@ async fn exclusive_consumer_group_member_target_shapes_split_e2e() {
             partition,
             cohort,
             Some(1),
+            member_capped,
         )
         .await;
     }
@@ -3403,6 +3420,7 @@ async fn exclusive_consumer_group_member_target_shapes_split_e2e() {
             partition,
             cohort,
             None,
+            member_flex,
         )
         .await;
     }
@@ -3463,6 +3481,7 @@ async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
         topic: &str,
         partition: u32,
         cohort: &str,
+        member_id: uuid::Uuid,
     ) {
         framed
             .send(
@@ -3477,6 +3496,7 @@ async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
                         auto_ack: true,
                         consumer_group: Some(cohort.into()),
                         consumer_target: None,
+                        member_id: Some(member_id),
                     },
                 )
                 .unwrap(),
@@ -3487,8 +3507,9 @@ async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
 
     let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
     handshake(&mut a).await;
-    send_sub(&mut a, 10, topic, 0, cohort).await;
-    send_sub(&mut a, 11, topic, 1, cohort).await;
+    let member_a = uuid::Uuid::new_v4();
+    send_sub(&mut a, 10, topic, 0, cohort, member_a).await;
+    send_sub(&mut a, 11, topic, 1, cohort, member_a).await;
 
     // Sole member: eventually assigned both partitions.
     let sole = recv_assignment_until(&mut a, |asg| asg.assigned.len() == 2).await;
@@ -3501,8 +3522,9 @@ async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
     // Second member joins -> the cohort rebalances to one partition each.
     let mut b = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
     handshake(&mut b).await;
-    send_sub(&mut b, 20, topic, 0, cohort).await;
-    send_sub(&mut b, 21, topic, 1, cohort).await;
+    let member_b = uuid::Uuid::new_v4();
+    send_sub(&mut b, 20, topic, 0, cohort, member_b).await;
+    send_sub(&mut b, 21, topic, 1, cohort, member_b).await;
 
     // b is told it owns exactly one partition; a is told one was revoked.
     let b_asg = recv_assignment_until(&mut b, |asg| asg.assigned.len() == 1).await;
@@ -3554,8 +3576,11 @@ async fn exclusive_cohort_works_across_partition_owners_e2e() {
     let mut b = Framed::new(TcpStream::connect(addr_b).await.unwrap(), ProtoCodec);
     handshake(&mut a).await;
     handshake(&mut b).await;
-    subscribe_exclusive(&mut a, 10, topic, 0, "default", None).await;
-    subscribe_exclusive(&mut b, 20, topic, 1, "default", None).await;
+    // One logical consumer spanning both owners carries the SAME member id, so
+    // each broker recognizes it as the same cohort member.
+    let member = uuid::Uuid::new_v4();
+    subscribe_exclusive(&mut a, 10, topic, 0, "default", None, member).await;
+    subscribe_exclusive(&mut b, 20, topic, 1, "default", None, member).await;
 
     // Publish to each partition on its owner.
     let mut pa = Framed::new(TcpStream::connect(addr_a).await.unwrap(), ProtoCodec);
@@ -3596,7 +3621,16 @@ async fn exclusive_consumer_group_rejects_second_cohort_e2e() {
     // First cohort claims the queue.
     let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
     handshake(&mut a).await;
-    subscribe_exclusive(&mut a, 10, topic, 0, "cohort-one", None).await;
+    subscribe_exclusive(
+        &mut a,
+        10,
+        topic,
+        0,
+        "cohort-one",
+        None,
+        uuid::Uuid::new_v4(),
+    )
+    .await;
 
     // A different cohort id on the same queue is refused.
     let mut b = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
@@ -3613,6 +3647,7 @@ async fn exclusive_consumer_group_rejects_second_cohort_e2e() {
                 auto_ack: true,
                 consumer_group: Some("cohort-two".into()),
                 consumer_target: None,
+                member_id: None,
             },
         )
         .unwrap(),
@@ -3947,6 +3982,7 @@ async fn unowned_subscribe_returns_not_owner_error_and_keeps_connection_open() {
                     auto_ack: false,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -3980,6 +4016,7 @@ async fn duplicate_subscribe_returns_conflict_and_keeps_connection_open() {
                     auto_ack: false,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -4012,6 +4049,7 @@ async fn publish_content_type_header_is_delivered_as_metadata() {
                     auto_ack: true,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -4145,6 +4183,7 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
                     auto_ack: true,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -4217,6 +4256,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                     auto_ack: false,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -4334,6 +4374,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     auto_ack: false,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -4355,6 +4396,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     auto_ack: false,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
@@ -4601,6 +4643,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
                     auto_ack: true,
                     consumer_group: None,
                     consumer_target: None,
+                    member_id: None,
                 },
             )
             .unwrap(),
