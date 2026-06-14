@@ -935,6 +935,7 @@ pub struct SubscriptionBuilder<'a> {
     group: Option<GroupName>,
     prefetch: u32,
     consumer_group: Option<String>,
+    consumer_target: Option<u32>,
 }
 
 impl<'a> SubscriptionBuilder<'a> {
@@ -957,6 +958,15 @@ impl<'a> SubscriptionBuilder<'a> {
     /// delivery to the assigned member.
     pub fn consumer_group(mut self, id: impl Into<String>) -> Self {
         self.consumer_group = Some(id.into());
+        self
+    }
+
+    /// Set this consumer's soft partition target within its exclusive cohort —
+    /// the max partitions it would prefer to own. Only meaningful together with
+    /// [`Self::consumer_group`]; coverage always wins, so a member may still be
+    /// assigned more than its target when the cohort is under-provisioned.
+    pub fn consumer_target(mut self, max_partitions: u32) -> Self {
+        self.consumer_target = Some(max_partitions);
         self
     }
 
@@ -989,6 +999,7 @@ impl<'a> SubscriptionBuilder<'a> {
                 prefetch,
                 auto_ack: false,
                 consumer_group: self.consumer_group.clone(),
+                consumer_target: self.consumer_target,
             };
             receivers.push(subscribe_partition_manual(self.client, req).await?);
         }
@@ -1014,6 +1025,7 @@ impl<'a> SubscriptionBuilder<'a> {
                 prefetch,
                 auto_ack: true,
                 consumer_group: self.consumer_group.clone(),
+                consumer_target: self.consumer_target,
             };
             receivers.push(subscribe_partition_auto(self.client, req).await?);
         }
@@ -1230,6 +1242,7 @@ impl Client {
             group: None,
             prefetch: 1, // sensible default
             consumer_group: None,
+            consumer_target: None,
         })
     }
 

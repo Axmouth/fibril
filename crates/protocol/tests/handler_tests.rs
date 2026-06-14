@@ -459,6 +459,7 @@ async fn framed_subscribe(
                     prefetch: 1,
                     auto_ack,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -552,6 +553,7 @@ async fn reconcile_after_resume_keeps_matching_subscription() {
                     prefetch: 1,
                     auto_ack: false,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -628,6 +630,7 @@ async fn reconcile_after_resume_closes_mismatched_subscription() {
                     prefetch: 1,
                     auto_ack: false,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -3063,6 +3066,7 @@ async fn multi_partition_publish_subscribe_is_isolated_e2e() {
                         prefetch: 8,
                         auto_ack: true,
                         consumer_group: None,
+                        consumer_target: None,
                     },
                 )
                 .unwrap(),
@@ -3131,6 +3135,7 @@ async fn subscribe_exclusive(
     topic: &str,
     partition: u32,
     consumer_group: &str,
+    consumer_target: Option<u32>,
 ) {
     framed
         .send(
@@ -3144,6 +3149,7 @@ async fn subscribe_exclusive(
                     prefetch: 8,
                     auto_ack: true,
                     consumer_group: Some(consumer_group.into()),
+                    consumer_target,
                 },
             )
             .unwrap(),
@@ -3219,10 +3225,10 @@ async fn exclusive_consumer_group_splits_partitions_and_fails_over_e2e() {
 
     // Both members fan in to BOTH partitions under the same cohort id. After all
     // four SubscribeOks the per-partition gates have settled to the split.
-    subscribe_exclusive(&mut a, 10, topic, 0, cohort).await;
-    subscribe_exclusive(&mut a, 11, topic, 1, cohort).await;
-    subscribe_exclusive(&mut b, 20, topic, 0, cohort).await;
-    subscribe_exclusive(&mut b, 21, topic, 1, cohort).await;
+    subscribe_exclusive(&mut a, 10, topic, 0, cohort, None).await;
+    subscribe_exclusive(&mut a, 11, topic, 1, cohort, None).await;
+    subscribe_exclusive(&mut b, 20, topic, 0, cohort, None).await;
+    subscribe_exclusive(&mut b, 21, topic, 1, cohort, None).await;
 
     // Publisher connection: two messages into each partition.
     let mut publisher = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
@@ -3276,6 +3282,84 @@ async fn exclusive_consumer_group_splits_partitions_and_fails_over_e2e() {
 
     shutdown.cancel();
     drop(b);
+    drop(publisher);
+    drop(dir);
+}
+
+/// A member's soft target shapes the split: a member that caps itself at one
+/// partition gets exactly one of three, and the uncapped peer absorbs the other
+/// two — deterministic regardless of which member sorts first.
+#[tokio::test]
+async fn exclusive_consumer_group_member_target_shapes_split_e2e() {
+    let (broker, dir) = open_test_broker().await;
+    let (addr, shutdown) =
+        start_multi_connection_listener(ConnectionSettings::new(None), broker.clone()).await;
+
+    let topic = "exgroup-target";
+    let cohort = "g";
+
+    // `capped` self-limits to 1 partition; `flex` is uncapped. Both fan in to all
+    // three partitions of the queue.
+    let mut capped = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut flex = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut capped).await;
+    handshake(&mut flex).await;
+
+    for partition in 0..3u32 {
+        subscribe_exclusive(
+            &mut capped,
+            10 + partition as u64,
+            topic,
+            partition,
+            cohort,
+            Some(1),
+        )
+        .await;
+    }
+    for partition in 0..3u32 {
+        subscribe_exclusive(
+            &mut flex,
+            20 + partition as u64,
+            topic,
+            partition,
+            cohort,
+            None,
+        )
+        .await;
+    }
+
+    let mut publisher = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    handshake(&mut publisher).await;
+    for partition in 0..3u32 {
+        publish_to_partition(
+            &mut publisher,
+            100 + partition as u64,
+            topic,
+            partition,
+            format!("p{partition}").into_bytes(),
+        )
+        .await;
+    }
+
+    let capped_parts = collected_partitions(&mut capped, topic, 1).await;
+    let flex_parts = collected_partitions(&mut flex, topic, 2).await;
+    assert_eq!(
+        capped_parts.len(),
+        1,
+        "the capped member honors its target of 1"
+    );
+    assert_eq!(flex_parts.len(), 2, "the uncapped member absorbs the rest");
+    assert!(
+        capped_parts.is_disjoint(&flex_parts),
+        "no partition is shared across the cohort"
+    );
+    let mut covered: Vec<u32> = capped_parts.union(&flex_parts).copied().collect();
+    covered.sort();
+    assert_eq!(covered, vec![0, 1, 2], "all partitions covered");
+
+    shutdown.cancel();
+    drop(capped);
+    drop(flex);
     drop(publisher);
     drop(dir);
 }
@@ -3594,6 +3678,7 @@ async fn unowned_subscribe_returns_not_owner_error_and_keeps_connection_open() {
                     prefetch: 1,
                     auto_ack: false,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -3626,6 +3711,7 @@ async fn duplicate_subscribe_returns_conflict_and_keeps_connection_open() {
                     prefetch: 1,
                     auto_ack: false,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -3657,6 +3743,7 @@ async fn publish_content_type_header_is_delivered_as_metadata() {
                     prefetch: 1,
                     auto_ack: true,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -3789,6 +3876,7 @@ async fn delayed_publish_over_tcp_waits_until_not_before() {
                     prefetch: 1,
                     auto_ack: true,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -3860,6 +3948,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                     prefetch: 1,
                     auto_ack: false,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -3976,6 +4065,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     prefetch: 1,
                     auto_ack: false,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -3996,6 +4086,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     prefetch: 1,
                     auto_ack: false,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),
@@ -4241,6 +4332,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
                     prefetch: 20,
                     auto_ack: true,
                     consumer_group: None,
+                    consumer_target: None,
                 },
             )
             .unwrap(),

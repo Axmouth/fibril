@@ -649,6 +649,7 @@ pub async fn visual_client(
             prefetch: 100,
             auto_ack: true,
             consumer_group: None,
+            consumer_target: None,
         },
     )?)
     .await?;

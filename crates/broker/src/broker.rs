@@ -1056,6 +1056,10 @@ struct ExclusiveGroupRouter {
     registry: ExclusiveConsumerGroups,
     /// cohort -> member (connection client_id) -> partition -> broker sub_id.
     subs: HashMap<ConsumerGroupKey, HashMap<String, HashMap<Partition, ConsumerId>>>,
+    /// cohort -> member -> soft per-consumer target override (the member's
+    /// desired max partitions). Members absent here fall back to the group
+    /// default. Fed to the assignor on every recompute.
+    targets: HashMap<ConsumerGroupKey, HashMap<String, usize>>,
 }
 
 impl ExclusiveGroupRouter {
@@ -1066,24 +1070,40 @@ impl ExclusiveGroupRouter {
                 target_per_consumer,
             ),
             subs: HashMap::new(),
+            targets: HashMap::new(),
         }
     }
 
     /// Record an exclusive member's subscription to one partition (with the broker
-    /// sub_id it was assigned) and return the gate updates to apply.
+    /// sub_id it was assigned) and its optional soft target, then return the gate
+    /// updates to apply.
     fn join(
         &mut self,
         key: ConsumerGroupKey,
         partition: Partition,
         member: String,
         sub_id: ConsumerId,
+        target: Option<usize>,
     ) -> Vec<GateUpdate> {
         self.subs
             .entry(key.clone())
             .or_default()
-            .entry(member)
+            .entry(member.clone())
             .or_default()
             .insert(partition, sub_id);
+        match target {
+            Some(target) => {
+                self.targets
+                    .entry(key.clone())
+                    .or_default()
+                    .insert(member, target);
+            }
+            None => {
+                if let Some(group_targets) = self.targets.get_mut(&key) {
+                    group_targets.remove(&member);
+                }
+            }
+        }
         self.recompute(&key, &[partition])
     }
 
@@ -1103,6 +1123,12 @@ impl ExclusiveGroupRouter {
         group_subs.remove(member);
         if group_subs.is_empty() {
             self.subs.remove(&key);
+        }
+        if let Some(group_targets) = self.targets.get_mut(&key) {
+            group_targets.remove(member);
+            if group_targets.is_empty() {
+                self.targets.remove(&key);
+            }
         }
         self.recompute(&key, &[partition])
     }
@@ -1124,7 +1150,10 @@ impl ExclusiveGroupRouter {
         }
         let union: Vec<Partition> = union.into_iter().collect();
 
-        let delta = self.registry.reconcile(key.clone(), union.clone(), members);
+        let member_targets = self.targets.get(key).cloned().unwrap_or_default();
+        let delta = self
+            .registry
+            .reconcile(key.clone(), union.clone(), members, member_targets);
 
         // partition -> assigned member (from the full per-member assignment).
         let mut assignee_of: HashMap<Partition, &String> = HashMap::new();
@@ -2600,7 +2629,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     /// Register an exclusive consumer-group member's subscription to one
     /// partition and re-apply the cohort's per-partition delivery gates. `member`
     /// is the connection's stable client id; `sub_id` is the broker consumer id
-    /// just created for this partition subscription. Called after `subscribe`.
+    /// just created for this partition subscription; `target` is the member's
+    /// optional soft per-consumer capacity. Called after `subscribe`.
     pub fn exclusive_group_join(
         &self,
         topic: &str,
@@ -2609,11 +2639,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         consumer_group: &str,
         member: impl Into<String>,
         sub_id: ConsumerId,
+        target: Option<usize>,
     ) {
         let key = ConsumerGroupKey::new(topic, group, consumer_group);
-        let updates = self
-            .lock_exclusive_groups()
-            .join(key, partition, member.into(), sub_id);
+        let updates =
+            self.lock_exclusive_groups()
+                .join(key, partition, member.into(), sub_id, target);
         for (partition, assignee) in updates {
             self.set_exclusive_assignee(topic, partition, group, assignee);
         }

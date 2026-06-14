@@ -251,6 +251,11 @@ pub struct Subscribe {
     /// `partition` is ignored for the join.
     #[serde(default)]
     pub consumer_group: Option<String>,
+    /// Soft per-consumer target: the member's desired max partitions within its
+    /// exclusive cohort. `None` (default) uses the group default. Only meaningful
+    /// alongside `consumer_group`; coverage always wins over the target.
+    #[serde(default)]
+    pub consumer_target: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

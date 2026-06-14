@@ -149,6 +149,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                             partition: Partition::new(0),
                             prefetch: 1024,
                             consumer_group: None,
+                            consumer_target: None,
                         },
                     )
                     .unwrap(),

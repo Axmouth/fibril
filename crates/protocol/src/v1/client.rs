@@ -59,6 +59,7 @@ pub async fn demo_client(mut conn: Conn) -> anyhow::Result<()> {
             prefetch: 100,
             auto_ack: true,
             consumer_group: None,
+            consumer_target: None,
         },
     )?)
     .await?;

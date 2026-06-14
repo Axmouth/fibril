@@ -367,16 +367,32 @@ fn queue_sort_key(queue: &QueueIdentity) -> (String, Partition, String) {
 // target is a soft capacity signal, never a coverage cap.
 
 /// Inputs for assigning a queue's partitions across a consumer group's members.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConsumerGroupAssignmentInput {
     /// The partitions to cover (one logical queue's partitions).
     pub partitions: Vec<Partition>,
     /// Live group member ids (stable per consumer instance).
     pub members: Vec<String>,
-    /// Soft per-consumer capacity. If the balanced load `ceil(N/M)` exceeds it,
-    /// partitions are still fully assigned (coverage wins) and
-    /// `under_provisioned` is set. `None` disables the signal.
-    pub target_per_consumer: Option<usize>,
+    /// Group-wide soft per-consumer capacity, applied to any member without an
+    /// explicit override in `member_targets`. `None` leaves those members
+    /// uncapped (pure balanced share).
+    pub default_target_per_consumer: Option<usize>,
+    /// Per-member soft capacity overrides (a member's desired max partitions).
+    /// Takes precedence over `default_target_per_consumer`. Coverage always wins:
+    /// when total capacity is below the partition count every partition is still
+    /// assigned and `under_provisioned` is set.
+    pub member_targets: HashMap<String, usize>,
+}
+
+impl ConsumerGroupAssignmentInput {
+    /// The effective soft capacity for `member`: its explicit override, else the
+    /// group default, else uncapped (`None`).
+    fn target_for(&self, member: &str) -> Option<usize> {
+        self.member_targets
+            .get(member)
+            .copied()
+            .or(self.default_target_per_consumer)
+    }
 }
 
 /// The computed assignment of partitions to group members.
@@ -384,8 +400,8 @@ pub struct ConsumerGroupAssignmentInput {
 pub struct ConsumerGroupAssignment {
     /// Partitions assigned to each member (every member present, possibly empty).
     pub by_member: HashMap<String, Vec<Partition>>,
-    /// True when the balanced load exceeds `target_per_consumer` — the group is
-    /// under-provisioned for its target (still fully covered). Feeds
+    /// True when some member's load exceeds its soft target — the group is
+    /// under-provisioned for its targets (still fully covered). Feeds
     /// alert/autoscale, never reduces coverage.
     pub under_provisioned: bool,
 }
@@ -397,48 +413,73 @@ pub trait ConsumerGroupAssignor: std::fmt::Debug + Send + Sync {
 }
 
 /// Deterministic, balanced, coverage-first assignor: deals the queue's
-/// partitions round-robin across the sorted members, giving the first `N % M`
-/// members `ceil(N/M)` partitions and the rest `floor(N/M)`. Stickiness
-/// (minimizing moves across rebalances) is a future variant.
+/// partitions one at a time to the eligible member (load below its soft target)
+/// with the least load, breaking ties by sorted member order. With no targets
+/// this is exactly a round-robin balanced deal (first `N % M` members get
+/// `ceil(N/M)`, the rest `floor(N/M)`); with targets it respects each member's
+/// soft capacity until capacity runs out, then keeps assigning (coverage wins)
+/// and flags `under_provisioned`. Stickiness (minimizing moves across
+/// rebalances) is a future variant.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BalancedConsumerGroupAssignor;
 
 impl ConsumerGroupAssignor for BalancedConsumerGroupAssignor {
     fn assign(&self, input: ConsumerGroupAssignmentInput) -> ConsumerGroupAssignment {
-        let mut partitions = input.partitions;
+        let mut partitions = input.partitions.clone();
         partitions.sort();
         partitions.dedup();
 
-        let mut members = input.members;
+        let mut members = input.members.clone();
         members.sort();
         members.dedup();
-
-        // Every member appears in the result, even if it gets no partitions
-        // (more members than partitions => some idle).
-        let mut by_member: HashMap<String, Vec<Partition>> =
-            members.iter().map(|m| (m.clone(), Vec::new())).collect();
 
         if members.is_empty() {
             // No members => nothing assigned. The queue is unconsumed (backlog
             // waits); not "under-provisioned" — there is no target to miss.
             return ConsumerGroupAssignment {
-                by_member,
+                by_member: HashMap::new(),
                 under_provisioned: false,
             };
         }
 
         let member_count = members.len();
-        for (index, partition) in partitions.iter().enumerate() {
-            let member = &members[index % member_count];
-            if let Some(assigned) = by_member.get_mut(member) {
-                assigned.push(*partition);
+        let caps: Vec<Option<usize>> = members.iter().map(|m| input.target_for(m)).collect();
+        let mut loads = vec![0usize; member_count];
+        let mut assigned: Vec<Vec<Partition>> = vec![Vec::new(); member_count];
+
+        for partition in &partitions {
+            // Prefer the least-loaded member still under its soft cap (ties ->
+            // earliest sorted member). If every member is at capacity, overflow
+            // to the least-loaded member overall (coverage-first).
+            let mut pick: Option<usize> = None;
+            for index in 0..member_count {
+                let under_cap = caps[index].is_none_or(|cap| loads[index] < cap);
+                if under_cap && pick.is_none_or(|best| loads[index] < loads[best]) {
+                    pick = Some(index);
+                }
             }
+            let index = pick.unwrap_or_else(|| {
+                let mut best = 0;
+                for index in 1..member_count {
+                    if loads[index] < loads[best] {
+                        best = index;
+                    }
+                }
+                best
+            });
+            assigned[index].push(*partition);
+            loads[index] += 1;
         }
 
-        let max_load = partitions.len().div_ceil(member_count);
-        let under_provisioned = input
-            .target_per_consumer
-            .is_some_and(|target| target > 0 && max_load > target);
+        // Under-provisioned when any member ended up above its (set) soft target.
+        let mut under_provisioned = false;
+        let mut by_member = HashMap::with_capacity(member_count);
+        for (index, member) in members.into_iter().enumerate() {
+            if caps[index].is_some_and(|cap| cap > 0 && loads[index] > cap) {
+                under_provisioned = true;
+            }
+            by_member.insert(member, std::mem::take(&mut assigned[index]));
+        }
 
         ConsumerGroupAssignment {
             by_member,
@@ -479,14 +520,16 @@ pub struct ConsumerGroupState {
     members: BTreeSet<String>,
     assignment: HashMap<String, Vec<Partition>>,
     generation: u64,
-    target_per_consumer: Option<usize>,
+    default_target_per_consumer: Option<usize>,
+    /// Per-member soft capacity overrides (see [`ConsumerGroupAssignmentInput`]).
+    member_targets: HashMap<String, usize>,
     assignor: Arc<dyn ConsumerGroupAssignor>,
 }
 
 impl ConsumerGroupState {
     pub fn new(
         partitions: Vec<Partition>,
-        target_per_consumer: Option<usize>,
+        default_target_per_consumer: Option<usize>,
         assignor: Arc<dyn ConsumerGroupAssignor>,
     ) -> Self {
         Self {
@@ -494,7 +537,8 @@ impl ConsumerGroupState {
             members: BTreeSet::new(),
             assignment: HashMap::new(),
             generation: 0,
-            target_per_consumer,
+            default_target_per_consumer,
+            member_targets: HashMap::new(),
             assignor,
         }
     }
@@ -553,9 +597,11 @@ impl ConsumerGroupState {
         &mut self,
         partitions: Vec<Partition>,
         members: Vec<String>,
+        member_targets: HashMap<String, usize>,
     ) -> GroupAssignmentDelta {
         self.partitions = partitions;
         self.members = members.into_iter().collect();
+        self.member_targets = member_targets;
         self.rebalance()
     }
 
@@ -563,7 +609,8 @@ impl ConsumerGroupState {
         let result = self.assignor.assign(ConsumerGroupAssignmentInput {
             partitions: self.partitions.clone(),
             members: self.members.iter().cloned().collect(),
-            target_per_consumer: self.target_per_consumer,
+            default_target_per_consumer: self.default_target_per_consumer,
+            member_targets: self.member_targets.clone(),
         });
         let new_assignment = result.by_member;
 
@@ -646,18 +693,18 @@ impl ConsumerGroupKey {
 #[derive(Debug)]
 pub struct ExclusiveConsumerGroups {
     assignor: Arc<dyn ConsumerGroupAssignor>,
-    target_per_consumer: Option<usize>,
+    default_target_per_consumer: Option<usize>,
     groups: HashMap<ConsumerGroupKey, ConsumerGroupState>,
 }
 
 impl ExclusiveConsumerGroups {
     pub fn new(
         assignor: Arc<dyn ConsumerGroupAssignor>,
-        target_per_consumer: Option<usize>,
+        default_target_per_consumer: Option<usize>,
     ) -> Self {
         Self {
             assignor,
-            target_per_consumer,
+            default_target_per_consumer,
             groups: HashMap::new(),
         }
     }
@@ -671,7 +718,7 @@ impl ExclusiveConsumerGroups {
         member: impl Into<String>,
     ) -> GroupAssignmentDelta {
         let assignor = self.assignor.clone();
-        let target = self.target_per_consumer;
+        let target = self.default_target_per_consumer;
         let state = self
             .groups
             .entry(key)
@@ -683,17 +730,19 @@ impl ExclusiveConsumerGroups {
         state.add_member(member)
     }
 
-    /// Reconcile a group to an authoritative `(partitions, members)` view and
-    /// return the resulting delta. When `members` is empty the group is dropped
-    /// (its last member left); the returned delta reports everything revoked so
-    /// the caller can release any gates. This is the broker-side entry point: the
-    /// router recomputes the union of subscribed partitions and live members on
-    /// every change rather than tracking incremental join/leave.
+    /// Reconcile a group to an authoritative `(partitions, members, targets)` view
+    /// and return the resulting delta. When `members` is empty the group is
+    /// dropped (its last member left); the returned delta reports everything
+    /// revoked so the caller can release any gates. This is the broker-side entry
+    /// point: the router recomputes the union of subscribed partitions, live
+    /// members, and their soft targets on every change rather than tracking
+    /// incremental join/leave.
     pub fn reconcile(
         &mut self,
         key: ConsumerGroupKey,
         partitions: Vec<Partition>,
         members: Vec<String>,
+        member_targets: HashMap<String, usize>,
     ) -> GroupAssignmentDelta {
         if members.is_empty() {
             // Last member gone: tear the group down, reporting full revocation.
@@ -707,12 +756,12 @@ impl ExclusiveConsumerGroups {
             };
         }
         let assignor = self.assignor.clone();
-        let target = self.target_per_consumer;
+        let target = self.default_target_per_consumer;
         let state = self
             .groups
             .entry(key)
             .or_insert_with(|| ConsumerGroupState::new(partitions.clone(), target, assignor));
-        state.reconcile(partitions, members)
+        state.reconcile(partitions, members, member_targets)
     }
 
     /// Remove `member`; returns the delta, or `None` if the group was unknown.
@@ -1416,7 +1465,25 @@ mod tests {
         BalancedConsumerGroupAssignor.assign(ConsumerGroupAssignmentInput {
             partitions: (0..partitions).map(Partition::new).collect(),
             members: members.iter().map(|m| m.to_string()).collect(),
-            target_per_consumer: target,
+            default_target_per_consumer: target,
+            member_targets: HashMap::new(),
+        })
+    }
+
+    fn assign_with_targets(
+        partitions: u32,
+        members: &[&str],
+        default_target: Option<usize>,
+        member_targets: &[(&str, usize)],
+    ) -> ConsumerGroupAssignment {
+        BalancedConsumerGroupAssignor.assign(ConsumerGroupAssignmentInput {
+            partitions: (0..partitions).map(Partition::new).collect(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            default_target_per_consumer: default_target,
+            member_targets: member_targets
+                .iter()
+                .map(|(m, t)| (m.to_string(), *t))
+                .collect(),
         })
     }
 
@@ -1476,6 +1543,74 @@ mod tests {
             (0..9).collect::<Vec<_>>(),
             "coverage is never capped"
         );
+        assert!(assignment.under_provisioned);
+    }
+
+    fn member_load(assignment: &ConsumerGroupAssignment, member: &str) -> usize {
+        assignment.by_member.get(member).map_or(0, Vec::len)
+    }
+
+    #[test]
+    fn group_assignment_member_target_caps_one_member_others_absorb() {
+        // c1 caps itself at 1 partition; c2 is uncapped (no default) and absorbs
+        // the rest. Coverage is preserved and nobody is over their target.
+        let assignment = assign_with_targets(6, &["c1", "c2"], None, &[("c1", 1)]);
+        assert_eq!(member_load(&assignment, "c1"), 1, "c1 honors its soft cap");
+        assert_eq!(
+            member_load(&assignment, "c2"),
+            5,
+            "c2 absorbs the remainder"
+        );
+        let mut covered: Vec<u32> = assignment
+            .by_member
+            .values()
+            .flatten()
+            .map(|p| p.id())
+            .collect();
+        covered.sort();
+        assert_eq!(covered, (0..6).collect::<Vec<_>>());
+        assert!(
+            !assignment.under_provisioned,
+            "c2 is uncapped, so not under target"
+        );
+    }
+
+    #[test]
+    fn group_assignment_member_target_overrides_group_default() {
+        // Default target 2 for everyone, but c1 overrides to 4. With 6 partitions
+        // c1 takes up to 4 and c2 the rest; coverage preserved.
+        let assignment = assign_with_targets(6, &["c1", "c2"], Some(2), &[("c1", 4)]);
+        // Greedy keeps loads balanced until a cap binds: both fill to 2 (c1,c2),
+        // then only c1 may continue (c2 at its default cap of 2) up to c1's 4.
+        assert_eq!(
+            member_load(&assignment, "c1"),
+            4,
+            "c1's override raises its cap"
+        );
+        assert_eq!(
+            member_load(&assignment, "c2"),
+            2,
+            "c2 stays at the group default"
+        );
+        assert!(
+            !assignment.under_provisioned,
+            "both members land exactly at their cap (4 + 2 == 6), none over target"
+        );
+    }
+
+    #[test]
+    fn group_assignment_all_capped_below_total_overflows_and_flags() {
+        // Two members each capped at 1, three partitions: coverage forces one
+        // member over its cap and flags under-provisioned.
+        let assignment = assign_with_targets(3, &["c1", "c2"], None, &[("c1", 1), ("c2", 1)]);
+        let mut covered: Vec<u32> = assignment
+            .by_member
+            .values()
+            .flatten()
+            .map(|p| p.id())
+            .collect();
+        covered.sort();
+        assert_eq!(covered, vec![0, 1, 2], "coverage wins over capacity");
         assert!(assignment.under_provisioned);
     }
 
@@ -1595,7 +1730,12 @@ mod tests {
         let key = ConsumerGroupKey::new("jobs", None, "g1");
 
         // One member covers everything.
-        registry.reconcile(key.clone(), parts(4), vec!["c1".to_string()]);
+        registry.reconcile(
+            key.clone(),
+            parts(4),
+            vec!["c1".to_string()],
+            HashMap::new(),
+        );
         assert_eq!(
             sorted_ids(registry.assignment_for(&key, "c1")),
             vec![0, 1, 2, 3]
@@ -1606,6 +1746,7 @@ mod tests {
             key.clone(),
             parts(4),
             vec!["c1".to_string(), "c2".to_string()],
+            HashMap::new(),
         );
         let mut covered = sorted_ids(registry.assignment_for(&key, "c1"));
         covered.extend(sorted_ids(registry.assignment_for(&key, "c2")));
@@ -1619,10 +1760,15 @@ mod tests {
     fn exclusive_registry_reconcile_to_no_members_drops_group() {
         let mut registry = exclusive_groups();
         let key = ConsumerGroupKey::new("jobs", None, "g1");
-        registry.reconcile(key.clone(), parts(2), vec!["c1".to_string()]);
+        registry.reconcile(
+            key.clone(),
+            parts(2),
+            vec!["c1".to_string()],
+            HashMap::new(),
+        );
 
         // Emptying membership reports full revocation and drops the group.
-        let delta = registry.reconcile(key.clone(), parts(2), Vec::new());
+        let delta = registry.reconcile(key.clone(), parts(2), Vec::new(), HashMap::new());
         let c1 = &delta.per_member["c1"];
         assert!(c1.assigned.is_empty());
         assert_eq!(sorted_ids(&c1.revoked), vec![0, 1]);

@@ -693,6 +693,9 @@ struct InstallSubscriptionArgs {
     /// behavior; `Some(id)` joins the cohort that exclusively divides the
     /// queue's partitions.
     consumer_group: Option<String>,
+    /// Soft per-consumer target for the exclusive cohort (member's desired max
+    /// partitions). Ignored without `consumer_group`.
+    consumer_target: Option<usize>,
 }
 
 async fn install_subscription(
@@ -737,6 +740,7 @@ async fn install_subscription(
             consumer_group,
             args.client_id.to_string(),
             sub_id,
+            args.consumer_target,
         );
     }
 
@@ -907,6 +911,7 @@ async fn reconcile_subscriptions(
                     // (not part of ReconcileSubscription); restored subs rejoin
                     // as competing until the client re-subscribes with the id.
                     consumer_group: None,
+                    consumer_target: None,
                 })
                 .await;
 
@@ -2045,6 +2050,7 @@ pub async fn handle_connection(
                     prefetch: sub.prefetch,
                     auto_ack: sub.auto_ack,
                     consumer_group: sub.consumer_group,
+                    consumer_target: sub.consumer_target.map(|target| target as usize),
                 })
                 .await;
 
