@@ -16,11 +16,11 @@ continuous monitoring.
 ## Overview And Diagnostics
 
 The overview page is intentionally curated. It shows broker throughput, process
-resource use, reconnect outcomes, and a small set of Stroma timing and health
-signals that help answer whether storage or queue actors are backing up.
+resource use, reconnect outcomes, and a small set of storage and queue health
+signals that help answer whether queue processing or persistence is backing up.
 
-The diagnostics page shows the wider Stroma metrics snapshot: command lane
-depths and timings, command-kind counters, event-log append stats, snapshot
+The diagnostics page shows lower-level storage and queue metrics, including
+command-lane depths and timings, command-kind counters, append stats, snapshot
 cost, and recovery counters. Use it when the overview suggests pressure and you
 need the next level of detail.
 

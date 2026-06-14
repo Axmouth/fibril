@@ -23,7 +23,7 @@ Memory usage during these runs ranged from a few hundred MB at lower load to rou
 These numbers are useful mostly as a sanity check:
 
 - the durable path is not obviously too slow
-- batching and the actor-like queue model are promising
+- batching and the queue execution model are promising
 - memory behavior still needs tuning
 - larger payloads will shift bottlenecks toward memory, copying, storage, and network I/O
 
@@ -118,7 +118,7 @@ prints a compact summary including publish and confirmation error counts plus
 server RSS average and peak sampled during the benchmark run.
 
 The wrapper starts a local `fibril-server` on the default broker and admin
-ports. Run one wrapper benchmark at a time; a second run will fail if those
+ports. Run one wrapper benchmark at a time. A second run will fail if those
 ports are already occupied.
 
 When `CONFIRMED=1`, writers still run with pipelined publish confirmations by
@@ -224,7 +224,7 @@ Pipelined confirmed publishes follow the same pattern. With
 `CONFIRM_WINDOW=1024`, a 400k/s target reached about 385k/s. Raising the window
 to `4096` reached the 400k/s target, and 450k/s also reached target, but latency
 rose into the 1-2 second range. Larger windows are useful for saturating the
-path while preserving publish confirmation correctness; they are not a latency
+path while preserving publish confirmation correctness. They are not a latency
 optimization.
 
 Payload-size spot checks on the same SATA SSD development machine:
@@ -232,12 +232,12 @@ Payload-size spot checks on the same SATA SSD development machine:
 | Payload | Target rate | Actual measured rate | Missing | publish→deliver p50/p95/p99/max | Server RSS avg/peak | Notes |
 | ---: | ---: | ---: | ---: | --- | --- | --- |
 | 8KB | 50k/s | 50,010/s | 0 | 14 / 17 / 19 / 61 ms | not sampled | Clean short run |
-| 8KB | 150k/s | 139,987/s | 0 | 2608 / 3117 / 3168 / 3245 ms | not sampled | Could not reach target; backlog-driven |
+| 8KB | 150k/s | 139,987/s | 0 | 2608 / 3117 / 3168 / 3245 ms | not sampled | Could not reach target, backlog-driven |
 | 64KB | 10k/s | 10,000/s | 0 | 18 / 22 / 23 / 32 ms | not sampled | Clean short run |
-| 64KB | 20k/s | 18,285/s | 0 | 1605 / 1891 / 2144 / 2277 ms | not sampled | Could not reach target; likely storage-bandwidth bound |
+| 64KB | 20k/s | 18,285/s | 0 | 1605 / 1891 / 2144 / 2277 ms | not sampled | Could not reach target, likely storage-bandwidth bound |
 | 512KB | 1k/s | 999/s | 0 | 27 / 34 / 39 / 47 ms | 262.9 / 310.2 MiB | Clean short run |
 | 512KB | 2k/s | 2,000/s | 0 | 1165 / 1669 / 1756 / 1841 ms | 951.4 / 1538.0 MiB | Drains, but backlog-driven |
-| 1MB | 500/s | 498/s | 0 | 33 / 45 / 51 / 63 ms | ~290 / ~334 MiB | Clean short run; reruns varied slightly |
+| 1MB | 500/s | 498/s | 0 | 33 / 45 / 51 / 63 ms | ~290 / ~334 MiB | Clean short run. Reruns varied slightly |
 | 1MB | 1k/s | 1,000/s | 0 | 1812 / 2539 / 2693 / 2801 ms | 847.0 / 1187.5 MiB | Drains, but backlog-driven |
 
 For larger payloads, the bottleneck shifts away from message scheduling and

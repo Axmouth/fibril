@@ -10,7 +10,7 @@ For a more detailed checklist of what is wired and what conditions apply, see
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Durable queues | Available | Append-only message and event logs, snapshot, and replay |
+| Durable queues | Available | Durable message storage, queue state, snapshots, and replay |
 | Publish and subscribe | Available | Custom TCP protocol, Rust client, and TypeScript client |
 | Explicit settlement | Available | ACK, fail, immediate retry, and delayed retry paths |
 | Leasing | Available | Expired leases can return to ready |
@@ -20,8 +20,8 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Sparse queues | Available | Lazy loading and idle cleanup are wired, observability is still growing |
 | Message inspection | Available | Browse active queue messages from admin tooling, with optional settled offsets and payload previews |
 | Partitioned queues | Available | Declared queues can have multiple partitions, with client-side key routing and transparent fan-in |
-| Partition ownership | Experimental | Ganglion-backed coordination can assign owners and followers, with owner fencing and not-owner redirects |
-| Replication | Experimental | Follower pull replication, failover promotion, ISR checks, and replica-durable confirms are wired on this branch |
+| Partition ownership | Experimental | Embedded coordination can assign queue ownership, fence stale owners, and redirect clients to the current owner |
+| Replication | Experimental | Follower pull replication, failover promotion, in-sync checks, and replica-durable confirms are wired on this branch |
 | Exclusive consumer groups | Partial | Rust client opt-in for one active consumer per partition, with sticky assignment and cross-broker coordinator wiring |
 | Transactions | Out of scope | Not planned. Transactional publish/consume workflows are intentionally excluded |
 

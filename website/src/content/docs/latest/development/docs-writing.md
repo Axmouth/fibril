@@ -17,6 +17,17 @@ Avoid making regular concept pages depend on internal names such as queue actors
 
 Implementation detail is still useful, but it belongs in development notes. User-facing pages can link there with clear wording so readers know they are choosing a deeper design explanation, not the next required step.
 
+Use the docs sections deliberately:
+
+- `concepts`, `reliability`, `configuration`, `quickstart`, `clients`, and
+  `admin-dashboard` should explain what users can do and what behavior they can
+  rely on.
+- `status` should be a concise user-facing feature matrix.
+- `implemented-surface` can be more detailed, but should still say which client
+  or operator path is wired before naming internals.
+- `development` is the right place for implementation mechanisms, tradeoff
+  records, and future design policies.
+
 Keep the [roadmap](/latest/roadmap/) current as work lands. It should be the
 short checkpoint for what changed recently and what remains pending, even when
 the detailed docs for a feature live elsewhere.

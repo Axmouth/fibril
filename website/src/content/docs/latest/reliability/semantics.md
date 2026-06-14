@@ -7,11 +7,11 @@ Fibril currently targets best-effort at-least-once delivery.
 
 ## Durability
 
-Queue state is backed by append-only logs through Keratin:
+Fibril stores message payloads and queue state durably. Recovery is based on:
 
-- message log
-- event and state log
-- snapshot and replay
+- persisted message records
+- persisted queue-state records
+- snapshots and replay
 
 Commands are designed to be idempotent and replay-safe.
 

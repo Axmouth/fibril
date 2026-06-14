@@ -54,10 +54,10 @@ their own audit documents so this file stays useful as a status board.
   - Next: add cluster benchmark profiles for replica-durable confirms,
     follower catch-up, partitioned fan-in, and redirects.
 - [ ] User-facing documentation shape
-  - Status: Pending
-  - Detail: not started
-  - Next: audit that user docs explain behavior and operations, while internals
-    stay in development docs.
+  - Status: Audited
+  - Detail: [USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md](USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md)
+  - Next: add a clustered queues and replication explainer, then keep TypeScript
+    examples scoped to the single-owner API until the parity pass lands.
 
 ## Single-Node Guardrail
 

@@ -25,13 +25,13 @@ At the state layer, this removes the offset from inflight, increments the retry 
 
 ## Lease expiry
 
-When a message is delivered, it becomes inflight with a lease deadline. If the consumer disappears or does not settle the message, the broker expiry worker asks Stroma to collect expired inflight offsets and returns them to ready.
+When a message is delivered, it becomes inflight with a lease deadline. If the consumer disappears or does not settle the message, the broker checks for expired inflight messages and returns them to ready.
 
 This is the core failure-recovery path for best-effort at-least-once delivery.
 
 ## Delayed publish
 
-Stroma has durable delayed-enqueue state. Offsets can be held until `not_before`, and delayed enqueue state is included in snapshots.
+Fibril persists delayed-delivery state. Messages can be held until `not_before`, and delayed-delivery state is included in recovery snapshots.
 
 The Rust and TypeScript clients expose delayed publish methods:
 
