@@ -6,7 +6,7 @@ use fibril::{
 use fibril_admin::{AdminConfig, AdminServer, StartupConfigSummary};
 use fibril_broker::{
     broker::{Broker, BrokerConfig},
-    coordination::StaticCoordination,
+    coordination::{Coordination, StaticCoordination},
     queue_engine::{KeratinConfig, SnapshotConfig, StromaEngine},
     runtime_settings::{RuntimeSettingsLocks, RuntimeSettingsManager},
 };
@@ -264,9 +264,81 @@ async fn main() -> anyhow::Result<()> {
                         );
                     }
                 }
+                // Advertise this broker's exclusive-cohort membership so the
+                // controller can compute one cluster-wide assignment per cohort.
+                let cohorts = tails_broker.local_cohort_membership();
+                if !cohorts.is_empty() {
+                    labels.insert(
+                        fibril_coordination_ganglion::COHORT_MEMBERSHIP_LABEL.to_string(),
+                        fibril_coordination_ganglion::encode_cohort_membership(&cohorts),
+                    );
+                }
                 labels
             },
         );
+
+        // Leader-gated cohort controller: aggregate cluster-wide cohort membership
+        // from heartbeat labels and publish one balanced/sticky plan per cohort
+        // for owners to apply. Standbys no-op (the tick checks leadership).
+        {
+            let coordination = parts.coordination.clone();
+            let default_target = runtime.consumer_groups.default_target_per_consumer;
+            let tick_ms = config.coordination.ganglion.heartbeat_interval_ms;
+            tokio::spawn(async move {
+                let mut controller = fibril_broker::coordination::ClusterCohortController::new(
+                    Arc::new(fibril_broker::coordination::StickyConsumerGroupAssignor),
+                    default_target,
+                );
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(tick_ms)).await;
+                    let count_of = |key: &fibril_broker::coordination::ConsumerGroupKey| {
+                        coordination
+                            .queue_partitioning(&key.topic, key.group.as_deref())
+                            .map(|partitioning| partitioning.partition_count)
+                            .unwrap_or(1)
+                    };
+                    if let Err(error) = coordination
+                        .run_cohort_controller_tick(&mut controller, count_of)
+                        .await
+                    {
+                        tracing::debug!(%error, "cohort controller tick deferred; will retry");
+                    }
+                }
+            });
+        }
+
+        // Owner watcher: when the committed snapshot changes (incl. a newly
+        // published cohort plan), apply each local cohort's assignment to the
+        // partitions this node owns. Local computation governs until the
+        // controller's first plan arrives.
+        {
+            let coordination = parts.coordination.clone();
+            let watch_broker = broker.clone();
+            let mut snapshot = coordination.watch();
+            tokio::spawn(async move {
+                loop {
+                    for cohort in watch_broker.local_cohort_membership() {
+                        let key = fibril_broker::coordination::ConsumerGroupKey::new(
+                            cohort.topic.clone(),
+                            cohort.group.as_deref(),
+                            cohort.consumer_group.clone(),
+                        );
+                        let plan = coordination.cohort_assignment(&key);
+                        if !plan.is_empty() {
+                            watch_broker.apply_exclusive_assignment(
+                                &cohort.topic,
+                                cohort.group.as_deref(),
+                                &cohort.consumer_group,
+                                plan,
+                            );
+                        }
+                    }
+                    if snapshot.changed().await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
     }
     let connection_settings = ConnectionSettings::new(None)
         .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms)
