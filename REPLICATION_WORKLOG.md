@@ -14,7 +14,8 @@ no-phase-labels-in-code) — worklog .md is fine.
 
 WHAT'S DONE — opt-in exclusive consumer groups (cohorts), single-node fully
 working + cross-broker correctness verified; the cross-broker COORDINATOR is built
-as composable, tested pieces — ONLY the server-bootstrap spawns remain.
+AND fully wired into the server bootstrap. Only remaining: a multi-node e2e (needs
+server.rs-refactor-b to make the bootstrap testable — see NEXT).
 - Mechanism = per-partition delivery GATE (`QueueLoopState.exclusive_assignee`,
   AtomicU64). Default (no `consumer_group`) = competing consumers, untouched.
 - Client API: `subscribe(t).exclusive()` (id-free) + `.consumer_target(n)`;
@@ -32,25 +33,25 @@ as composable, tested pieces — ONLY the server-bootstrap spawns remain.
   publish_cohort_assignment / cohort_assignment / run_cohort_controller_tick
   (leader-gated). Live single-node tests cover roundtrip + full tick.
 
-NEXT — 4 server-bootstrap spawns (everything they call is built + tested; explore
-server.rs, where coordination/heartbeat/watcher are wired — also pending
-"server.rs refactor b"):
-  1. Heartbeat label: in the `spawn_heartbeat_with_labels` labels closure, insert
-     `COHORT_MEMBERSHIP_LABEL -> coordination_ganglion::encode_cohort_membership(
-     broker.local_cohort_membership())`.
-  2. Controller spawn: periodic task holding ONE `ClusterCohortController`
-     (Arc<StickyConsumerGroupAssignor>, default target from settings), calling
-     `coordination.run_cohort_controller_tick(&mut ctrl, |key| <partition count
-     from queue_partitioning(key)>)`.
-  3. Owner watcher: on committed-snapshot change, for cohorts with a published
-     `coordination.cohort_assignment(key)`, call
-     `broker.apply_exclusive_assignment(topic, group, consumer_group, plan)` for the
-     partitions this node owns. Hook into the existing become-owner/assignment
-     watcher.
-  4. Multi-node integration test (ganglion harness like
-     ganglion_coordination_drives_supervised_follower_replication): 2 brokers,
-     partitions split, a cohort spanning both -> globally balanced; drop a consumer
-     -> rebalances.
+DONE — server-bootstrap spawns (2e5f52a, crates/fibril/bin/server.rs, cluster
+block): (1) heartbeat closure advertises COHORT_MEMBERSHIP_LABEL =
+encode_cohort_membership(broker.local_cohort_membership()); (2) leader-gated
+cohort controller task holding one ClusterCohortController calling
+run_cohort_controller_tick (partition counts from queue_partitioning); (3) owner
+watcher: on coordination.watch() change, for each local cohort apply
+cohort_assignment -> apply_exclusive_assignment for owned partitions. Cluster-only;
+single-node untouched. The cross-broker cohort coordinator is now FULLY WIRED.
+
+NEXT — multi-node integration test for the coordinator. BLOCKED/PAIR WITH
+"server.rs refactor b": the spawns live in server.rs `main` (not test-reachable);
+extract the cluster bootstrap into the `fibril` lib so a test can stand up 2
+broker+coordination nodes and drive it. Then the e2e (ganglion harness like
+ganglion_coordination_drives_supervised_follower_replication): 2 brokers,
+partitions split across owners, a cohort spanning both -> globally balanced
+(the thing per-broker-local can't do); drop a consumer -> rebalances. Until then
+the coordinator's pieces are each unit/integration-tested + the wiring compiles
+and composes them; single-node + cross-broker-correctness paths are covered by
+existing e2es.
 INVARIANTS: gate is the correctness backstop, so the global plan is advisory/
 eventually-consistent (≈1 heartbeat lag affects balance only, never correctness;
 a departed member's partitions pause, never mis-deliver). Single-node unaffected
