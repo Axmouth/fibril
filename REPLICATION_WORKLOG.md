@@ -2061,3 +2061,12 @@ Tests needed before implementing transition:
    - FAR BACK: load-aware REBALANCE (act on load to move partitions) — very
      late, play safe, trends-not-spikes, generous hysteresis.
    - DEEP BACKLOG: client load-aware publish routing (keyless-only, P2C).
+     P2C = "Power of Two Choices": to route a keyless publish, sample TWO random
+     candidate partitions and send to the less-loaded of the two (by ready/
+     backlog hint), instead of the globally least-loaded (which herds: every
+     client stampedes the same hint, worsened by staleness) or pure random
+     (poor balance). Result ("power of two random choices", Mitzenmacher/Azar):
+     expected max load drops from ~log n/log log n (random) to ~log log n —
+     exponential improvement — for O(1) work, no coordination, and tolerance to
+     stale hints (the 2nd sample breaks herds). Used by nginx/HAProxy/gRPC
+     least-request. Keyed publishes ignore it (stay hash(key)%N deterministic).
