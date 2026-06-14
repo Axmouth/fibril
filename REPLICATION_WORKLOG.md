@@ -2033,11 +2033,16 @@ Tests needed before implementing transition:
   per-partition server publish logs; partition-aware subscribe + transparent
   client fan-in (assignment-set ready for groups); connect-time topology warm;
   e2e isolation test. Remaining within reach but separable:
-  NEXT CANDIDATES (recalc):
-  1. Consumer-group coverage-first rebalancer — distribute partitions across group
-     members so fan-in consumes an assigned SUBSET (not all). The fan-in +
-     partition_set were built for this (see memory consumer-partition-assignment-
-     model + subscription-fanin-model). BIG new sub-project; highest feature value.
+  NEXT CANDIDATES (recalc; Phase 1 assignor DONE d91a23a):
+  1. Consumer-group rebalancer Phase 2 — membership (live members via liveness/
+     lease) -> recompute on join/leave/expire -> push assignments -> client
+     narrows fan-in partition_set to its subset -> GRACEFUL DRAIN on revoke/leave
+     (pause + settle in-flight before release; see consumer-partition-assignment-
+     model). The assignor (Phase 1) + fan-in + partition_set are built for this.
+  1b. Per-consumer target override (NEAR-TERM, easy, isolated): generalize the
+     assignor's global target_per_consumer into per-member weights (weighted deal,
+     still coverage-first soft-signal). Adjacent to / part of Phase 2. See
+     load-aware-future-direction memory.
   2. server.rs refactor "b" (coordination bootstrap/spawns/admin wiring ->
      fibril lib.rs) — organizational, was deferred to end of Phase B (now).
   3. Gated auto-create-on-first-publish (deferred follow-on).
@@ -2049,4 +2054,10 @@ Tests needed before implementing transition:
      implemented-surface docs page up to date with what's shipped.
   PLACEMENT (locked in, memory placement-spreads-partitions-first): cluster
   partition placement already spreads a queue's partitions across distinct nodes
-  before reusing a node (small-cluster balance). Add an explicit test to lock it.
+  before reusing a node (small-cluster balance). Locked with a test (d91a23a).
+  LOAD-AWARE (memory load-aware-future-direction; advisory, off-raft, trends):
+   - EARLIER-ish: load metadata COLLECTION (per-node score + per-queue activity)
+     — doubles as observability; collect+expose before anything rebalances on it.
+   - FAR BACK: load-aware REBALANCE (act on load to move partitions) — very
+     late, play safe, trends-not-spikes, generous hysteresis.
+   - DEEP BACKLOG: client load-aware publish routing (keyless-only, P2C).
