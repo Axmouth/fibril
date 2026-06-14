@@ -25,11 +25,10 @@ their own audit documents so this file stays useful as a status board.
   - Detail: not started
   - Next: decide whether Fibril needs replicated locks or policy for selected
     cluster runtime settings. Keep hardware-shaped startup settings local.
-- [ ] Single-node behavior
-  - Status: Pending
-  - Detail: not started
-  - Next: audit that clustered features stay optional and standalone mode remains
-    the simplest, smoothest path.
+- [x] Single-node behavior
+  - Status: Addressed
+  - Detail: [SINGLE_NODE_GUARDRAIL_AUDIT.md](SINGLE_NODE_GUARDRAIL_AUDIT.md)
+  - Next: add a broader single-node scenario runner with the end-to-end harness.
 - [ ] Replication and sharding transition safety
   - Status: Pending
   - Detail: use [REPLICATION_WORKLOG.md](REPLICATION_WORKLOG.md) as source context

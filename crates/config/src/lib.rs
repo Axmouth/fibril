@@ -881,6 +881,26 @@ mod tests {
     }
 
     #[test]
+    fn static_mode_allows_node_local_runtime_locks() {
+        let config = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [coordination]
+            mode = "static"
+
+            [runtime_locks]
+            idle_queue_cleanup = true
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.coordination.mode, CoordinationMode::Static);
+        assert!(config.runtime_locks.idle_queue_cleanup);
+    }
+
+    #[test]
     fn runtime_seed_validation_matches_runtime_settings_rules() {
         let err = ServerConfig::from_toml_str(
             r#"

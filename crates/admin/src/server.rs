@@ -1092,8 +1092,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_settings_put_updates_settings() {
+    async fn runtime_settings_put_updates_local_settings_without_cluster_store() {
         let server = test_server(RuntimeSettingsLocks::default()).await;
+        assert!(server.runtime_settings_cluster.is_none());
+        let runtime_settings = server.runtime_settings.as_ref().unwrap().clone();
         let app = AdminServer::router(server);
 
         let response = app
@@ -1135,6 +1137,10 @@ mod tests {
         assert_eq!(body["version"], 2);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 12_000);
         assert_eq!(body["settings"]["connection"]["reconnect_grace_ms"], 30_000);
+        assert_eq!(
+            runtime_settings.current().settings.delivery.inflight_ttl_ms,
+            12_000
+        );
     }
 
     #[tokio::test]
