@@ -1070,6 +1070,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topology_page_escapes_operator_supplied_labels() {
+        let server = test_server_with_auth(RuntimeSettingsLocks::default(), None).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("function escapeHtml"));
+        assert!(body.contains("escapeHtml(assignment.topic)"));
+        assert!(body.contains("escapeHtml(assignment.group"));
+        assert!(body.contains("escapeHtml(coordination.node_id)"));
+    }
+
+    #[tokio::test]
     async fn auth_disabled_pages_show_status_without_logout() {
         let server = test_server_with_auth(RuntimeSettingsLocks::default(), None).await;
         let app = AdminServer::router(server);

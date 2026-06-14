@@ -49,20 +49,31 @@ function el(name, attrs, text) {
   return node;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 function renderSummary(data) {
   const coordination = data.coordination;
   const raft = data.raft;
   const parts = [];
   if (coordination) {
-    parts.push(`reporting node <b>${coordination.node_id}</b>`);
-    parts.push(`generation <b>${coordination.generation}</b>`);
-    parts.push(`${coordination.nodes.length} broker(s), ${coordination.assignments.length} assignment(s)`);
+    parts.push(`reporting node <b>${escapeHtml(coordination.node_id)}</b>`);
+    parts.push(`generation <b>${escapeHtml(coordination.generation)}</b>`);
+    parts.push(`${escapeHtml(coordination.nodes.length)} broker(s), ${escapeHtml(coordination.assignments.length)} assignment(s)`);
   } else {
     parts.push("no coordination provider attached");
   }
   if (raft) {
-    parts.push(`raft: leader <b>${raft.leader ?? "none"}</b>, voters [${raft.voters.join(", ")}]` +
-      (raft.learners.length ? `, learners [${raft.learners.join(", ")}]` : ""));
+    const voters = (raft.voters ?? []).map(escapeHtml).join(", ");
+    const learners = (raft.learners ?? []).map(escapeHtml).join(", ");
+    parts.push(`raft: leader <b>${escapeHtml(raft.leader ?? "none")}</b>, voters [${voters}]` +
+      (learners ? `, learners [${learners}]` : ""));
   }
   document.getElementById("topology-summary").innerHTML = parts.join(" · ");
 }
@@ -150,12 +161,12 @@ function renderAssignments(data) {
   const assignments = data.coordination?.assignments ?? [];
   body.innerHTML = assignments.map((assignment) => `
     <tr>
-      <td>${assignment.topic}</td>
-      <td>${assignment.partition}</td>
-      <td>${assignment.group ?? "-"}</td>
-      <td>${assignment.owner}</td>
-      <td>${assignment.followers.join(", ") || "-"}</td>
-      <td class="text-right">${assignment.epoch}</td>
+      <td>${escapeHtml(assignment.topic)}</td>
+      <td>${escapeHtml(assignment.partition)}</td>
+      <td>${escapeHtml(assignment.group ?? "-")}</td>
+      <td>${escapeHtml(assignment.owner)}</td>
+      <td>${escapeHtml(assignment.followers.join(", ") || "-")}</td>
+      <td class="text-right">${escapeHtml(assignment.epoch)}</td>
     </tr>`).join("") || `<tr><td colspan="6" style="color:#8a93a6">no assignments yet</td></tr>`;
 }
 

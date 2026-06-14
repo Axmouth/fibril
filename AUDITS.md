@@ -39,10 +39,11 @@ their own audit documents so this file stays useful as a status board.
   - Detail: [GANGLION_INTEGRATION_BOUNDARY_AUDIT.md](GANGLION_INTEGRATION_BOUNDARY_AUDIT.md)
   - Next: defer dedupe until a helper is clearly domain-neutral and reused.
 - [ ] Admin operations surface
-  - Status: Pending
-  - Detail: not started
-  - Next: audit settings, auth, message inspection, DLQ replay, and cluster
-    topology from an operator perspective.
+  - Status: Audited
+  - Detail: [ADMIN_OPERATIONS_SURFACE_AUDIT.md](ADMIN_OPERATIONS_SURFACE_AUDIT.md)
+  - Next: make message inspection status filtering explicit, either with a
+    bounded admin-side scan-fill loop or a response/UI note that filtering
+    happens after a bounded page read.
 - [ ] Client API parity
   - Status: Pending
   - Detail: not started
