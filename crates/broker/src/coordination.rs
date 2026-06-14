@@ -1855,6 +1855,145 @@ mod tests {
         )
     }
 
+    fn sticky_state(partitions: u32) -> ConsumerGroupState {
+        ConsumerGroupState::new(
+            (0..partitions).map(Partition::new).collect(),
+            None,
+            Arc::new(StickyConsumerGroupAssignor),
+        )
+    }
+
+    /// Min and max member load across the cohort's current assignment.
+    fn load_spread(state: &ConsumerGroupState, members: &[String]) -> (usize, usize) {
+        let loads: Vec<usize> = members
+            .iter()
+            .map(|m| state.assignment_for(m).len())
+            .collect();
+        (
+            loads.iter().copied().min().unwrap_or(0),
+            loads.iter().copied().max().unwrap_or(0),
+        )
+    }
+
+    fn member_ids(prefix: &str, count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("{prefix}{i:04}")).collect()
+    }
+
+    #[test]
+    fn sticky_large_scale_add_member_moves_only_to_newcomer() {
+        // 100 members over 1000 partitions, then one joins. Stickiness guarantees
+        // the join moves the MINIMUM: only the newcomer gains; every existing
+        // member only sheds (never gains), and everything it sheds goes to the
+        // newcomer. This is optimal — you cannot add a member without handing it
+        // ~N/(M+1) partitions.
+        let partitions = 1000u32;
+        let mut state = sticky_state(partitions);
+        let members = member_ids("c", 100);
+        state.set_members(members.clone());
+
+        let delta = state.add_member("c0100");
+        let newcomer = &delta.per_member["c0100"];
+        assert!(
+            newcomer.revoked.is_empty(),
+            "the newcomer starts from nothing"
+        );
+        assert_eq!(
+            newcomer.added.len(),
+            newcomer.assigned.len(),
+            "all of the newcomer's partitions are freshly added"
+        );
+
+        let mut total_shed = 0;
+        for member in &members {
+            let change = &delta.per_member[member];
+            assert!(
+                change.added.is_empty(),
+                "no existing member gains partitions on a join"
+            );
+            total_shed += change.revoked.len();
+        }
+        assert_eq!(
+            total_shed,
+            newcomer.added.len(),
+            "everything shed by existing members goes to the newcomer"
+        );
+
+        // Still balanced (within one) and fully covered.
+        let all_members = member_ids("c", 101);
+        let (min, max) = load_spread(&state, &all_members);
+        assert!(
+            max - min <= 1,
+            "balanced within one partition (got {min}..{max})"
+        );
+    }
+
+    #[test]
+    fn sticky_large_scale_remove_member_only_orphans_move() {
+        // 100 members over 1000 partitions, then one leaves. Survivors keep ALL
+        // their partitions; only the departed member's partitions are
+        // redistributed.
+        let partitions = 1000u32;
+        let mut state = sticky_state(partitions);
+        let members = member_ids("c", 100);
+        state.set_members(members.clone());
+
+        let departing = "c0050";
+        let departed_load = state.assignment_for(departing).len();
+        let delta = state.remove_member(departing);
+
+        let departed = &delta.per_member[departing];
+        assert!(departed.added.is_empty());
+        assert_eq!(
+            departed.revoked.len(),
+            departed_load,
+            "departed loses all it held"
+        );
+
+        let mut total_gained = 0;
+        for member in &members {
+            if member == departing {
+                continue;
+            }
+            let change = &delta.per_member[member];
+            assert!(
+                change.revoked.is_empty(),
+                "survivors keep every partition they held"
+            );
+            total_gained += change.added.len();
+        }
+        assert_eq!(
+            total_gained, departed_load,
+            "the departed member's partitions are fully redistributed"
+        );
+    }
+
+    #[test]
+    fn sticky_scales_to_hundreds_of_members_balanced_and_covered() {
+        // 300 members over 5000 partitions: full coverage, balanced within one.
+        let partitions = 5000u32;
+        let mut state = sticky_state(partitions);
+        let members = member_ids("m", 300);
+        state.set_members(members.clone());
+
+        let mut covered: HashSet<u32> = HashSet::new();
+        for member in &members {
+            for p in state.assignment_for(member) {
+                assert!(covered.insert(p.id()), "no partition assigned twice");
+            }
+        }
+        assert_eq!(
+            covered.len(),
+            partitions as usize,
+            "every partition covered exactly once"
+        );
+
+        let (min, max) = load_spread(&state, &members);
+        assert!(
+            max - min <= 1,
+            "balanced within one partition (got {min}..{max})"
+        );
+    }
+
     fn sorted_ids(parts: &[Partition]) -> Vec<u32> {
         let mut ids: Vec<u32> = parts.iter().map(|p| p.id()).collect();
         ids.sort();
