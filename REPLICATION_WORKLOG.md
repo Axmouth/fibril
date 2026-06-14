@@ -64,10 +64,33 @@ imbalance, never double-deliver; fits load-aware-future-direction off-raft stanc
   5. STICKINESS ACROSS OWNER MOVES: when a partition's owner changes (failover/
      rebalance) the new owner has no `current` -> cold reassign. Coordinator carries
      the global assignment so the new owner restores the prior assignee.
-DESIGN: controller aggregates cohort membership off-raft (gossip/heartbeat) keyed by
-the cluster member id, computes global (partition->member) with the sticky/target
-assignor, distributes per-partition assignees to owner brokers which set local
-gates. Gate remains the correctness backstop.
+  OWNER APPLY-PATH (brick 2, a6c52ae) — DONE: Broker::apply_exclusive_assignment
+  (topic, group, consumer_group, partition->member id) installs a coordinator plan;
+  ExclusiveGroupRouter.external overrides local computation — join/leave/apply
+  resolve gates from the plan (assigned member -> local sub_id; unsubscribed
+  assignee left untouched). Additive: single-node never populates it. 3 white-box
+  router tests. This is the owner-side hook the coordinator drives.
+
+REMAINING coordinator bricks (build on apply-path + member identity):
+  A. Global plan computation — reuse the sticky/target assignor over GLOBAL
+     (full partition set, global members+targets, prior global plan for sticky-
+     across-owner-moves) -> partition->member. Mostly reuse; thin.
+  B. Membership aggregation (transport in): each broker's local cohort membership
+     (cohort -> member ids, with targets) must reach the controller. OPEN DECISION
+     (transport): (i) heartbeat node labels (bounded-rate, already replicated via
+     coordination), (ii) replicated cluster attributes (CAS, exists), or (iii) a
+     dedicated off-raft gossip. Membership is high-churn -> prefer bounded-rate/
+     advisory; the gate is the correctness backstop so the plan can be eventually-
+     consistent. Cross-repo (ganglion generic vs fibril glue).
+  C. Distribution (transport out): controller's per-(cohort,partition) assignee
+     -> owner brokers -> apply_exclusive_assignment. Likely rides the same channel
+     as B / the controller loop (spawn_controller already leader-gated).
+  D. Controller integration: run cohort planning in the leader-gated controller
+     tick alongside placement; partition counts from the catalogue/partitioning
+     metadata; live members from B.
+DESIGN: gate remains the correctness backstop, so the global plan is advisory/
+eventually-consistent. Decide the B/C transport before building (see memory
+load-aware-future-direction off-raft stance).
 
 DONE — Phase 2a (opt-in exclusive consumer groups, single-owner), Model A (client
 fan-in + per-partition consumer_group; server gates each partition to the assigned
