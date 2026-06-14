@@ -81,7 +81,7 @@ See also: [client usage](/latest/clients/) and
 | Content type metadata | Implemented | Protocol metadata, Rust client, TypeScript client, delivery path |
 | Reserved metadata headers | Implemented | Broker protocol handler rejects `fibril.*` and `stroma.*` user headers |
 | Partition key routing | Implemented | Rust client `NewMessage::partition_key`, protocol publish metadata, server per-partition publish routing |
-| Partitioning-version fence | Implemented | Client stamps routed version; server redirects stale publishes before appending |
+| Partitioning-version fence | Implemented | Client stamps routed version, and server redirects stale publishes before appending |
 
 Conditions and limits:
 
@@ -109,8 +109,8 @@ See also: [backpressure](/latest/concepts/backpressure/) and
 | Backpressure | Implemented | Pull-based delivery bounded by prefetch |
 | Unsubscribe redistribution | Implemented | Broker tests cover prefetched unacked messages returning to active subscribers |
 | Competing consumers (default) | Implemented | Many consumers per queue, fair dispatch, unordered |
-| Exclusive consumer groups | Partial | `.exclusive()` Rust client + TCP protocol; per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
-| Cross-broker cohort coordination | Partial | Member identity + controller (aggregate→plan→publish) + owner apply all wired in cluster bootstrap; multi-node integration test pending |
+| Exclusive consumer groups | Partial | `.exclusive()` Rust client + TCP protocol, per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
+| Cross-broker cohort coordination | Partial | Member identity + controller (aggregate→plan→publish) + owner apply all wired in cluster bootstrap, coordination-level multi-node rebalance test exists, fuller broker/client scenarios are still growing |
 | Partition fan-in | Implemented | Rust client subscribes to all known partitions and merges deliveries while keeping per-partition settlement routing |
 
 See [consumer groups](/latest/concepts/consumer-groups/) for the user-facing model.
@@ -122,8 +122,8 @@ Conditions and limits:
 - Prefetch limits how many messages a subscription can hold at once.
 - If a subscription ends with prefetched but unsettled messages, those messages are returned for redelivery.
 - A message can be delivered more than once under failure, retry, or lease expiry conditions.
-- Exclusive consumer groups are opt-in; without `.exclusive()`, consumers compete (no ordering). A queue has a single exclusive cohort. The TypeScript client does not yet expose `.exclusive()`.
-- Cross-broker cohort balance is advisory/eventually-consistent (the per-partition delivery gate is always the correctness backstop); single-node is fully covered by tests.
+- Exclusive consumer groups are opt-in. Without `.exclusive()`, consumers compete (no ordering). A queue has a single exclusive cohort. The TypeScript client does not yet expose `.exclusive()`.
+- Cross-broker cohort balance is advisory/eventually-consistent. The per-partition delivery gate is always the correctness backstop. Single-node is fully covered by tests.
 - Plain subscriptions fan in over known partitions. A topology warm step at
   connect prevents pure consumers from staying on partition `0` when topology is
   available.
@@ -467,14 +467,14 @@ Conditions and limits:
 | --- | --- | --- |
 | Ganglion coordination mode | Partial | Startup config, embedded coordinator, TCP transport, broker self-registration, topology endpoint |
 | Queue catalogue and placement controller | Partial | Declared queues register partitions, controller assigns owners and followers, placement is stable and anti-churn |
-| Partition ownership gate | Partial | Broker serves only assigned owners in Ganglion mode; standalone mode owns all queues |
+| Partition ownership gate | Partial | Broker serves only assigned owners in Ganglion mode. Standalone mode owns all queues |
 | Follower pull replication | Partial | Follower workers pull owner records over protocol, apply durably, install checkpoints when needed |
 | Automatic failover | Partial | Dead owner can trigger epoch-bumped reassignment, follower promotion at local tail, stale owner demotion |
 | Epoch fencing | Implemented | Role transitions advance log epochs before serving or applying replicated batches |
 | Replica-durable confirms | Partial | Owner waits for durable follower progress according to assignment policy, with timeout and ISR floor |
 | `min_in_sync_replicas` | Implemented | Runtime setting, fail-fast publish refusal when healthy ISR is below floor |
-| Topology visibility | Partial | Admin API/page and `fibrilctl topology`; cross-broker lag aggregation is pending |
-| Multi-node cohort coordinator test | Planned | Pieces are wired, but the full multi-broker test needs server bootstrap extraction |
+| Topology visibility | Partial | Admin API/page and `fibrilctl topology`. Cross-broker lag aggregation is pending |
+| Multi-node cohort coordinator test | Partial | Coordination-level e2e covers cross-broker membership aggregation and rebalance. Full broker/client scenario coverage is still growing |
 
 Conditions and limits:
 

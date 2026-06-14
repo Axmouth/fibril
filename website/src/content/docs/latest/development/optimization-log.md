@@ -216,6 +216,67 @@ implementation can be slower than cloning small strings.
 
 Status: idea only.
 
+### Replica-durable confirm latency
+
+Hypothesis: replica-durable confirmed publish latency is currently bounded by
+the follower pull worker's caught-up poll interval. When a follower is already
+caught up, the default next poll delay is `1000ms`, so the first confirmed
+publish after an idle period may wait for the follower to poll again before the
+owner can observe durable follower progress.
+
+Why it might help: changing this path to owner notification, long-poll
+replication reads, or a lower adaptive delay could reduce cluster confirmed
+publish latency without changing standalone behavior.
+
+Benchmark needed: one owner and one follower with replica-durable confirms
+enabled. Run low offered loads to expose idle penalty, then a small knee sweep.
+Record confirmed publish p50, p95, p99, timeout/error count, follower lag, and
+server RSS.
+
+Risk: lowering the poll interval globally can add idle CPU and network wakeups.
+Notification or long-poll machinery can add complexity and must not hide owner
+failure.
+
+Status: audit finding, benchmark not yet written.
+
+### Multi-queue follower catch-up
+
+Hypothesis: the current protocol replication resolver keeps one serialized
+connection per owner. This is simple and conservative, but it may bottleneck a
+node that follows many queues from the same owner.
+
+Why it might help: per-queue peers, a small peer pool, or request multiplexing
+could increase catch-up throughput if the one-connection design becomes the
+limit.
+
+Benchmark needed: one follower catching up many queues from one owner, with both
+small and medium payloads. Compare catch-up wall time, owner CPU, follower CPU,
+connection count, and error behavior.
+
+Risk: more connections or multiplexing can make failure handling harder and can
+increase owner pressure. Keep the current design unless the benchmark proves it
+is the bottleneck.
+
+Status: audit finding, benchmark not yet written.
+
+### Cluster routing and fan-in
+
+Hypothesis: partitioned publish routing, not-owner redirects, and multi-partition
+subscription fan-in can regress independently of standalone publish/delivery
+benchmarks.
+
+Why it might help: cluster routing adds topology lookup, redirect retry, multiple
+client engines, and merged subscription streams. These costs should be visible
+before TypeScript parity or further routing polish.
+
+Benchmark needed: Rust client scenarios for keyed publish, keyless round-robin,
+redirected publish, and fan-in subscriptions across multiple partitions.
+
+Risk: optimizing routing too early can make the client API more complex. Measure
+first, then only change the pieces that show up.
+
+Status: audit finding, benchmark not yet written.
+
 ## Experiment record
 
 Add entries here when an optimization is actually tried.

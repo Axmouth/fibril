@@ -49,10 +49,10 @@ their own audit documents so this file stays useful as a status board.
   - Detail: not started
   - Next: audit Rust and TypeScript clients against the current protocol and docs.
 - [ ] Performance-sensitive paths
-  - Status: Pending
-  - Detail: see the docs optimization log for existing notes
-  - Next: audit publish, delivery, replication, and metadata paths with benchmarks
-    before and after changes.
+  - Status: Audited
+  - Detail: [PERFORMANCE_SENSITIVE_PATHS_AUDIT.md](PERFORMANCE_SENSITIVE_PATHS_AUDIT.md)
+  - Next: add cluster benchmark profiles for replica-durable confirms,
+    follower catch-up, partitioned fan-in, and redirects.
 - [ ] User-facing documentation shape
   - Status: Pending
   - Detail: not started

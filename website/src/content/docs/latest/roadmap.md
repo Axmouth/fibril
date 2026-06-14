@@ -27,8 +27,9 @@ check what is already wired and under what conditions.
 - Exclusive consumer groups: an opt-in `.exclusive()` subscription gives ordered,
   balanced, sticky, self-healing consumption of a partitioned queue (one consumer
   per partition), with reconnect-safe membership and a soft per-consumer target.
-  Single-node works end to end; the cross-broker coordinator is wired (multi-node
-  integration test pending). See [consumer groups](/latest/concepts/consumer-groups/).
+  Single-node works end to end, and a coordination-level multi-node test covers
+  cross-broker membership aggregation and rebalance. Fuller broker/client
+  scenario coverage is still growing. See [consumer groups](/latest/concepts/consumer-groups/).
 - Runtime broker settings can be read and updated through the admin surface.
 - The global DLQ target is stored as versioned Stroma state and can be edited at runtime.
 - Queue-specific retry and dead-letter policy can be declared from clients and `fibrilctl`.
@@ -59,8 +60,8 @@ check what is already wired and under what conditions.
 - Refactor server bootstrap wiring into the `fibril` library enough to make
   multi-node coordination and cohort-controller tests stand up real brokers
   without going through `main`.
-- Add the pending multi-node integration test for cross-broker exclusive
-  consumer-group coordination.
+- Add fuller multi-broker client scenario tests for cross-broker exclusive
+  consumer-group coordination and failure handling.
 - Finish the combined Offset plus Topic/Group newtype pass after the current
   partition newtype pass, including the planned `Arc<str>` direction for
   Topic/Group.
