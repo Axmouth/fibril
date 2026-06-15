@@ -2406,3 +2406,67 @@ Tests needed before implementing transition:
      exponential improvement — for O(1) work, no coordination, and tolerance to
      stale hints (the 2nd sample breaks herds). Used by nginx/HAProxy/gRPC
      least-request. Keyed publishes ignore it (stay hash(key)%N deterministic).
+
+## 2026-06-15 Replica-Durable Perf/Correctness Audit
+
+Observed 3-node tryout results with `replica_durable:2`, confirmed publishes,
+and post-bench owner/follower cursor checks:
+
+- 1 KiB, target 25k/s, confirm window 2048: about 10.9k/s, clean, p99 about
+  18 ms.
+- 1 KiB, target 50k/s, confirm window 8192: about 14.9k/s, clean, p99 about
+  17 ms.
+- 1 KiB, target 100k/s, confirm window 16384: client/window backlog, not useful
+  throughput. Server-receive-to-deliver stayed low, but publish-to-deliver went
+  to seconds.
+- 64 KiB, target 2k/s, confirm window 1024: clean after fixes, p99 about 18 ms.
+- 512 KiB, target 200/s, confirm window 512: clean, p99 about 65 ms, but large
+  payloads need sane prefetch because the default 16,384 prefetch can create
+  multi-GB resident memory.
+
+Fixes from this pass:
+
+- Stroma owner replication reads now run Keratin `scan_from` calls in
+  `spawn_blocking`. Regular delivery already did this; replication had repeated
+  the old sync-read-on-Tokio-worker hazard.
+- `safe_message_truncate_before()` no longer returns `u64::MAX` to truncation
+  callers when no retained message offsets exist. It returns the settled
+  frontier instead.
+- Tryout steady benchmarks now verify both owner-side durable follower progress
+  and follower-side worker progress after the run, and reject `u64::MAX` cursors.
+
+Current suspected throughput boundary:
+
+Follower replication worker defaults are `256 messages/read`,
+`8 iterations/tick`, `retry_poll_ms=100`, and `caught_up_poll_ms=1000`.
+Gross lagging capacity is therefore about 20.5k messages/s before protocol,
+durable append, event, and scheduling costs. The observed 10-15k/s ceiling is
+consistent with this budget.
+
+Next candidates:
+
+- Make replication read budgets explicit settings, following the existing
+  configuration discipline.
+- Add follower wakeups or long-poll owner reads so caught-up followers do not
+  rely only on `caught_up_poll_ms`.
+- Consider a combined Stroma owner read API so message and event log scans happen
+  in one blocking task and one coherent owner-read operation.
+- Add benchmark output for follower records-per-tick, loop status, and chosen
+  next delay.
+
+Resume concerns after operator-surface cleanup:
+
+- The replica-durable 1 KiB ceiling currently looks budget-limited by follower
+  read cadence, not Keratin. Next throughput runs should sweep follower read
+  budgets before changing write internals.
+- Larger payload runs are clean, but default prefetch can create unrealistic RAM
+  pressure. Use explicit smaller prefetch when probing 512 KiB and 1 MiB payloads.
+- `--repartition-smoke` covers the admin/CLI grow and shrink path plus normal
+  public client routing afterward. It is not yet a heavy mid-flight migration
+  test with backlog on old partitions.
+- A stronger initial smoke attempt published and consumed one message before
+  grow, then saw that old payload again during the post-grow consume. Treat this
+  as a separate backlog/drain-redelivery investigation before pinning behavior
+  in the operator smoke.
+- Any new replication worker knobs should go through the config/runtime-settings
+  discipline, not ad hoc environment variables.

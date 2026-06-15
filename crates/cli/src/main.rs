@@ -84,6 +84,23 @@ enum AdminCommand {
         #[command(subcommand)]
         command: CoordinationCommand,
     },
+    /// Live-repartition a queue: grow (to a multiple) or shrink (to a factor) of
+    /// its current partition count.
+    Repartition(RepartitionArgs),
+}
+
+#[derive(Debug, Parser)]
+struct RepartitionArgs {
+    /// Topic to repartition.
+    topic: String,
+
+    /// New partition count: a larger integer multiple to grow, a smaller integer
+    /// factor to shrink.
+    partition_count: u32,
+
+    /// Optional group (part of the queue identity).
+    #[arg(long)]
+    group: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -360,6 +377,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                         print_json(admin.remove_coordination_voting_member(args).await?)?
                     }
                 },
+                AdminCommand::Repartition(args) => print_json(admin.repartition(args).await?)?,
             }
         }
     }
@@ -549,6 +567,14 @@ struct RemoveCoordinationVotingMemberRequest {
     id: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct RepartitionRequest {
+    topic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
+    partition_count: u32,
+}
+
 impl AdminClient {
     async fn get_global_dlq(&self) -> anyhow::Result<GlobalDlqSnapshot> {
         self.get_json("/admin/api/global-dlq", &[]).await
@@ -637,6 +663,18 @@ impl AdminClient {
         self.post_json(
             "/admin/api/coordination/membership/remove-voting-member",
             &RemoveCoordinationVotingMemberRequest { id: args.id },
+        )
+        .await
+    }
+
+    async fn repartition(&self, args: RepartitionArgs) -> anyhow::Result<serde_json::Value> {
+        self.post_json(
+            "/admin/api/repartition",
+            &RepartitionRequest {
+                topic: args.topic,
+                group: normalize_group_arg(args.group.as_deref()).map(str::to_string),
+                partition_count: args.partition_count,
+            },
         )
         .await
     }

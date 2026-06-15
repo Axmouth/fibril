@@ -201,3 +201,53 @@ Recommendation:
    replica-durable.
 5. Keep `website/src/content/docs/latest/development/optimization-log.md`
    updated with each result.
+
+## Replica-Durable Throughput Notes
+
+2026-06-15 checks against a 3-node Ganglion-backed tryout cluster found a
+repeatable replica-durable ceiling for 1 KiB confirmed publishes:
+
+- `confirm_window=2048`, target 25k/s: about 10.9k/s, p99 about 18 ms.
+- `confirm_window=8192`, target 50k/s: about 14.9k/s, p99 about 17 ms.
+- `confirm_window=16384`, target 100k/s: lower measured rate and multi-second
+  publish-to-deliver latency, while server-receive-to-deliver stayed around
+  13-21 ms. This is client/window backlog, not useful throughput.
+
+The current follower worker defaults make that ceiling plausible:
+
+- `max_messages_per_read = 256`
+- `max_iterations_per_tick = 8`
+- `retry_poll_ms = 100`
+- `caught_up_poll_ms = 1000`
+
+Gross lagging capacity is roughly:
+
+`256 messages/read * 8 reads/tick / 0.1s = 20,480 messages/s`
+
+The measured 10-15k/s range is consistent once protocol round trips, durable
+replicated appends, event reads, scheduling overhead, and client confirms are
+included. This suggests the next throughput work should first target follower
+replication worker budget and wakeup behavior, not Keratin write throughput.
+
+Correctness/perf fixes from the same pass:
+
+- Owner replication reads were synchronous Keratin scans inside async Stroma
+  methods. They now run in `spawn_blocking`, matching the normal delivery read
+  path and preventing replication polling from starving Tokio timers.
+- `safe_message_truncate_before()` could return `u64::MAX` when no message
+  offsets were retained in state. That sentinel reached Keratin truncation and
+  leaked into replica progress. It now clamps to the settled frontier.
+- `scripts/cluster-tryout.sh` now checks owner and follower replica cursors after
+  steady benchmarks and rejects `u64::MAX` as an invalid cursor.
+
+Next candidate changes:
+
+- Expose replication read budget settings with configuration discipline instead
+  of hard-coded worker defaults.
+- Add follower wakeups or long-poll-style owner reads so caught-up followers do
+  not depend only on `caught_up_poll_ms`.
+- Consider a combined Stroma owner replication read that performs message and
+  event scans in one blocking task. The current patch uses two blocking scans
+  because the public Stroma API already exposes separate methods.
+- Add a benchmark variant that records follower loop status, records-per-tick,
+  and delay decisions alongside publish latency.

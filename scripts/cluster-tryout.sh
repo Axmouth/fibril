@@ -34,6 +34,7 @@ STEADY_BENCH=false
 BENCH_TOPIC="orders"
 ASSIGNMENT_DURABILITY=""
 FAILOVER_SMOKE=false
+REPARTITION_SMOKE=false
 ADMIN_WAIT_SECS=5
 CLUSTER_WAIT_SECS=90
 # Keep wide spacing between port bands so large local clusters do not make
@@ -58,6 +59,7 @@ while [[ $# -gt 0 ]]; do
     --replica-durable) GANGLION=true; ASSIGNMENT_DURABILITY="replica_durable:2"; shift ;;
     --assignment-durability) GANGLION=true; ASSIGNMENT_DURABILITY="$2"; shift 2 ;;
     --failover-smoke) GANGLION=true; FAILOVER_SMOKE=true; shift ;;
+    --repartition-smoke) GANGLION=true; REPARTITION_SMOKE=true; shift ;;
     --admin-wait-secs) ADMIN_WAIT_SECS="$2"; shift 2 ;;
     --cluster-wait-secs) CLUSTER_WAIT_SECS="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -82,6 +84,10 @@ if [[ -n "$ASSIGNMENT_DURABILITY" && "$ASSIGNMENT_DURABILITY" =~ ^replica_ && "$
 fi
 if [[ "$FAILOVER_SMOKE" == true && "$NODES" -lt 3 ]]; then
   echo "FAIL: --failover-smoke needs at least three nodes so raft keeps quorum after one death" >&2
+  exit 2
+fi
+if [[ "$REPARTITION_SMOKE" == true && "$NODES" -lt 2 ]]; then
+  echo "FAIL: --repartition-smoke needs at least two nodes to exercise routed client traffic" >&2
   exit 2
 fi
 
@@ -484,6 +490,15 @@ assignment_for_topic_from_json() {
     | sed -n '1p'
 }
 
+assignment_for_topic_partition_from_json() {
+  local json="$1"
+  local topic="$2"
+  local partition="$3"
+  echo "$json" | jq -c --arg topic "$topic" --argjson partition "$partition" \
+    '.coordination.assignments[]? | select(.topic == $topic and .partition == $partition and (.group == null))' \
+    | sed -n '1p'
+}
+
 wait_assignment_for_topic() {
   local topic="$1"
   local last=""
@@ -500,6 +515,36 @@ wait_assignment_for_topic() {
     sleep 0.3
   done
   echo "FAIL: controller never assigned topic '$topic'; last seen: $last" >&2
+  return 1
+}
+
+wait_all_nodes_see_topic_partition() {
+  local topic="$1"
+  local partition="$2"
+  local ready=false
+  local last_seen=""
+  local json=""
+  local assignment=""
+
+  for attempt in $(seq 1 "$(cluster_attempts)"); do
+    ready=true
+    last_seen=""
+    for i in $(seq 1 "$NODES"); do
+      json="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + i))" admin topology --json 2>/dev/null || echo '{}')"
+      assignment="$(assignment_for_topic_partition_from_json "$json" "$topic" "$partition")"
+      last_seen="${last_seen} node-$i=${assignment:-missing}"
+      if [[ -z "$assignment" ]]; then
+        ready=false
+        break
+      fi
+    done
+    if [[ "$ready" == true ]]; then
+      return 0
+    fi
+    sleep 0.3
+  done
+
+  echo "FAIL: partition $partition for topic '$topic' was not visible on every node; last seen:$last_seen" >&2
   return 1
 }
 
@@ -563,6 +608,80 @@ wait_follower_progress() {
   return 1
 }
 
+check_bench_replication_tails() {
+  local owner_node="$1"
+  local follower_node="$2"
+  local topic="$3"
+  local min_tail="$4"
+  local owner_port=$((BASE_ADMIN_PORT + owner_node))
+  local follower_port=$((BASE_ADMIN_PORT + follower_node))
+  local follower_id="broker-$follower_node"
+  local owner_json=""
+  local follower_json=""
+  local owner_view=""
+  local follower_state=""
+  local last_owner=""
+  local last_follower=""
+  local owner_message_next=""
+  local owner_event_next=""
+  local owner_in_sync=""
+  local follower_message_next=""
+  local follower_event_next=""
+  local invalid_offset="18446744073709551615"
+
+  for attempt in $(seq 1 "$(cluster_attempts)"); do
+    owner_json="$(curl -sf "http://127.0.0.1:$owner_port/admin/api/queues_debug" 2>/dev/null || true)"
+    follower_json="$(curl -sf "http://127.0.0.1:$follower_port/admin/api/queues_debug" 2>/dev/null || true)"
+
+    if [[ -n "$owner_json" && -n "$follower_json" ]]; then
+      owner_view="$(echo "$owner_json" | jq -c --arg topic "$topic" --arg follower "$follower_id" \
+        '.owned_replicas[]?
+         | select(.topic == $topic and .partition == 0 and (.group == null))
+         | .followers[]?
+         | select(.node_id == $follower)' \
+        | sed -n '1p')"
+      follower_state="$(echo "$follower_json" | jq -c --arg topic "$topic" \
+        '.replication_followers[]?
+         | select(.topic == $topic and .partition == 0 and (.group == null))
+         | .state' \
+        | sed -n '1p')"
+      last_owner="$owner_view"
+      last_follower="$follower_state"
+
+      if [[ -n "$owner_view" && -n "$follower_state" ]]; then
+        owner_message_next="$(echo "$owner_view" | jq -r '.durable_message_next // empty')"
+        owner_event_next="$(echo "$owner_view" | jq -r '.durable_event_next // empty')"
+        owner_in_sync="$(echo "$owner_view" | jq -r '.in_sync // false')"
+        follower_message_next="$(echo "$follower_state" | jq -r '.message_next_offset // empty')"
+        follower_event_next="$(echo "$follower_state" | jq -r '.event_next_offset // empty')"
+
+        if [[ "$owner_message_next" == "$follower_message_next" \
+          && "$owner_event_next" == "$follower_event_next" \
+          && "$owner_in_sync" == "true" \
+          && "$owner_message_next" =~ ^[0-9]+$ \
+          && "$owner_event_next" =~ ^[0-9]+$ \
+          && "$follower_message_next" =~ ^[0-9]+$ \
+          && "$follower_event_next" =~ ^[0-9]+$ \
+          && "$owner_message_next" != "$invalid_offset" \
+          && "$owner_event_next" != "$invalid_offset" \
+          && "$follower_message_next" != "$invalid_offset" \
+          && "$follower_event_next" != "$invalid_offset" \
+          && "$owner_message_next" -ge "$min_tail" \
+          && "$owner_event_next" -ge 1 ]]; then
+          echo "  owner/follower replication cursors match: message_next=$owner_message_next event_next=$owner_event_next in_sync=true"
+          return 0
+        fi
+      fi
+    fi
+    sleep 0.3
+  done
+
+  echo "FAIL: owner/follower replication cursors did not converge for '$topic'" >&2
+  echo "  owner view: ${last_owner:-missing}" >&2
+  echo "  follower view: ${last_follower:-missing}" >&2
+  return 1
+}
+
 run_steady_benchmark() {
   local broker_node="$1"
   local admin_node="$2"
@@ -573,6 +692,7 @@ run_steady_benchmark() {
   local results_file="$bench_dir/results.txt"
   local log_file="$bench_dir/bench.log"
   local summary_file="$bench_dir/summary.md"
+  local min_tail=""
 
   mkdir -p "$bench_dir"
   echo
@@ -594,6 +714,21 @@ run_steady_benchmark() {
   scripts/bench-results-table.sh "$results_file" >"$summary_file"
   echo "  steady benchmark summary: $summary_file"
   sed -n '1,4p' "$summary_file"
+
+  if [[ "$GANGLION" == true && -n "$BENCH_FOLLOWER_NODE" ]]; then
+    min_tail="$(sed -n 's/^Confirmed total: //p' "$results_file" | head -n1)"
+    if [[ -z "$min_tail" ]]; then
+      min_tail="$(sed -n 's/^Sent total: //p' "$results_file" | head -n1)"
+    fi
+    if ! [[ "$min_tail" =~ ^[0-9]+$ ]] || [[ "$min_tail" -lt 1 ]]; then
+      min_tail=1
+    fi
+
+    echo "  checking follower broker-$BENCH_FOLLOWER_NODE replicated at least $min_tail messages..."
+    wait_follower_progress "$BENCH_FOLLOWER_NODE" "$BENCH_TOPIC" "$min_tail" 1 >/dev/null
+    echo "  follower replication tail reached benchmark writes"
+    check_bench_replication_tails "$BENCH_OWNER_NODE" "$BENCH_FOLLOWER_NODE" "$BENCH_TOPIC" "$min_tail"
+  fi
 }
 
 run_failover_smoke() {
@@ -694,6 +829,73 @@ run_failover_smoke() {
   echo "  failover smoke delivered pre- and post-failover messages"
 }
 
+run_repartition_smoke() {
+  local topic="${BENCH_TOPIC}-repartition"
+  local admin_node=1
+  local publish_node=2
+  local consume_node="$NODES"
+  local grown=""
+  local shrunk=""
+  local count=""
+  local version=""
+  local payload=""
+
+  if [[ "$publish_node" -gt "$NODES" ]]; then
+    publish_node=1
+  fi
+  if [[ "$consume_node" -eq "$publish_node" && "$NODES" -ge 2 ]]; then
+    consume_node=1
+  fi
+
+  echo
+  echo "running live repartition smoke with topic '$topic'..."
+  "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + 1))" queue declare "$topic" >/dev/null \
+    || { echo "FAIL: repartition smoke failed to declare topic '$topic'" >&2; return 1; }
+  wait_assignment_for_topic "$topic" >/dev/null || return 1
+
+  echo "  growing $topic from 1 to 2 partitions..."
+  grown="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + admin_node))" admin repartition "$topic" 2)"
+  count="$(echo "$grown" | jq -r '.partitioning.partition_count // empty')"
+  version="$(echo "$grown" | jq -r '.partitioning.partitioning_version // empty')"
+  if [[ "$count" != "2" || -z "$version" ]]; then
+    echo "FAIL: repartition grow returned unexpected response: $grown" >&2
+    return 1
+  fi
+  wait_all_nodes_see_topic_partition "$topic" 1 || return 1
+  echo "  grow visible cluster-wide at partitioning_version=$version"
+
+  payload="repartition-grown-$RANDOM-$RANDOM"
+  for n in $(seq 1 4); do
+    "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + publish_node))" \
+      queue publish "$topic" --partition-key "grown-$n" --message "$payload" >/dev/null \
+      || { echo "FAIL: repartition smoke failed to publish grown message $n" >&2; return 1; }
+  done
+  "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + consume_node))" \
+    queue consume "$topic" --count 4 --prefetch 4 --timeout-ms 20000 --expect "$payload" >/dev/null \
+    || { echo "FAIL: repartition smoke failed to consume after grow" >&2; return 1; }
+
+  echo "  shrinking $topic from 2 to 1 partition..."
+  shrunk="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + admin_node))" admin repartition "$topic" 1)"
+  count="$(echo "$shrunk" | jq -r '.partitioning.partition_count // empty')"
+  version="$(echo "$shrunk" | jq -r '.partitioning.partitioning_version // empty')"
+  if [[ "$count" != "1" || -z "$version" ]]; then
+    echo "FAIL: repartition shrink returned unexpected response: $shrunk" >&2
+    return 1
+  fi
+  echo "  shrink committed at partitioning_version=$version"
+
+  payload="repartition-shrunk-$RANDOM-$RANDOM"
+  for n in $(seq 1 4); do
+    "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + publish_node))" \
+      queue publish "$topic" --partition-key "shrunk-$n" --message "$payload" >/dev/null \
+      || { echo "FAIL: repartition smoke failed to publish shrunk message $n" >&2; return 1; }
+  done
+  "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + consume_node))" \
+    queue consume "$topic" --count 4 --prefetch 4 --timeout-ms 20000 --expect "$payload" >/dev/null \
+    || { echo "FAIL: repartition smoke failed to consume after shrink" >&2; return 1; }
+  echo "  repartition smoke delivered after grow and after shrink"
+}
+
 if [[ "$STAGGERED" == true ]]; then
   echo "staggered join: starting node 1 alone (bootstrap) under $RUN_DIR"
   start_node 1
@@ -775,6 +977,8 @@ FAILED=0
 BENCH_BROKER_NODE=1
 BENCH_ADMIN_NODE=1
 BENCH_DURABILITY_LABEL="standalone"
+BENCH_OWNER_NODE=""
+BENCH_FOLLOWER_NODE=""
 declare -a LEADERS=()
 declare -a VOTERS=()
 for i in $(seq 1 "$NODES"); do
@@ -914,6 +1118,12 @@ if [[ "$GANGLION" == true ]]; then
       BENCH_BROKER_NODE="$publish_node"
       BENCH_ADMIN_NODE="$publish_node"
       BENCH_DURABILITY_LABEL="$(assignment_durability_label "$assigned")"
+      BENCH_OWNER_NODE="$owner_node"
+      follower="$(echo "$assigned" | jq -r '.followers[0] // empty')"
+      follower_node="${follower#broker-}"
+      if [[ -n "$follower" && "$follower_node" =~ ^[0-9]+$ ]]; then
+        BENCH_FOLLOWER_NODE="$follower_node"
+      fi
       payload="cluster-smoke-$RANDOM-$RANDOM"
 
       echo "publishing and consuming one message through public client routing..."
@@ -961,6 +1171,10 @@ if [[ "$GANGLION" == true ]]; then
   fi
 fi
 
+if [[ "$REPARTITION_SMOKE" == true && "$FAILED" -eq 0 ]]; then
+  run_repartition_smoke || FAILED=1
+fi
+
 if [[ "$STEADY_BENCH" == true ]]; then
   if [[ "$GANGLION" != true ]]; then
     echo "declaring queue '$BENCH_TOPIC' on standalone node-1 for steady benchmark..."
@@ -984,6 +1198,8 @@ fi
 
 if [[ "$FAILOVER_SMOKE" == true ]]; then
   echo "cluster-tryout: all checks passed, including intentional owner kill/failover"
+elif [[ "$REPARTITION_SMOKE" == true ]]; then
+  echo "cluster-tryout: all checks passed, including live repartition grow/shrink"
 else
   echo "cluster-tryout: all $NODES servers serve topology correctly"
 fi

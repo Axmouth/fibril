@@ -3,6 +3,6 @@ mod routes;
 mod server;
 
 pub use server::{
-    AdminConfig, AdminServer, CoordinationMembershipManager, RuntimeSettingsClusterStore,
-    RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
+    AdminConfig, AdminServer, CoordinationMembershipManager, QueueRepartitionManager,
+    RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
 };

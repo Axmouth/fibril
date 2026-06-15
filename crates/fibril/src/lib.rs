@@ -117,6 +117,46 @@ pub struct GanglionBrokerTaskHandles {
     pub repartition_watcher: tokio::task::JoinHandle<()>,
 }
 
+/// Live-repartition trigger for the admin endpoint: decides grow vs shrink from
+/// the queue's current count and calls the matching coordination operation.
+pub struct GanglionQueueRepartitionManager {
+    coordination: Arc<TcpGanglionCoordination>,
+}
+
+impl GanglionQueueRepartitionManager {
+    pub fn new(coordination: Arc<TcpGanglionCoordination>) -> Self {
+        Self { coordination }
+    }
+}
+
+#[async_trait]
+impl fibril_admin::QueueRepartitionManager for GanglionQueueRepartitionManager {
+    async fn repartition(
+        &self,
+        topic: String,
+        group: Option<String>,
+        partition_count: u32,
+    ) -> Result<serde_json::Value, String> {
+        let current = self
+            .coordination
+            .queue_partitioning(&topic, group.as_deref())
+            .map(|p| p.partition_count);
+        let result = match current {
+            Some(current) if partition_count < current => self
+                .coordination
+                .shrink_queue(&topic, group.as_deref(), partition_count)
+                .await
+                .map_err(|error| error.to_string())?,
+            _ => self
+                .coordination
+                .grow_queue(&topic, group.as_deref(), partition_count)
+                .await
+                .map_err(|error| error.to_string())?,
+        };
+        serde_json::to_value(result).map_err(|error| error.to_string())
+    }
+}
+
 pub struct GanglionCoordinationMembershipManager {
     coordination: Arc<TcpGanglionCoordination>,
 }
@@ -814,6 +854,9 @@ pub async fn run_server_from_config(config: ServerConfig) -> anyhow::Result<()> 
                     value
                 }))
                 .with_coordination_membership(Arc::new(GanglionCoordinationMembershipManager::new(
+                    parts.coordination.clone(),
+                )))
+                .with_queue_repartition(Arc::new(GanglionQueueRepartitionManager::new(
                     parts.coordination.clone(),
                 )))
                 .with_runtime_settings_cluster(Arc::new(GanglionRuntimeSettingsStore::new(

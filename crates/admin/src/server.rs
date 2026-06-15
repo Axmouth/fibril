@@ -42,6 +42,18 @@ pub trait CoordinationMembershipManager: Send + Sync + 'static {
     async fn remove_voting_member(&self, id: u64) -> Result<serde_json::Value, String>;
 }
 
+/// Operator-triggered live repartition (grow or shrink) of a queue's partition
+/// count. The implementation decides direction from the current count.
+#[async_trait]
+pub trait QueueRepartitionManager: Send + Sync + 'static {
+    async fn repartition(
+        &self,
+        topic: String,
+        group: Option<String>,
+        partition_count: u32,
+    ) -> Result<serde_json::Value, String>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSettingsClusterUpdateOutcome {
     Stored(RuntimeSettingsSnapshot),
@@ -88,6 +100,8 @@ pub struct AdminServer {
     pub coordination: Option<Arc<dyn fibril_broker::Coordination>>,
     pub raft_topology: Option<Arc<RaftTopologyProvider>>,
     pub coordination_membership: Option<Arc<dyn CoordinationMembershipManager>>,
+    /// Optional live-repartition trigger (grow/shrink a queue's partition count).
+    pub queue_repartition: Option<Arc<dyn QueueRepartitionManager>>,
     /// Optional cluster-authoritative runtime-settings store. When absent,
     /// runtime settings are local-only and use the node's Stroma global store.
     pub runtime_settings_cluster: Option<Arc<dyn RuntimeSettingsClusterStore>>,
@@ -125,6 +139,7 @@ impl AdminServer {
             coordination: None,
             raft_topology: None,
             coordination_membership: None,
+            queue_repartition: None,
             runtime_settings_cluster: None,
         }
     }
@@ -147,6 +162,12 @@ impl AdminServer {
         manager: Arc<dyn CoordinationMembershipManager>,
     ) -> Self {
         self.coordination_membership = Some(manager);
+        self
+    }
+
+    /// Attach the live-repartition trigger for `POST /admin/api/repartition`.
+    pub fn with_queue_repartition(mut self, manager: Arc<dyn QueueRepartitionManager>) -> Self {
+        self.queue_repartition = Some(manager);
         self
     }
 
@@ -216,6 +237,10 @@ impl AdminServer {
             .route(
                 "/admin/api/coordination/membership/remove-voting-member",
                 axum::routing::post(routes::remove_coordination_voting_member),
+            )
+            .route(
+                "/admin/api/repartition",
+                axum::routing::post(routes::repartition_queue),
             )
             .route(
                 "/admin/api/global-dlq",

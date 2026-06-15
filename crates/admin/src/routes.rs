@@ -93,6 +93,14 @@ pub struct RemoveCoordinationVotingMemberRequest {
     pub id: u64,
 }
 
+#[derive(Deserialize)]
+pub struct RepartitionQueueRequest {
+    pub topic: String,
+    #[serde(default)]
+    pub group: Option<String>,
+    pub partition_count: u32,
+}
+
 #[derive(Serialize)]
 pub struct QueueDlqResponse {
     pub status: &'static str,
@@ -567,6 +575,49 @@ pub async fn remove_coordination_voting_member(
         Err(error) => Ok(admin_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "coordination_membership_update_failed",
+            error,
+        )),
+    }
+}
+
+/// Trigger a live repartition (grow or shrink) of a queue to `partition_count`.
+pub async fn repartition_queue(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<RepartitionQueueRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    if request.partition_count == 0 {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_partition_count",
+            "partition_count must be at least 1",
+        ));
+    }
+
+    let Some(manager) = &server.queue_repartition else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "repartition_unavailable",
+            "live repartitioning is not available (requires ganglion coordination)",
+        ));
+    };
+
+    match manager
+        .repartition(
+            request.topic,
+            normalize_group(request.group),
+            request.partition_count,
+        )
+        .await
+    {
+        Ok(partitioning) => {
+            Ok(Json(serde_json::json!({ "partitioning": partitioning })).into_response())
+        }
+        Err(error) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "repartition_failed",
             error,
         )),
     }
