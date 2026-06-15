@@ -195,18 +195,29 @@ keeps the old static fan-in). Integration test grows a mock broker's reported
 count and asserts the consumer receives a delivery from the new partition. Code:
 crates/client/src/lib.rs (partition_resubscribe_loop_manual/_auto + forward_into).
 
-REMAINING — live repartitioning follow-ons:
-1. Operator surface: an admin endpoint + fibrilctl command calling grow_queue
-   (today it is only reachable programmatically).
-2. SHRINK-by-factor (N -> N/k), the planned next BUILD. Design is ready in
-   DESIGN_NOTES.md "Live repartitioning" (offset-gated hold via hold_above_offset
-   that also subsumes grow's whole-partition hold, multi-source drain, removed
-   partitions start full so they must be kept consumable until retired). Auto-
-   resub already handles the client side for both directions. Arbitrary-N is then
-   the gcd composition (shrink to gcd then grow), never needs a per-key gate.
-3. Live-cluster grow (and later shrink) smoke: exercise the whole flow with the
-   watcher running via scripts/cluster-tryout.sh (unit/integration tests prove the
-   pieces, this proves it in a real cluster).
+DONE — SHRINK-by-factor (N -> N/k), wired end to end. shrink_queue trigger
+(factor validation, marker-first then version bump), the offset-gated survivor
+hold (hold_above_offset: deliver below the cutover boundary, hold above until all
+merge sources {r, r+n_new, ...} drain, then lift), removed partitions just drain.
+The broker apply/refresh/drain are now direction-aware; the watcher and drain
+label are direction-agnostic so shrink rides the same drive loop. Broker e2e: a
+survivor holds a moved key until the removed source drains, then delivers it.
+Grow and shrink now both work, so arbitrary-N is reachable by composing them via
+gcd (shrink to gcd then grow), no per-key gate ever needed.
+
+REMAINING — live repartitioning follow-ons (all ergonomics/polish, core is done):
+1. Operator surface: an admin endpoint + fibrilctl command calling
+   grow_queue / shrink_queue (today they are only reachable programmatically).
+2. Removed-partition retirement: a shrink leaves merged-away partitions
+   registered and draining forever; deregister + unmaterialize them once drained
+   (safe to defer, no data loss meanwhile).
+3. Shrink choreography hardening: v1 relies on the watcher applying survivor holds
+   within ~1 tick of the marker before the bump; a stricter version has owners ack
+   "held" before the leader bumps (see DESIGN_NOTES). Low risk for a rare op.
+4. Live-cluster grow + shrink smoke via scripts/cluster-tryout.sh (unit/integration
+   tests prove the pieces; this proves it in a real cluster).
+5. Optional: a repartition_to(target) helper that composes shrink-to-gcd then
+   grow-to-target for arbitrary N.
 
 BACKGROUND AUDIT: an audit has been running in the background (separate from this
 log). Check its findings once it is done and fold anything actionable in here.
