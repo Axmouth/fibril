@@ -928,6 +928,28 @@ where
         aggregate_repartition_drained(labels, topic, group, version)
     }
 
+    /// Every queue with an in-progress repartition transition, read from the
+    /// committed attributes. Owners iterate these to hold/drain/lift their
+    /// partitions. Cleared markers (empty value) decode to None and are skipped.
+    pub fn active_repartition_transitions(
+        &self,
+    ) -> Vec<(String, Option<String>, RepartitionTransitionDoc)> {
+        let snapshot = self.node.committed_snapshot();
+        snapshot
+            .attributes
+            .iter()
+            .filter_map(|(key, raw)| {
+                let rest = key.strip_prefix(REPARTITION_TRANSITION_PREFIX)?;
+                let doc = decode_repartition_transition(raw)?;
+                let (topic, group) = match rest.split_once('/') {
+                    Some((topic, group)) => (topic.to_string(), Some(group.to_string())),
+                    None => (rest.to_string(), None),
+                };
+                Some((topic, group, doc))
+            })
+            .collect()
+    }
+
     /// One cohort-controller iteration: as the leader, aggregate cluster-wide
     /// cohort membership, compute each cohort's global plan (`controller` holds
     /// per-cohort state across ticks for stickiness), and publish the plans for
@@ -3192,6 +3214,74 @@ mod tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "published cohort assignment never became visible"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        coordination.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repartition_transition_marker_lifecycle() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node should start");
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            ganglion_openraft::openraft::BasicNode::new("coordinator-1"),
+        );
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("single node elects itself");
+
+        let coordination = GanglionCoordination::new("broker-a", raft_node);
+        let doc = RepartitionTransitionDoc {
+            version: 1,
+            n_old: 2,
+            n_new: 4,
+        };
+        coordination
+            .begin_repartition_transition("orders", None, &doc)
+            .await
+            .expect("begin transition");
+
+        // The marker becomes readable and is listed as active.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if coordination.repartition_transition("orders", None) == Some(doc.clone()) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "transition marker never became visible"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let active = coordination.active_repartition_transitions();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, "orders");
+        assert_eq!(active[0].2, doc);
+
+        // Clearing retires the marker: no longer readable or listed.
+        coordination
+            .clear_repartition_transition("orders", None)
+            .await
+            .expect("clear transition");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if coordination.repartition_transition("orders", None).is_none()
+                && coordination.active_repartition_transitions().is_empty()
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "transition marker never cleared"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

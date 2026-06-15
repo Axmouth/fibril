@@ -110,6 +110,7 @@ pub struct GanglionBrokerTaskHandles {
     pub heartbeat: tokio::task::JoinHandle<()>,
     pub cohort_controller: tokio::task::JoinHandle<()>,
     pub cohort_owner_watcher: tokio::task::JoinHandle<()>,
+    pub repartition_watcher: tokio::task::JoinHandle<()>,
 }
 
 pub struct GanglionCoordinationMembershipManager {
@@ -366,6 +367,23 @@ pub fn broker_heartbeat_labels(broker: &Broker<StromaEngine>) -> BTreeMap<String
             fibril_coordination_ganglion::encode_cohort_membership(&cohorts),
         );
     }
+
+    let drained = broker.repartition_drained_reports();
+    if !drained.is_empty() {
+        let reports: Vec<fibril_coordination_ganglion::RepartitionDrainedReport> = drained
+            .into_iter()
+            .map(|status| fibril_coordination_ganglion::RepartitionDrainedReport {
+                topic: status.topic,
+                group: status.group,
+                version: status.version,
+                drained: status.drained,
+            })
+            .collect();
+        labels.insert(
+            fibril_coordination_ganglion::REPARTITION_DRAINED_LABEL.to_string(),
+            fibril_coordination_ganglion::encode_repartition_drained(&reports),
+        );
+    }
     labels
 }
 
@@ -459,10 +477,63 @@ pub fn spawn_ganglion_broker_tasks(
         }
     });
 
+    // Repartition watcher: drives the per-partition drain gate during a grow.
+    // Runs on a timer (drain progresses as messages are acked, which is not a
+    // coordination event), holding new partitions until their source old
+    // partition drains, reporting this owner's drained partitions, and (as
+    // leader) clearing the transition marker once every old partition has drained.
+    let coordination = parts.coordination.clone();
+    let repartition_broker = broker.clone();
+    let repartition_tick_ms = config.coordination.ganglion.heartbeat_interval_ms;
+    let repartition_watcher = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(repartition_tick_ms)).await;
+            let active = coordination.active_repartition_transitions();
+            // Drop local state for any grow whose marker is gone (completed).
+            let active_keys: std::collections::HashSet<(String, Option<String>)> = active
+                .iter()
+                .map(|(topic, group, _)| (topic.clone(), group.clone()))
+                .collect();
+            for (topic, group) in repartition_broker.active_repartition_queues() {
+                if !active_keys.contains(&(topic.clone(), group.clone())) {
+                    repartition_broker.clear_repartition_transition(&topic, group.as_deref());
+                }
+            }
+            for (topic, group, doc) in active {
+                repartition_broker.apply_repartition_transition(
+                    &topic,
+                    group.as_deref(),
+                    doc.version,
+                    doc.n_old,
+                    doc.n_new,
+                );
+                repartition_broker
+                    .refresh_repartition_drain(&topic, group.as_deref())
+                    .await;
+                let drained =
+                    coordination.global_repartition_drained(&topic, group.as_deref(), doc.version);
+                repartition_broker.apply_repartition_drained(
+                    &topic,
+                    group.as_deref(),
+                    drained.clone(),
+                );
+                // The leader retires the transition once every old partition has
+                // drained cluster-wide.
+                let complete = (0..doc.n_old).all(|r| drained.contains(&r));
+                if complete && coordination.is_leader().await {
+                    let _ = coordination
+                        .clear_repartition_transition(&topic, group.as_deref())
+                        .await;
+                }
+            }
+        }
+    });
+
     GanglionBrokerTaskHandles {
         heartbeat,
         cohort_controller,
         cohort_owner_watcher,
+        repartition_watcher,
     }
 }
 

@@ -3093,6 +3093,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
     }
 
+    /// The queues this broker is currently tracking a repartition transition for.
+    /// Owners compare this to the cluster's active transitions to drop local
+    /// state once a grow's marker is gone.
+    pub fn active_repartition_queues(&self) -> Vec<(String, Option<String>)> {
+        self.lock_repartition().keys().cloned().collect()
+    }
+
     /// Finish a repartition: drop the local transition and release any remaining
     /// holds for the queue (all sources have drained).
     pub fn clear_repartition_transition(&self, topic: &str, group: Option<&str>) {
