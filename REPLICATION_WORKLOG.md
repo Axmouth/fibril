@@ -86,6 +86,42 @@ replication module separation, the combined Offset + Topic/Group newtype pass
 (Arc<str> for Topic/Group), and the broader replication + partitioning docs
 explainer (the consumer-groups docs page already landed).
 
+MERGE READINESS NOTE: merging `replication-sharding-plan` to main should mean
+"experimental replication and sharding foundation generally works", not
+"production HA is done". The branch can plausibly hit that milestone before all
+clustering follow-up is complete.
+
+Candidate pre-merge checklist:
+- Run full verification from a clean tree.
+- Run cluster tryout smokes at small and medium sizes, at minimum 3, 5, and a
+  moderate multi-node count such as 15.
+- Split clustering-related logic into dedicated modules per crate where this
+  improves reviewability, especially partitioning, replication, cohorts, and
+  coordination glue. Do not do broad rewrites just to satisfy the split.
+- Ensure a real cluster scenario is covered or manually demonstrated: declare a
+  queue, publish, consume, follower catches up, owner dies, promoted owner serves
+  traffic.
+- Keep docs explicit that clustered mode is experimental and not production HA.
+- Keep the TypeScript cluster/cohort gap visible until the cohesive parity pass
+  lands.
+- Confirm single-node mode needs no coordination config and keeps existing
+  behavior.
+- Do a debug-leftover and stale-planning-wording pass.
+
+Feature work still considered in-scope before or shortly after merge:
+- Opt-in client narrowing for exclusive cohorts, so clients can subscribe only
+  to their assigned partition subset instead of relying only on the delivery
+  gate.
+- Cooperative incremental rebalance. The leader-change churn piece is already
+  handled by controller seeding, but whole-set recompute can still be improved.
+
+Useful but not merge-blocking:
+- sub_id-scoped leave for cross-connection reconnect takeover.
+- Keratin pass: README/docs refresh, slogan, performance audit, and follow-up
+  optimization experiments.
+- Repository split for Stroma and Keratin, once it helps iteration more than it
+  disrupts the replication branch.
+
 DOCS HOUSEKEEPING (at some point, user request): do a relevance pass over all the
 .md files we have collected. We should not keep them all, especially planning and
 handoff docs that go stale. Prune or fold the dead ones. While at it, give the

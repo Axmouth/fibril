@@ -1950,6 +1950,9 @@ impl EngineSlot {
         let stream = TcpStream::connect(address)
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+        stream.set_nodelay(true).map_err(|e| FibrilError::Disconnection {
+            msg: format!("failed to set TCP_NODELAY: {e}"),
+        })?;
         let framed = Framed::new(stream, ProtoCodec);
         let engine = start_engine(
             framed,
@@ -1988,6 +1991,10 @@ impl EngineSlot {
         let stream = TcpStream::connect(self.address)
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+
+        stream.set_nodelay(true).map_err(|e| FibrilError::Disconnection {
+            msg: format!("failed to set TCP_NODELAY: {e}"),
+        })?;
 
         let framed = Framed::new(stream, ProtoCodec);
         let new_engine = start_engine(
