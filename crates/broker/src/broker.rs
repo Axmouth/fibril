@@ -1595,6 +1595,14 @@ pub struct RepartitionDrainStatus {
     pub drained: Vec<u32>,
 }
 
+/// The merge sources of surviving partition `r` under a shrink to `n_new`: every
+/// old partition `p < n_old` with `p % n_new == r`, i.e. `{r, r+n_new, ...}`. A
+/// survivor may lift its hold only once all of these have drained.
+fn shrink_sources(r: u32, n_new: u32, n_old: u32) -> impl Iterator<Item = u32> {
+    let step = n_new.max(1) as usize;
+    (r..n_old).step_by(step)
+}
+
 /// Cheap shared handle for publish-confirm replication waits inside
 /// per-queue confirm loops.
 #[derive(Clone)]
@@ -2867,6 +2875,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         if self.repartition_new_partition_should_hold(&key.tp, key.part.id(), key.group.as_deref()) {
             qs.set_delivery_held(true);
         }
+        if self.repartition_shrink_survivor_should_hold(
+            &key.tp,
+            key.part.id(),
+            key.group.as_deref(),
+        ) {
+            // Hold everything until a drain refresh captures the boundary.
+            qs.set_hold_above_offset(Some(0));
+        }
 
         qs.wake();
 
@@ -3002,9 +3018,31 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
     }
 
-    /// Record an in-progress grow and hold any already-active new-partition loops
-    /// whose source has not drained. Idempotent on `version`; a newer version
-    /// supersedes (resets the local state).
+    /// Whether a partition is a shrink survivor whose merge sources have not all
+    /// drained, so its loop should start held (at offset 0 until a refresh
+    /// captures its boundary). Consulted when a delivery loop is created mid-shrink.
+    fn repartition_shrink_survivor_should_hold(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+    ) -> bool {
+        let map = self.lock_repartition();
+        match map.get(&(topic.to_string(), group.map(str::to_string))) {
+            Some(local) if local.n_new < local.n_old && partition < local.n_new => {
+                !shrink_sources(partition, local.n_new.max(1), local.n_old.max(1))
+                    .all(|s| local.drained_sources.contains(&s))
+            }
+            _ => false,
+        }
+    }
+
+    /// Record an in-progress repartition and hold any already-active partition
+    /// loops that need it. GROW holds each new partition (>= n_old) whole until
+    /// its single source drains. SHRINK holds each surviving partition (< n_new)
+    /// at offset 0 (everything) until a drain refresh captures its boundary and
+    /// relaxes it, and until all its merge sources drain. Idempotent on
+    /// `version`; a newer version supersedes (resets the local state).
     pub fn apply_repartition_transition(
         &self,
         topic: &str,
@@ -3033,13 +3071,23 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             local.drained_sources.clone()
         };
         let n_old = n_old.max(1);
+        let n_new = n_new.max(1);
+        let grow = n_new > n_old;
         for entry in self.queues.iter() {
             let qk = entry.key();
-            if qk.tp == topic && qk.group.as_deref() == group {
-                let p = qk.part.id();
+            if qk.tp != topic || qk.group.as_deref() != group {
+                continue;
+            }
+            let p = qk.part.id();
+            if grow {
                 if p >= n_old && !drained_sources.contains(&(p % n_old)) {
                     entry.value().set_delivery_held(true);
                 }
+            } else if p < n_new
+                && !shrink_sources(p, n_new, n_old).all(|s| drained_sources.contains(&s))
+            {
+                // Survivor: hold everything until the refresh captures the boundary.
+                entry.value().set_hold_above_offset(Some(0));
             }
         }
     }
@@ -3049,15 +3097,21 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     /// report. Call periodically while a grow runs.
     pub async fn refresh_repartition_drain(&self, topic: &str, group: Option<&str>) {
         let key = (topic.to_string(), group.map(str::to_string));
-        let (n_old, known_boundaries) = {
+        let (n_old, n_new, known_boundaries, drained_sources) = {
             let map = self.lock_repartition();
             match map.get(&key) {
-                Some(local) => (local.n_old.max(1), local.boundaries.clone()),
+                Some(local) => (
+                    local.n_old.max(1),
+                    local.n_new.max(1),
+                    local.boundaries.clone(),
+                    local.drained_sources.clone(),
+                ),
                 None => return,
             }
         };
-        // Old partitions this broker owns a delivery loop for.
-        let owned_old: Vec<u32> = self
+        let shrink = n_new < n_old;
+        // Every partition below n_old is a drain source (both directions).
+        let owned_sources: Vec<u32> = self
             .queues
             .iter()
             .filter(|e| e.key().tp == topic && e.key().group.as_deref() == group)
@@ -3066,7 +3120,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .collect();
 
         let mut self_drained = HashSet::new();
-        for r in owned_old {
+        for r in owned_sources {
             let boundary = match known_boundaries.get(&r) {
                 Some(b) => *b,
                 None => {
@@ -3081,6 +3135,18 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     b
                 }
             };
+            // A surviving partition (shrink) delivers below its boundary and holds
+            // above it until all its merge sources have drained, then lifts.
+            if shrink && r < n_new {
+                let all_drained =
+                    shrink_sources(r, n_new, n_old).all(|s| drained_sources.contains(&s));
+                self.set_partition_hold_above_offset(
+                    topic,
+                    Partition::new(r),
+                    group,
+                    if all_drained { None } else { Some(boundary) },
+                );
+            }
             if let Ok(settled) = self
                 .partition_lowest_unacked_offset(topic, Partition::new(r), group)
                 .await
@@ -3113,8 +3179,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .collect()
     }
 
-    /// Apply the cluster-wide set of drained old partitions for a queue: lift the
-    /// hold on any owned new partition whose source is now drained.
+    /// Apply the cluster-wide set of drained source partitions for a queue. On a
+    /// GROW this lifts the hold on any owned new partition whose source is now
+    /// drained. On a SHRINK it just records the set; the next drain refresh lifts
+    /// each surviving partition once all its merge sources are in it.
     pub fn apply_repartition_drained(
         &self,
         topic: &str,
@@ -3153,11 +3221,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     pub fn clear_repartition_transition(&self, topic: &str, group: Option<&str>) {
         let key = (topic.to_string(), group.map(str::to_string));
         let removed = self.lock_repartition().remove(&key);
-        if let Some(local) = removed {
+        if removed.is_some() {
+            // Release any remaining holds for this queue (grow new partitions and
+            // shrink survivors); all sources have drained.
             for entry in self.queues.iter() {
                 let qk = entry.key();
-                if qk.tp == topic && qk.group.as_deref() == group && qk.part.id() >= local.n_old {
+                if qk.tp == topic && qk.group.as_deref() == group {
                     entry.value().set_delivery_held(false);
+                    entry.value().set_hold_above_offset(None);
                 }
             }
         }

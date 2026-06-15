@@ -784,6 +784,81 @@ async fn repartition_drain_detection_lifts_new_partition_after_old_acks() {
 }
 
 #[tokio::test]
+async fn shrink_survivor_holds_moved_key_until_removed_source_drains() {
+    let mut owned = StdHashSet::new();
+    owned.insert(OwnedQueue::new("merge", Partition::new(0), None));
+    owned.insert(OwnedQueue::new("merge", Partition::new(1), None));
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
+
+    // Pre-cutover backlog in the removed partition (1), which merges into 0.
+    let (pub1, _c1) = broker.get_publisher("merge", Partition::new(1), &None).await.unwrap();
+    pub1.publish(b"old1".to_vec(), unix_millis(), unix_millis(), None, Default::default())
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+
+    let mut survivor = broker
+        .subscribe("merge", Partition::new(0), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .await
+        .unwrap();
+    let mut removed = broker
+        .subscribe("merge", Partition::new(1), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .await
+        .unwrap();
+
+    // Shrink 2 -> 1: surviving partition 0 sources from {0, 1}.
+    broker.apply_repartition_transition("merge", None, 1, 2, 1);
+    broker.refresh_repartition_drain("merge", None).await;
+
+    // A post-cutover message routed to the survivor (a moved key): held until the
+    // removed source drains.
+    let (pub0, _c0) = broker.get_publisher("merge", Partition::new(0), &None).await.unwrap();
+    pub0.publish(b"moved".to_vec(), unix_millis(), unix_millis(), None, Default::default())
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        recv_with_timeout(&mut survivor, 300).await.is_none(),
+        "survivor holds the moved key while the removed source has backlog"
+    );
+
+    // Drain the removed partition's backlog.
+    let msg = recv_with_timeout(&mut removed, 1000).await.expect("removed delivery");
+    removed
+        .settle(SettleRequest { settle_type: SettleType::Ack, delivery_tag: msg.delivery_tag })
+        .await
+        .unwrap();
+
+    // Refresh detects both sources drained; feed the cluster drained set back.
+    let drained = loop {
+        broker.refresh_repartition_drain("merge", None).await;
+        let reports = broker.repartition_drained_reports();
+        let set: StdHashSet<u32> = reports
+            .iter()
+            .flat_map(|r| r.drained.iter().copied())
+            .collect();
+        if set.contains(&0) && set.contains(&1) {
+            break set;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    broker.apply_repartition_drained("merge", None, drained);
+    broker.refresh_repartition_drain("merge", None).await;
+
+    // The survivor now delivers the held moved key.
+    let moved = recv_with_timeout(&mut survivor, 1000)
+        .await
+        .expect("survivor delivers the moved key once sources drain");
+    assert_eq!(moved.message.payload, b"moved");
+    broker.shutdown().await;
+}
+
+#[tokio::test]
 async fn shrink_hold_delivers_below_boundary_and_holds_above() {
     let mut owned = StdHashSet::new();
     owned.insert(OwnedQueue::new("survivor", Partition::new(0), None));
