@@ -144,15 +144,28 @@ Kafka and Pulsar allow arbitrary growth but silently break key ordering across
 the remap and cannot shrink, so gated integer-multiple grow is strictly stronger
 on correctness.
 
+SHRINK (later): shrink-by-factor (N -> N/k) is the mirror. Surviving partition r
+absorbs old partitions {r, r+N_new, r+2*N_new, ...} (those p with p % N_new = r),
+still a pure partition-identity gate, no key storage. It is modestly more
+involved than grow: the removed partitions (indexes >= N_new) start FULL, so they
+must be kept consumable until their v_old backlog drains and only then retired
+(grow's new partitions start empty), and a surviving partition gates on a GROUP
+of sources rather than one. A follow-on after grow, not free with it.
+
 ESCAPE HATCH (not a one-way door): the integer-multiple gate leaves no persistent
 artifact, it changes no storage format, message schema, or hash function. After a
-grow the queue is indistinguishable from one created at N_new. So arbitrary-N can
-be added later as a fallback chosen at repartition time (N_new % N_old == 0 ->
-cheap per-partition gate, else -> global barrier or a per-key gate with key
-storage), purely additively. The same integer relationship also yields a clean
-factor-shrink path later. The one standing commitment is keeping modulo hashing
-(which we already use); only switching to consistent hashing would invalidate the
-fast path, and that would force a repartitioning redesign regardless.
+grow the queue is indistinguishable from one created at N_new. The strong
+consequence: with both grow-by-multiple and shrink-by-factor, ANY target T is
+reachable from N in at most two cheap steps, because gcd(N, T) divides both,
+shrink to gcd(N, T) (a factor of N) then grow to T (a multiple of gcd). Worst
+case N -> 1 -> T. So arbitrary-N never needs a per-key gate or a message-schema
+change, it decomposes into the two cheap partition-identity operations. The only
+cost is that the intermediate count (gcd, possibly small) transiently funnels
+traffic through fewer partitions, so a big awkward jump (e.g. 6 -> 8 via 2) has a
+real transition cost while doubling stays a single clean step. The one standing
+commitment is keeping modulo hashing (which we already use); only switching to
+consistent hashing would invalidate the fast path, and that would force a
+repartitioning redesign regardless.
 
 ## Forwarded writes (coordination)
 
