@@ -55,6 +55,29 @@ sweep_interval_ms = 60000
 # Blank or omit to disable reconnect grace.
 # reconnect_grace_ms = 30000
 
+[runtime_seed.replication]
+confirm_timeout_ms = 5000
+caught_up_poll_ms = 1000
+retry_poll_ms = 100
+checkpoint_retry_poll_ms = 5000
+max_messages_per_read = 256
+max_events_per_read = 256
+max_bytes_per_read = 8388608
+max_iterations_per_tick = 8
+min_in_sync_replicas = 1
+isr_timeout_ms = 10000
+
+[runtime_seed.partitioning]
+default_partition_count = 1
+
+[runtime_seed.consumer_groups]
+# Blank or omit to disable the under-provisioned signal.
+# default_target_per_consumer = 4
+
+[coordination.ganglion]
+heartbeat_interval_ms = 3000
+liveness_ttl_ms = 9000
+
 [runtime_locks]
 idle_queue_cleanup = false
 ```
@@ -96,6 +119,8 @@ These fields are read on process start.
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.message_log.segment_max_bytes` | `FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES` | `--keratin-message-log-segment-max-bytes` | `268435456` |
 | `storage.keratin.event_log.segment_max_bytes` | `FIBRIL_KERATIN_EVENT_LOG_SEGMENT_MAX_BYTES` | `--keratin-event-log-segment-max-bytes` | `33554432` |
+| `coordination.ganglion.heartbeat_interval_ms` | `FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS` | none | `3000` |
+| `coordination.ganglion.liveness_ttl_ms` | `FIBRIL_COORDINATION_LIVENESS_TTL_MS` | none | `9000` |
 
 Changing these generally requires restarting the server.
 
@@ -103,6 +128,13 @@ Changing these generally requires restarting the server.
 The admin password is intentionally not shown in the dashboard startup summary.
 
 `storage.keratin.message_log.segment_max_bytes` and `storage.keratin.event_log.segment_max_bytes` are rollover thresholds. A segment rolls after an append crosses the configured size, so an individual segment can be slightly larger than this value.
+
+`coordination.ganglion.heartbeat_interval_ms` controls how often a broker
+renews its cluster liveness record. `coordination.ganglion.liveness_ttl_ms`
+controls how long a broker can go without a fresh heartbeat before the cluster
+considers it unavailable. The TTL must be at least twice the heartbeat interval.
+For heavy replication benchmarks, a longer TTL can avoid false failover while
+the node is under artificial load.
 
 ## Runtime Seeds
 
@@ -139,6 +171,34 @@ See [many idle queues](/latest/concepts/many-idle-queues/) for the user-facing b
 | `runtime_seed.connection.reconnect_grace_ms` | `FIBRIL_RECONNECT_GRACE_MS`, `--reconnect-grace-ms` | unset | Keeps a disconnected resumable client alive for this long before cleaning up subscriptions and requeueing unsettled messages. |
 
 Reconnect grace is disabled when unset. It only helps clients that use the resume identity handshake.
+
+### Replication
+
+These settings apply to the experimental cluster replication path.
+
+| TOML field | Default | Meaning |
+| --- | --- | --- |
+| `runtime_seed.replication.confirm_timeout_ms` | `5000` | How long a replica-durable publish confirm can wait for enough durable follower progress. |
+| `runtime_seed.replication.caught_up_poll_ms` | `1000` | Follower pull interval while already caught up with the owner. Lower values can reduce idle replica-durable confirm latency at the cost of more wakeups. |
+| `runtime_seed.replication.retry_poll_ms` | `100` | Follower retry interval after a partial pull or transient replication error. |
+| `runtime_seed.replication.checkpoint_retry_poll_ms` | `5000` | Follower retry interval while it needs an owner checkpoint before it can continue. |
+| `runtime_seed.replication.max_messages_per_read` | `256` | Maximum message records a follower asks the owner for in one pull. |
+| `runtime_seed.replication.max_events_per_read` | `256` | Maximum event records a follower asks the owner for in one pull. |
+| `runtime_seed.replication.max_bytes_per_read` | `8388608` | Approximate byte budget for one owner replication response. One oversized message can exceed it so replication still makes progress. |
+| `runtime_seed.replication.max_iterations_per_tick` | `8` | Maximum pull/apply iterations a follower performs before yielding. |
+| `runtime_seed.replication.min_in_sync_replicas` | `1` | Minimum recently in-sync replicas required before accepting replica-durable publishes. `1` disables the floor. |
+| `runtime_seed.replication.isr_timeout_ms` | `10000` | How recently a follower must report durable progress to count as in sync. |
+
+The read-budget settings are useful when tuning replica-durable throughput.
+Small values reduce per-tick work, while larger values let a follower catch up
+faster when the owner is receiving sustained traffic.
+
+### Partitioning and Consumer Groups
+
+| TOML field | Default | Meaning |
+| --- | --- | --- |
+| `runtime_seed.partitioning.default_partition_count` | `1` | Partition count for a new queue declared without an explicit count. |
+| `runtime_seed.consumer_groups.default_target_per_consumer` | unset | Optional soft target for exclusive consumer groups. When set, cohorts above the target can be reported as under-provisioned without reducing coverage. |
 
 ## Runtime Locks
 
@@ -208,7 +268,13 @@ Current validation rules:
 - `storage.keratin.fsync_interval_ms` must be at least `1`
 - `storage.keratin.message_log.segment_max_bytes` must be at least `1`
 - `storage.keratin.event_log.segment_max_bytes` must be at least `1`
+- `coordination.ganglion.heartbeat_interval_ms` must be at least `1`
+- `coordination.ganglion.liveness_ttl_ms` must be at least twice `coordination.ganglion.heartbeat_interval_ms`
 - `runtime_seed.delivery.expiry_batch_max` must be at least `1`
 - `runtime_seed.idle_queue_cleanup.sweep_interval_ms` must be at least `1`
+- `runtime_seed.replication` poll intervals and worker limits must be at least `1`
+- `runtime_seed.replication.min_in_sync_replicas` must be at least `1`
+- `runtime_seed.replication.isr_timeout_ms` must be at least `1`
+- `runtime_seed.partitioning.default_partition_count` must be at least `1`
 
 More validation will be added as more settings become user-facing.

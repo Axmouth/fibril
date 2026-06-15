@@ -6,3 +6,4 @@ crates/**/test_data
 /bench_data
 */bench_data
 /server_data
+/.cluster-tryout-runs

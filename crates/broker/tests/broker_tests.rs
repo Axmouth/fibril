@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet as StdHashSet},
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -1170,6 +1170,8 @@ async fn assignment_transition_apply_can_make_queue_follower() {
             0,
             1,
             1,
+            usize::MAX,
+            0,
         )
         .await
         .expect_err("follower queue should reject owner replication reads");
@@ -1738,7 +1740,7 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
         .unwrap();
     reply.await.unwrap().unwrap();
     let stale_records = owner
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10)
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
         .await
         .unwrap();
 
@@ -1779,7 +1781,7 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
         .await
         .unwrap();
     let fresh_records = owner
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10)
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
         .await
         .unwrap();
     let outcome = follower
@@ -1919,6 +1921,60 @@ async fn assignment_watcher_applies_snapshot_update_to_follower_role() {
         .await
         .expect_err("watched follower queue should reject owner reads");
     assert!(matches!(err, StromaError::WrongQueueRole { .. }));
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn assignment_transitions_use_cached_local_role_when_watch_skips_previous_owner() {
+    let (broker, _dir) = open_test_broker().await;
+    let group = Some("workers".to_string());
+    let topic = "coalesced-owner-watch";
+    let queue = QueueIdentity::new(topic, Partition::new(0), group.as_deref());
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &group)
+        .await
+        .unwrap();
+    let reply = publisher
+        .publish(
+            b"owned-before-watch-skip".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let empty = coordination_snapshot(Vec::new(), 1);
+    let owner_assignment = PartitionAssignment::new(queue.clone(), "node-a", Vec::new(), 2);
+    let first = coordination_snapshot(vec![owner_assignment], 2);
+    broker
+        .apply_assignment_snapshot_transitions("node-a", &empty, &first)
+        .await;
+
+    let moved = coordination_snapshot(
+        vec![PartitionAssignment::new(queue, "node-b", Vec::new(), 3)],
+        3,
+    );
+    let outcomes = broker
+        .apply_assignment_snapshot_transitions("node-a", &empty, &moved)
+        .await;
+
+    assert_eq!(outcomes.len(), 1);
+    assert!(matches!(
+        outcomes.into_iter().next().unwrap(),
+        Ok(BrokerAssignmentTransitionApply::Applied(
+            LocalAssignmentIntent::FreezeOwner
+        ))
+    ));
+    let err = broker
+        .engine()
+        .read_owner_message_records(topic, 0, group.as_deref(), 0, 1)
+        .await
+        .expect_err("cached local owner role must be frozen even if watch skipped previous owner");
+    assert!(matches!(err, StromaError::WrongQueueRole { .. }));
+
     broker.shutdown().await;
 }
 
@@ -2320,7 +2376,17 @@ async fn owner_replication_read_returns_published_records() {
     reply.await.unwrap().unwrap();
 
     let records = broker
-        .read_owner_replication_records("replicated", Partition::new(0), None, 0, 0, 10, 10)
+        .read_owner_replication_records(
+            "replicated",
+            Partition::new(0),
+            None,
+            0,
+            0,
+            10,
+            10,
+            usize::MAX,
+            0,
+        )
         .await
         .unwrap();
 
@@ -2339,6 +2405,263 @@ async fn owner_replication_read_returns_published_records() {
     assert_eq!(events.requested_offset, 0);
     assert_eq!(events.next_offset, 1);
     assert_eq!(events.records.len(), 1);
+
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn owner_replication_long_poll_wakes_after_publish() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "replication-long-poll";
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
+    let initial_records = broker
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .await
+        .unwrap();
+    let message_from = match initial_records.messages {
+        OwnerReplicationRead::Batch(batch) => batch.next_offset,
+        OwnerReplicationRead::CheckpointRequired { .. } => {
+            panic!("fresh long-poll test queue unexpectedly needed a message checkpoint")
+        }
+    };
+    let event_from = match initial_records.events {
+        OwnerReplicationRead::Batch(batch) => batch.next_offset,
+        OwnerReplicationRead::CheckpointRequired { .. } => {
+            panic!("fresh long-poll test queue unexpectedly needed an event checkpoint")
+        }
+    };
+
+    let reader_broker = broker.clone();
+    let mut read_task = tokio::spawn(async move {
+        reader_broker
+            .read_owner_replication_records(
+                topic,
+                Partition::new(0),
+                None,
+                message_from,
+                event_from,
+                10,
+                10,
+                usize::MAX,
+                5_000,
+            )
+            .await
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut read_task)
+            .await
+            .is_err(),
+        "empty long-poll read should wait instead of returning an empty batch immediately"
+    );
+
+    let reply = publisher
+        .publish(
+            b"wake follower".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let records = tokio::time::timeout(Duration::from_secs(2), read_task)
+        .await
+        .expect("long-poll read should wake after publish")
+        .unwrap()
+        .unwrap();
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("expected message records, got checkpoint required");
+    };
+    assert_eq!(messages.requested_offset, message_from);
+    assert_eq!(messages.next_offset, message_from + 1);
+    assert_eq!(messages.records.len(), 1);
+    assert_eq!(messages.records[0].1.payload, b"wake follower");
+
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn owner_replication_long_poll_ignores_local_only_wake() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "replication-local-wake";
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
+    let initial_records = broker
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .await
+        .unwrap();
+    let message_from = match initial_records.messages {
+        OwnerReplicationRead::Batch(batch) => batch.next_offset,
+        OwnerReplicationRead::CheckpointRequired { .. } => {
+            panic!("fresh long-poll test queue unexpectedly needed a message checkpoint")
+        }
+    };
+    let event_from = match initial_records.events {
+        OwnerReplicationRead::Batch(batch) => batch.next_offset,
+        OwnerReplicationRead::CheckpointRequired { .. } => {
+            panic!("fresh long-poll test queue unexpectedly needed an event checkpoint")
+        }
+    };
+
+    let reader_broker = broker.clone();
+    let mut read_task = tokio::spawn(async move {
+        reader_broker
+            .read_owner_replication_records(
+                topic,
+                Partition::new(0),
+                None,
+                message_from,
+                event_from,
+                10,
+                10,
+                usize::MAX,
+                5_000,
+            )
+            .await
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut read_task)
+            .await
+            .is_err(),
+        "empty long-poll read should wait before a local-only wake"
+    );
+
+    broker.update_config(BrokerConfig {
+        delivery_poll_max_ms: 123,
+        ..Default::default()
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), &mut read_task)
+            .await
+            .is_err(),
+        "local-only broker wake should not release owner replication long-poll"
+    );
+
+    let reply = publisher
+        .publish(
+            b"durable wake".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), read_task)
+        .await
+        .expect("durable publish should still wake long-poll")
+        .unwrap()
+        .unwrap();
+
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn owner_replication_long_poll_wakes_after_ack_event() {
+    let (broker, _dir) = open_test_broker().await;
+    let topic = "replication-ack-long-poll";
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
+    let reply = publisher
+        .publish(
+            b"ack wakes follower".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let mut sub = broker
+        .subscribe(
+            topic,
+            Partition::new(0),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 1 },
+        )
+        .await
+        .unwrap();
+    let msg = recv_with_timeout(&mut sub, 1000)
+        .await
+        .expect("message should be delivered before ack replication test");
+
+    let initial_records = broker
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
+        .await
+        .unwrap();
+    let message_from = match initial_records.messages {
+        OwnerReplicationRead::Batch(batch) => batch.next_offset,
+        OwnerReplicationRead::CheckpointRequired { .. } => {
+            panic!("fresh long-poll test queue unexpectedly needed a message checkpoint")
+        }
+    };
+    let event_from = match initial_records.events {
+        OwnerReplicationRead::Batch(batch) => batch.next_offset,
+        OwnerReplicationRead::CheckpointRequired { .. } => {
+            panic!("fresh long-poll test queue unexpectedly needed an event checkpoint")
+        }
+    };
+
+    let reader_broker = broker.clone();
+    let mut read_task = tokio::spawn(async move {
+        reader_broker
+            .read_owner_replication_records(
+                topic,
+                Partition::new(0),
+                None,
+                message_from,
+                event_from,
+                10,
+                10,
+                usize::MAX,
+                5_000,
+            )
+            .await
+    });
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut read_task)
+            .await
+            .is_err(),
+        "empty event long-poll read should wait before ACK"
+    );
+
+    sub.settle(SettleRequest {
+        settle_type: SettleType::Ack,
+        delivery_tag: msg.delivery_tag,
+    })
+    .await
+    .unwrap();
+    broker.wait_for_pending_settles().await;
+
+    let records = tokio::time::timeout(Duration::from_secs(2), read_task)
+        .await
+        .expect("ACK event should wake long-poll")
+        .unwrap()
+        .unwrap();
+    let OwnerReplicationRead::Batch(events) = records.events else {
+        panic!("expected event records after ACK, got checkpoint required");
+    };
+    assert_eq!(events.requested_offset, event_from);
+    assert!(events.next_offset > event_from);
+    assert!(!events.records.is_empty());
 
     broker.shutdown().await;
 }
@@ -2367,7 +2690,7 @@ async fn cold_owner_materializes_at_cached_assignment_epoch() {
     reply.await.unwrap().unwrap();
 
     let records = broker
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10)
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10, usize::MAX, 0)
         .await
         .unwrap();
 
@@ -2436,7 +2759,17 @@ async fn publishes_route_to_independent_partition_logs() {
         let group = group.clone();
         async move {
             let records = broker
-                .read_owner_replication_records(topic, partition, group.as_deref(), 0, 0, 10, 10)
+                .read_owner_replication_records(
+                    topic,
+                    partition,
+                    group.as_deref(),
+                    0,
+                    0,
+                    10,
+                    10,
+                    usize::MAX,
+                    0,
+                )
                 .await
                 .unwrap();
             let OwnerReplicationRead::Batch(messages) = records.messages else {
@@ -2552,7 +2885,17 @@ async fn owner_replication_read_rejects_unowned_queue_before_materializing() {
             .await;
 
     let err = broker
-        .read_owner_replication_records("unowned", Partition::new(0), None, 0, 0, 10, 10)
+        .read_owner_replication_records(
+            "unowned",
+            Partition::new(0),
+            None,
+            0,
+            0,
+            10,
+            10,
+            usize::MAX,
+            0,
+        )
         .await
         .expect_err("unowned queue unexpectedly served replication records");
 
@@ -2597,7 +2940,17 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     }
 
     let records = owner
-        .read_owner_replication_records("catchup", Partition::new(0), None, 0, 0, 10, 10)
+        .read_owner_replication_records(
+            "catchup",
+            Partition::new(0),
+            None,
+            0,
+            0,
+            10,
+            10,
+            usize::MAX,
+            0,
+        )
         .await
         .unwrap();
     let expected_message_next_offset = match &records.messages {
@@ -2721,6 +3074,8 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
             checkpoint.event_next_offset,
             10,
             10,
+            usize::MAX,
+            0,
         )
         .await
         .unwrap();
@@ -3154,6 +3509,7 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
     let cfg = FollowerReplicationWorkerConfig {
         max_messages_per_read: 11,
         max_events_per_read: 13,
+        max_bytes_per_read: 19,
         max_iterations_per_tick: 17,
         allow_checkpoint_install: false,
         caught_up_poll_ms: 1000,
@@ -3170,13 +3526,15 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
             event_from: 29,
             max_messages_per_read: 11,
             max_events_per_read: 13,
+            max_bytes_per_read: 19,
             max_iterations: 17,
+            max_wait_ms: 0,
         }
     );
 }
 
 #[test]
-fn follower_worker_state_records_caught_up_progress_and_cooldown() {
+fn follower_worker_state_records_caught_up_progress_and_enables_wait_budget() {
     let cfg = FollowerReplicationWorkerConfig::default();
     let mut state = FollowerReplicationWorkerState::new(0, 0);
     let progress = BrokerReplicationCatchUpProgress {
@@ -3191,7 +3549,39 @@ fn follower_worker_state_records_caught_up_progress_and_cooldown() {
     assert_eq!(state.event_next_offset, 7);
     assert_eq!(state.status, FollowerReplicationWorkerStatus::CaughtUp);
     assert_eq!(state.last_progress, Some(progress));
-    assert_eq!(state.next_delay_ms, cfg.caught_up_poll_ms);
+    assert_eq!(state.next_delay_ms, 0);
+    assert_eq!(
+        state.catch_up_options(cfg).max_wait_ms,
+        cfg.caught_up_poll_ms
+    );
+}
+
+#[test]
+fn follower_worker_state_uses_wait_budget_only_after_caught_up() {
+    let cfg = FollowerReplicationWorkerConfig {
+        caught_up_poll_ms: 250,
+        ..Default::default()
+    };
+    let mut state = FollowerReplicationWorkerState::new(0, 0);
+
+    assert_eq!(state.catch_up_options(cfg).max_wait_ms, 0);
+
+    state.record_catch_up(
+        cfg,
+        &BrokerReplicationCatchUp::IterationLimit {
+            progress: BrokerReplicationCatchUpProgress::default(),
+        },
+    );
+    assert_eq!(state.catch_up_options(cfg).max_wait_ms, 0);
+
+    state.record_catch_up(
+        cfg,
+        &BrokerReplicationCatchUp::CaughtUp(BrokerReplicationCatchUpProgress::default()),
+    );
+    assert_eq!(
+        state.catch_up_options(cfg).max_wait_ms,
+        cfg.caught_up_poll_ms
+    );
 }
 
 #[test]
@@ -3411,6 +3801,8 @@ impl BrokerOwnerReplicationPeer for EmptyOwnerPeer {
         event_from: Offset,
         _max_messages: usize,
         _max_events: usize,
+        _max_bytes: usize,
+        _max_wait_ms: u64,
     ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
         Box::pin(async move {
             Ok(BrokerOwnerReplicationRecords {
@@ -3476,6 +3868,8 @@ impl BrokerOwnerReplicationPeer for NotOwnerPeer {
         _event_from: Offset,
         _max_messages: usize,
         _max_events: usize,
+        _max_bytes: usize,
+        _max_wait_ms: u64,
     ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
         Box::pin(async move {
             Err(BrokerError::NotOwner {
@@ -3503,6 +3897,7 @@ impl BrokerOwnerReplicationPeer for NotOwnerPeer {
 #[derive(Debug)]
 struct CountingEmptyOwnerPeer {
     reads: AtomicUsize,
+    last_max_wait_ms: AtomicU64,
     read_notify: Notify,
 }
 
@@ -3510,6 +3905,7 @@ impl CountingEmptyOwnerPeer {
     fn new() -> Self {
         Self {
             reads: AtomicUsize::new(0),
+            last_max_wait_ms: AtomicU64::new(0),
             read_notify: Notify::new(),
         }
     }
@@ -3531,8 +3927,11 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
         event_from: Offset,
         _max_messages: usize,
         _max_events: usize,
+        _max_bytes: usize,
+        max_wait_ms: u64,
     ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
         self.reads.fetch_add(1, Ordering::AcqRel);
+        self.last_max_wait_ms.store(max_wait_ms, Ordering::Release);
         self.read_notify.notify_waiters();
         Box::pin(async move {
             Ok(BrokerOwnerReplicationRecords {
@@ -3563,6 +3962,55 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
                 "counting owner peer does not export checkpoints".into(),
             ))
         })
+    }
+}
+
+#[derive(Debug)]
+struct BlockingOwnerPeer {
+    reads: AtomicUsize,
+    read_notify: Notify,
+}
+
+impl BlockingOwnerPeer {
+    fn new() -> Self {
+        Self {
+            reads: AtomicUsize::new(0),
+            read_notify: Notify::new(),
+        }
+    }
+
+    async fn wait_for_read(&self) {
+        while self.reads.load(Ordering::Acquire) == 0 {
+            self.read_notify.notified().await;
+        }
+    }
+}
+
+impl BrokerOwnerReplicationPeer for BlockingOwnerPeer {
+    fn read_owner_replication_records<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: fibril_storage::Partition,
+        _group: Option<&'a str>,
+        _message_from: Offset,
+        _event_from: Offset,
+        _max_messages: usize,
+        _max_events: usize,
+        _max_bytes: usize,
+        _max_wait_ms: u64,
+    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        self.reads.fetch_add(1, Ordering::AcqRel);
+        self.read_notify.notify_waiters();
+        Box::pin(std::future::pending())
+    }
+
+    fn export_owner_state_checkpoint<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: fibril_storage::Partition,
+        _group: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
+        Box::pin(std::future::pending())
     }
 }
 
@@ -3610,6 +4058,160 @@ async fn follower_worker_tick_uses_owner_peer_abstraction() {
     );
 
     follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn follower_worker_tick_long_polls_only_after_caught_up() {
+    let (follower, _follower_dir) = open_test_broker().await;
+    let queue = QueueIdentity::new("peer-long-poll", Partition::new(0), Some("workers"));
+    let transition = assignment_transition(
+        "peer-long-poll",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    follower
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    let peer = CountingEmptyOwnerPeer::new();
+    let cfg = FollowerReplicationWorkerConfig {
+        caught_up_poll_ms: 375,
+        ..Default::default()
+    };
+
+    follower
+        .run_follower_replication_worker_once(&peer, &queue, cfg)
+        .await
+        .unwrap();
+    assert_eq!(peer.last_max_wait_ms.load(Ordering::Acquire), 0);
+
+    follower
+        .run_follower_replication_worker_once(&peer, &queue, cfg)
+        .await
+        .unwrap();
+    assert_eq!(
+        peer.last_max_wait_ms.load(Ordering::Acquire),
+        cfg.caught_up_poll_ms
+    );
+
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn owner_replication_long_poll_wakes_on_broker_shutdown() {
+    let (owner, _owner_dir) = open_test_broker().await;
+    let reader = {
+        let owner = owner.clone();
+        tokio::spawn(async move {
+            owner
+                .read_owner_replication_records(
+                    "shutdown-long-poll",
+                    Partition::new(0),
+                    None,
+                    0,
+                    0,
+                    8,
+                    8,
+                    usize::MAX,
+                    60_000,
+                )
+                .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    owner.shutdown().await;
+    let result = tokio::time::timeout(Duration::from_secs(1), reader)
+        .await
+        .expect("broker shutdown should wake owner replication long-poll")
+        .unwrap();
+    drop(result);
+}
+
+#[tokio::test]
+async fn follower_worker_loop_cancels_in_flight_owner_read() {
+    let (follower, _follower_dir) = open_test_broker().await;
+    let queue = QueueIdentity::new("peer-loop-cancel-read", Partition::new(0), Some("workers"));
+    let assignment =
+        PartitionAssignment::new(queue.clone(), "node-a", vec!["node-b".to_string()], 1);
+    let transition = assignment_transition(
+        "peer-loop-cancel-read",
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    follower
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    let peer = Arc::new(BlockingOwnerPeer::new());
+    let resolver = Arc::new(StaticOwnerPeerResolver::new(peer.clone()));
+    let shutdown = CancellationToken::new();
+    let cfg = FollowerReplicationWorkerConfig {
+        caught_up_poll_ms: 60_000,
+        ..Default::default()
+    };
+
+    let canceller = async {
+        peer.wait_for_read().await;
+        shutdown.cancel();
+    };
+    let loop_result =
+        follower.run_follower_replication_worker_loop(assignment, resolver, cfg, shutdown.clone());
+    let (_, outcome) = tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::join!(canceller, loop_result)
+    })
+    .await
+    .expect("worker loop cancellation should not wait for owner read timeout");
+
+    assert_eq!(
+        outcome.unwrap(),
+        FollowerReplicationWorkerLoopExit::Cancelled { ticks: 0 }
+    );
+    assert_eq!(peer.reads.load(Ordering::Acquire), 1);
+
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn broker_shutdown_stops_spawned_follower_worker() {
+    let (follower, _follower_dir) = open_test_broker().await;
+    let topic = "broker-shutdown-stops-follower";
+    let queue = QueueIdentity::new(topic, Partition::new(0), Some("workers"));
+    let assignment =
+        PartitionAssignment::new(queue.clone(), "node-a", vec!["node-b".to_string()], 1);
+    let transition = assignment_transition(
+        topic,
+        LocalAssignmentIntent::BecomeFollower,
+        None,
+        Some(LocalAssignmentRole::Follower),
+    );
+    follower
+        .apply_assignment_transition(&transition)
+        .await
+        .unwrap();
+
+    let peer = Arc::new(BlockingOwnerPeer::new());
+    let resolver = Arc::new(StaticOwnerPeerResolver::new(peer.clone()));
+    follower
+        .spawn_follower_replication_worker_loop(
+            assignment,
+            resolver,
+            FollowerReplicationWorkerConfig {
+                caught_up_poll_ms: 60_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    peer.wait_for_read().await;
+    tokio::time::timeout(Duration::from_secs(1), follower.shutdown())
+        .await
+        .expect("broker shutdown should stop spawned follower workers promptly");
+    assert!(!follower.has_follower_replication_worker(topic, Partition::new(0), Some("workers")));
 }
 
 #[tokio::test]

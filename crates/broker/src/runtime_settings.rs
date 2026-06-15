@@ -72,6 +72,15 @@ impl RuntimeSettings {
                 "replication poll intervals must be at least 1ms".into(),
             ));
         }
+        if self.replication.max_messages_per_read == 0
+            || self.replication.max_events_per_read == 0
+            || self.replication.max_bytes_per_read == 0
+            || self.replication.max_iterations_per_tick == 0
+        {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication worker limits must be at least 1".into(),
+            ));
+        }
         if self.replication.min_in_sync_replicas == 0 {
             return Err(RuntimeSettingsError::Invalid(
                 "replication.min_in_sync_replicas must be at least 1".into(),
@@ -133,6 +142,16 @@ pub struct ReplicationRuntimeSettings {
     pub retry_poll_ms: u64,
     /// Follower retry interval while a checkpoint install is required.
     pub checkpoint_retry_poll_ms: u64,
+    /// Maximum message records read from the owner in one follower pull.
+    pub max_messages_per_read: usize,
+    /// Maximum event records read from the owner in one follower pull.
+    pub max_events_per_read: usize,
+    /// Approximate byte budget for records read from the owner in one follower
+    /// pull. One oversized message is still allowed so replication can
+    /// progress.
+    pub max_bytes_per_read: usize,
+    /// Maximum pull/apply iterations a follower performs before yielding.
+    pub max_iterations_per_tick: usize,
     /// Minimum in-sync replicas required to accept a replica-durable publish.
     /// 1 disables the floor.
     pub min_in_sync_replicas: usize,
@@ -147,6 +166,10 @@ impl Default for ReplicationRuntimeSettings {
             caught_up_poll_ms: 1_000,
             retry_poll_ms: 100,
             checkpoint_retry_poll_ms: 5_000,
+            max_messages_per_read: 256,
+            max_events_per_read: 256,
+            max_bytes_per_read: 8 * 1024 * 1024,
+            max_iterations_per_tick: 8,
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
         }
@@ -398,6 +421,10 @@ impl BrokerConfig {
             replication_caught_up_poll_ms: settings.replication.caught_up_poll_ms,
             replication_retry_poll_ms: settings.replication.retry_poll_ms,
             replication_checkpoint_retry_poll_ms: settings.replication.checkpoint_retry_poll_ms,
+            replication_max_messages_per_read: settings.replication.max_messages_per_read,
+            replication_max_events_per_read: settings.replication.max_events_per_read,
+            replication_max_bytes_per_read: settings.replication.max_bytes_per_read,
+            replication_max_iterations_per_tick: settings.replication.max_iterations_per_tick,
             replication_min_in_sync_replicas: settings.replication.min_in_sync_replicas,
             replication_isr_timeout_ms: settings.replication.isr_timeout_ms,
             default_partition_count: settings.partitioning.default_partition_count,
@@ -639,6 +666,10 @@ mod tests {
         assert_eq!(config.delivery_poll_max_ms, 13);
         assert_eq!(config.queue_idle_evict_after_ms, Some(14));
         assert_eq!(config.queue_idle_sweep_interval_ms, 15);
+        assert_eq!(
+            config.replication_max_bytes_per_read,
+            ReplicationRuntimeSettings::default().max_bytes_per_read
+        );
     }
 
     #[test]
@@ -650,6 +681,22 @@ mod tests {
             settings.validate(),
             Err(RuntimeSettingsError::Invalid(message))
                 if message.contains("replication poll intervals")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.replication.max_messages_per_read = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("replication worker limits")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.replication.max_bytes_per_read = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("replication worker limits")
         ));
 
         settings = RuntimeSettings::default();

@@ -86,6 +86,8 @@ pub struct StartupConfigSummary {
     pub keratin_fsync_interval_ms: u64,
     pub keratin_message_log_segment_max_bytes: u64,
     pub keratin_event_log_segment_max_bytes: u64,
+    pub coordination_heartbeat_interval_ms: u64,
+    pub coordination_liveness_ttl_ms: u64,
 }
 
 pub struct AdminServer {
@@ -617,6 +619,8 @@ mod tests {
                 keratin_fsync_interval_ms: 5,
                 keratin_message_log_segment_max_bytes: 16 * 1024 * 1024,
                 keratin_event_log_segment_max_bytes: 16 * 1024 * 1024,
+                coordination_heartbeat_interval_ms: 3000,
+                coordination_liveness_ttl_ms: 9000,
             }),
             Arc::new(engine),
             None,
@@ -1399,6 +1403,10 @@ mod tests {
                                     "caught_up_poll_ms": 1000,
                                     "retry_poll_ms": 100,
                                     "checkpoint_retry_poll_ms": 5000,
+                                    "max_messages_per_read": 256,
+                                    "max_events_per_read": 256,
+                                    "max_bytes_per_read": 8388608,
+                                    "max_iterations_per_tick": 8,
                                     "min_in_sync_replicas": 1,
                                     "isr_timeout_ms": 10000
                                 },

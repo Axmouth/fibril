@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::{sync::OnceLock, time::Instant};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
@@ -21,21 +22,88 @@ pub enum ProtocolError {
 pub type ProtocolResult<T> = Result<T, ProtocolError>;
 
 pub fn try_encode<T: Serialize>(op: Op, req_id: u64, msg: &T) -> ProtocolResult<Frame> {
-    let payload = rmp_serde::to_vec_named(msg)
-        .map_err(|err| ProtocolError::Encode(err.to_string()))?
-        .into();
+    let started = Instant::now();
+    let payload =
+        rmp_serde::to_vec_named(msg).map_err(|err| ProtocolError::Encode(err.to_string()))?;
+    log_protocol_codec_timing(
+        "encode",
+        Some(op),
+        Some(op as u16),
+        req_id,
+        payload.len(),
+        started.elapsed(),
+    );
 
     Ok(Frame {
         version: PROTOCOL_V1,
         opcode: op as u16,
         flags: 0,
         request_id: req_id,
-        payload,
+        payload: payload.into(),
     })
 }
 
 pub fn try_decode<T: for<'de> Deserialize<'de>>(frame: &Frame) -> ProtocolResult<T> {
-    rmp_serde::from_slice(&frame.payload).map_err(|err| ProtocolError::Decode(err.to_string()))
+    let started = Instant::now();
+    let decoded =
+        rmp_serde::from_slice(&frame.payload).map_err(|err| ProtocolError::Decode(err.to_string()));
+    log_protocol_codec_timing(
+        "decode",
+        None,
+        Some(frame.opcode),
+        frame.request_id,
+        frame.payload.len(),
+        started.elapsed(),
+    );
+    decoded
+}
+
+pub(crate) fn log_protocol_codec_timing(
+    stage: &'static str,
+    op: Option<Op>,
+    opcode: Option<u16>,
+    request_id: u64,
+    payload_len: usize,
+    elapsed: std::time::Duration,
+) {
+    const LARGE_FRAME_BYTES: usize = 1 << 20;
+    const SLOW_FRAME_MICROS: u128 = 5_000;
+
+    let is_replication_op = op.is_some_and(|op| {
+        matches!(
+            op,
+            Op::ReplicationReadOk
+                | Op::ReplicationApply
+                | Op::ReplicationCheckpointExportOk
+                | Op::ReplicationCheckpointInstall
+        )
+    });
+    let slow = elapsed.as_micros() >= SLOW_FRAME_MICROS;
+    let detailed = protocol_codec_timing_enabled();
+    if !slow && (!detailed || (!is_replication_op && payload_len < LARGE_FRAME_BYTES)) {
+        return;
+    }
+
+    tracing::info!(
+        stage,
+        op = ?op,
+        opcode = ?opcode,
+        pid = std::process::id(),
+        request_id,
+        payload_len,
+        elapsed_us = elapsed.as_micros(),
+        "protocol frame codec timing"
+    );
+}
+
+fn protocol_codec_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("FIBRIL_PROTOCOL_CODEC_TIMING").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+        )
+    })
 }
 
 pub fn error_frame(req_id: u64, code: u16, message: impl Into<String>) -> ProtocolResult<Frame> {
@@ -196,6 +264,8 @@ mod tests {
             event_from: 17,
             max_messages: 128,
             max_events: 256,
+            max_bytes: 1024 * 1024,
+            max_wait_ms: 250,
             reporter_node_id: None,
         };
 

@@ -35,6 +35,13 @@ BENCH_TOPIC="orders"
 ASSIGNMENT_DURABILITY=""
 FAILOVER_SMOKE=false
 REPARTITION_SMOKE=false
+COORDINATION_HEARTBEAT_INTERVAL_MS="${COORDINATION_HEARTBEAT_INTERVAL_MS:-}"
+COORDINATION_LIVENESS_TTL_MS="${COORDINATION_LIVENESS_TTL_MS:-}"
+REPLICATION_CAUGHT_UP_POLL_MS="${REPLICATION_CAUGHT_UP_POLL_MS:-}"
+REPLICATION_MAX_MESSAGES_PER_READ="${REPLICATION_MAX_MESSAGES_PER_READ:-}"
+REPLICATION_MAX_EVENTS_PER_READ="${REPLICATION_MAX_EVENTS_PER_READ:-}"
+REPLICATION_MAX_ITERATIONS_PER_TICK="${REPLICATION_MAX_ITERATIONS_PER_TICK:-}"
+CLUSTER_TRYOUT_RUN_ROOT="${CLUSTER_TRYOUT_RUN_ROOT:-/tmp}"
 ADMIN_WAIT_SECS=5
 CLUSTER_WAIT_SECS=90
 # Keep wide spacing between port bands so large local clusters do not make
@@ -91,6 +98,26 @@ if [[ "$REPARTITION_SMOKE" == true && "$NODES" -lt 2 ]]; then
   exit 2
 fi
 
+require_positive_int_env() {
+  local name="$1"
+  local value="${!name:-}"
+  if [[ -n "$value" ]] && { ! [[ "$value" =~ ^[0-9]+$ ]] || [[ "$value" -lt 1 ]]; }; then
+    echo "FAIL: $name must be a positive integer" >&2
+    exit 2
+  fi
+}
+
+for numeric_env in \
+  COORDINATION_HEARTBEAT_INTERVAL_MS \
+  COORDINATION_LIVENESS_TTL_MS \
+  REPLICATION_CAUGHT_UP_POLL_MS \
+  REPLICATION_MAX_MESSAGES_PER_READ \
+  REPLICATION_MAX_EVENTS_PER_READ \
+  REPLICATION_MAX_ITERATIONS_PER_TICK
+do
+  require_positive_int_env "$numeric_env"
+done
+
 cluster_attempts() {
   # Cluster checks sleep 0.3s between attempts. Round up so the configured
   # seconds are a real lower bound, not an accidental shorter window.
@@ -101,7 +128,8 @@ if [[ -z "$PORT_OFFSET" ]]; then
   PORT_OFFSET=$(( (RANDOM % 20) * 1000 ))
 fi
 
-RUN_DIR="$(mktemp -d /tmp/fibril-cluster-tryout.XXXXXX)"
+mkdir -p "$CLUSTER_TRYOUT_RUN_ROOT"
+RUN_DIR="$(mktemp -d "$CLUSTER_TRYOUT_RUN_ROOT/fibril-cluster-tryout.XXXXXX")"
 declare -a PIDS=()
 EXPECTED_PROCESSES="$NODES"
 if [[ "$DYNAMIC_MEMBERSHIP" == true ]]; then
@@ -377,6 +405,12 @@ start_node() {
     )
     if [[ -n "$ASSIGNMENT_DURABILITY" ]]; then
       env_vars+=("FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY=$ASSIGNMENT_DURABILITY")
+    fi
+    if [[ -n "$COORDINATION_HEARTBEAT_INTERVAL_MS" ]]; then
+      env_vars+=("FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS=$COORDINATION_HEARTBEAT_INTERVAL_MS")
+    fi
+    if [[ -n "$COORDINATION_LIVENESS_TTL_MS" ]]; then
+      env_vars+=("FIBRIL_COORDINATION_LIVENESS_TTL_MS=$COORDINATION_LIVENESS_TTL_MS")
     fi
     if [[ "$i" -eq 1 ]]; then
       env_vars+=("FIBRIL_COORDINATION_BOOTSTRAP=true")
@@ -1145,8 +1179,30 @@ if [[ "$GANGLION" == true ]]; then
   current="$(curl -sf "http://127.0.0.1:$((BASE_ADMIN_PORT + 1))/admin/api/runtime-settings")"
   expected_version="$(echo "$current" | jq -r '.version')"
   new_ttl="$(( $(echo "$current" | jq -r '.settings.delivery.inflight_ttl_ms') + 111 ))"
-  body="$(echo "$current" | jq -c --argjson v "$expected_version" --argjson ttl "$new_ttl" \
-    '{expected_version: $v, settings: (.settings | .delivery.inflight_ttl_ms = $ttl)}')"
+  settings="$(echo "$current" | jq -c --argjson ttl "$new_ttl" \
+    '.settings | .delivery.inflight_ttl_ms = $ttl')"
+  if [[ -n "$REPLICATION_CAUGHT_UP_POLL_MS" ]]; then
+    settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_CAUGHT_UP_POLL_MS" \
+      '.replication.caught_up_poll_ms = $value')"
+  fi
+  if [[ -n "$REPLICATION_MAX_MESSAGES_PER_READ" ]]; then
+    settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_MAX_MESSAGES_PER_READ" \
+      '.replication.max_messages_per_read = $value')"
+  fi
+  if [[ -n "$REPLICATION_MAX_EVENTS_PER_READ" ]]; then
+    settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_MAX_EVENTS_PER_READ" \
+      '.replication.max_events_per_read = $value')"
+  fi
+  if [[ -n "$REPLICATION_MAX_BYTES_PER_READ" ]]; then
+    settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_MAX_BYTES_PER_READ" \
+      '.replication.max_bytes_per_read = $value')"
+  fi
+  if [[ -n "$REPLICATION_MAX_ITERATIONS_PER_TICK" ]]; then
+    settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_MAX_ITERATIONS_PER_TICK" \
+      '.replication.max_iterations_per_tick = $value')"
+  fi
+  body="$(jq -cn --argjson v "$expected_version" --argjson settings "$settings" \
+    '{expected_version: $v, settings: $settings}')"
   curl -sf -X PUT -H 'content-type: application/json' -d "$body" \
     "http://127.0.0.1:$((BASE_ADMIN_PORT + 1))/admin/api/runtime-settings" >/dev/null \
     || { echo "FAIL: runtime settings PUT failed" >&2; FAILED=1; }

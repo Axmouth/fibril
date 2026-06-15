@@ -118,10 +118,10 @@ Failure chain fixed:
   overlap/gap as a checkpoint-repair condition for checkpoint-aware workers,
   installs the owner checkpoint, and then resumes pull replication.
 
-Important caveat: `AlreadyPresent` remains an idempotence outcome only. It does
-not prove byte equality. Catch-up advances only over the owner-returned range,
-not to the follower's whole local tail. If we need stronger divergence
-detection, add prefix hash/CRC validation in Keratin before accepting overlap.
+Important caveat: `AlreadyPresent` now verifies byte equality for non-empty
+retained ranges before accepting an already-applied replicated batch. Empty
+batches remain cursor/status probes. Catch-up advances only over the
+owner-returned range, not to the follower's whole local tail.
 
 Tests added/covered in this pass:
 - stale replicated append does not record ready state or permit promotion
@@ -494,6 +494,58 @@ locally, every higher layer would be built on the wrong foundation.
    notifications should be coalesced per queue/follower at a small cooldown and
    can be lost without breaking replication. If a notification is lost, the
    follower catches up on the next long poll or periodic retry.
+   Longer term, this should likely become a hybrid push/pull transport. Pull
+   stays authoritative for repair and cursor reconciliation: the follower says
+   "I have applied through X, send from there". Push is a latency accelerator:
+   when the owner knows a follower is caught up or nearly caught up, it may push
+   records or a wake-up hint immediately instead of waiting for the next poll.
+   A follower pull should update the owner's view of that follower cursor so the
+   owner does not push already requested ranges. If push delivery fails, stalls,
+   or sees the follower lag beyond a small window, the follower falls back to
+   pull/checkpoint catch-up. This keeps owner-side push out of the correctness
+   contract while still allowing low-latency replication when the system is
+   healthy.
+   First wakeup implementation: protocol and broker owner reads now carry an
+   optional `max_wait_ms`. Followers send `0` while catching up. Once a worker
+   records `CaughtUp`, its next read uses `caught_up_poll_ms` as a bounded
+   long-poll budget. The owner subscribes to a per-queue notify, does an
+   immediate read, and only waits when both streams are empty. Publish/settle
+   activity wakes the parked read, which then re-reads from the follower's
+   supplied cursor. This keeps cursor authority on the follower and makes lost
+   notifications harmless: timeout falls back to another ordinary pull.
+   This is deliberately not direct data push. The accepted tradeoff is a small
+   amount of server-side parked read state and possible spurious wakeups. The
+   bounds are explicit, and the mechanism should remain a latency accelerator,
+   not the correctness source. Direct owner record push can be revisited later
+   for followers whose last reported cursor is close enough to the owner tail,
+   with bounded outstanding pushes and fallback to ordinary pull.
+   Explicit replication wake path: the broker now separates local delivery-loop
+   wakeups from replication wakeups. Config changes, subscription changes,
+   repartition delivery gates, and shutdown wake local delivery work only.
+   Durable owner state changes wake replication readers: publish completion,
+   successful settle/release callbacks, `poll_ready` after it records in-flight
+   leases, and expiry requeue. This turns the current long-poll read into the
+   first hybrid push/pull step: the owner pushes a wake hint, then the follower
+   still pulls by its own cursor. Direct owner record push remains future work
+   and should keep the same fallback rule. A long-poll read still creates broker
+   queue loop state for that queue. If sparse queue memory growth shows up,
+   replace this with a narrower replication wait registry.
+   Regression coverage: broker tests now verify that caught-up worker state
+   enables the wait budget only after `CaughtUp`, that the worker passes the
+   budget to the owner peer on the second tick, and that a local owner
+   long-poll from the current tail waits instead of returning empty, ignores a
+   local-only config wake, wakes after a publish, and wakes after an ACK event.
+   Shutdown and invalidation follow-up: long-poll must not make parallel tests
+   or broker shutdown wait for the full poll budget. The protocol owner peer now
+   separates the intentional single-request guard from the reusable connection
+   slot, so the connection slot mutex is not held across socket send/receive.
+   Resolver invalidation drains cached peers and cancels in-flight protocol
+   reads via a peer close token. Broker shutdown also stops all follower worker
+   runtimes before task-group shutdown, clearing the worker registry instead of
+   relying only on task cancellation. Regression coverage includes owner
+   long-poll waking on broker shutdown, follower-loop cancellation during an
+   in-flight owner read, and broker shutdown stopping a spawned follower worker
+   promptly.
    Contiguous log catch-up only works while the owner still retains the
    requested message and event ranges. Once the follower asks for data older
    than the retained head, the owner should not stream all history and may no
@@ -2470,3 +2522,303 @@ Resume concerns after operator-surface cleanup:
   in the operator smoke.
 - Any new replication worker knobs should go through the config/runtime-settings
   discipline, not ad hoc environment variables.
+
+Follow-up done:
+
+- Added runtime replication settings for follower pull budgets:
+  `max_messages_per_read`, `max_events_per_read`, and
+  `max_iterations_per_tick`. These are seeded from config, persisted with the
+  runtime settings document, cluster-replicated with the other broker runtime
+  settings, and reread by the follower worker loop.
+- Added boot-time config/env knobs for Ganglion broker liveness:
+  `coordination.ganglion.heartbeat_interval_ms` and
+  `coordination.ganglion.liveness_ttl_ms`, with env overrides
+  `FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS` and
+  `FIBRIL_COORDINATION_LIVENESS_TTL_MS`. These stay startup-only because the
+  coordination path itself is the thing that would replicate runtime settings.
+- The admin settings page now preserves and exposes replication, partitioning,
+  and consumer-group runtime fields. This avoids the old full-document save
+  hazard where editing delivery settings from the dashboard could silently
+  reset newer runtime groups to serde defaults.
+- The startup summary now shows coordination heartbeat and liveness TTL, because
+  those values are important when reading failover and replica-durable benchmark
+  behavior.
+- `cluster-tryout.sh` can accept temporary tuning env vars for the replication
+  read budgets and coordination liveness values, then applies the runtime
+  replication values through the same admin runtime-settings API operators use.
+- The steady benchmark now prints `publish->server-receive` latency. In the
+  tuned 30k/s run, most of the apparent publish-to-deliver latency was already
+  present before server receive, while server-receive-to-deliver stayed low.
+
+Tuned result after adding the knobs:
+
+- Command shape: 3-node Ganglion tryout, `replica_durable:2`, 1 KiB payloads,
+  target 50k/s, confirm window 50k, `heartbeat_interval_ms=1000`,
+  `liveness_ttl_ms=30000`, follower budgets `1024 messages/read`,
+  `1024 events/read`, `16 iterations/tick`.
+- Result: about 45.6k/s measured, zero missing, zero publish errors, zero
+  confirm errors.
+- Latency: publish-to-server-receive p99 about 3.9s, server-receive-to-deliver
+  p99 about 141ms, publish-to-deliver p99 about 3.9s.
+- Verification: post-run follower tail reached benchmark writes and owner/
+  follower cursors matched (`message_next=437760`, `event_next=53574`,
+  `in_sync=true`).
+
+Current interpretation:
+
+- The original 10-15k/s ceiling was at least partly follower read-budget
+  limited.
+- With larger follower batches, 50k/s offered load gets much closer to target,
+  but remaining latency is mostly publish/confirm backpressure before the
+  server accepts the message.
+- Next useful sweeps: smaller confirm windows at 30k-50k/s, higher offered
+  rates with the larger follower budgets, and larger follower budgets such as
+  2048/2048/32 to see whether the knee moves again.
+
+Snapshot/checkpoint concern found during higher-rate sweep:
+
+- A 75k/s target run with 2048/2048/32 follower budgets did not produce a valid
+  throughput result. It surfaced user-visible `WrongQueueRole` errors where the
+  current role was `Frozen`.
+- The likely mechanism is checkpoint export during follower catch-up. If the
+  owner has already truncated the requested range, the follower asks for an
+  owner state checkpoint. The first checkpoint export implementation uses the
+  same freeze/drain primitive as ownership transitions, then restores owner
+  role after the checkpoint is built. Under high publish pressure, that short
+  freeze can still reject public owner operations.
+- Fixed in Stroma by separating checkpoint export from role transitions.
+  Checkpoint export now pauses new owner-operation leases, waits for already
+  accepted owner work to enqueue its state mutations, and leaves the queue role
+  as `Owner`. New owner operations wait on the pause gate instead of seeing
+  `WrongQueueRole(Frozen)`. Real ownership transitions still use the `Frozen`
+  role and keep the previous drain contract.
+- Checkpoint export now also uses a single queue-actor command to clone state
+  and read `message_checkpoint_offset` from the same actor-state turn. That
+  avoids mixing an Express `lowest_not_acked` read with a later SuperLow
+  snapshot. Snapshot encoding itself still happens off the actor loop with
+  `spawn_blocking`, matching normal snapshot behavior.
+- The state checkpoint is only queue state, not message payloads. After install,
+  followers must still catch up message records from `message_checkpoint_offset`
+  to `message_next_offset`.
+- Follow-up validation: a repeat 75k/s target run with 2048/2048/32 follower
+  budgets no longer showed `WrongQueueRole(Frozen)`, but it did expose a second
+  owner-read race. The owner can truncate between the read boundary's
+  `head_offset` check and the synchronous Keratin scan. Also, Keratin's
+  segment-level truncation can leave the public head lower than the first
+  readable retained segment. Both used to surface as a 500 corruption error
+  (`message log gap while reading owner records`), even though the correct
+  recovery path is checkpoint install. Stroma now treats an initial scanner jump
+  from the requested offset as `CheckpointRequired`, using the observed first
+  readable offset as a head floor. Interior gaps after records have started
+  still remain corruption.
+- Live validation after the checkpoint and owner-read fixes: a 3-node Ganglion
+  run with `replica_durable:2`, 75k/s target, confirm window 50000, 2048
+  message/event read budgets, and 32 iterations per tick completed with 0
+  publish errors, 0 confirm errors, 0 missing messages, follower message tail
+  at the benchmark write count, and matching owner/follower cursors. The log
+  scan showed no `WrongQueueRole(Frozen)`, no message/event log gap warning,
+  and no follower replication worker tick failure. Startup raft connection
+  warnings remain expected while peers are still opening sockets.
+- Future availability pass: checkpoint export is now non-role-changing, but it
+  can still pause new owner-operation leases. Revisit this to reduce
+  interruptions under load, likely by deriving compact checkpoints from actor
+  state without blocking new owner work for the whole export, or by amortizing
+  checkpoint handoff so followers do not repeatedly force owner-side pauses.
+- `applied_upto` should be treated as the last applied event offset in
+  checkpoint and promotion code. The async event append completion path had been
+  recording `base + count`; it now records `base + count - 1`. If more offset
+  convention cleanup is done later, keep this contract explicit.
+- Keratin replicated append now verifies retained bytes before returning
+  `AlreadyPresent` for non-empty replicated batches that are fully before the
+  local tail. It already verified the existing prefix when applying a suffix
+  after overlap, but fully-present ranges had skipped that check. This makes
+  `AlreadyPresent` safer for follower repair and failover: it now means the
+  local retained records matched the owner-provided records for that range, not
+  merely that the follower tail had already advanced past it. Empty batches
+  remain cursor/status probes and do not prove byte equality.
+- Stroma now has a focused regression for the applied-event offset convention on
+  the async event append completion path. `ack_enqueue` used to advance the
+  queue's applied-event watermark to `base + count`, while checkpoint and
+  promotion code reason in terms of the last applied event offset. That path now
+  records `base + count - 1`, and the test verifies the forced snapshot metadata
+  tracks the last applied event rather than the next event offset.
+- Future Keratin cleanup: replace stringly `io::Error` replication validation
+  failures with structured error variants, at least for retained-range
+  mismatch, unreadable retained prefix, gap, stale epoch, and wrong log role.
+  Stroma/broker can then distinguish data divergence from ordinary IO failure
+  without parsing error text.
+- Test lifecycle cleanup: the protocol handler suite previously completed but
+  one supervised follower test waited out the 60s caught-up long-poll budget.
+  Root cause was teardown waiting behind an in-flight protocol owner read: the
+  cached peer kept the connection mutex across `recv_response`, so `close_all`
+  could not interrupt the read. The peer now uses a short connection-slot mutex,
+  a separate request mutex for the one-in-flight contract, and a close token
+  selected against reads/checkpoint exports. Full `fibril-protocol`
+  `handler_tests` now runs in about 2.5s locally with the same 60s production
+  poll budget.
+- Assignment-watch coalescing guard: local role transitions no longer trust
+  only the watch callback's previous snapshot. A broker may have already
+  applied owner/follower state locally even if a later watch observation skipped
+  over that exact previous snapshot. Transition planning now augments the
+  previous snapshot with the broker's applied local assignment cache for queues
+  this node owns or follows. This makes stale-owner demotion/freeze happen even
+  when the watch stream coalesces changes. Regression: a node that locally
+  applied owner assignment still freezes that queue when the next observed
+  snapshot has moved ownership away, even if the caller supplies an empty
+  previous snapshot.
+- Checkpoint-aware worker test contract: installing an owner checkpoint can
+  happen inside one completed follower worker tick, so tests should assert
+  stable outcomes rather than transient scheduler states. The useful contract is
+  that checkpoint-aware catch-up reaches the owner's checkpoint tails and the
+  follower can promote at those tails. Requiring a visible intermediate
+  `CheckpointRequired` worker status or exactly two loop ticks is too brittle
+  and does not express user-visible behavior.
+- Hybrid push/pull wake validation: after splitting local delivery wakeups from
+  explicit replication wakeups, a 3-node Ganglion steady benchmark with
+  `replica_durable:2`, target 50k/s, confirm window 50k, payload 1 KiB, and
+  follower budgets `2048 messages/read`, `2048 events/read`, `32 iterations/tick`
+  completed with 0 publish errors, 0 confirm errors, 0 missing messages, and
+  matching owner/follower cursors. Measured throughput was about 45.9k/s.
+  Latency was still dominated by publish-to-server acceptance
+  (`publish->server p99` about 4.4s), while `server-receive->deliver p99` was
+  about 117ms. Follower tail reached the benchmark writes and cursors matched
+  (`message_next=581676`, `event_next=60407`, `in_sync=true`).
+- Confirm-window sweep on the same 3-node replicated setup, 1 KiB payloads,
+  follower budgets `2048 messages/read`, `2048 events/read`, `32
+  iterations/tick`, and `8 MiB/read`:
+
+  | Target | Confirm window | Extra replication budget | Actual | p99 publish->server | p99 publish->deliver | p99 server->deliver | Errors | Replication |
+  | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
+  | 30k/s | 30k | baseline | 30.0k/s | 1ms | 17ms | 17ms | 0 | caught up |
+  | 50k/s | 5k | baseline | 30.3k/s | 1ms | 17ms | 17ms | 0 | caught up |
+  | 50k/s | 7.5k | baseline | 31.8k/s | 1ms | 17ms | 17ms | 0 | caught up |
+  | 50k/s | 7.5k | 8192 events/read | 31.3k/s | 1ms | 18ms | 17ms | 0 | caught up |
+  | 50k/s | 7.5k | 8192 messages/read, 8192 events/read | 31.2k/s | 1ms | 18ms | 17ms | 0 | caught up |
+  | 50k/s | 10k | baseline | 34.8k/s | 767ms | 841ms | 114ms | 0 | caught up |
+  | 50k/s | 20k | baseline | 38.5k/s | 2736ms | 2777ms | 83ms | 0 | caught up |
+  | 50k/s | 50k | baseline | 46.9k/s | 2751ms | 2780ms | 129ms | 0 | caught up |
+
+  Interpretation: the low-latency knee on this single-machine, same-disk setup
+  is about 30k-32k 1 KiB replica-durable messages/s. Larger confirm windows buy
+  more throughput by allowing a large pre-acceptance backlog, so p99
+  publish-to-server and publish-to-deliver latency jump sharply. Raising event
+  or message records per read at the 7.5k window did not improve throughput,
+  which suggests the limiting path is not simply follower pull batch size in
+  this case. Future work should improve owner ingest/confirm scheduling, client
+  confirm pacing, or storage contention isolation so low latency does not
+  require giving up as much throughput.
+- Storage isolation check: `/tmp` on this machine is `tmpfs`, and
+  `cluster-tryout.sh` already writes node data under `/tmp` by default. The
+  small-message runs above are therefore tmpfs-backed. A disk-backed comparison
+  using `CLUSTER_TRYOUT_RUN_ROOT=/home/george/code/fibril/.cluster-tryout-runs`
+  at 50k/s target and 7.5k confirm window reached 28.2k/s with p99
+  publish-to-deliver 28ms, versus the tmpfs run's 31.8k/s and 17ms. Storage
+  placement matters, but the tmpfs result means the current low-latency ceiling
+  is not purely physical disk throughput.
+- Publish pipeline wait suspects after reading the current code:
+  - Benchmark `confirm_window` is per writer, not global. With 10 writers,
+    window 7.5k means up to 75k outstanding confirms, and window 50k means up
+    to 500k outstanding confirms. Interpret the sweep with that in mind.
+  - The Rust client outbound publish path uses `framed.send(frame).await`, which
+    encodes and flushes each publish frame. The server writer batches outbound
+    frames, but the client publish side does not currently batch writes. This is
+    a strong candidate for publish-to-server latency and throughput loss before
+    the broker has accepted the message.
+  - Broker `confirm_sink_loop` awaits append completion and then replica
+    confirmation one message at a time. Request ids allow out-of-order replies,
+    and follower progress is monotonic, so later ready confirmations do not
+    need to be held behind an earlier await. A range-aware confirm completer may
+    be better than spawning one task per message.
+  - Protocol `pub_queue_handle` also awaits each publish-result oneshot in
+    receive order before sending `PublishOk`, another unnecessary ordering point
+    for request-id-addressed responses.
+  - Stroma's current publish is intentionally two durable phases: message-log
+    append, then one event-log `EnqueueMany` append. That is correctness work,
+    not accidental waiting, but batching and range-level confirm handling around
+    it can still improve the path.
+- Payload-size sweep on the same 3-node replicated setup. Payload throughput is
+  logical payload size only, before protocol, message headers, storage format,
+  replication transport, and filesystem overhead:
+
+  | Payload | Target | Target payload | Confirm window | Actual | Reached payload | p99 publish->deliver | p99 server->deliver | Errors | Replication |
+  | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+  | 8 KiB | 10k/s | 78.1 MiB/s | 5k | 9.0k/s | 70.4 MiB/s | 22ms | 21ms | 0 | caught up |
+  | 64 KiB | 2k/s | 125.0 MiB/s | 1k | 1.2k/s | 74.7 MiB/s | 17ms | 17ms | 20 confirm timeouts | caught up |
+  | 64 KiB | 1k/s | 62.5 MiB/s | 500 | 670/s | 41.9 MiB/s | 22ms | 21ms | 0 | caught up |
+  | 256 KiB | 250/s | 62.5 MiB/s | 200 | 225/s | 56.3 MiB/s | 55ms | 53ms | 20 confirm timeouts | caught up |
+
+  Interpretation: larger payloads keep low p99 delivery latency when the system
+  is not overloaded, but replica-durable confirms can time out even when the
+  follower catches up by the end of the run. Message-count replication budgets
+  are not enough to describe this behavior. Add byte-aware replication
+  observability and likely byte-aware read/apply limits before treating
+  large-payload durability tuning as solved. The `max` outliers on larger
+  payloads also deserve a focused pass, because p99 stays low while a few
+  requests wait near the confirm timeout.
+- Batching/tuning rule confirmed by the payload sweep: replication batching
+  should use all three limits together: elapsed time, record count, and total
+  encoded byte size. Count-only limits hide large-payload pressure. Byte-only
+  limits can behave poorly for many tiny messages. Time bounds keep low-traffic
+  queues from waiting just to fill a batch. Apply this rule to future owner
+  replication reads, follower apply loops, push hints or pushed batches, and
+  Keratin writer-side batching work.
+- Temporary protocol codec timing probe: `FIBRIL_PROTOCOL_CODEC_TIMING=1` can
+  expose per-frame encode/decode/frame-copy timing with process ids, which lets
+  us separate server-side stalls from benchmark-client stalls. This is audit
+  tooling only. Before merging, either remove the raw timing logs or refactor
+  the useful signal into sampled/aggregated metrics. Do not leave per-frame
+  large-payload logging as a normal production behavior.
+- First probe signal: in a 1 MiB `replica_durable:2` run, the benchmark client
+  spent about 3-6ms encoding 1 MiB publish frames and 3-6ms decoding 1 MiB
+  deliver frames. The owner spent similar low single-digit milliseconds decoding
+  publishes and encoding deliveries. The stronger suspect is replication
+  response decode on the follower: 1 MiB `ReplicationReadOk` frames took about
+  30ms to decode and ~9 MiB responses took roughly 240-260ms. Next investigation
+  should measure whether `rmp-serde` is copying payload bytes into nested
+  structures and whether a raw/binary replication response shape can avoid that
+  cost without complicating the wire contract too much.
+- Short-term mitigation tried: protocol owner-peer response decode now moves
+  frames of at least 1 MiB through `spawn_blocking`. This does not make
+  `rmp-serde` decode cheaper: a repeat 1 MiB run still showed follower
+  `ReplicationReadOk` decode averaging about 145ms for ~5 MiB responses, with
+  peaks around 270ms. The goal is narrower: keep long deserialization work off
+  Tokio worker threads so the follower broker remains responsive. If this path
+  becomes frequent enough that `spawn_blocking` scheduling overhead or pool
+  pressure is visible, replace it with a long-lived replication decode/apply
+  worker communicated with through bounded channels.
+- Byte cap fix in progress/applied in Fibril: replication owner reads now carry
+  `max_bytes_per_read` through startup config, persisted runtime settings,
+  admin settings, protocol reads, and the follower worker. Owner-side reads cap
+  returned message records by approximate bytes before encoding the response.
+  Event records are then capped at the returned message frontier, so a follower
+  never applies an enqueue/ack/nack/dead-letter event that references a payload
+  not included in the same or an earlier replicated message batch. The cap
+  preserves owner-tail metadata and allows one oversized message so replication
+  can still make progress.
+- Verification after byte cap: the previous problematic 256 KiB
+  `replica_durable:2` steady case at 170/s with confirm window 100 completed
+  with 0 publish errors, 0 confirm errors, 0 missing messages, p99
+  publish-to-deliver around 69ms, and matching owner/follower cursors
+  (`message_next=2127`, `event_next=4252`). Before the cap, the same shape hit
+  confirm timeouts while follower decode processed giant responses.
+- Follow-up large-payload stress with the same 8 MiB byte cap stayed correct at
+  doubled rates:
+
+  | Payload | Target | Window | publish->server p99 | publish->deliver p50/p95/p99/max | Result |
+  | --- | ---: | ---: | ---: | --- | --- |
+  | 256 KiB | 500/s | 500 | 3ms | 18 / 28 / 92 / 166ms | 0 publish errors, 0 confirm errors, 0 missing, cursors in sync |
+  | 512 KiB | 240/s | 240 | 6ms | 24 / 34 / 104 / 151ms | 0 publish errors, 0 confirm errors, 0 missing, cursors in sync |
+  | 1 MiB | 120/s | 120 | 11ms | 37 / 52 / 140 / 223ms | 0 publish errors, 0 confirm errors, 0 missing, cursors in sync |
+
+  Interpretation: the cap removed the correctness/failure mode from giant
+  replication responses. Median delivery latency remains modest, but p99 widens
+  as payload size and aggregate MiB/s rise. Next optimization should target
+  replication/decode/apply burst size and scheduling, not basic catch-up
+  correctness.
+- Transport follow-up: the current `ReplicationReadOk` carries both message
+  payload records and event records in one serialized response. That is a
+  practical first shape, but the large-payload audit suggests the durable
+  replication transport should probably split payload and event streams later.
+  The two streams have different size and latency profiles; separate streams
+  would make byte limits, decode offload, and future push/pull hybrid behavior
+  easier to reason about.

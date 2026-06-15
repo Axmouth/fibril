@@ -1989,6 +1989,8 @@ pub async fn handle_connection(
                         read.event_from,
                         read.max_messages as usize,
                         read.max_events as usize,
+                        usize::try_from(read.max_bytes).unwrap_or(usize::MAX),
+                        read.max_wait_ms as u64,
                     )
                     .await
                 {

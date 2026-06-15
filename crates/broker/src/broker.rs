@@ -23,8 +23,8 @@ use uuid::Uuid;
 use crate::coordination::{
     CohortMemberInfo, ConsumerGroupKey, Coordination, CoordinationSnapshot,
     ExclusiveConsumerGroups, LocalAssignmentIntent, LocalAssignmentTransition,
-    LocalCohortMembership, PartitionAssignment, StaticCoordination, StickyConsumerGroupAssignor,
-    plan_local_assignment_transitions,
+    LocalCohortMembership, PartitionAssignment, QueueIdentity, StaticCoordination,
+    StickyConsumerGroupAssignor, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
     EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome,
@@ -362,6 +362,10 @@ pub struct BrokerConfig {
     pub replication_caught_up_poll_ms: u64,
     pub replication_retry_poll_ms: u64,
     pub replication_checkpoint_retry_poll_ms: u64,
+    pub replication_max_messages_per_read: usize,
+    pub replication_max_events_per_read: usize,
+    pub replication_max_bytes_per_read: usize,
+    pub replication_max_iterations_per_tick: usize,
     /// Minimum in-sync replicas (owner + healthy followers) required to accept
     /// a replica-durable publish. 1 (default) disables the floor.
     pub replication_min_in_sync_replicas: usize,
@@ -387,6 +391,10 @@ impl Default for BrokerConfig {
             replication_caught_up_poll_ms: 1_000,
             replication_retry_poll_ms: 100,
             replication_checkpoint_retry_poll_ms: 5_000,
+            replication_max_messages_per_read: 256,
+            replication_max_events_per_read: 256,
+            replication_max_bytes_per_read: 8 * 1024 * 1024,
+            replication_max_iterations_per_tick: 8,
             replication_min_in_sync_replicas: 1,
             replication_isr_timeout_ms: 10_000,
             default_partition_count: 1,
@@ -465,6 +473,8 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
         event_from: Offset,
         max_messages: usize,
         max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
     ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>>;
 
     fn export_owner_state_checkpoint<'a>(
@@ -505,7 +515,9 @@ pub struct BrokerReplicationCatchUpOptions {
     pub event_from: Offset,
     pub max_messages_per_read: usize,
     pub max_events_per_read: usize,
+    pub max_bytes_per_read: usize,
     pub max_iterations: usize,
+    pub max_wait_ms: u64,
 }
 
 impl Default for BrokerReplicationCatchUpOptions {
@@ -515,7 +527,9 @@ impl Default for BrokerReplicationCatchUpOptions {
             event_from: 0,
             max_messages_per_read: 256,
             max_events_per_read: 256,
+            max_bytes_per_read: 8 * 1024 * 1024,
             max_iterations: 1024,
+            max_wait_ms: 0,
         }
     }
 }
@@ -553,6 +567,7 @@ pub enum FollowerReplicationWorkerLoopExit {
 pub struct FollowerReplicationWorkerConfig {
     pub max_messages_per_read: usize,
     pub max_events_per_read: usize,
+    pub max_bytes_per_read: usize,
     pub max_iterations_per_tick: usize,
     pub allow_checkpoint_install: bool,
     pub caught_up_poll_ms: u64,
@@ -569,6 +584,7 @@ impl Default for FollowerReplicationWorkerConfig {
         Self {
             max_messages_per_read: 256,
             max_events_per_read: 256,
+            max_bytes_per_read: 8 * 1024 * 1024,
             max_iterations_per_tick: 8,
             allow_checkpoint_install: false,
             caught_up_poll_ms: 1000,
@@ -584,13 +600,16 @@ impl FollowerReplicationWorkerConfig {
         self,
         message_from: Offset,
         event_from: Offset,
+        max_wait_ms: u64,
     ) -> BrokerReplicationCatchUpOptions {
         BrokerReplicationCatchUpOptions {
             message_from,
             event_from,
             max_messages_per_read: self.max_messages_per_read,
             max_events_per_read: self.max_events_per_read,
+            max_bytes_per_read: self.max_bytes_per_read,
             max_iterations: self.max_iterations_per_tick,
+            max_wait_ms,
         }
     }
 }
@@ -631,7 +650,15 @@ impl FollowerReplicationWorkerState {
         &self,
         cfg: FollowerReplicationWorkerConfig,
     ) -> BrokerReplicationCatchUpOptions {
-        cfg.catch_up_options(self.message_next_offset, self.event_next_offset)
+        let max_wait_ms = match self.status {
+            FollowerReplicationWorkerStatus::CaughtUp => cfg.caught_up_poll_ms,
+            _ => 0,
+        };
+        cfg.catch_up_options(
+            self.message_next_offset,
+            self.event_next_offset,
+            max_wait_ms,
+        )
     }
 
     pub fn should_install_checkpoint(&self, cfg: FollowerReplicationWorkerConfig) -> bool {
@@ -651,7 +678,7 @@ impl FollowerReplicationWorkerState {
             BrokerReplicationCatchUp::CaughtUp(progress) => {
                 self.apply_progress(progress);
                 self.status = FollowerReplicationWorkerStatus::CaughtUp;
-                self.next_delay_ms = cfg.caught_up_poll_ms;
+                self.next_delay_ms = 0;
             }
             BrokerReplicationCatchUp::IterationLimit { progress } => {
                 self.apply_progress(progress);
@@ -987,6 +1014,8 @@ struct QueueLoopState {
     owner_runtime_shutdown: CancellationToken,
     // used to wake the delivery loop
     notify: tokio::sync::Notify,
+    // used to wake caught-up follower long-poll reads
+    replication_notify: tokio::sync::Notify,
     epoch: AtomicU64,
     /// Exclusive consumer-group gate: when set, deliver this partition's messages
     /// ONLY to the assigned consumer (the rest stay subscribed as standbys). The
@@ -1026,6 +1055,7 @@ impl QueueLoopState {
             eviction_lock: AsyncMutex::new(()),
             owner_runtime_shutdown: CancellationToken::new(),
             notify: tokio::sync::Notify::new(),
+            replication_notify: tokio::sync::Notify::new(),
             epoch: AtomicU64::new(1),
             exclusive_assignee: AtomicU64::new(NO_EXCLUSIVE_ASSIGNEE),
             delivery_held: AtomicBool::new(false),
@@ -1035,6 +1065,15 @@ impl QueueLoopState {
     fn wake(&self) {
         self.epoch.fetch_add(1, Ordering::Release);
         self.notify.notify_one();
+    }
+
+    fn wake_replication_followers(&self) {
+        self.replication_notify.notify_waiters();
+    }
+
+    fn wake_with_replication(&self) {
+        self.wake();
+        self.wake_replication_followers();
     }
 
     /// The current exclusive assignee, or `None` when delivery is open to all.
@@ -1988,6 +2027,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.shutdown_settle.cancel();
         self.shutdown_expiry.cancel();
         self.shutdown_queue_eviction.cancel();
+        self.stop_all_follower_replication_workers().await;
         self.task_group.shutdown().await;
         self.engine
             .shutdown()
@@ -2006,6 +2046,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.shutdown_consumers.cancel();
         self.shutdown_expiry.cancel();
         self.shutdown_queue_eviction.cancel();
+        self.stop_all_follower_replication_workers().await;
         tracing::debug!("Signaled shutdown to publishers, consumers, and expiry worker");
         self.shutdown_settle.cancel();
         tracing::debug!("Signaled shutdown to settle workers");
@@ -2232,6 +2273,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         if let Err(e) = confirm_tx.send(offset).await {
                             tracing::error!("Failed to send confirm offset: {e:?}");
                         }
+                        qs_clone.wake_with_replication();
                         // Local durability first, then the assignment's
                         // replication policy (replica/majority acks) before
                         // the producer sees the confirm.
@@ -2245,6 +2287,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     }
                     Ok(Err(e)) => {
                         tracing::error!("Append failed: {e:?}");
+                        qs_clone.wake();
                         let res = Err(BrokerError::Engine(StromaError::Io(e.to_string())));
                         if let Err(e) = reply.send(res) {
                             tracing::error!("Failed to send publish response: {e:?}");
@@ -2252,6 +2295,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     }
                     Err(e) => {
                         tracing::error!("Failed to receive append completion: {e:?}");
+                        qs_clone.wake();
                         let res = Err(BrokerError::Engine(StromaError::Io(
                             "append completion channel closed".to_string(),
                         )));
@@ -2260,8 +2304,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         }
                     }
                 }
-
-                qs_clone.wake();
             }
         });
 
@@ -2425,6 +2467,17 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         };
         worker.stop_and_wait().await;
         true
+    }
+
+    async fn stop_all_follower_replication_workers(&self) {
+        let queues = self
+            .follower_replication_workers
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for queue in queues {
+            self.stop_follower_replication_worker(&queue).await;
+        }
     }
 
     fn follower_replication_worker_runtime(
@@ -3435,7 +3488,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let mut done_tx = Some(done_tx);
         let done = move |ok: bool| {
             if let Some(qs) = &qs {
-                qs.wake();
+                if ok {
+                    qs.wake_with_replication();
+                } else {
+                    qs.wake();
+                }
             }
             if let Some(done_tx) = done_tx.take() {
                 let _ = done_tx.send(ok);
@@ -3617,7 +3674,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 }
 
                 if let Some(qs) = &qs {
-                    qs.wake();
+                    qs.wake_with_replication();
                 }
             } else {
                 // If settle append failed, you may want to:
@@ -3733,7 +3790,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         m.acked_many(count as u64);
                     }
                     if let Some(qs) = &qs {
-                        qs.wake();
+                        qs.wake_with_replication();
                     }
                 } else if let Some(qs) = &qs {
                     qs.wake();
@@ -3776,7 +3833,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         consumer_clone.dec_inflight();
                     }
                     if let Some(qs) = &qs {
-                        qs.wake();
+                        qs.wake_with_replication();
                     }
                 } else if let Some(qs) = &qs {
                     qs.wake();
@@ -3926,6 +3983,10 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     };
 
                     tracing::debug!("Polled {} deliverables for tp={} part={} group={:?}", deliverables.len(), key.tp, key.part, key.group);
+                    // `poll_ready` records the in-flight lease before returning,
+                    // so followers need a prompt read even if local delivery
+                    // later races with subscriber capacity.
+                    qs.wake_replication_followers();
 
                     let mut delivered = 0;
                     let mut rr = qs.rr.fetch_add(1, Ordering::Relaxed) as usize;
@@ -4217,7 +4278,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                 for key in touched {
                     if let Some(qs) = broker.queues.get(&key).map(|e| e.value().clone()) {
-                        qs.wake();
+                        qs.wake_with_replication();
                     }
                 }
 
@@ -4317,7 +4378,8 @@ impl Broker<StromaEngine> {
         previous: &CoordinationSnapshot,
         next: &CoordinationSnapshot,
     ) -> Vec<Result<BrokerAssignmentTransitionApply, BrokerError>> {
-        let transitions = plan_local_assignment_transitions(node_id, previous, next);
+        let previous = self.snapshot_with_cached_local_assignments(node_id, previous);
+        let transitions = plan_local_assignment_transitions(node_id, &previous, next);
         let mut outcomes = Vec::with_capacity(transitions.len());
         for transition in transitions {
             let result = self.apply_assignment_transition(&transition).await;
@@ -4343,7 +4405,8 @@ impl Broker<StromaEngine> {
         resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
         cfg: FollowerReplicationWorkerConfig,
     ) -> Vec<Result<BrokerAssignmentTransitionApply, BrokerError>> {
-        let transitions = plan_local_assignment_transitions(node_id, previous, next);
+        let previous = self.snapshot_with_cached_local_assignments(node_id, previous);
+        let transitions = plan_local_assignment_transitions(node_id, &previous, next);
         let mut outcomes = Vec::with_capacity(transitions.len());
         for transition in transitions {
             let result = self.apply_assignment_transition(&transition).await;
@@ -4382,6 +4445,26 @@ impl Broker<StromaEngine> {
             outcomes.push(result);
         }
         outcomes
+    }
+
+    fn snapshot_with_cached_local_assignments(
+        &self,
+        node_id: &str,
+        previous: &CoordinationSnapshot,
+    ) -> CoordinationSnapshot {
+        let mut previous = previous.clone();
+        for entry in self.assignment_cache.iter() {
+            let assignment = entry.value();
+            if !assignment.is_owned_by(node_id) && !assignment.is_followed_by(node_id) {
+                continue;
+            }
+            let key = entry.key();
+            previous.assignments.insert(
+                QueueIdentity::new(key.tp.clone(), key.part, key.group.as_deref()),
+                assignment.clone(),
+            );
+        }
+        previous
     }
 
     pub async fn apply_assignment_transition(
@@ -4579,9 +4662,86 @@ impl Broker<StromaEngine> {
         event_from: Offset,
         max_messages: usize,
         max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+    ) -> Result<BrokerOwnerReplicationRecords, BrokerError> {
+        if max_messages == 0 || max_events == 0 || max_bytes == 0 {
+            return Err(BrokerError::InvalidArgument(
+                "replication read limits must be greater than zero".into(),
+            ));
+        }
+
+        if max_wait_ms == 0 {
+            return self
+                .read_owner_replication_records_now(
+                    topic,
+                    partition,
+                    group,
+                    message_from,
+                    event_from,
+                    max_messages,
+                    max_events,
+                    max_bytes,
+                )
+                .await;
+        }
+
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        let qs = self.queue(&key).await;
+        let notified = qs.replication_notify.notified();
+        tokio::pin!(notified);
+
+        let records = self
+            .read_owner_replication_records_now(
+                topic,
+                partition,
+                group,
+                message_from,
+                event_from,
+                max_messages,
+                max_events,
+                max_bytes,
+            )
+            .await?;
+        if !owner_replication_records_empty(&records) {
+            return Ok(records);
+        }
+
+        tokio::select! {
+            _ = &mut notified => {}
+            _ = self.shutdown_publishers.cancelled() => {}
+            _ = tokio::time::sleep(Duration::from_millis(max_wait_ms)) => {}
+        }
+
+        self.read_owner_replication_records_now(
+            topic,
+            partition,
+            group,
+            message_from,
+            event_from,
+            max_messages,
+            max_events,
+            max_bytes,
+        )
+        .await
+    }
+
+    async fn read_owner_replication_records_now(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+        max_bytes: usize,
     ) -> Result<BrokerOwnerReplicationRecords, BrokerError> {
         self.ensure_queue_owner(topic, partition, group)?;
-
         let messages = self
             .engine
             .read_owner_message_records(topic, partition.id(), group, message_from, max_messages)
@@ -4591,7 +4751,10 @@ impl Broker<StromaEngine> {
             .read_owner_event_records(topic, partition.id(), group, event_from, max_events)
             .await?;
 
-        Ok(BrokerOwnerReplicationRecords { messages, events })
+        Ok(cap_owner_replication_records(
+            BrokerOwnerReplicationRecords { messages, events },
+            max_bytes,
+        ))
     }
 
     pub async fn become_replication_follower(
@@ -4803,6 +4966,7 @@ impl Broker<StromaEngine> {
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
         if options.max_messages_per_read == 0
             || options.max_events_per_read == 0
+            || options.max_bytes_per_read == 0
             || options.max_iterations == 0
         {
             return Err(BrokerError::InvalidArgument(
@@ -4826,6 +4990,8 @@ impl Broker<StromaEngine> {
                     progress.event_next_offset,
                     options.max_messages_per_read,
                     options.max_events_per_read,
+                    options.max_bytes_per_read,
+                    options.max_wait_ms,
                 )
                 .await?;
 
@@ -4931,6 +5097,7 @@ impl Broker<StromaEngine> {
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
         if options.max_messages_per_read == 0
             || options.max_events_per_read == 0
+            || options.max_bytes_per_read == 0
             || options.max_iterations == 0
         {
             return Err(BrokerError::InvalidArgument(
@@ -5038,6 +5205,10 @@ impl Broker<StromaEngine> {
             let cfg = if cfg.follow_runtime_settings {
                 let snap = self.config_snapshot();
                 FollowerReplicationWorkerConfig {
+                    max_messages_per_read: snap.replication_max_messages_per_read,
+                    max_events_per_read: snap.replication_max_events_per_read,
+                    max_bytes_per_read: snap.replication_max_bytes_per_read,
+                    max_iterations_per_tick: snap.replication_max_iterations_per_tick,
                     caught_up_poll_ms: snap.replication_caught_up_poll_ms,
                     retry_poll_ms: snap.replication_retry_poll_ms,
                     checkpoint_retry_poll_ms: snap.replication_checkpoint_retry_poll_ms,
@@ -5075,10 +5246,22 @@ impl Broker<StromaEngine> {
                 return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
             }
 
-            match self
-                .run_follower_replication_worker_once(owner.as_ref(), &assignment.queue, cfg)
-                .await
-            {
+            let tick_result = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
+                }
+                _ = runtime.shutdown.cancelled() => {
+                    return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+                }
+                outcome = self.run_follower_replication_worker_once(
+                    owner.as_ref(),
+                    &assignment.queue,
+                    cfg,
+                ) => outcome,
+            };
+
+            match tick_result {
                 Ok(_) => {
                     ticks += 1;
                 }
@@ -5180,6 +5363,8 @@ impl BrokerOwnerReplicationPeer for Broker<StromaEngine> {
         event_from: Offset,
         max_messages: usize,
         max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
     ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
         Box::pin(async move {
             Broker::<StromaEngine>::read_owner_replication_records(
@@ -5191,6 +5376,8 @@ impl BrokerOwnerReplicationPeer for Broker<StromaEngine> {
                 event_from,
                 max_messages,
                 max_events,
+                max_bytes,
+                max_wait_ms,
             )
             .await
         })
@@ -5222,6 +5409,8 @@ where
         event_from: Offset,
         max_messages: usize,
         max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
     ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
         self.as_ref().read_owner_replication_records(
             topic,
@@ -5231,6 +5420,8 @@ where
             event_from,
             max_messages,
             max_events,
+            max_bytes,
+            max_wait_ms,
         )
     }
 
@@ -5274,6 +5465,142 @@ fn checkpoint_required<T>(
             next_offset: *next_offset,
         }),
     }
+}
+
+struct OwnerMessageReadCap {
+    read: OwnerReplicationRead<Message>,
+    returned_frontier: Option<Offset>,
+    owner_tail: Option<Offset>,
+}
+
+fn cap_owner_replication_records(
+    records: BrokerOwnerReplicationRecords,
+    max_bytes: usize,
+) -> BrokerOwnerReplicationRecords {
+    let capped_messages = cap_owner_message_read_by_bytes(records.messages, max_bytes);
+    let events = match (
+        capped_messages.returned_frontier,
+        capped_messages.owner_tail,
+    ) {
+        (Some(message_frontier), Some(message_owner_tail)) => {
+            cap_owner_event_read_to_message_frontier(
+                records.events,
+                message_frontier,
+                message_owner_tail,
+            )
+        }
+        _ => records.events,
+    };
+
+    BrokerOwnerReplicationRecords {
+        messages: capped_messages.read,
+        events,
+    }
+}
+
+fn cap_owner_message_read_by_bytes(
+    read: OwnerReplicationRead<Message>,
+    max_bytes: usize,
+) -> OwnerMessageReadCap {
+    let OwnerReplicationRead::Batch(mut batch) = read else {
+        return OwnerMessageReadCap {
+            read,
+            returned_frontier: None,
+            owner_tail: None,
+        };
+    };
+
+    let owner_tail = batch.next_offset;
+    let mut used = 0usize;
+    let mut kept = Vec::with_capacity(batch.records.len());
+    for (offset, message) in batch.records.into_iter() {
+        let record_bytes = approximate_replication_message_bytes(&message);
+        if !kept.is_empty() && used.saturating_add(record_bytes) > max_bytes {
+            break;
+        }
+        used = used.saturating_add(record_bytes);
+        kept.push((offset, message));
+    }
+
+    let returned_frontier = kept
+        .last()
+        .map(|(offset, _)| offset.saturating_add(1))
+        .unwrap_or(batch.requested_offset);
+    batch.records = kept;
+
+    OwnerMessageReadCap {
+        read: OwnerReplicationRead::Batch(batch),
+        returned_frontier: Some(returned_frontier),
+        owner_tail: Some(owner_tail),
+    }
+}
+
+fn approximate_replication_message_bytes(message: &Message) -> usize {
+    message
+        .headers
+        .len()
+        .saturating_add(message.payload.len())
+        .saturating_add(32)
+}
+
+fn cap_owner_event_read_to_message_frontier(
+    read: OwnerReplicationRead<StromaEvent>,
+    message_frontier: Offset,
+    message_owner_tail: Offset,
+) -> OwnerReplicationRead<StromaEvent> {
+    let OwnerReplicationRead::Batch(mut batch) = read else {
+        return read;
+    };
+
+    let message_tail_fully_returned = message_frontier >= message_owner_tail;
+    let mut kept = Vec::with_capacity(batch.records.len());
+    for (offset, event) in batch.records.into_iter() {
+        if !stroma_event_available_for_replicated_messages(
+            &event,
+            message_frontier,
+            message_tail_fully_returned,
+        ) {
+            break;
+        }
+        kept.push((offset, event));
+    }
+    batch.records = kept;
+    OwnerReplicationRead::Batch(batch)
+}
+
+fn stroma_event_available_for_replicated_messages(
+    event: &StromaEvent,
+    message_frontier: Offset,
+    message_tail_fully_returned: bool,
+) -> bool {
+    match event {
+        StromaEvent::Enqueue { off, .. }
+        | StromaEvent::EnqueueDelayed { off, .. }
+        | StromaEvent::MarkInflight { off, .. }
+        | StromaEvent::Ack { off }
+        | StromaEvent::Nack { off, .. } => *off < message_frontier,
+        StromaEvent::EnqueueMany { reqs } => reqs.iter().all(|req| req.off < message_frontier),
+        StromaEvent::EnqueueDelayedMany { reqs } => {
+            reqs.iter().all(|req| req.off < message_frontier)
+        }
+        StromaEvent::MarkInflightMany { reqs } => reqs.iter().all(|req| req.off < message_frontier),
+        StromaEvent::AckMany { reqs } | StromaEvent::ReleaseInflightMany { reqs } => {
+            reqs.iter().all(|req| req.off < message_frontier)
+        }
+        StromaEvent::NackMany { reqs } => reqs.iter().all(|req| req.off < message_frontier),
+        StromaEvent::DeadLetter { reqs } => reqs.iter().all(|req| req.off < message_frontier),
+        StromaEvent::DeadLetterCommit { offs } => offs.iter().all(|off| *off < message_frontier),
+        StromaEvent::Declare(_) | StromaEvent::ResetQueue { .. } => true,
+        StromaEvent::Snapshot { .. } => message_tail_fully_returned,
+    }
+}
+
+fn owner_replication_records_empty(records: &BrokerOwnerReplicationRecords) -> bool {
+    fn read_empty<T>(read: &OwnerReplicationRead<T>) -> bool {
+        matches!(read, OwnerReplicationRead::Batch(batch) if batch.records.is_empty())
+    }
+
+    read_empty(&records.messages) && read_empty(&records.events)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5472,6 +5799,117 @@ impl AppendCompletion<IoError> for SimpleCompletion {
         if let Some(f) = self.f.take() {
             f(ok);
         }
+    }
+}
+
+#[cfg(test)]
+mod replication_byte_limit_tests {
+    use super::*;
+    use stroma_core::OwnerReplicationBatch;
+
+    fn message(payload_len: usize) -> Message {
+        Message {
+            flags: 0,
+            headers: vec![0; 4],
+            payload: vec![1; payload_len],
+        }
+    }
+
+    fn message_batch(
+        requested_offset: Offset,
+        next_offset: Offset,
+        records: Vec<(Offset, Message)>,
+    ) -> OwnerReplicationRead<Message> {
+        OwnerReplicationRead::Batch(OwnerReplicationBatch {
+            epoch: 7,
+            requested_offset,
+            next_offset,
+            records,
+        })
+    }
+
+    fn event_batch(
+        requested_offset: Offset,
+        next_offset: Offset,
+        records: Vec<(Offset, StromaEvent)>,
+    ) -> OwnerReplicationRead<StromaEvent> {
+        OwnerReplicationRead::Batch(OwnerReplicationBatch {
+            epoch: 7,
+            requested_offset,
+            next_offset,
+            records,
+        })
+    }
+
+    #[test]
+    fn byte_cap_keeps_first_oversized_message_so_replication_can_progress() {
+        let records = BrokerOwnerReplicationRecords {
+            messages: message_batch(10, 12, vec![(10, message(128)), (11, message(8))]),
+            events: event_batch(20, 20, Vec::new()),
+        };
+
+        let capped = cap_owner_replication_records(records, 1);
+        let OwnerReplicationRead::Batch(messages) = capped.messages else {
+            panic!("expected message batch");
+        };
+
+        assert_eq!(messages.next_offset, 12);
+        assert_eq!(messages.records.len(), 1);
+        assert_eq!(messages.records[0].0, 10);
+    }
+
+    #[test]
+    fn byte_cap_stops_events_before_unreturned_message_payloads() {
+        let records = BrokerOwnerReplicationRecords {
+            messages: message_batch(
+                10,
+                13,
+                vec![(10, message(16)), (11, message(16)), (12, message(16))],
+            ),
+            events: event_batch(
+                20,
+                24,
+                vec![
+                    (20, StromaEvent::Declare(Default::default())),
+                    (
+                        21,
+                        StromaEvent::Enqueue {
+                            off: 10,
+                            retries: 0,
+                        },
+                    ),
+                    (
+                        22,
+                        StromaEvent::Enqueue {
+                            off: 11,
+                            retries: 0,
+                        },
+                    ),
+                    (23, StromaEvent::Ack { off: 10 }),
+                ],
+            ),
+        };
+
+        let capped = cap_owner_replication_records(records, 60);
+        let OwnerReplicationRead::Batch(messages) = capped.messages else {
+            panic!("expected message batch");
+        };
+        let OwnerReplicationRead::Batch(events) = capped.events else {
+            panic!("expected event batch");
+        };
+
+        assert_eq!(messages.next_offset, 13);
+        assert_eq!(messages.records.len(), 1);
+        assert_eq!(messages.records[0].0, 10);
+        assert_eq!(events.next_offset, 24);
+        assert_eq!(
+            events
+                .records
+                .iter()
+                .map(|(offset, _)| *offset)
+                .collect::<Vec<_>>(),
+            vec![20, 21]
+        );
     }
 }
 

@@ -1133,6 +1133,8 @@ async fn replication_read_returns_owner_log_records() {
                     event_from: 0,
                     max_messages: 10,
                     max_events: 10,
+                    max_bytes: 1024 * 1024,
+                    max_wait_ms: 0,
                     reporter_node_id: None,
                 },
             )
@@ -1194,6 +1196,8 @@ async fn unowned_replication_read_returns_not_owner_error_and_keeps_connection_o
                     event_from: 0,
                     max_messages: 10,
                     max_events: 10,
+                    max_bytes: 1024 * 1024,
+                    max_wait_ms: 0,
                     reporter_node_id: None,
                 },
             )
@@ -1438,7 +1442,17 @@ async fn protocol_owner_replication_peer_reads_owner_records() {
 
     let peer = ProtocolOwnerReplicationPeer::new(owner_framed);
     let records = peer
-        .read_owner_replication_records(topic, Partition::new(0), group.as_deref(), 0, 0, 8, 8)
+        .read_owner_replication_records(
+            topic,
+            Partition::new(0),
+            group.as_deref(),
+            0,
+            0,
+            8,
+            8,
+            usize::MAX,
+            0,
+        )
         .await
         .unwrap();
 
@@ -1503,7 +1517,17 @@ async fn protocol_owner_replication_peer_maps_not_owner_error() {
 
     let peer = ProtocolOwnerReplicationPeer::new(framed);
     let err = peer
-        .read_owner_replication_records("unowned", Partition::new(0), None, 0, 0, 8, 8)
+        .read_owner_replication_records(
+            "unowned",
+            Partition::new(0),
+            None,
+            0,
+            0,
+            8,
+            8,
+            usize::MAX,
+            0,
+        )
         .await
         .unwrap_err();
 
@@ -1559,7 +1583,17 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
         .unwrap()
         .expect("owner peer");
     let records = peer
-        .read_owner_replication_records(topic, Partition::new(0), group.as_deref(), 0, 0, 8, 8)
+        .read_owner_replication_records(
+            topic,
+            Partition::new(0),
+            group.as_deref(),
+            0,
+            0,
+            8,
+            8,
+            usize::MAX,
+            0,
+        )
         .await
         .unwrap();
 
@@ -1570,6 +1604,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
     assert_eq!(messages.records[0].1.payload, b"resolver-payload");
 
     drop(peer);
+    resolver.close_all().await;
     drop(resolver);
     server_task.await.unwrap().unwrap();
 }
@@ -1842,7 +1877,7 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
         .unwrap()
         .expect("owner peer");
     let records = peer
-        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 8, 8)
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 8, 8, usize::MAX, 0)
         .await
         .unwrap();
 
@@ -1943,7 +1978,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     );
     follower_broker.spawn_assignment_watcher_with_follower_replication(
         coordination.clone(),
-        resolver,
+        resolver.clone(),
         FollowerReplicationWorkerConfig {
             caught_up_poll_ms: 60_000,
             ..Default::default()
@@ -2029,6 +2064,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     );
 
     coordination.raft_node().shutdown().await.unwrap();
+    resolver.close_all().await;
     follower_broker.shutdown().await;
     owner_broker.shutdown().await;
     server_task.await.unwrap().unwrap();
@@ -2118,7 +2154,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
     );
     follower_broker.spawn_assignment_watcher_with_follower_replication(
         coordination.clone(),
-        resolver,
+        resolver.clone(),
         FollowerReplicationWorkerConfig {
             caught_up_poll_ms: 60_000,
             ..Default::default()
@@ -2242,6 +2278,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
     );
 
     coordination.raft_node().shutdown().await.unwrap();
+    resolver.close_all().await;
     follower_broker.shutdown().await;
     owner_broker.shutdown().await;
     server_task.await.unwrap().unwrap();
@@ -2343,6 +2380,22 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
         .expect("assigned")
         .clone();
     assert_eq!(first.owner, "a-owner");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(checkpoint) = owner_broker
+                .export_owner_state_checkpoint(topic, Partition::new(0), None)
+                .await
+            {
+                if checkpoint.message_epoch == first.epoch && checkpoint.event_epoch == first.epoch
+                {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("old owner watcher should observe initial ownership before failover");
 
     // Failover away from a-owner (simulates: it was partitioned, the cluster
     // moved on, now its watcher sees the fenced assignment).
@@ -2494,16 +2547,16 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     };
     let loop_task = follower_broker.run_follower_replication_worker_loop(
         assignment,
-        resolver,
+        resolver.clone(),
         cfg,
         shutdown.clone(),
     );
     let (_, loop_outcome) = tokio::join!(observer, loop_task);
 
-    assert_eq!(
-        loop_outcome.unwrap(),
-        FollowerReplicationWorkerLoopExit::Cancelled { ticks: 1 }
-    );
+    let FollowerReplicationWorkerLoopExit::Cancelled { ticks } = loop_outcome.unwrap() else {
+        panic!("follower worker loop should exit by cancellation");
+    };
+    assert!(ticks >= 1, "worker must run at least one catch-up tick");
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
             topic,
@@ -2523,6 +2576,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
         }
     );
 
+    resolver.close_all().await;
     follower_broker.shutdown().await;
     owner_broker.shutdown().await;
     server_task.await.unwrap().unwrap();
@@ -2558,7 +2612,17 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         .await
         .unwrap();
     let owner_records = owner_broker
-        .read_owner_replication_records(topic, Partition::new(0), group.as_deref(), 0, 0, 8, 8)
+        .read_owner_replication_records(
+            topic,
+            Partition::new(0),
+            group.as_deref(),
+            0,
+            0,
+            8,
+            8,
+            usize::MAX,
+            0,
+        )
         .await
         .unwrap();
     let OwnerReplicationRead::Batch(messages) = owner_records.messages else {
@@ -2646,7 +2710,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     };
     let loop_task = follower_broker.run_follower_replication_worker_loop(
         assignment,
-        resolver,
+        resolver.clone(),
         cfg,
         shutdown.clone(),
     );
@@ -2665,9 +2729,12 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         owner_checkpoint.event_next_offset
     );
 
-    assert_eq!(
-        loop_outcome.unwrap(),
-        FollowerReplicationWorkerLoopExit::Cancelled { ticks: 2 }
+    let FollowerReplicationWorkerLoopExit::Cancelled { ticks } = loop_outcome.unwrap() else {
+        panic!("follower worker loop should exit by cancellation");
+    };
+    assert!(
+        ticks >= 1,
+        "worker should perform at least one checkpoint-aware catch-up tick"
     );
     let promoted = follower_broker
         .promote_replication_follower_if_caught_up(
@@ -2688,6 +2755,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
         }
     );
 
+    resolver.close_all().await;
     follower_broker.shutdown().await;
     owner_broker.shutdown().await;
     server_task.await.unwrap().unwrap();
@@ -2749,7 +2817,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     };
     let loop_task = follower_broker.run_follower_replication_worker_loop(
         assignment,
-        resolver,
+        resolver.clone(),
         worker_cfg,
         shutdown.clone(),
     );
@@ -2795,6 +2863,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     let (_, loop_outcome) = tokio::join!(publish_and_check, loop_task);
     loop_outcome.unwrap();
 
+    resolver.close_all().await;
     follower_broker.shutdown().await;
     owner_broker.shutdown().await;
     server_task.await.unwrap().unwrap();

@@ -20,14 +20,16 @@ use fibril_broker::{
     },
 };
 use futures::{SinkExt, StreamExt};
+use serde::de::DeserializeOwned;
 use tokio::{net::TcpStream, sync::Mutex};
+use tokio_util::sync::CancellationToken;
 
 use crate::v1::{
     Auth, ERR_NOT_OWNER, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, ReplicationApply,
     ReplicationApplyOk, ReplicationCheckpointExport, ReplicationCheckpointExportOk,
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead, ReplicationReadOk,
-    frame::ProtoCodec,
+    frame::{Frame, ProtoCodec},
     helper::{Conn, try_decode, try_encode},
 };
 
@@ -37,6 +39,7 @@ pub struct ProtocolReplicationCatchUpOptions {
     pub event_from: u64,
     pub max_messages_per_read: u32,
     pub max_events_per_read: u32,
+    pub max_bytes_per_read: u64,
     pub max_iterations: usize,
     pub request_id_start: u64,
 }
@@ -48,6 +51,7 @@ impl Default for ProtocolReplicationCatchUpOptions {
             event_from: 0,
             max_messages_per_read: 256,
             max_events_per_read: 256,
+            max_bytes_per_read: 8 * 1024 * 1024,
             max_iterations: 1024,
             request_id_start: 10_000,
         }
@@ -137,7 +141,7 @@ impl ProtocolOwnerPeerResolverConfig {
 /// resolver.
 pub struct StaticProtocolOwnerPeerResolver {
     cfg: ProtocolOwnerPeerResolverConfig,
-    peers: Mutex<HashMap<String, Arc<dyn BrokerOwnerReplicationPeer>>>,
+    peers: Mutex<HashMap<String, Arc<ProtocolOwnerReplicationPeer>>>,
 }
 
 impl StaticProtocolOwnerPeerResolver {
@@ -152,6 +156,16 @@ impl StaticProtocolOwnerPeerResolver {
         Self {
             cfg,
             peers: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn close_all(&self) {
+        let peers = {
+            let mut peers = self.peers.lock().await;
+            peers.drain().map(|(_, peer)| peer).collect::<Vec<_>>()
+        };
+        for peer in peers {
+            peer.close().await;
         }
     }
 }
@@ -171,7 +185,8 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
 
             let mut peers = self.peers.lock().await;
             if let Some(peer) = peers.get(&assignment.owner) {
-                return Ok(Some(peer.clone()));
+                let peer: Arc<dyn BrokerOwnerReplicationPeer> = peer.clone();
+                return Ok(Some(peer));
             }
 
             let mut built = ProtocolOwnerReplicationPeer::new_reconnecting(
@@ -183,8 +198,9 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
             }
-            let peer: Arc<dyn BrokerOwnerReplicationPeer> = Arc::new(built);
+            let peer = Arc::new(built);
             peers.insert(assignment.owner.clone(), peer.clone());
+            let peer: Arc<dyn BrokerOwnerReplicationPeer> = peer;
             Ok(Some(peer))
         })
     }
@@ -192,7 +208,7 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
 
 struct CachedProtocolOwnerPeer {
     addr: SocketAddr,
-    peer: Arc<dyn BrokerOwnerReplicationPeer>,
+    peer: Arc<ProtocolOwnerReplicationPeer>,
 }
 
 /// Coordination-backed owner-peer resolver for replication workers.
@@ -228,6 +244,19 @@ impl CoordinationProtocolOwnerPeerResolver {
             peers: Mutex::new(HashMap::new()),
         }
     }
+
+    pub async fn close_all(&self) {
+        let peers = {
+            let mut peers = self.peers.lock().await;
+            peers
+                .drain()
+                .map(|(_, cached)| cached.peer)
+                .collect::<Vec<_>>()
+        };
+        for peer in peers {
+            peer.close().await;
+        }
+    }
 }
 
 impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolver {
@@ -249,7 +278,8 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
             let mut peers = self.peers.lock().await;
             if let Some(cached) = peers.get(&assignment.owner) {
                 if cached.addr == addr {
-                    return Ok(Some(cached.peer.clone()));
+                    let peer: Arc<dyn BrokerOwnerReplicationPeer> = cached.peer.clone();
+                    return Ok(Some(peer));
                 }
             }
 
@@ -262,7 +292,7 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
             }
-            let peer: Arc<dyn BrokerOwnerReplicationPeer> = Arc::new(built);
+            let peer = Arc::new(built);
             peers.insert(
                 assignment.owner.clone(),
                 CachedProtocolOwnerPeer {
@@ -270,6 +300,7 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
                     peer: peer.clone(),
                 },
             );
+            let peer: Arc<dyn BrokerOwnerReplicationPeer> = peer;
             Ok(Some(peer))
         })
     }
@@ -395,8 +426,10 @@ impl ProtocolReplicationRequestError {
 /// requests on that connection.
 pub struct ProtocolOwnerReplicationPeer {
     conn: Mutex<Option<Conn>>,
+    request_lock: Mutex<()>,
     next_request_id: AtomicU64,
     reconnect: Option<ProtocolOwnerPeerConnectConfig>,
+    close_token: CancellationToken,
     /// Stamped into replication reads for owner-side progress tracking.
     reporter_node_id: Option<String>,
 }
@@ -405,8 +438,10 @@ impl ProtocolOwnerReplicationPeer {
     pub fn new(conn: Conn) -> Self {
         Self {
             conn: Mutex::new(Some(conn)),
+            request_lock: Mutex::new(()),
             next_request_id: AtomicU64::new(20_000),
             reconnect: None,
+            close_token: CancellationToken::new(),
             reporter_node_id: None,
         }
     }
@@ -425,6 +460,7 @@ impl ProtocolOwnerReplicationPeer {
     ) -> Self {
         Self {
             conn: Mutex::new(None),
+            request_lock: Mutex::new(()),
             next_request_id: AtomicU64::new(20_000),
             reporter_node_id: None,
             reconnect: Some(ProtocolOwnerPeerConnectConfig {
@@ -433,6 +469,7 @@ impl ProtocolOwnerReplicationPeer {
                 client_name,
                 client_version,
             }),
+            close_token: CancellationToken::new(),
         }
     }
 
@@ -440,17 +477,31 @@ impl ProtocolOwnerReplicationPeer {
         self.next_request_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    async fn take_conn(&self, guard: &mut Option<Conn>) -> Result<Conn, BrokerError> {
-        if guard.is_none() {
-            let reconnect = self.reconnect.as_ref().ok_or_else(|| {
-                BrokerError::Unknown("protocol owner peer connection is closed".into())
-            })?;
-            *guard = Some(reconnect.open().await?);
+    async fn take_conn(&self) -> Result<Conn, BrokerError> {
+        if self.close_token.is_cancelled() {
+            return Err(BrokerError::Unknown("protocol owner peer closed".into()));
         }
 
-        guard
-            .take()
-            .ok_or_else(|| BrokerError::Unknown("protocol owner peer connection is closed".into()))
+        if let Some(conn) = self.conn.lock().await.take() {
+            return Ok(conn);
+        }
+
+        let reconnect = self.reconnect.as_ref().ok_or_else(|| {
+            BrokerError::Unknown("protocol owner peer connection is closed".into())
+        })?;
+        reconnect.open().await
+    }
+
+    async fn restore_conn(&self, conn: Conn) {
+        if self.close_token.is_cancelled() {
+            return;
+        }
+        *self.conn.lock().await = Some(conn);
+    }
+
+    pub async fn close(&self) {
+        self.close_token.cancel();
+        self.conn.lock().await.take();
     }
 }
 
@@ -464,6 +515,8 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         event_from: Offset,
         max_messages: usize,
         max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
     ) -> futures::future::BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
         Box::pin(async move {
             let max_messages = u32::try_from(max_messages).map_err(|_| {
@@ -472,9 +525,21 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             let max_events = u32::try_from(max_events).map_err(|_| {
                 BrokerError::InvalidArgument("max_events exceeds protocol limit".into())
             })?;
+            let max_bytes = u64::try_from(max_bytes).map_err(|_| {
+                BrokerError::InvalidArgument("max_bytes exceeds protocol limit".into())
+            })?;
+            let max_wait_ms = u32::try_from(max_wait_ms).map_err(|_| {
+                BrokerError::InvalidArgument("max_wait_ms exceeds protocol limit".into())
+            })?;
+            let _request_guard = tokio::select! {
+                biased;
+                _ = self.close_token.cancelled() => {
+                    return Err(BrokerError::Unknown("protocol owner peer closed".into()));
+                }
+                guard = self.request_lock.lock() => guard,
+            };
             let request_id = self.next_request_id();
-            let mut conn_guard = self.conn.lock().await;
-            let mut conn = self.take_conn(&mut conn_guard).await?;
+            let mut conn = self.take_conn().await?;
             if let Err(err) = conn
                 .send(
                     try_encode(
@@ -488,6 +553,8 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                             event_from,
                             max_messages,
                             max_events,
+                            max_bytes,
+                            max_wait_ms,
                             reporter_node_id: self.reporter_node_id.clone(),
                         },
                     )
@@ -500,19 +567,26 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 )));
             }
 
-            let read: ReplicationReadOk =
-                match recv_response(&mut conn, request_id, Op::ReplicationReadOk).await {
-                    Ok(read) => read,
-                    Err(err) => {
-                        if !err.invalidates_connection() {
-                            *conn_guard = Some(conn);
-                        }
-                        return Err(protocol_request_error_to_broker(
-                            err, topic, partition, group,
-                        ));
+            let read: ReplicationReadOk = match tokio::select! {
+                biased;
+                _ = self.close_token.cancelled() => {
+                    Err(ProtocolReplicationRequestError::ConnectionClosed)
+                }
+                response = recv_response(&mut conn, request_id, Op::ReplicationReadOk) => {
+                    response
+                }
+            } {
+                Ok(read) => read,
+                Err(err) => {
+                    if !err.invalidates_connection() {
+                        self.restore_conn(conn).await;
                     }
-                };
-            *conn_guard = Some(conn);
+                    return Err(protocol_request_error_to_broker(
+                        err, topic, partition, group,
+                    ));
+                }
+            };
+            self.restore_conn(conn).await;
             to_broker_owner_replication_records(read)
         })
     }
@@ -524,9 +598,15 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         group: Option<&'a str>,
     ) -> futures::future::BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
         Box::pin(async move {
+            let _request_guard = tokio::select! {
+                biased;
+                _ = self.close_token.cancelled() => {
+                    return Err(BrokerError::Unknown("protocol owner peer closed".into()));
+                }
+                guard = self.request_lock.lock() => guard,
+            };
             let request_id = self.next_request_id();
-            let mut conn_guard = self.conn.lock().await;
-            let mut conn = self.take_conn(&mut conn_guard).await?;
+            let mut conn = self.take_conn().await?;
             if let Err(err) = conn
                 .send(
                     try_encode(
@@ -547,20 +627,30 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 )));
             }
 
-            let export: ReplicationCheckpointExportOk =
-                match recv_response(&mut conn, request_id, Op::ReplicationCheckpointExportOk).await
-                {
-                    Ok(export) => export,
-                    Err(err) => {
-                        if !err.invalidates_connection() {
-                            *conn_guard = Some(conn);
-                        }
-                        return Err(protocol_request_error_to_broker(
-                            err, topic, partition, group,
-                        ));
+            let export: ReplicationCheckpointExportOk = match tokio::select! {
+                biased;
+                _ = self.close_token.cancelled() => {
+                    Err(ProtocolReplicationRequestError::ConnectionClosed)
+                }
+                response = recv_response(
+                    &mut conn,
+                    request_id,
+                    Op::ReplicationCheckpointExportOk,
+                ) => {
+                    response
+                }
+            } {
+                Ok(export) => export,
+                Err(err) => {
+                    if !err.invalidates_connection() {
+                        self.restore_conn(conn).await;
                     }
-                };
-            *conn_guard = Some(conn);
+                    return Err(protocol_request_error_to_broker(
+                        err, topic, partition, group,
+                    ));
+                }
+            };
+            self.restore_conn(conn).await;
             Ok(OwnerStateCheckpoint {
                 message_epoch: export.checkpoint.message_epoch,
                 event_epoch: export.checkpoint.event_epoch,
@@ -588,6 +678,7 @@ pub async fn catch_up_replication_over_protocol(
 ) -> anyhow::Result<ProtocolReplicationCatchUp> {
     if options.max_messages_per_read == 0
         || options.max_events_per_read == 0
+        || options.max_bytes_per_read == 0
         || options.max_iterations == 0
     {
         bail!("replication catch-up limits must be greater than zero");
@@ -615,6 +706,8 @@ pub async fn catch_up_replication_over_protocol(
                     event_from: progress.event_next_offset,
                     max_messages: options.max_messages_per_read,
                     max_events: options.max_events_per_read,
+                    max_bytes: options.max_bytes_per_read,
+                    max_wait_ms: 0,
                     reporter_node_id: None,
                 },
             )?)
@@ -689,7 +782,7 @@ async fn recv_response<T>(
     expected: Op,
 ) -> Result<T, ProtocolReplicationRequestError>
 where
-    T: for<'de> serde::Deserialize<'de>,
+    T: DeserializeOwned + Send + 'static,
 {
     loop {
         let frame = conn
@@ -733,9 +826,27 @@ where
             });
         }
 
+        return decode_response_frame(frame).await;
+    }
+}
+
+async fn decode_response_frame<T>(frame: Frame) -> Result<T, ProtocolReplicationRequestError>
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    const BLOCKING_DECODE_BYTES: usize = 1 << 20;
+
+    if frame.payload.len() < BLOCKING_DECODE_BYTES {
         return try_decode(&frame)
             .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()));
     }
+
+    tokio::task::spawn_blocking(move || try_decode::<T>(&frame))
+        .await
+        .map_err(|err| {
+            ProtocolReplicationRequestError::Decode(format!("decode task failed: {err}"))
+        })?
+        .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
 }
 
 fn message_checkpoint_required(

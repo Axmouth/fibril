@@ -368,6 +368,14 @@ pub struct ReplicationRead {
     pub event_from: u64,
     pub max_messages: u32,
     pub max_events: u32,
+    /// Approximate byte budget for returned records. One oversized message may
+    /// still exceed this so replication can make progress.
+    #[serde(default)]
+    pub max_bytes: u64,
+    /// Optional long-poll budget. Zero means an immediate read. Followers use
+    /// this only after they have caught up; ordinary catch-up remains pull.
+    #[serde(default)]
+    pub max_wait_ms: u32,
     /// Follower identity for owner-side progress tracking (publish-confirm
     /// durability policies). Followers apply durably, so `message_from` /
     /// `event_from` are honest durable progress. Optional: old peers simply

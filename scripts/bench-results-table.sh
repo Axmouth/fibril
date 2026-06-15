@@ -52,6 +52,11 @@ format_publish_latency() {
   format_latency "Latency publish->deliver ms" "$file"
 }
 
+format_publish_receive_latency() {
+  local file="$1"
+  format_latency "Latency publish->server-receive ms" "$file"
+}
+
 format_server_latency() {
   local file="$1"
   format_latency "Latency server-receive->deliver ms" "$file"
@@ -132,8 +137,8 @@ format_queue() {
   fi
 }
 
-printf '| Case | Mode | Durability | Topic | Target | Actual | Missing | publish→deliver p50/p95/p99/max | server-receive→deliver p50/p95/p99/max | Errors | Server RSS avg/peak | End queue |\n'
-printf '| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | ---: | --- | --- |\n'
+printf '| Case | Mode | Durability | Topic | Target | Actual | Missing | publish→server p50/p95/p99/max | publish→deliver p50/p95/p99/max | server-receive→deliver p50/p95/p99/max | Errors | Server RSS avg/peak | End queue |\n'
+printf '| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: | --- | --- |\n'
 
 for file in "$@"; do
   case_name="$(basename "$file" .results.txt)"
@@ -141,7 +146,7 @@ for file in "$@"; do
   actual="$(extract_value "Actual measured publish rate" "$file")"
   missing="$(extract_value "Measured missing" "$file")"
 
-  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
     "$case_name" \
     "$(format_mode "$file")" \
     "$(format_durability "$file")" \
@@ -149,6 +154,7 @@ for file in "$@"; do
     "$(format_rate "$target")" \
     "$(format_rate "$actual")" \
     "${missing:-n/a}" \
+    "$(format_publish_receive_latency "$file")" \
     "$(format_publish_latency "$file")" \
     "$(format_server_latency "$file")" \
     "$(format_errors "$file")" \

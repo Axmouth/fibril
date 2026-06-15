@@ -21,6 +21,7 @@ struct ReaderStats {
     received_total: u64,
     measured_received: u64,
     retries_seen: u64,
+    publish_to_server_receive_ms: Vec<u64>,
     publish_to_delivery_ms: Vec<u64>,
     server_receive_to_delivery_ms: Vec<u64>,
 }
@@ -218,6 +219,9 @@ async fn main() {
                     stats.measured_received += 1;
                     measured_received_total.fetch_add(1, Ordering::AcqRel);
                     stats
+                        .publish_to_server_receive_ms
+                        .push(msg.publish_received.saturating_sub(msg.published));
+                    stats
                         .publish_to_delivery_ms
                         .push(now.saturating_sub(msg.published));
                     stats
@@ -343,6 +347,9 @@ async fn main() {
         reader_stats.measured_received += stats.measured_received;
         reader_stats.retries_seen += stats.retries_seen;
         reader_stats
+            .publish_to_server_receive_ms
+            .append(&mut stats.publish_to_server_receive_ms);
+        reader_stats
             .publish_to_delivery_ms
             .append(&mut stats.publish_to_delivery_ms);
         reader_stats
@@ -372,6 +379,10 @@ async fn main() {
     println!("Actual measured publish rate: {actual_rate}");
     println!("Measured receive rate: {receive_rate}");
     println!("Retries seen: {}", reader_stats.retries_seen);
+    print_latency(
+        "Latency publish->server-receive ms",
+        &mut reader_stats.publish_to_server_receive_ms,
+    );
     print_latency(
         "Latency publish->deliver ms",
         &mut reader_stats.publish_to_delivery_ms,

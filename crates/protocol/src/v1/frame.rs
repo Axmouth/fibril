@@ -1,5 +1,5 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use std::io;
+use std::{io, sync::OnceLock, time::Instant};
 use tokio_util::codec::{Decoder, Encoder};
 
 #[derive(Debug, Clone)]
@@ -55,6 +55,9 @@ impl Encoder<Frame> for ProtoCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: Frame, dst: &mut BytesMut) -> Result<(), io::Error> {
+        let started = Instant::now();
+        let opcode = item.opcode;
+        let request_id = item.request_id;
         let payload_len = item.payload.len();
         dst.reserve(20 + payload_len);
 
@@ -64,7 +67,44 @@ impl Encoder<Frame> for ProtoCodec {
         dst.put_u32(item.flags);
         dst.put_u64(item.request_id);
         dst.extend_from_slice(&item.payload);
+        log_frame_encode_timing(opcode, request_id, payload_len, started.elapsed());
 
         Ok(())
     }
+}
+
+fn log_frame_encode_timing(
+    opcode: u16,
+    request_id: u64,
+    payload_len: usize,
+    elapsed: std::time::Duration,
+) {
+    const LARGE_FRAME_BYTES: usize = 1 << 20;
+    const SLOW_FRAME_MICROS: u128 = 5_000;
+
+    let slow = elapsed.as_micros() >= SLOW_FRAME_MICROS;
+    let detailed_large = protocol_frame_timing_enabled() && payload_len >= LARGE_FRAME_BYTES;
+    if !slow && !detailed_large {
+        return;
+    }
+
+    tracing::info!(
+        stage = "frame_encode",
+        pid = std::process::id(),
+        opcode,
+        request_id,
+        payload_len,
+        elapsed_us = elapsed.as_micros(),
+        "protocol frame codec timing"
+    );
+}
+
+fn protocol_frame_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("FIBRIL_PROTOCOL_CODEC_TIMING").as_deref(),
+            Ok("1") | Ok("true") | Ok("yes") | Ok("on")
+        )
+    })
 }

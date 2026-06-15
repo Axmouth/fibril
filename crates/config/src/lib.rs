@@ -165,6 +165,14 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_WIRE_FORMAT")? {
             self.coordination.ganglion.wire_format = value;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS")? {
+            self.coordination.ganglion.heartbeat_interval_ms =
+                parse_env("FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_LIVENESS_TTL_MS")? {
+            self.coordination.ganglion.liveness_ttl_ms =
+                parse_env("FIBRIL_COORDINATION_LIVENESS_TTL_MS", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_RAFT_HEARTBEAT_INTERVAL_MS")?
         {
             self.coordination.ganglion.raft.heartbeat_interval_ms =
@@ -387,6 +395,13 @@ impl ServerConfig {
             || self.runtime_seed.replication.checkpoint_retry_poll_ms == 0
         {
             anyhow::bail!("runtime_seed.replication poll intervals must be at least 1ms");
+        }
+        if self.runtime_seed.replication.max_messages_per_read == 0
+            || self.runtime_seed.replication.max_events_per_read == 0
+            || self.runtime_seed.replication.max_bytes_per_read == 0
+            || self.runtime_seed.replication.max_iterations_per_tick == 0
+        {
+            anyhow::bail!("runtime_seed.replication read limits must be at least 1");
         }
         if self.runtime_seed.replication.min_in_sync_replicas == 0 {
             anyhow::bail!("runtime_seed.replication.min_in_sync_replicas must be at least 1");
@@ -877,6 +892,10 @@ pub struct ReplicationSettings {
     pub caught_up_poll_ms: u64,
     pub retry_poll_ms: u64,
     pub checkpoint_retry_poll_ms: u64,
+    pub max_messages_per_read: usize,
+    pub max_events_per_read: usize,
+    pub max_bytes_per_read: usize,
+    pub max_iterations_per_tick: usize,
     pub min_in_sync_replicas: usize,
     pub isr_timeout_ms: u64,
 }
@@ -888,6 +907,10 @@ impl Default for ReplicationSettings {
             caught_up_poll_ms: 1_000,
             retry_poll_ms: 100,
             checkpoint_retry_poll_ms: 5_000,
+            max_messages_per_read: 256,
+            max_events_per_read: 256,
+            max_bytes_per_read: 8 * 1024 * 1024,
+            max_iterations_per_tick: 8,
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
         }
@@ -1063,6 +1086,22 @@ mod tests {
             [runtime_seed.connection]
             reconnect_grace_ms = 17
 
+            [runtime_seed.replication]
+            confirm_timeout_ms = 18
+            caught_up_poll_ms = 19
+            retry_poll_ms = 20
+            checkpoint_retry_poll_ms = 21
+            max_messages_per_read = 22
+            max_events_per_read = 23
+            max_bytes_per_read = 24
+            max_iterations_per_tick = 25
+            min_in_sync_replicas = 2
+            isr_timeout_ms = 26
+
+            [coordination.ganglion]
+            heartbeat_interval_ms = 3000
+            liveness_ttl_ms = 12000
+
             [coordination.ganglion.raft]
             heartbeat_interval_ms = 300
             election_timeout_min_ms = 1800
@@ -1142,6 +1181,18 @@ mod tests {
             }
         );
         assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, Some(17));
+        assert_eq!(config.runtime_seed.replication.confirm_timeout_ms, 18);
+        assert_eq!(config.runtime_seed.replication.caught_up_poll_ms, 19);
+        assert_eq!(config.runtime_seed.replication.retry_poll_ms, 20);
+        assert_eq!(config.runtime_seed.replication.checkpoint_retry_poll_ms, 21);
+        assert_eq!(config.runtime_seed.replication.max_messages_per_read, 22);
+        assert_eq!(config.runtime_seed.replication.max_events_per_read, 23);
+        assert_eq!(config.runtime_seed.replication.max_bytes_per_read, 24);
+        assert_eq!(config.runtime_seed.replication.max_iterations_per_tick, 25);
+        assert_eq!(config.runtime_seed.replication.min_in_sync_replicas, 2);
+        assert_eq!(config.runtime_seed.replication.isr_timeout_ms, 26);
+        assert_eq!(config.coordination.ganglion.heartbeat_interval_ms, 3000);
+        assert_eq!(config.coordination.ganglion.liveness_ttl_ms, 12000);
         assert!(config.runtime_locks.idle_queue_cleanup);
     }
 
@@ -1357,6 +1408,8 @@ mod tests {
                 "FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS" => Some(Ok("123".to_string())),
                 "FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS" => Some(Ok("".to_string())),
                 "FIBRIL_RECONNECT_GRACE_MS" => Some(Ok("789".to_string())),
+                "FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS" => Some(Ok("1000".to_string())),
+                "FIBRIL_COORDINATION_LIVENESS_TTL_MS" => Some(Ok("20000".to_string())),
                 "FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY" => {
                     Some(Ok("replica_durable:2".to_string()))
                 }
@@ -1386,6 +1439,8 @@ mod tests {
             }
         );
         assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, Some(789));
+        assert_eq!(config.coordination.ganglion.heartbeat_interval_ms, 1000);
+        assert_eq!(config.coordination.ganglion.liveness_ttl_ms, 20000);
         assert_eq!(
             config.coordination.ganglion.assignment_durability,
             GanglionAssignmentDurabilitySection {
