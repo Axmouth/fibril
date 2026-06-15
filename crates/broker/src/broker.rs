@@ -1534,6 +1534,38 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     /// Opt-in exclusive consumer-group routing: maps cohort membership to the
     /// per-partition delivery gate. Absent cohorts leave delivery competing.
     exclusive_groups: Mutex<ExclusiveGroupRouter>,
+    /// In-progress live-repartition transitions, keyed by (topic, group). Cold
+    /// path (a repartition is rare), so a plain Mutex is fine. Drives the
+    /// per-partition `delivery_held` gate: a new partition is held until its
+    /// source old partition has drained its pre-cutover backlog.
+    repartition_transitions: Mutex<HashMap<RepartitionKey, RepartitionLocal>>,
+}
+
+type RepartitionKey = (String, Option<String>);
+
+/// Broker-local state for one in-progress grow of a queue.
+#[derive(Debug, Default)]
+struct RepartitionLocal {
+    version: u64,
+    n_old: u32,
+    n_new: u32,
+    /// old partition -> cutover boundary offset (snapshotted by this owner).
+    boundaries: HashMap<u32, Offset>,
+    /// old partitions this owner has confirmed drained (reported via heartbeat).
+    self_drained: HashSet<u32>,
+    /// old partitions known drained cluster-wide (sources that let a new
+    /// partition lift its hold).
+    drained_sources: HashSet<u32>,
+}
+
+/// One owner's repartition drain status for a queue, surfaced for the heartbeat
+/// label. Plain data so the broker does not depend on the coordination crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepartitionDrainStatus {
+    pub topic: String,
+    pub group: Option<String>,
+    pub version: u64,
+    pub drained: Vec<u32>,
 }
 
 /// Cheap shared handle for publish-confirm replication waits inside
@@ -1627,6 +1659,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             replication_progress: Arc::new(DashMap::new()),
             assignment_cache: Arc::new(DashMap::new()),
             exclusive_groups: Mutex::new(ExclusiveGroupRouter::new(default_consumer_target)),
+            repartition_transitions: Mutex::new(HashMap::new()),
             pending_settles: Arc::new(AtomicUsize::new(0)),
             settle_drained: Arc::new(Notify::new()),
             settings_changed: Arc::new(Notify::new()),
@@ -2801,6 +2834,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             self.spawn_delivery_loop(key.clone(), qs.clone());
         }
 
+        // Repartition drain gate: a new partition (added by a grow) holds delivery
+        // until its source old partition has drained. Apply here so the hold is in
+        // place no matter when this partition's loop first appears.
+        if self.repartition_new_partition_should_hold(&key.tp, key.part.id(), key.group.as_deref()) {
+            qs.set_delivery_held(true);
+        }
+
         qs.wake();
 
         Ok(ConsumerHandle {
@@ -2887,6 +2927,185 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .engine
             .current_next_offset(topic, partition.id(), group)
             .await?)
+    }
+
+    fn lock_repartition(&self) -> std::sync::MutexGuard<'_, HashMap<RepartitionKey, RepartitionLocal>> {
+        self.repartition_transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether a partition should hold delivery for an in-progress repartition:
+    /// true only for a NEW partition (index >= n_old) whose source old partition
+    /// (index % n_old) has not yet drained. Consulted when a delivery loop is
+    /// created so a new partition starts held even if its loop appears mid-grow.
+    fn repartition_new_partition_should_hold(
+        &self,
+        topic: &str,
+        partition: u32,
+        group: Option<&str>,
+    ) -> bool {
+        let map = self.lock_repartition();
+        match map.get(&(topic.to_string(), group.map(str::to_string))) {
+            Some(local) if partition >= local.n_old => {
+                !local.drained_sources.contains(&(partition % local.n_old.max(1)))
+            }
+            _ => false,
+        }
+    }
+
+    /// Record an in-progress grow and hold any already-active new-partition loops
+    /// whose source has not drained. Idempotent on `version`; a newer version
+    /// supersedes (resets the local state).
+    pub fn apply_repartition_transition(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        version: u64,
+        n_old: u32,
+        n_new: u32,
+    ) {
+        let key = (topic.to_string(), group.map(str::to_string));
+        let drained_sources = {
+            let mut map = self.lock_repartition();
+            let local = map.entry(key).or_insert_with(|| RepartitionLocal {
+                version,
+                n_old,
+                n_new,
+                ..Default::default()
+            });
+            if local.version != version {
+                *local = RepartitionLocal {
+                    version,
+                    n_old,
+                    n_new,
+                    ..Default::default()
+                };
+            }
+            local.drained_sources.clone()
+        };
+        let n_old = n_old.max(1);
+        for entry in self.queues.iter() {
+            let qk = entry.key();
+            if qk.tp == topic && qk.group.as_deref() == group {
+                let p = qk.part.id();
+                if p >= n_old && !drained_sources.contains(&(p % n_old)) {
+                    entry.value().set_delivery_held(true);
+                }
+            }
+        }
+    }
+
+    /// Snapshot each owned old partition's cutover boundary (once) and recompute
+    /// which have drained their pre-cutover backlog, for this owner's heartbeat
+    /// report. Call periodically while a grow runs.
+    pub async fn refresh_repartition_drain(&self, topic: &str, group: Option<&str>) {
+        let key = (topic.to_string(), group.map(str::to_string));
+        let (n_old, known_boundaries) = {
+            let map = self.lock_repartition();
+            match map.get(&key) {
+                Some(local) => (local.n_old.max(1), local.boundaries.clone()),
+                None => return,
+            }
+        };
+        // Old partitions this broker owns a delivery loop for.
+        let owned_old: Vec<u32> = self
+            .queues
+            .iter()
+            .filter(|e| e.key().tp == topic && e.key().group.as_deref() == group)
+            .map(|e| e.key().part.id())
+            .filter(|p| *p < n_old)
+            .collect();
+
+        let mut self_drained = HashSet::new();
+        for r in owned_old {
+            let boundary = match known_boundaries.get(&r) {
+                Some(b) => *b,
+                None => {
+                    // Capture the boundary once, the partition's high-water now.
+                    let Ok(b) = self.partition_next_offset(topic, Partition::new(r), group).await
+                    else {
+                        continue;
+                    };
+                    if let Some(local) = self.lock_repartition().get_mut(&key) {
+                        local.boundaries.entry(r).or_insert(b);
+                    }
+                    b
+                }
+            };
+            if let Ok(settled) = self
+                .partition_lowest_unacked_offset(topic, Partition::new(r), group)
+                .await
+            {
+                if settled >= boundary {
+                    self_drained.insert(r);
+                }
+            }
+        }
+        if let Some(local) = self.lock_repartition().get_mut(&key) {
+            local.self_drained = self_drained;
+        }
+    }
+
+    /// This owner's repartition drain status across all in-progress grows, for
+    /// the heartbeat label.
+    pub fn repartition_drained_reports(&self) -> Vec<RepartitionDrainStatus> {
+        self.lock_repartition()
+            .iter()
+            .map(|((topic, group), local)| {
+                let mut drained: Vec<u32> = local.self_drained.iter().copied().collect();
+                drained.sort_unstable();
+                RepartitionDrainStatus {
+                    topic: topic.clone(),
+                    group: group.clone(),
+                    version: local.version,
+                    drained,
+                }
+            })
+            .collect()
+    }
+
+    /// Apply the cluster-wide set of drained old partitions for a queue: lift the
+    /// hold on any owned new partition whose source is now drained.
+    pub fn apply_repartition_drained(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        drained_sources: std::collections::HashSet<u32>,
+    ) {
+        let key = (topic.to_string(), group.map(str::to_string));
+        let n_old = {
+            let mut map = self.lock_repartition();
+            let Some(local) = map.get_mut(&key) else {
+                return;
+            };
+            local.drained_sources = drained_sources.clone();
+            local.n_old.max(1)
+        };
+        for entry in self.queues.iter() {
+            let qk = entry.key();
+            if qk.tp == topic && qk.group.as_deref() == group {
+                let p = qk.part.id();
+                if p >= n_old && drained_sources.contains(&(p % n_old)) {
+                    entry.value().set_delivery_held(false);
+                }
+            }
+        }
+    }
+
+    /// Finish a repartition: drop the local transition and release any remaining
+    /// holds for the queue (all sources have drained).
+    pub fn clear_repartition_transition(&self, topic: &str, group: Option<&str>) {
+        let key = (topic.to_string(), group.map(str::to_string));
+        let removed = self.lock_repartition().remove(&key);
+        if let Some(local) = removed {
+            for entry in self.queues.iter() {
+                let qk = entry.key();
+                if qk.tp == topic && qk.group.as_deref() == group && qk.part.id() >= local.n_old {
+                    entry.value().set_delivery_held(false);
+                }
+            }
+        }
     }
 
     fn lock_exclusive_groups(&self) -> std::sync::MutexGuard<'_, ExclusiveGroupRouter> {

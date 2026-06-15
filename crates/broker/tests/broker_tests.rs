@@ -606,6 +606,90 @@ async fn repartition_delivery_hold_blocks_until_released() {
 }
 
 #[tokio::test]
+async fn repartition_transition_holds_new_partition_until_source_drains() {
+    let mut owned = StdHashSet::new();
+    owned.insert(OwnedQueue::new("grow", Partition::new(0), None));
+    owned.insert(OwnedQueue::new("grow", Partition::new(1), None));
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
+
+    // Grow 1 -> 2: partition 1 is new and sources from partition 0 (1 % 1).
+    broker.apply_repartition_transition("grow", None, 1, 1, 2);
+
+    // Subscribing to the new partition starts its loop held.
+    let mut new_sub = broker
+        .subscribe(
+            "grow",
+            Partition::new(1),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 4 },
+        )
+        .await
+        .unwrap();
+    let (pub1, _c1) = broker
+        .get_publisher("grow", Partition::new(1), &None)
+        .await
+        .unwrap();
+    pub1.publish(
+        b"new".to_vec(),
+        unix_millis(),
+        unix_millis(),
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        recv_with_timeout(&mut new_sub, 300).await.is_none(),
+        "new partition is held while its source has not drained"
+    );
+
+    // The old partition delivers normally throughout the transition.
+    let mut old_sub = broker
+        .subscribe(
+            "grow",
+            Partition::new(0),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 4 },
+        )
+        .await
+        .unwrap();
+    let (pub0, _c0) = broker
+        .get_publisher("grow", Partition::new(0), &None)
+        .await
+        .unwrap();
+    pub0.publish(
+        b"old".to_vec(),
+        unix_millis(),
+        unix_millis(),
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        recv_with_timeout(&mut old_sub, 1000).await.is_some(),
+        "old partition delivers during the transition"
+    );
+
+    // Once the source partition drains cluster-wide, the new partition lifts.
+    broker.apply_repartition_drained("grow", None, StdHashSet::from([0u32]));
+    let msg = recv_with_timeout(&mut new_sub, 1000)
+        .await
+        .expect("new partition delivers after its source drains");
+    assert_eq!(msg.message.payload, b"new");
+    broker.shutdown().await;
+}
+
+#[tokio::test]
 async fn static_coordination_can_drive_broker_ownership_gate() {
     let local_node = "node-a".to_string();
     let remote_node = "node-b".to_string();
