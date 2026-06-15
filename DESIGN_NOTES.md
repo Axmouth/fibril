@@ -82,6 +82,78 @@ are a cluster-issued signed token (HMAC over the id with a shared cluster secret
 verified locally on any broker, no per-subscribe round-trip) or full
 coordinator-issued identity.
 
+## Live repartitioning (changing partition_count on an existing queue)
+
+Easier than for a log: fibril is a work queue (consumed = gone), so there is no
+historical log to migrate or rewrite. Only undelivered messages and per-key
+ordering need handling across the change. v1 is GROW only, and only by an INTEGER
+MULTIPLE (N_new = k * N_old, typically doubling). Shrink-by-factor and
+arbitrary-N are deferred (see escape hatch below).
+
+FIRST, THE NON-FEATURE: you can already over-provision. Declare a high partition
+count up front and the spread-first placement planner distributes them across
+nodes, no repartitioning ever needed (the Redis-slots / Cassandra-vnodes stance).
+Live repartitioning is the escape hatch for queues that did not over-provision.
+
+THE GUARANTEE AT RISK: per-key order. A key K routes to P_old = hash(K) % N_old
+before and P_new = hash(K) % N_new after. When P_old != P_new, K's pre-cutover
+messages sit in P_old while its post-cutover messages go to P_new, so P_new must
+not deliver K before P_old has drained K.
+
+WHY INTEGER-MULTIPLE GROWTH MAKES THIS CHEAP (the core trick): with modulo
+hashing and N_new = k * N_old, every new partition sources from exactly one old
+partition: source(p) = p % N_old. A new partition p (>= N_old) only ever receives
+keys that were in old partition (p % N_old). Old partitions (< N_old) keep only
+keys that STAY (P_old == P_new), so their order is preserved naturally by offset
+order and they need NO gate. So the ordering barrier is a pure partition-identity
+rule, with no per-message key storage and no whole-queue pause:
+
+    new partition p may deliver only once old partition (p % N_old) has drained
+    its pre-cutover (v_old) backlog. old partitions deliver throughout.
+
+Example (N_old=4 -> N_new=8): new partition 5 only holds keys with h%8=5, all of
+which had h%4=1, so partition 5 simply waits on partition 1 draining.
+
+TWO VERSIONS:
+- Routing version (partitioning_version, already exists): bumped immediately on
+  repartition. Producers re-route to N_new at once via the existing
+  fence_stale_partitioning redirect (a stale-version publish is redirected, the
+  client refreshes topology and re-routes).
+- Per-partition drain gate (new): each old partition's owner captures a cutover
+  boundary offset when it first observes v_new (messages below it are v_old), and
+  reports "old partition r drained" once its v_old backlog (ready + inflight
+  below the boundary) is empty. The controller aggregates a drained set into a
+  transition doc. A new partition p's owner reads the doc and ungates once
+  (p % N_old) is drained. When all old partitions drain, the transition clears.
+  This reuses the cohort controller pattern (heartbeat report -> leader aggregate
+  -> published doc -> owner reads).
+
+FLOW (grow):
+1. Admin repartition(topic, group, N_new): validate N_new is a multiple of and
+   greater than current; CAS the partitioning doc to (N_new, version+1).
+2. Controller places owners/followers for the added partitions (spread-first).
+3. Producers cut over to N_new via the version fence.
+4. Old-partition owners drain v_old and report per-partition drain.
+5. Each new partition ungates when its single source old partition drains.
+6. Cohorts re-plan over N_new (generation + controller seeding absorb the churn).
+
+PRECEDENTS: Elasticsearch _split requires the target to be a multiple of the
+source and _shrink a factor of it, the same constraint for the same reason.
+Linear / extendible hashing in DB indexes double the address space the same way.
+Kafka and Pulsar allow arbitrary growth but silently break key ordering across
+the remap and cannot shrink, so gated integer-multiple grow is strictly stronger
+on correctness.
+
+ESCAPE HATCH (not a one-way door): the integer-multiple gate leaves no persistent
+artifact, it changes no storage format, message schema, or hash function. After a
+grow the queue is indistinguishable from one created at N_new. So arbitrary-N can
+be added later as a fallback chosen at repartition time (N_new % N_old == 0 ->
+cheap per-partition gate, else -> global barrier or a per-key gate with key
+storage), purely additively. The same integer relationship also yields a clean
+factor-shrink path later. The one standing commitment is keeping modulo hashing
+(which we already use); only switching to consistent hashing would invalidate the
+fast path, and that would force a repartitioning redesign regardless.
+
 ## Forwarded writes (coordination)
 
 The deterministic path is the mechanism, retries are only a safety net. A
