@@ -136,6 +136,88 @@ pub fn decode_cohort_assignment(raw: &str) -> HashMap<Partition, String> {
         .unwrap_or_default()
 }
 
+/// Attribute-key prefix for an in-progress live-repartition transition.
+pub const REPARTITION_TRANSITION_PREFIX: &str = "fibril/repartition/";
+
+/// Heartbeat label key under which an owner reports the old partitions whose
+/// pre-cutover backlog it has drained during a repartition.
+pub const REPARTITION_DRAINED_LABEL: &str = "fibril/repartition_drained";
+
+/// Replicated marker for an in-progress grow of a queue `(topic, group)`.
+/// Present only while the transition runs (the controller clears it once every
+/// old partition has drained). `version` scopes drain reports to this grow so a
+/// stale report from a prior transition is ignored.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepartitionTransitionDoc {
+    pub version: u64,
+    pub n_old: u32,
+    pub n_new: u32,
+}
+
+/// The old partition `r` a new partition `p` sources from under integer-multiple
+/// growth: `p % n_old`. A new partition may deliver once its source has drained.
+pub fn repartition_source_partition(p: u32, n_old: u32) -> u32 {
+    p % n_old.max(1)
+}
+
+/// Attribute key carrying the repartition transition marker for `(topic, group)`.
+pub fn repartition_transition_attribute_key(topic: &str, group: Option<&str>) -> String {
+    match group {
+        Some(group) => format!("{REPARTITION_TRANSITION_PREFIX}{topic}/{group}"),
+        None => format!("{REPARTITION_TRANSITION_PREFIX}{topic}"),
+    }
+}
+
+pub fn encode_repartition_transition(doc: &RepartitionTransitionDoc) -> String {
+    serde_json::to_string(doc).unwrap_or_else(|_| String::from("{}"))
+}
+
+pub fn decode_repartition_transition(raw: &str) -> Option<RepartitionTransitionDoc> {
+    serde_json::from_str(raw).ok()
+}
+
+/// One owner's drain report: the old partitions of a queue whose pre-cutover
+/// backlog it has fully drained, scoped to a transition `version`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RepartitionDrainedReport {
+    pub topic: String,
+    #[serde(default)]
+    pub group: Option<String>,
+    pub version: u64,
+    pub drained: Vec<u32>,
+}
+
+pub fn encode_repartition_drained(reports: &[RepartitionDrainedReport]) -> String {
+    serde_json::to_string(reports).unwrap_or_else(|_| String::from("[]"))
+}
+
+pub fn decode_repartition_drained(raw: &str) -> Vec<RepartitionDrainedReport> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+/// Union the drained old partitions reported across all nodes' labels for one
+/// queue `(topic, group)` at transition `version`. Reports for other queues or
+/// stale versions contribute nothing.
+pub fn aggregate_repartition_drained<'a>(
+    labels: impl IntoIterator<Item = &'a str>,
+    topic: &str,
+    group: Option<&str>,
+    version: u64,
+) -> std::collections::HashSet<u32> {
+    let mut drained = std::collections::HashSet::new();
+    for raw in labels {
+        for report in decode_repartition_drained(raw) {
+            if report.topic == topic
+                && report.group.as_deref() == group
+                && report.version == version
+            {
+                drained.extend(report.drained);
+            }
+        }
+    }
+    drained
+}
+
 /// Replicated runtime-settings document: the cluster truth. `cluster_version`
 /// is independent of each node's local store version (those differ per node);
 /// CAS on the serialized document makes concurrent publishers race-safe.
@@ -786,6 +868,64 @@ where
     pub fn cohort_assignment_doc(&self, key: &ConsumerGroupKey) -> Option<CohortAssignmentDoc> {
         self.cluster_attribute(&cohort_assignment_attribute_key(key))
             .and_then(|raw| decode_cohort_assignment_doc(&raw))
+    }
+
+    /// Publish the marker for an in-progress repartition transition (leader-or-
+    /// forwarded). New-partition owners read it to learn `n_old` and hold their
+    /// partitions until the source old partition drains.
+    pub async fn begin_repartition_transition(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        doc: &RepartitionTransitionDoc,
+    ) -> Result<(), OpenraftAdapterError> {
+        self.set_cluster_attribute(
+            repartition_transition_attribute_key(topic, group),
+            encode_repartition_transition(doc),
+        )
+        .await
+    }
+
+    /// Read the repartition transition marker for `(topic, group)`, if a grow is
+    /// in progress.
+    pub fn repartition_transition(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+    ) -> Option<RepartitionTransitionDoc> {
+        self.cluster_attribute(&repartition_transition_attribute_key(topic, group))
+            .and_then(|raw| decode_repartition_transition(&raw))
+    }
+
+    /// Clear the repartition transition marker once the grow is complete.
+    pub async fn clear_repartition_transition(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+    ) -> Result<(), OpenraftAdapterError> {
+        // An empty value is the absent state (decode yields None).
+        self.set_cluster_attribute(
+            repartition_transition_attribute_key(topic, group),
+            String::new(),
+        )
+        .await
+    }
+
+    /// The set of old partitions reported drained cluster-wide for a queue's
+    /// repartition at `version`, aggregated from every node's heartbeat label.
+    pub fn global_repartition_drained(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        version: u64,
+    ) -> std::collections::HashSet<u32> {
+        let snapshot = self.node.committed_snapshot();
+        let labels: Vec<&str> = snapshot
+            .nodes
+            .values()
+            .filter_map(|node| node.labels.get(REPARTITION_DRAINED_LABEL).map(String::as_str))
+            .collect();
+        aggregate_repartition_drained(labels, topic, group, version)
     }
 
     /// One cohort-controller iteration: as the leader, aggregate cluster-wide
@@ -1803,6 +1943,67 @@ mod cohort_transport_tests {
         let doc = decode_cohort_assignment_doc(legacy).expect("legacy doc decodes");
         assert_eq!(doc.generation, 0);
         assert_eq!(doc.entries.len(), 1);
+    }
+
+    #[test]
+    fn repartition_transition_roundtrips_and_rejects_garbage() {
+        let doc = RepartitionTransitionDoc {
+            version: 3,
+            n_old: 4,
+            n_new: 8,
+        };
+        let encoded = encode_repartition_transition(&doc);
+        assert_eq!(decode_repartition_transition(&encoded), Some(doc));
+        assert_eq!(decode_repartition_transition(""), None);
+        assert_eq!(decode_repartition_transition("garbage"), None);
+    }
+
+    #[test]
+    fn repartition_source_maps_each_new_partition_to_one_old() {
+        // Doubling 4 -> 8: new partition p sources from p % 4.
+        assert_eq!(repartition_source_partition(5, 4), 1);
+        assert_eq!(repartition_source_partition(7, 4), 3);
+        assert_eq!(repartition_source_partition(4, 4), 0);
+        // Staying partitions map to themselves.
+        assert_eq!(repartition_source_partition(1, 4), 1);
+    }
+
+    #[test]
+    fn aggregate_repartition_drained_unions_and_filters() {
+        // Two owners each report a drained old partition for the same grow.
+        let a = encode_repartition_drained(&[RepartitionDrainedReport {
+            topic: "orders".into(),
+            group: None,
+            version: 1,
+            drained: vec![0],
+        }]);
+        let b = encode_repartition_drained(&[RepartitionDrainedReport {
+            topic: "orders".into(),
+            group: None,
+            version: 1,
+            drained: vec![2],
+        }]);
+        // A stale-version report and a different-queue report contribute nothing.
+        let stale = encode_repartition_drained(&[RepartitionDrainedReport {
+            topic: "orders".into(),
+            group: None,
+            version: 0,
+            drained: vec![3],
+        }]);
+        let other = encode_repartition_drained(&[RepartitionDrainedReport {
+            topic: "shipments".into(),
+            group: None,
+            version: 1,
+            drained: vec![1],
+        }]);
+
+        let drained = aggregate_repartition_drained(
+            [a.as_str(), b.as_str(), stale.as_str(), other.as_str()],
+            "orders",
+            None,
+            1,
+        );
+        assert_eq!(drained, std::collections::HashSet::from([0, 2]));
     }
 
     #[test]
