@@ -2495,6 +2495,23 @@ Gross lagging capacity is therefore about 20.5k messages/s before protocol,
 durable append, event, and scheduling costs. The observed 10-15k/s ceiling is
 consistent with this budget.
 
+Update from split publish-only runs: after tuning follower read budgets to
+4096 messages/read, 4096 events/read, 16 MiB/read, and 64 iterations/tick,
+replica-durable publish-only throughput at a 50k/s target stayed around
+27k/s. Setting `retry_poll_ms=1` did not move the number. Raising the read
+budget to 16k messages/read and 64 MiB/read barely changed throughput, but
+raised publish-confirm latency from roughly 360ms p50 to roughly 1.36s p50.
+This makes the remaining ceiling unlikely to be the retry sleep or simple
+request roundtrip count.
+
+Protocol codec timing from those runs points at follower-side bulk decode:
+owner `ReplicationReadOk` encode for ~4.8 MiB responses was usually about
+13-16ms, while follower decode of the same responses was about 117-130ms.
+With ~4096 one-kilobyte messages per response, that decode cost almost exactly
+explains the ~27k/s cap. Larger ~19 MiB responses decoded in roughly
+460-590ms and did not improve throughput. `/tmp` is tmpfs on this machine, so
+this is not primarily physical disk latency.
+
 Next candidates:
 
 - Make replication read budgets explicit settings, following the existing
@@ -2505,6 +2522,12 @@ Next candidates:
   in one blocking task and one coherent owner-read operation.
 - Add benchmark output for follower records-per-tick, loop status, and chosen
   next delay.
+- Investigate a replication-specific wire shape that avoids `rmp-serde`
+  decoding thousands of nested payload records into fresh `Vec<u8>` values.
+  Good candidates are a custom binary replication batch, split message/event
+  streams, or a bounded decode/apply worker pipeline. Moving large decodes to
+  `spawn_blocking` protects Tokio workers but does not make deserialization
+  cheaper.
 
 Resume concerns after operator-surface cleanup:
 
@@ -2822,3 +2845,46 @@ Snapshot/checkpoint concern found during higher-rate sweep:
   The two streams have different size and latency profiles; separate streams
   would make byte limits, decode offload, and future push/pull hybrid behavior
   easier to reason about.
+- Replication encoding inventory (verified 2026-06-15): replication is not
+  repeatedly MessagePack-encoding an already MessagePacked payload, but it is
+  wrapping already encoded storage bytes inside a larger MessagePack object.
+  Message records are stored in Keratin's binary record format, decoded by the
+  owner reader into owned headers/payload bytes, wrapped as
+  `ReplicationMessageRecord { offset, flags, headers, payload }`, then
+  serialized as part of a MessagePack `ReplicationReadOk`. On the follower, the
+  whole response is decoded into a `Vec<ReplicationMessageRecord>`, converted
+  back into Keratin `Message`s, and encoded again into Keratin records for the
+  follower log. Event records currently do more domain churn: owner storage
+  bytes are decoded to `StromaEvent`, encoded back to event bytes for
+  `ReplicationEventRecord`, MessagePacked in `ReplicationReadOk`, decoded on
+  the follower, decoded again to `StromaEvent`, then encoded again for the
+  follower event log while also applying the event to in-memory state.
+- Raw frame implication: `Frame.payload` is already just bytes. If a replication
+  op places event-storage bytes or Keratin record bytes directly in the frame
+  payload, the frame layer only length-prefixes and copies those bytes into the
+  socket buffer. The current overhead comes from using serde structs inside that
+  payload, not from the frame header itself. A v2 replication transport should
+  therefore consider chunked raw/binary payload frames with a small fixed
+  envelope, decoded record-by-record, instead of one large nested MessagePack
+  `ReplicationReadOk`.
+- Raw replication payload prototype benchmark (2026-06-15): added a local
+  Criterion prototype in `crates/protocol/benches/encode.rs` that compares the
+  current `rmp-serde` `ReplicationReadOk` decode with a compact binary payload
+  parser. This is benchmark-only, not production protocol. It asserts that the
+  raw-owned decode roundtrips to the same `ReplicationReadOk`, and that the
+  raw-borrowed parser sees the expected record and byte counts. Short-run
+  results:
+
+  | Shape | MessagePack owned decode | Raw borrowed parse | Raw owned decode |
+  | --- | ---: | ---: | ---: |
+  | 4096 x 1 KiB | ~168ms | ~44us | ~572us |
+  | 128 x 64 KiB | ~317ms | ~655ns | ~212us |
+
+  Caveat: raw-borrowed intentionally validates structure and borrows slices; it
+  does not touch every payload byte. That models the eventual raw append path,
+  where replication should not deserialize payloads just to write them back out.
+  Raw-owned is closer to the current apply API because it still allocates and
+  copies into owned payload vectors. Even that middle-ground is dramatically
+  faster than the nested MessagePack decode, so the next serious optimization
+  target is a real replication v2 payload/chunk codec and, after that, Keratin
+  raw replicated record scan/append APIs.

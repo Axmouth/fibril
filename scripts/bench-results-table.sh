@@ -19,10 +19,10 @@ extract_config() {
   local file="$2"
   local line
   line="$(grep -m1 '^Steady benchmark:' "$file" || true)"
-  if [[ "$line" != *"${key}="* ]]; then
-    return
-  fi
-  sed -E "s/^.*${key}=//; s/, [[:alpha:]_][[:alnum:]_]*=.*$//" <<<"$line"
+  line="${line#Steady benchmark: }"
+  tr ',' '\n' <<<"$line" \
+    | sed -E 's/^ +//; s/ +$//' \
+    | awk -F= -v key="$key" '$1 == key { print substr($0, index($0, "=") + 1); exit }'
 }
 
 extract_value() {
@@ -62,16 +62,29 @@ format_server_latency() {
   format_latency "Latency server-receive->deliver ms" "$file"
 }
 
+format_confirm_latency() {
+  local file="$1"
+  format_latency "Latency publish confirmation ms" "$file"
+}
+
 format_mode() {
   local file="$1"
+  local bench_mode
   local confirmed
+  local preload_confirmed
   local window
+  bench_mode="$(extract_config "mode" "$file")"
+  bench_mode="${bench_mode:-Mixed}"
   confirmed="$(extract_config "confirmed" "$file")"
-  if [ "$confirmed" = "true" ]; then
+  preload_confirmed="$(extract_config "preload_confirmed" "$file")"
+  if [ "$bench_mode" = "ConsumeDrain" ] && [ "$preload_confirmed" = "true" ]; then
     window="$(extract_config "confirm_window" "$file")"
-    printf 'confirmed, window=%s' "$window"
+    printf '%s, preload-confirmed, window=%s' "$bench_mode" "$window"
+  elif [ "$confirmed" = "true" ]; then
+    window="$(extract_config "confirm_window" "$file")"
+    printf '%s, confirmed, window=%s' "$bench_mode" "$window"
   else
-    printf 'unconfirmed'
+    printf '%s, unconfirmed' "$bench_mode"
   fi
 }
 
@@ -137,8 +150,8 @@ format_queue() {
   fi
 }
 
-printf '| Case | Mode | Durability | Topic | Target | Actual | Missing | publish→server p50/p95/p99/max | publish→deliver p50/p95/p99/max | server-receive→deliver p50/p95/p99/max | Errors | Server RSS avg/peak | End queue |\n'
-printf '| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- | ---: | --- | --- |\n'
+printf '| Case | Mode | Durability | Topic | Target | Actual | Missing | confirm p50/p95/p99/max | publish→server p50/p95/p99/max | publish→deliver p50/p95/p99/max | server-receive→deliver p50/p95/p99/max | Errors | Server RSS avg/peak | End queue |\n'
+printf '| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | --- | --- | ---: | --- | --- |\n'
 
 for file in "$@"; do
   case_name="$(basename "$file" .results.txt)"
@@ -146,7 +159,7 @@ for file in "$@"; do
   actual="$(extract_value "Actual measured publish rate" "$file")"
   missing="$(extract_value "Measured missing" "$file")"
 
-  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
     "$case_name" \
     "$(format_mode "$file")" \
     "$(format_durability "$file")" \
@@ -154,6 +167,7 @@ for file in "$@"; do
     "$(format_rate "$target")" \
     "$(format_rate "$actual")" \
     "${missing:-n/a}" \
+    "$(format_confirm_latency "$file")" \
     "$(format_publish_receive_latency "$file")" \
     "$(format_publish_latency "$file")" \
     "$(format_server_latency "$file")" \

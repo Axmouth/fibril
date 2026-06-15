@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 writers="${WRITERS:-10}"
 readers="${READERS:-10}"
+mode="${BENCH_MODE:-mixed}"
 rate_per_sec="${RATE_PER_SEC:-100000}"
 warmup_secs="${WARMUP_SECS:-5}"
 duration_secs="${DURATION_SECS:-30}"
@@ -18,6 +19,8 @@ broker_addr="${BROKER_ADDR:-127.0.0.1:9876}"
 admin_addr="${ADMIN_ADDR:-127.0.0.1:8081}"
 durability_label="${DURABILITY_LABEL:-local}"
 topic="${TOPIC:-topic1}"
+preload_messages="${PRELOAD_MESSAGES:-100000}"
+preload_confirmed="${PRELOAD_CONFIRMED:-1}"
 data_dir="$(mktemp -d)"
 log_file="${LOG_FILE:-$data_dir/steady.log}"
 results_file="${RESULTS_FILE:-$data_dir/steady-results.txt}"
@@ -27,7 +30,15 @@ memory_sampler_pid=""
 server_pid=""
 
 if [ "$confirmed" != "0" ]; then
-  bench_args+=(--confirmed --confirm-window "$confirm_window")
+  bench_args+=(--confirmed)
+fi
+
+if [ "$confirmed" != "0" ] || [ "$preload_confirmed" != "0" ]; then
+  bench_args+=(--confirm-window "$confirm_window")
+fi
+
+if [ "$preload_confirmed" = "0" ]; then
+  bench_args+=(--preload-unconfirmed)
 fi
 
 mkdir -p "$(dirname "$log_file")" "$(dirname "$results_file")"
@@ -100,6 +111,7 @@ if [ -n "$server_pid" ]; then
 fi
 
 "$repo_root/target/release/steady_c" \
+  --mode "$mode" \
   --broker-addr "$broker_addr" \
   --durability-label "$durability_label" \
   --topic "$topic" \
@@ -111,6 +123,7 @@ fi
   --drain-timeout-secs "$drain_timeout_secs" \
   --size "$size" \
   --prefetch "$prefetch" \
+  --preload-messages "$preload_messages" \
   "${bench_args[@]}" >>"$results_file" 2>>"$log_file"
 
 if [ -n "$memory_sampler_pid" ]; then

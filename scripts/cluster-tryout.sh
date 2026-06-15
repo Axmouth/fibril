@@ -38,8 +38,11 @@ REPARTITION_SMOKE=false
 COORDINATION_HEARTBEAT_INTERVAL_MS="${COORDINATION_HEARTBEAT_INTERVAL_MS:-}"
 COORDINATION_LIVENESS_TTL_MS="${COORDINATION_LIVENESS_TTL_MS:-}"
 REPLICATION_CAUGHT_UP_POLL_MS="${REPLICATION_CAUGHT_UP_POLL_MS:-}"
+REPLICATION_RETRY_POLL_MS="${REPLICATION_RETRY_POLL_MS:-}"
+REPLICATION_CHECKPOINT_RETRY_POLL_MS="${REPLICATION_CHECKPOINT_RETRY_POLL_MS:-}"
 REPLICATION_MAX_MESSAGES_PER_READ="${REPLICATION_MAX_MESSAGES_PER_READ:-}"
 REPLICATION_MAX_EVENTS_PER_READ="${REPLICATION_MAX_EVENTS_PER_READ:-}"
+REPLICATION_MAX_BYTES_PER_READ="${REPLICATION_MAX_BYTES_PER_READ:-}"
 REPLICATION_MAX_ITERATIONS_PER_TICK="${REPLICATION_MAX_ITERATIONS_PER_TICK:-}"
 CLUSTER_TRYOUT_RUN_ROOT="${CLUSTER_TRYOUT_RUN_ROOT:-/tmp}"
 ADMIN_WAIT_SECS=5
@@ -111,8 +114,11 @@ for numeric_env in \
   COORDINATION_HEARTBEAT_INTERVAL_MS \
   COORDINATION_LIVENESS_TTL_MS \
   REPLICATION_CAUGHT_UP_POLL_MS \
+  REPLICATION_RETRY_POLL_MS \
+  REPLICATION_CHECKPOINT_RETRY_POLL_MS \
   REPLICATION_MAX_MESSAGES_PER_READ \
   REPLICATION_MAX_EVENTS_PER_READ \
+  REPLICATION_MAX_BYTES_PER_READ \
   REPLICATION_MAX_ITERATIONS_PER_TICK
 do
   require_positive_int_env "$numeric_env"
@@ -1181,23 +1187,31 @@ if [[ "$GANGLION" == true ]]; then
   new_ttl="$(( $(echo "$current" | jq -r '.settings.delivery.inflight_ttl_ms') + 111 ))"
   settings="$(echo "$current" | jq -c --argjson ttl "$new_ttl" \
     '.settings | .delivery.inflight_ttl_ms = $ttl')"
-  if [[ -n "$REPLICATION_CAUGHT_UP_POLL_MS" ]]; then
+  if [[ -n "${REPLICATION_CAUGHT_UP_POLL_MS:-}" ]]; then
     settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_CAUGHT_UP_POLL_MS" \
       '.replication.caught_up_poll_ms = $value')"
   fi
-  if [[ -n "$REPLICATION_MAX_MESSAGES_PER_READ" ]]; then
+  if [[ -n "${REPLICATION_RETRY_POLL_MS:-}" ]]; then
+    settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_RETRY_POLL_MS" \
+      '.replication.retry_poll_ms = $value')"
+  fi
+  if [[ -n "${REPLICATION_CHECKPOINT_RETRY_POLL_MS:-}" ]]; then
+    settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_CHECKPOINT_RETRY_POLL_MS" \
+      '.replication.checkpoint_retry_poll_ms = $value')"
+  fi
+  if [[ -n "${REPLICATION_MAX_MESSAGES_PER_READ:-}" ]]; then
     settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_MAX_MESSAGES_PER_READ" \
       '.replication.max_messages_per_read = $value')"
   fi
-  if [[ -n "$REPLICATION_MAX_EVENTS_PER_READ" ]]; then
+  if [[ -n "${REPLICATION_MAX_EVENTS_PER_READ:-}" ]]; then
     settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_MAX_EVENTS_PER_READ" \
       '.replication.max_events_per_read = $value')"
   fi
-  if [[ -n "$REPLICATION_MAX_BYTES_PER_READ" ]]; then
+  if [[ -n "${REPLICATION_MAX_BYTES_PER_READ:-}" ]]; then
     settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_MAX_BYTES_PER_READ" \
       '.replication.max_bytes_per_read = $value')"
   fi
-  if [[ -n "$REPLICATION_MAX_ITERATIONS_PER_TICK" ]]; then
+  if [[ -n "${REPLICATION_MAX_ITERATIONS_PER_TICK:-}" ]]; then
     settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_MAX_ITERATIONS_PER_TICK" \
       '.replication.max_iterations_per_tick = $value')"
   fi
