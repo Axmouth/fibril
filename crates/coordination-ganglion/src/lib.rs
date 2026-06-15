@@ -347,6 +347,15 @@ pub enum RepartitionQueueError {
         current: u32,
         requested: u32,
     },
+    /// The requested count is not a smaller integer factor of the current count.
+    /// v1 shrinks by an integer factor only (the new count must divide the
+    /// current one), mirroring the integer-multiple grow constraint.
+    NotIntegerFactorShrink {
+        topic: String,
+        group: Option<String>,
+        current: u32,
+        requested: u32,
+    },
     /// A coordination/consensus error (not-leader, storage, repeated CAS loss).
     Coordination(OpenraftAdapterError),
 }
@@ -375,6 +384,17 @@ impl std::fmt::Display for RepartitionQueueError {
                 f,
                 "queue {} cannot repartition from {current} to {requested} partitions: \
                  the new count must be a larger integer multiple of the current one",
+                queue(topic, group)
+            ),
+            Self::NotIntegerFactorShrink {
+                topic,
+                group,
+                current,
+                requested,
+            } => write!(
+                f,
+                "queue {} cannot shrink from {current} to {requested} partitions: \
+                 the new count must be a smaller integer factor of the current one",
                 queue(topic, group)
             ),
             Self::Coordination(error) => write!(f, "{error}"),
@@ -1316,6 +1336,100 @@ where
         }
         // 3. Bump the version last: this is the routing cutover.
         self.repartition_queue(topic, group, new_count).await
+    }
+
+    /// Operator entry point for a live shrink: `new_count` must be a factor of the
+    /// current count (new_count divides it, and is smaller). Writes the transition
+    /// marker first so surviving partitions are held before producers cut over,
+    /// then bumps the version. Removed partitions stay registered so they keep
+    /// draining (retirement/deregistration is deferred).
+    ///
+    /// NOTE: a stricter choreography would wait for owners to confirm survivors
+    /// are held before the version bump (see DESIGN_NOTES). v1 relies on the
+    /// watcher applying the hold within about one tick of the marker.
+    pub async fn shrink_queue(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        new_count: u32,
+    ) -> Result<QueuePartitioning, RepartitionQueueError> {
+        let current = self.queue_partitioning(topic, group).ok_or_else(|| {
+            RepartitionQueueError::NotDeclared {
+                topic: topic.to_string(),
+                group: group.map(str::to_string),
+            }
+        })?;
+        let n_old = current.partition_count;
+        if n_old == new_count {
+            return Ok(current);
+        }
+        // Shrink only, and only to a factor of the current count.
+        if new_count == 0 || new_count >= n_old || n_old % new_count != 0 {
+            return Err(RepartitionQueueError::NotIntegerFactorShrink {
+                topic: topic.to_string(),
+                group: group.map(str::to_string),
+                current: n_old,
+                requested: new_count,
+            });
+        }
+        let next_version = current.partitioning_version + 1;
+        // 1. Marker first: surviving partitions are held before the cutover.
+        self.begin_repartition_transition(
+            topic,
+            group,
+            &RepartitionTransitionDoc {
+                version: next_version,
+                n_old,
+                n_new: new_count,
+            },
+        )
+        .await
+        .map_err(RepartitionQueueError::Coordination)?;
+        // 2. Bump the version (routing cutover) via a CAS to the smaller count.
+        let key = queue_partitioning_key(topic, group);
+        for _ in 0..8 {
+            let Some(current_raw) = self.cluster_attribute(&key) else {
+                return Err(RepartitionQueueError::NotDeclared {
+                    topic: topic.to_string(),
+                    group: group.map(str::to_string),
+                });
+            };
+            let existing: QueuePartitioning =
+                serde_json::from_str(&current_raw).map_err(|error| {
+                    RepartitionQueueError::Coordination(OpenraftAdapterError::Storage(format!(
+                        "queue `{topic}`/{group:?} partitioning is corrupt: {error}"
+                    )))
+                })?;
+            if existing.partition_count == new_count {
+                return Ok(existing);
+            }
+            let next = QueuePartitioning {
+                partition_count: new_count,
+                partitioning_version: existing.partitioning_version + 1,
+            };
+            let value = serde_json::to_string(&next).map_err(|error| {
+                RepartitionQueueError::Coordination(OpenraftAdapterError::Storage(
+                    error.to_string(),
+                ))
+            })?;
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: key.clone(),
+                    expected: Some(current_raw.clone()),
+                    value,
+                })
+                .await
+            {
+                Ok(_) => return Ok(next),
+                Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
+                Err(error) => return Err(RepartitionQueueError::Coordination(error)),
+            }
+        }
+        Err(RepartitionQueueError::Coordination(
+            OpenraftAdapterError::Storage(
+                "queue shrink lost the CAS race repeatedly".to_string(),
+            ),
+        ))
     }
 
     pub fn runtime_settings_document(
@@ -3351,6 +3465,77 @@ mod tests {
         assert!(matches!(
             coordination.grow_queue("orders", None, 6).await,
             Err(RepartitionQueueError::NotIntegerMultipleGrowth { .. })
+        ));
+
+        coordination.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shrink_queue_bumps_version_and_marks_transition() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let coordination = GanglionCoordination::new("broker-a", raft_node);
+        coordination
+            .declare_queue_partitioning("orders", None, 4)
+            .await
+            .expect("declare");
+
+        // Shrink 4 -> 2 (a factor): count drops, version bumps, marker recorded.
+        let shrunk = coordination
+            .shrink_queue("orders", None, 2)
+            .await
+            .expect("shrink");
+        assert_eq!(shrunk.partition_count, 2);
+        assert_eq!(shrunk.partitioning_version, 1);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let part = coordination.queue_partitioning("orders", None);
+            let marker = coordination.repartition_transition("orders", None);
+            if part.as_ref().map(|p| p.partition_count) == Some(2)
+                && marker
+                    == Some(RepartitionTransitionDoc {
+                        version: 1,
+                        n_old: 4,
+                        n_new: 2,
+                    })
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shrink never became fully visible"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Idempotent at the target; non-factor and growth are rejected.
+        assert_eq!(
+            coordination
+                .shrink_queue("orders", None, 2)
+                .await
+                .expect("idempotent shrink")
+                .partition_count,
+            2
+        );
+        // 3 does not divide the current count (2); growth via shrink is rejected.
+        assert!(matches!(
+            coordination.shrink_queue("orders", None, 3).await,
+            Err(RepartitionQueueError::NotIntegerFactorShrink { .. })
+        ));
+        assert!(matches!(
+            coordination.shrink_queue("orders", None, 4).await,
+            Err(RepartitionQueueError::NotIntegerFactorShrink { .. })
         ));
 
         coordination.raft_node().shutdown().await.expect("shutdown");
