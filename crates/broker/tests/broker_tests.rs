@@ -451,6 +451,58 @@ async fn static_ownership_allows_owned_queue() {
 }
 
 #[tokio::test]
+async fn repartition_delivery_hold_blocks_until_released() {
+    let mut owned = StdHashSet::new();
+    owned.insert(OwnedQueue::new("repartition-hold", Partition::new(0), None));
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
+
+    // Subscribe first so the partition's delivery loop exists, then hold it.
+    let mut sub = broker
+        .subscribe(
+            "repartition-hold",
+            Partition::new(0),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 4 },
+        )
+        .await
+        .unwrap();
+    broker.set_partition_delivery_held("repartition-hold", Partition::new(0), None, true);
+
+    // A message published while held is not delivered.
+    let (publisher, _confirms) = broker
+        .get_publisher("repartition-hold", Partition::new(0), &None)
+        .await
+        .unwrap();
+    publisher
+        .publish(
+            b"held".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        recv_with_timeout(&mut sub, 300).await.is_none(),
+        "a held partition delivers nothing"
+    );
+
+    // Releasing the hold delivers the queued message.
+    broker.set_partition_delivery_held("repartition-hold", Partition::new(0), None, false);
+    let msg = recv_with_timeout(&mut sub, 1000)
+        .await
+        .expect("released partition delivers the queued message");
+    assert_eq!(msg.message.offset, 0);
+    broker.shutdown().await;
+}
+
+#[tokio::test]
 async fn static_coordination_can_drive_broker_ownership_gate() {
     let local_node = "node-a".to_string();
     let remote_node = "node-b".to_string();

@@ -987,6 +987,13 @@ struct QueueLoopState {
     /// sentinel `NO_EXCLUSIVE_ASSIGNEE` means "no gate" — deliver to all
     /// consumers (the default competing-consumer behavior).
     exclusive_assignee: AtomicU64,
+    /// Repartition drain gate: while true this partition holds ALL delivery. Set
+    /// on a newly added partition during a grow transition so it does not deliver
+    /// post-cutover (v_new) messages until its single source old partition has
+    /// drained its pre-cutover (v_old) backlog, preserving per-key order across
+    /// the remap. Cleared (and the partition delivers normally) once the source
+    /// has drained. Default false — no transition in progress.
+    delivery_held: AtomicBool,
 }
 
 /// Sentinel for [`QueueLoopState::exclusive_assignee`] meaning "no exclusive
@@ -1005,6 +1012,7 @@ impl QueueLoopState {
             notify: tokio::sync::Notify::new(),
             epoch: AtomicU64::new(1),
             exclusive_assignee: AtomicU64::new(NO_EXCLUSIVE_ASSIGNEE),
+            delivery_held: AtomicBool::new(false),
         }
     }
     fn wake(&self) {
@@ -1025,6 +1033,19 @@ impl QueueLoopState {
     fn set_exclusive_assignee(&self, assignee: Option<ConsumerId>) {
         self.exclusive_assignee
             .store(assignee.unwrap_or(NO_EXCLUSIVE_ASSIGNEE), Ordering::Release);
+        self.wake();
+    }
+
+    /// Whether this partition is holding delivery for a repartition transition.
+    fn is_delivery_held(&self) -> bool {
+        self.delivery_held.load(Ordering::Acquire)
+    }
+
+    /// Hold (`true`) or release (`false`) this partition's delivery for a
+    /// repartition transition, waking the delivery loop so a release delivers any
+    /// queued messages immediately.
+    fn set_delivery_held(&self, held: bool) {
+        self.delivery_held.store(held, Ordering::Release);
         self.wake();
     }
 
@@ -2816,6 +2837,27 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
     }
 
+    /// Hold or release a partition's delivery for a repartition transition. A
+    /// held partition delivers nothing until released. Used during a grow to keep
+    /// a newly added partition silent until its source old partition has drained.
+    /// No-op if the partition's delivery loop is not present on this broker.
+    pub fn set_partition_delivery_held(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        held: bool,
+    ) {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        if let Some(qs) = self.queues.get(&key).map(|e| e.value().clone()) {
+            qs.set_delivery_held(held);
+        }
+    }
+
     fn lock_exclusive_groups(&self) -> std::sync::MutexGuard<'_, ExclusiveGroupRouter> {
         self.exclusive_groups
             .lock()
@@ -3386,6 +3428,14 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     if broker.shutdown_consumers.is_cancelled()
                         || owner_runtime_shutdown.is_cancelled()
                     {
+                        break;
+                    }
+
+                    // Repartition drain gate: a newly added partition holds all
+                    // delivery until its source old partition drains (per-key
+                    // order across the remap). Skip delivery while held.
+                    if qs.is_delivery_held() {
+                        tracing::debug!("Delivery held for repartition on tp={} part={} group={:?}", key.tp, key.part, key.group);
                         break;
                     }
 
