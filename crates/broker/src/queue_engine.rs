@@ -249,6 +249,19 @@ pub trait QueueEngine {
         group: Option<&str>,
     ) -> Result<Offset, StromaError>;
 
+    /// The next deliverable offset in `[from, upper)`, or `None` if the range has
+    /// nothing ready. A shrink uses this to hold a surviving partition's
+    /// post-cutover delivery (offset >= boundary) WITHOUT polling/leasing it:
+    /// probe `[0, boundary)` and hold when it is empty.
+    async fn next_deliverable(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        upper: Offset,
+    ) -> Result<Option<Offset>, StromaError>;
+
     fn metrics(&self) -> Arc<StromaMetrics>;
 
     fn deadline_awaker(&self) -> Arc<Notify>;
@@ -907,6 +920,17 @@ impl QueueEngine for StromaEngine {
         group: Option<&str>,
     ) -> Result<Offset, StromaError> {
         self.inner.current_next_offset(tp, part, group).await
+    }
+
+    async fn next_deliverable(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        upper: Offset,
+    ) -> Result<Option<Offset>, StromaError> {
+        self.inner.next_deliverable(tp, part, group, from, upper).await
     }
 
     fn metrics(&self) -> Arc<StromaMetrics> {

@@ -994,11 +994,21 @@ struct QueueLoopState {
     /// the remap. Cleared (and the partition delivers normally) once the source
     /// has drained. Default false — no transition in progress.
     delivery_held: AtomicBool,
+    /// Repartition SHRINK gate: a surviving partition delivers messages with
+    /// offset BELOW this boundary (its own pre-cutover backlog, all staying keys)
+    /// but holds those at or above it (post-cutover, possibly moved keys whose old
+    /// messages are still in a merged-away partition) until every merge source has
+    /// drained. Sentinel `NO_HOLD_ABOVE` (u64::MAX) means no shrink hold.
+    hold_above_offset: AtomicU64,
 }
 
 /// Sentinel for [`QueueLoopState::exclusive_assignee`] meaning "no exclusive
 /// gate" (deliver to all consumers).
 const NO_EXCLUSIVE_ASSIGNEE: u64 = u64::MAX;
+
+/// Sentinel for [`QueueLoopState::hold_above_offset`] meaning "no shrink hold"
+/// (deliver every offset).
+const NO_HOLD_ABOVE: u64 = u64::MAX;
 
 impl QueueLoopState {
     fn new() -> Self {
@@ -1013,6 +1023,7 @@ impl QueueLoopState {
             epoch: AtomicU64::new(1),
             exclusive_assignee: AtomicU64::new(NO_EXCLUSIVE_ASSIGNEE),
             delivery_held: AtomicBool::new(false),
+            hold_above_offset: AtomicU64::new(NO_HOLD_ABOVE),
         }
     }
     fn wake(&self) {
@@ -1046,6 +1057,22 @@ impl QueueLoopState {
     /// queued messages immediately.
     fn set_delivery_held(&self, held: bool) {
         self.delivery_held.store(held, Ordering::Release);
+        self.wake();
+    }
+
+    /// The shrink hold boundary, or `None` when delivery is unbounded.
+    fn hold_above_offset(&self) -> Option<Offset> {
+        match self.hold_above_offset.load(Ordering::Acquire) {
+            NO_HOLD_ABOVE => None,
+            boundary => Some(boundary),
+        }
+    }
+
+    /// Hold delivery at or above `boundary` (`Some`) or remove the shrink hold
+    /// (`None`), waking the delivery loop so a release delivers immediately.
+    fn set_hold_above_offset(&self, boundary: Option<Offset>) {
+        self.hold_above_offset
+            .store(boundary.unwrap_or(NO_HOLD_ABOVE), Ordering::Release);
         self.wake();
     }
 
@@ -2898,6 +2925,27 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
     }
 
+    /// Hold a surviving partition's delivery at or above `boundary` for a shrink
+    /// transition (`None` removes the hold). Below the boundary it keeps
+    /// delivering its own pre-cutover backlog so it can drain. No-op if the
+    /// partition's delivery loop is not present on this broker.
+    pub fn set_partition_hold_above_offset(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        boundary: Option<Offset>,
+    ) {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        if let Some(qs) = self.queues.get(&key).map(|e| e.value().clone()) {
+            qs.set_hold_above_offset(boundary);
+        }
+    }
+
     /// The lowest not-yet-settled offset for a partition: every offset below it
     /// is consumed and gone. Live repartitioning compares this to a partition's
     /// cutover boundary to tell when its pre-cutover backlog has drained (the
@@ -3696,6 +3744,32 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         break;
                     }
 
+                    // Repartition SHRINK gate: a surviving partition delivers only
+                    // below the boundary until its merge sources drain. When we can
+                    // confirm nothing is deliverable below it, hold WITHOUT polling
+                    // (no over-lease). `next_deliverable` returns the `upper`
+                    // sentinel when the range is empty, so a result at or above the
+                    // boundary means "nothing below". Anything else proceeds and the
+                    // per-deliverable filter below enforces the boundary.
+                    let hold_above = qs.hold_above_offset();
+                    if let Some(boundary) = hold_above {
+                        if let Ok(Some(next)) = broker
+                            .engine
+                            .next_deliverable(
+                                &key.tp,
+                                key.part.id(),
+                                key.group.as_deref(),
+                                0,
+                                boundary,
+                            )
+                            .await
+                        {
+                            if next >= boundary {
+                                break;
+                            }
+                        }
+                    }
+
                     let mut consumers: Vec<Arc<ConsumerState>> =
                         qs.consumers.iter().map(|e| e.value().clone()).collect();
                     // Exclusive consumer-group gate: when an assignee is set,
@@ -3748,6 +3822,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     let mut rr = qs.rr.fetch_add(1, Ordering::Relaxed) as usize;
                     let mut redelivered = 0;
                     for d in deliverables {
+                        // Shrink hold: never deliver at or above the boundary.
+                        // Deliverables are earliest-first, so the rest are too.
+                        if let Some(boundary) = hold_above {
+                            if d.offset >= boundary {
+                                break;
+                            }
+                        }
                         let mut picked = None;
                         for _ in 0..consumers.len() {
                             let c = &consumers[rr % consumers.len()];

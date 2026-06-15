@@ -284,6 +284,17 @@ impl QueueEngine for FailingPublishEngine {
         Ok(0)
     }
 
+    async fn next_deliverable(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _from: Offset,
+        _upper: Offset,
+    ) -> Result<Option<Offset>, StromaError> {
+        Ok(None)
+    }
+
     fn metrics(&self) -> Arc<StromaMetrics> {
         Arc::new(StromaMetrics::default())
     }
@@ -769,6 +780,54 @@ async fn repartition_drain_detection_lifts_new_partition_after_old_acks() {
         .await
         .expect("new partition delivers once drain is detected");
     assert_eq!(msg.message.payload, b"new");
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn shrink_hold_delivers_below_boundary_and_holds_above() {
+    let mut owned = StdHashSet::new();
+    owned.insert(OwnedQueue::new("survivor", Partition::new(0), None));
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
+
+    let mut sub = broker
+        .subscribe("survivor", Partition::new(0), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .await
+        .unwrap();
+
+    // Hold at boundary 2: offsets 0,1 (pre-cutover) deliver, 2,3 (post-cutover,
+    // possibly moved keys) are held until the merge sources drain.
+    broker.set_partition_hold_above_offset("survivor", Partition::new(0), None, Some(2));
+
+    let (publisher, _c) = broker
+        .get_publisher("survivor", Partition::new(0), &None)
+        .await
+        .unwrap();
+    for _ in 0..4 {
+        publisher
+            .publish(b"m".to_vec(), unix_millis(), unix_millis(), None, Default::default())
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    // Below-boundary messages deliver.
+    let a = recv_with_timeout(&mut sub, 1000).await.expect("offset 0");
+    let b = recv_with_timeout(&mut sub, 1000).await.expect("offset 1");
+    assert_eq!(a.message.offset, 0);
+    assert_eq!(b.message.offset, 1);
+    // Above-boundary messages are held.
+    assert!(
+        recv_with_timeout(&mut sub, 300).await.is_none(),
+        "offsets at/above the boundary are held during a shrink"
+    );
+
+    // Releasing the hold delivers the rest.
+    broker.set_partition_hold_above_offset("survivor", Partition::new(0), None, None);
+    let c = recv_with_timeout(&mut sub, 1000).await.expect("offset 2");
+    assert_eq!(c.message.offset, 2);
     broker.shutdown().await;
 }
 
