@@ -167,6 +167,19 @@ commitment is keeping modulo hashing (which we already use); only switching to
 consistent hashing would invalidate the fast path, and that would force a
 repartitioning redesign regardless.
 
+## Dependency boundaries
+
+### Future: a single top-level ganglion crate to depend on
+
+Fibril currently reaches into two ganglion sub-crates (`ganglion-core` and
+`ganglion-openraft`), so it depends on ganglion internals rather than a stable
+surface. The target is a single top-level `ganglion` umbrella crate that
+re-exports the public surface fibril needs, so the fibril side depends on just
+`ganglion` (and the workspace [patch] redirects that one crate to the local
+checkout). This is a ganglion-repo refactor, do it opportunistically. It mirrors
+the clustering-module-separation intent: depend on cohesive public surfaces, not
+internals.
+
 ## Forwarded writes (coordination)
 
 The deterministic path is the mechanism, retries are only a safety net. A
