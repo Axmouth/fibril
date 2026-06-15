@@ -248,6 +248,60 @@ impl std::fmt::Display for DeclareQueueError {
 
 impl std::error::Error for DeclareQueueError {}
 
+/// Outcome of repartitioning (growing) a queue's partition count.
+#[derive(Debug)]
+pub enum RepartitionQueueError {
+    /// The queue has not been declared, so there is nothing to repartition.
+    NotDeclared {
+        topic: String,
+        group: Option<String>,
+    },
+    /// The requested count is not a strictly larger integer multiple of the
+    /// current count. v1 grows by an integer multiple only (typically doubling),
+    /// which keeps the per-key ordering barrier a pure partition-identity gate.
+    NotIntegerMultipleGrowth {
+        topic: String,
+        group: Option<String>,
+        current: u32,
+        requested: u32,
+    },
+    /// A coordination/consensus error (not-leader, storage, repeated CAS loss).
+    Coordination(OpenraftAdapterError),
+}
+
+impl std::fmt::Display for RepartitionQueueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let queue = |topic: &str, group: &Option<String>| {
+            format!(
+                "`{topic}`{}",
+                group
+                    .as_deref()
+                    .map(|g| format!("/{g}"))
+                    .unwrap_or_default()
+            )
+        };
+        match self {
+            Self::NotDeclared { topic, group } => {
+                write!(f, "queue {} is not declared", queue(topic, group))
+            }
+            Self::NotIntegerMultipleGrowth {
+                topic,
+                group,
+                current,
+                requested,
+            } => write!(
+                f,
+                "queue {} cannot repartition from {current} to {requested} partitions: \
+                 the new count must be a larger integer multiple of the current one",
+                queue(topic, group)
+            ),
+            Self::Coordination(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for RepartitionQueueError {}
+
 /// Client-facing ownership of one queue partition: which node owns it and where
 /// to reach that node, plus the partitioning version the routing was computed
 /// under.
@@ -965,6 +1019,83 @@ where
         }
         Err(DeclareQueueError::Coordination(
             OpenraftAdapterError::Storage("queue declare lost the CAS race repeatedly".to_string()),
+        ))
+    }
+
+    /// Grow a logical queue's partition count to `new_count` and bump its
+    /// partitioning version. Race-safe via CAS on the current document.
+    ///
+    /// v1 grows by an INTEGER MULTIPLE only (`new_count` must be a strictly larger
+    /// multiple of the current count, typically doubling). With modulo hashing
+    /// that keeps the per-key ordering barrier a pure partition-identity gate
+    /// (each new partition sources from exactly one old partition), see
+    /// DESIGN_NOTES.md.
+    ///
+    /// - undeclared queue -> `NotDeclared`.
+    /// - already at `new_count` -> idempotent success.
+    /// - `new_count` not a larger integer multiple -> `NotIntegerMultipleGrowth`.
+    pub async fn repartition_queue(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        new_count: u32,
+    ) -> Result<QueuePartitioning, RepartitionQueueError> {
+        let key = queue_partitioning_key(topic, group);
+        for _ in 0..8 {
+            let Some(current_raw) = self.cluster_attribute(&key) else {
+                return Err(RepartitionQueueError::NotDeclared {
+                    topic: topic.to_string(),
+                    group: group.map(str::to_string),
+                });
+            };
+            let existing: QueuePartitioning =
+                serde_json::from_str(&current_raw).map_err(|error| {
+                    RepartitionQueueError::Coordination(OpenraftAdapterError::Storage(format!(
+                        "queue `{topic}`/{group:?} partitioning is corrupt: {error}"
+                    )))
+                })?;
+            // Idempotent: already grown to the requested count.
+            if existing.partition_count == new_count {
+                return Ok(existing);
+            }
+            // v1 grows by an integer multiple only.
+            if new_count <= existing.partition_count
+                || new_count % existing.partition_count != 0
+            {
+                return Err(RepartitionQueueError::NotIntegerMultipleGrowth {
+                    topic: topic.to_string(),
+                    group: group.map(str::to_string),
+                    current: existing.partition_count,
+                    requested: new_count,
+                });
+            }
+            let next = QueuePartitioning {
+                partition_count: new_count,
+                partitioning_version: existing.partitioning_version + 1,
+            };
+            let value = serde_json::to_string(&next).map_err(|error| {
+                RepartitionQueueError::Coordination(OpenraftAdapterError::Storage(
+                    error.to_string(),
+                ))
+            })?;
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: key.clone(),
+                    expected: Some(current_raw.clone()),
+                    value,
+                })
+                .await
+            {
+                Ok(_) => return Ok(next),
+                // Lost the race against a concurrent writer: re-read and resolve.
+                Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
+                Err(error) => return Err(RepartitionQueueError::Coordination(error)),
+            }
+        }
+        Err(RepartitionQueueError::Coordination(
+            OpenraftAdapterError::Storage(
+                "queue repartition lost the CAS race repeatedly".to_string(),
+            ),
         ))
     }
 
@@ -2043,6 +2174,98 @@ mod tests {
                 .map(|m| m.partition_count),
             Some(4),
             "the ungrouped queue is unaffected by the grouped declare"
+        );
+
+        provider.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn repartition_grows_by_integer_multiple_and_bumps_version() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+
+        // Repartitioning an undeclared queue is rejected.
+        let undeclared = provider
+            .repartition_queue("orders", None, 4)
+            .await
+            .expect_err("undeclared queue cannot repartition");
+        assert!(matches!(
+            undeclared,
+            RepartitionQueueError::NotDeclared { .. }
+        ));
+
+        let created = provider
+            .declare_queue_partitioning("orders", None, 2)
+            .await
+            .expect("declare");
+        assert_eq!(created.partition_count, 2);
+
+        // Grow 2 -> 4 (a multiple): count grows, version bumps.
+        let grown = provider
+            .repartition_queue("orders", None, 4)
+            .await
+            .expect("grow to a multiple");
+        assert_eq!(grown.partition_count, 4);
+        assert_eq!(
+            grown.partitioning_version,
+            created.partitioning_version + 1
+        );
+
+        // Idempotent: repartition to the current count is a no-op success.
+        let idempotent = provider
+            .repartition_queue("orders", None, 4)
+            .await
+            .expect("idempotent repartition");
+        assert_eq!(idempotent, grown);
+
+        // Not a multiple of the current count -> rejected, state unchanged.
+        let not_multiple = provider
+            .repartition_queue("orders", None, 6)
+            .await
+            .expect_err("6 is not a multiple of 4");
+        assert!(matches!(
+            not_multiple,
+            RepartitionQueueError::NotIntegerMultipleGrowth {
+                current: 4,
+                requested: 6,
+                ..
+            }
+        ));
+
+        // Shrinking is rejected in v1.
+        let shrink = provider
+            .repartition_queue("orders", None, 2)
+            .await
+            .expect_err("shrink rejected");
+        assert!(matches!(
+            shrink,
+            RepartitionQueueError::NotIntegerMultipleGrowth { .. }
+        ));
+
+        // Chained grow 4 -> 8 bumps the version again.
+        let grown_again = provider
+            .repartition_queue("orders", None, 8)
+            .await
+            .expect("grow to 8");
+        assert_eq!(grown_again.partition_count, 8);
+        assert_eq!(
+            grown_again.partitioning_version,
+            grown.partitioning_version + 1
+        );
+        assert_eq!(
+            provider.queue_partitioning("orders", None),
+            Some(grown_again)
         );
 
         provider.raft_node().shutdown().await.expect("shutdown");
