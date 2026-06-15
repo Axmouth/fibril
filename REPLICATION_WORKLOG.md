@@ -184,17 +184,29 @@ gcd in two cheap steps, shrink-by-factor is the mirror) are in DESIGN_NOTES.md
   detect -> lift); coordination e2e covers grow_queue (version bump + new-entry
   registration + marker) and the marker lifecycle.
 
-REMAINING — live repartitioning follow-ons (ergonomics + scale, NOT core
-correctness; the mechanism above is complete and green):
+DONE — CLIENT AUTO-RESUBSCRIBE on partition-count change. A subscription's fan-in
+was fixed at subscribe time, so a running consumer never picked up partitions
+added by a grow. Now dynamic: a per-subscription manager task periodically
+refreshes topology (a consumer-only client has no other trigger) and subscribes
+to newly appeared partitions, merging them into the same channel. Removed
+partitions (shrink) end naturally when the broker retires their stream.
+Controlled by ClientOptions.partition_resubscribe_interval_ms (default 5s, None
+keeps the old static fan-in). Integration test grows a mock broker's reported
+count and asserts the consumer receives a delivery from the new partition. Code:
+crates/client/src/lib.rs (partition_resubscribe_loop_manual/_auto + forward_into).
+
+REMAINING — live repartitioning follow-ons:
 1. Operator surface: an admin endpoint + fibrilctl command calling grow_queue
    (today it is only reachable programmatically).
-2. Client auto-resubscribe on growth: a consumer should pick up the new
-   partitions automatically when the count grows, rather than relying on a manual
-   re-subscribe. Sibling to opt-in client narrowing. (User may PRIORITIZE this.)
-3. Live-cluster grow smoke: exercise the whole flow with the watcher running via
-   scripts/cluster-tryout.sh (the unit/integration tests prove the pieces, this
-   proves it in a real cluster). Also: shrink-by-factor is a later mirror (see
-   DESIGN_NOTES), and arbitrary-N is the gcd composition, neither is built.
+2. SHRINK-by-factor (N -> N/k), the planned next BUILD. Design is ready in
+   DESIGN_NOTES.md "Live repartitioning" (offset-gated hold via hold_above_offset
+   that also subsumes grow's whole-partition hold, multi-source drain, removed
+   partitions start full so they must be kept consumable until retired). Auto-
+   resub already handles the client side for both directions. Arbitrary-N is then
+   the gcd composition (shrink to gcd then grow), never needs a per-key gate.
+3. Live-cluster grow (and later shrink) smoke: exercise the whole flow with the
+   watcher running via scripts/cluster-tryout.sh (unit/integration tests prove the
+   pieces, this proves it in a real cluster).
 
 BACKGROUND AUDIT: an audit has been running in the background (separate from this
 log). Check its findings once it is done and fold anything actionable in here.
