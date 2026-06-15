@@ -150,6 +150,55 @@ failover atomicity so it is its own brick). The unified-global-generation and
 coordinator-issued-member-id items are addressed (generation DONE, member-id done
 as a local guard).
 
+DONE — LIVE REPARTITIONING (grow), core complete and tested. Changing a queue's
+partition_count on a running cluster, GROW only and only by an INTEGER MULTIPLE
+(N_new = k*N_old, typically doubling). Full design, precedents (Elasticsearch
+_split/_shrink, linear hashing), and the escape hatch (arbitrary-N reachable via
+gcd in two cheap steps, shrink-by-factor is the mirror) are in DESIGN_NOTES.md
+"Live repartitioning". What landed:
+- Trigger: coordination grow_queue() writes the transition marker and registers
+  the new partitions BEFORE bumping the partitioning version (marker-first
+  ordering is the correctness point, so a new partition is held and placed before
+  producers cut over). Integer-multiple-only, idempotent. (Brick 1 repartition_queue
+  is the raw CAS bump under it.)
+- Routing cutover is free: the existing fence_stale_partitioning redirect sends
+  stale-version publishes to the new owner, the client refreshes and re-routes.
+- The gate: per-partition delivery_held (broker). With modulo hashing each new
+  partition sources from exactly one old partition (source(p) = p % n_old), so a
+  new partition is held until that one source drains its pre-cutover backlog. Old
+  partitions deliver throughout. delivery_held is checked before the cohort gate,
+  so the two compose (a repartitioned cohort re-plans at N_new automatically via
+  partition_count, but new partitions stay silent until drained).
+- Drain detection: lowest_unacked_offset (settled_until) >= cutover boundary
+  (partition_next_offset captured once at cutover). Both surfaced through the
+  QueueEngine trait, delegating to existing stroma-core accessors, NO keratin
+  change.
+- Coordination: RepartitionTransitionDoc marker, REPARTITION_DRAINED_LABEL
+  heartbeat report, global_repartition_drained (union from the snapshot, no
+  controller aggregation), active_repartition_transitions lister.
+- Wiring: the fibril repartition watcher (timer-driven, since drain progresses on
+  ack not on a coordination event) holds new partitions, refreshes this owner's
+  drain, applies the cluster drained set to lift, and as leader clears the marker
+  once every old partition has drained.
+- Tests: broker e2e drives the real drain path (publish backlog -> hold -> ack ->
+  detect -> lift); coordination e2e covers grow_queue (version bump + new-entry
+  registration + marker) and the marker lifecycle.
+
+REMAINING — live repartitioning follow-ons (ergonomics + scale, NOT core
+correctness; the mechanism above is complete and green):
+1. Operator surface: an admin endpoint + fibrilctl command calling grow_queue
+   (today it is only reachable programmatically).
+2. Client auto-resubscribe on growth: a consumer should pick up the new
+   partitions automatically when the count grows, rather than relying on a manual
+   re-subscribe. Sibling to opt-in client narrowing. (User may PRIORITIZE this.)
+3. Live-cluster grow smoke: exercise the whole flow with the watcher running via
+   scripts/cluster-tryout.sh (the unit/integration tests prove the pieces, this
+   proves it in a real cluster). Also: shrink-by-factor is a later mirror (see
+   DESIGN_NOTES), and arbitrary-N is the gcd composition, neither is built.
+
+BACKGROUND AUDIT: an audit has been running in the background (separate from this
+log). Check its findings once it is done and fold anything actionable in here.
+
 CODE POINTERS: cohort assignor/router/controller-brain + membership types =
 crates/broker/src/coordination.rs. Gate + ExclusiveGroupRouter + apply path =
 crates/broker/src/broker.rs. Wire fields + handler join/leave/reconcile =
@@ -157,6 +206,12 @@ crates/protocol/src/v1/{mod.rs,handler.rs}. Client `.exclusive()` + member-id
 cache + assignment_events = crates/client/src/lib.rs. Transport + provider methods
 + controller tick = crates/coordination-ganglion/src/lib.rs. Bootstrap spawns =
 crates/fibril/src/lib.rs.
+REPARTITION CODE POINTERS: delivery_held gate + transition state (apply/refresh/
+apply_drained/clear) + drain accessors (lowest_unacked_offset, next_offset) =
+crates/broker/src/broker.rs. grow_queue / repartition_queue / transition marker +
+drain label + active_repartition_transitions = crates/coordination-ganglion/src/lib.rs.
+Repartition watcher + drain heartbeat label = crates/fibril/src/lib.rs. Routing
+version fence = crates/protocol/src/v1/handler.rs (fence_stale_partitioning).
 <!-- ===== END START HERE ===== -->
 
 
