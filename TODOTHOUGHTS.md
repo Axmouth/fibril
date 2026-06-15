@@ -201,3 +201,44 @@ replace epoch in delivery tag with gen and seq. Seq is simple monotonic counter,
 dls or embedded language to script transformations, routing, etc?
 
 in memory queues(no durability)? would need to make keratin pluggable or its write target able to take file or memory buffer(like a trait where flush etc becomes noop). Might be more worth doing it on Kerating level, though keeping the same semantics and only changing the storage is more reliably same behavior
+
+phrasing:
+Most applications need reliable queues, clear delivery semantics, reconnect behavior that does not surprise them, and admin operations that are obvious. Fibril optimizes for that path.
+What happens if the broker restarts?
+What happens if a consumer disconnects?
+What happens if a queue is idle?
+What happens if a message expires?
+What happens if I purge while consumers are attached?
+What happens during leader failover?
+What should I alert on?
+
+
+The relevant setting will show a random proverb each time. roadmap,locked in:
+Stability requires patience. But for those who may not wait:
+The surest path is seldom the swiftest. But for those in haste:
+What is built to endure is rarely built to hurry. But for those who must:
+Speed is easy to borrow from certainty. But for those willing to pay the price:
+The fastest message is often the least certain. But for those who accept the risk:
+Durability is purchased with time. But for those spending a different currency:
+A promise kept takes longer than a promise made. But for those in a hurry:
+Patience is the companion of certainty. But not all travelers keep the same company:
+The river reaches the sea by refusing shortcuts. But for those seeking them:
+What survives the storm is not always first to leave the harbor. But for those who must sail now:
+The surest path is seldom the swiftest.
+A bridge tested twice carries the heavier load.
+The lock that yields quickly opens for all.
+The swiftest promise is often the first forgotten
+What survives the storm seldom outruns it.
+The shortest road is not always the one that arrives.
+Certainty walks; haste runs.
+A message hurried is a message trusted less.
+The patient builder sleeps through the wind
+Time spent securing a door is rarely noticed after the theft.
+The oak and the reed both reach the sky, but only one expects the storm.
+Every shortcut borrows from tomorrow.
+
+The second mouse gets the cheese.
+A falling anvil reaches the ground first.
+Most parachutes work best when opened before landing.
+The tortoise won. The hare became a benchmark.
+"You are overriding the default safety assumptions. We trust you know why."

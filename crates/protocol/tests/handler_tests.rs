@@ -45,6 +45,7 @@ use fibril_protocol::v1::{
         ProtocolReplicationCatchUpOptions, StaticProtocolOwnerPeerResolver,
         catch_up_replication_over_protocol,
     },
+    replication_payload::{decode_replication_read_ok, encode_replication_read_ok},
 };
 use fibril_storage::Partition;
 use fibril_util::{StaticAuthHandler, unix_millis};
@@ -277,12 +278,8 @@ async fn start_checkpoint_required_owner_server(
                             ),
                         }
                     };
-                    conn.send(try_encode(
-                        Op::ReplicationReadOk,
-                        frame.request_id,
-                        &response,
-                    )?)
-                    .await?;
+                    conn.send(encode_replication_read_ok(frame.request_id, &response)?)
+                        .await?;
                 }
                 x if x == Op::ReplicationCheckpointExport as u16 => {
                     let _: ReplicationCheckpointExport = try_decode(&frame)?;
@@ -1146,7 +1143,7 @@ async fn replication_read_returns_owner_log_records() {
     let frame = recv_frame(&mut framed).await;
     assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
     assert_eq!(frame.request_id, 3);
-    let response: ReplicationReadOk = try_decode(&frame).unwrap();
+    let response: ReplicationReadOk = decode_replication_read_ok(&frame).unwrap();
 
     match response.messages {
         ReplicationMessageRead::Batch { records, .. } => {

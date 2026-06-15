@@ -268,6 +268,29 @@ Future improvement: Keratin can expose prefix hash/CRC validation for overlap.
 Once the existing prefix is proven byte-identical, a suffix append can be safe
 without checkpoint reset.
 
+### Future replication cache shape
+
+The first record-owned replication cache is intentionally opt-in because it did
+not help the SSD/local benchmark path enough to justify default hot-path cost.
+If we revisit it, the better shape is not a single fragile suffix per queue.
+
+The cache should keep recent offsets indexed per queue and stream, so an owner
+replication read can cheaply answer "do I have a contiguous range from this
+offset?" even when inserts complete out of order. Reads should still only return
+contiguous records. Gaps remain misses until filled.
+
+Eviction should be global, not per-queue. The memory budget belongs to Stroma as
+a whole, while each queue keeps enough local indexing to answer reads quickly.
+When over budget, evict the oldest retained record globally, effectively taking
+the lowest/oldest offsets from the queue that owns the oldest cached records.
+That lets hot queues retain their newest replication tail while cold queues age
+out naturally.
+
+This is a replication performance cache only. It must never become the source
+of truth for durability or follower progress. Cache population happens after
+the durable owner operation completes, and follower progress still advances only
+after the follower applies records locally.
+
 ## Dependency boundaries
 
 ### Future: a single top-level ganglion crate to depend on

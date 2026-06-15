@@ -5,13 +5,14 @@ Branch: `replication-sharding-plan`
 <!-- ===== START HERE (post-compaction handoff, refreshed) ===== -->
 ## START HERE
 
-STATE: all green, all committed on branch `replication-sharding-plan`. The branch
-gets rebased between sessions, so reference commits by MESSAGE, not hash. keratin
-is pushed (its replication-sharding-plan origin matches local) and fibril builds
-it via the [patch] in fibril/Cargo.toml. The codebase moved during a background
-interlude (cluster fixes, audits, live-cluster test scripts/smokes, ganglion
-docs, and a server-bootstrap EXTRACTION), so re-grep before trusting old
-locations.
+STATE: active replication transport optimization slice on branch
+`replication-sharding-plan`. Fibril now has a production raw
+`ReplicationReadOk` payload path under test. The branch gets rebased between
+sessions, so reference commits by MESSAGE, not hash. keratin is pushed (its
+replication-sharding-plan origin matches local) and fibril builds it via the
+[patch] in fibril/Cargo.toml. The codebase moved during a background interlude
+(cluster fixes, audits, live-cluster test scripts/smokes, ganglion docs, and a
+server-bootstrap EXTRACTION), so re-grep before trusting old locations.
 
 STYLE + WORKING RULES (memories): prose avoids semicolons, uses em dashes only
 where the visual value is real, and uses plain ASCII apostrophes/quotes
@@ -2888,3 +2889,178 @@ Snapshot/checkpoint concern found during higher-rate sweep:
   faster than the nested MessagePack decode, so the next serious optimization
   target is a real replication v2 payload/chunk codec and, after that, Keratin
   raw replicated record scan/append APIs.
+- Production raw `ReplicationReadOk` response path (2026-06-15): the owner now
+  encodes `ReplicationReadOk` with a compact binary frame payload instead of
+  `rmp-serde`, and followers decode that raw payload for live replication reads.
+  The format carries fixed batch metadata plus raw message headers/payload bytes
+  and raw event bytes. It also carries each record offset explicitly. This is
+  important: a live tryout first exposed that treating `next_offset` as
+  `requested_offset + records.len()` was too strict for the wire contract. The
+  decoder now preserves offsets and only rejects impossible ordering such as
+  records before the requested offset, non-contiguous records inside a returned
+  batch, or `next_offset` behind the returned records.
+- Verification for the production raw path:
+  `cargo test -p fibril-protocol replication_read_ok --locked` and
+  `cargo test --quiet -p fibril-protocol --test handler_tests replication
+  --locked` pass. A 3-node Ganglion `replica_durable:2` publish-only steady run
+  at 50k/s, 1 KiB payloads, confirmed window 1024, max 4096 messages/events per
+  read, and 16 MiB read byte budget completed with 200k measured writes, zero
+  publish/confirm errors, follower tail reaching the benchmark writes, and
+  matching owner/follower cursors (`message_next=298161`, `event_next=55292`,
+  `in_sync=true`). Confirm latency stayed around p50/p95/p99/max =
+  204/205/205/206ms, so the raw response fixes the codec/correctness stall but
+  does not remove the current batch/window latency shape.
+- Practical-window replication measurements after the raw response path:
+
+  | Target rate | Confirm window | Actual rate | Confirm p50 | Confirm p95 | Confirm p99 | Notes |
+  | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+  | 50k/s | 2k | ~49,993/s | 399ms | 400ms | 400ms | follower cursors in sync |
+  | 50k/s | 4k | ~50,000/s | 799ms | 800ms | 800ms | follower cursors in sync |
+  | 50k/s | 8k | ~50,000/s | 1599ms | 1600ms | 1600ms | follower cursors in sync |
+  | 100k/s | 2k | ~99,709/s | 200ms | 204ms | 216ms | follower cursors in sync |
+  | 100k/s | 4k | ~99,982/s | 399ms | 400ms | 400ms | follower cursors in sync |
+  | 150k/s | 2k | ~130,652/s | 133ms | 295ms | 437ms | follower cursors in sync |
+
+  These runs make the next bottleneck clearer. Once the response codec stopped
+  dominating, confirm latency mostly tracks the amount of work allowed to sit
+  behind the replication confirm window. Larger windows can prove high peak
+  throughput, but they are not useful operational targets if they create seconds
+  of confirm latency.
+- Recent replication cache design note: if we add a cache, it should likely live
+  in Stroma, not the broker. Stroma sees the durable append boundary, queue key,
+  message offsets, event offsets, and role state. The intended shape is one
+  global byte budget across all queues, plus per-queue indexes for fast suffix
+  reads. Eviction should remove the oldest cached records globally until total
+  retained bytes are under the configured limit, while each queue keeps quick
+  access by stream and offset for owner replication reads. A read can be served
+  from cache only when the requested offset falls inside that retained contiguous
+  suffix; otherwise it falls back to the Keratin scan path. Cache population must
+  happen only after the durable owner operation has completed, otherwise
+  replica-durable confirms could observe data that is not yet durable.
+- Recent replication cache implementation start in Stroma: added a standalone
+  `replication_cache` module in `stroma-core`. It is record-owned for now, not
+  raw-byte-owned. That is deliberate so we can lock down semantics first:
+  contiguous suffix reads by queue, global byte-budget eviction across queues,
+  gap reset, oversized-record rejection, and “tail offset is not authoritative”
+  fallback behavior. Focused tests pass with
+  `cargo test -p stroma-core replication_cache --locked`. Added Stroma metrics
+  surface for future wiring: message hits/misses, event hits/misses, retained
+  bytes, and evicted records. The first version intentionally uses cloned
+  message/event records so the behavior can be measured before changing Keratin
+  raw record APIs.
+- Recent replication cache wiring: owner replication reads now consult the
+  Stroma cache after role and checkpoint checks, then fall back to Keratin scans
+  on miss. Message records are cloned into the cache from publish paths after
+  the matching enqueue event append succeeds. Event records are inserted from
+  `append_events_durable_leased` after durable append and in-memory apply
+  succeed. Cache failures remain non-fatal and are treated as misses. Current
+  budget is a fixed 64 MiB per Stroma instance, intentionally pending runtime
+  settings discipline. This version may clone large payloads and may hold the
+  cache mutex while cloning read results, so benchmark results must be checked
+  for both latency improvement and CPU/memory regression.
+- Cache verification added:
+  `cargo test -p stroma-core replication_cache --locked`,
+  `cargo test -p stroma-core
+  owner_replication_reads_use_recent_cache_and_fall_back_at_tail --locked`, and
+  `cargo test -p stroma-core owner_replication_read --locked` pass. The new
+  integration test confirms cache hit metrics for message/event reads and a
+  cache miss plus Keratin fallback when reading at the current tail.
+- Protocol codec scope: the raw `ReplicationReadOk` path is an internal cluster
+  transport optimization, not a commitment to rewrite the public client protocol.
+  A broader custom codec can be done incrementally, but the sensible order is:
+  hot internal replication responses first, then any large internal checkpoint or
+  apply frames that show measurable overhead, then public client frames only if
+  benchmarks and compatibility policy justify the churn.
+- Next transport optimization candidates, one by one:
+  1. Keep the raw `ReplicationReadOk` path and benchmark it against more rates,
+     windows, and payload sizes.
+  2. Avoid owner-side event decode/re-encode by reading raw event storage bytes
+     for replication responses where safe.
+  3. Decode/apply follower records incrementally or on a dedicated worker so
+     large replication responses do not monopolize async workers.
+  4. Add Keratin raw replicated scan/append APIs so message payload bytes can
+     move from owner storage to follower storage with fewer owned allocations
+     and fewer encode/decode passes.
+  5. Revisit separate message and event replication streams after the raw
+     single-response path has enough measurements.
+- Byte-cap correctness fix during cache benchmarking: a bounded 3-node
+  `replica_durable:2` run exposed repeated follower failures:
+  `owner returned empty batch at requested offset ... but reported tail ...`,
+  followed by Keratin overlap validation errors. The cause was not only cache
+  accounting. The owner byte cap could drop returned message or event records
+  while leaving the batch `next_offset` at the pre-cap owner tail. Followers
+  then advanced or retried from metadata that did not match the returned
+  records. The broker cap now rewrites `next_offset` to the returned frontier
+  for capped message and event batches. The byte-limit tests now assert this
+  corrected progress behavior.
+- Cache accounting fix during the same run: inserting a gap into a cached
+  suffix cleared the per-queue suffix but did not subtract the cleared bytes
+  from the global cache budget. The cache now reports dropped bytes/count from
+  gap reset and updates the global budget accordingly. The gap-reset unit test
+  now checks byte accounting as well as read behavior.
+- Verification after the fixes:
+  `cargo test -p stroma-core replication_cache --locked`,
+  `cargo test -p stroma-core
+  owner_replication_reads_use_recent_cache_and_fall_back_at_tail --locked`, and
+  `cargo test -p fibril-broker replication_byte_limit --locked` pass. A bounded
+  3-node Ganglion `replica_durable:2` publish-only run at 50k/s, 1 KiB payloads,
+  confirmed window 2000, max 4096 messages/events per read, and 16 MiB read
+  byte budget completed with no publish/confirm errors. Follower tails reached
+  the benchmark writes and owner/follower cursors matched
+  (`message_next=295183`, `event_next=55582`, `in_sync=true`).
+- Current latency interpretation: the benchmark `confirm_window` is per writer.
+  With 10 writers and window 2000, the client can keep roughly 20k publishes
+  outstanding. At 50k/s that alone explains about 400ms of confirm latency.
+  A single-node sanity run at 50k/s with window 2000 measured p50/p95/p99/max
+  = 399/400/405/417ms. With window 200, single-node stayed at ~49,979/s and
+  measured p50/p95/p99/max = 40/40/40/47ms.
+- Replicated low-window comparison: the same 3-node `replica_durable:2` setup
+  with window 200 remained correct but did not fully hit target throughput:
+  actual ~40,895/s, no publish/confirm errors, matched cursors, confirm
+  p50/p95/p99/max = 40/122/183/185ms. This is now the useful tuning tradeoff:
+  window 2000 proves 50k/s correctness but bakes in client-window latency,
+  while window 200 lowers median latency but exposes replication throughput or
+  polling limits before 50k/s.
+- Cache benchmark signal so far: owner cache metrics stayed low in these
+  50k/s runs, with many more misses than hits and a tiny retained byte count by
+  the end. The cache is correct enough to keep testing, but this evidence says
+  the immediate latency bottleneck is not owner Keratin reads alone. The next
+  likely targets are replication poll cadence, per-tick work limits, confirm
+  gate wake behavior, and possibly separate message/event streams.
+- Replication cache default policy: because the current record-owned suffix
+  cache did not show meaningful benefit on the SSD/local benchmark path, it is
+  now opt-in. `Stroma::open` leaves it disabled, so normal broker runs avoid
+  the extra clones, mutex traffic, and cache metrics noise. Experiments can use
+  `Stroma::open_with_options` with `ReplicationCacheConfig::enabled(max_bytes)`.
+  Focused tests cover both disabled-by-default behavior and explicit cache-hit
+  behavior.
+- Default-disabled live verification: bounded 3-node Ganglion
+  `replica_durable:2` publish-only runs, 1 KiB payloads, confirmed window 2000,
+  max 4096 messages/events per read, and 16 MiB read byte budget:
+
+  | Target rate | Actual rate | Confirm p50 | Confirm p95 | Confirm p99 | Confirm max | Notes |
+  | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+  | 50k/s | 50,000/s | 399ms | 400ms | 400ms | 401ms | matched cursors, zero cache metrics |
+  | 100k/s | 97,860/s | 200ms | 270ms | 272ms | 273ms | matched cursors, zero cache metrics |
+  | 150k/s | 100,615/s | 184ms | 290ms | 300ms | 308ms | matched cursors, zero cache metrics |
+
+  The first attempted 100k/s run on `/tmp` failed with `Disk quota exceeded`.
+  Re-running under `target/cluster-tryout-runs` put the benchmark data on the
+  SSD-backed workspace filesystem and completed cleanly. The 150k/s target did
+  not produce errors, but it saturated around 100k/s with these settings.
+- Window-1024 comparison on the same default-disabled 3-node
+  `replica_durable:2` setup, 1 KiB payloads, max 4096 messages/events per read,
+  and 16 MiB read byte budget:
+
+  | Target rate | Actual rate | Confirm p50 | Confirm p95 | Confirm p99 | Confirm max | Notes |
+  | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+  | 50k/s | 49,988/s | 204ms | 205ms | 205ms | 207ms | matched cursors, zero cache metrics |
+  | 100k/s | 95,086/s | 102ms | 164ms | 171ms | 173ms | matched cursors, zero cache metrics |
+  | 150k/s | 77,138/s | 130ms | 169ms | 198ms | 205ms | matched cursors, zero cache metrics |
+
+  Since `confirm_window` is per writer, this is about 10,240 global outstanding
+  publishes with the current 10-writer benchmark. The 50k/s and 100k/s latency
+  roughly follows the window math. The 150k/s result underfeeds the current pull
+  replication path and drops throughput below the window-2000 run, so smaller
+  windows are useful for latency but not enough by themselves for higher peak
+  throughput.

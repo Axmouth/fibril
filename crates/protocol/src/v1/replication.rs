@@ -31,6 +31,7 @@ use crate::v1::{
     ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead, ReplicationReadOk,
     frame::{Frame, ProtoCodec},
     helper::{Conn, try_decode, try_encode},
+    replication_payload::decode_replication_read_ok,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -572,7 +573,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 _ = self.close_token.cancelled() => {
                     Err(ProtocolReplicationRequestError::ConnectionClosed)
                 }
-                response = recv_response(&mut conn, request_id, Op::ReplicationReadOk) => {
+                response = recv_replication_read_ok_response(&mut conn, request_id) => {
                     response
                 }
             } {
@@ -715,7 +716,7 @@ pub async fn catch_up_replication_over_protocol(
             .context("failed to send replication read request")?;
 
         let read: ReplicationReadOk =
-            recv_response(owner, read_request_id, Op::ReplicationReadOk).await?;
+            recv_replication_read_ok_response(owner, read_request_id).await?;
 
         if let Some(required) = message_checkpoint_required(&read.messages) {
             return Ok(ProtocolReplicationCatchUp::CheckpointRequired {
@@ -784,6 +785,24 @@ async fn recv_response<T>(
 where
     T: DeserializeOwned + Send + 'static,
 {
+    let frame = recv_response_frame(conn, request_id, expected).await?;
+    decode_response_frame(frame).await
+}
+
+async fn recv_replication_read_ok_response(
+    conn: &mut Conn,
+    request_id: u64,
+) -> Result<ReplicationReadOk, ProtocolReplicationRequestError> {
+    let frame = recv_response_frame(conn, request_id, Op::ReplicationReadOk).await?;
+    decode_replication_read_ok(&frame)
+        .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
+}
+
+async fn recv_response_frame(
+    conn: &mut Conn,
+    request_id: u64,
+    expected: Op,
+) -> Result<Frame, ProtocolReplicationRequestError> {
     loop {
         let frame = conn
             .next()
@@ -826,7 +845,7 @@ where
             });
         }
 
-        return decode_response_frame(frame).await;
+        return Ok(frame);
     }
 }
 

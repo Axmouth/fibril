@@ -3,6 +3,7 @@ pub mod frame;
 pub mod handler;
 pub mod helper;
 pub mod replication;
+pub mod replication_payload;
 
 use std::collections::HashMap;
 

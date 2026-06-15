@@ -5527,6 +5527,7 @@ fn cap_owner_message_read_by_bytes(
         .map(|(offset, _)| offset.saturating_add(1))
         .unwrap_or(batch.requested_offset);
     batch.records = kept;
+    batch.next_offset = returned_frontier;
 
     OwnerMessageReadCap {
         read: OwnerReplicationRead::Batch(batch),
@@ -5564,6 +5565,10 @@ fn cap_owner_event_read_to_message_frontier(
         }
         kept.push((offset, event));
     }
+    batch.next_offset = kept
+        .last()
+        .map(|(offset, _)| offset.saturating_add(1))
+        .unwrap_or(batch.requested_offset);
     batch.records = kept;
     OwnerReplicationRead::Batch(batch)
 }
@@ -5853,7 +5858,7 @@ mod replication_byte_limit_tests {
             panic!("expected message batch");
         };
 
-        assert_eq!(messages.next_offset, 12);
+        assert_eq!(messages.next_offset, 11);
         assert_eq!(messages.records.len(), 1);
         assert_eq!(messages.records[0].0, 10);
     }
@@ -5898,10 +5903,10 @@ mod replication_byte_limit_tests {
             panic!("expected event batch");
         };
 
-        assert_eq!(messages.next_offset, 13);
+        assert_eq!(messages.next_offset, 11);
         assert_eq!(messages.records.len(), 1);
         assert_eq!(messages.records[0].0, 10);
-        assert_eq!(events.next_offset, 24);
+        assert_eq!(events.next_offset, 22);
         assert_eq!(
             events
                 .records

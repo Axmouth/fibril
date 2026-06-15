@@ -722,6 +722,27 @@ check_bench_replication_tails() {
   return 1
 }
 
+print_replication_cache_metrics() {
+  local owner_node="$1"
+  local follower_node="$2"
+  local results_file="$3"
+  local owner_port=$((BASE_ADMIN_PORT + owner_node))
+  local follower_port=$((BASE_ADMIN_PORT + follower_node))
+  local owner_metrics=""
+  local follower_metrics=""
+
+  owner_metrics="$(curl -sf "http://127.0.0.1:$owner_port/admin/api/queues_debug" 2>/dev/null \
+    | jq -c '.replication_cache_metrics' 2>/dev/null || true)"
+  follower_metrics="$(curl -sf "http://127.0.0.1:$follower_port/admin/api/queues_debug" 2>/dev/null \
+    | jq -c '.replication_cache_metrics' 2>/dev/null || true)"
+
+  echo "--- replication cache metrics: after steady run ---" >>"$results_file"
+  echo "owner broker-$owner_node: ${owner_metrics:-missing}" >>"$results_file"
+  echo "follower broker-$follower_node: ${follower_metrics:-missing}" >>"$results_file"
+  echo "  owner cache metrics: ${owner_metrics:-missing}"
+  echo "  follower cache metrics: ${follower_metrics:-missing}"
+}
+
 run_steady_benchmark() {
   local broker_node="$1"
   local admin_node="$2"
@@ -768,6 +789,7 @@ run_steady_benchmark() {
     wait_follower_progress "$BENCH_FOLLOWER_NODE" "$BENCH_TOPIC" "$min_tail" 1 >/dev/null
     echo "  follower replication tail reached benchmark writes"
     check_bench_replication_tails "$BENCH_OWNER_NODE" "$BENCH_FOLLOWER_NODE" "$BENCH_TOPIC" "$min_tail"
+    print_replication_cache_metrics "$BENCH_OWNER_NODE" "$BENCH_FOLLOWER_NODE" "$results_file"
   fi
 }
 
