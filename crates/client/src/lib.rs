@@ -37,6 +37,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use std::{
     collections::HashMap,
     fmt::{self, Debug},
+    mem::size_of,
     net::{SocketAddr, ToSocketAddrs},
     str::FromStr,
     sync::{
@@ -2374,6 +2375,46 @@ fn apply_reconcile_result(
 }
 
 const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
+const PUBLISH_FLUSH_MESSAGES: usize = 128;
+const PUBLISH_FLUSH_BYTES: usize = 1024 * 1024;
+const PUBLISH_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_micros(250);
+
+async fn feed_protocol_frame<S, T>(
+    framed: &mut Framed<S, ProtoCodec>,
+    op: Op,
+    request_id: u64,
+    msg: &T,
+) -> FibrilResult<usize>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let frame = try_encode(op, request_id, msg).map_err(|err| FibrilError::Unexpected {
+        msg: err.to_string(),
+    })?;
+    let size = size_of::<Frame>() + frame.payload.len();
+
+    framed
+        .feed(frame)
+        .await
+        .map_err(|err| FibrilError::Disconnection {
+            msg: err.to_string(),
+        })?;
+
+    Ok(size)
+}
+
+async fn flush_protocol_frames<S>(framed: &mut Framed<S, ProtoCodec>) -> FibrilResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    framed
+        .flush()
+        .await
+        .map_err(|err| FibrilError::Disconnection {
+            msg: err.to_string(),
+        })
+}
 
 async fn send_protocol_frame<S, T>(
     framed: &mut Framed<S, ProtoCodec>,
@@ -2385,20 +2426,12 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
     T: Serialize,
 {
-    let frame = try_encode(op, request_id, msg).map_err(|err| FibrilError::Unexpected {
-        msg: err.to_string(),
-    })?;
-
-    framed
-        .send(frame)
-        .await
-        .map_err(|err| FibrilError::Disconnection {
-            msg: err.to_string(),
-        })
+    feed_protocol_frame(framed, op, request_id, msg).await?;
+    flush_protocol_frames(framed).await
 }
 
 // TODO: Further reconnection attempts logic
-// TODO: Better handle `t _ = framed.send(...)` errors, which currently just get swallowed. These errors indicate a broken connection and should trigger cleanup and reconnection logic.
+// TODO: Better handle frame send errors, which currently just get swallowed. These errors indicate a broken connection and should trigger cleanup and reconnection logic.
 async fn start_engine<S>(
     mut framed: Framed<S, ProtoCodec>,
     opts: ClientOptions,
@@ -2562,6 +2595,11 @@ where
 
         let timeout = std::time::Duration::from_secs(heartbeat_secs * 3);
         let mut last_seen = tokio::time::Instant::now();
+        let mut flush_ticker = tokio::time::interval(PUBLISH_FLUSH_INTERVAL);
+        flush_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        flush_ticker.tick().await;
+        let mut queued_publish_frames = 0usize;
+        let mut queued_publish_bytes = 0usize;
 
         // In the engine task, before the select! loop:
         let mut fatal_error: Option<FibrilError> = None;
@@ -2572,6 +2610,42 @@ where
                 if let Err(e) = send_protocol_frame(&mut $framed, $op, $request_id, $msg).await {
                     $err_slot = Some(e);
                     break;
+                } else {
+                    queued_publish_frames = 0;
+                    queued_publish_bytes = 0;
+                }
+            };
+        }
+
+        macro_rules! flush_publishes_or_die {
+            ($framed:expr, $err_slot:expr) => {
+                if queued_publish_frames > 0 {
+                    if let Err(e) = flush_protocol_frames(&mut $framed).await {
+                        $err_slot = Some(e);
+                        break;
+                    }
+                    queued_publish_frames = 0;
+                    queued_publish_bytes = 0;
+                }
+            };
+        }
+
+        macro_rules! feed_publish_or_die {
+            ($framed:expr, $op:expr, $request_id:expr, $msg:expr, $err_slot:expr) => {
+                match feed_protocol_frame(&mut $framed, $op, $request_id, $msg).await {
+                    Ok(size) => {
+                        queued_publish_frames += 1;
+                        queued_publish_bytes += size;
+                        if queued_publish_frames >= PUBLISH_FLUSH_MESSAGES
+                            || queued_publish_bytes >= PUBLISH_FLUSH_BYTES
+                        {
+                            flush_publishes_or_die!($framed, $err_slot);
+                        }
+                    }
+                    Err(e) => {
+                        $err_slot = Some(e);
+                        break;
+                    }
                 }
             };
         }
@@ -2588,8 +2662,17 @@ where
                     send_or_die!(framed, Op::Ping, req_id, &(), fatal_error)
                 }
 
+                _ = flush_ticker.tick(), if queued_publish_frames > 0 => {
+                    flush_publishes_or_die!(framed, fatal_error)
+                }
+
                 _ = shutdown.notified() => {
                     tracing::info!("Shutting down, exiting event loop.");
+                    if queued_publish_frames > 0 {
+                        if let Err(e) = flush_protocol_frames(&mut framed).await {
+                            fatal_error = Some(e);
+                        }
+                    }
                     break;
                 }
 
@@ -2608,7 +2691,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
+                        feed_publish_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
                     Command::PublishConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -2625,7 +2708,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
+                        feed_publish_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
                     }
                     Command::PublishDelayedUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -2642,7 +2725,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
+                        feed_publish_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
                     }
                     Command::PublishDelayedConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -2660,7 +2743,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
+                        feed_publish_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
                     }
                     Command::Subscribe { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
