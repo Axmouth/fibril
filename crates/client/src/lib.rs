@@ -1016,27 +1016,56 @@ impl<'a> SubscriptionBuilder<'a> {
         let topic = self.topic.into_string();
         let group = self.group.map(GroupName::into_string);
         let prefetch = self.prefetch;
+        let consumer_group = self.consumer_group.clone();
+        let consumer_target = self.consumer_target;
+        let member_id = self
+            .consumer_group
+            .as_ref()
+            .and_then(|_| self.client.shared.cohort_member_id.get().copied());
+        let make_req = |partition| Subscribe {
+            topic: topic.clone(),
+            partition,
+            group: group.clone(),
+            prefetch,
+            auto_ack: false,
+            consumer_group: consumer_group.clone(),
+            consumer_target,
+            member_id,
+        };
         // Fan in across every partition the topology cache knows about
         // (default: just partition 0 — see `partition_set`).
         let partitions = partition_set(self.client, &topic, group.as_deref());
         let mut receivers = Vec::with_capacity(partitions.len());
-        for partition in partitions {
-            let req = Subscribe {
-                topic: topic.clone(),
-                partition,
-                group: group.clone(),
-                prefetch,
-                auto_ack: false,
-                consumer_group: self.consumer_group.clone(),
-                consumer_target: self.consumer_target,
-                member_id: self
-                    .consumer_group
-                    .as_ref()
-                    .and_then(|_| self.client.shared.cohort_member_id.get().copied()),
-            };
-            receivers.push(subscribe_partition_manual(self.client, req).await?);
+        for partition in &partitions {
+            receivers.push(subscribe_partition_manual(self.client, make_req(*partition)).await?);
         }
-        Ok(Subscription::fan_in(receivers, prefetch))
+
+        // Static fan-in when auto-resubscribe is disabled.
+        let Some(interval_ms) = self.client.shared.opts.partition_resubscribe_interval_ms else {
+            return Ok(Subscription::fan_in(receivers, prefetch));
+        };
+
+        // Dynamic fan-in: a manager task picks up partitions added by a live grow.
+        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        for part_rx in receivers {
+            forward_into(part_rx, tx.clone());
+        }
+        let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
+        let client = self.client.clone();
+        tokio::spawn(partition_resubscribe_loop_manual(
+            client,
+            topic,
+            group,
+            prefetch,
+            consumer_group,
+            consumer_target,
+            member_id,
+            known,
+            tx,
+            interval_ms,
+        ));
+        Ok(Subscription { rx })
     }
 
     /// Subscribe with client-side automatic acknowledgement.
@@ -1048,25 +1077,52 @@ impl<'a> SubscriptionBuilder<'a> {
         let topic = self.topic.into_string();
         let group = self.group.map(GroupName::into_string);
         let prefetch = self.prefetch;
+        let consumer_group = self.consumer_group.clone();
+        let consumer_target = self.consumer_target;
+        let member_id = self
+            .consumer_group
+            .as_ref()
+            .and_then(|_| self.client.shared.cohort_member_id.get().copied());
+        let make_req = |partition| Subscribe {
+            topic: topic.clone(),
+            partition,
+            group: group.clone(),
+            prefetch,
+            auto_ack: true,
+            consumer_group: consumer_group.clone(),
+            consumer_target,
+            member_id,
+        };
         let partitions = partition_set(self.client, &topic, group.as_deref());
         let mut receivers = Vec::with_capacity(partitions.len());
-        for partition in partitions {
-            let req = Subscribe {
-                topic: topic.clone(),
-                partition,
-                group: group.clone(),
-                prefetch,
-                auto_ack: true,
-                consumer_group: self.consumer_group.clone(),
-                consumer_target: self.consumer_target,
-                member_id: self
-                    .consumer_group
-                    .as_ref()
-                    .and_then(|_| self.client.shared.cohort_member_id.get().copied()),
-            };
-            receivers.push(subscribe_partition_auto(self.client, req).await?);
+        for partition in &partitions {
+            receivers.push(subscribe_partition_auto(self.client, make_req(*partition)).await?);
         }
-        Ok(AutoAckedSubscription::fan_in(receivers, prefetch))
+
+        let Some(interval_ms) = self.client.shared.opts.partition_resubscribe_interval_ms else {
+            return Ok(AutoAckedSubscription::fan_in(receivers, prefetch));
+        };
+
+        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        for part_rx in receivers {
+            forward_into(part_rx, tx.clone());
+        }
+        let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
+        let client = self.client.clone();
+        tokio::spawn(partition_resubscribe_loop_auto(
+            client,
+            topic,
+            group,
+            prefetch,
+            consumer_group,
+            consumer_target,
+            member_id,
+            known,
+            tx,
+            interval_ms,
+        ));
+        Ok(AutoAckedSubscription { rx })
     }
 }
 
@@ -1089,6 +1145,109 @@ fn partition_set(client: &Client, topic: &str, group: Option<&str>) -> Vec<Parti
         .unwrap_or(1)
         .max(1);
     (0..count).map(Partition::new).collect()
+}
+
+/// Forward one partition's stream into the merged subscription channel. Ends when
+/// the partition stream closes (e.g. the broker retired it during a shrink) or
+/// the subscription is dropped.
+fn forward_into<M: Send + 'static>(mut part_rx: mpsc::Receiver<M>, tx: mpsc::Sender<M>) {
+    tokio::spawn(async move {
+        while let Some(msg) = part_rx.recv().await {
+            if tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Background loop keeping a manual-ack subscription's fan-in current: on each
+/// tick it refreshes topology and subscribes to any partition added by a live
+/// grow, merging it into the same channel. Removed partitions (shrink) end
+/// naturally when the broker retires their stream. Stops when the subscription is
+/// dropped (the output sender closes).
+#[allow(clippy::too_many_arguments)]
+async fn partition_resubscribe_loop_manual(
+    client: Client,
+    topic: String,
+    group: Option<String>,
+    prefetch: u32,
+    consumer_group: Option<String>,
+    consumer_target: Option<u32>,
+    member_id: Option<uuid::Uuid>,
+    mut known: std::collections::HashSet<Partition>,
+    tx: mpsc::Sender<InflightMessage>,
+    interval_ms: u64,
+) {
+    let interval = std::time::Duration::from_millis(interval_ms.max(1));
+    loop {
+        tokio::select! {
+            _ = tx.closed() => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
+        let _ = client.fetch_topology().await;
+        for partition in partition_set(&client, &topic, group.as_deref()) {
+            if known.contains(&partition) {
+                continue;
+            }
+            let req = Subscribe {
+                topic: topic.clone(),
+                partition,
+                group: group.clone(),
+                prefetch,
+                auto_ack: false,
+                consumer_group: consumer_group.clone(),
+                consumer_target,
+                member_id,
+            };
+            if let Ok(part_rx) = subscribe_partition_manual(&client, req).await {
+                known.insert(partition);
+                forward_into(part_rx, tx.clone());
+            }
+        }
+    }
+}
+
+/// Auto-ack counterpart of [`partition_resubscribe_loop_manual`].
+#[allow(clippy::too_many_arguments)]
+async fn partition_resubscribe_loop_auto(
+    client: Client,
+    topic: String,
+    group: Option<String>,
+    prefetch: u32,
+    consumer_group: Option<String>,
+    consumer_target: Option<u32>,
+    member_id: Option<uuid::Uuid>,
+    mut known: std::collections::HashSet<Partition>,
+    tx: mpsc::Sender<Message>,
+    interval_ms: u64,
+) {
+    let interval = std::time::Duration::from_millis(interval_ms.max(1));
+    loop {
+        tokio::select! {
+            _ = tx.closed() => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
+        let _ = client.fetch_topology().await;
+        for partition in partition_set(&client, &topic, group.as_deref()) {
+            if known.contains(&partition) {
+                continue;
+            }
+            let req = Subscribe {
+                topic: topic.clone(),
+                partition,
+                group: group.clone(),
+                prefetch,
+                auto_ack: true,
+                consumer_group: consumer_group.clone(),
+                consumer_target,
+                member_id,
+            };
+            if let Ok(part_rx) = subscribe_partition_auto(&client, req).await {
+                known.insert(partition);
+                forward_into(part_rx, tx.clone());
+            }
+        }
+    }
 }
 
 /// Subscribe to a single partition (manual ack), following owner redirects.
@@ -1950,9 +2109,11 @@ impl EngineSlot {
         let stream = TcpStream::connect(address)
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
-        stream.set_nodelay(true).map_err(|e| FibrilError::Disconnection {
-            msg: format!("failed to set TCP_NODELAY: {e}"),
-        })?;
+        stream
+            .set_nodelay(true)
+            .map_err(|e| FibrilError::Disconnection {
+                msg: format!("failed to set TCP_NODELAY: {e}"),
+            })?;
         let framed = Framed::new(stream, ProtoCodec);
         let engine = start_engine(
             framed,
@@ -1992,9 +2153,11 @@ impl EngineSlot {
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
 
-        stream.set_nodelay(true).map_err(|e| FibrilError::Disconnection {
-            msg: format!("failed to set TCP_NODELAY: {e}"),
-        })?;
+        stream
+            .set_nodelay(true)
+            .map_err(|e| FibrilError::Disconnection {
+                msg: format!("failed to set TCP_NODELAY: {e}"),
+            })?;
 
         let framed = Framed::new(stream, ProtoCodec);
         let new_engine = start_engine(
@@ -3244,6 +3407,13 @@ pub struct ClientOptions {
     /// is best-effort: on timeout or error the client proceeds with a cold
     /// cache (single-partition behavior).
     pub topology_warm_timeout_ms: Option<u64>,
+    /// How often a live subscription re-checks the topology to pick up partitions
+    /// added by a live grow (and shed ones removed by a shrink). A consumer-only
+    /// client has no other reason to refresh, so the subscription polls on this
+    /// interval. `None` disables auto-resubscribe (the fan-in is fixed at
+    /// subscribe time). Higher values reduce background traffic at the cost of
+    /// slower pickup of new partitions.
+    pub partition_resubscribe_interval_ms: Option<u64>,
 }
 
 impl ClientOptions {
@@ -3262,6 +3432,7 @@ impl ClientOptions {
             max_redirects: 3,
             topology_refresh_cooldown_ms: 1_000,
             topology_warm_timeout_ms: Some(5_000),
+            partition_resubscribe_interval_ms: Some(5_000),
         }
     }
 
@@ -3278,6 +3449,24 @@ impl ClientOptions {
     pub fn disable_topology_warm(self) -> Self {
         Self {
             topology_warm_timeout_ms: None,
+            ..self
+        }
+    }
+
+    /// Return a copy with a custom auto-resubscribe interval (ms): how often a
+    /// live subscription re-checks topology to pick up partitions added by a grow.
+    pub fn partition_resubscribe_interval_ms(self, interval_ms: u64) -> Self {
+        Self {
+            partition_resubscribe_interval_ms: Some(interval_ms),
+            ..self
+        }
+    }
+
+    /// Return a copy with auto-resubscribe disabled: the subscription fan-in is
+    /// fixed at subscribe time and will not pick up partitions added later.
+    pub fn disable_partition_resubscribe(self) -> Self {
+        Self {
+            partition_resubscribe_interval_ms: None,
             ..self
         }
     }

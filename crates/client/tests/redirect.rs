@@ -40,6 +40,9 @@ struct SelfPartitions {
     group: Option<String>,
     partition_count: u32,
     partitioning_version: u64,
+    /// If set, the topology answer reports this live count instead of the fixed
+    /// `partition_count`, so a test can simulate a live grow.
+    live_partition_count: Option<Arc<std::sync::atomic::AtomicU32>>,
 }
 
 #[derive(Clone, Default)]
@@ -178,14 +181,19 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         .unwrap()
                     } else if frame.opcode == Op::Topology as u16 {
                         if let Some(spread) = &config.self_partitions {
-                            let queues = (0..spread.partition_count)
+                            let count = spread
+                                .live_partition_count
+                                .as_ref()
+                                .map(|c| c.load(Ordering::SeqCst))
+                                .unwrap_or(spread.partition_count);
+                            let queues = (0..count)
                                 .map(|partition| QueueTopologyEntry {
                                     topic: spread.topic.clone(),
                                     partition: Partition::new(partition),
                                     group: spread.group.clone(),
                                     owner_endpoint: Some(addr.to_string()),
                                     partitioning_version: spread.partitioning_version,
-                                    partition_count: spread.partition_count,
+                                    partition_count: count,
                                 })
                                 .collect();
                             let topology = TopologyOk {
@@ -402,6 +410,7 @@ async fn keyless_publishes_spread_keyed_publishes_stick() {
             group: None,
             partition_count: 4,
             partitioning_version: 0,
+            live_partition_count: None,
         }),
         recorded_partitions: Some(recorded.clone()),
         ..Default::default()
@@ -473,6 +482,7 @@ async fn publishes_carry_routed_partitioning_version() {
             group: None,
             partition_count: 3,
             partitioning_version: 5,
+            live_partition_count: None,
         }),
         recorded_versions: Some(versions.clone()),
         ..Default::default()
@@ -513,6 +523,7 @@ async fn subscription_fans_in_all_partitions() {
             group: None,
             partition_count: 3,
             partitioning_version: 0,
+            live_partition_count: None,
         }),
         subscribe_partitions: Some(subscribed.clone()),
         ..Default::default()
@@ -581,4 +592,54 @@ async fn reconnect_presents_resume_identity() {
         resumes.load(Ordering::SeqCst) >= 1,
         "broker should have seen a resume identity on reconnect"
     );
+}
+
+/// A live subscription picks up a partition added by a grow: the mock reports
+/// partition_count 1, the consumer subscribes, then the count grows to 2 and the
+/// auto-resubscribe manager subscribes to the new partition and delivers from it.
+#[tokio::test]
+async fn subscription_auto_resubscribes_to_grown_partition() {
+    let count = Arc::new(std::sync::atomic::AtomicU32::new(1));
+    let mock = spawn_configurable_mock(MockConfig {
+        self_partitions: Some(SelfPartitions {
+            topic: "orders".into(),
+            group: None,
+            partition_count: 1,
+            partitioning_version: 0,
+            live_partition_count: Some(count.clone()),
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let opts = ClientOptions::new()
+        .topology_warm_timeout_ms(2_000)
+        .partition_resubscribe_interval_ms(150);
+    let client = Client::connect(mock, opts).await.unwrap();
+
+    let mut sub = client.subscribe("orders").unwrap().sub_auto_ack().await.unwrap();
+
+    // Initial fan-in covers partition 0 (mock delivers payload = [partition]).
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
+        .await
+        .expect("first delivery")
+        .expect("message");
+    assert_eq!(first.payload, vec![0]);
+
+    // Grow to 2 partitions; the manager should subscribe to partition 1.
+    count.store(2, std::sync::atomic::Ordering::SeqCst);
+
+    // Collect deliveries until partition 1's message arrives.
+    let saw_partition_1 = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match sub.recv().await {
+                Some(msg) if msg.payload == vec![1] => break true,
+                Some(_) => continue,
+                None => break false,
+            }
+        }
+    })
+    .await
+    .expect("auto-resubscribe should deliver from the new partition");
+    assert!(saw_partition_1, "consumer received a delivery from the grown partition");
 }
