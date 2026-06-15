@@ -333,6 +333,14 @@ Add entries here when an optimization is actually tried.
   while client-observed confirmation p50 was about 204ms. The next useful split
   is local append completion latency versus client/window backlog and follower
   tick/apply work.
+- Replica-durable replication is now usable enough to benchmark seriously, but
+  it is not a finished performance story. Current runs prove correctness and
+  useful throughput, while the latency caveat is still real: higher throughput
+  currently depends on enough outstanding confirms, and that backlog becomes
+  visible client latency.
+- The next narrow measurement should split local append completion, confirm sink
+  backlog, replica-gate wait, and follower apply/tick time before making more
+  protocol or scheduling changes.
 - Temporary timing probes are acceptable during an audit, but they should not
   remain as ad hoc logs. Promote useful signals to cheap aggregated metrics or
   sampled diagnostics, then remove the raw per-frame logging.

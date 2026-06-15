@@ -3107,3 +3107,26 @@ Snapshot/checkpoint concern found during higher-rate sweep:
   measurements should separate local append completion latency from client-side
   pacing, and should test smaller windows plus higher follower poll/read
   cadence before assuming the follower durability gate itself is the bottleneck.
+- Consolidated performance status after the raw-wire and timing passes:
+  replica-durable replication is not final, but it is now a usable experimental
+  path. The branch can run the 3-node Ganglion tryout, route client traffic
+  through non-owners, keep followers caught up, prove owner/follower cursor
+  equality after steady publish runs, and pass the failover smoke. The main
+  caveat is latency under replica-durable confirms. With current tuning, useful
+  throughput is achieved by allowing enough outstanding confirmations, and that
+  backlog shows up directly in client-observed confirm latency.
+- Suspects to measure next, in order:
+  1. Local owner append completion latency before `replica_confirm_wait` starts.
+  2. Confirm sink backlog in replica mode. The sink is fine enough for
+     single-node confirms, but replica mode adds follower wakes and per-offset
+     confirm-gate work before replying to publishers.
+  3. Client confirm-window backlog and pacing. The window is per writer, so the
+     benchmark can create tens of thousands of outstanding publishes.
+  4. Follower tick batching and durable apply cadence. Current timing shows
+     follower apply and whole-tick costs large enough to affect catch-up
+     granularity.
+  5. Remaining owner/follower transport shape. Raw `ReplicationReadOk` was the
+     biggest win, but separate message/event streams, long-poll pull, hybrid
+     push/pull, or Keratin raw scan/append APIs may still matter.
+  6. Caught-up poll cadence for low-load idle cases. Keep this in scope, but do
+     not treat it as the dominant 50k/s bottleneck without a low-load benchmark.

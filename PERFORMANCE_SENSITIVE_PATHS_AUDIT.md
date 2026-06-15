@@ -25,6 +25,15 @@ the new clustered paths. Replica-durable confirms, follower pull cadence,
 multi-queue replication, and exclusive cohort fan-in now need benchmark cases
 before we call their performance acceptable.
 
+Current practical status: replica-durable replication has crossed from
+"correctness prototype" into "usable experimental path". The current branch can
+route through a 3-node local cluster, keep a follower caught up, prove matching
+owner/follower cursors after steady publish runs, survive the failover smoke,
+and reach useful publish rates with no publish or confirm errors. It is not
+final. The remaining caveat is latency under replica-durable confirms: higher
+throughput is currently achieved by allowing enough outstanding confirmations,
+and that turns into visible client latency.
+
 Replication optimization arc so far:
 
 - The first live cluster benchmarks were not enough by themselves because they
@@ -50,6 +59,25 @@ Replication optimization arc so far:
   wait for follower acknowledgement. The next likely targets are local append
   completion latency, client confirm-window backlog, follower tick batching, and
   follower durable apply cost.
+
+Current suspect list, ordered by what the latest data makes most plausible:
+
+- Local owner append completion latency before the replica gate starts.
+- Confirm sink backlog in replica-durable mode. Single-node behavior can be
+  fine while replica mode still serializes more work per completion, especially
+  if append completions arrive in bursts.
+- Client confirm-window backlog and pacing. The benchmark window is per writer,
+  so 10 writers with window 1024 means about 10,240 outstanding publishes.
+- Follower tick batching and apply cadence. Whole follower ticks are coarse and
+  currently expensive enough to explain some catch-up granularity.
+- Follower durable apply cost. Raw read responses removed the largest decode
+  cost, but apply still allocates and writes durable records through the current
+  follower API.
+- Owner/follower transport shape. Separate message and event streams, long-poll
+  pull, or hybrid push/pull may reduce latency once the local append and confirm
+  sink split is measured.
+- Low-load caught-up poll cadence. This is still a real idle-latency risk, but
+  the latest high-rate timing does not show it as the dominant 50k/s bottleneck.
 
 ## Findings
 
