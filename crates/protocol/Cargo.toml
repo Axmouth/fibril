@@ -34,7 +34,7 @@ uuid = { version = "1.19", features = ["serde", "v4", "v7"] }
 
 [dev-dependencies]
 fibril-coordination-ganglion = { path = "../coordination-ganglion" }
-ganglion-openraft = { path = "../../../ganglion/crates/ganglion-openraft", features = ["openraft"] }
+ganglion-openraft = { git = "https://github.com/Axmouth/ganglion.git", branch = "main", features = ["openraft"] }
 criterion = "0.8"
 stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
 

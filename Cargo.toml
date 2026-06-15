@@ -28,3 +28,7 @@ policy-url = "https://github.com/axmouth/fibril/blob/main/AI_POLICY.md"
 stroma-core = { path = "../keratin/stroma/core" }
 stroma-common = { path = "../keratin/stroma/common" }
 keratin-log = { path = "../keratin/keratin-log" }
+
+[patch."https://github.com/Axmouth/ganglion.git"]
+ganglion-core = { path = "../ganglion/crates/ganglion-core" }
+ganglion-openraft = { path = "../ganglion/crates/ganglion-openraft" }

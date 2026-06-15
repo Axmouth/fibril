@@ -16,7 +16,7 @@ fibril-storage = { path = "../storage" }
 fibril-metrics = { path = "../metrics" }
 fibril-util = { path = "../util" }
 fibril-coordination-ganglion = { path = "../coordination-ganglion" }
-ganglion-openraft = { path = "../../../ganglion/crates/ganglion-openraft", features = ["openraft"] }
+ganglion-openraft = { git = "https://github.com/Axmouth/ganglion.git", branch = "main", features = ["openraft"] }
 anyhow = "1.0"
 async-trait = "0.1"
 fastrand = "2"
