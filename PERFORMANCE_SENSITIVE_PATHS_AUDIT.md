@@ -25,6 +25,32 @@ the new clustered paths. Replica-durable confirms, follower pull cadence,
 multi-queue replication, and exclusive cohort fan-in now need benchmark cases
 before we call their performance acceptable.
 
+Replication optimization arc so far:
+
+- The first live cluster benchmarks were not enough by themselves because they
+  could prove client routing but not follower catch-up. We added post-benchmark
+  owner/follower cursor checks so replica-durable runs must prove the follower
+  reached the measured writes.
+- Large and high-rate runs exposed that the old `ReplicationReadOk` response was
+  doing too much work through nested MessagePack. The follower had to decode a
+  large structured envelope, allocate owned records, then apply them again.
+- The biggest win so far was replacing that hot replication response with an
+  internal raw binary frame: fixed batch metadata plus raw message
+  header/payload bytes and raw event bytes, with explicit per-record offsets.
+  That made the frame cheap to parse and avoided deserializing payload bytes just
+  to forward them into follower storage.
+- Byte-aware read caps were added after the same tests showed that record-count
+  caps alone could create huge responses for large payloads. The cap now adjusts
+  returned progress metadata to match the records actually sent.
+- A Stroma recent-record cache was implemented and tested, then left opt-in
+  because the local SSD benchmark did not show enough benefit to justify default
+  hot-path clones and mutex traffic.
+- The current measurement pass added aggregated broker timing metrics. The first
+  50k/s run shows client-observed latency is not mostly the post-local-append
+  wait for follower acknowledgement. The next likely targets are local append
+  completion latency, client confirm-window backlog, follower tick batching, and
+  follower durable apply cost.
+
 ## Findings
 
 ### 1. Replica-durable confirm latency is probably tied to follower poll cadence

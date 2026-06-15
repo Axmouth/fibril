@@ -309,6 +309,15 @@ Add entries here when an optimization is actually tried.
   wake timing need more precise measurement before changing this path.
 - For 1KB publish frames, MessagePack encode/decode is measurable but not large
   enough by itself to explain the current backlog knee.
+- For internal replication reads, MessagePack was the wrong shape. The biggest
+  replicated-throughput win so far came from replacing the hot
+  `ReplicationReadOk` response with a raw, easy-to-parse binary frame carrying
+  fixed metadata, raw message header/payload bytes, raw event bytes, and explicit
+  offsets. That removed a large nested decode/re-encode cost from follower
+  catch-up.
+- Record-count limits are not enough for replication batches. Payload size can
+  dominate, so byte caps must be part of the protocol and must rewrite progress
+  metadata to the actual returned frontier.
 - The publish sink benefits from a much shorter coalescing window than the
   original 1ms. Removing the wait entirely lost useful batching around the
   350k-400k/s knee. Measuring the window from the previous flush gives sparse
@@ -318,6 +327,12 @@ Add entries here when an optimization is actually tried.
 - For replica-durable runs, publish-to-deliver latency can be misleading by
   itself. The current 50k/s tuned run shows most latency before server receive,
   while server-receive-to-deliver remains much lower. Keep reporting both.
+- The first broker timing metrics show that replica-durable confirm latency is
+  not automatically the same thing as post-local-append follower wait. In the
+  50k/s window-1024 run, owner `replica_confirm_wait` averaged about 0.033ms
+  while client-observed confirmation p50 was about 204ms. The next useful split
+  is local append completion latency versus client/window backlog and follower
+  tick/apply work.
 - Temporary timing probes are acceptable during an audit, but they should not
   remain as ad hoc logs. Promote useful signals to cheap aggregated metrics or
   sampled diagnostics, then remove the raw per-frame logging.

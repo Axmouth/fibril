@@ -2910,6 +2910,16 @@ Snapshot/checkpoint concern found during higher-rate sweep:
   `in_sync=true`). Confirm latency stayed around p50/p95/p99/max =
   204/205/205/206ms, so the raw response fixes the codec/correctness stall but
   does not remove the current batch/window latency shape.
+- Conclusion from the wire-protocol pass: the raw binary replication response is
+  the largest clear optimization win in this round. The old path encoded a large
+  structured `ReplicationReadOk` through MessagePack, then made the follower
+  decode and rebuild owned records before durable apply. The new hot path keeps
+  replication payloads in a simple binary layout: fixed metadata, raw message
+  header/payload bytes, raw event bytes, and explicit offsets. It is still a
+  conservative format because offsets are validated and the follower apply API
+  remains unchanged, but it removes the avoidable nested decode/re-encode work.
+  Future raw Keratin scan/append APIs can build on this without changing the
+  durability contract.
 - Practical-window replication measurements after the raw response path:
 
   | Target rate | Confirm window | Actual rate | Confirm p50 | Confirm p95 | Confirm p99 | Notes |
