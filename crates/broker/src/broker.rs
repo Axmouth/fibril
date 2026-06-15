@@ -4,7 +4,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use arc_swap::ArcSwap;
@@ -878,6 +878,7 @@ pub struct SparseQueueObservabilitySnapshot {
     pub replication_summary: FollowerReplicationWorkerSummary,
     pub owned_replicas: Vec<OwnedQueueReplicaObservability>,
     pub owned_replica_summary: OwnedQueueReplicaSummary,
+    pub replication_timing: ReplicationTimingSnapshot,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -929,6 +930,127 @@ pub struct OwnedQueueReplicaObservability {
 pub struct OwnedQueueReplicaSummary {
     pub owned_queue_count: usize,
     pub below_floor_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReplicationTimingSnapshot {
+    pub replication_wakes: u64,
+    pub follower_progress_reports: u64,
+    pub replica_confirm_wait: ReplicationTimingPhaseSnapshot,
+    pub owner_read: ReplicationTimingPhaseSnapshot,
+    pub follower_owner_read: ReplicationTimingPhaseSnapshot,
+    pub follower_apply: ReplicationTimingPhaseSnapshot,
+    pub follower_tick: ReplicationTimingPhaseSnapshot,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReplicationTimingPhaseSnapshot {
+    pub count: u64,
+    pub total_ms: f64,
+    pub avg_ms: f64,
+    pub max_ms: f64,
+}
+
+#[derive(Debug, Default)]
+struct ReplicationTimingMetrics {
+    replication_wakes: AtomicU64,
+    follower_progress_reports: AtomicU64,
+    replica_confirm_wait: ReplicationTimingPhase,
+    owner_read: ReplicationTimingPhase,
+    follower_owner_read: ReplicationTimingPhase,
+    follower_apply: ReplicationTimingPhase,
+    follower_tick: ReplicationTimingPhase,
+}
+
+impl ReplicationTimingMetrics {
+    fn record_replication_wake(&self) {
+        self.replication_wakes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_follower_progress_report(&self) {
+        self.follower_progress_reports
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> ReplicationTimingSnapshot {
+        ReplicationTimingSnapshot {
+            replication_wakes: self.replication_wakes.load(Ordering::Relaxed),
+            follower_progress_reports: self.follower_progress_reports.load(Ordering::Relaxed),
+            replica_confirm_wait: self.replica_confirm_wait.snapshot(),
+            owner_read: self.owner_read.snapshot(),
+            follower_owner_read: self.follower_owner_read.snapshot(),
+            follower_apply: self.follower_apply.snapshot(),
+            follower_tick: self.follower_tick.snapshot(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct ReplicationTimingPhase {
+    count: AtomicU64,
+    total_ns: AtomicU64,
+    max_ns: AtomicU64,
+}
+
+impl ReplicationTimingPhase {
+    fn observe(&self, duration: Duration) {
+        let ns = duration.as_nanos().min(u64::MAX as u128) as u64;
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.total_ns.fetch_add(ns, Ordering::Relaxed);
+
+        let mut current = self.max_ns.load(Ordering::Relaxed);
+        while ns > current {
+            match self.max_ns.compare_exchange_weak(
+                current,
+                ns,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    fn timer(&self) -> ReplicationTimingGuard<'_> {
+        ReplicationTimingGuard {
+            phase: self,
+            started_at: Instant::now(),
+        }
+    }
+
+    fn snapshot(&self) -> ReplicationTimingPhaseSnapshot {
+        let count = self.count.load(Ordering::Relaxed);
+        let total_ns = self.total_ns.load(Ordering::Relaxed);
+        let max_ns = self.max_ns.load(Ordering::Relaxed);
+        let total_ms = ns_to_ms(total_ns);
+        ReplicationTimingPhaseSnapshot {
+            count,
+            total_ms,
+            avg_ms: if count == 0 {
+                0.0
+            } else {
+                total_ms / count as f64
+            },
+            max_ms: ns_to_ms(max_ns),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ReplicationTimingGuard<'a> {
+    phase: &'a ReplicationTimingPhase,
+    started_at: Instant,
+}
+
+impl Drop for ReplicationTimingGuard<'_> {
+    fn drop(&mut self) {
+        self.phase.observe(self.started_at.elapsed());
+    }
+}
+
+fn ns_to_ms(ns: u64) -> f64 {
+    ns as f64 / 1_000_000.0
 }
 
 fn eviction_attempt_summary(
@@ -1599,6 +1721,8 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     /// Per-queue durable replication progress reported by followers (from
     /// stamped replication reads). Drives publish-confirm durability policies.
     replication_progress: Arc<DashMap<QueueKey, Arc<ReplicationProgressCell>>>,
+    /// Broker-local aggregate timings for replicated confirms and follower pull.
+    replication_timing: Arc<ReplicationTimingMetrics>,
     /// Latest assignment applied for each local queue (durability policy +
     /// replica set source for confirms). Maintained by the assignment watcher;
     /// empty for standalone brokers (local-durable confirms only).
@@ -1655,6 +1779,7 @@ pub struct ReplicationConfirmGate {
     progress: Arc<DashMap<QueueKey, Arc<ReplicationProgressCell>>>,
     assignments: Arc<DashMap<QueueKey, PartitionAssignment>>,
     cfg: Arc<ArcSwap<BrokerConfig>>,
+    timing: Arc<ReplicationTimingMetrics>,
 }
 
 /// One follower's last-reported durable progress, with the report time used to
@@ -1737,6 +1862,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             queue_eviction_observations: DashMap::new(),
             follower_replication_workers: DashMap::new(),
             replication_progress: Arc::new(DashMap::new()),
+            replication_timing: Arc::new(ReplicationTimingMetrics::default()),
             assignment_cache: Arc::new(DashMap::new()),
             exclusive_groups: Mutex::new(ExclusiveGroupRouter::new(default_consumer_target)),
             repartition_transitions: Mutex::new(HashMap::new()),
@@ -1804,6 +1930,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             entry.event_next = entry.event_next.max(durable_event_next);
             entry.last_report = std::time::Instant::now();
         }
+        self.replication_timing.record_follower_progress_report();
         cell.changed.notify_waiters();
     }
 
@@ -1851,6 +1978,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             progress: self.replication_progress.clone(),
             assignments: self.assignment_cache.clone(),
             cfg: self.cfg.clone(),
+            timing: self.replication_timing.clone(),
         }
     }
 
@@ -1886,6 +2014,7 @@ impl ReplicationConfirmGate {
         if required_followers == 0 {
             return Ok(());
         }
+        let _replica_confirm_wait_timer = self.timing.replica_confirm_wait.timer();
 
         let cfg = self.cfg.load();
         let timeout_ms = cfg.replication_confirm_timeout_ms;
@@ -2141,6 +2270,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         };
         let qs_publish = qs.clone();
         let qs_clone = qs.clone();
+        let replication_timing = self.replication_timing.clone();
         let owner_runtime_shutdown = qs.owner_runtime_shutdown.clone();
         // TODO: do not keep handle(memory leak effective) if relevant connection dies
         self.task_group.spawn("publisher_sink", async move {
@@ -2273,6 +2403,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         if let Err(e) = confirm_tx.send(offset).await {
                             tracing::error!("Failed to send confirm offset: {e:?}");
                         }
+                        replication_timing.record_replication_wake();
                         qs_clone.wake_with_replication();
                         // Local durability first, then the assignment's
                         // replication policy (replica/majority acks) before
@@ -2606,6 +2737,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             replication_summary,
             owned_replicas,
             owned_replica_summary,
+            replication_timing: self.replication_timing.snapshot(),
         }
     }
 
@@ -3484,11 +3616,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
         let count = offsets.len();
         let qs = self.queues.get(&key).map(|e| e.value().clone());
+        let replication_timing = self.replication_timing.clone();
         let (done_tx, done_rx) = oneshot::channel::<bool>();
         let mut done_tx = Some(done_tx);
         let done = move |ok: bool| {
             if let Some(qs) = &qs {
                 if ok {
+                    replication_timing.record_replication_wake();
                     qs.wake_with_replication();
                 } else {
                     qs.wake();
@@ -3664,6 +3798,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let pending_settles = self.pending_settles.clone();
         let settle_drained = self.settle_drained.clone();
         let metrics = self.metrics.clone();
+        let replication_timing = self.replication_timing.clone();
         let done = move |ok: bool| {
             if ok {
                 consumer2.dec_inflight();
@@ -3674,6 +3809,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 }
 
                 if let Some(qs) = &qs {
+                    replication_timing.record_replication_wake();
                     qs.wake_with_replication();
                 }
             } else {
@@ -3780,6 +3916,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             let pending_settles = self.pending_settles.clone();
             let settle_drained = self.settle_drained.clone();
             let metrics = self.metrics.clone();
+            let replication_timing = self.replication_timing.clone();
 
             let done = move |ok: bool| {
                 if ok {
@@ -3790,6 +3927,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         m.acked_many(count as u64);
                     }
                     if let Some(qs) = &qs {
+                        replication_timing.record_replication_wake();
                         qs.wake_with_replication();
                     }
                 } else if let Some(qs) = &qs {
@@ -3826,6 +3964,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             let qs = self.queues.get(&key).map(|e| e.value().clone());
             let pending_settles = self.pending_settles.clone();
             let settle_drained = self.settle_drained.clone();
+            let replication_timing = self.replication_timing.clone();
 
             let done = move |ok: bool| {
                 if ok {
@@ -3833,6 +3972,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         consumer_clone.dec_inflight();
                     }
                     if let Some(qs) = &qs {
+                        replication_timing.record_replication_wake();
                         qs.wake_with_replication();
                     }
                 } else if let Some(qs) = &qs {
@@ -3986,6 +4126,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     // `poll_ready` records the in-flight lease before returning,
                     // so followers need a prompt read even if local delivery
                     // later races with subscriber capacity.
+                    broker.replication_timing.record_replication_wake();
                     qs.wake_replication_followers();
 
                     let mut delivered = 0;
@@ -4278,6 +4419,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
                 for key in touched {
                     if let Some(qs) = broker.queues.get(&key).map(|e| e.value().clone()) {
+                        broker.replication_timing.record_replication_wake();
                         qs.wake_with_replication();
                     }
                 }
@@ -4742,6 +4884,7 @@ impl Broker<StromaEngine> {
         max_bytes: usize,
     ) -> Result<BrokerOwnerReplicationRecords, BrokerError> {
         self.ensure_queue_owner(topic, partition, group)?;
+        let _owner_read_timer = self.replication_timing.owner_read.timer();
         let messages = self
             .engine
             .read_owner_message_records(topic, partition.id(), group, message_from, max_messages)
@@ -4981,19 +5124,23 @@ impl Broker<StromaEngine> {
         };
 
         for _ in 0..options.max_iterations {
-            let records = owner
-                .read_owner_replication_records(
-                    topic,
-                    partition,
-                    group,
-                    progress.message_next_offset,
-                    progress.event_next_offset,
-                    options.max_messages_per_read,
-                    options.max_events_per_read,
-                    options.max_bytes_per_read,
-                    options.max_wait_ms,
-                )
-                .await?;
+            let records = {
+                let _follower_owner_read_timer =
+                    self.replication_timing.follower_owner_read.timer();
+                owner
+                    .read_owner_replication_records(
+                        topic,
+                        partition,
+                        group,
+                        progress.message_next_offset,
+                        progress.event_next_offset,
+                        options.max_messages_per_read,
+                        options.max_events_per_read,
+                        options.max_bytes_per_read,
+                        options.max_wait_ms,
+                    )
+                    .await?
+            };
 
             let message_progress = owner_read_batch_progress("message", &records.messages)?;
             let event_progress = owner_read_batch_progress("event", &records.events)?;
@@ -5002,9 +5149,11 @@ impl Broker<StromaEngine> {
                     (message_progress, event_progress)
                 }
                 _ => {
-                    let apply = self
-                        .apply_follower_replication_records(topic, partition, group, records)
-                        .await?;
+                    let apply = {
+                        let _follower_apply_timer = self.replication_timing.follower_apply.timer();
+                        self.apply_follower_replication_records(topic, partition, group, records)
+                            .await?
+                    };
                     return match apply {
                         BrokerFollowerReplicationApply::CheckpointRequired { messages, events } => {
                             Ok(BrokerReplicationCatchUp::CheckpointRequired {
@@ -5028,10 +5177,13 @@ impl Broker<StromaEngine> {
                 }
             };
 
-            match self
-                .apply_follower_replication_records(topic, partition, group, records)
-                .await?
-            {
+            let apply = {
+                let _follower_apply_timer = self.replication_timing.follower_apply.timer();
+                self.apply_follower_replication_records(topic, partition, group, records)
+                    .await?
+            };
+
+            match apply {
                 BrokerFollowerReplicationApply::Applied(outcome) => {
                     match replicated_append_progress_after_apply(
                         "message",
@@ -5163,6 +5315,7 @@ impl Broker<StromaEngine> {
         queue: &crate::coordination::QueueIdentity,
         cfg: FollowerReplicationWorkerConfig,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
+        let _follower_tick_timer = self.replication_timing.follower_tick.timer();
         let worker = self.follower_replication_worker(queue)?;
         let options = {
             let state = worker.lock().await;

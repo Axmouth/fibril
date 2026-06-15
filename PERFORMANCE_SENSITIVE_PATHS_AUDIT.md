@@ -61,6 +61,28 @@ Recommendation:
   long-poll style replication read with a cooldown. Do not just lower the
   default blindly.
 
+Update, 2026-06-16:
+
+- The live tryout benchmark now emits broker replication timing from the admin
+  queue debug surface.
+- In a 3-node Ganglion `replica_durable:2` publish-only run at 50k/s, 1 KiB
+  payloads, and confirm window 1024, client-observed confirm latency was
+  p50/p95/p99/max = 204/243/244/246ms.
+- The owner-side `replica_confirm_wait` metric, which measures only the wait
+  after local owner append until follower durable progress is observed, averaged
+  about 0.033ms over 144,447 samples. That means this run's visible latency was
+  not mostly the post-append replica wait.
+- The larger signal was follower work: owner read averaged about 1.0ms,
+  follower owner-read await averaged about 6.3ms, follower apply averaged about
+  19.2ms, and whole follower ticks averaged about 552ms.
+
+Revised interpretation: caught-up poll cadence is still a low-load/idle risk to
+test, but the current 50k/s latency shape is more likely dominated by local
+append completion, client confirm-window backlog, follower tick batching, and
+follower durable apply cost. The next benchmark should separate local append
+completion latency from replica-gate wait before changing the poll cadence
+again.
+
 ### 2. Cluster-mode benchmark coverage is behind the implementation
 
 Severity: High for confidence.

@@ -730,17 +730,28 @@ print_replication_cache_metrics() {
   local follower_port=$((BASE_ADMIN_PORT + follower_node))
   local owner_metrics=""
   local follower_metrics=""
+  local owner_timing=""
+  local follower_timing=""
 
   owner_metrics="$(curl -sf "http://127.0.0.1:$owner_port/admin/api/queues_debug" 2>/dev/null \
     | jq -c '.replication_cache_metrics' 2>/dev/null || true)"
   follower_metrics="$(curl -sf "http://127.0.0.1:$follower_port/admin/api/queues_debug" 2>/dev/null \
     | jq -c '.replication_cache_metrics' 2>/dev/null || true)"
+  owner_timing="$(curl -sf "http://127.0.0.1:$owner_port/admin/api/queues_debug" 2>/dev/null \
+    | jq -c '.replication_timing' 2>/dev/null || true)"
+  follower_timing="$(curl -sf "http://127.0.0.1:$follower_port/admin/api/queues_debug" 2>/dev/null \
+    | jq -c '.replication_timing' 2>/dev/null || true)"
 
   echo "--- replication cache metrics: after steady run ---" >>"$results_file"
   echo "owner broker-$owner_node: ${owner_metrics:-missing}" >>"$results_file"
   echo "follower broker-$follower_node: ${follower_metrics:-missing}" >>"$results_file"
+  echo "--- replication timing: after steady run ---" >>"$results_file"
+  echo "owner broker-$owner_node: ${owner_timing:-missing}" >>"$results_file"
+  echo "follower broker-$follower_node: ${follower_timing:-missing}" >>"$results_file"
   echo "  owner cache metrics: ${owner_metrics:-missing}"
   echo "  follower cache metrics: ${follower_metrics:-missing}"
+  echo "  owner replication timing: ${owner_timing:-missing}"
+  echo "  follower replication timing: ${follower_timing:-missing}"
 }
 
 run_steady_benchmark() {

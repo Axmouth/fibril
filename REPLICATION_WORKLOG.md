@@ -3064,3 +3064,36 @@ Snapshot/checkpoint concern found during higher-rate sweep:
   replication path and drops throughput below the window-2000 run, so smaller
   windows are useful for latency but not enough by themselves for higher peak
   throughput.
+- Replication timing observability added for the next throughput pass. The
+  broker sparse-queue observability snapshot now exposes internal replication
+  timing counters, and `cluster-tryout.sh --steady-bench` prints them for the
+  owner and a follower. Field meaning:
+  - `replica_confirm_wait`: time spent inside the replica-durability gate after
+    the owner local append is complete. It is not full client-observed publish
+    confirmation latency.
+  - `owner_read`: owner-side time to serve a replication read from Stroma.
+  - `follower_owner_read`: follower-side time awaiting the owner replication
+    read call.
+  - `follower_apply`: follower-side time applying replicated records durably.
+  - `follower_tick`: whole follower worker tick, including all per-tick catch-up
+    iterations.
+  - `replication_wakes` and `follower_progress_reports`: coarse counters for
+    wake pressure and progress notifications.
+- First timing signal, 3-node Ganglion `replica_durable:2`, 50k/s target,
+  1 KiB payloads, confirmed window 1024, 4096 messages/events per read, 16 MiB
+  byte cap, publish-only:
+  - Actual measured publish rate: 49,025/s.
+  - Client-observed confirm p50/p95/p99/max: 204/243/244/246ms.
+  - Owner replica-confirm wait: 144,447 samples, avg ~0.033ms, max ~187ms.
+  - Owner read: 135 samples, avg ~1.0ms, max ~6.2ms.
+  - Follower owner-read await: 130 samples, avg ~6.3ms, max ~229ms.
+  - Follower apply: 130 samples, avg ~19.2ms, max ~75ms.
+  - Follower whole tick: 6 samples, avg ~552ms, max ~1428ms.
+
+  Interpretation: in this specific 50k/window-1024 run, the full publish
+  confirm latency is not mostly time spent waiting after local append for
+  follower progress. The larger visible costs are follower apply/read tick work
+  and the amount of work admitted by the per-writer confirm window. Next useful
+  measurements should separate local append completion latency from client-side
+  pacing, and should test smaller windows plus higher follower poll/read
+  cadence before assuming the follower durability gate itself is the bottleneck.

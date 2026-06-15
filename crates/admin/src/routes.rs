@@ -350,6 +350,9 @@ pub async fn queues_debug(
                     owned_replica_summary.clone(),
                 );
             }
+            if let Some(replication_timing) = observability.get("replication_timing") {
+                object.insert("replication_timing".into(), replication_timing.clone());
+            }
             object.insert(
                 "broker_cleanup_metrics".into(),
                 serde_json::to_value(server.metrics.broker().snapshot().queue_cleanup)
