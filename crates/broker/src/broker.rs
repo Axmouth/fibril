@@ -2858,6 +2858,22 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
     }
 
+    /// The lowest not-yet-settled offset for a partition: every offset below it
+    /// is consumed and gone. Live repartitioning compares this to a partition's
+    /// cutover boundary to tell when its pre-cutover backlog has drained (the
+    /// settled offset has reached the boundary).
+    pub async fn partition_lowest_unacked_offset(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Result<Offset, BrokerError> {
+        Ok(self
+            .engine
+            .lowest_unacked_offset(topic, partition.id(), group)
+            .await?)
+    }
+
     fn lock_exclusive_groups(&self) -> std::sync::MutexGuard<'_, ExclusiveGroupRouter> {
         self.exclusive_groups
             .lock()

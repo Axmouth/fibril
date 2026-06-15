@@ -266,6 +266,15 @@ impl QueueEngine for FailingPublishEngine {
         Ok(false)
     }
 
+    async fn lowest_unacked_offset(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+    ) -> Result<Offset, StromaError> {
+        Ok(0)
+    }
+
     fn metrics(&self) -> Arc<StromaMetrics> {
         Arc::new(StromaMetrics::default())
     }
@@ -447,6 +456,85 @@ async fn static_ownership_allows_owned_queue() {
         .await
         .expect("owned queue should deliver published message");
     assert_eq!(msg.message.offset, 0);
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn partition_lowest_unacked_offset_reaches_boundary_when_drained() {
+    let mut owned = StdHashSet::new();
+    owned.insert(OwnedQueue::new("drain-probe", Partition::new(0), None));
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
+
+    // Publish three messages: the cutover boundary would be the next offset, 3.
+    let (publisher, _confirms) = broker
+        .get_publisher("drain-probe", Partition::new(0), &None)
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        publisher
+            .publish(
+                b"m".to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    // Nothing settled yet: the lowest unacked offset is below the boundary.
+    let boundary: Offset = 3;
+    assert!(
+        broker
+            .partition_lowest_unacked_offset("drain-probe", Partition::new(0), None)
+            .await
+            .unwrap()
+            < boundary
+    );
+
+    // Consume and ack all three; the settled offset reaches the boundary.
+    let mut sub = broker
+        .subscribe(
+            "drain-probe",
+            Partition::new(0),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 10 },
+        )
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let msg = recv_with_timeout(&mut sub, 1000).await.expect("delivery");
+        sub.settle(SettleRequest {
+            settle_type: SettleType::Ack,
+            delivery_tag: msg.delivery_tag,
+        })
+        .await
+        .unwrap();
+    }
+
+    // Poll briefly for the ack to settle.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let settled = broker
+            .partition_lowest_unacked_offset("drain-probe", Partition::new(0), None)
+            .await
+            .unwrap();
+        if settled >= boundary {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "settled offset never reached the boundary (last={settled})"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
     broker.shutdown().await;
 }
 

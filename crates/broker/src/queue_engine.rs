@@ -228,6 +228,17 @@ pub trait QueueEngine {
         group: Option<&str>,
     ) -> Result<bool, StromaError>;
 
+    /// The lowest offset not yet settled (acked): every offset below it is
+    /// consumed and gone. Used by live repartitioning to tell when a partition
+    /// has drained its pre-cutover backlog (settled offset has reached the
+    /// cutover boundary).
+    async fn lowest_unacked_offset(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<Offset, StromaError>;
+
     fn metrics(&self) -> Arc<StromaMetrics>;
 
     fn deadline_awaker(&self) -> Arc<Notify>;
@@ -868,6 +879,15 @@ impl QueueEngine for StromaEngine {
         group: Option<&str>,
     ) -> Result<bool, StromaError> {
         self.inner.has_inflight(tp, part, group).await
+    }
+
+    async fn lowest_unacked_offset(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<Offset, StromaError> {
+        self.inner.lowest_unacked_offset(tp, part, group).await
     }
 
     fn metrics(&self) -> Arc<StromaMetrics> {
