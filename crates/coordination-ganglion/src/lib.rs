@@ -1261,6 +1261,63 @@ where
         ))
     }
 
+    /// Operator entry point for a live grow: publish the transition marker and
+    /// register the new partitions BEFORE bumping the partitioning version, so a
+    /// new partition is held (and placed) before producers cut over to it. Then
+    /// bump the version (the bump is what redirects producers to the new count).
+    ///
+    /// Order matters for correctness: marker first means any new partition that
+    /// materializes starts held, never delivering before its source old partition
+    /// has drained.
+    pub async fn grow_queue(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        new_count: u32,
+    ) -> Result<QueuePartitioning, RepartitionQueueError> {
+        let current = self.queue_partitioning(topic, group).ok_or_else(|| {
+            RepartitionQueueError::NotDeclared {
+                topic: topic.to_string(),
+                group: group.map(str::to_string),
+            }
+        })?;
+        let n_old = current.partition_count;
+        // Idempotent: already at the target count.
+        if n_old == new_count {
+            return Ok(current);
+        }
+        if new_count <= n_old || new_count % n_old.max(1) != 0 {
+            return Err(RepartitionQueueError::NotIntegerMultipleGrowth {
+                topic: topic.to_string(),
+                group: group.map(str::to_string),
+                current: n_old,
+                requested: new_count,
+            });
+        }
+        let next_version = current.partitioning_version + 1;
+        // 1. Marker first, so new partitions are held the moment they appear.
+        self.begin_repartition_transition(
+            topic,
+            group,
+            &RepartitionTransitionDoc {
+                version: next_version,
+                n_old,
+                n_new: new_count,
+            },
+        )
+        .await
+        .map_err(RepartitionQueueError::Coordination)?;
+        // 2. Register the new partitions so the controller places owners.
+        for partition in n_old..new_count {
+            let queue = QueueIdentity::new(topic, fibril_storage::Partition::new(partition), group);
+            self.register_queue(&queue)
+                .await
+                .map_err(RepartitionQueueError::Coordination)?;
+        }
+        // 3. Bump the version last: this is the routing cutover.
+        self.repartition_queue(topic, group, new_count).await
+    }
+
     pub fn runtime_settings_document(
         &self,
     ) -> Result<Option<ClusterRuntimeSettings>, OpenraftAdapterError> {
@@ -3217,6 +3274,84 @@ mod tests {
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+
+        coordination.raft_node().shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn grow_queue_bumps_version_registers_new_partitions_and_marks_transition() {
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node should start");
+        let mut members = BTreeMap::new();
+        members.insert(
+            1u64,
+            ganglion_openraft::openraft::BasicNode::new("coordinator-1"),
+        );
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("single node elects itself");
+
+        let coordination = GanglionCoordination::new("broker-a", raft_node);
+        coordination
+            .declare_queue_partitioning("orders", None, 2)
+            .await
+            .expect("declare");
+
+        // Grow 2 -> 4.
+        let grown = coordination
+            .grow_queue("orders", None, 4)
+            .await
+            .expect("grow");
+        assert_eq!(grown.partition_count, 4);
+        assert_eq!(grown.partitioning_version, 1);
+
+        // Version bump, new partitions registered, and a transition marker exist.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let part = coordination.queue_partitioning("orders", None);
+            let registered: std::collections::HashSet<u32> = coordination
+                .registered_queues()
+                .into_iter()
+                .filter(|q| q.topic.as_str() == "orders")
+                .map(|q| q.partition.id())
+                .collect();
+            let marker = coordination.repartition_transition("orders", None);
+            if part.as_ref().map(|p| p.partition_count) == Some(4)
+                && registered.is_superset(&std::collections::HashSet::from([2, 3]))
+                && marker
+                    == Some(RepartitionTransitionDoc {
+                        version: 1,
+                        n_old: 2,
+                        n_new: 4,
+                    })
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "grow never became fully visible"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        // Idempotent at the target count; non-multiple growth is rejected.
+        assert_eq!(
+            coordination
+                .grow_queue("orders", None, 4)
+                .await
+                .expect("idempotent grow")
+                .partition_count,
+            4
+        );
+        assert!(matches!(
+            coordination.grow_queue("orders", None, 6).await,
+            Err(RepartitionQueueError::NotIntegerMultipleGrowth { .. })
+        ));
 
         coordination.raft_node().shutdown().await.expect("shutdown");
     }

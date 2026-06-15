@@ -690,6 +690,89 @@ async fn repartition_transition_holds_new_partition_until_source_drains() {
 }
 
 #[tokio::test]
+async fn repartition_drain_detection_lifts_new_partition_after_old_acks() {
+    let mut owned = StdHashSet::new();
+    owned.insert(OwnedQueue::new("grow2", Partition::new(0), None));
+    owned.insert(OwnedQueue::new("grow2", Partition::new(1), None));
+    let (broker, _dir) =
+        open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
+
+    // Grow 1 -> 2. Partition 1 (new) sources from partition 0 (old).
+    broker.apply_repartition_transition("grow2", None, 1, 1, 2);
+
+    // Consumer on the old partition (so its loop exists for drain checks), and on
+    // the new partition (which starts held).
+    let mut old_sub = broker
+        .subscribe("grow2", Partition::new(0), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .await
+        .unwrap();
+    let mut new_sub = broker
+        .subscribe("grow2", Partition::new(1), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .await
+        .unwrap();
+
+    // Two pre-cutover messages in the old partition (boundary becomes 2).
+    let (pub0, _c0) = broker.get_publisher("grow2", Partition::new(0), &None).await.unwrap();
+    for _ in 0..2 {
+        pub0.publish(b"old".to_vec(), unix_millis(), unix_millis(), None, Default::default())
+            .await
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    // A post-cutover message routed to the new partition: held.
+    let (pub1, _c1) = broker.get_publisher("grow2", Partition::new(1), &None).await.unwrap();
+    pub1.publish(b"new".to_vec(), unix_millis(), unix_millis(), None, Default::default())
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+
+    // Capture the boundary; nothing acked yet, so the old partition is not drained.
+    broker.refresh_repartition_drain("grow2", None).await;
+    assert!(
+        broker.repartition_drained_reports().iter().all(|r| r.drained.is_empty()),
+        "old partition is not drained before its backlog is acked"
+    );
+    assert!(
+        recv_with_timeout(&mut new_sub, 200).await.is_none(),
+        "new partition stays held while the source has backlog"
+    );
+
+    // Drain the old partition's backlog.
+    for _ in 0..2 {
+        let msg = recv_with_timeout(&mut old_sub, 1000).await.expect("old delivery");
+        old_sub
+            .settle(SettleRequest { settle_type: SettleType::Ack, delivery_tag: msg.delivery_tag })
+            .await
+            .unwrap();
+    }
+
+    // Now drain detection reports partition 0 drained.
+    let drained = loop {
+        broker.refresh_repartition_drain("grow2", None).await;
+        let reports = broker.repartition_drained_reports();
+        if reports.iter().any(|r| r.drained.contains(&0)) {
+            break reports;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].version, 1);
+
+    // Feeding that back (as the watcher would, via the cluster drained set) lifts
+    // the new partition, which now delivers its held message.
+    broker.apply_repartition_drained("grow2", None, StdHashSet::from([0u32]));
+    let msg = recv_with_timeout(&mut new_sub, 1000)
+        .await
+        .expect("new partition delivers once drain is detected");
+    assert_eq!(msg.message.payload, b"new");
+    broker.shutdown().await;
+}
+
+#[tokio::test]
 async fn static_coordination_can_drive_broker_ownership_gate() {
     let local_node = "node-a".to_string();
     let remote_node = "node-b".to_string();
