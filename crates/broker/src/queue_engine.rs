@@ -239,6 +239,16 @@ pub trait QueueEngine {
         group: Option<&str>,
     ) -> Result<Offset, StromaError>;
 
+    /// The partition's next write offset (high-water). Live repartitioning
+    /// snapshots this at cutover as a partition's boundary: messages below it are
+    /// pre-cutover (v_old), at or above it are post-cutover (v_new).
+    async fn current_next_offset(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<Offset, StromaError>;
+
     fn metrics(&self) -> Arc<StromaMetrics>;
 
     fn deadline_awaker(&self) -> Arc<Notify>;
@@ -888,6 +898,15 @@ impl QueueEngine for StromaEngine {
         group: Option<&str>,
     ) -> Result<Offset, StromaError> {
         self.inner.lowest_unacked_offset(tp, part, group).await
+    }
+
+    async fn current_next_offset(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<Offset, StromaError> {
+        self.inner.current_next_offset(tp, part, group).await
     }
 
     fn metrics(&self) -> Arc<StromaMetrics> {

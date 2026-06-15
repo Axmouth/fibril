@@ -2874,6 +2874,21 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .await?)
     }
 
+    /// The partition's next write offset (high-water). Live repartitioning
+    /// snapshots this at cutover as the partition's boundary: the dividing line
+    /// between pre-cutover (v_old) and post-cutover (v_new) messages.
+    pub async fn partition_next_offset(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Result<Offset, BrokerError> {
+        Ok(self
+            .engine
+            .current_next_offset(topic, partition.id(), group)
+            .await?)
+    }
+
     fn lock_exclusive_groups(&self) -> std::sync::MutexGuard<'_, ExclusiveGroupRouter> {
         self.exclusive_groups
             .lock()

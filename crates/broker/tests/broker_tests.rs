@@ -275,6 +275,15 @@ impl QueueEngine for FailingPublishEngine {
         Ok(0)
     }
 
+    async fn current_next_offset(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+    ) -> Result<Offset, StromaError> {
+        Ok(0)
+    }
+
     fn metrics(&self) -> Arc<StromaMetrics> {
         Arc::new(StromaMetrics::default())
     }
@@ -487,8 +496,14 @@ async fn partition_lowest_unacked_offset_reaches_boundary_when_drained() {
             .unwrap();
     }
 
+    // The cutover boundary is the partition's next write offset (3 here).
+    let boundary = broker
+        .partition_next_offset("drain-probe", Partition::new(0), None)
+        .await
+        .unwrap();
+    assert_eq!(boundary, 3);
+
     // Nothing settled yet: the lowest unacked offset is below the boundary.
-    let boundary: Offset = 3;
     assert!(
         broker
             .partition_lowest_unacked_offset("drain-probe", Partition::new(0), None)
