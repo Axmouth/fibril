@@ -144,13 +144,42 @@ Kafka and Pulsar allow arbitrary growth but silently break key ordering across
 the remap and cannot shrink, so gated integer-multiple grow is strictly stronger
 on correctness.
 
-SHRINK (later): shrink-by-factor (N -> N/k) is the mirror. Surviving partition r
-absorbs old partitions {r, r+N_new, r+2*N_new, ...} (those p with p % N_new = r),
-still a pure partition-identity gate, no key storage. It is modestly more
-involved than grow: the removed partitions (indexes >= N_new) start FULL, so they
-must be kept consumable until their v_old backlog drains and only then retired
-(grow's new partitions start empty), and a surviving partition gates on a GROUP
-of sources rather than one. A follow-on after grow, not free with it.
+SHRINK (planned next): shrink-by-factor (N -> N/k) is the mirror. Surviving
+partition r absorbs old partitions {r, r+N_new, r+2*N_new, ...} (those p with
+p % N_new = r), still a pure partition-identity gate, no key storage. More
+involved than grow in three concrete ways:
+
+1. OFFSET-GATED hold, not whole-partition. A surviving partition keeps existing
+   AND must deliver its own pre-cutover backlog (offset < boundary_r) so it can
+   drain, while holding its post-cutover messages (offset >= boundary_r) until
+   the merge is safe. So the grow gate (whole-partition delivery_held bool) does
+   NOT apply, holding a surviving partition entirely would deadlock its own
+   drain. Replace/augment with a `hold_above_offset` gate (an AtomicU64 boundary,
+   sentinel = no hold): the delivery loop delivers messages below it and stops at
+   the first message at/above it. This UNIFIES with grow, a new partition is just
+   hold_above_offset = 0 (hold everything), so both directions share one gate.
+2. MULTI-SOURCE drain. A surviving partition r lifts its hold only once ALL its
+   merge sources {r, r+N_new, ...} have drained their pre-cutover backlog (r's own
+   drain is settled_until(r) >= boundary_r; the others via the same drain label).
+3. REMOVED partitions start FULL. Partitions >= N_new must stay consumable until
+   their backlog drains and only then retire (grow's new partitions start empty).
+   Client side: a shrinking consumer must KEEP consuming a removed partition until
+   it is retired, then drop it (the broker closing the retired partition's stream
+   is the natural signal). This is why auto-resub (below) is the foundation for
+   both directions.
+
+## Client auto-resubscribe on partition-count change
+
+The client builds its fan-in ONCE at subscribe time from the topology cache
+(partition_set), so a running consumer never picks up partitions added by a grow
+(or sheds ones removed by a shrink). Auto-resub makes the fan-in DYNAMIC: a
+manager task watches the topology partition_count and, on growth, subscribes to
+the newly appeared partitions and merges their streams into the same output; on
+shrink, a removed partition's stream ends naturally when the broker retires it,
+so the forwarder just exits. The manager periodically refreshes topology (a pure
+consumer otherwise has no reason to refresh, so it would never notice a grow) and
+stops when the subscription is dropped (its output sender's closed() resolves).
+This is the foundation both grow and shrink need to be usable end to end.
 
 ESCAPE HATCH (not a one-way door): the integer-multiple gate leaves no persistent
 artifact, it changes no storage format, message schema, or hash function. After a
