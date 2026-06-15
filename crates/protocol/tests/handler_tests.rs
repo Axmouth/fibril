@@ -26,15 +26,14 @@ use fibril_broker::{
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, ContentType, DeclareQueue, DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ErrorMsg,
-    Hello, HelloOk, Nack, Op,
-    PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction,
-    ReconcileClient, ReconcilePolicy, ReconcileResult, ReconcileSubscription, ReplicationApply,
-    ReplicationApplyOk, ReplicationCheckpointExport, ReplicationCheckpointExportOk,
-    ReplicationCheckpointInstall, ReplicationCheckpointInstallOk, ReplicationCheckpointRequired,
-    ReplicationEventApplyBatch, ReplicationEventRead, ReplicationEventRecord,
-    ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationMessageRecord,
-    ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome,
-    Subscribe, TopologyOk, TopologyRequest,
+    Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy,
+    QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
+    ReconcileSubscription, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
+    ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
+    ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
+    ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
+    ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
+    ResumeIdentity, ResumeOutcome, Subscribe, TopologyOk, TopologyRequest,
     frame::{Frame, ProtoCodec},
     handler::{
         ClientTopologySource, ConnectionSettings, QueueDeclareCoordinator, handle_connection,
@@ -1959,6 +1958,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
             1,
+            ReplicationDurabilityPolicy::LocalDurable,
             &live,
             8,
         )
@@ -2132,6 +2132,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
             1,
+            ReplicationDurabilityPolicy::LocalDurable,
             &live,
             8,
         )
@@ -2179,6 +2180,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
             1,
+            ReplicationDurabilityPolicy::LocalDurable,
             &live_after_death,
             8,
         )
@@ -2329,6 +2331,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
             1,
+            ReplicationDurabilityPolicy::LocalDurable,
             &live,
             8,
         )
@@ -2350,6 +2353,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
             1,
+            ReplicationDurabilityPolicy::LocalDurable,
             &live_without_owner,
             8,
         )

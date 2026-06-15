@@ -17,10 +17,12 @@ fi
 extract_config() {
   local key="$1"
   local file="$2"
-  grep -m1 '^Steady benchmark:' "$file" \
-    | tr ',' '\n' \
-    | sed -n "s/.*${key}=//p" \
-    | head -n1
+  local line
+  line="$(grep -m1 '^Steady benchmark:' "$file" || true)"
+  if [[ "$line" != *"${key}="* ]]; then
+    return
+  fi
+  sed -E "s/^.*${key}=//; s/, [[:alpha:]_][[:alnum:]_]*=.*$//" <<<"$line"
 }
 
 extract_value() {
@@ -66,6 +68,20 @@ format_mode() {
   else
     printf 'unconfirmed'
   fi
+}
+
+format_durability() {
+  local file="$1"
+  local durability
+  durability="$(extract_config "durability" "$file")"
+  printf '%s' "${durability:-unknown}"
+}
+
+format_topic() {
+  local file="$1"
+  local topic
+  topic="$(extract_config "topic" "$file")"
+  printf '%s' "${topic:-unknown}"
 }
 
 format_errors() {
@@ -116,8 +132,8 @@ format_queue() {
   fi
 }
 
-printf '| Case | Mode | Target | Actual | Missing | publish→deliver p50/p95/p99/max | server-receive→deliver p50/p95/p99/max | Errors | Server RSS avg/peak | End queue |\n'
-printf '| --- | --- | ---: | ---: | ---: | --- | --- | ---: | --- | --- |\n'
+printf '| Case | Mode | Durability | Topic | Target | Actual | Missing | publish→deliver p50/p95/p99/max | server-receive→deliver p50/p95/p99/max | Errors | Server RSS avg/peak | End queue |\n'
+printf '| --- | --- | --- | --- | ---: | ---: | ---: | --- | --- | ---: | --- | --- |\n'
 
 for file in "$@"; do
   case_name="$(basename "$file" .results.txt)"
@@ -125,9 +141,11 @@ for file in "$@"; do
   actual="$(extract_value "Actual measured publish rate" "$file")"
   missing="$(extract_value "Measured missing" "$file")"
 
-  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+  printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
     "$case_name" \
     "$(format_mode "$file")" \
+    "$(format_durability "$file")" \
+    "$(format_topic "$file")" \
     "$(format_rate "$target")" \
     "$(format_rate "$actual")" \
     "${missing:-n/a}" \

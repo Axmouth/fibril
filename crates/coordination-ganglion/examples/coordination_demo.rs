@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use fibril_broker::coordination::{
     Coordination, DeterministicPartitionPlacement, NodeInfo, QueueIdentity,
+    ReplicationDurabilityPolicy,
 };
 use fibril_broker::Partition;
 use fibril_coordination_ganglion::GanglionCoordination;
@@ -95,6 +96,7 @@ impl Playground {
                 &DeterministicPartitionPlacement,
                 &self.queues,
                 1,
+                ReplicationDurabilityPolicy::LocalDurable,
                 &self.live,
                 8,
             )

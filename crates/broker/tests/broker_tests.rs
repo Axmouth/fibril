@@ -244,6 +244,16 @@ impl QueueEngine for FailingPublishEngine {
         Ok(())
     }
 
+    async fn become_queue_owner_with_epoch(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+        _epoch: u64,
+    ) -> Result<(), StromaError> {
+        Ok(())
+    }
+
     async fn unmaterialize(
         &self,
         _tp: &str,
@@ -714,37 +724,70 @@ async fn repartition_drain_detection_lifts_new_partition_after_old_acks() {
     // Consumer on the old partition (so its loop exists for drain checks), and on
     // the new partition (which starts held).
     let mut old_sub = broker
-        .subscribe("grow2", Partition::new(0), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .subscribe(
+            "grow2",
+            Partition::new(0),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 10 },
+        )
         .await
         .unwrap();
     let mut new_sub = broker
-        .subscribe("grow2", Partition::new(1), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .subscribe(
+            "grow2",
+            Partition::new(1),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 10 },
+        )
         .await
         .unwrap();
 
     // Two pre-cutover messages in the old partition (boundary becomes 2).
-    let (pub0, _c0) = broker.get_publisher("grow2", Partition::new(0), &None).await.unwrap();
+    let (pub0, _c0) = broker
+        .get_publisher("grow2", Partition::new(0), &None)
+        .await
+        .unwrap();
     for _ in 0..2 {
-        pub0.publish(b"old".to_vec(), unix_millis(), unix_millis(), None, Default::default())
-            .await
-            .unwrap()
-            .await
-            .unwrap()
-            .unwrap();
-    }
-    // A post-cutover message routed to the new partition: held.
-    let (pub1, _c1) = broker.get_publisher("grow2", Partition::new(1), &None).await.unwrap();
-    pub1.publish(b"new".to_vec(), unix_millis(), unix_millis(), None, Default::default())
+        pub0.publish(
+            b"old".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
         .await
         .unwrap()
         .await
         .unwrap()
         .unwrap();
+    }
+    // A post-cutover message routed to the new partition: held.
+    let (pub1, _c1) = broker
+        .get_publisher("grow2", Partition::new(1), &None)
+        .await
+        .unwrap();
+    pub1.publish(
+        b"new".to_vec(),
+        unix_millis(),
+        unix_millis(),
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
 
     // Capture the boundary; nothing acked yet, so the old partition is not drained.
     broker.refresh_repartition_drain("grow2", None).await;
     assert!(
-        broker.repartition_drained_reports().iter().all(|r| r.drained.is_empty()),
+        broker
+            .repartition_drained_reports()
+            .iter()
+            .all(|r| r.drained.is_empty()),
         "old partition is not drained before its backlog is acked"
     );
     assert!(
@@ -754,9 +797,14 @@ async fn repartition_drain_detection_lifts_new_partition_after_old_acks() {
 
     // Drain the old partition's backlog.
     for _ in 0..2 {
-        let msg = recv_with_timeout(&mut old_sub, 1000).await.expect("old delivery");
+        let msg = recv_with_timeout(&mut old_sub, 1000)
+            .await
+            .expect("old delivery");
         old_sub
-            .settle(SettleRequest { settle_type: SettleType::Ack, delivery_tag: msg.delivery_tag })
+            .settle(SettleRequest {
+                settle_type: SettleType::Ack,
+                delivery_tag: msg.delivery_tag,
+            })
             .await
             .unwrap();
     }
@@ -792,20 +840,41 @@ async fn shrink_survivor_holds_moved_key_until_removed_source_drains() {
         open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
 
     // Pre-cutover backlog in the removed partition (1), which merges into 0.
-    let (pub1, _c1) = broker.get_publisher("merge", Partition::new(1), &None).await.unwrap();
-    pub1.publish(b"old1".to_vec(), unix_millis(), unix_millis(), None, Default::default())
+    let (pub1, _c1) = broker
+        .get_publisher("merge", Partition::new(1), &None)
         .await
-        .unwrap()
-        .await
-        .unwrap()
         .unwrap();
+    pub1.publish(
+        b"old1".to_vec(),
+        unix_millis(),
+        unix_millis(),
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
 
     let mut survivor = broker
-        .subscribe("merge", Partition::new(0), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .subscribe(
+            "merge",
+            Partition::new(0),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 10 },
+        )
         .await
         .unwrap();
     let mut removed = broker
-        .subscribe("merge", Partition::new(1), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .subscribe(
+            "merge",
+            Partition::new(1),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 10 },
+        )
         .await
         .unwrap();
 
@@ -815,22 +884,36 @@ async fn shrink_survivor_holds_moved_key_until_removed_source_drains() {
 
     // A post-cutover message routed to the survivor (a moved key): held until the
     // removed source drains.
-    let (pub0, _c0) = broker.get_publisher("merge", Partition::new(0), &None).await.unwrap();
-    pub0.publish(b"moved".to_vec(), unix_millis(), unix_millis(), None, Default::default())
+    let (pub0, _c0) = broker
+        .get_publisher("merge", Partition::new(0), &None)
         .await
-        .unwrap()
-        .await
-        .unwrap()
         .unwrap();
+    pub0.publish(
+        b"moved".to_vec(),
+        unix_millis(),
+        unix_millis(),
+        None,
+        Default::default(),
+    )
+    .await
+    .unwrap()
+    .await
+    .unwrap()
+    .unwrap();
     assert!(
         recv_with_timeout(&mut survivor, 300).await.is_none(),
         "survivor holds the moved key while the removed source has backlog"
     );
 
     // Drain the removed partition's backlog.
-    let msg = recv_with_timeout(&mut removed, 1000).await.expect("removed delivery");
+    let msg = recv_with_timeout(&mut removed, 1000)
+        .await
+        .expect("removed delivery");
     removed
-        .settle(SettleRequest { settle_type: SettleType::Ack, delivery_tag: msg.delivery_tag })
+        .settle(SettleRequest {
+            settle_type: SettleType::Ack,
+            delivery_tag: msg.delivery_tag,
+        })
         .await
         .unwrap();
 
@@ -866,7 +949,13 @@ async fn shrink_hold_delivers_below_boundary_and_holds_above() {
         open_test_broker_with_ownership(Arc::new(StaticQueueOwnership::new(owned))).await;
 
     let mut sub = broker
-        .subscribe("survivor", Partition::new(0), None, Uuid::now_v7(), ConsumerConfig { prefetch: 10 })
+        .subscribe(
+            "survivor",
+            Partition::new(0),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 10 },
+        )
         .await
         .unwrap();
 
@@ -880,7 +969,13 @@ async fn shrink_hold_delivers_below_boundary_and_holds_above() {
         .unwrap();
     for _ in 0..4 {
         publisher
-            .publish(b"m".to_vec(), unix_millis(), unix_millis(), None, Default::default())
+            .publish(
+                b"m".to_vec(),
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
             .await
             .unwrap()
             .await
@@ -1672,12 +1767,9 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
         ),
         "stale-epoch message batch must be rejected: {apply:?}"
     );
-    assert!(
-        matches!(
-            apply.event_log,
-            Some(ReplicatedAppendOutcome::StaleEpoch { .. })
-        ),
-        "stale-epoch event batch must be rejected: {apply:?}"
+    assert_eq!(
+        apply.event_log, None,
+        "event batch must not append after stale message batch rejection: {apply:?}"
     );
 
     // The owner reaches the fenced epoch (e.g. it holds the new assignment):
@@ -1701,6 +1793,82 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
         matches!(apply.message_log, Some(ReplicatedAppendOutcome::Applied(_))),
         "fenced-epoch batch must apply: {apply:?}"
     );
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn catch_up_rejects_stale_append_without_recording_ready_state() {
+    let topic = "stale-catchup";
+
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (publisher, _confirms) = owner
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
+    let reply = publisher
+        .publish(
+            b"stale-payload".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let (follower, _follower_dir) = open_test_broker().await;
+    follower
+        .become_replication_follower_with_epoch(topic, Partition::new(0), None, 2)
+        .await
+        .unwrap();
+
+    let err = follower
+        .catch_up_replication_follower_from_owner(
+            &owner,
+            topic,
+            Partition::new(0),
+            None,
+            BrokerReplicationCatchUpOptions {
+                max_messages_per_read: 10,
+                max_events_per_read: 10,
+                max_iterations: 1,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("stale owner batch must not advance follower progress");
+
+    assert!(matches!(
+        err,
+        BrokerError::InvalidReplicationProgress {
+            stream: "message",
+            ..
+        }
+    ));
+
+    let snapshot = follower.debug_snapshot().await.unwrap();
+    let queue = snapshot
+        .queues
+        .iter()
+        .find(|queue| queue.topic == topic && queue.partition == 0 && queue.group.is_none())
+        .expect("stale catch-up should have materialized the follower queue");
+    assert_eq!(queue.role, QueueRole::Follower);
+    assert_eq!(queue.state.ready_count, 0);
+
+    let not_promoted = follower
+        .promote_replication_follower_if_caught_up(topic, Partition::new(0), None, 1, 1)
+        .await
+        .unwrap();
+    assert!(matches!(
+        not_promoted,
+        QueuePromotionOutcome::MessageLogBehind {
+            local_next_offset: 0,
+            expected_next_offset: 1,
+        }
+    ));
 
     owner.shutdown().await;
     follower.shutdown().await;
@@ -2170,6 +2338,49 @@ async fn owner_replication_read_returns_published_records() {
     };
     assert_eq!(events.requested_offset, 0);
     assert_eq!(events.next_offset, 1);
+    assert_eq!(events.records.len(), 1);
+
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn cold_owner_materializes_at_cached_assignment_epoch() {
+    let topic = "assigned-cold-owner";
+    let (broker, _dir) = open_test_broker().await;
+    let queue = QueueIdentity::new(topic, Partition::new(0), None);
+    broker.cache_queue_assignment(&PartitionAssignment::new(queue, "node-a", Vec::new(), 7));
+
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
+    let reply = publisher
+        .publish(
+            b"epoch-seven".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let records = broker
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 10, 10)
+        .await
+        .unwrap();
+
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("expected message records, got checkpoint required");
+    };
+    assert_eq!(messages.epoch, 7);
+    assert_eq!(messages.records.len(), 1);
+
+    let OwnerReplicationRead::Batch(events) = records.events else {
+        panic!("expected event records, got checkpoint required");
+    };
+    assert_eq!(events.epoch, 7);
     assert_eq!(events.records.len(), 1);
 
     broker.shutdown().await;
@@ -2814,6 +3025,124 @@ async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
             message_next_offset: 3,
             event_next_offset: 3,
         })
+    );
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
+#[tokio::test]
+async fn checkpoint_aware_catch_up_repairs_overlapping_local_prefix() {
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+    let topic = "checkpoint-overlap";
+    let partition = Partition::new(0);
+
+    let (stale_publisher, _stale_confirms) = follower
+        .get_publisher(topic, partition, &None)
+        .await
+        .unwrap();
+    let stale_reply = stale_publisher
+        .publish(
+            b"stale local data".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    stale_reply.await.unwrap().unwrap();
+
+    follower
+        .become_replication_follower_with_epoch(topic, partition, None, 1)
+        .await
+        .unwrap();
+    owner
+        .advance_replication_epoch(topic, partition, None, 1)
+        .await
+        .unwrap();
+
+    let (publisher, _confirms) = owner.get_publisher(topic, partition, &None).await.unwrap();
+    for payload in [
+        b"owner one".to_vec(),
+        b"owner two".to_vec(),
+        b"owner three".to_vec(),
+    ] {
+        let reply = publisher
+            .publish(
+                payload,
+                unix_millis(),
+                unix_millis(),
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        reply.await.unwrap().unwrap();
+    }
+
+    let outcome = follower
+        .catch_up_replication_follower_from_owner_with_checkpoint(
+            &owner,
+            topic,
+            partition,
+            None,
+            BrokerReplicationCatchUpOptions {
+                max_messages_per_read: 10,
+                max_events_per_read: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let BrokerReplicationCatchUp::CaughtUp(progress) = outcome else {
+        panic!("overlapping prefix should be repaired by checkpoint install");
+    };
+    assert_eq!(progress.message_next_offset, 3);
+    assert_eq!(progress.event_next_offset, 3);
+
+    let promotion = follower
+        .promote_replication_follower_if_caught_up(topic, partition, None, 3, 3)
+        .await
+        .unwrap();
+    assert!(matches!(
+        promotion,
+        QueuePromotionOutcome::Promoted {
+            message_next_offset: 3,
+            event_next_offset: 3,
+            applied_event_offset: Some(2),
+        }
+    ));
+
+    let mut sub = follower
+        .subscribe(
+            topic,
+            partition,
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 3 },
+        )
+        .await
+        .unwrap();
+    let mut payloads = Vec::new();
+    for _ in 0..3 {
+        payloads.push(
+            recv_with_timeout(&mut sub, 1000)
+                .await
+                .expect("checkpoint-repaired message should deliver")
+                .message
+                .payload,
+        );
+    }
+    assert_eq!(
+        payloads,
+        vec![
+            b"owner one".to_vec(),
+            b"owner two".to_vec(),
+            b"owner three".to_vec(),
+        ]
     );
 
     owner.shutdown().await;

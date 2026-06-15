@@ -168,6 +168,31 @@ involved than grow in three concrete ways:
    is the natural signal). This is why auto-resub (below) is the foundation for
    both directions.
 
+CHOREOGRAPHY (correctness ordering, the part to get right when wiring):
+- Grow tolerates a ~1-tick lag between the version bump and a new partition being
+  held, because new partitions start empty with no consumers (and the subscribe
+  path starts them held). Shrink does NOT: a surviving partition is already live
+  with consumers, so if the bump routes moved keys to it before it is held, it
+  could deliver a moved key ahead of that key draining from its old partition.
+- So shrink must: (1) write the marker, (2) wait until survivors are actually
+  held (hold_above set) on their owners, (3) only THEN bump the version. A short
+  grace (a couple of watcher ticks) between marker and bump is the pragmatic v1;
+  a stricter version has owners ack "held" before the leader bumps.
+- Survivor hold sequence: on seeing the marker, a survivor first sets
+  hold_above_offset = 0 (hold everything) so nothing slips through, then the next
+  drain refresh captures its boundary (= next_offset at that point) and relaxes
+  hold_above to that boundary so it can deliver and drain its own pre-cutover
+  backlog. Lift (hold_above = None) once ALL its merge sources have drained.
+
+REMAINING WIRING (shrink, after the gate which is DONE): a shrink_queue trigger
+(factor validation, marker-first with the grace before the version bump, no new
+registration), direction-aware apply_repartition_transition /
+refresh_repartition_drain / apply_repartition_drained in the broker (grow holds
+p >= n_old whole; shrink holds p < n_new above-boundary and treats every p < n_old
+as a drain source), and removed-partition retirement/deregistration deferred
+(safe to leave them draining). The watcher and the drain label/aggregation are
+already direction-agnostic.
+
 ## Client auto-resubscribe on partition-count change
 
 The client builds its fan-in ONCE at subscribe time from the topology cache
@@ -195,6 +220,53 @@ real transition cost while doubling stays a single clean step. The one standing
 commitment is keeping modulo hashing (which we already use); only switching to
 consistent hashing would invalidate the fast path, and that would force a
 repartitioning redesign regardless.
+
+## Replication safety
+
+### Follower progress is local-append progress
+
+Owner reads are only proposals from the follower's point of view. A follower can
+advance its durable replication cursor only after its own local append path
+accepts the owner batch. This matters for gaps, overlaps, stale epochs, and
+future prefix-validation failures. If the broker advanced from owner-read
+offsets alone, a follower could report itself caught up without actually having
+the corresponding local durable records.
+
+This also keeps the durability contract honest. Replica-durable confirm waits on
+what followers have accepted durably, not on what the owner attempted to send.
+
+### Replicated events cannot outrun replicated messages
+
+Stroma queue state is derived from events, but a ready/delivered/settled event is
+not meaningful unless the payload it references is present and accepted in the
+message log. Replication therefore applies in this order:
+
+1. append replicated messages
+2. append replicated events only if the message append was accepted
+3. mutate in-memory queue state only if the event append was accepted
+
+This prevents a follower from having in-memory state that says "offset N is
+ready" while payload N is missing, stale, or from a different owner history. It
+is intentionally conservative. A rejected message batch means the paired event
+batch is skipped for that pull and the follower must repair or retry through a
+safe path.
+
+### Overlap is a checkpoint repair until Keratin can validate prefixes
+
+Keratin's default replicated append mode rejects partial overlap. That is the
+right default because "I already have offsets 0..10" does not prove that those
+bytes are identical to the new owner's offsets 0..10. Accepting a suffix over an
+unknown prefix would silently bless divergence.
+
+The broker's checkpoint-aware catch-up treats overlap or gap as a repair signal:
+install the owner's queue-state checkpoint, reset local follower logs to the
+checkpoint continuation, then resume pulling records. `AlreadyPresent` remains
+an idempotence outcome only. It advances over the owner-returned range, not to
+the follower's full local tail.
+
+Future improvement: Keratin can expose prefix hash/CRC validation for overlap.
+Once the existing prefix is proven byte-identical, a suffix append can be safe
+without checkpoint reset.
 
 ## Dependency boundaries
 

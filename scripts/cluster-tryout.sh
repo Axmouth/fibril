@@ -11,6 +11,9 @@
 #   scripts/cluster-tryout.sh --nodes 21 --ganglion --summary
 #   scripts/cluster-tryout.sh --nodes 21 --ganglion --summary --port-offset 4000
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --dynamic-membership
+#   scripts/cluster-tryout.sh --nodes 3 --ganglion --replica-durable
+#   scripts/cluster-tryout.sh --nodes 3 --ganglion --replica-durable --failover-smoke
+#   scripts/cluster-tryout.sh --nodes 3 --ganglion --steady-bench
 #   scripts/cluster-tryout.sh --nodes 100 --ganglion --summary --resource-summary --admin-wait-secs 5 --cluster-wait-secs 90
 #   scripts/cluster-tryout.sh --keep       # leave the cluster running to play with
 #
@@ -27,6 +30,10 @@ SUMMARY=false
 PORT_OFFSET=""
 RESOURCE_SUMMARY=false
 DYNAMIC_MEMBERSHIP=false
+STEADY_BENCH=false
+BENCH_TOPIC="orders"
+ASSIGNMENT_DURABILITY=""
+FAILOVER_SMOKE=false
 ADMIN_WAIT_SECS=5
 CLUSTER_WAIT_SECS=90
 # Keep wide spacing between port bands so large local clusters do not make
@@ -46,6 +53,11 @@ while [[ $# -gt 0 ]]; do
     --port-offset) PORT_OFFSET="$2"; shift 2 ;;
     --resource-summary) RESOURCE_SUMMARY=true; shift ;;
     --dynamic-membership) GANGLION=true; DYNAMIC_MEMBERSHIP=true; shift ;;
+    --steady-bench) STEADY_BENCH=true; shift ;;
+    --bench-topic) BENCH_TOPIC="$2"; shift 2 ;;
+    --replica-durable) GANGLION=true; ASSIGNMENT_DURABILITY="replica_durable:2"; shift ;;
+    --assignment-durability) GANGLION=true; ASSIGNMENT_DURABILITY="$2"; shift 2 ;;
+    --failover-smoke) GANGLION=true; FAILOVER_SMOKE=true; shift ;;
     --admin-wait-secs) ADMIN_WAIT_SECS="$2"; shift 2 ;;
     --cluster-wait-secs) CLUSTER_WAIT_SECS="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -58,6 +70,18 @@ if ! [[ "$ADMIN_WAIT_SECS" =~ ^[0-9]+$ ]] || [[ "$ADMIN_WAIT_SECS" -lt 1 ]]; the
 fi
 if ! [[ "$CLUSTER_WAIT_SECS" =~ ^[0-9]+$ ]] || [[ "$CLUSTER_WAIT_SECS" -lt 1 ]]; then
   echo "FAIL: --cluster-wait-secs must be a positive integer" >&2
+  exit 2
+fi
+if [[ -z "$BENCH_TOPIC" ]]; then
+  echo "FAIL: --bench-topic must not be empty" >&2
+  exit 2
+fi
+if [[ -n "$ASSIGNMENT_DURABILITY" && "$ASSIGNMENT_DURABILITY" =~ ^replica_ && "$NODES" -lt 2 ]]; then
+  echo "FAIL: replica assignment durability needs at least two nodes" >&2
+  exit 2
+fi
+if [[ "$FAILOVER_SMOKE" == true && "$NODES" -lt 3 ]]; then
+  echo "FAIL: --failover-smoke needs at least three nodes so raft keeps quorum after one death" >&2
   exit 2
 fi
 
@@ -308,10 +332,18 @@ for i in $(seq 1 "$EXPECTED_PROCESSES"); do
   done
 done
 
-echo "building fibril-server and fibrilctl..."
-cargo build --quiet -p fibril -p fibril-cli
-SERVER=target/debug/fibril-server
-CTL=target/debug/fibrilctl
+if [[ "$STEADY_BENCH" == true ]]; then
+  echo "building release fibril-server, fibrilctl, and steady_c..."
+  cargo build --quiet --release -p fibril -p fibril-cli
+  cargo build --quiet --release -p fibril-benches --bin steady_c
+  SERVER=target/release/fibril-server
+  CTL=target/release/fibrilctl
+else
+  echo "building fibril-server and fibrilctl..."
+  cargo build --quiet -p fibril -p fibril-cli
+  SERVER=target/debug/fibril-server
+  CTL=target/debug/fibrilctl
+fi
 
 PEERS=""
 if [[ "$GANGLION" == true ]]; then
@@ -337,6 +369,9 @@ start_node() {
       "FIBRIL_COORDINATION_LISTEN=127.0.0.1:$((BASE_RAFT_PORT + i))"
       "FIBRIL_COORDINATION_PEERS=$PEERS"
     )
+    if [[ -n "$ASSIGNMENT_DURABILITY" ]]; then
+      env_vars+=("FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY=$ASSIGNMENT_DURABILITY")
+    fi
     if [[ "$i" -eq 1 ]]; then
       env_vars+=("FIBRIL_COORDINATION_BOOTSTRAP=true")
     fi
@@ -426,6 +461,239 @@ current_leader_id() {
   exit 1
 }
 
+topology_from_any_live_node() {
+  local i json
+  for i in $(seq 1 "$NODES"); do
+    if [[ -n "${PIDS[$((i - 1))]:-}" ]] && ! kill -0 "${PIDS[$((i - 1))]}" 2>/dev/null; then
+      continue
+    fi
+    json="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + i))" admin topology --json 2>/dev/null || true)"
+    if [[ -n "$json" && "$json" != "{}" ]]; then
+      echo "$json"
+      return 0
+    fi
+  done
+  return 1
+}
+
+assignment_for_topic_from_json() {
+  local json="$1"
+  local topic="$2"
+  echo "$json" | jq -c --arg topic "$topic" \
+    '.coordination.assignments[]? | select(.topic == $topic and .partition == 0 and (.group == null))' \
+    | sed -n '1p'
+}
+
+wait_assignment_for_topic() {
+  local topic="$1"
+  local last=""
+  local json=""
+  for attempt in $(seq 1 "$(cluster_attempts)"); do
+    json="$(topology_from_any_live_node || true)"
+    if [[ -n "$json" ]]; then
+      last="$(assignment_for_topic_from_json "$json" "$topic")"
+      if [[ -n "$last" ]]; then
+        echo "$last"
+        return 0
+      fi
+    fi
+    sleep 0.3
+  done
+  echo "FAIL: controller never assigned topic '$topic'; last seen: $last" >&2
+  return 1
+}
+
+wait_assignment_owner_change() {
+  local topic="$1"
+  local old_owner="$2"
+  local assignment=""
+  local owner=""
+  for attempt in $(seq 1 "$(cluster_attempts)"); do
+    assignment="$(wait_assignment_for_topic "$topic" 2>/dev/null || true)"
+    if [[ -n "$assignment" ]]; then
+      owner="$(echo "$assignment" | jq -r '.owner // empty')"
+      if [[ -n "$owner" && "$owner" != "$old_owner" ]]; then
+        echo "$assignment"
+        return 0
+      fi
+    fi
+    sleep 0.3
+  done
+  echo "FAIL: assignment for '$topic' did not move away from $old_owner" >&2
+  return 1
+}
+
+assignment_durability_label() {
+  local assignment="$1"
+  local mode nodes
+  mode="$(echo "$assignment" | jq -r '.durability.mode // "cluster-routed"')"
+  nodes="$(echo "$assignment" | jq -r '.durability.nodes // empty')"
+  if [[ -n "$nodes" ]]; then
+    echo "$mode:$nodes"
+  else
+    echo "$mode"
+  fi
+}
+
+wait_follower_progress() {
+  local follower_node="$1"
+  local topic="$2"
+  local min_message_next="$3"
+  local min_event_next="$4"
+  local admin_port=$((BASE_ADMIN_PORT + follower_node))
+  local last=""
+  local json=""
+  for attempt in $(seq 1 "$(cluster_attempts)"); do
+    json="$(curl -sf "http://127.0.0.1:$admin_port/admin/api/queues_debug" 2>/dev/null || true)"
+    if [[ -n "$json" ]]; then
+      last="$(echo "$json" | jq -c --arg topic "$topic" \
+        '.replication_followers[]? | select(.topic == $topic and .partition == 0 and (.group == null))' \
+        | sed -n '1p')"
+      if [[ -n "$last" ]] && echo "$last" | jq -e \
+        --argjson min_message_next "$min_message_next" \
+        --argjson min_event_next "$min_event_next" \
+        '.state != null and (.state.message_next_offset >= $min_message_next) and (.state.event_next_offset >= $min_event_next)' >/dev/null; then
+        echo "$last"
+        return 0
+      fi
+    fi
+    sleep 0.3
+  done
+  echo "FAIL: follower broker-$follower_node did not reach message_next>=$min_message_next event_next>=$min_event_next for '$topic'; last seen: $last" >&2
+  return 1
+}
+
+run_steady_benchmark() {
+  local broker_node="$1"
+  local admin_node="$2"
+  local durability="$3"
+  local broker_addr="127.0.0.1:$((BASE_BROKER_PORT + broker_node))"
+  local admin_addr="127.0.0.1:$((BASE_ADMIN_PORT + admin_node))"
+  local bench_dir="$RUN_DIR/steady-bench"
+  local results_file="$bench_dir/results.txt"
+  local log_file="$bench_dir/bench.log"
+  local summary_file="$bench_dir/summary.md"
+
+  mkdir -p "$bench_dir"
+  echo
+  echo "running steady benchmark against live tryout cluster..."
+  echo "  topic=$BENCH_TOPIC broker=broker-$broker_node($broker_addr) admin=broker-$admin_node($admin_addr) durability=$durability"
+  if ! env \
+    START_SERVER=0 \
+    BUILD=0 \
+    BROKER_ADDR="$broker_addr" \
+    ADMIN_ADDR="$admin_addr" \
+    TOPIC="$BENCH_TOPIC" \
+    DURABILITY_LABEL="$durability" \
+    LOG_FILE="$log_file" \
+    RESULTS_FILE="$results_file" \
+    scripts/bench-steady-c.sh; then
+    echo "FAIL: steady benchmark failed" >&2
+    return 1
+  fi
+  scripts/bench-results-table.sh "$results_file" >"$summary_file"
+  echo "  steady benchmark summary: $summary_file"
+  sed -n '1,4p' "$summary_file"
+}
+
+run_failover_smoke() {
+  local topic="${BENCH_TOPIC}-failover"
+  local assignment=""
+  local durability_mode=""
+  local owner=""
+  local owner_node=""
+  local follower=""
+  local follower_node=""
+  local publish_node=1
+  local payload="failover-pre-$RANDOM-$RANDOM"
+  local post_payload="failover-post-$RANDOM-$RANDOM"
+  local owner_pid=""
+  local reassigned=""
+  local new_owner=""
+  local new_owner_node=""
+
+  echo
+  echo "running replica failover smoke with topic '$topic'..."
+  if ! "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + 1))" queue declare "$topic" >/dev/null; then
+    echo "FAIL: failover smoke failed to declare topic '$topic'" >&2
+    return 1
+  fi
+  assignment="$(wait_assignment_for_topic "$topic")"
+  echo "  initial assignment: $assignment"
+
+  durability_mode="$(echo "$assignment" | jq -r '.durability.mode // "local_durable"')"
+  if [[ "$durability_mode" != "replica_durable" && "$durability_mode" != "majority_durable" ]]; then
+    echo "FAIL: failover smoke needs durable replica assignment, got $durability_mode" >&2
+    return 1
+  fi
+
+  owner="$(echo "$assignment" | jq -r '.owner')"
+  follower="$(echo "$assignment" | jq -r '.followers[0] // empty')"
+  if [[ -z "$follower" ]]; then
+    echo "FAIL: failover smoke assignment has no follower: $assignment" >&2
+    return 1
+  fi
+  owner_node="${owner#broker-}"
+  follower_node="${follower#broker-}"
+  if ! [[ "$owner_node" =~ ^[0-9]+$ && "$follower_node" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: failover smoke owner/follower ids are not broker-N: owner=$owner follower=$follower" >&2
+    return 1
+  fi
+  if [[ "$publish_node" -eq "$owner_node" ]]; then
+    publish_node=2
+  fi
+
+  echo "  publishing 10 pre-failover messages through broker-$publish_node"
+  for n in $(seq 1 10); do
+    if ! "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + publish_node))" \
+      queue publish "$topic" --message "$payload" >/dev/null; then
+      echo "FAIL: failover smoke failed to publish pre-failover message $n" >&2
+      return 1
+    fi
+  done
+
+  echo "  waiting for follower $follower to apply replicated messages..."
+  wait_follower_progress "$follower_node" "$topic" 10 10 >/dev/null || return 1
+
+  echo "  waiting one broker heartbeat so follower tails reach coordination state..."
+  sleep 4
+
+  owner_pid="${PIDS[$((owner_node - 1))]}"
+  echo "  killing owner $owner pid=$owner_pid"
+  kill "$owner_pid" 2>/dev/null || true
+  wait "$owner_pid" 2>/dev/null || true
+
+  echo "  waiting for assignment to move away from $owner..."
+  reassigned="$(wait_assignment_owner_change "$topic" "$owner")"
+  echo "  failover assignment: $reassigned"
+  new_owner="$(echo "$reassigned" | jq -r '.owner')"
+  new_owner_node="${new_owner#broker-}"
+  if ! [[ "$new_owner_node" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: failover owner is not broker-N: $new_owner" >&2
+    return 1
+  fi
+
+  echo "  consuming pre-failover replicated messages through new owner $new_owner"
+  if ! "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + new_owner_node))" \
+    queue consume "$topic" --count 10 --timeout-ms 20000 --expect "$payload" >/dev/null; then
+    echo "FAIL: failover smoke could not consume pre-failover replicated messages from $new_owner" >&2
+    return 1
+  fi
+
+  echo "  publishing and consuming one post-failover message through $new_owner"
+  if ! "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + new_owner_node))" \
+    queue publish "$topic" --message "$post_payload" >/dev/null; then
+    echo "FAIL: failover smoke failed to publish post-failover message" >&2
+    return 1
+  fi
+  if ! "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + new_owner_node))" \
+    queue consume "$topic" --timeout-ms 20000 --expect "$post_payload" >/dev/null; then
+    echo "FAIL: failover smoke could not consume post-failover message from $new_owner" >&2
+    return 1
+  fi
+  echo "  failover smoke delivered pre- and post-failover messages"
+}
+
 if [[ "$STAGGERED" == true ]]; then
   echo "staggered join: starting node 1 alone (bootstrap) under $RUN_DIR"
   start_node 1
@@ -504,6 +772,9 @@ fi
 
 echo
 FAILED=0
+BENCH_BROKER_NODE=1
+BENCH_ADMIN_NODE=1
+BENCH_DURABILITY_LABEL="standalone"
 declare -a LEADERS=()
 declare -a VOTERS=()
 for i in $(seq 1 "$NODES"); do
@@ -592,15 +863,9 @@ if [[ "$GANGLION" == true ]]; then
 
   # Declare a queue through the data-plane CLI on node 1; the embedded
   # controller must assign it (owner + follower + epoch) cluster-wide.
-  echo "declaring queue 'orders' and waiting for controller assignment (up to ${CLUSTER_WAIT_SECS}s)..."
-  "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + 1))" queue declare orders >/dev/null
-  assigned=""
-  for attempt in $(seq 1 "$(cluster_attempts)"); do
-    assigned="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + 1))" admin topology --json 2>/dev/null \
-      | jq -c '.coordination.assignments[0] // empty')"
-    [[ -n "$assigned" ]] && break
-    sleep 0.3
-  done
+  echo "declaring queue '$BENCH_TOPIC' and waiting for controller assignment (up to ${CLUSTER_WAIT_SECS}s)..."
+  "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + 1))" queue declare "$BENCH_TOPIC" >/dev/null
+  assigned="$(wait_assignment_for_topic "$BENCH_TOPIC" || true)"
   if [[ -z "$assigned" ]]; then
     echo "FAIL: controller never assigned the declared queue" >&2
     FAILED=1
@@ -619,8 +884,8 @@ if [[ "$GANGLION" == true ]]; then
       assignment_synced=false
       node_view=""
       for attempt in $(seq 1 "$(cluster_attempts)"); do
-        node_view="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + i))" admin topology --json 2>/dev/null \
-          | jq -c '.coordination.assignments[0] // empty')"
+        node_json="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + i))" admin topology --json 2>/dev/null || echo '{}')"
+        node_view="$(assignment_for_topic_from_json "$node_json" "$BENCH_TOPIC")"
         if [[ "$node_view" == "$assigned" ]]; then
           assignment_synced=true
           break
@@ -646,15 +911,18 @@ if [[ "$GANGLION" == true ]]; then
       if [[ "$consume_node" -eq "$publish_node" && "$NODES" -ge 2 ]]; then
         consume_node=1
       fi
+      BENCH_BROKER_NODE="$publish_node"
+      BENCH_ADMIN_NODE="$publish_node"
+      BENCH_DURABILITY_LABEL="$(assignment_durability_label "$assigned")"
       payload="cluster-smoke-$RANDOM-$RANDOM"
 
       echo "publishing and consuming one message through public client routing..."
       echo "  owner=$owner publish_node=broker-$publish_node consume_node=broker-$consume_node"
       "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + publish_node))" \
-        queue publish orders --message "$payload" >/dev/null \
+        queue publish "$BENCH_TOPIC" --message "$payload" >/dev/null \
         || { echo "FAIL: publish smoke failed" >&2; FAILED=1; }
       "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + consume_node))" \
-        queue consume orders --timeout-ms 10000 --expect "$payload" >/dev/null \
+        queue consume "$BENCH_TOPIC" --timeout-ms 10000 --expect "$payload" >/dev/null \
         || { echo "FAIL: consume smoke failed" >&2; FAILED=1; }
       if [[ "$FAILED" -eq 0 ]]; then
         echo "  data-plane smoke delivered expected payload"
@@ -693,12 +961,32 @@ if [[ "$GANGLION" == true ]]; then
   fi
 fi
 
+if [[ "$STEADY_BENCH" == true ]]; then
+  if [[ "$GANGLION" != true ]]; then
+    echo "declaring queue '$BENCH_TOPIC' on standalone node-1 for steady benchmark..."
+    "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + 1))" queue declare "$BENCH_TOPIC" >/dev/null \
+      || { echo "FAIL: standalone benchmark queue declare failed" >&2; FAILED=1; }
+  fi
+  if [[ "$FAILED" -eq 0 ]]; then
+    run_steady_benchmark "$BENCH_BROKER_NODE" "$BENCH_ADMIN_NODE" "$BENCH_DURABILITY_LABEL" \
+      || FAILED=1
+  fi
+fi
+
+if [[ "$FAILOVER_SMOKE" == true && "$FAILED" -eq 0 ]]; then
+  run_failover_smoke || FAILED=1
+fi
+
 if [[ "$FAILED" -ne 0 ]]; then
   echo "cluster-tryout: FAILED"
   exit 1
 fi
 
-echo "cluster-tryout: all $NODES servers serve topology correctly"
+if [[ "$FAILOVER_SMOKE" == true ]]; then
+  echo "cluster-tryout: all checks passed, including intentional owner kill/failover"
+else
+  echo "cluster-tryout: all $NODES servers serve topology correctly"
+fi
 print_resource_summary
 if [[ "$KEEP" == true ]]; then
   echo

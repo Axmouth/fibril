@@ -28,8 +28,8 @@ use crate::coordination::{
 };
 use crate::queue_engine::{
     EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome,
-    KDurability, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedEventBatch,
-    ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SettleKind,
+    KDurability, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedAppendOutcome,
+    ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SettleKind,
     SettleRequest as EngineSettleRequest, StromaEngine,
 };
 use stroma_core::{
@@ -58,6 +58,12 @@ pub enum BrokerError {
 
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+
+    #[error("invalid replicated {stream} progress: {reason}")]
+    InvalidReplicationProgress {
+        stream: &'static str,
+        reason: String,
+    },
 
     #[error(
         "not enough in-sync replicas for {topic}/{partition}: {in_sync} in sync, {required} required"
@@ -1951,6 +1957,31 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         })
     }
 
+    async fn materialize_owned_queue(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Result<(), BrokerError> {
+        self.engine
+            .materialize(topic, partition.id(), group)
+            .await
+            .map_err(BrokerError::Engine)?;
+
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        if let Some(assignment) = self.assignment_cache.get(&key).map(|entry| entry.clone()) {
+            self.engine
+                .become_queue_owner_with_epoch(topic, partition.id(), group, assignment.epoch)
+                .await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn shutdown(&self) {
         self.shutdown_publishers.cancel();
         self.shutdown_consumers.cancel();
@@ -2056,10 +2087,13 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let activity_lease = {
             let eviction_guard = qs.lock_for_eviction().await;
             let lease = qs.activity.add_publisher();
-            if let Err(err) = engine.materialize(&tp, part.id(), group.as_deref()).await {
+            if let Err(err) = self
+                .materialize_owned_queue(&tp, part, group.as_deref())
+                .await
+            {
                 drop(lease);
                 drop(eviction_guard);
-                return Err(BrokerError::Engine(err));
+                return Err(err);
             }
             drop(eviction_guard);
             lease
@@ -2841,13 +2875,12 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             let eviction_guard = qs.lock_for_eviction().await;
             let lease = qs.activity.add_subscriber();
             if let Err(err) = self
-                .engine
-                .materialize(&tp, part.id(), group.as_deref())
+                .materialize_owned_queue(&tp, part, group.as_deref())
                 .await
             {
                 drop(lease);
                 drop(eviction_guard);
-                return Err(BrokerError::Engine(err));
+                return Err(err);
             }
             drop(eviction_guard);
             lease
@@ -2872,7 +2905,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         // Repartition drain gate: a new partition (added by a grow) holds delivery
         // until its source old partition has drained. Apply here so the hold is in
         // place no matter when this partition's loop first appears.
-        if self.repartition_new_partition_should_hold(&key.tp, key.part.id(), key.group.as_deref()) {
+        if self.repartition_new_partition_should_hold(&key.tp, key.part.id(), key.group.as_deref())
+        {
             qs.set_delivery_held(true);
         }
         if self.repartition_shrink_survivor_should_hold(
@@ -2993,7 +3027,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .await?)
     }
 
-    fn lock_repartition(&self) -> std::sync::MutexGuard<'_, HashMap<RepartitionKey, RepartitionLocal>> {
+    fn lock_repartition(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<RepartitionKey, RepartitionLocal>> {
         self.repartition_transitions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3011,9 +3047,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     ) -> bool {
         let map = self.lock_repartition();
         match map.get(&(topic.to_string(), group.map(str::to_string))) {
-            Some(local) if partition >= local.n_old => {
-                !local.drained_sources.contains(&(partition % local.n_old.max(1)))
-            }
+            Some(local) if partition >= local.n_old => !local
+                .drained_sources
+                .contains(&(partition % local.n_old.max(1))),
             _ => false,
         }
     }
@@ -3125,7 +3161,9 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 Some(b) => *b,
                 None => {
                     // Capture the boundary once, the partition's high-water now.
-                    let Ok(b) = self.partition_next_offset(topic, Partition::new(r), group).await
+                    let Ok(b) = self
+                        .partition_next_offset(topic, Partition::new(r), group)
+                        .await
                     else {
                         continue;
                     };
@@ -4791,52 +4829,77 @@ impl Broker<StromaEngine> {
                 )
                 .await?;
 
-            let message_progress = owner_read_batch_progress(&records.messages);
-            let event_progress = owner_read_batch_progress(&records.events);
-            let (message_record_count, message_next_offset, event_record_count, event_next_offset) =
-                match (message_progress, event_progress) {
-                    (
-                        Some((message_record_count, message_next_offset)),
-                        Some((event_record_count, event_next_offset)),
-                    ) => (
-                        message_record_count,
-                        message_next_offset,
-                        event_record_count,
-                        event_next_offset,
-                    ),
-                    _ => {
-                        let apply = self
-                            .apply_follower_replication_records(topic, partition, group, records)
-                            .await?;
-                        return match apply {
-                            BrokerFollowerReplicationApply::CheckpointRequired {
-                                messages,
-                                events,
-                            } => Ok(BrokerReplicationCatchUp::CheckpointRequired {
+            let message_progress = owner_read_batch_progress("message", &records.messages)?;
+            let event_progress = owner_read_batch_progress("event", &records.events)?;
+            let (message_progress, event_progress) = match (message_progress, event_progress) {
+                (Some(message_progress), Some(event_progress)) => {
+                    (message_progress, event_progress)
+                }
+                _ => {
+                    let apply = self
+                        .apply_follower_replication_records(topic, partition, group, records)
+                        .await?;
+                    return match apply {
+                        BrokerFollowerReplicationApply::CheckpointRequired { messages, events } => {
+                            Ok(BrokerReplicationCatchUp::CheckpointRequired {
                                 progress,
                                 messages,
                                 events,
-                            }),
-                            BrokerFollowerReplicationApply::Applied(_) => {
-                                tracing::error!(
-                                    topic,
-                                    partition = partition.id(),
-                                    group,
-                                    "replication catch-up applied records even though owner read reported checkpoint required"
-                                );
-                                Err(BrokerError::Unknown(
-                                    "checkpoint-required owner read unexpectedly applied".into(),
-                                ))
-                            }
-                        };
-                    }
-                };
+                            })
+                        }
+                        BrokerFollowerReplicationApply::Applied(_) => {
+                            tracing::error!(
+                                topic,
+                                partition = partition.id(),
+                                group,
+                                "replication catch-up applied records even though owner read reported checkpoint required"
+                            );
+                            Err(BrokerError::Unknown(
+                                "checkpoint-required owner read unexpectedly applied".into(),
+                            ))
+                        }
+                    };
+                }
+            };
 
             match self
                 .apply_follower_replication_records(topic, partition, group, records)
                 .await?
             {
-                BrokerFollowerReplicationApply::Applied(_) => {}
+                BrokerFollowerReplicationApply::Applied(outcome) => {
+                    match replicated_append_progress_after_apply(
+                        "message",
+                        &message_progress,
+                        outcome.message_log.as_ref(),
+                    )? {
+                        ReplicatedAppendProgress::Advanced(next_offset) => {
+                            progress.message_next_offset = next_offset;
+                        }
+                        ReplicatedAppendProgress::CheckpointRequired(checkpoint) => {
+                            return Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                                progress,
+                                messages: Some(checkpoint),
+                                events: None,
+                            });
+                        }
+                    }
+                    match replicated_append_progress_after_apply(
+                        "event",
+                        &event_progress,
+                        outcome.event_log.as_ref(),
+                    )? {
+                        ReplicatedAppendProgress::Advanced(next_offset) => {
+                            progress.event_next_offset = next_offset;
+                        }
+                        ReplicatedAppendProgress::CheckpointRequired(checkpoint) => {
+                            return Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                                progress,
+                                messages: None,
+                                events: Some(checkpoint),
+                            });
+                        }
+                    }
+                }
                 BrokerFollowerReplicationApply::CheckpointRequired { messages, events } => {
                     return Ok(BrokerReplicationCatchUp::CheckpointRequired {
                         progress,
@@ -4847,12 +4910,10 @@ impl Broker<StromaEngine> {
             }
 
             progress.iterations += 1;
-            progress.applied_message_records += message_record_count;
-            progress.applied_event_records += event_record_count;
-            progress.message_next_offset = message_next_offset;
-            progress.event_next_offset = event_next_offset;
+            progress.applied_message_records += message_progress.record_count;
+            progress.applied_event_records += event_progress.record_count;
 
-            if message_record_count == 0 && event_record_count == 0 {
+            if message_progress.record_count == 0 && event_progress.record_count == 0 {
                 return Ok(BrokerReplicationCatchUp::CaughtUp(progress));
             }
         }
@@ -4936,15 +4997,12 @@ impl Broker<StromaEngine> {
         cfg: FollowerReplicationWorkerConfig,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
         let worker = self.follower_replication_worker(queue)?;
-        let (options, install_checkpoint) = {
+        let options = {
             let state = worker.lock().await;
-            (
-                state.catch_up_options(cfg),
-                state.should_install_checkpoint(cfg),
-            )
+            state.catch_up_options(cfg)
         };
 
-        let outcome = if install_checkpoint {
+        let outcome = if cfg.allow_checkpoint_install {
             self.catch_up_replication_follower_from_owner_with_checkpoint(
                 owner,
                 queue.topic.as_str(),
@@ -5218,19 +5276,176 @@ fn checkpoint_required<T>(
     }
 }
 
-fn owner_read_batch_progress<T>(read: &OwnerReplicationRead<T>) -> Option<(usize, Offset)> {
+#[derive(Debug, Clone, Copy)]
+struct OwnerBatchProgress {
+    epoch: u64,
+    requested_offset: Offset,
+    first_offset: Option<Offset>,
+    record_count: usize,
+    next_request_offset: Offset,
+    owner_next_offset: Offset,
+}
+
+fn owner_read_batch_progress<T>(
+    stream: &'static str,
+    read: &OwnerReplicationRead<T>,
+) -> Result<Option<OwnerBatchProgress>, BrokerError> {
     match read {
         OwnerReplicationRead::Batch(batch) => {
-            // Stroma reports the owner log tail as batch.next_offset. For a
-            // limited read, the next pull must continue after the last returned
-            // record rather than jumping straight to the owner tail.
-            let next_request_offset = batch
-                .records
-                .last()
-                .map_or(batch.next_offset, |(offset, _)| offset + 1);
-            Some((batch.records.len(), next_request_offset))
+            let first_offset = batch.records.first().map(|(offset, _)| *offset);
+            let next_request_offset = match batch.records.last() {
+                Some((offset, _)) => offset + 1,
+                None if batch.next_offset == batch.requested_offset => batch.next_offset,
+                None => {
+                    return Err(BrokerError::InvalidReplicationProgress {
+                        stream,
+                        reason: format!(
+                            "owner returned empty batch at requested offset {} but reported tail {}",
+                            batch.requested_offset, batch.next_offset
+                        ),
+                    });
+                }
+            };
+
+            Ok(Some(OwnerBatchProgress {
+                epoch: batch.epoch,
+                requested_offset: batch.requested_offset,
+                first_offset,
+                record_count: batch.records.len(),
+                next_request_offset,
+                owner_next_offset: batch.next_offset,
+            }))
         }
-        OwnerReplicationRead::CheckpointRequired { .. } => None,
+        OwnerReplicationRead::CheckpointRequired { .. } => Ok(None),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReplicatedAppendProgress {
+    Advanced(Offset),
+    CheckpointRequired(BrokerReplicationCheckpointRequired),
+}
+
+fn replicated_append_progress_after_apply(
+    stream: &'static str,
+    owner: &OwnerBatchProgress,
+    outcome: Option<&ReplicatedAppendOutcome>,
+) -> Result<ReplicatedAppendProgress, BrokerError> {
+    let Some(first_offset) = owner.first_offset else {
+        if outcome.is_some() {
+            return Err(BrokerError::InvalidReplicationProgress {
+                stream,
+                reason: "local append outcome present for empty owner batch".into(),
+            });
+        }
+        return Ok(ReplicatedAppendProgress::Advanced(
+            owner.next_request_offset,
+        ));
+    };
+
+    let Some(outcome) = outcome else {
+        return Err(BrokerError::InvalidReplicationProgress {
+            stream,
+            reason: "missing local append outcome for non-empty owner batch".into(),
+        });
+    };
+
+    match *outcome {
+        ReplicatedAppendOutcome::Applied(result) => {
+            let end = result.base_offset + u64::from(result.count);
+            if result.base_offset == first_offset
+                && result.count as usize == owner.record_count
+                && end == owner.next_request_offset
+            {
+                Ok(ReplicatedAppendProgress::Advanced(
+                    owner.next_request_offset,
+                ))
+            } else {
+                Err(BrokerError::InvalidReplicationProgress {
+                    stream,
+                    reason: format!(
+                        "applied range {}..{} does not match owner range {}..{} ({} records)",
+                        result.base_offset,
+                        end,
+                        first_offset,
+                        owner.next_request_offset,
+                        owner.record_count
+                    ),
+                })
+            }
+        }
+        ReplicatedAppendOutcome::AppliedSuffix {
+            requested_first_offset,
+            skipped_count,
+            result,
+        } => {
+            let end = result.base_offset + u64::from(result.count);
+            if requested_first_offset == first_offset
+                && skipped_count as usize <= owner.record_count
+                && result.base_offset == first_offset + u64::from(skipped_count)
+                && skipped_count as usize + result.count as usize == owner.record_count
+                && end == owner.next_request_offset
+            {
+                Ok(ReplicatedAppendProgress::Advanced(
+                    owner.next_request_offset,
+                ))
+            } else {
+                Err(BrokerError::InvalidReplicationProgress {
+                    stream,
+                    reason: format!(
+                        "applied suffix {:?} does not match owner range {}..{} ({} records)",
+                        outcome, first_offset, owner.next_request_offset, owner.record_count
+                    ),
+                })
+            }
+        }
+        ReplicatedAppendOutcome::AlreadyPresent {
+            first_offset: present_first,
+            count,
+            next_offset,
+        } => {
+            // AlreadyPresent supports idempotent retries. It does not prove the
+            // bytes/events are identical; stronger overlap validation belongs
+            // in Keratin if we need divergence detection later. Progress only
+            // moves over the owner-returned range so catch-up does not skip
+            // ahead merely because the local tail is higher.
+            if present_first == first_offset
+                && count as usize == owner.record_count
+                && next_offset >= owner.next_request_offset
+            {
+                Ok(ReplicatedAppendProgress::Advanced(
+                    owner.next_request_offset,
+                ))
+            } else {
+                Err(BrokerError::InvalidReplicationProgress {
+                    stream,
+                    reason: format!(
+                        "already-present range {:?} does not cover owner range {}..{} ({} records)",
+                        outcome, first_offset, owner.next_request_offset, owner.record_count
+                    ),
+                })
+            }
+        }
+        ReplicatedAppendOutcome::Overlap { .. } | ReplicatedAppendOutcome::Gap { .. } => {
+            // A new follower can have stale local data for the same queue
+            // identity. Without validating the overlapping bytes/events, the
+            // only safe repair path is to install an owner checkpoint and then
+            // continue from that checkpoint boundary.
+            Ok(ReplicatedAppendProgress::CheckpointRequired(
+                BrokerReplicationCheckpointRequired {
+                    epoch: owner.epoch,
+                    requested_offset: owner.requested_offset,
+                    head_offset: first_offset,
+                    next_offset: owner.owner_next_offset,
+                },
+            ))
+        }
+        ReplicatedAppendOutcome::StaleEpoch { .. } => {
+            Err(BrokerError::InvalidReplicationProgress {
+                stream,
+                reason: format!("local append rejected owner batch: {outcome:?}"),
+            })
+        }
     }
 }
 

@@ -207,6 +207,7 @@ pub struct PartitionPlacementInput {
     pub queues: Vec<QueueIdentity>,
     pub existing: HashMap<QueueIdentity, PartitionAssignment>,
     pub target_followers: usize,
+    pub default_durability: ReplicationDurabilityPolicy,
     pub generation: u64,
 }
 
@@ -277,7 +278,7 @@ impl PartitionPlacementPolicy for DeterministicPartitionPlacement {
 
             let durability = existing
                 .map(|assignment| assignment.durability)
-                .unwrap_or_default();
+                .unwrap_or(input.default_durability);
             let epoch = existing
                 .filter(|assignment| assignment.owner == owner && assignment.followers == followers)
                 .map(|assignment| assignment.epoch)
@@ -910,8 +911,11 @@ impl ExclusiveConsumerGroups {
             return;
         }
         let partitions: Vec<Partition> = assignment.values().flatten().copied().collect();
-        let mut state =
-            ConsumerGroupState::new(partitions, self.default_target_per_consumer, self.assignor.clone());
+        let mut state = ConsumerGroupState::new(
+            partitions,
+            self.default_target_per_consumer,
+            self.assignor.clone(),
+        );
         state.seed_assignment(assignment);
         self.groups.insert(key, state);
     }
@@ -1706,6 +1710,7 @@ mod tests {
                 queues: Vec::new(),
                 existing: HashMap::new(),
                 target_followers: 2,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 9,
             })
             .unwrap();
@@ -1723,6 +1728,7 @@ mod tests {
                 queues: vec![QueueIdentity::new("emails", Partition::new(0), None)],
                 existing: HashMap::new(),
                 target_followers: 1,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 1,
             })
             .unwrap_err();
@@ -1742,6 +1748,7 @@ mod tests {
                 ],
                 existing: HashMap::new(),
                 target_followers: 0,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 3,
             })
             .unwrap();
@@ -1764,6 +1771,7 @@ mod tests {
                     .collect(),
                 existing: HashMap::new(),
                 target_followers: 0,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 1,
             })
             .unwrap();
@@ -2344,7 +2352,10 @@ mod tests {
             )]),
             |_| 4,
         );
-        assert_eq!(again[0].assignment, published, "live state is not clobbered");
+        assert_eq!(
+            again[0].assignment, published,
+            "live state is not clobbered"
+        );
     }
 
     #[test]
@@ -2531,6 +2542,7 @@ mod tests {
                 queues: vec![QueueIdentity::new("emails", Partition::new(0), None)],
                 existing: HashMap::new(),
                 target_followers: 8,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 4,
             })
             .unwrap();
@@ -2557,6 +2569,7 @@ mod tests {
                 queues: vec![queue],
                 existing,
                 target_followers: 2,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 12,
             })
             .unwrap();
@@ -2587,6 +2600,7 @@ mod tests {
                 queues: vec![queue],
                 existing,
                 target_followers: 1,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 8,
             })
             .unwrap();
@@ -2678,6 +2692,7 @@ mod tests {
                 queues: queues.clone(),
                 existing: HashMap::new(),
                 target_followers: TARGET_FOLLOWERS,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 1,
             })
             .unwrap();
@@ -2717,6 +2732,7 @@ mod tests {
                 queues: queues.clone(),
                 existing: assignments.clone(),
                 target_followers: TARGET_FOLLOWERS,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 2,
             })
             .unwrap();
@@ -2739,6 +2755,7 @@ mod tests {
                 queues: queues.clone(),
                 existing: assignments.clone(),
                 target_followers: TARGET_FOLLOWERS,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 3,
             })
             .unwrap();
@@ -2777,6 +2794,7 @@ mod tests {
                 queues,
                 existing: HashMap::new(),
                 target_followers: TARGET_FOLLOWERS,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 1,
             })
             .unwrap();
@@ -2814,6 +2832,7 @@ mod tests {
                 queues: batch_a.clone(),
                 existing: HashMap::new(),
                 target_followers: TARGET_FOLLOWERS,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 1,
             })
             .unwrap();
@@ -2831,6 +2850,7 @@ mod tests {
                 queues: all_queues,
                 existing: placed_a.clone(),
                 target_followers: TARGET_FOLLOWERS,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 2,
             })
             .unwrap();
@@ -2882,6 +2902,7 @@ mod tests {
                 queues: queues.clone(),
                 existing: HashMap::new(),
                 target_followers: TARGET_FOLLOWERS,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 1,
             })
             .unwrap();
@@ -2892,6 +2913,7 @@ mod tests {
                 queues: queues.clone(),
                 existing: stale_plan.snapshot.assignments,
                 target_followers: TARGET_FOLLOWERS,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 2,
             })
             .unwrap();
@@ -2924,6 +2946,7 @@ mod tests {
                 queues: vec![new_queue.clone(), existing_queue.clone()],
                 existing,
                 target_followers: 2,
+                default_durability: ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 },
                 generation: 18,
             })
             .unwrap();
@@ -2935,7 +2958,15 @@ mod tests {
                 .expect("existing assignment"),
             &existing_assignment
         );
-        assert!(plan.snapshot.assignments.contains_key(&new_queue));
+        let new_assignment = plan
+            .snapshot
+            .assignments
+            .get(&new_queue)
+            .expect("new queue assignment");
+        assert_eq!(
+            new_assignment.durability,
+            ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 }
+        );
     }
 
     #[test]
@@ -2959,6 +2990,7 @@ mod tests {
                 queues: vec![queue],
                 existing,
                 target_followers: 2,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 generation: 9,
             })
             .unwrap();

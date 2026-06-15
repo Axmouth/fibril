@@ -233,6 +233,10 @@ impl ServerConfig {
             }
             self.coordination.ganglion.peers = peers;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY")? {
+            self.coordination.ganglion.assignment_durability =
+                parse_env("FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_AUTH_ENABLED")? {
             self.admin.auth.enabled = parse_env("FIBRIL_ADMIN_AUTH_ENABLED", &value)?;
         }
@@ -440,6 +444,25 @@ impl ServerConfig {
                 "coordination.ganglion.forwarded_write.no_leader_base_backoff_ms must be <= no_leader_max_backoff_ms"
             );
         }
+        let durability = &self.coordination.ganglion.assignment_durability;
+        match durability.mode {
+            GanglionAssignmentDurabilityMode::ReplicaAccepted
+            | GanglionAssignmentDurabilityMode::ReplicaDurable => {
+                if durability.nodes.unwrap_or_default() == 0 {
+                    anyhow::bail!(
+                        "coordination.ganglion.assignment_durability.nodes must be at least 1 for replica durability"
+                    );
+                }
+            }
+            GanglionAssignmentDurabilityMode::LocalDurable
+            | GanglionAssignmentDurabilityMode::MajorityDurable => {
+                if durability.nodes.is_some() {
+                    anyhow::bail!(
+                        "coordination.ganglion.assignment_durability.nodes is only valid for replica durability"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -611,6 +634,8 @@ pub struct GanglionCoordinationSection {
     pub heartbeat_interval_ms: u64,
     /// Controller: desired follower count per queue partition.
     pub target_followers: usize,
+    /// Controller: default durability policy for newly assigned partitions.
+    pub assignment_durability: GanglionAssignmentDurabilitySection,
     /// Controller: bounded tick interval (also wakes on snapshot changes).
     pub controller_tick_ms: u64,
     /// Controller: heartbeats older than this mark a broker dead. Must exceed
@@ -631,8 +656,73 @@ impl Default for GanglionCoordinationSection {
             forwarded_write: GanglionForwardedWriteSection::default(),
             heartbeat_interval_ms: 3000,
             target_followers: 1,
+            assignment_durability: GanglionAssignmentDurabilitySection::default(),
             controller_tick_ms: 2000,
             liveness_ttl_ms: 9000,
+        }
+    }
+}
+
+/// Default durability policy stamped on newly planned queue assignments.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GanglionAssignmentDurabilitySection {
+    pub mode: GanglionAssignmentDurabilityMode,
+    pub nodes: Option<usize>,
+}
+
+impl Default for GanglionAssignmentDurabilitySection {
+    fn default() -> Self {
+        Self {
+            mode: GanglionAssignmentDurabilityMode::LocalDurable,
+            nodes: None,
+        }
+    }
+}
+
+impl std::str::FromStr for GanglionAssignmentDurabilitySection {
+    type Err = anyhow::Error;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let (mode, nodes) = match raw.split_once(':') {
+            Some((mode, nodes)) => (mode, Some(nodes.parse::<usize>()?)),
+            None => (raw, None),
+        };
+        Ok(Self {
+            mode: mode.parse()?,
+            nodes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GanglionAssignmentDurabilityMode {
+    LocalDurable,
+    ReplicaAccepted,
+    ReplicaDurable,
+    MajorityDurable,
+}
+
+impl Default for GanglionAssignmentDurabilityMode {
+    fn default() -> Self {
+        Self::LocalDurable
+    }
+}
+
+impl std::str::FromStr for GanglionAssignmentDurabilityMode {
+    type Err = anyhow::Error;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "local_durable" | "local" => Ok(Self::LocalDurable),
+            "replica_accepted" => Ok(Self::ReplicaAccepted),
+            "replica_durable" => Ok(Self::ReplicaDurable),
+            "majority_durable" | "majority" => Ok(Self::MajorityDurable),
+            other => anyhow::bail!(
+                "unknown assignment durability `{other}` \
+                 (local_durable|replica_accepted|replica_durable|majority_durable)"
+            ),
         }
     }
 }
@@ -913,6 +1003,13 @@ mod tests {
                 no_leader_max_backoff_ms: 250,
             }
         );
+        assert_eq!(
+            config.coordination.ganglion.assignment_durability,
+            GanglionAssignmentDurabilitySection {
+                mode: GanglionAssignmentDurabilityMode::LocalDurable,
+                nodes: None,
+            }
+        );
         assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, None);
         assert_eq!(
             config.idle_queue_cleanup_internal(),
@@ -977,6 +1074,10 @@ mod tests {
             no_leader_base_backoff_ms = 30
             no_leader_max_backoff_ms = 300
 
+            [coordination.ganglion.assignment_durability]
+            mode = "replica_durable"
+            nodes = 2
+
             [runtime_locks]
             idle_queue_cleanup = true
             "#,
@@ -1019,6 +1120,13 @@ mod tests {
                 no_leader_retries: 2,
                 no_leader_base_backoff_ms: 30,
                 no_leader_max_backoff_ms: 300,
+            }
+        );
+        assert_eq!(
+            config.coordination.ganglion.assignment_durability,
+            GanglionAssignmentDurabilitySection {
+                mode: GanglionAssignmentDurabilityMode::ReplicaDurable,
+                nodes: Some(2),
             }
         );
         assert_eq!(config.runtime_seed.delivery.inflight_ttl_ms, 10);
@@ -1249,6 +1357,9 @@ mod tests {
                 "FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS" => Some(Ok("123".to_string())),
                 "FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS" => Some(Ok("".to_string())),
                 "FIBRIL_RECONNECT_GRACE_MS" => Some(Ok("789".to_string())),
+                "FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY" => {
+                    Some(Ok("replica_durable:2".to_string()))
+                }
                 _ => None,
             })
             .unwrap();
@@ -1275,6 +1386,13 @@ mod tests {
             }
         );
         assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, Some(789));
+        assert_eq!(
+            config.coordination.ganglion.assignment_durability,
+            GanglionAssignmentDurabilitySection {
+                mode: GanglionAssignmentDurabilityMode::ReplicaDurable,
+                nodes: Some(2),
+            }
+        );
     }
 
     #[test]

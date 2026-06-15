@@ -617,7 +617,12 @@ async fn subscription_auto_resubscribes_to_grown_partition() {
         .partition_resubscribe_interval_ms(150);
     let client = Client::connect(mock, opts).await.unwrap();
 
-    let mut sub = client.subscribe("orders").unwrap().sub_auto_ack().await.unwrap();
+    let mut sub = client
+        .subscribe("orders")
+        .unwrap()
+        .sub_auto_ack()
+        .await
+        .unwrap();
 
     // Initial fan-in covers partition 0 (mock delivers payload = [partition]).
     let first = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
@@ -641,5 +646,8 @@ async fn subscription_auto_resubscribes_to_grown_partition() {
     })
     .await
     .expect("auto-resubscribe should deliver from the new partition");
-    assert!(saw_partition_1, "consumer received a delivery from the grown partition");
+    assert!(
+        saw_partition_1,
+        "consumer received a delivery from the grown partition"
+    );
 }

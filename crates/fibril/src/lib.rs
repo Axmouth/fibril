@@ -17,7 +17,8 @@ use fibril_broker::{
     broker::{Broker, BrokerConfig, FollowerReplicationWorkerConfig, OwnAllQueues, QueueOwnership},
     coordination::{
         ClusterCohortController, ConsumerGroupKey, Coordination, DeterministicPartitionPlacement,
-        NodeInfo, QueueIdentity, StaticCoordination, StickyConsumerGroupAssignor,
+        NodeInfo, QueueIdentity, ReplicationDurabilityPolicy, StaticCoordination,
+        StickyConsumerGroupAssignor,
     },
     queue_engine::{
         KeratinConfig, QueueEngine as _, SnapshotConfig, StromaEngine, StromaKeratinConfig,
@@ -29,7 +30,10 @@ use fibril_broker::{
         RuntimeSettingsSnapshot,
     },
 };
-use fibril_config::{CoordinationMode, ServerConfig};
+use fibril_config::{
+    CoordinationMode, GanglionAssignmentDurabilityMode, GanglionAssignmentDurabilitySection,
+    ServerConfig,
+};
 use fibril_coordination_ganglion::{
     ClientTopology, ClusterRuntimeSettingsUpdateOutcome, ControllerStatus, ForwardedWritePolicy,
     GanglionCoordination,
@@ -241,6 +245,9 @@ pub async fn open_tcp_ganglion_parts(
                 Arc::new(DeterministicPartitionPlacement),
                 fibril_coordination_ganglion::ControllerConfig {
                     target_followers: section.target_followers,
+                    default_durability: assignment_durability_from_config(
+                        &section.assignment_durability,
+                    )?,
                     tick: Duration::from_millis(section.controller_tick_ms),
                     liveness_ttl: Duration::from_millis(section.liveness_ttl_ms),
                     max_cas_retries: 8,
@@ -283,6 +290,55 @@ fn forwarded_write_policy_from_config(config: &ServerConfig) -> ForwardedWritePo
         no_leader_max_backoff: Duration::from_millis(section.no_leader_max_backoff_ms),
     }
 }
+
+fn assignment_durability_from_config(
+    section: &GanglionAssignmentDurabilitySection,
+) -> Result<ReplicationDurabilityPolicy, AssignmentDurabilityConfigError> {
+    match section.mode {
+        GanglionAssignmentDurabilityMode::LocalDurable => {
+            Ok(ReplicationDurabilityPolicy::LocalDurable)
+        }
+        GanglionAssignmentDurabilityMode::ReplicaAccepted => {
+            Ok(ReplicationDurabilityPolicy::ReplicaAccepted {
+                nodes: section.nodes.ok_or(
+                    AssignmentDurabilityConfigError::MissingReplicaNodes {
+                        mode: "replica_accepted",
+                    },
+                )?,
+            })
+        }
+        GanglionAssignmentDurabilityMode::ReplicaDurable => {
+            Ok(ReplicationDurabilityPolicy::ReplicaDurable {
+                nodes: section.nodes.ok_or(
+                    AssignmentDurabilityConfigError::MissingReplicaNodes {
+                        mode: "replica_durable",
+                    },
+                )?,
+            })
+        }
+        GanglionAssignmentDurabilityMode::MajorityDurable => {
+            Ok(ReplicationDurabilityPolicy::MajorityDurable)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AssignmentDurabilityConfigError {
+    MissingReplicaNodes { mode: &'static str },
+}
+
+impl std::fmt::Display for AssignmentDurabilityConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingReplicaNodes { mode } => write!(
+                formatter,
+                "coordination.ganglion.assignment_durability.nodes is required for {mode}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AssignmentDurabilityConfigError {}
 
 /// Ownership provider used by the broker: cluster assignments in Ganglion mode,
 /// own-all standalone behavior otherwise.
@@ -372,12 +428,14 @@ pub fn broker_heartbeat_labels(broker: &Broker<StromaEngine>) -> BTreeMap<String
     if !drained.is_empty() {
         let reports: Vec<fibril_coordination_ganglion::RepartitionDrainedReport> = drained
             .into_iter()
-            .map(|status| fibril_coordination_ganglion::RepartitionDrainedReport {
-                topic: status.topic,
-                group: status.group,
-                version: status.version,
-                drained: status.drained,
-            })
+            .map(
+                |status| fibril_coordination_ganglion::RepartitionDrainedReport {
+                    topic: status.topic,
+                    group: status.group,
+                    version: status.version,
+                    drained: status.drained,
+                },
+            )
             .collect();
         labels.insert(
             fibril_coordination_ganglion::REPARTITION_DRAINED_LABEL.to_string(),
@@ -396,14 +454,20 @@ pub fn spawn_ganglion_broker_tasks(
     runtime: &RuntimeSettings,
 ) -> GanglionBrokerTaskHandles {
     let resolver = Arc::new(
-        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::new(
+        fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::with_config(
             parts.coordination.clone(),
+            fibril_protocol::v1::replication::ProtocolOwnerPeerResolverConfig::new(
+                std::collections::HashMap::new(),
+            )
+            .with_reporter(config.coordination.node_id.clone())
+            .with_auth("fibril", "fibril"),
         ),
     );
     broker.spawn_assignment_watcher_with_follower_replication(
         parts.coordination.clone(),
         resolver,
         FollowerReplicationWorkerConfig {
+            allow_checkpoint_install: true,
             follow_runtime_settings: true,
             ..Default::default()
         },

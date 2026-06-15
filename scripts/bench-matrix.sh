@@ -10,6 +10,11 @@ default_writers="${WRITERS:-10}"
 default_readers="${READERS:-10}"
 default_prefetch="${PREFETCH:-16384}"
 default_confirm_window="${CONFIRM_WINDOW:-1024}"
+default_start_server="${START_SERVER:-1}"
+default_broker_addr="${BROKER_ADDR:-127.0.0.1:9876}"
+default_admin_addr="${ADMIN_ADDR:-127.0.0.1:8081}"
+default_durability_label="${DURABILITY_LABEL:-local}"
+default_topic="${TOPIC:-topic1}"
 build="${BUILD:-1}"
 
 usage() {
@@ -30,7 +35,8 @@ Scenarios:
 
 Useful environment overrides:
   OUT_DIR, WRITERS, READERS, WARMUP_SECS, DURATION_SECS,
-  DRAIN_TIMEOUT_SECS, PREFETCH, CONFIRM_WINDOW, BUILD=0
+  DRAIN_TIMEOUT_SECS, PREFETCH, CONFIRM_WINDOW, BUILD=0,
+  START_SERVER=0, BROKER_ADDR, ADMIN_ADDR, DURABILITY_LABEL, TOPIC
 EOF
 }
 
@@ -79,6 +85,11 @@ run_case() {
     DRAIN_TIMEOUT_SECS="$default_drain_timeout_secs" \
     PREFETCH="$default_prefetch" \
     CONFIRM_WINDOW="$default_confirm_window" \
+    START_SERVER="$default_start_server" \
+    BROKER_ADDR="$default_broker_addr" \
+    ADMIN_ADDR="$default_admin_addr" \
+    DURABILITY_LABEL="$default_durability_label" \
+    TOPIC="$default_topic" \
     LOG_FILE="$log_file" \
     RESULTS_FILE="$results_file" \
     BUILD=0 \

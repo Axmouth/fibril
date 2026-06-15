@@ -212,6 +212,14 @@ pub trait QueueEngine {
         group: Option<&str>,
     ) -> Result<(), StromaError>;
 
+    async fn become_queue_owner_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), StromaError>;
+
     async fn unmaterialize(
         &self,
         tp: &str,
@@ -882,6 +890,18 @@ impl QueueEngine for StromaEngine {
         self.inner.materialize(tp, part, group).await
     }
 
+    async fn become_queue_owner_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .become_queue_owner_with_epoch(tp, part, group, epoch)
+            .await
+    }
+
     async fn unmaterialize(
         &self,
         tp: &str,
@@ -930,7 +950,9 @@ impl QueueEngine for StromaEngine {
         from: Offset,
         upper: Offset,
     ) -> Result<Option<Offset>, StromaError> {
-        self.inner.next_deliverable(tp, part, group, from, upper).await
+        self.inner
+            .next_deliverable(tp, part, group, from, upper)
+            .await
     }
 
     fn metrics(&self) -> Arc<StromaMetrics> {

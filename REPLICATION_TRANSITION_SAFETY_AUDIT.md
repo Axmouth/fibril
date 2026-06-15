@@ -144,14 +144,29 @@ Follow-up:
 - Do not rewrite historical planning notes just to remove etcd references. New
   work should be appended as the current direction.
 
-### 5. Failover Core Exists, Hardening Remains
+### 5. Failover Core Exists And Has A Passing Live Smoke
 
-Status: Audited
+Status: Addressed
 
 Automatic failover is no longer merely theoretical. The worklog records
 TTL-driven owner loss, epoch-bumped reassignment, progress-aware candidate
 selection, follower drain, local-tail promotion, stale-owner demotion, and
 cluster tryout coverage.
+
+The 3-node Ganglion tryout now covers the key public scenario: replica-durable
+pre-failover publish confirms, owner kill, follower promotion, consumption of
+pre-failover payloads through the new owner, and a post-failover publish/consume.
+
+Two important safety fixes landed from that smoke:
+
+- Follower catch-up progress is derived from local replicated append outcomes,
+  not from owner-read offsets alone.
+- Replicated events are not appended or applied in memory when the paired
+  replicated message batch is rejected.
+- A cold owner applies its cached assignment epoch during first lazy
+  materialization.
+- An overlapping stale local follower prefix is repaired through owner
+  checkpoint install instead of retried blindly.
 
 The remaining risk is production hardening, not basic architecture.
 
@@ -249,10 +264,18 @@ The code has many focused tests, protocol proofs, storage tests, and tryout
 scripts. The remaining confidence gap is around scenarios that combine real
 server bootstrap, real coordination, real protocol transport, and failure.
 
+Addressed in this pass:
+
+- live 3-node replica-durable owner-kill smoke
+- stale append must not record ready state
+- rejected replicated message append must not apply corresponding event state
+- cold owner materialization must fence logs to the assignment epoch
+- checkpoint-aware catch-up must repair an overlapping stale local prefix
+
 Priority tests:
 
 - multi-node cohort coordinator e2e
-- two or three broker failover with owner death and return
+- owner death and return
 - partition during failover
 - cached owner endpoint changes while follower worker is running
 - checkpoint-required catch-up interrupted and resumed

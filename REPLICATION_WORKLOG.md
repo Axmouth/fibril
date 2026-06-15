@@ -91,6 +91,48 @@ MERGE READINESS NOTE: merging `replication-sharding-plan` to main should mean
 "production HA is done". The branch can plausibly hit that milestone before all
 clustering follow-up is complete.
 
+DONE — replica-durable failover correctness fix (2026-06-15): the 3-node
+Ganglion tryout with `--replica-durable --failover-smoke` now passes end to end.
+The smoke declares `orders-failover`, publishes 10 messages with replica-durable
+confirms, kills the owner, waits for reassignment, consumes all pre-failover
+messages through the promoted follower, then publishes and consumes a
+post-failover message on the new owner.
+
+Failure chain fixed:
+- Follower catch-up used to advance progress from the owner-read offsets, even
+  when the local replicated append rejected the batch. Progress must be derived
+  from the local append outcome, because only that proves the follower actually
+  accepted the records.
+- Stroma used to be able to apply replicated queue events in memory even when
+  the corresponding replicated message append failed. That can create "ready"
+  state for a payload that is absent or not the owner's payload. The rule now is:
+  message append must be accepted before event append, and event append must be
+  accepted before in-memory state is updated.
+- Cold owned queues could materialize at Keratin epoch 0 even when their
+  assignment epoch was higher, because `BecomeOwner` was a no-op while
+  unmaterialized. First lazy owner materialization now applies the cached
+  assignment epoch before serving owner traffic.
+- After failover, the newly selected follower can already have stale local data
+  for the same queue identity. Keratin correctly rejects blind overlap by
+  default, since it cannot prove bytes/events match. Broker catch-up now treats
+  overlap/gap as a checkpoint-repair condition for checkpoint-aware workers,
+  installs the owner checkpoint, and then resumes pull replication.
+
+Important caveat: `AlreadyPresent` remains an idempotence outcome only. It does
+not prove byte equality. Catch-up advances only over the owner-returned range,
+not to the follower's whole local tail. If we need stronger divergence
+detection, add prefix hash/CRC validation in Keratin before accepting overlap.
+
+Tests added/covered in this pass:
+- stale replicated append does not record ready state or permit promotion
+- rejected replicated message append skips corresponding event/state apply
+- cold owner materialization uses the cached assignment epoch
+- checkpoint-aware catch-up repairs an overlapping stale local prefix and then
+  delivers the owner's payloads after promotion
+- focused broker replication tests, Stroma role tests, `cargo check -p fibril`,
+  and live `scripts/cluster-tryout.sh --nodes 3 --ganglion --summary
+  --replica-durable --failover-smoke --cluster-wait-secs 60`
+
 Candidate pre-merge checklist:
 - Run full verification from a clean tree.
 - Run cluster tryout smokes at small and medium sizes, at minimum 3, 5, and a

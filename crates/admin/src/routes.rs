@@ -6,6 +6,7 @@ use axum::{
     response::Response,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use fibril_broker::coordination::ReplicationDurabilityPolicy;
 use fibril_broker::queue_engine::{
     DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
     InspectMode, MessageHeaders, MessageInspectionStatus, QueueInspectionState, StromaError,
@@ -213,6 +214,23 @@ async fn check_auth(
     headers: &axum::http::HeaderMap,
 ) -> Result<(), StatusCode> {
     check_admin_auth(headers, &server.config.auth, &server.sessions).await
+}
+
+fn durability_policy_json(policy: ReplicationDurabilityPolicy) -> serde_json::Value {
+    match policy {
+        ReplicationDurabilityPolicy::LocalDurable => {
+            serde_json::json!({ "mode": "local_durable" })
+        }
+        ReplicationDurabilityPolicy::ReplicaAccepted { nodes } => {
+            serde_json::json!({ "mode": "replica_accepted", "nodes": nodes })
+        }
+        ReplicationDurabilityPolicy::ReplicaDurable { nodes } => {
+            serde_json::json!({ "mode": "replica_durable", "nodes": nodes })
+        }
+        ReplicationDurabilityPolicy::MajorityDurable => {
+            serde_json::json!({ "mode": "majority_durable" })
+        }
+    }
 }
 
 pub async fn overview(
@@ -462,6 +480,7 @@ pub async fn topology(
                         "owner": assignment.owner,
                         "followers": assignment.followers,
                         "epoch": assignment.epoch,
+                        "durability": durability_policy_json(assignment.durability),
                     })
                 })
                 .collect();

@@ -118,8 +118,29 @@ prints a compact summary including publish and confirmation error counts plus
 server RSS average and peak sampled during the benchmark run.
 
 The wrapper starts a local `fibril-server` on the default broker and admin
-ports. Run one wrapper benchmark at a time. A second run will fail if those
-ports are already occupied.
+ports by default. Run one wrapper benchmark at a time. A second run will fail if
+those ports are already occupied.
+
+To target an already running server or a kept cluster, set `START_SERVER=0`,
+`BROKER_ADDR`, and `ADMIN_ADDR`. `DURABILITY_LABEL` is only a result label, but
+it is useful when comparing local, cluster-routed, and later replica-durable
+confirmed runs.
+
+To reuse the real cluster lifecycle checks, run the steady benchmark through the
+tryout script:
+
+```sh
+CONFIRMED=1 RATE_PER_SEC=1000 WARMUP_SECS=2 DURATION_SECS=5 \
+  scripts/cluster-tryout.sh --ganglion --nodes 3 --steady-bench
+```
+
+`cluster-tryout.sh` starts the nodes, waits for the cluster, declares the
+benchmark topic, runs the normal data-plane smoke, then calls
+`bench-steady-c.sh` against the live cluster with `START_SERVER=0`. Use
+`--bench-topic <topic>` when you want the tryout script to declare and benchmark
+a different topic. This path currently measures clustered client routing. Treat
+it as replica-durable only once the assignment and post-run follower state prove
+the chosen follower applied the measured log range.
 
 When `CONFIRMED=1`, writers still run with pipelined publish confirmations by
 default. Set `CONFIRM_WINDOW=1` if you specifically want the older serial
@@ -139,6 +160,11 @@ Useful knobs:
 | `PREFETCH` | `16384` | Reader subscription prefetch |
 | `CONFIRMED` | `0` | Set `1` to require broker publish confirmations |
 | `CONFIRM_WINDOW` | `1024` | In-flight confirmations per writer when `CONFIRMED=1` |
+| `TOPIC` | `topic1` | Queue topic used by the steady benchmark |
+| `START_SERVER` | `1` | Set `0` to target an external server or cluster |
+| `BROKER_ADDR` | `127.0.0.1:9876` | Broker TCP address passed to the benchmark client |
+| `ADMIN_ADDR` | `127.0.0.1:8081` | Admin address used for health checks and queue snapshots |
+| `DURABILITY_LABEL` | `local` | Label printed into results and summary tables |
 | `BUILD` | `1` | Set `0` to skip rebuilding release binaries |
 | `LOG_FILE` | temporary file | Build, server, and noisy runtime logs |
 | `RESULTS_FILE` | temporary file | Deterministic benchmark summary and queue snapshots |

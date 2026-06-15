@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -100,6 +100,18 @@ struct Args {
     /// Maximum in-flight publish confirmations per writer when --confirmed is set
     #[arg(long, default_value_t = 1024)]
     confirm_window: usize,
+
+    /// Broker TCP address to target.
+    #[arg(long, default_value = "127.0.0.1:9876")]
+    broker_addr: SocketAddr,
+
+    /// Human-readable durability contract for the run.
+    #[arg(long, default_value = "local")]
+    durability_label: String,
+
+    /// Queue topic used by writers and readers.
+    #[arg(long, default_value = "topic1")]
+    topic: String,
 }
 
 #[tokio::main]
@@ -115,7 +127,7 @@ async fn main() {
         "confirm_window must be > 0 when confirmed"
     );
 
-    let address = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from([127, 0, 0, 1]), 9876));
+    let address = args.broker_addr;
     let run_started = Instant::now();
     let measure_start = run_started + Duration::from_secs(args.warmup_secs);
     let measure_end = measure_start + Duration::from_secs(args.duration_secs);
@@ -125,7 +137,7 @@ async fn main() {
     let drain_timeout_secs = args.drain_timeout_secs;
 
     println!(
-        "Steady benchmark: writers={}, readers={}, rate_per_sec={}, warmup_secs={}, duration_secs={}, size={}, prefetch={}, confirmed={}, confirm_window={}",
+        "Steady benchmark: writers={}, readers={}, rate_per_sec={}, warmup_secs={}, duration_secs={}, size={}, prefetch={}, confirmed={}, confirm_window={}, broker_addr={}, durability={}, topic={}",
         args.writers,
         args.readers,
         args.rate_per_sec,
@@ -135,6 +147,9 @@ async fn main() {
         args.prefetch,
         args.confirmed,
         args.confirm_window,
+        args.broker_addr,
+        args.durability_label,
+        args.topic,
     );
 
     let mut reader_handles = Vec::new();
@@ -143,6 +158,7 @@ async fn main() {
         let measured_sent_total = measured_sent_total.clone();
         let measured_received_total = measured_received_total.clone();
         let prefetch = args.prefetch;
+        let topic = args.topic.clone();
         reader_handles.push(tokio::spawn(async move {
             let client = ClientOptions::new()
                 .auth("fibril", "fibril")
@@ -150,7 +166,7 @@ async fn main() {
                 .await
                 .unwrap();
             let mut sub = client
-                .subscribe("topic1")
+                .subscribe(&topic)
                 .unwrap()
                 .prefetch(prefetch)
                 .sub_manual_ack()
@@ -230,6 +246,7 @@ async fn main() {
         let writer_rate = rate_for_writer(args.rate_per_sec, args.writers, writer_id);
         let confirmed = args.confirmed;
         let confirm_window = args.confirm_window;
+        let topic = args.topic.clone();
         if writer_rate == 0 {
             continue;
         }
@@ -239,7 +256,7 @@ async fn main() {
                 .connect(address)
                 .await
                 .unwrap();
-            let publisher = client.publisher("topic1").unwrap();
+            let publisher = client.publisher(&topic).unwrap();
             let mut stats = WriterStats::default();
             let mut pending_confirms = VecDeque::<PublishConfirmation>::new();
 

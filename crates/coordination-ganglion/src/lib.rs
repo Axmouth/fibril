@@ -616,6 +616,7 @@ fn to_fibril_durability(
 #[derive(Debug, Clone)]
 pub struct ControllerConfig {
     pub target_followers: usize,
+    pub default_durability: ReplicationDurabilityPolicy,
     /// Bounded tick interval; the loop also wakes on snapshot changes.
     pub tick: std::time::Duration,
     /// Heartbeats older than this mark a broker dead. Must exceed worst-case
@@ -628,6 +629,7 @@ impl Default for ControllerConfig {
     fn default() -> Self {
         Self {
             target_followers: 1,
+            default_durability: ReplicationDurabilityPolicy::LocalDurable,
             tick: std::time::Duration::from_millis(2000),
             liveness_ttl: std::time::Duration::from_millis(9000),
             max_cas_retries: 8,
@@ -943,7 +945,11 @@ where
         let labels: Vec<&str> = snapshot
             .nodes
             .values()
-            .filter_map(|node| node.labels.get(REPARTITION_DRAINED_LABEL).map(String::as_str))
+            .filter_map(|node| {
+                node.labels
+                    .get(REPARTITION_DRAINED_LABEL)
+                    .map(String::as_str)
+            })
             .collect();
         aggregate_repartition_drained(labels, topic, group, version)
     }
@@ -1241,9 +1247,7 @@ where
                 return Ok(existing);
             }
             // v1 grows by an integer multiple only.
-            if new_count <= existing.partition_count
-                || new_count % existing.partition_count != 0
-            {
+            if new_count <= existing.partition_count || new_count % existing.partition_count != 0 {
                 return Err(RepartitionQueueError::NotIntegerMultipleGrowth {
                     topic: topic.to_string(),
                     group: group.map(str::to_string),
@@ -1426,9 +1430,7 @@ where
             }
         }
         Err(RepartitionQueueError::Coordination(
-            OpenraftAdapterError::Storage(
-                "queue shrink lost the CAS race repeatedly".to_string(),
-            ),
+            OpenraftAdapterError::Storage("queue shrink lost the CAS race repeatedly".to_string()),
         ))
     }
 
@@ -1671,6 +1673,7 @@ where
                             planner.as_ref(),
                             &queues,
                             config.target_followers,
+                            config.default_durability,
                             &live,
                             config.max_cas_retries,
                         )
@@ -1906,6 +1909,7 @@ where
         planner: &dyn PartitionPlacementPolicy,
         queues: &[QueueIdentity],
         target_followers: usize,
+        default_durability: ReplicationDurabilityPolicy,
         live_nodes: &HashMap<String, NodeInfo>,
         max_retries: usize,
     ) -> Result<Option<CoordinationSnapshot>, ControlError> {
@@ -1924,6 +1928,7 @@ where
                     queues: queues.to_vec(),
                     existing: fibril_committed.assignments,
                     target_followers,
+                    default_durability,
                     generation: committed.generation + 1,
                 })
                 .map_err(ControlError::Planning)?;
@@ -2124,7 +2129,10 @@ mod cohort_transport_tests {
         // Entry sequence, not a map keyed by Partition.
         assert!(encoded.contains("\"entries\""));
         assert_eq!(decode_cohort_assignment(&encoded), plan.assignment);
-        assert_eq!(decode_cohort_assignment_doc(&encoded).unwrap().generation, 7);
+        assert_eq!(
+            decode_cohort_assignment_doc(&encoded).unwrap().generation,
+            7
+        );
         assert!(decode_cohort_assignment("garbage").is_empty());
         assert!(decode_cohort_assignment_doc("garbage").is_none());
     }
@@ -2413,6 +2421,7 @@ mod tests {
                 &DeterministicPartitionPlacement,
                 std::slice::from_ref(&queue),
                 1,
+                ReplicationDurabilityPolicy::LocalDurable,
                 &live,
                 8,
             )
@@ -2426,6 +2435,7 @@ mod tests {
                 &DeterministicPartitionPlacement,
                 std::slice::from_ref(&queue),
                 1,
+                ReplicationDurabilityPolicy::LocalDurable,
                 &live,
                 8,
             )
@@ -2461,6 +2471,7 @@ mod tests {
                 &DeterministicPartitionPlacement,
                 std::slice::from_ref(&queue),
                 1,
+                ReplicationDurabilityPolicy::LocalDurable,
                 &live,
                 8,
             )
@@ -2611,10 +2622,7 @@ mod tests {
             .await
             .expect("grow to a multiple");
         assert_eq!(grown.partition_count, 4);
-        assert_eq!(
-            grown.partitioning_version,
-            created.partitioning_version + 1
-        );
+        assert_eq!(grown.partitioning_version, created.partitioning_version + 1);
 
         // Idempotent: repartition to the current count is a no-op success.
         let idempotent = provider
@@ -2837,6 +2845,7 @@ mod tests {
                 &DeterministicPartitionPlacement,
                 &provider.registered_queues(),
                 0,
+                ReplicationDurabilityPolicy::LocalDurable,
                 &live,
                 8,
             )
@@ -2906,6 +2915,7 @@ mod tests {
             std::sync::Arc::new(DeterministicPartitionPlacement),
             ControllerConfig {
                 target_followers: 1,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 tick: Duration::from_millis(100),
                 // Generous TTL first: both brokers count as live.
                 liveness_ttl: Duration::from_secs(30),
@@ -2969,6 +2979,7 @@ mod tests {
             std::sync::Arc::new(DeterministicPartitionPlacement),
             ControllerConfig {
                 target_followers: 1,
+                default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 tick: Duration::from_millis(100),
                 liveness_ttl: Duration::from_millis(900),
                 max_cas_retries: 8,
@@ -3192,6 +3203,7 @@ mod tests {
                 &DeterministicPartitionPlacement,
                 &provider.registered_queues(),
                 2,
+                ReplicationDurabilityPolicy::LocalDurable,
                 &all_live,
                 8,
             )
@@ -3215,6 +3227,7 @@ mod tests {
                 &DeterministicPartitionPlacement,
                 &provider.registered_queues(),
                 2,
+                ReplicationDurabilityPolicy::LocalDurable,
                 &live,
                 8,
             )
@@ -3594,7 +3607,9 @@ mod tests {
             .expect("clear transition");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if coordination.repartition_transition("orders", None).is_none()
+            if coordination
+                .repartition_transition("orders", None)
+                .is_none()
                 && coordination.active_repartition_transitions().is_empty()
             {
                 break;
