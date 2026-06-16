@@ -3,8 +3,9 @@ use std::{collections::HashMap, hint::black_box};
 use bytes::{BufMut, BytesMut};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use fibril_protocol::v1::{
-    ContentType, Op, Publish, ReplicationEventRead, ReplicationEventRecord, ReplicationMessageRead,
-    ReplicationMessageRecord, ReplicationReadOk,
+    ContentType, Op, PROTOCOL_V1, Publish, ReplicationEventRead, ReplicationEventRecord,
+    ReplicationMessageRead, ReplicationMessageRecord, ReplicationReadOk,
+    frame::Frame,
     helper::{try_decode, try_encode},
 };
 use fibril_storage::Partition;
@@ -29,7 +30,7 @@ fn publish_frame(
 }
 
 fn bench_case(c: &mut Criterion, name: &str, publish: Publish) {
-    c.bench_function(&format!("encode_publish/{name}"), |b| {
+    c.bench_function(&format!("encode_publish/msgpack/{name}"), |b| {
         b.iter_batched(
             || publish.clone(),
             |publish| try_encode(Op::Publish, 1, black_box(&publish)).unwrap(),
@@ -38,7 +39,7 @@ fn bench_case(c: &mut Criterion, name: &str, publish: Publish) {
     });
 
     let frame = try_encode(Op::Publish, 1, &publish).unwrap();
-    c.bench_function(&format!("decode_publish/{name}"), |b| {
+    c.bench_function(&format!("decode_publish/msgpack_owned/{name}"), |b| {
         b.iter_batched(
             || frame.clone(),
             |frame| {
@@ -49,12 +50,64 @@ fn bench_case(c: &mut Criterion, name: &str, publish: Publish) {
         )
     });
 
-    c.bench_function(&format!("encode_decode_publish/{name}"), |b| {
+    c.bench_function(
+        &format!("encode_decode_publish/msgpack_owned/{name}"),
+        |b| {
+            b.iter_batched(
+                || publish.clone(),
+                |publish| {
+                    let frame = try_encode(Op::Publish, 1, black_box(&publish)).unwrap();
+                    let decoded: Publish = try_decode(black_box(&frame)).unwrap();
+                    black_box(decoded);
+                },
+                BatchSize::SmallInput,
+            )
+        },
+    );
+
+    c.bench_function(&format!("encode_publish/raw/{name}"), |b| {
+        b.iter_batched(
+            || publish.clone(),
+            |publish| raw_encode_publish_frame(1, black_box(&publish)),
+            BatchSize::SmallInput,
+        )
+    });
+
+    let raw_frame = raw_encode_publish_frame(1, &publish);
+    assert_publish_roundtrip(&raw_decode_publish_owned(&raw_frame.payload), &publish);
+
+    c.bench_function(&format!("decode_publish/raw_borrowed/{name}"), |b| {
+        b.iter_batched(
+            || raw_frame.clone(),
+            |frame| {
+                let decoded = raw_decode_publish_borrowed(black_box(&frame.payload));
+                black_box((
+                    decoded.topic.len(),
+                    decoded.group.map(str::len),
+                    decoded.headers,
+                    decoded.payload.len(),
+                    decoded.partition_key.map(<[u8]>::len),
+                    decoded.checksum,
+                ));
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    c.bench_function(&format!("decode_publish/raw_owned/{name}"), |b| {
+        b.iter_batched(
+            || raw_frame.clone(),
+            |frame| black_box(raw_decode_publish_owned(black_box(&frame.payload))),
+            BatchSize::SmallInput,
+        )
+    });
+
+    c.bench_function(&format!("encode_decode_publish/raw_owned/{name}"), |b| {
         b.iter_batched(
             || publish.clone(),
             |publish| {
-                let frame = try_encode(Op::Publish, 1, black_box(&publish)).unwrap();
-                let decoded: Publish = try_decode(black_box(&frame)).unwrap();
+                let frame = raw_encode_publish_frame(1, black_box(&publish));
+                let decoded = raw_decode_publish_owned(black_box(&frame.payload));
                 black_box(decoded);
             },
             BatchSize::SmallInput,
@@ -91,6 +144,219 @@ fn bench_encode_decode(c: &mut Criterion) {
         "64k_no_headers",
         publish_frame(64 * 1024, None, HashMap::new()),
     );
+}
+
+fn assert_publish_roundtrip(got: &Publish, expected: &Publish) {
+    assert_eq!(got.topic, expected.topic);
+    assert_eq!(got.partition, expected.partition);
+    assert_eq!(got.group, expected.group);
+    assert_eq!(got.require_confirm, expected.require_confirm);
+    assert_eq!(
+        got.content_type.as_ref().map(ContentType::as_header),
+        expected.content_type.as_ref().map(ContentType::as_header)
+    );
+    assert_eq!(got.headers, expected.headers);
+    assert_eq!(got.payload, expected.payload);
+    assert_eq!(got.published, expected.published);
+    assert_eq!(got.partition_key, expected.partition_key);
+    assert_eq!(got.partitioning_version, expected.partitioning_version);
+}
+
+#[derive(Debug)]
+struct RawPublishBorrowedStats<'a> {
+    topic: &'a str,
+    group: Option<&'a str>,
+    headers: usize,
+    payload: &'a [u8],
+    partition_key: Option<&'a [u8]>,
+    checksum: u64,
+}
+
+fn raw_encode_publish_frame(request_id: u64, publish: &Publish) -> Frame {
+    Frame {
+        version: PROTOCOL_V1,
+        opcode: Op::Publish as u16,
+        flags: 0,
+        request_id,
+        payload: raw_publish_payload(publish).into(),
+    }
+}
+
+fn raw_publish_payload(publish: &Publish) -> Vec<u8> {
+    let mut buf = BytesMut::new();
+    buf.extend_from_slice(b"FPB1");
+    put_str(&mut buf, &publish.topic);
+    put_optional_str(&mut buf, publish.group.as_deref());
+    buf.put_u32(publish.partition.id());
+    buf.put_u8(u8::from(publish.require_confirm));
+    put_content_type(&mut buf, publish.content_type.as_ref());
+    buf.put_u32(publish.headers.len() as u32);
+    for (key, value) in &publish.headers {
+        put_str(&mut buf, key);
+        put_str(&mut buf, value);
+    }
+    buf.put_u64(publish.published);
+    put_optional_bytes(&mut buf, publish.partition_key.as_deref());
+    buf.put_u64(publish.partitioning_version);
+    put_bytes(&mut buf, &publish.payload);
+    buf.freeze().to_vec()
+}
+
+fn put_bytes(buf: &mut BytesMut, bytes: &[u8]) {
+    buf.put_u32(bytes.len() as u32);
+    buf.extend_from_slice(bytes);
+}
+
+fn put_str(buf: &mut BytesMut, value: &str) {
+    put_bytes(buf, value.as_bytes());
+}
+
+fn put_optional_bytes(buf: &mut BytesMut, value: Option<&[u8]>) {
+    match value {
+        Some(value) => {
+            buf.put_u8(1);
+            put_bytes(buf, value);
+        }
+        None => buf.put_u8(0),
+    }
+}
+
+fn put_optional_str(buf: &mut BytesMut, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            buf.put_u8(1);
+            put_str(buf, value);
+        }
+        None => buf.put_u8(0),
+    }
+}
+
+fn put_content_type(buf: &mut BytesMut, content_type: Option<&ContentType>) {
+    match content_type {
+        None => buf.put_u8(0),
+        Some(ContentType::MsgPack) => buf.put_u8(1),
+        Some(ContentType::Json) => buf.put_u8(2),
+        Some(ContentType::Text) => buf.put_u8(3),
+        Some(ContentType::Custom(value)) => {
+            buf.put_u8(4);
+            put_str(buf, value);
+        }
+    }
+}
+
+fn read_bytes<'a>(payload: &'a [u8], cursor: &mut usize) -> &'a [u8] {
+    let len = read_u32(payload, cursor) as usize;
+    take(payload, cursor, len)
+}
+
+fn read_str<'a>(payload: &'a [u8], cursor: &mut usize) -> &'a str {
+    std::str::from_utf8(read_bytes(payload, cursor)).unwrap()
+}
+
+fn read_optional_bytes<'a>(payload: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
+    match read_u8(payload, cursor) {
+        0 => None,
+        _ => Some(read_bytes(payload, cursor)),
+    }
+}
+
+fn read_optional_str<'a>(payload: &'a [u8], cursor: &mut usize) -> Option<&'a str> {
+    match read_u8(payload, cursor) {
+        0 => None,
+        _ => Some(read_str(payload, cursor)),
+    }
+}
+
+fn read_content_type_owned(payload: &[u8], cursor: &mut usize) -> Option<ContentType> {
+    match read_u8(payload, cursor) {
+        0 => None,
+        1 => Some(ContentType::MsgPack),
+        2 => Some(ContentType::Json),
+        3 => Some(ContentType::Text),
+        4 => Some(ContentType::Custom(read_str(payload, cursor).to_string())),
+        kind => panic!("unknown content type kind {kind}"),
+    }
+}
+
+fn skip_content_type(payload: &[u8], cursor: &mut usize) -> u64 {
+    match read_u8(payload, cursor) {
+        0 => 0,
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => read_str(payload, cursor).len() as u64,
+        kind => panic!("unknown content type kind {kind}"),
+    }
+}
+
+fn raw_decode_publish_borrowed(payload: &[u8]) -> RawPublishBorrowedStats<'_> {
+    let mut cursor = 0;
+    assert_eq!(take(payload, &mut cursor, 4), b"FPB1");
+    let topic = read_str(payload, &mut cursor);
+    let group = read_optional_str(payload, &mut cursor);
+    let partition = read_u32(payload, &mut cursor);
+    let require_confirm = read_u8(payload, &mut cursor);
+    let mut checksum = u64::from(partition) ^ u64::from(require_confirm);
+    checksum ^= skip_content_type(payload, &mut cursor);
+    let header_count = read_u32(payload, &mut cursor) as usize;
+    for _ in 0..header_count {
+        let key = read_str(payload, &mut cursor);
+        let value = read_str(payload, &mut cursor);
+        checksum ^= key.len() as u64 ^ value.len() as u64;
+    }
+    checksum ^= read_u64(payload, &mut cursor);
+    let partition_key = read_optional_bytes(payload, &mut cursor);
+    checksum ^= partition_key
+        .map(|key| key.len() as u64)
+        .unwrap_or_default();
+    checksum ^= read_u64(payload, &mut cursor);
+    let body = read_bytes(payload, &mut cursor);
+    checksum ^= body.len() as u64 ^ body.first().copied().unwrap_or_default() as u64;
+    assert_eq!(cursor, payload.len());
+
+    RawPublishBorrowedStats {
+        topic,
+        group,
+        headers: header_count,
+        payload: body,
+        partition_key,
+        checksum,
+    }
+}
+
+fn raw_decode_publish_owned(input: &[u8]) -> Publish {
+    let mut cursor = 0;
+    assert_eq!(take(input, &mut cursor, 4), b"FPB1");
+    let topic = read_str(input, &mut cursor).to_string();
+    let group = read_optional_str(input, &mut cursor).map(ToString::to_string);
+    let partition = Partition::new(read_u32(input, &mut cursor));
+    let require_confirm = read_u8(input, &mut cursor) != 0;
+    let content_type = read_content_type_owned(input, &mut cursor);
+    let header_count = read_u32(input, &mut cursor) as usize;
+    let mut headers = HashMap::with_capacity(header_count);
+    for _ in 0..header_count {
+        let key = read_str(input, &mut cursor).to_string();
+        let value = read_str(input, &mut cursor).to_string();
+        headers.insert(key, value);
+    }
+    let published = read_u64(input, &mut cursor);
+    let partition_key = read_optional_bytes(input, &mut cursor).map(ToOwned::to_owned);
+    let partitioning_version = read_u64(input, &mut cursor);
+    let payload = read_bytes(input, &mut cursor).to_vec();
+    assert_eq!(cursor, input.len());
+
+    Publish {
+        topic,
+        partition,
+        group,
+        require_confirm,
+        content_type,
+        headers,
+        payload,
+        published,
+        partition_key,
+        partitioning_version,
+    }
 }
 
 struct RawDecodeStats {

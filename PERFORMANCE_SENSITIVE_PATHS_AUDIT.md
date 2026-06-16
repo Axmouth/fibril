@@ -59,6 +59,12 @@ Replication optimization arc so far:
   wait for follower acknowledgement. The next likely targets are local append
   completion latency, client confirm-window backlog, follower tick batching, and
   follower durable apply cost.
+- A protocol payload format comparison was added after the replication raw
+  payload win raised the broader question. The outer frame is already custom
+  binary. The remaining general client/server cost is mostly MessagePack payload
+  encode/decode. A benchmark-only raw `Publish` codec shows that a custom binary
+  payload can remove most payload-size scaling and can support borrowed decoding
+  for server hot paths. This is not wired into production protocol handling yet.
 
 Current suspect list, ordered by what the latest data makes most plausible:
 
@@ -169,7 +175,64 @@ Recommendation:
   `partitioned-fan-in`, and `redirect-publish`.
 - Record broker logs separately, as the current scripts already do.
 
-### 3. Per-owner protocol replication peers serialize requests
+### 3. General protocol payloads still use MessagePack on hot paths
+
+Severity: Medium for standalone throughput, high for larger payload CPU cost.
+
+The Fibril protocol frame itself is already a small custom binary envelope:
+version, opcode, flags, request id, and raw payload bytes. Most ordinary
+request/response payloads inside that frame still use MessagePack through
+Serde. That is convenient, but the replication optimization showed that it can
+be the wrong default for hot, byte-heavy paths.
+
+Benchmark-only comparison, 2026-06-16:
+
+| Case | MessagePack | Raw owned | Raw borrowed |
+| --- | ---: | ---: | ---: |
+| encode+decode publish, 1 KiB, no headers | about 6.0us | about 0.38us | n/a |
+| encode+decode publish, 1 KiB, content type | about 6.0us | about 0.39us | n/a |
+| encode+decode publish, 1 KiB, user headers | about 6.4us | about 0.76us | n/a |
+| encode+decode publish, 64 KiB, no headers | about 341us | about 5.7us | n/a |
+| decode publish, 1 KiB, no headers | about 3.0us | about 0.15-0.31us noisy | about 18ns |
+| decode publish, 64 KiB, no headers | about 177us | about 5.4us | about 18ns |
+
+Interpretation:
+
+- Replacing the outer frame is not the job. It is already custom binary.
+- The high-value change is opcode-specific payload codecs, starting with hot
+  data-plane operations.
+- A borrowed decode path matters. It lets the server validate and route without
+  copying the message payload first. Owned decode is still much faster than
+  MessagePack, but borrowed decode is the shape that best matches publish and
+  delivery hot paths.
+- This benchmark does not prove the end-to-end server will get the same ratio.
+  It proves the codec cost is large enough to justify a production experiment.
+
+Recommended migration shape:
+
+- Keep the current frame structure.
+- Add opcode-specific payload codecs for `Publish`, `PublishDelayed`,
+  `Deliver`, `PublishOk`, `Ack`, and `Nack` first.
+- Prefer borrowed request views on server ingress, then convert only the fields
+  that must outlive the frame buffer.
+- Use protocol flags or a protocol-version bump to distinguish raw payloads
+  from MessagePack while the transition is in progress. Because this branch is
+  pre-0.1, avoid compatibility machinery unless it directly reduces rollout
+  risk.
+- Keep admin/control-plane and rare reconnect/topology payloads on MessagePack
+  until a benchmark says otherwise.
+
+Required tests before production wiring:
+
+- Roundtrip tests for each raw codec.
+- Truncation and invalid-tag tests that produce typed wire-format errors.
+- Client/server interoperability tests on the actual TCP protocol path.
+- A single-node throughput and latency before/after comparison.
+- A replica-durable cluster run after publish/deliver codecs change, because
+  any per-frame scheduling or allocation change can shift the replication
+  latency profile.
+
+### 4. Per-owner protocol replication peers serialize requests
 
 Severity: Medium for many followed queues, low for the current first version.
 
@@ -195,7 +258,7 @@ Recommendation:
 - Only consider per-queue peers or request multiplexing if the benchmark shows
   serialization is the limiting factor.
 
-### 4. Cohort routing uses a mutex, but currently on control paths
+### 5. Cohort routing uses a mutex, but currently on control paths
 
 Severity: Low.
 
@@ -223,7 +286,7 @@ Recommendation:
 - The next correctness cleanup, `sub_id`-scoped leave, is more important than
   changing the lock shape.
 
-### 5. Delivery loop allocation is known, but not yet proven worth changing
+### 6. Delivery loop allocation is known, but not yet proven worth changing
 
 Severity: Medium for standalone throughput, low for immediate work.
 
@@ -242,7 +305,7 @@ Recommendation:
 - Avoid fairness or backpressure changes unless the benchmark includes tail
   latency and redelivery behavior.
 
-### 6. Topic/group allocation remains a broad cleanup, not a quick win
+### 7. Topic/group allocation remains a broad cleanup, not a quick win
 
 Severity: Low now, potentially medium for many queues.
 
