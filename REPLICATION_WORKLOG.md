@@ -202,6 +202,27 @@ Details:
   replace local exploratory context errors blindly; prioritize surfaces that
   cross crate, protocol, admin, or operator boundaries.
 
+IN PROGRESS — protocol payload binary migration (2026-06-16): the outer TCP
+frame is already custom binary; the remaining general protocol overhead is
+MessagePack payload encoding/decoding. The comparison bench in
+`crates/protocol/benches/encode.rs` shows a raw `Publish` payload codec is about
+an order of magnitude faster for 1 KiB messages and dramatically faster for
+large payloads. Target state: Rust protocol payloads are all custom binary, with
+no MessagePack in the TCP protocol crate. Mixed MessagePack/raw payloads are
+acceptable only as a short migration state while opcodes are converted one by
+one.
+
+Current direction:
+- Keep the existing binary frame header and choose payload codec by opcode.
+- Start with hot data-plane opcodes: `Publish`, `PublishDelayed`, `Deliver`,
+  `PublishOk`, `Ack`, and `Nack`.
+- Add typed wire-format parse errors instead of formatted decode strings.
+- Do not add a JSON/debug flag now. If we need debug-readable protocol traffic
+  later, make it an explicit mode rather than compatibility baggage.
+- TypeScript client parity is deferred to the planned large TS catch-up pass,
+  because that client is already behind this branch across clustering,
+  reconnect, and cohort behavior.
+
 DOCS HOUSEKEEPING (at some point, user request): do a relevance pass over all the
 .md files we have collected. We should not keep them all, especially planning and
 handoff docs that go stale. Prune or fold the dead ones. While at it, give the

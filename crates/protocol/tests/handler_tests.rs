@@ -36,7 +36,8 @@ use fibril_protocol::v1::{
     ResumeIdentity, ResumeOutcome, Subscribe, TopologyOk, TopologyRequest,
     frame::{Frame, ProtoCodec},
     handler::{
-        ClientTopologySource, ConnectionSettings, QueueDeclareCoordinator, handle_connection,
+        ClientTopologySource, ConnectionSettings, ProtocolConnectionError, QueueDeclareCoordinator,
+        handle_connection,
     },
     helper::{try_decode, try_encode},
     replication::{
@@ -104,7 +105,7 @@ async fn open_test_broker_with_ownership(
 
 async fn open_protocol_connection() -> (
     Framed<TcpStream, ProtoCodec>,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
     TempDir,
 ) {
     let (framed, server_task, dir, _broker) =
@@ -116,7 +117,7 @@ async fn open_protocol_connection_with_settings(
     settings: ConnectionSettings,
 ) -> (
     Framed<TcpStream, ProtoCodec>,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
     TempDir,
     Arc<Broker<StromaEngine>>,
 ) {
@@ -130,7 +131,7 @@ async fn open_protocol_connection_for_broker(
     dir: TempDir,
 ) -> (
     Framed<TcpStream, ProtoCodec>,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
     TempDir,
     Arc<Broker<StromaEngine>>,
 ) {
@@ -165,7 +166,7 @@ async fn start_protocol_listener_for_broker(
     auth: Option<StaticAuthHandler>,
 ) -> (
     SocketAddr,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
+    tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
     TempDir,
     Arc<Broker<StromaEngine>>,
 ) {

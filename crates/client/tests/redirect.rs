@@ -16,6 +16,7 @@ use fibril_protocol::v1::{
     TopologyOk,
     frame::ProtoCodec,
     helper::{try_decode, try_encode},
+    wire,
 };
 use fibril_storage::{DeliveryTag, Partition};
 use futures::{SinkExt, StreamExt};
@@ -160,7 +161,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             payload: vec![sub.partition.id() as u8],
                         };
                         if framed
-                            .send(try_encode(Op::Deliver, 0, &deliver).unwrap())
+                            .send(wire::encode_deliver(0, &deliver).unwrap())
                             .await
                             .is_err()
                         {
@@ -212,7 +213,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             try_encode(Op::TopologyOk, frame.request_id, &topology).unwrap()
                         }
                     } else if frame.opcode == Op::Publish as u16 {
-                        let publish: Publish = try_decode(&frame).unwrap();
+                        let publish: Publish = wire::decode_publish(&frame).unwrap();
                         if let Some(recorder) = &config.recorded_partitions {
                             if let Ok(mut partitions) = recorder.lock() {
                                 partitions.push(publish.partition.id());
@@ -225,12 +226,10 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                         }
                         match &config.publish {
                             None => continue,
-                            Some(MockBehavior::ConfirmOk) => try_encode(
-                                Op::PublishOk,
-                                frame.request_id,
-                                &PublishOk { offset: 0 },
-                            )
-                            .unwrap(),
+                            Some(MockBehavior::ConfirmOk) => {
+                                wire::encode_publish_ok(frame.request_id, &PublishOk { offset: 0 })
+                                    .unwrap()
+                            }
                             Some(MockBehavior::RedirectTo(target)) => {
                                 let redirect = Redirect {
                                     topic: publish.topic,

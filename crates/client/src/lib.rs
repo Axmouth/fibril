@@ -57,7 +57,7 @@ use uuid::Uuid;
 use fibril_protocol::v1::{
     frame::{Frame, ProtoCodec},
     helper::*,
-    *,
+    wire, *,
 };
 
 // ===== Public API ============================================================
@@ -793,7 +793,9 @@ fn deserialize_by_content_type<T: DeserializeOwned>(
     }
 }
 
-fn decode_protocol<T: for<'de> serde::Deserialize<'de>>(frame: &Frame) -> FibrilResult<T> {
+fn decode_protocol<T: for<'de> serde::Deserialize<'de> + 'static>(
+    frame: &Frame,
+) -> FibrilResult<T> {
     try_decode(frame).map_err(|err| FibrilError::DeserializationFailure {
         msg: err.to_string(),
     })
@@ -2387,11 +2389,30 @@ async fn feed_protocol_frame<S, T>(
 ) -> FibrilResult<usize>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    T: Serialize,
+    T: Serialize + 'static,
 {
     let frame = try_encode(op, request_id, msg).map_err(|err| FibrilError::Unexpected {
         msg: err.to_string(),
     })?;
+    let size = size_of::<Frame>() + frame.payload.len();
+
+    framed
+        .feed(frame)
+        .await
+        .map_err(|err| FibrilError::Disconnection {
+            msg: err.to_string(),
+        })?;
+
+    Ok(size)
+}
+
+async fn feed_encoded_frame<S>(
+    framed: &mut Framed<S, ProtoCodec>,
+    frame: Frame,
+) -> FibrilResult<usize>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let size = size_of::<Frame>() + frame.payload.len();
 
     framed
@@ -2424,7 +2445,7 @@ async fn send_protocol_frame<S, T>(
 ) -> FibrilResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    T: Serialize,
+    T: Serialize + 'static,
 {
     feed_protocol_frame(framed, op, request_id, msg).await?;
     flush_protocol_frames(framed).await
@@ -2630,17 +2651,50 @@ where
             };
         }
 
-        macro_rules! feed_publish_or_die {
-            ($framed:expr, $op:expr, $request_id:expr, $msg:expr, $err_slot:expr) => {
-                match feed_protocol_frame(&mut $framed, $op, $request_id, $msg).await {
-                    Ok(size) => {
-                        queued_publish_frames += 1;
-                        queued_publish_bytes += size;
-                        if queued_publish_frames >= PUBLISH_FLUSH_MESSAGES
-                            || queued_publish_bytes >= PUBLISH_FLUSH_BYTES
-                        {
-                            flush_publishes_or_die!($framed, $err_slot);
+        macro_rules! feed_encoded_publish_or_die {
+            ($framed:expr, $frame:expr, $err_slot:expr) => {
+                match $frame.map_err(|err| FibrilError::Unexpected {
+                    msg: err.to_string(),
+                }) {
+                    Ok(frame) => match feed_encoded_frame(&mut $framed, frame).await {
+                        Ok(size) => {
+                            queued_publish_frames += 1;
+                            queued_publish_bytes += size;
+                            if queued_publish_frames >= PUBLISH_FLUSH_MESSAGES
+                                || queued_publish_bytes >= PUBLISH_FLUSH_BYTES
+                            {
+                                flush_publishes_or_die!($framed, $err_slot);
+                            }
                         }
+                        Err(e) => {
+                            $err_slot = Some(e);
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        $err_slot = Some(e);
+                        break;
+                    }
+                }
+            };
+        }
+
+        macro_rules! send_encoded_or_die {
+            ($framed:expr, $frame:expr, $err_slot:expr) => {
+                match $frame.map_err(|err| FibrilError::Unexpected {
+                    msg: err.to_string(),
+                }) {
+                    Ok(frame) => {
+                        if let Err(e) = feed_encoded_frame(&mut $framed, frame).await {
+                            $err_slot = Some(e);
+                            break;
+                        }
+                        if let Err(e) = flush_protocol_frames(&mut $framed).await {
+                            $err_slot = Some(e);
+                            break;
+                        }
+                        queued_publish_frames = 0;
+                        queued_publish_bytes = 0;
                     }
                     Err(e) => {
                         $err_slot = Some(e);
@@ -2691,7 +2745,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        feed_publish_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
+                        feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }
                     Command::PublishConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -2708,7 +2762,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        feed_publish_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
+                        feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }
                     Command::PublishDelayedUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -2725,7 +2779,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        feed_publish_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
+                        feed_encoded_publish_or_die!(framed, wire::encode_publish_delayed(req_id, &p), fatal_error)
                     }
                     Command::PublishDelayedConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -2743,7 +2797,7 @@ where
                             partition_key: None,
                             partitioning_version,
                         };
-                        feed_publish_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
+                        feed_encoded_publish_or_die!(framed, wire::encode_publish_delayed(req_id, &p), fatal_error)
                     }
                     Command::Subscribe { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -2773,7 +2827,7 @@ where
                                 partition: sub.partition,
                                 tags: vec![delivery_tag],
                             };
-                            send_or_die!(framed, Op::Ack, request_id, &ack, fatal_error)
+                            send_encoded_or_die!(framed, wire::encode_ack(request_id, &ack), fatal_error)
                         }
                     }
                     Command::Nack { sub_id, delivery_tag, requeue, not_before, request_id } => {
@@ -2786,7 +2840,7 @@ where
                                 requeue,
                                 not_before,
                             };
-                           send_or_die!(framed, Op::Nack, request_id, &nack, fatal_error)
+                            send_encoded_or_die!(framed, wire::encode_nack(request_id, &nack), fatal_error)
                         }
                     }
                 },
@@ -2803,10 +2857,12 @@ where
 
                     match frame.opcode {
                         x if x == Op::PublishOk as u16 => {
-                            let ok: PublishOk = match decode_protocol(&frame) {
+                            let ok: PublishOk = match wire::decode_publish_ok(&frame) {
                                 Ok(ok) => ok,
                                 Err(err) => {
-                                    fatal_error = Some(err);
+                                    fatal_error = Some(FibrilError::DeserializationFailure {
+                                        msg: err.to_string(),
+                                    });
                                     break;
                                 }
                             };
@@ -2832,10 +2888,12 @@ where
                             }
                         }
                         x if x == Op::Deliver as u16 => {
-                            let d: Deliver = match decode_protocol(&frame) {
+                            let d: Deliver = match wire::decode_deliver(&frame) {
                                 Ok(deliver) => deliver,
                                 Err(err) => {
-                                    fatal_error = Some(err);
+                                    fatal_error = Some(FibrilError::DeserializationFailure {
+                                        msg: err.to_string(),
+                                    });
                                     break;
                                 }
                             };
@@ -3921,8 +3979,7 @@ mod tests {
                 .unwrap();
             second
                 .send(
-                    try_encode(
-                        Op::Deliver,
+                    wire::encode_deliver(
                         88,
                         &Deliver {
                             sub_id: 88,

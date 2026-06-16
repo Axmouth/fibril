@@ -12,6 +12,7 @@ use crate::v1::{
     frame::{Frame, ProtoCodec},
     helper::{ProtocolError, error_frame, try_decode, try_encode},
     replication_payload::encode_replication_read_ok,
+    wire::{self, WireError},
     *,
 };
 use arc_swap::ArcSwap;
@@ -68,6 +69,8 @@ pub enum ProtocolConnectionError {
     Io(#[from] std::io::Error),
     #[error("protocol frame error: {0}")]
     Protocol(#[from] ProtocolError),
+    #[error("protocol wire format error: {0}")]
+    Wire(#[from] WireError),
     #[error("connection frame channel closed")]
     FrameChannelClosed,
     #[error("protocol compliance marker mismatch")]
@@ -989,7 +992,7 @@ async fn install_subscription(
 
             tracing::debug!("Sending Deliver");
 
-            let frame = match try_encode(Op::Deliver, req_id_gen_clone.next_id(), &deliver) {
+            let frame = match wire::encode_deliver(req_id_gen_clone.next_id(), &deliver) {
                 Ok(frame) => frame,
                 Err(err) => {
                     tracing::error!("Failed to encode Deliver frame: {err}");
@@ -1634,7 +1637,7 @@ pub async fn handle_connection(
     let logical = resume.logical.clone();
     let transport_generation = logical.attach_transport(frame_tx_high_prio.clone());
     client_id = resume.client_id;
-    let hello_ok = &HelloOk {
+    let hello_ok = HelloOk {
         protocol_version: PROTOCOL_V1,
         owner_id: connection_settings.resume_sessions.owner_id,
         client_id,
@@ -1803,7 +1806,7 @@ pub async fn handle_connection(
                     };
                     if require_confirm {
                         let send_res =
-                            match try_encode(Op::PublishOk, request_id, &PublishOk { offset }) {
+                            match wire::encode_publish_ok(request_id, &PublishOk { offset }) {
                                 Ok(frame) => frame_tx_pub
                                     .send(frame)
                                     .await
@@ -1837,6 +1840,25 @@ pub async fn handle_connection(
     macro_rules! decode_or_400 {
         ($frame:expr, $tx:expr, $metrics:expr, $ty:ty) => {
             match try_decode::<$ty>(&$frame) {
+                Ok(value) => value,
+                Err(err) => {
+                    send_error_response(
+                        &$tx,
+                        $frame.request_id,
+                        400,
+                        format!("malformed frame: {err}"),
+                    )
+                    .await?;
+                    $metrics.error();
+                    continue;
+                }
+            }
+        };
+    }
+
+    macro_rules! decode_wire_or_400 {
+        ($frame:expr, $tx:expr, $metrics:expr, $decoder:path) => {
+            match $decoder(&$frame) {
                 Ok(value) => value,
                 Err(err) => {
                     send_error_response(
@@ -2435,7 +2457,8 @@ pub async fn handle_connection(
             // -------- ACK ----------------------------------------------------
             x if x == Op::Ack as u16 => {
                 // TODO: Decline ack when auto ack? Log?
-                let ack: Ack = decode_or_400!(frame, frame_tx_high_prio, metrics, Ack);
+                let ack: Ack =
+                    decode_wire_or_400!(frame, frame_tx_high_prio, metrics, wire::decode_ack);
 
                 let key: SubKey = (ack.topic.clone(), ack.partition, ack.group.clone());
 
@@ -2467,7 +2490,8 @@ pub async fn handle_connection(
             // -------- NACK ----------------------------------------------------
             x if x == Op::Nack as u16 => {
                 // TODO: Decline ack when auto ack? Log?
-                let nack: Nack = decode_or_400!(frame, frame_tx_high_prio, metrics, Nack);
+                let nack: Nack =
+                    decode_wire_or_400!(frame, frame_tx_high_prio, metrics, wire::decode_nack);
                 if nack.not_before.is_some() && !nack.requeue {
                     send_error_response_and_count(
                         &frame_tx_high_prio,
@@ -2513,7 +2537,8 @@ pub async fn handle_connection(
             // -------- PUBLISH ------------------------------------------------
             x if x == Op::Publish as u16 => {
                 let publish_received = unix_millis();
-                let pubreq: Publish = decode_or_400!(frame, frame_tx_low_prio, metrics, Publish);
+                let pubreq: Publish =
+                    decode_wire_or_400!(frame, frame_tx_low_prio, metrics, wire::decode_publish);
                 if fence_stale_partitioning(
                     &frame_tx_low_prio,
                     frame.request_id,
@@ -2640,8 +2665,12 @@ pub async fn handle_connection(
             }
             x if x == Op::PublishDelayed as u16 => {
                 let publish_received = unix_millis();
-                let pubreq: PublishDelayed =
-                    decode_or_400!(frame, frame_tx_low_prio, metrics, PublishDelayed);
+                let pubreq: PublishDelayed = decode_wire_or_400!(
+                    frame,
+                    frame_tx_low_prio,
+                    metrics,
+                    wire::decode_publish_delayed
+                );
                 if fence_stale_partitioning(
                     &frame_tx_low_prio,
                     frame.request_id,

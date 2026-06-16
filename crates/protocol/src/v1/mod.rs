@@ -4,6 +4,7 @@ pub mod handler;
 pub mod helper;
 pub mod replication;
 pub mod replication_payload;
+pub mod wire;
 
 use std::collections::HashMap;
 

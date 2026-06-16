@@ -1,12 +1,13 @@
 use serde::{Deserialize, Serialize};
-use std::{sync::OnceLock, time::Instant};
+use std::{any::Any, sync::OnceLock, time::Instant};
 use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 
 use crate::v1::{
-    ErrorMsg, Op, PROTOCOL_V1,
+    Ack, Deliver, ErrorMsg, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, PublishOk,
     frame::{Frame, ProtoCodec},
+    wire::{self, WireError},
 };
 
 pub type Conn = Framed<TcpStream, ProtoCodec>;
@@ -21,7 +22,59 @@ pub enum ProtocolError {
 
 pub type ProtocolResult<T> = Result<T, ProtocolError>;
 
-pub fn try_encode<T: Serialize>(op: Op, req_id: u64, msg: &T) -> ProtocolResult<Frame> {
+pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolResult<Frame> {
+    match op {
+        Op::Publish => {
+            let Some(msg) = (msg as &dyn Any).downcast_ref::<Publish>() else {
+                return Err(ProtocolError::Encode(
+                    "Publish opcode requires Publish payload".into(),
+                ));
+            };
+            return wire::encode_publish(req_id, msg).map_err(wire_encode_error);
+        }
+        Op::PublishDelayed => {
+            let Some(msg) = (msg as &dyn Any).downcast_ref::<PublishDelayed>() else {
+                return Err(ProtocolError::Encode(
+                    "PublishDelayed opcode requires PublishDelayed payload".into(),
+                ));
+            };
+            return wire::encode_publish_delayed(req_id, msg).map_err(wire_encode_error);
+        }
+        Op::PublishOk => {
+            let Some(msg) = (msg as &dyn Any).downcast_ref::<PublishOk>() else {
+                return Err(ProtocolError::Encode(
+                    "PublishOk opcode requires PublishOk payload".into(),
+                ));
+            };
+            return wire::encode_publish_ok(req_id, msg).map_err(wire_encode_error);
+        }
+        Op::Deliver => {
+            let Some(msg) = (msg as &dyn Any).downcast_ref::<Deliver>() else {
+                return Err(ProtocolError::Encode(
+                    "Deliver opcode requires Deliver payload".into(),
+                ));
+            };
+            return wire::encode_deliver(req_id, msg).map_err(wire_encode_error);
+        }
+        Op::Ack => {
+            let Some(msg) = (msg as &dyn Any).downcast_ref::<Ack>() else {
+                return Err(ProtocolError::Encode(
+                    "Ack opcode requires Ack payload".into(),
+                ));
+            };
+            return wire::encode_ack(req_id, msg).map_err(wire_encode_error);
+        }
+        Op::Nack => {
+            let Some(msg) = (msg as &dyn Any).downcast_ref::<Nack>() else {
+                return Err(ProtocolError::Encode(
+                    "Nack opcode requires Nack payload".into(),
+                ));
+            };
+            return wire::encode_nack(req_id, msg).map_err(wire_encode_error);
+        }
+        _ => {}
+    }
+
     let started = Instant::now();
     let payload =
         rmp_serde::to_vec_named(msg).map_err(|err| ProtocolError::Encode(err.to_string()))?;
@@ -43,7 +96,41 @@ pub fn try_encode<T: Serialize>(op: Op, req_id: u64, msg: &T) -> ProtocolResult<
     })
 }
 
-pub fn try_decode<T: for<'de> Deserialize<'de>>(frame: &Frame) -> ProtocolResult<T> {
+pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> ProtocolResult<T> {
+    match frame.opcode {
+        x if x == Op::Publish as u16 => {
+            return wire::decode_publish(frame)
+                .map_err(wire_decode_error)
+                .and_then(cast_decoded);
+        }
+        x if x == Op::PublishDelayed as u16 => {
+            return wire::decode_publish_delayed(frame)
+                .map_err(wire_decode_error)
+                .and_then(cast_decoded);
+        }
+        x if x == Op::PublishOk as u16 => {
+            return wire::decode_publish_ok(frame)
+                .map_err(wire_decode_error)
+                .and_then(cast_decoded);
+        }
+        x if x == Op::Deliver as u16 => {
+            return wire::decode_deliver(frame)
+                .map_err(wire_decode_error)
+                .and_then(cast_decoded);
+        }
+        x if x == Op::Ack as u16 => {
+            return wire::decode_ack(frame)
+                .map_err(wire_decode_error)
+                .and_then(cast_decoded);
+        }
+        x if x == Op::Nack as u16 => {
+            return wire::decode_nack(frame)
+                .map_err(wire_decode_error)
+                .and_then(cast_decoded);
+        }
+        _ => {}
+    }
+
     let started = Instant::now();
     let decoded =
         rmp_serde::from_slice(&frame.payload).map_err(|err| ProtocolError::Decode(err.to_string()));
@@ -56,6 +143,21 @@ pub fn try_decode<T: for<'de> Deserialize<'de>>(frame: &Frame) -> ProtocolResult
         started.elapsed(),
     );
     decoded
+}
+
+fn cast_decoded<T: Any, U: Any>(value: U) -> ProtocolResult<T> {
+    let boxed: Box<dyn Any> = Box::new(value);
+    boxed.downcast::<T>().map(|boxed| *boxed).map_err(|_| {
+        ProtocolError::Decode("decoded wire payload did not match requested type".into())
+    })
+}
+
+fn wire_encode_error(err: WireError) -> ProtocolError {
+    ProtocolError::Encode(err.to_string())
+}
+
+fn wire_decode_error(err: WireError) -> ProtocolError {
+    ProtocolError::Decode(err.to_string())
 }
 
 pub(crate) fn log_protocol_codec_timing(
