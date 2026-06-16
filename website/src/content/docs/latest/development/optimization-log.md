@@ -338,6 +338,15 @@ Add entries here when an optimization is actually tried.
   useful throughput, while the latency caveat is still real: higher throughput
   currently depends on enough outstanding confirms, and that backlog becomes
   visible client latency.
+- Compared with mature replicated queues and logs, the main open performance
+  questions are architectural rather than micro-optimizations: committed
+  visibility watermarking, long-poll or push-hinted follower replication,
+  cheaper watermark-based confirmation, better separation of payload transfer
+  from event/progress movement, whole-frame versus streaming decode, and raw
+  Keratin range replication that avoids decode/re-encode work where safe.
+- Local multi-node benchmarks are useful stress tests, but they are not a full
+  deployment model. They share CPU, page cache, and one drive, while also hiding
+  real network cost.
 - The next narrow measurement should split local append completion, confirm sink
   backlog, replica-gate wait, and follower apply/tick time before making more
   protocol or scheduling changes.

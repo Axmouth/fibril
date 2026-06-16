@@ -11,7 +11,6 @@ use std::{
 use crate::v1::{
     frame::{Frame, ProtoCodec},
     helper::{ProtocolError, error_frame, try_decode, try_encode},
-    replication_payload::encode_replication_read_ok,
     wire::{self, WireError},
     *,
 };
@@ -2084,7 +2083,10 @@ pub async fn handle_connection(
                             }
                         };
                         frame_tx_high_prio
-                            .send(encode_replication_read_ok(frame.request_id, &response)?)
+                            .send(wire::encode_replication_read_ok(
+                                frame.request_id,
+                                &response,
+                            )?)
                             .await?;
                     }
                     Err(err) => {

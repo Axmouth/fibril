@@ -1,6 +1,5 @@
 use std::{collections::HashMap, hint::black_box};
 
-use bytes::{BufMut, BytesMut};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use fibril_protocol::v1::{
     ContentType, Op, Publish, ReplicationEventRead, ReplicationEventRecord, ReplicationMessageRead,
@@ -30,7 +29,7 @@ fn publish_frame(
 }
 
 fn bench_case(c: &mut Criterion, name: &str, publish: Publish) {
-    c.bench_function(&format!("encode_publish/msgpack/{name}"), |b| {
+    c.bench_function(&format!("encode_publish/helper/{name}"), |b| {
         b.iter_batched(
             || publish.clone(),
             |publish| try_encode(Op::Publish, 1, black_box(&publish)).unwrap(),
@@ -39,7 +38,7 @@ fn bench_case(c: &mut Criterion, name: &str, publish: Publish) {
     });
 
     let frame = try_encode(Op::Publish, 1, &publish).unwrap();
-    c.bench_function(&format!("decode_publish/msgpack_owned/{name}"), |b| {
+    c.bench_function(&format!("decode_publish/helper_owned/{name}"), |b| {
         b.iter_batched(
             || frame.clone(),
             |frame| {
@@ -50,20 +49,17 @@ fn bench_case(c: &mut Criterion, name: &str, publish: Publish) {
         )
     });
 
-    c.bench_function(
-        &format!("encode_decode_publish/msgpack_owned/{name}"),
-        |b| {
-            b.iter_batched(
-                || publish.clone(),
-                |publish| {
-                    let frame = try_encode(Op::Publish, 1, black_box(&publish)).unwrap();
-                    let decoded: Publish = try_decode(black_box(&frame)).unwrap();
-                    black_box(decoded);
-                },
-                BatchSize::SmallInput,
-            )
-        },
-    );
+    c.bench_function(&format!("encode_decode_publish/helper_owned/{name}"), |b| {
+        b.iter_batched(
+            || publish.clone(),
+            |publish| {
+                let frame = try_encode(Op::Publish, 1, black_box(&publish)).unwrap();
+                let decoded: Publish = try_decode(black_box(&frame)).unwrap();
+                black_box(decoded);
+            },
+            BatchSize::SmallInput,
+        )
+    });
 
     c.bench_function(&format!("encode_publish/raw/{name}"), |b| {
         b.iter_batched(
@@ -279,68 +275,6 @@ fn replication_read_ok(message_count: usize, payload_size: usize) -> Replication
     }
 }
 
-fn raw_replication_payload(read: &ReplicationReadOk) -> Vec<u8> {
-    let mut buf = BytesMut::new();
-    buf.extend_from_slice(b"FRR2");
-
-    match &read.messages {
-        ReplicationMessageRead::Batch {
-            epoch,
-            requested_offset,
-            next_offset,
-            records,
-        } => {
-            buf.put_u8(0);
-            buf.put_u64(*epoch);
-            buf.put_u64(*requested_offset);
-            buf.put_u64(*next_offset);
-            buf.put_u32(records.len() as u32);
-            for record in records {
-                buf.put_u16(record.flags);
-                buf.put_u32(record.headers.len() as u32);
-                buf.put_u32(record.payload.len() as u32);
-                buf.extend_from_slice(&record.headers);
-                buf.extend_from_slice(&record.payload);
-            }
-        }
-        ReplicationMessageRead::CheckpointRequired(required) => {
-            buf.put_u8(1);
-            buf.put_u64(required.epoch);
-            buf.put_u64(required.requested_offset);
-            buf.put_u64(required.head_offset);
-            buf.put_u64(required.next_offset);
-        }
-    }
-
-    match &read.events {
-        ReplicationEventRead::Batch {
-            epoch,
-            requested_offset,
-            next_offset,
-            records,
-        } => {
-            buf.put_u8(0);
-            buf.put_u64(*epoch);
-            buf.put_u64(*requested_offset);
-            buf.put_u64(*next_offset);
-            buf.put_u32(records.len() as u32);
-            for record in records {
-                buf.put_u32(record.payload.len() as u32);
-                buf.extend_from_slice(&record.payload);
-            }
-        }
-        ReplicationEventRead::CheckpointRequired(required) => {
-            buf.put_u8(1);
-            buf.put_u64(required.epoch);
-            buf.put_u64(required.requested_offset);
-            buf.put_u64(required.head_offset);
-            buf.put_u64(required.next_offset);
-        }
-    }
-
-    buf.freeze().to_vec()
-}
-
 fn take<'a>(payload: &'a [u8], cursor: &mut usize, len: usize) -> &'a [u8] {
     let end = *cursor + len;
     let bytes = &payload[*cursor..end];
@@ -389,14 +323,16 @@ fn decode_raw_borrowed(payload: &[u8]) -> RawDecodeStats {
         let count = read_u32(payload, &mut cursor) as usize;
         stats.checksum ^= requested_offset ^ next_offset;
         for _ in 0..count {
+            let offset = read_u64(payload, &mut cursor);
             let flags = read_u16(payload, &mut cursor);
             let headers_len = read_u32(payload, &mut cursor) as usize;
-            let payload_len = read_u32(payload, &mut cursor) as usize;
             let headers = take(payload, &mut cursor, headers_len);
+            let payload_len = read_u32(payload, &mut cursor) as usize;
             let body = take(payload, &mut cursor, payload_len);
             stats.records += 1;
             stats.bytes += headers.len() + body.len();
-            stats.checksum ^= u64::from(flags)
+            stats.checksum ^= offset
+                ^ u64::from(flags)
                 ^ headers.first().copied().unwrap_or_default() as u64
                 ^ body.first().copied().unwrap_or_default() as u64;
         }
@@ -414,11 +350,12 @@ fn decode_raw_borrowed(payload: &[u8]) -> RawDecodeStats {
         let count = read_u32(payload, &mut cursor) as usize;
         stats.checksum ^= requested_offset ^ next_offset;
         for _ in 0..count {
+            let offset = read_u64(payload, &mut cursor);
             let payload_len = read_u32(payload, &mut cursor) as usize;
             let event = take(payload, &mut cursor, payload_len);
             stats.records += 1;
             stats.bytes += event.len();
-            stats.checksum ^= event.first().copied().unwrap_or_default() as u64;
+            stats.checksum ^= offset ^ event.first().copied().unwrap_or_default() as u64;
         }
     } else {
         for _ in 0..4 {
@@ -440,14 +377,15 @@ fn decode_raw_owned(payload: &[u8]) -> ReplicationReadOk {
         let next_offset = read_u64(payload, &mut cursor);
         let count = read_u32(payload, &mut cursor) as usize;
         let mut records = Vec::with_capacity(count);
-        for idx in 0..count {
+        for _ in 0..count {
+            let offset = read_u64(payload, &mut cursor);
             let flags = read_u16(payload, &mut cursor);
             let headers_len = read_u32(payload, &mut cursor) as usize;
-            let payload_len = read_u32(payload, &mut cursor) as usize;
             let headers = take(payload, &mut cursor, headers_len).to_vec();
+            let payload_len = read_u32(payload, &mut cursor) as usize;
             let payload = take(payload, &mut cursor, payload_len).to_vec();
             records.push(ReplicationMessageRecord {
-                offset: requested_offset + idx as u64,
+                offset,
                 flags,
                 headers,
                 payload,
@@ -476,13 +414,11 @@ fn decode_raw_owned(payload: &[u8]) -> ReplicationReadOk {
         let next_offset = read_u64(payload, &mut cursor);
         let count = read_u32(payload, &mut cursor) as usize;
         let mut records = Vec::with_capacity(count);
-        for idx in 0..count {
+        for _ in 0..count {
+            let offset = read_u64(payload, &mut cursor);
             let payload_len = read_u32(payload, &mut cursor) as usize;
             let payload = take(payload, &mut cursor, payload_len).to_vec();
-            records.push(ReplicationEventRecord {
-                offset: requested_offset + idx as u64,
-                payload,
-            });
+            records.push(ReplicationEventRecord { offset, payload });
         }
         ReplicationEventRead::Batch {
             epoch,
@@ -511,11 +447,13 @@ fn bench_replication_decode(c: &mut Criterion) {
         let name = format!("{message_count}x{payload_size}");
         let read = replication_read_ok(message_count, payload_size);
         let msgpack = rmp_serde::to_vec_named(&read).unwrap();
-        let raw = raw_replication_payload(&read);
+        let raw_frame = wire::encode_replication_read_ok(1, &read).unwrap();
+        let raw = raw_frame.payload.to_vec();
         let raw_stats = decode_raw_borrowed(&raw);
         assert_eq!(raw_stats.records, message_count * 2);
         assert_eq!(raw_stats.bytes, message_count * (payload_size + 16 + 48));
         assert_eq!(decode_raw_owned(&raw), read);
+        assert_eq!(wire::decode_replication_read_ok(&raw_frame).unwrap(), read);
 
         group.throughput(criterion::Throughput::Bytes(msgpack.len() as u64));
         group.bench_with_input(
@@ -531,8 +469,26 @@ fn bench_replication_decode(c: &mut Criterion) {
         );
 
         group.throughput(criterion::Throughput::Bytes(raw.len() as u64));
+        group.bench_with_input(BenchmarkId::new("wire_encode", &name), &read, |b, read| {
+            b.iter(|| black_box(wire::encode_replication_read_ok(1, black_box(read))))
+        });
         group.bench_with_input(
-            BenchmarkId::new("raw_borrowed", &name),
+            BenchmarkId::new("wire_owned", &name),
+            &raw_frame,
+            |b, frame| b.iter(|| black_box(wire::decode_replication_read_ok(black_box(frame)))),
+        );
+        group.bench_with_input(
+            BenchmarkId::new("helper_owned", &name),
+            &raw_frame,
+            |b, frame| {
+                b.iter(|| {
+                    let decoded: ReplicationReadOk = try_decode(black_box(frame)).unwrap();
+                    black_box(decoded);
+                })
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("raw_borrowed_skip_payload", &name),
             &raw,
             |b, payload| b.iter(|| black_box(decode_raw_borrowed(black_box(payload)))),
         );

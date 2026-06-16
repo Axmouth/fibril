@@ -85,6 +85,40 @@ Current suspect list, ordered by what the latest data makes most plausible:
 - Low-load caught-up poll cadence. This is still a real idle-latency risk, but
   the latest high-rate timing does not show it as the dominant 50k/s bottleneck.
 
+Comparison against mature replicated queue/log designs:
+
+- Mature systems usually separate local append readiness from committed
+  visibility. Consumers read only up to a committed or replicated-enough
+  watermark. Fibril needs to make the replica-durable visibility contract
+  explicit, then test whether locally-ready messages can currently be delivered
+  before the follower durability gate completes.
+- Mature replication paths tend to be continuous streams, long-poll pulls, or
+  push-hinted pulls. Fibril's follower loop is still tick/batch shaped, which can
+  create sawtooth latency as the worker waits, fetches, applies, reports
+  progress, then repeats.
+- The current replication response couples message payload records with event
+  and progress records. Large payload transfer can interfere with small
+  event/progress movement. Separate streams, separate budgets, or a better
+  pipeline may be needed once the durability contract is locked.
+- Per-offset replica confirmation is a likely scaling risk. A monotonic
+  replicated/committed watermark that wakes ranges of waiters should be cheaper
+  and closer to common replicated-log designs.
+- Protocol decode is now custom binary, but still whole-frame decode/apply.
+  Iterator or streaming decode could smooth large-payload memory and scheduling
+  pressure, especially on follower replication responses.
+- Keratin is still primarily a local log with replication APIs added on top.
+  The efficient long-term path is likely raw range read, send, validate, and
+  append, avoiding decode/re-encode work in follower replication where safe.
+- Local multi-node benchmarks share CPU, page cache, and one drive. That makes
+  local contention harsher than separate machines while hiding real network
+  costs. Treat these numbers as a useful stress model, not a full deployment
+  model.
+
+Practical implication: do not tune only poll intervals or batch sizes. The next
+meaningful work should first decide the committed visibility contract, then
+measure and move confirmation toward watermark progress, and only then revisit
+transport shape, streaming decode, and raw Keratin replication APIs.
+
 ## Findings
 
 ### 1. Replica-durable confirm latency is probably tied to follower poll cadence

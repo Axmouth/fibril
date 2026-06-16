@@ -53,6 +53,11 @@ their own audit documents so this file stays useful as a status board.
   - Detail: [PERFORMANCE_SENSITIVE_PATHS_AUDIT.md](PERFORMANCE_SENSITIVE_PATHS_AUDIT.md)
   - Next: add cluster benchmark profiles for replica-durable confirms,
     follower catch-up, partitioned fan-in, and redirects.
+- [ ] Lock usage and synchronization
+  - Status: Audited
+  - Detail: [LOCK_USAGE_AUDIT.md](LOCK_USAGE_AUDIT.md)
+  - Next: replace replica-durable per-offset follower-map checks with committed
+    watermark progress, then add the concurrent duplicate-subscribe regression.
 - [ ] User-facing documentation shape
   - Status: Audited
   - Detail: [USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md](USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md)

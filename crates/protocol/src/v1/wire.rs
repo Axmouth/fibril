@@ -2,9 +2,20 @@ use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::HashMap;
 use thiserror::Error;
 
+use uuid::Uuid;
+
 use crate::v1::{
-    Ack, ContentType, Deliver, DeliveryTag, Nack, Op, PROTOCOL_V1, Partition, Publish,
-    PublishDelayed, PublishOk, frame::Frame,
+    Ack, AssignmentChanged, Auth, ContentType, DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag,
+    ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Partition, Publish, PublishDelayed, PublishOk,
+    QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy,
+    ReconcileResult, ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
+    ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
+    ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
+    ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
+    ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
+    ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
+    ResumeIdentity, ResumeOutcome, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
+    frame::Frame,
 };
 
 pub type WireResult<T> = Result<T, WireError>;
@@ -23,6 +34,9 @@ pub enum WireError {
     #[error("invalid utf-8 string")]
     InvalidUtf8,
 
+    #[error("invalid uuid bytes")]
+    InvalidUuid,
+
     #[error("invalid bool tag {0}")]
     InvalidBool(u8),
 
@@ -32,11 +46,132 @@ pub enum WireError {
     #[error("unknown content type tag {0}")]
     UnknownContentType(u8),
 
+    #[error("unknown {context} tag {value}")]
+    UnknownTag { context: &'static str, value: u8 },
+
+    #[error("invalid record sequence for {0}")]
+    InvalidRecordSequence(&'static str),
+
     #[error("payload has trailing bytes: {0}")]
     TrailingBytes(usize),
 
     #[error("field too large for wire format: {0}")]
     FieldTooLarge(&'static str),
+}
+
+pub fn encode_hello(request_id: u64, hello: &Hello) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FHL1");
+    put_str(&mut out, &hello.client_name)?;
+    put_str(&mut out, &hello.client_version)?;
+    out.put_u16(hello.protocol_version);
+    put_optional_resume_identity(&mut out, hello.resume.as_ref());
+    Ok(frame(Op::Hello, request_id, out.freeze()))
+}
+
+pub fn decode_hello(frame: &Frame) -> WireResult<Hello> {
+    expect_op(frame, Op::Hello)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FHL1", "hello")?;
+    let hello = Hello {
+        client_name: reader.str()?.to_owned(),
+        client_version: reader.str()?.to_owned(),
+        protocol_version: reader.u16()?,
+        resume: reader.optional_resume_identity()?,
+    };
+    reader.finish()?;
+    Ok(hello)
+}
+
+pub fn encode_hello_ok(request_id: u64, hello: &HelloOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FHO1");
+    out.put_u16(hello.protocol_version);
+    put_uuid(&mut out, hello.owner_id);
+    put_uuid(&mut out, hello.client_id);
+    put_uuid(&mut out, hello.resume_token);
+    put_resume_outcome(&mut out, hello.resume_outcome);
+    put_str(&mut out, &hello.server_name)?;
+    put_str(&mut out, &hello.compliance)?;
+    Ok(frame(Op::HelloOk, request_id, out.freeze()))
+}
+
+pub fn decode_hello_ok(frame: &Frame) -> WireResult<HelloOk> {
+    expect_op(frame, Op::HelloOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FHO1", "hello ok")?;
+    let hello = HelloOk {
+        protocol_version: reader.u16()?,
+        owner_id: reader.uuid()?,
+        client_id: reader.uuid()?,
+        resume_token: reader.uuid()?,
+        resume_outcome: reader.resume_outcome()?,
+        server_name: reader.str()?.to_owned(),
+        compliance: reader.str()?.to_owned(),
+    };
+    reader.finish()?;
+    Ok(hello)
+}
+
+pub fn encode_auth(request_id: u64, auth: &Auth) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FAU1");
+    put_str(&mut out, &auth.username)?;
+    put_str(&mut out, &auth.password)?;
+    Ok(frame(Op::Auth, request_id, out.freeze()))
+}
+
+pub fn decode_auth(frame: &Frame) -> WireResult<Auth> {
+    expect_op(frame, Op::Auth)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FAU1", "auth")?;
+    let auth = Auth {
+        username: reader.str()?.to_owned(),
+        password: reader.str()?.to_owned(),
+    };
+    reader.finish()?;
+    Ok(auth)
+}
+
+pub fn encode_error_message(op: Op, request_id: u64, error: &ErrorMsg) -> WireResult<Frame> {
+    expect_error_op(op as u16)?;
+    let mut out = payload_builder(b"FER1");
+    out.put_u16(error.code);
+    put_str(&mut out, &error.message)?;
+    Ok(frame(op, request_id, out.freeze()))
+}
+
+pub fn decode_error_message(frame: &Frame) -> WireResult<ErrorMsg> {
+    expect_error_op(frame.opcode)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FER1", "error")?;
+    let error = ErrorMsg {
+        code: reader.u16()?,
+        message: reader.str()?.to_owned(),
+    };
+    reader.finish()?;
+    Ok(error)
+}
+
+pub fn encode_unit(op: Op, request_id: u64) -> WireResult<Frame> {
+    match op {
+        Op::AuthOk | Op::Ping | Op::Pong => Ok(frame(op, request_id, Bytes::new())),
+        _ => Err(WireError::UnexpectedOpcode {
+            expected: 0,
+            actual: op as u16,
+        }),
+    }
+}
+
+pub fn decode_unit(frame: &Frame, op: Op) -> WireResult<()> {
+    expect_op(frame, op)?;
+    match op {
+        Op::AuthOk | Op::Ping | Op::Pong => {
+            let reader = Reader::new(&frame.payload);
+            reader.finish()
+        }
+        _ => Err(WireError::UnexpectedOpcode {
+            expected: 0,
+            actual: op as u16,
+        }),
+    }
 }
 
 pub fn encode_publish(request_id: u64, publish: &Publish) -> WireResult<Frame> {
@@ -225,6 +360,507 @@ pub fn decode_nack(frame: &Frame) -> WireResult<Nack> {
     })
 }
 
+pub fn encode_declare_queue(request_id: u64, declare: &DeclareQueue) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FDQ1");
+    put_str(&mut out, &declare.topic)?;
+    put_optional_str(&mut out, declare.group.as_deref())?;
+    put_optional_dlq_policy(&mut out, declare.dlq_policy.as_ref())?;
+    put_optional_u32(&mut out, declare.dlq_max_retries);
+    put_optional_u32(&mut out, declare.partition_count);
+    Ok(frame(Op::DeclareQueue, request_id, out.freeze()))
+}
+
+pub fn decode_declare_queue(frame: &Frame) -> WireResult<DeclareQueue> {
+    expect_op(frame, Op::DeclareQueue)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FDQ1", "declare queue")?;
+    let declare = DeclareQueue {
+        topic: reader.str()?.to_owned(),
+        group: reader.optional_str()?.map(ToOwned::to_owned),
+        dlq_policy: reader.optional_dlq_policy()?,
+        dlq_max_retries: reader.optional_u32()?,
+        partition_count: reader.optional_u32()?,
+    };
+    reader.finish()?;
+    Ok(declare)
+}
+
+pub fn encode_declare_queue_ok(request_id: u64, ok: &DeclareQueueOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FDK1");
+    put_str(&mut out, &ok.status)?;
+    out.put_u32(ok.partition_count);
+    Ok(frame(Op::DeclareQueueOk, request_id, out.freeze()))
+}
+
+pub fn decode_declare_queue_ok(frame: &Frame) -> WireResult<DeclareQueueOk> {
+    expect_op(frame, Op::DeclareQueueOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FDK1", "declare queue ok")?;
+    let ok = DeclareQueueOk {
+        status: reader.str()?.to_owned(),
+        partition_count: reader.u32()?,
+    };
+    reader.finish()?;
+    Ok(ok)
+}
+
+pub fn encode_subscribe(request_id: u64, sub: &Subscribe) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSB1");
+    put_queue_key(&mut out, &sub.topic, sub.partition, sub.group.as_deref())?;
+    out.put_u32(sub.prefetch);
+    put_bool(&mut out, sub.auto_ack);
+    put_optional_str(&mut out, sub.consumer_group.as_deref())?;
+    put_optional_u32(&mut out, sub.consumer_target);
+    put_optional_uuid(&mut out, sub.member_id);
+    Ok(frame(Op::Subscribe, request_id, out.freeze()))
+}
+
+pub fn decode_subscribe(frame: &Frame) -> WireResult<Subscribe> {
+    expect_op(frame, Op::Subscribe)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSB1", "subscribe")?;
+    let (topic, partition, group) = reader.queue_key()?;
+    let sub = Subscribe {
+        topic,
+        partition,
+        group,
+        prefetch: reader.u32()?,
+        auto_ack: reader.bool()?,
+        consumer_group: reader.optional_str()?.map(ToOwned::to_owned),
+        consumer_target: reader.optional_u32()?,
+        member_id: reader.optional_uuid()?,
+    };
+    reader.finish()?;
+    Ok(sub)
+}
+
+pub fn encode_subscribe_ok(request_id: u64, sub: &SubscribeOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSO1");
+    out.put_u64(sub.sub_id);
+    put_queue_key(&mut out, &sub.topic, sub.partition, sub.group.as_deref())?;
+    out.put_u32(sub.prefetch);
+    put_optional_str(&mut out, sub.consumer_group.as_deref())?;
+    put_optional_u32(&mut out, sub.consumer_target);
+    put_optional_uuid(&mut out, sub.member_id);
+    Ok(frame(Op::SubscribeOk, request_id, out.freeze()))
+}
+
+pub fn decode_subscribe_ok(frame: &Frame) -> WireResult<SubscribeOk> {
+    expect_op(frame, Op::SubscribeOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSO1", "subscribe ok")?;
+    let sub_id = reader.u64()?;
+    let (topic, partition, group) = reader.queue_key()?;
+    let sub = SubscribeOk {
+        sub_id,
+        topic,
+        group,
+        partition,
+        prefetch: reader.u32()?,
+        consumer_group: reader.optional_str()?.map(ToOwned::to_owned),
+        consumer_target: reader.optional_u32()?,
+        member_id: reader.optional_uuid()?,
+    };
+    reader.finish()?;
+    Ok(sub)
+}
+
+pub fn encode_assignment_changed(
+    request_id: u64,
+    assignment: &AssignmentChanged,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FAC1");
+    put_str(&mut out, &assignment.topic)?;
+    put_optional_str(&mut out, assignment.group.as_deref())?;
+    put_str(&mut out, &assignment.consumer_group)?;
+    out.put_u64(assignment.generation);
+    put_partitions(&mut out, &assignment.assigned)?;
+    put_partitions(&mut out, &assignment.added)?;
+    put_partitions(&mut out, &assignment.revoked)?;
+    Ok(frame(Op::AssignmentChanged, request_id, out.freeze()))
+}
+
+pub fn decode_assignment_changed(frame: &Frame) -> WireResult<AssignmentChanged> {
+    expect_op(frame, Op::AssignmentChanged)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FAC1", "assignment changed")?;
+    let assignment = AssignmentChanged {
+        topic: reader.str()?.to_owned(),
+        group: reader.optional_str()?.map(ToOwned::to_owned),
+        consumer_group: reader.str()?.to_owned(),
+        generation: reader.u64()?,
+        assigned: reader.partitions()?,
+        added: reader.partitions()?,
+        revoked: reader.partitions()?,
+    };
+    reader.finish()?;
+    Ok(assignment)
+}
+
+pub fn encode_topology_request(request_id: u64, request: &TopologyRequest) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FTP1");
+    put_optional_str(&mut out, request.topic.as_deref())?;
+    put_optional_str(&mut out, request.group.as_deref())?;
+    Ok(frame(Op::Topology, request_id, out.freeze()))
+}
+
+pub fn decode_topology_request(frame: &Frame) -> WireResult<TopologyRequest> {
+    expect_op(frame, Op::Topology)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FTP1", "topology")?;
+    let request = TopologyRequest {
+        topic: reader.optional_str()?.map(ToOwned::to_owned),
+        group: reader.optional_str()?.map(ToOwned::to_owned),
+    };
+    reader.finish()?;
+    Ok(request)
+}
+
+pub fn encode_topology_ok(request_id: u64, topology: &TopologyOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FTO1");
+    out.put_u64(topology.generation);
+    put_len(&mut out, topology.queues.len(), "topology queues")?;
+    for entry in &topology.queues {
+        put_topology_entry(&mut out, entry)?;
+    }
+    Ok(frame(Op::TopologyOk, request_id, out.freeze()))
+}
+
+pub fn decode_topology_ok(frame: &Frame) -> WireResult<TopologyOk> {
+    expect_op(frame, Op::TopologyOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FTO1", "topology ok")?;
+    let generation = reader.u64()?;
+    let count = reader.u32()? as usize;
+    let mut queues = Vec::with_capacity(count);
+    for _ in 0..count {
+        queues.push(reader.topology_entry()?);
+    }
+    reader.finish()?;
+    Ok(TopologyOk { generation, queues })
+}
+
+pub fn encode_redirect(request_id: u64, redirect: &Redirect) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FRD1");
+    put_queue_key(
+        &mut out,
+        &redirect.topic,
+        redirect.partition,
+        redirect.group.as_deref(),
+    )?;
+    put_str(&mut out, &redirect.owner_endpoint)?;
+    out.put_u64(redirect.partitioning_version);
+    Ok(frame(Op::Redirect, request_id, out.freeze()))
+}
+
+pub fn decode_redirect(frame: &Frame) -> WireResult<Redirect> {
+    expect_op(frame, Op::Redirect)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FRD1", "redirect")?;
+    let (topic, partition, group) = reader.queue_key()?;
+    let redirect = Redirect {
+        topic,
+        partition,
+        group,
+        owner_endpoint: reader.str()?.to_owned(),
+        partitioning_version: reader.u64()?,
+    };
+    reader.finish()?;
+    Ok(redirect)
+}
+
+pub fn encode_reconcile_client(request_id: u64, reconcile: &ReconcileClient) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FRC1");
+    put_reconcile_policy(&mut out, reconcile.policy);
+    put_reconcile_subscriptions(&mut out, &reconcile.subscriptions)?;
+    Ok(frame(Op::ReconcileClient, request_id, out.freeze()))
+}
+
+pub fn decode_reconcile_client(frame: &Frame) -> WireResult<ReconcileClient> {
+    expect_op(frame, Op::ReconcileClient)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FRC1", "reconcile client")?;
+    let reconcile = ReconcileClient {
+        policy: reader.reconcile_policy()?,
+        subscriptions: reader.reconcile_subscriptions()?,
+    };
+    reader.finish()?;
+    Ok(reconcile)
+}
+
+pub fn encode_reconcile_server(request_id: u64, reconcile: &ReconcileServer) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FRS1");
+    put_reconcile_subscriptions(&mut out, &reconcile.subscriptions)?;
+    Ok(frame(Op::ReconcileServer, request_id, out.freeze()))
+}
+
+pub fn decode_reconcile_server(frame: &Frame) -> WireResult<ReconcileServer> {
+    expect_op(frame, Op::ReconcileServer)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FRS1", "reconcile server")?;
+    let reconcile = ReconcileServer {
+        subscriptions: reader.reconcile_subscriptions()?,
+    };
+    reader.finish()?;
+    Ok(reconcile)
+}
+
+pub fn encode_reconcile_result(request_id: u64, result: &ReconcileResult) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FRR1");
+    put_len(
+        &mut out,
+        result.subscriptions.len(),
+        "reconcile result subscriptions",
+    )?;
+    for sub in &result.subscriptions {
+        put_optional_reconcile_subscription(&mut out, sub.client.as_ref())?;
+        put_optional_reconcile_subscription(&mut out, sub.server.as_ref())?;
+        put_reconcile_action(&mut out, sub.action);
+        put_str(&mut out, &sub.reason)?;
+    }
+    Ok(frame(Op::ReconcileResult, request_id, out.freeze()))
+}
+
+pub fn decode_reconcile_result(frame: &Frame) -> WireResult<ReconcileResult> {
+    expect_op(frame, Op::ReconcileResult)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FRR1", "reconcile result")?;
+    let count = reader.u32()? as usize;
+    let mut subscriptions = Vec::with_capacity(count);
+    for _ in 0..count {
+        subscriptions.push(ReconcileSubscriptionResult {
+            client: reader.optional_reconcile_subscription()?,
+            server: reader.optional_reconcile_subscription()?,
+            action: reader.reconcile_action()?,
+            reason: reader.str()?.to_owned(),
+        });
+    }
+    reader.finish()?;
+    Ok(ReconcileResult { subscriptions })
+}
+
+pub fn encode_replication_read(request_id: u64, read: &ReplicationRead) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FRQ1");
+    put_queue_key(&mut out, &read.topic, read.partition, read.group.as_deref())?;
+    out.put_u64(read.message_from);
+    out.put_u64(read.event_from);
+    out.put_u32(read.max_messages);
+    out.put_u32(read.max_events);
+    out.put_u64(read.max_bytes);
+    out.put_u32(read.max_wait_ms);
+    put_optional_str(&mut out, read.reporter_node_id.as_deref())?;
+    Ok(frame(Op::ReplicationRead, request_id, out.freeze()))
+}
+
+pub fn decode_replication_read(frame: &Frame) -> WireResult<ReplicationRead> {
+    expect_op(frame, Op::ReplicationRead)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FRQ1", "replication read")?;
+    let (topic, partition, group) = reader.queue_key()?;
+    let read = ReplicationRead {
+        topic,
+        group,
+        partition,
+        message_from: reader.u64()?,
+        event_from: reader.u64()?,
+        max_messages: reader.u32()?,
+        max_events: reader.u32()?,
+        max_bytes: reader.u64()?,
+        max_wait_ms: reader.u32()?,
+        reporter_node_id: reader.optional_str()?.map(ToOwned::to_owned),
+    };
+    reader.finish()?;
+    Ok(read)
+}
+
+pub fn encode_replication_read_ok(request_id: u64, read: &ReplicationReadOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FRR2");
+    put_replication_message_read(&mut out, &read.messages)?;
+    put_replication_event_read(&mut out, &read.events)?;
+    Ok(frame(Op::ReplicationReadOk, request_id, out.freeze()))
+}
+
+pub fn decode_replication_read_ok(frame: &Frame) -> WireResult<ReplicationReadOk> {
+    expect_op(frame, Op::ReplicationReadOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FRR2", "replication read ok")?;
+    let messages = reader.replication_message_read()?;
+    let events = reader.replication_event_read()?;
+    reader.finish()?;
+    Ok(ReplicationReadOk { messages, events })
+}
+
+pub fn encode_replication_apply(request_id: u64, apply: &ReplicationApply) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FRA1");
+    put_queue_key(
+        &mut out,
+        &apply.topic,
+        apply.partition,
+        apply.group.as_deref(),
+    )?;
+    put_optional_replication_message_apply_batch(&mut out, apply.messages.as_ref())?;
+    put_optional_replication_event_apply_batch(&mut out, apply.events.as_ref())?;
+    Ok(frame(Op::ReplicationApply, request_id, out.freeze()))
+}
+
+pub fn decode_replication_apply(frame: &Frame) -> WireResult<ReplicationApply> {
+    expect_op(frame, Op::ReplicationApply)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FRA1", "replication apply")?;
+    let (topic, partition, group) = reader.queue_key()?;
+    let apply = ReplicationApply {
+        topic,
+        group,
+        partition,
+        messages: reader.optional_replication_message_apply_batch()?,
+        events: reader.optional_replication_event_apply_batch()?,
+    };
+    reader.finish()?;
+    Ok(apply)
+}
+
+pub fn encode_replication_apply_ok(request_id: u64, ok: &ReplicationApplyOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FAO1");
+    put_bool(&mut out, ok.messages_applied);
+    put_bool(&mut out, ok.events_applied);
+    Ok(frame(Op::ReplicationApplyOk, request_id, out.freeze()))
+}
+
+pub fn decode_replication_apply_ok(frame: &Frame) -> WireResult<ReplicationApplyOk> {
+    expect_op(frame, Op::ReplicationApplyOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FAO1", "replication apply ok")?;
+    let ok = ReplicationApplyOk {
+        messages_applied: reader.bool()?,
+        events_applied: reader.bool()?,
+    };
+    reader.finish()?;
+    Ok(ok)
+}
+
+pub fn encode_replication_checkpoint_export(
+    request_id: u64,
+    export: &ReplicationCheckpointExport,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FCE1");
+    put_queue_key(
+        &mut out,
+        &export.topic,
+        export.partition,
+        export.group.as_deref(),
+    )?;
+    Ok(frame(
+        Op::ReplicationCheckpointExport,
+        request_id,
+        out.freeze(),
+    ))
+}
+
+pub fn decode_replication_checkpoint_export(
+    frame: &Frame,
+) -> WireResult<ReplicationCheckpointExport> {
+    expect_op(frame, Op::ReplicationCheckpointExport)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FCE1", "replication checkpoint export")?;
+    let (topic, partition, group) = reader.queue_key()?;
+    reader.finish()?;
+    Ok(ReplicationCheckpointExport {
+        topic,
+        group,
+        partition,
+    })
+}
+
+pub fn encode_replication_checkpoint_export_ok(
+    request_id: u64,
+    ok: &ReplicationCheckpointExportOk,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FCO1");
+    put_replication_state_checkpoint(&mut out, &ok.checkpoint)?;
+    Ok(frame(
+        Op::ReplicationCheckpointExportOk,
+        request_id,
+        out.freeze(),
+    ))
+}
+
+pub fn decode_replication_checkpoint_export_ok(
+    frame: &Frame,
+) -> WireResult<ReplicationCheckpointExportOk> {
+    expect_op(frame, Op::ReplicationCheckpointExportOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FCO1", "replication checkpoint export ok")?;
+    let checkpoint = reader.replication_state_checkpoint()?;
+    reader.finish()?;
+    Ok(ReplicationCheckpointExportOk { checkpoint })
+}
+
+pub fn encode_replication_checkpoint_install(
+    request_id: u64,
+    install: &ReplicationCheckpointInstall,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FCI1");
+    put_queue_key(
+        &mut out,
+        &install.topic,
+        install.partition,
+        install.group.as_deref(),
+    )?;
+    put_replication_state_checkpoint(&mut out, &install.checkpoint)?;
+    Ok(frame(
+        Op::ReplicationCheckpointInstall,
+        request_id,
+        out.freeze(),
+    ))
+}
+
+pub fn decode_replication_checkpoint_install(
+    frame: &Frame,
+) -> WireResult<ReplicationCheckpointInstall> {
+    expect_op(frame, Op::ReplicationCheckpointInstall)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FCI1", "replication checkpoint install")?;
+    let (topic, partition, group) = reader.queue_key()?;
+    let checkpoint = reader.replication_state_checkpoint()?;
+    reader.finish()?;
+    Ok(ReplicationCheckpointInstall {
+        topic,
+        group,
+        partition,
+        checkpoint,
+    })
+}
+
+pub fn encode_replication_checkpoint_install_ok(
+    request_id: u64,
+    ok: &ReplicationCheckpointInstallOk,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FCK1");
+    out.put_u64(ok.message_next_offset);
+    out.put_u64(ok.event_next_offset);
+    out.put_u64(ok.applied_event_offset);
+    Ok(frame(
+        Op::ReplicationCheckpointInstallOk,
+        request_id,
+        out.freeze(),
+    ))
+}
+
+pub fn decode_replication_checkpoint_install_ok(
+    frame: &Frame,
+) -> WireResult<ReplicationCheckpointInstallOk> {
+    expect_op(frame, Op::ReplicationCheckpointInstallOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FCK1", "replication checkpoint install ok")?;
+    let ok = ReplicationCheckpointInstallOk {
+        message_next_offset: reader.u64()?,
+        event_next_offset: reader.u64()?,
+        applied_event_offset: reader.u64()?,
+    };
+    reader.finish()?;
+    Ok(ok)
+}
+
 fn put_publish_common(out: &mut BytesMut, publish: &Publish) -> WireResult<()> {
     put_str(out, &publish.topic)?;
     put_optional_str(out, publish.group.as_deref())?;
@@ -310,6 +946,22 @@ fn expect_op(frame: &Frame, op: Op) -> WireResult<()> {
     }
 }
 
+fn expect_error_op(opcode: u16) -> WireResult<()> {
+    match opcode {
+        x if x == Op::Error as u16
+            || x == Op::HelloErr as u16
+            || x == Op::AuthErr as u16
+            || x == Op::SubscribeErr as u16 =>
+        {
+            Ok(())
+        }
+        actual => Err(WireError::UnexpectedOpcode {
+            expected: Op::Error as u16,
+            actual,
+        }),
+    }
+}
+
 fn put_len(out: &mut BytesMut, len: usize, field: &'static str) -> WireResult<()> {
     let len = u32::try_from(len).map_err(|_| WireError::FieldTooLarge(field))?;
     out.put_u32(len);
@@ -328,6 +980,292 @@ fn put_str(out: &mut BytesMut, value: &str) -> WireResult<()> {
 
 fn put_bool(out: &mut BytesMut, value: bool) {
     out.put_u8(u8::from(value));
+}
+
+fn put_uuid(out: &mut BytesMut, value: Uuid) {
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn put_optional_uuid(out: &mut BytesMut, value: Option<Uuid>) {
+    match value {
+        Some(value) => {
+            out.put_u8(1);
+            put_uuid(out, value);
+        }
+        None => out.put_u8(0),
+    }
+}
+
+fn put_partition(out: &mut BytesMut, partition: Partition) {
+    out.put_u32(partition.id());
+}
+
+fn put_queue_key(
+    out: &mut BytesMut,
+    topic: &str,
+    partition: Partition,
+    group: Option<&str>,
+) -> WireResult<()> {
+    put_str(out, topic)?;
+    put_partition(out, partition);
+    put_optional_str(out, group)?;
+    Ok(())
+}
+
+fn put_resume_identity(out: &mut BytesMut, resume: &ResumeIdentity) {
+    put_uuid(out, resume.owner_id);
+    put_uuid(out, resume.client_id);
+    put_uuid(out, resume.resume_token);
+}
+
+fn put_optional_resume_identity(out: &mut BytesMut, resume: Option<&ResumeIdentity>) {
+    match resume {
+        Some(resume) => {
+            out.put_u8(1);
+            put_resume_identity(out, resume);
+        }
+        None => out.put_u8(0),
+    }
+}
+
+fn put_resume_outcome(out: &mut BytesMut, outcome: ResumeOutcome) {
+    out.put_u8(match outcome {
+        ResumeOutcome::New => 0,
+        ResumeOutcome::Resumed => 1,
+        ResumeOutcome::ResumeNotFound => 2,
+        ResumeOutcome::ResumeRejected => 3,
+    });
+}
+
+fn put_dlq_policy(out: &mut BytesMut, policy: &QueueDlqPolicy) -> WireResult<()> {
+    match policy {
+        QueueDlqPolicy::Discard => out.put_u8(0),
+        QueueDlqPolicy::Global => out.put_u8(1),
+        QueueDlqPolicy::Custom { topic, group } => {
+            out.put_u8(2);
+            put_str(out, topic)?;
+            put_optional_str(out, group.as_deref())?;
+        }
+    }
+    Ok(())
+}
+
+fn put_optional_dlq_policy(out: &mut BytesMut, policy: Option<&QueueDlqPolicy>) -> WireResult<()> {
+    match policy {
+        Some(policy) => {
+            out.put_u8(1);
+            put_dlq_policy(out, policy)
+        }
+        None => {
+            out.put_u8(0);
+            Ok(())
+        }
+    }
+}
+
+fn put_reconcile_policy(out: &mut BytesMut, policy: ReconcilePolicy) {
+    out.put_u8(match policy {
+        ReconcilePolicy::Conservative => 0,
+        ReconcilePolicy::RestoreClientSubscriptions => 1,
+    });
+}
+
+fn put_reconcile_action(out: &mut BytesMut, action: ReconcileAction) {
+    out.put_u8(match action {
+        ReconcileAction::Keep => 0,
+        ReconcileAction::CloseClientSide => 1,
+        ReconcileAction::CloseServerSide => 2,
+        ReconcileAction::RecreateClientSide => 3,
+    });
+}
+
+fn put_reconcile_subscription(out: &mut BytesMut, sub: &ReconcileSubscription) -> WireResult<()> {
+    out.put_u64(sub.sub_id);
+    put_queue_key(out, &sub.topic, sub.partition, sub.group.as_deref())?;
+    put_bool(out, sub.auto_ack);
+    out.put_u32(sub.prefetch);
+    put_optional_str(out, sub.consumer_group.as_deref())?;
+    put_optional_u32(out, sub.consumer_target);
+    put_optional_uuid(out, sub.member_id);
+    Ok(())
+}
+
+fn put_optional_reconcile_subscription(
+    out: &mut BytesMut,
+    sub: Option<&ReconcileSubscription>,
+) -> WireResult<()> {
+    match sub {
+        Some(sub) => {
+            out.put_u8(1);
+            put_reconcile_subscription(out, sub)
+        }
+        None => {
+            out.put_u8(0);
+            Ok(())
+        }
+    }
+}
+
+fn put_reconcile_subscriptions(
+    out: &mut BytesMut,
+    subs: &[ReconcileSubscription],
+) -> WireResult<()> {
+    put_len(out, subs.len(), "reconcile subscriptions")?;
+    for sub in subs {
+        put_reconcile_subscription(out, sub)?;
+    }
+    Ok(())
+}
+
+fn put_topology_entry(out: &mut BytesMut, entry: &QueueTopologyEntry) -> WireResult<()> {
+    put_queue_key(out, &entry.topic, entry.partition, entry.group.as_deref())?;
+    put_optional_str(out, entry.owner_endpoint.as_deref())?;
+    out.put_u64(entry.partitioning_version);
+    out.put_u32(entry.partition_count);
+    Ok(())
+}
+
+fn put_replication_checkpoint_required(
+    out: &mut BytesMut,
+    required: &ReplicationCheckpointRequired,
+) {
+    out.put_u64(required.epoch);
+    out.put_u64(required.requested_offset);
+    out.put_u64(required.head_offset);
+    out.put_u64(required.next_offset);
+}
+
+fn put_replication_message_record(
+    out: &mut BytesMut,
+    record: &ReplicationMessageRecord,
+) -> WireResult<()> {
+    out.put_u64(record.offset);
+    out.put_u16(record.flags);
+    put_bytes(out, &record.headers)?;
+    put_bytes(out, &record.payload)?;
+    Ok(())
+}
+
+fn put_replication_event_record(
+    out: &mut BytesMut,
+    record: &ReplicationEventRecord,
+) -> WireResult<()> {
+    out.put_u64(record.offset);
+    put_bytes(out, &record.payload)?;
+    Ok(())
+}
+
+fn put_replication_message_records(
+    out: &mut BytesMut,
+    records: &[ReplicationMessageRecord],
+) -> WireResult<()> {
+    put_len(out, records.len(), "replication message records")?;
+    for record in records {
+        put_replication_message_record(out, record)?;
+    }
+    Ok(())
+}
+
+fn put_replication_event_records(
+    out: &mut BytesMut,
+    records: &[ReplicationEventRecord],
+) -> WireResult<()> {
+    put_len(out, records.len(), "replication event records")?;
+    for record in records {
+        put_replication_event_record(out, record)?;
+    }
+    Ok(())
+}
+
+fn put_replication_message_read(
+    out: &mut BytesMut,
+    read: &ReplicationMessageRead,
+) -> WireResult<()> {
+    match read {
+        ReplicationMessageRead::Batch {
+            epoch,
+            requested_offset,
+            next_offset,
+            records,
+        } => {
+            out.put_u8(0);
+            out.put_u64(*epoch);
+            out.put_u64(*requested_offset);
+            out.put_u64(*next_offset);
+            put_replication_message_records(out, records)?;
+        }
+        ReplicationMessageRead::CheckpointRequired(required) => {
+            out.put_u8(1);
+            put_replication_checkpoint_required(out, required);
+        }
+    }
+    Ok(())
+}
+
+fn put_replication_event_read(out: &mut BytesMut, read: &ReplicationEventRead) -> WireResult<()> {
+    match read {
+        ReplicationEventRead::Batch {
+            epoch,
+            requested_offset,
+            next_offset,
+            records,
+        } => {
+            out.put_u8(0);
+            out.put_u64(*epoch);
+            out.put_u64(*requested_offset);
+            out.put_u64(*next_offset);
+            put_replication_event_records(out, records)?;
+        }
+        ReplicationEventRead::CheckpointRequired(required) => {
+            out.put_u8(1);
+            put_replication_checkpoint_required(out, required);
+        }
+    }
+    Ok(())
+}
+
+fn put_optional_replication_message_apply_batch(
+    out: &mut BytesMut,
+    batch: Option<&ReplicationMessageApplyBatch>,
+) -> WireResult<()> {
+    match batch {
+        Some(batch) => {
+            out.put_u8(1);
+            out.put_u64(batch.epoch);
+            put_replication_message_records(out, &batch.records)?;
+        }
+        None => out.put_u8(0),
+    }
+    Ok(())
+}
+
+fn put_optional_replication_event_apply_batch(
+    out: &mut BytesMut,
+    batch: Option<&ReplicationEventApplyBatch>,
+) -> WireResult<()> {
+    match batch {
+        Some(batch) => {
+            out.put_u8(1);
+            out.put_u64(batch.epoch);
+            put_replication_event_records(out, &batch.records)?;
+        }
+        None => out.put_u8(0),
+    }
+    Ok(())
+}
+
+fn put_replication_state_checkpoint(
+    out: &mut BytesMut,
+    checkpoint: &ReplicationStateCheckpoint,
+) -> WireResult<()> {
+    out.put_u64(checkpoint.message_epoch);
+    out.put_u64(checkpoint.event_epoch);
+    out.put_u64(checkpoint.message_checkpoint_offset);
+    out.put_u64(checkpoint.message_next_offset);
+    out.put_u64(checkpoint.event_next_offset);
+    out.put_u64(checkpoint.applied_event_offset);
+    put_bytes(out, &checkpoint.state_snapshot)?;
+    Ok(())
 }
 
 fn put_optional_bytes(out: &mut BytesMut, value: Option<&[u8]>) -> WireResult<()> {
@@ -364,6 +1302,24 @@ fn put_optional_u64(out: &mut BytesMut, value: Option<u64>) {
         }
         None => out.put_u8(0),
     }
+}
+
+fn put_optional_u32(out: &mut BytesMut, value: Option<u32>) {
+    match value {
+        Some(value) => {
+            out.put_u8(1);
+            out.put_u32(value);
+        }
+        None => out.put_u8(0),
+    }
+}
+
+fn put_partitions(out: &mut BytesMut, partitions: &[Partition]) -> WireResult<()> {
+    put_len(out, partitions.len(), "partitions")?;
+    for partition in partitions {
+        put_partition(out, *partition);
+    }
+    Ok(())
 }
 
 fn put_content_type(out: &mut BytesMut, content_type: Option<&ContentType>) -> WireResult<()> {
@@ -442,12 +1398,295 @@ impl<'a> Reader<'a> {
         Ok(u32::from_be_bytes(bytes))
     }
 
+    fn u16(&mut self) -> WireResult<u16> {
+        let bytes: [u8; 2] = self
+            .take(2)?
+            .try_into()
+            .map_err(|_| WireError::UnexpectedEof)?;
+        Ok(u16::from_be_bytes(bytes))
+    }
+
     fn u64(&mut self) -> WireResult<u64> {
         let bytes: [u8; 8] = self
             .take(8)?
             .try_into()
             .map_err(|_| WireError::UnexpectedEof)?;
         Ok(u64::from_be_bytes(bytes))
+    }
+
+    fn uuid(&mut self) -> WireResult<Uuid> {
+        Uuid::from_slice(self.take(16)?).map_err(|_| WireError::InvalidUuid)
+    }
+
+    fn optional_uuid(&mut self) -> WireResult<Option<Uuid>> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => self.uuid().map(Some),
+            value => Err(WireError::InvalidOption(value)),
+        }
+    }
+
+    fn partition(&mut self) -> WireResult<Partition> {
+        self.u32().map(Partition::new)
+    }
+
+    fn queue_key(&mut self) -> WireResult<(String, Partition, Option<String>)> {
+        let topic = self.str()?.to_owned();
+        let partition = self.partition()?;
+        let group = self.optional_str()?.map(ToOwned::to_owned);
+        Ok((topic, partition, group))
+    }
+
+    fn resume_identity(&mut self) -> WireResult<ResumeIdentity> {
+        Ok(ResumeIdentity {
+            owner_id: self.uuid()?,
+            client_id: self.uuid()?,
+            resume_token: self.uuid()?,
+        })
+    }
+
+    fn optional_resume_identity(&mut self) -> WireResult<Option<ResumeIdentity>> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => self.resume_identity().map(Some),
+            value => Err(WireError::InvalidOption(value)),
+        }
+    }
+
+    fn resume_outcome(&mut self) -> WireResult<ResumeOutcome> {
+        match self.u8()? {
+            0 => Ok(ResumeOutcome::New),
+            1 => Ok(ResumeOutcome::Resumed),
+            2 => Ok(ResumeOutcome::ResumeNotFound),
+            3 => Ok(ResumeOutcome::ResumeRejected),
+            value => Err(WireError::UnknownTag {
+                context: "resume outcome",
+                value,
+            }),
+        }
+    }
+
+    fn dlq_policy(&mut self) -> WireResult<QueueDlqPolicy> {
+        match self.u8()? {
+            0 => Ok(QueueDlqPolicy::Discard),
+            1 => Ok(QueueDlqPolicy::Global),
+            2 => Ok(QueueDlqPolicy::Custom {
+                topic: self.str()?.to_owned(),
+                group: self.optional_str()?.map(ToOwned::to_owned),
+            }),
+            value => Err(WireError::UnknownTag {
+                context: "dlq policy",
+                value,
+            }),
+        }
+    }
+
+    fn optional_dlq_policy(&mut self) -> WireResult<Option<QueueDlqPolicy>> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => self.dlq_policy().map(Some),
+            value => Err(WireError::InvalidOption(value)),
+        }
+    }
+
+    fn reconcile_policy(&mut self) -> WireResult<ReconcilePolicy> {
+        match self.u8()? {
+            0 => Ok(ReconcilePolicy::Conservative),
+            1 => Ok(ReconcilePolicy::RestoreClientSubscriptions),
+            value => Err(WireError::UnknownTag {
+                context: "reconcile policy",
+                value,
+            }),
+        }
+    }
+
+    fn reconcile_action(&mut self) -> WireResult<ReconcileAction> {
+        match self.u8()? {
+            0 => Ok(ReconcileAction::Keep),
+            1 => Ok(ReconcileAction::CloseClientSide),
+            2 => Ok(ReconcileAction::CloseServerSide),
+            3 => Ok(ReconcileAction::RecreateClientSide),
+            value => Err(WireError::UnknownTag {
+                context: "reconcile action",
+                value,
+            }),
+        }
+    }
+
+    fn reconcile_subscription(&mut self) -> WireResult<ReconcileSubscription> {
+        let sub_id = self.u64()?;
+        let (topic, partition, group) = self.queue_key()?;
+        Ok(ReconcileSubscription {
+            sub_id,
+            topic,
+            group,
+            partition,
+            auto_ack: self.bool()?,
+            prefetch: self.u32()?,
+            consumer_group: self.optional_str()?.map(ToOwned::to_owned),
+            consumer_target: self.optional_u32()?,
+            member_id: self.optional_uuid()?,
+        })
+    }
+
+    fn optional_reconcile_subscription(&mut self) -> WireResult<Option<ReconcileSubscription>> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => self.reconcile_subscription().map(Some),
+            value => Err(WireError::InvalidOption(value)),
+        }
+    }
+
+    fn reconcile_subscriptions(&mut self) -> WireResult<Vec<ReconcileSubscription>> {
+        let count = self.u32()? as usize;
+        let mut subs = Vec::with_capacity(count);
+        for _ in 0..count {
+            subs.push(self.reconcile_subscription()?);
+        }
+        Ok(subs)
+    }
+
+    fn topology_entry(&mut self) -> WireResult<QueueTopologyEntry> {
+        let (topic, partition, group) = self.queue_key()?;
+        Ok(QueueTopologyEntry {
+            topic,
+            partition,
+            group,
+            owner_endpoint: self.optional_str()?.map(ToOwned::to_owned),
+            partitioning_version: self.u64()?,
+            partition_count: self.u32()?,
+        })
+    }
+
+    fn replication_checkpoint_required(&mut self) -> WireResult<ReplicationCheckpointRequired> {
+        Ok(ReplicationCheckpointRequired {
+            epoch: self.u64()?,
+            requested_offset: self.u64()?,
+            head_offset: self.u64()?,
+            next_offset: self.u64()?,
+        })
+    }
+
+    fn replication_message_record(&mut self) -> WireResult<ReplicationMessageRecord> {
+        Ok(ReplicationMessageRecord {
+            offset: self.u64()?,
+            flags: self.u16()?,
+            headers: self.bytes()?.to_vec(),
+            payload: self.bytes()?.to_vec(),
+        })
+    }
+
+    fn replication_event_record(&mut self) -> WireResult<ReplicationEventRecord> {
+        Ok(ReplicationEventRecord {
+            offset: self.u64()?,
+            payload: self.bytes()?.to_vec(),
+        })
+    }
+
+    fn replication_message_records(&mut self) -> WireResult<Vec<ReplicationMessageRecord>> {
+        let count = self.u32()? as usize;
+        let mut records = Vec::with_capacity(count);
+        for _ in 0..count {
+            records.push(self.replication_message_record()?);
+        }
+        Ok(records)
+    }
+
+    fn replication_event_records(&mut self) -> WireResult<Vec<ReplicationEventRecord>> {
+        let count = self.u32()? as usize;
+        let mut records = Vec::with_capacity(count);
+        for _ in 0..count {
+            records.push(self.replication_event_record()?);
+        }
+        Ok(records)
+    }
+
+    fn replication_message_read(&mut self) -> WireResult<ReplicationMessageRead> {
+        match self.u8()? {
+            0 => {
+                let epoch = self.u64()?;
+                let requested_offset = self.u64()?;
+                let next_offset = self.u64()?;
+                let records = self.replication_message_records()?;
+                validate_message_record_offsets(requested_offset, next_offset, &records)?;
+                Ok(ReplicationMessageRead::Batch {
+                    epoch,
+                    requested_offset,
+                    next_offset,
+                    records,
+                })
+            }
+            1 => Ok(ReplicationMessageRead::CheckpointRequired(
+                self.replication_checkpoint_required()?,
+            )),
+            value => Err(WireError::UnknownTag {
+                context: "replication message read",
+                value,
+            }),
+        }
+    }
+
+    fn replication_event_read(&mut self) -> WireResult<ReplicationEventRead> {
+        match self.u8()? {
+            0 => {
+                let epoch = self.u64()?;
+                let requested_offset = self.u64()?;
+                let next_offset = self.u64()?;
+                let records = self.replication_event_records()?;
+                validate_event_record_offsets(requested_offset, next_offset, &records)?;
+                Ok(ReplicationEventRead::Batch {
+                    epoch,
+                    requested_offset,
+                    next_offset,
+                    records,
+                })
+            }
+            1 => Ok(ReplicationEventRead::CheckpointRequired(
+                self.replication_checkpoint_required()?,
+            )),
+            value => Err(WireError::UnknownTag {
+                context: "replication event read",
+                value,
+            }),
+        }
+    }
+
+    fn optional_replication_message_apply_batch(
+        &mut self,
+    ) -> WireResult<Option<ReplicationMessageApplyBatch>> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(ReplicationMessageApplyBatch {
+                epoch: self.u64()?,
+                records: self.replication_message_records()?,
+            })),
+            value => Err(WireError::InvalidOption(value)),
+        }
+    }
+
+    fn optional_replication_event_apply_batch(
+        &mut self,
+    ) -> WireResult<Option<ReplicationEventApplyBatch>> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => Ok(Some(ReplicationEventApplyBatch {
+                epoch: self.u64()?,
+                records: self.replication_event_records()?,
+            })),
+            value => Err(WireError::InvalidOption(value)),
+        }
+    }
+
+    fn replication_state_checkpoint(&mut self) -> WireResult<ReplicationStateCheckpoint> {
+        Ok(ReplicationStateCheckpoint {
+            message_epoch: self.u64()?,
+            event_epoch: self.u64()?,
+            message_checkpoint_offset: self.u64()?,
+            message_next_offset: self.u64()?,
+            event_next_offset: self.u64()?,
+            applied_event_offset: self.u64()?,
+            state_snapshot: self.bytes()?.to_vec(),
+        })
     }
 
     fn bool(&mut self) -> WireResult<bool> {
@@ -491,6 +1730,23 @@ impl<'a> Reader<'a> {
         }
     }
 
+    fn optional_u32(&mut self) -> WireResult<Option<u32>> {
+        match self.u8()? {
+            0 => Ok(None),
+            1 => self.u32().map(Some),
+            value => Err(WireError::InvalidOption(value)),
+        }
+    }
+
+    fn partitions(&mut self) -> WireResult<Vec<Partition>> {
+        let count = self.u32()? as usize;
+        let mut partitions = Vec::with_capacity(count);
+        for _ in 0..count {
+            partitions.push(self.partition()?);
+        }
+        Ok(partitions)
+    }
+
     fn content_type(&mut self) -> WireResult<Option<ContentType>> {
         match self.u8()? {
             0 => Ok(None),
@@ -530,6 +1786,70 @@ impl<'a> Reader<'a> {
     }
 }
 
+fn validate_message_record_offsets(
+    requested_offset: u64,
+    next_offset: u64,
+    records: &[ReplicationMessageRecord],
+) -> WireResult<()> {
+    validate_record_offsets(
+        requested_offset,
+        next_offset,
+        records.iter().map(|record| record.offset),
+    )
+}
+
+fn validate_event_record_offsets(
+    requested_offset: u64,
+    next_offset: u64,
+    records: &[ReplicationEventRecord],
+) -> WireResult<()> {
+    validate_record_offsets(
+        requested_offset,
+        next_offset,
+        records.iter().map(|record| record.offset),
+    )
+}
+
+fn validate_record_offsets(
+    requested_offset: u64,
+    next_offset: u64,
+    offsets: impl IntoIterator<Item = u64>,
+) -> WireResult<()> {
+    let mut previous: Option<u64> = None;
+    for offset in offsets {
+        if offset < requested_offset {
+            return Err(WireError::InvalidRecordSequence("offset before requested"));
+        }
+
+        if let Some(previous) = previous {
+            let expected = previous
+                .checked_add(1)
+                .ok_or(WireError::InvalidRecordSequence("offset overflow"))?;
+            if offset != expected {
+                return Err(WireError::InvalidRecordSequence("non-contiguous offset"));
+            }
+        }
+
+        previous = Some(offset);
+    }
+
+    let minimum_next = previous
+        .map(|offset| {
+            offset
+                .checked_add(1)
+                .ok_or(WireError::InvalidRecordSequence("next offset overflow"))
+        })
+        .transpose()?
+        .unwrap_or(requested_offset);
+    if next_offset < minimum_next {
+        return Err(WireError::InvalidRecordSequence(
+            "next offset before minimum",
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,6 +1859,39 @@ mod tests {
             ("trace".to_string(), "abc".to_string()),
             ("tenant".to_string(), "west".to_string()),
         ])
+    }
+
+    fn sample_replication_read_ok() -> ReplicationReadOk {
+        ReplicationReadOk {
+            messages: ReplicationMessageRead::Batch {
+                epoch: 4,
+                requested_offset: 10,
+                next_offset: 12,
+                records: vec![
+                    ReplicationMessageRecord {
+                        offset: 10,
+                        flags: 0,
+                        headers: b"headers-a".to_vec(),
+                        payload: b"payload-a".to_vec(),
+                    },
+                    ReplicationMessageRecord {
+                        offset: 11,
+                        flags: 0,
+                        headers: b"headers-b".to_vec(),
+                        payload: b"payload-b".to_vec(),
+                    },
+                ],
+            },
+            events: ReplicationEventRead::Batch {
+                epoch: 4,
+                requested_offset: 20,
+                next_offset: 21,
+                records: vec![ReplicationEventRecord {
+                    offset: 20,
+                    payload: b"event".to_vec(),
+                }],
+            },
+        }
     }
 
     fn assert_publish_eq(got: &Publish, expected: &Publish) {
@@ -650,6 +2003,87 @@ mod tests {
     fn publish_ok_roundtrips() {
         let frame = encode_publish_ok(88, &PublishOk { offset: 123 }).unwrap();
         assert_eq!(decode_publish_ok(&frame).unwrap().offset, 123);
+    }
+
+    #[test]
+    fn replication_read_ok_roundtrips_batches() {
+        let msg = sample_replication_read_ok();
+        let frame = encode_replication_read_ok(14, &msg).unwrap();
+
+        assert_eq!(frame.version, PROTOCOL_V1);
+        assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
+        assert_eq!(frame.request_id, 14);
+        assert_eq!(decode_replication_read_ok(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn replication_read_ok_roundtrips_checkpoint_required() {
+        let checkpoint = ReplicationCheckpointRequired {
+            epoch: 7,
+            requested_offset: 1,
+            head_offset: 10,
+            next_offset: 20,
+        };
+        let msg = ReplicationReadOk {
+            messages: ReplicationMessageRead::CheckpointRequired(checkpoint.clone()),
+            events: ReplicationEventRead::CheckpointRequired(checkpoint),
+        };
+
+        let frame = encode_replication_read_ok(15, &msg).unwrap();
+        assert_eq!(decode_replication_read_ok(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn replication_read_ok_rejects_truncated_payload() {
+        let frame = Frame {
+            version: PROTOCOL_V1,
+            opcode: Op::ReplicationReadOk as u16,
+            flags: 0,
+            request_id: 9,
+            payload: Bytes::from_static(b"FRR2\0"),
+        };
+
+        assert!(matches!(
+            decode_replication_read_ok(&frame),
+            Err(WireError::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn replication_read_ok_rejects_offset_before_request() {
+        let mut msg = sample_replication_read_ok();
+        if let ReplicationMessageRead::Batch {
+            ref mut records, ..
+        } = msg.messages
+        {
+            records[0].offset = 9;
+        }
+
+        let frame = encode_replication_read_ok(14, &msg).unwrap();
+        assert!(matches!(
+            decode_replication_read_ok(&frame),
+            Err(WireError::InvalidRecordSequence(_))
+        ));
+    }
+
+    #[test]
+    fn replication_read_ok_rejects_non_contiguous_records() {
+        let mut msg = sample_replication_read_ok();
+        if let ReplicationEventRead::Batch {
+            ref mut records, ..
+        } = msg.events
+        {
+            records.push(ReplicationEventRecord {
+                offset: 22,
+                payload: b"gap".to_vec(),
+            });
+        }
+
+        let frame = encode_replication_read_ok(14, &msg).unwrap();
+        assert!(matches!(
+            decode_replication_read_ok(&frame),
+            Err(WireError::InvalidRecordSequence(_))
+        ));
     }
 
     #[test]

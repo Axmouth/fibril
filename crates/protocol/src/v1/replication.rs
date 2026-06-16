@@ -30,7 +30,7 @@ use crate::v1::{
     ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead, ReplicationReadOk,
     frame::{Frame, ProtoCodec},
     helper::{Conn, ProtocolError, try_decode, try_encode},
-    replication_payload::decode_replication_read_ok,
+    wire,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -841,7 +841,7 @@ async fn recv_replication_read_ok_response(
     request_id: u64,
 ) -> Result<ReplicationReadOk, ProtocolReplicationRequestError> {
     let frame = recv_response_frame(conn, request_id, Op::ReplicationReadOk).await?;
-    decode_replication_read_ok(&frame)
+    wire::decode_replication_read_ok(&frame)
         .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
 }
 

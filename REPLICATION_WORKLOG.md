@@ -202,25 +202,28 @@ Details:
   replace local exploratory context errors blindly; prioritize surfaces that
   cross crate, protocol, admin, or operator boundaries.
 
-IN PROGRESS — protocol payload binary migration (2026-06-16): the outer TCP
-frame is already custom binary; the remaining general protocol overhead is
-MessagePack payload encoding/decoding. The comparison bench in
-`crates/protocol/benches/encode.rs` shows a raw `Publish` payload codec is about
-an order of magnitude faster for 1 KiB messages and dramatically faster for
-large payloads. Target state: Rust protocol payloads are all custom binary, with
-no MessagePack in the TCP protocol crate. Mixed MessagePack/raw payloads are
-acceptable only as a short migration state while opcodes are converted one by
-one.
+DONE — Rust protocol payload binary migration (2026-06-16): the outer TCP frame
+was already custom binary, but the Rust protocol helper still used MessagePack
+payloads for most opcodes. The helper now dispatches every opcode through
+explicit binary payload codecs in `wire.rs`; there is no MessagePack fallback in
+the Rust TCP protocol helper path. Unit/signal opcodes (`AuthOk`, `Ping`,
+`Pong`) use an empty payload. Error-like opcodes share the typed `ErrorMsg`
+payload and are fenced to error opcodes. Malformed binary payloads return typed
+wire errors such as unexpected EOF, invalid tag, invalid magic, or invalid record
+sequence instead of unchecked slicing or generic MessagePack errors.
 
-Current direction:
-- Keep the existing binary frame header and choose payload codec by opcode.
-- Start with hot data-plane opcodes: `Publish`, `PublishDelayed`, `Deliver`,
-  `PublishOk`, `Ack`, and `Nack`.
-- Add typed wire-format parse errors instead of formatted decode strings.
-- Do not add a JSON/debug flag now. If we need debug-readable protocol traffic
+Details:
+- Converted the data plane and control plane: handshake, auth, publish,
+  subscribe, declare queue, assignment, topology, redirect, reconnect
+  reconciliation, replication read/apply/checkpoint, settle, error, and ping/pong
+  frames.
+- Removed the old `replication_payload` side module so replication read-ok uses
+  the same `wire` module as the rest of the protocol.
+- Kept the existing binary frame header and chose payload codec by opcode.
+- Did not add a JSON/debug flag. If we need debug-readable protocol traffic
   later, make it an explicit mode rather than compatibility baggage.
-- TypeScript client parity is deferred to the planned large TS catch-up pass,
-  because that client is already behind this branch across clustering,
+- TypeScript client parity is still deferred to the planned large TS catch-up
+  pass, because that client is already behind this branch across clustering,
   reconnect, and cohort behavior.
 
 DOCS HOUSEKEEPING (at some point, user request): do a relevance pass over all the
@@ -3173,6 +3176,94 @@ Snapshot/checkpoint concern found during higher-rate sweep:
   caveat is latency under replica-durable confirms. With current tuning, useful
   throughput is achieved by allowing enough outstanding confirmations, and that
   backlog shows up directly in client-observed confirm latency.
+- End-to-end checkpoint after the full Rust protocol binary migration
+  (2026-06-16): practical steady-state runs show the custom wire format did not
+  break the public path and did improve the replication path enough for stable
+  50k/s replica-durable runs. All replicated runs below used 3 local nodes,
+  Ganglion coordination, `replica_durable:2`, 10 writers, 10 readers, confirmed
+  publishes, 4096 message/event read budgets, 16 MiB replication read byte
+  budget, 16 replication iterations per tick, and verified follower tails plus
+  owner/follower cursor equality after the benchmark.
+
+  | Case | Payload | Target | Actual | Confirm p50/p95/p99/max | Publish to deliver p50/p95/p99/max | Errors | Notes |
+  | --- | ---: | ---: | ---: | --- | --- | ---: | --- |
+  | single-node local | 1 KiB | 100k/s | 99,839/s | 102/103/110/123ms | 10/14/15/26ms | 0 | baseline, server RSS avg/peak 131/150 MiB |
+  | replicated, 1ms poll | 1 KiB | 50k/s | 49,887/s | 204/205/216/225ms | 11/15/17/54ms | 0 | matched cursors, follower tail reached |
+  | replicated, 5ms poll | 1 KiB | 50k/s | 49,996/s | 204/205/205/214ms | 10/15/16/46ms | 0 | matched cursors, fewer follower ticks |
+  | replicated, 10ms poll | 1 KiB | 50k/s | 49,948/s | 204/205/210/217ms | 11/15/17/50ms | 0 | matched cursors |
+  | replicated, 50ms poll | 1 KiB | 50k/s | 49,974/s | 204/205/210/217ms | 10/15/17/49ms | 0 | matched cursors, lower follower loop churn |
+  | replicated, 100ms poll | 1 KiB | 50k/s | 49,949/s | 204/205/216/231ms | 11/15/17/50ms | 0 | matched cursors, still stable at this load |
+  | replicated, 1ms poll | 64 KiB | 5k/s | 5,000/s | 1023/1024/1024/1025ms | 11/36/269/333ms | 0 | matched cursors, large payload tails need more work |
+
+  Interpretation: for the 1 KiB 50k/s case, follower poll intervals from 1ms
+  through 100ms do not materially change user-visible latency or throughput.
+  The confirm p50 is still mostly benchmark window math: 1024 outstanding
+  publishes per writer, 10 writers, and 50k/s target gives about 204ms. Higher
+  poll intervals reduce follower tick/report churn, so the default should not
+  blindly chase 1ms polling. The 64 KiB case is throughput-correct at 5k/s but
+  has a much worse delivery tail and a confirm p50 set by its 512-window at
+  5k/s, so larger-payload work should focus on batch sizing, transport shape,
+  and storage scheduling rather than only payload decoding.
+- OPEN SEMANTICS CHECK — replica-durable delivery visibility: current benchmark
+  numbers show `publish -> deliver` latency far below publish-confirm latency.
+  Some of that is expected benchmark-window math, but it may also mean messages
+  become deliverable after local owner append/enqueue while replica-durable
+  publish confirmation waits for follower progress. That contract needs to be
+  explicit. If replica-durable means "safe before visible", consumers should not
+  receive offsets whose message and enqueue event have not reached the required
+  follower durability watermark. Otherwise a consumer could perform side effects
+  for a message that would be lost if the owner dies before replication catches
+  up.
+
+  Required follow-up:
+  - Add latency instrumentation that splits publish into local append complete,
+    replica gate complete, confirm frame sent, and client-observed confirm.
+  - Add an adversarial test with a stalled or delayed follower: publish to a
+    replica-durable queue and assert whether delivery can happen before the
+    replica gate completes. Use that test to lock the chosen contract.
+  - If the intended contract is strong replica visibility, add a committed
+    delivery watermark per queue/partition. Delivery should only return ready
+    offsets at or below that watermark for replica-durable queues.
+  - Keep frame streaming/iterator decode as a later performance item. It may
+    reduce large-payload memory and scheduling spikes, but it should not precede
+    the visibility contract decision.
+- Comparative weak spots versus mature replicated queues/logs:
+  - Mature systems usually expose consumer reads only up to a committed or
+    replicated-enough watermark. Fibril currently needs an explicit
+    replica-durable visibility contract and likely a committed delivery
+    watermark so local append readiness does not accidentally become durable
+    visibility.
+  - Mature replication paths are usually continuous streams, long-poll pulls, or
+    push-hinted pulls. Fibril's current follower catch-up loop is tick/batch
+    shaped, which can create sawtooth latency: wait, fetch, apply, report
+    progress, repeat.
+  - Message payload replication and event/progress replication may be too tightly
+    coupled in the current response shape. Large payload transfer can interfere
+    with small event/progress movement. Separate streams, separate budgets, or a
+    better pipeline may matter.
+  - Per-offset replica confirmation is a likely scaling risk. A monotonic
+    replicated/committed watermark that wakes whole ranges of waiters should be
+    cheaper and closer to common replicated-log designs.
+  - Protocol decode is now custom binary, but still whole-frame decode/apply.
+    Mature paths often parse incrementally and avoid intermediate owned
+    allocations where possible.
+  - Keratin is still primarily a local log with replication APIs added on top.
+    The long-term efficient path is likely raw range read/send/append with
+    validation, avoiding decode/re-encode for follower replication where safe.
+  - Local multi-node benchmarks share CPU, page cache, and one drive. That makes
+    local contention harsher than separate nodes, while also hiding real network
+    cost. Treat the current numbers as a useful stress model, not a full
+    deployment model.
+
+  Recommended direction from this comparison:
+  - Decide and test the committed visibility contract first.
+  - Move replica confirmation toward committed watermark progress rather than
+    per-offset thinking.
+  - Add long-poll or hybrid push/pull replication once the contract is clear.
+  - Separate or better pipeline payload replication from event/progress
+    replication.
+  - Explore Keratin raw-record replication APIs after the higher-level contract
+    stops moving.
 - Suspects to measure next, in order:
   1. Local owner append completion latency before `replica_confirm_wait` starts.
   2. Confirm sink backlog in replica mode. The sink is fine enough for
