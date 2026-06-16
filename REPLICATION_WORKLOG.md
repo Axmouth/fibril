@@ -184,6 +184,24 @@ Details:
   post-snapshot events apply and the snapshot-boundary event is not applied
   twice. A state test verifies snapshot metadata records the supplied offset.
 
+DONE — typed error cleanup pass (Fibril commits "Replace library anyhow
+surfaces" and "Add typed server error surfaces"; Keratin commit "Replace Keratin
+anyhow utility error", 2026-06-16): the branch moved further away from broad
+`anyhow` surfaces in library/server paths and toward explicit error variants
+that callers can match and tests can assert.
+
+Details:
+- Fibril library surfaces now avoid leaking generic anyhow errors where the
+  caller needs stable behavior, especially around cluster/replication paths.
+- Fibril server responses gained a typed error surface so protocol/admin callers
+  can see stable categories instead of only formatted strings.
+- Keratin utility error handling now uses a concrete error type rather than
+  `anyhow` for that path.
+- Future work: keep pushing this direction at API boundaries, including wire
+  format parse failures and not-owner/conflict-style cluster responses. Do not
+  replace local exploratory context errors blindly; prioritize surfaces that
+  cross crate, protocol, admin, or operator boundaries.
+
 DOCS HOUSEKEEPING (at some point, user request): do a relevance pass over all the
 .md files we have collected. We should not keep them all, especially planning and
 handoff docs that go stale. Prune or fold the dead ones. While at it, give the
