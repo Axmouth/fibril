@@ -50,9 +50,6 @@ pub enum StorageError {
 
     #[error("unexpected internal error: {0}")]
     Internal(String),
-
-    #[error("anyhow error: {0}")]
-    Anyhow(#[from] anyhow::Error),
 }
 
 #[async_trait]

@@ -7,7 +7,6 @@ use std::{
     },
 };
 
-use anyhow::{Context, bail};
 use fibril_broker::{
     Offset, Partition,
     broker::{
@@ -30,7 +29,7 @@ use crate::v1::{
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead, ReplicationReadOk,
     frame::{Frame, ProtoCodec},
-    helper::{Conn, try_decode, try_encode},
+    helper::{Conn, ProtocolError, try_decode, try_encode},
     replication_payload::decode_replication_read_ok,
 };
 
@@ -79,6 +78,35 @@ pub enum ProtocolReplicationCatchUp {
     IterationLimit {
         progress: ProtocolReplicationCatchUpProgress,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtocolReplicationStream {
+    Messages,
+    Events,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolReplicationCatchUpError {
+    #[error("replication catch-up limits must be greater than zero")]
+    InvalidLimits,
+    #[error("failed to encode {operation} request: {source}")]
+    Encode {
+        operation: &'static str,
+        #[source]
+        source: ProtocolError,
+    },
+    #[error("failed to send {operation} request: {message}")]
+    Send {
+        operation: &'static str,
+        message: String,
+    },
+    #[error(transparent)]
+    Request(#[from] ProtocolReplicationRequestError),
+    #[error("replication apply response reported unapplied {stream:?} records")]
+    Unapplied { stream: ProtocolReplicationStream },
+    #[error("{stream:?} checkpoint requirement was not handled before apply conversion")]
+    UnhandledCheckpointRequired { stream: ProtocolReplicationStream },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -676,13 +704,13 @@ pub async fn catch_up_replication_over_protocol(
     partition: Partition,
     group: Option<&str>,
     options: ProtocolReplicationCatchUpOptions,
-) -> anyhow::Result<ProtocolReplicationCatchUp> {
+) -> Result<ProtocolReplicationCatchUp, ProtocolReplicationCatchUpError> {
     if options.max_messages_per_read == 0
         || options.max_events_per_read == 0
         || options.max_bytes_per_read == 0
         || options.max_iterations == 0
     {
-        bail!("replication catch-up limits must be greater than zero");
+        return Err(ProtocolReplicationCatchUpError::InvalidLimits);
     }
 
     let mut request_id = options.request_id_start;
@@ -695,25 +723,33 @@ pub async fn catch_up_replication_over_protocol(
     for _ in 0..options.max_iterations {
         let read_request_id = request_id;
         request_id += 1;
+        let read_request = try_encode(
+            Op::ReplicationRead,
+            read_request_id,
+            &ReplicationRead {
+                topic: topic.to_string(),
+                group: group.map(str::to_string),
+                partition,
+                message_from: progress.message_next_offset,
+                event_from: progress.event_next_offset,
+                max_messages: options.max_messages_per_read,
+                max_events: options.max_events_per_read,
+                max_bytes: options.max_bytes_per_read,
+                max_wait_ms: 0,
+                reporter_node_id: None,
+            },
+        )
+        .map_err(|source| ProtocolReplicationCatchUpError::Encode {
+            operation: "replication read",
+            source,
+        })?;
         owner
-            .send(try_encode(
-                Op::ReplicationRead,
-                read_request_id,
-                &ReplicationRead {
-                    topic: topic.to_string(),
-                    group: group.map(str::to_string),
-                    partition,
-                    message_from: progress.message_next_offset,
-                    event_from: progress.event_next_offset,
-                    max_messages: options.max_messages_per_read,
-                    max_events: options.max_events_per_read,
-                    max_bytes: options.max_bytes_per_read,
-                    max_wait_ms: 0,
-                    reporter_node_id: None,
-                },
-            )?)
+            .send(read_request)
             .await
-            .context("failed to send replication read request")?;
+            .map_err(|err| ProtocolReplicationCatchUpError::Send {
+                operation: "replication read",
+                message: err.to_string(),
+            })?;
 
         let read: ReplicationReadOk =
             recv_replication_read_ok_response(owner, read_request_id).await?;
@@ -743,28 +779,39 @@ pub async fn catch_up_replication_over_protocol(
 
         let apply_request_id = request_id;
         request_id += 1;
-        follower
-            .send(try_encode(
-                Op::ReplicationApply,
-                apply_request_id,
-                &ReplicationApply {
-                    topic: topic.to_string(),
-                    group: group.map(str::to_string),
-                    partition,
-                    messages,
-                    events,
-                },
-            )?)
-            .await
-            .context("failed to send replication apply request")?;
+        let apply_request = try_encode(
+            Op::ReplicationApply,
+            apply_request_id,
+            &ReplicationApply {
+                topic: topic.to_string(),
+                group: group.map(str::to_string),
+                partition,
+                messages,
+                events,
+            },
+        )
+        .map_err(|source| ProtocolReplicationCatchUpError::Encode {
+            operation: "replication apply",
+            source,
+        })?;
+        follower.send(apply_request).await.map_err(|err| {
+            ProtocolReplicationCatchUpError::Send {
+                operation: "replication apply",
+                message: err.to_string(),
+            }
+        })?;
 
         let apply: ReplicationApplyOk =
             recv_response(follower, apply_request_id, Op::ReplicationApplyOk).await?;
         if message_record_count > 0 && !apply.messages_applied {
-            bail!("replication apply response reported unapplied message records");
+            return Err(ProtocolReplicationCatchUpError::Unapplied {
+                stream: ProtocolReplicationStream::Messages,
+            });
         }
         if event_record_count > 0 && !apply.events_applied {
-            bail!("replication apply response reported unapplied event records");
+            return Err(ProtocolReplicationCatchUpError::Unapplied {
+                stream: ProtocolReplicationStream::Events,
+            });
         }
 
         progress.iterations += 1;
@@ -886,7 +933,7 @@ fn event_checkpoint_required(read: &ReplicationEventRead) -> Option<ReplicationC
 
 fn message_apply_batch(
     read: ReplicationMessageRead,
-) -> anyhow::Result<(Option<ReplicationMessageApplyBatch>, usize, u64)> {
+) -> Result<(Option<ReplicationMessageApplyBatch>, usize, u64), ProtocolReplicationCatchUpError> {
     match read {
         ReplicationMessageRead::Batch {
             epoch,
@@ -901,15 +948,17 @@ fn message_apply_batch(
                 next_offset,
             ))
         }
-        ReplicationMessageRead::CheckpointRequired(_) => {
-            bail!("message checkpoint requirement was not handled before apply conversion")
-        }
+        ReplicationMessageRead::CheckpointRequired(_) => Err(
+            ProtocolReplicationCatchUpError::UnhandledCheckpointRequired {
+                stream: ProtocolReplicationStream::Messages,
+            },
+        ),
     }
 }
 
 fn event_apply_batch(
     read: ReplicationEventRead,
-) -> anyhow::Result<(Option<ReplicationEventApplyBatch>, usize, u64)> {
+) -> Result<(Option<ReplicationEventApplyBatch>, usize, u64), ProtocolReplicationCatchUpError> {
     match read {
         ReplicationEventRead::Batch {
             epoch,
@@ -924,9 +973,11 @@ fn event_apply_batch(
                 next_offset,
             ))
         }
-        ReplicationEventRead::CheckpointRequired(_) => {
-            bail!("event checkpoint requirement was not handled before apply conversion")
-        }
+        ReplicationEventRead::CheckpointRequired(_) => Err(
+            ProtocolReplicationCatchUpError::UnhandledCheckpointRequired {
+                stream: ProtocolReplicationStream::Events,
+            },
+        ),
     }
 }
 

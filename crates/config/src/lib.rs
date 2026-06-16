@@ -7,6 +7,62 @@ use std::{
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
+pub type ConfigResult<T> = Result<T, ConfigError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("failed to parse command line arguments: {0}")]
+    Cli(#[from] clap::Error),
+    #[error("failed to read config file {path}: {source}")]
+    ReadFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse config file {path}: {source}")]
+    ParseFile {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("failed to parse config TOML: {0}")]
+    ParseToml(#[from] toml::de::Error),
+    #[error("{name} is not valid unicode: {source}")]
+    EnvUnicode {
+        name: String,
+        #[source]
+        source: std::env::VarError,
+    },
+    #[error("{name} has invalid value {value:?}: {message}")]
+    EnvParse {
+        name: String,
+        value: String,
+        message: String,
+    },
+    #[error("FIBRIL_COORDINATION_PEERS entry `{entry}` is not id=addr")]
+    CoordinationPeerEntry { entry: String },
+    #[error("{0}")]
+    Validation(String),
+    #[error("unknown coordination mode `{value}` (static|ganglion)")]
+    UnknownCoordinationMode { value: String },
+    #[error("invalid assignment durability node count `{value}`: {source}")]
+    AssignmentDurabilityNodes {
+        value: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    #[error(
+        "unknown assignment durability `{value}` (local_durable|replica_accepted|replica_durable|majority_durable)"
+    )]
+    UnknownAssignmentDurability { value: String },
+}
+
+impl ConfigError {
+    fn validation(message: impl Into<String>) -> Self {
+        Self::Validation(message.into())
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "fibril-server", about = "Run the Fibril broker server")]
 struct CliArgs {
@@ -80,11 +136,11 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn load() -> anyhow::Result<Self> {
+    pub fn load() -> ConfigResult<Self> {
         Self::load_from_args(std::env::args_os())
     }
 
-    pub fn load_file_and_env(config_path: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn load_file_and_env(config_path: Option<PathBuf>) -> ConfigResult<Self> {
         let config_path = match config_path {
             Some(path) => Some(path),
             None => optional_path_env("FIBRIL_CONFIG")?,
@@ -98,7 +154,7 @@ impl ServerConfig {
         Ok(config)
     }
 
-    pub fn load_from_args<I, T>(args: I) -> anyhow::Result<Self>
+    pub fn load_from_args<I, T>(args: I) -> ConfigResult<Self>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
@@ -118,13 +174,13 @@ impl ServerConfig {
         Ok(config)
     }
 
-    pub fn from_toml_str(input: &str) -> anyhow::Result<Self> {
+    pub fn from_toml_str(input: &str) -> ConfigResult<Self> {
         let mut config: Self = toml::from_str(input)?;
         config.validate()?;
         Ok(config)
     }
 
-    fn apply_env(&mut self) -> anyhow::Result<()> {
+    fn apply_env(&mut self) -> ConfigResult<()> {
         self.apply_env_from(|name| match optional_string_env(name) {
             Ok(Some(value)) => Some(Ok(value)),
             Ok(None) => None,
@@ -132,9 +188,9 @@ impl ServerConfig {
         })
     }
 
-    fn apply_env_from<F>(&mut self, mut get: F) -> anyhow::Result<()>
+    fn apply_env_from<F>(&mut self, mut get: F) -> ConfigResult<()>
     where
-        F: FnMut(&str) -> Option<anyhow::Result<String>>,
+        F: FnMut(&str) -> Option<ConfigResult<String>>,
     {
         if let Some(value) = env_value(&mut get, "FIBRIL_DATA_DIR")? {
             self.server.data_dir = PathBuf::from(value);
@@ -234,9 +290,11 @@ impl ServerConfig {
             // Comma-separated "raft_id=host:port" pairs.
             let mut peers = std::collections::BTreeMap::new();
             for pair in value.split(',').filter(|pair| !pair.trim().is_empty()) {
-                let (id, addr) = pair.split_once('=').ok_or_else(|| {
-                    anyhow::anyhow!("FIBRIL_COORDINATION_PEERS entry `{pair}` is not id=addr")
-                })?;
+                let (id, addr) =
+                    pair.split_once('=')
+                        .ok_or_else(|| ConfigError::CoordinationPeerEntry {
+                            entry: pair.to_string(),
+                        })?;
                 peers.insert(id.trim().to_string(), addr.trim().to_string());
             }
             self.coordination.ganglion.peers = peers;
@@ -288,13 +346,15 @@ impl ServerConfig {
         Ok(())
     }
 
-    pub fn from_toml_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub fn from_toml_file(path: impl AsRef<Path>) -> ConfigResult<Self> {
         let path = path.as_ref();
-        let input = std::fs::read_to_string(path).map_err(|err| {
-            anyhow::anyhow!("failed to read config file {}: {err}", path.display())
+        let input = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
+            path: path.to_path_buf(),
+            source,
         })?;
-        let mut config: Self = toml::from_str(&input).map_err(|err| {
-            anyhow::anyhow!("failed to parse config file {}: {err}", path.display())
+        let mut config: Self = toml::from_str(&input).map_err(|source| ConfigError::ParseFile {
+            path: path.to_path_buf(),
+            source,
         })?;
         config.validate()?;
         Ok(config)
@@ -355,13 +415,15 @@ impl ServerConfig {
         }
     }
 
-    fn validate(&mut self) -> anyhow::Result<()> {
+    fn validate(&mut self) -> ConfigResult<()> {
         if self.server.data_dir.as_os_str().is_empty() {
-            anyhow::bail!("server.data_dir must not be empty");
+            return Err(ConfigError::validation("server.data_dir must not be empty"));
         }
         if self.admin.auth.enabled {
             if self.admin.auth.username.trim().is_empty() {
-                anyhow::bail!("admin.auth.username must not be empty when admin auth is enabled");
+                return Err(ConfigError::validation(
+                    "admin.auth.username must not be empty when admin auth is enabled",
+                ));
             }
             if self
                 .admin
@@ -372,109 +434,133 @@ impl ServerConfig {
                 .unwrap_or_default()
                 .is_empty()
             {
-                anyhow::bail!("admin.auth.password must be set when admin auth is enabled");
+                return Err(ConfigError::validation(
+                    "admin.auth.password must be set when admin auth is enabled",
+                ));
             }
         }
         if self.runtime_seed.delivery.expiry_batch_max == 0 {
-            anyhow::bail!("runtime_seed.delivery.expiry_batch_max must be at least 1");
+            return Err(ConfigError::validation(
+                "runtime_seed.delivery.expiry_batch_max must be at least 1",
+            ));
         }
         if self.storage.keratin.fsync_interval_ms == 0 {
-            anyhow::bail!("storage.keratin.fsync_interval_ms must be at least 1");
+            return Err(ConfigError::validation(
+                "storage.keratin.fsync_interval_ms must be at least 1",
+            ));
         }
         if self.storage.keratin.message_log.segment_max_bytes == 0 {
-            anyhow::bail!("storage.keratin.message_log.segment_max_bytes must be at least 1");
+            return Err(ConfigError::validation(
+                "storage.keratin.message_log.segment_max_bytes must be at least 1",
+            ));
         }
         if self.storage.keratin.event_log.segment_max_bytes == 0 {
-            anyhow::bail!("storage.keratin.event_log.segment_max_bytes must be at least 1");
+            return Err(ConfigError::validation(
+                "storage.keratin.event_log.segment_max_bytes must be at least 1",
+            ));
         }
         if self.runtime_seed.idle_queue_cleanup.sweep_interval_ms == 0 {
-            anyhow::bail!("runtime_seed.idle_queue_cleanup.sweep_interval_ms must be at least 1");
+            return Err(ConfigError::validation(
+                "runtime_seed.idle_queue_cleanup.sweep_interval_ms must be at least 1",
+            ));
         }
         if self.runtime_seed.replication.caught_up_poll_ms == 0
             || self.runtime_seed.replication.retry_poll_ms == 0
             || self.runtime_seed.replication.checkpoint_retry_poll_ms == 0
         {
-            anyhow::bail!("runtime_seed.replication poll intervals must be at least 1ms");
+            return Err(ConfigError::validation(
+                "runtime_seed.replication poll intervals must be at least 1ms",
+            ));
         }
         if self.runtime_seed.replication.max_messages_per_read == 0
             || self.runtime_seed.replication.max_events_per_read == 0
             || self.runtime_seed.replication.max_bytes_per_read == 0
             || self.runtime_seed.replication.max_iterations_per_tick == 0
         {
-            anyhow::bail!("runtime_seed.replication read limits must be at least 1");
+            return Err(ConfigError::validation(
+                "runtime_seed.replication read limits must be at least 1",
+            ));
         }
         if self.runtime_seed.replication.min_in_sync_replicas == 0 {
-            anyhow::bail!("runtime_seed.replication.min_in_sync_replicas must be at least 1");
+            return Err(ConfigError::validation(
+                "runtime_seed.replication.min_in_sync_replicas must be at least 1",
+            ));
         }
         if self.runtime_seed.replication.isr_timeout_ms == 0 {
-            anyhow::bail!("runtime_seed.replication.isr_timeout_ms must be at least 1");
+            return Err(ConfigError::validation(
+                "runtime_seed.replication.isr_timeout_ms must be at least 1",
+            ));
         }
         if self.runtime_seed.partitioning.default_partition_count == 0 {
-            anyhow::bail!("runtime_seed.partitioning.default_partition_count must be at least 1");
+            return Err(ConfigError::validation(
+                "runtime_seed.partitioning.default_partition_count must be at least 1",
+            ));
         }
         if self.coordination.mode == CoordinationMode::Ganglion
             && self.runtime_locks.idle_queue_cleanup
         {
-            anyhow::bail!(
-                "runtime_locks are standalone-only; in ganglion mode, runtime settings are cluster-authoritative"
-            );
+            return Err(ConfigError::validation(
+                "runtime_locks are standalone-only; in ganglion mode, runtime settings are cluster-authoritative",
+            ));
         }
         if self.coordination.mode == CoordinationMode::Ganglion
             && self.coordination.ganglion.liveness_ttl_ms
                 < 2 * self.coordination.ganglion.heartbeat_interval_ms
         {
-            anyhow::bail!(
+            return Err(ConfigError::validation(
                 "coordination.ganglion.liveness_ttl_ms must be at least twice \
                  heartbeat_interval_ms, or healthy nodes will flap dead on a \
-                 single missed heartbeat"
-            );
+                 single missed heartbeat",
+            ));
         }
         let raft = &self.coordination.ganglion.raft;
         if raft.heartbeat_interval_ms == 0 {
-            anyhow::bail!("coordination.ganglion.raft.heartbeat_interval_ms must be at least 1");
+            return Err(ConfigError::validation(
+                "coordination.ganglion.raft.heartbeat_interval_ms must be at least 1",
+            ));
         }
         if raft.election_timeout_min_ms <= raft.heartbeat_interval_ms {
-            anyhow::bail!(
-                "coordination.ganglion.raft.election_timeout_min_ms must be greater than heartbeat_interval_ms"
-            );
+            return Err(ConfigError::validation(
+                "coordination.ganglion.raft.election_timeout_min_ms must be greater than heartbeat_interval_ms",
+            ));
         }
         if raft.election_timeout_min_ms >= raft.election_timeout_max_ms {
-            anyhow::bail!(
-                "coordination.ganglion.raft.election_timeout_min_ms must be less than election_timeout_max_ms"
-            );
+            return Err(ConfigError::validation(
+                "coordination.ganglion.raft.election_timeout_min_ms must be less than election_timeout_max_ms",
+            ));
         }
         let forwarded = &self.coordination.ganglion.forwarded_write;
         if forwarded.redirect_limit == 0 {
-            anyhow::bail!(
-                "coordination.ganglion.forwarded_write.redirect_limit must be at least 1"
-            );
+            return Err(ConfigError::validation(
+                "coordination.ganglion.forwarded_write.redirect_limit must be at least 1",
+            ));
         }
         if forwarded.no_leader_base_backoff_ms == 0 || forwarded.no_leader_max_backoff_ms == 0 {
-            anyhow::bail!(
-                "coordination.ganglion.forwarded_write backoff values must be at least 1ms"
-            );
+            return Err(ConfigError::validation(
+                "coordination.ganglion.forwarded_write backoff values must be at least 1ms",
+            ));
         }
         if forwarded.no_leader_base_backoff_ms > forwarded.no_leader_max_backoff_ms {
-            anyhow::bail!(
-                "coordination.ganglion.forwarded_write.no_leader_base_backoff_ms must be <= no_leader_max_backoff_ms"
-            );
+            return Err(ConfigError::validation(
+                "coordination.ganglion.forwarded_write.no_leader_base_backoff_ms must be <= no_leader_max_backoff_ms",
+            ));
         }
         let durability = &self.coordination.ganglion.assignment_durability;
         match durability.mode {
             GanglionAssignmentDurabilityMode::ReplicaAccepted
             | GanglionAssignmentDurabilityMode::ReplicaDurable => {
                 if durability.nodes.unwrap_or_default() == 0 {
-                    anyhow::bail!(
-                        "coordination.ganglion.assignment_durability.nodes must be at least 1 for replica durability"
-                    );
+                    return Err(ConfigError::validation(
+                        "coordination.ganglion.assignment_durability.nodes must be at least 1 for replica durability",
+                    ));
                 }
             }
             GanglionAssignmentDurabilityMode::LocalDurable
             | GanglionAssignmentDurabilityMode::MajorityDurable => {
                 if durability.nodes.is_some() {
-                    anyhow::bail!(
-                        "coordination.ganglion.assignment_durability.nodes is only valid for replica durability"
-                    );
+                    return Err(ConfigError::validation(
+                        "coordination.ganglion.assignment_durability.nodes is only valid for replica durability",
+                    ));
                 }
             }
         }
@@ -482,9 +568,9 @@ impl ServerConfig {
     }
 }
 
-fn env_value<F>(get: &mut F, name: &str) -> anyhow::Result<Option<String>>
+fn env_value<F>(get: &mut F, name: &'static str) -> ConfigResult<Option<String>>
 where
-    F: FnMut(&str) -> Option<anyhow::Result<String>>,
+    F: FnMut(&str) -> Option<ConfigResult<String>>,
 {
     match get(name).transpose()? {
         Some(value) if value.trim().is_empty() => Ok(None),
@@ -492,27 +578,32 @@ where
     }
 }
 
-fn optional_path_env(name: &str) -> anyhow::Result<Option<PathBuf>> {
+fn optional_path_env(name: &'static str) -> ConfigResult<Option<PathBuf>> {
     Ok(optional_string_env(name)?.map(PathBuf::from))
 }
 
-fn optional_string_env(name: &str) -> anyhow::Result<Option<String>> {
+fn optional_string_env(name: &str) -> ConfigResult<Option<String>> {
     match std::env::var(name) {
         Ok(value) if value.trim().is_empty() => Ok(None),
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(err) => Err(anyhow::anyhow!("{name} is not valid unicode: {err}")),
+        Err(source) => Err(ConfigError::EnvUnicode {
+            name: name.to_string(),
+            source,
+        }),
     }
 }
 
-fn parse_env<T>(name: &str, value: &str) -> anyhow::Result<T>
+fn parse_env<T>(name: &str, value: &str) -> ConfigResult<T>
 where
     T: std::str::FromStr,
     T::Err: std::fmt::Display,
 {
-    value
-        .parse::<T>()
-        .map_err(|err| anyhow::anyhow!("{name} has invalid value {value:?}: {err}"))
+    value.parse::<T>().map_err(|err| ConfigError::EnvParse {
+        name: name.to_string(),
+        value: value.to_string(),
+        message: err.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -610,13 +701,15 @@ pub enum CoordinationMode {
 }
 
 impl std::str::FromStr for CoordinationMode {
-    type Err = anyhow::Error;
+    type Err = ConfigError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw {
             "static" => Ok(Self::Static),
             "ganglion" => Ok(Self::Ganglion),
-            other => anyhow::bail!("unknown coordination mode `{other}` (static|ganglion)"),
+            other => Err(ConfigError::UnknownCoordinationMode {
+                value: other.to_string(),
+            }),
         }
     }
 }
@@ -696,11 +789,19 @@ impl Default for GanglionAssignmentDurabilitySection {
 }
 
 impl std::str::FromStr for GanglionAssignmentDurabilitySection {
-    type Err = anyhow::Error;
+    type Err = ConfigError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         let (mode, nodes) = match raw.split_once(':') {
-            Some((mode, nodes)) => (mode, Some(nodes.parse::<usize>()?)),
+            Some((mode, nodes)) => (
+                mode,
+                Some(nodes.parse::<usize>().map_err(|source| {
+                    ConfigError::AssignmentDurabilityNodes {
+                        value: nodes.to_string(),
+                        source,
+                    }
+                })?),
+            ),
             None => (raw, None),
         };
         Ok(Self {
@@ -726,7 +827,7 @@ impl Default for GanglionAssignmentDurabilityMode {
 }
 
 impl std::str::FromStr for GanglionAssignmentDurabilityMode {
-    type Err = anyhow::Error;
+    type Err = ConfigError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         match raw {
@@ -734,10 +835,9 @@ impl std::str::FromStr for GanglionAssignmentDurabilityMode {
             "replica_accepted" => Ok(Self::ReplicaAccepted),
             "replica_durable" => Ok(Self::ReplicaDurable),
             "majority_durable" | "majority" => Ok(Self::MajorityDurable),
-            other => anyhow::bail!(
-                "unknown assignment durability `{other}` \
-                 (local_durable|replica_accepted|replica_durable|majority_durable)"
-            ),
+            other => Err(ConfigError::UnknownAssignmentDurability {
+                value: other.to_string(),
+            }),
         }
     }
 }

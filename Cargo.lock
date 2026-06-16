@@ -1146,7 +1146,6 @@ dependencies = [
 name = "fibril-client"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "dashmap",
  "fastrand",
@@ -1177,9 +1176,9 @@ dependencies = [
 name = "fibril-config"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "clap",
  "serde",
+ "thiserror 2.0.18",
  "toml",
 ]
 
@@ -1201,7 +1200,6 @@ dependencies = [
 name = "fibril-metrics"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "arc-swap",
  "async-trait",
  "dashmap",
@@ -1251,7 +1249,6 @@ dependencies = [
 name = "fibril-storage"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "bytes",
  "dashmap",
@@ -1293,7 +1290,6 @@ dependencies = [
 name = "fibril-util"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "console-subscriber",
  "fastrand",
@@ -2033,7 +2029,6 @@ dependencies = [
 name = "keratin-log"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "byteorder",
  "crc32c",
  "crossbeam-channel",
