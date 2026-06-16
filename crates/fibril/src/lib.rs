@@ -4,14 +4,14 @@
 //! reusable coordination primitives live in ganglion.
 
 use std::collections::BTreeMap;
+use std::num::ParseIntError;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use anyhow::Context;
 use async_trait::async_trait;
 use fibril_admin::{
-    AdminConfig, AdminServer, CoordinationMembershipManager, RuntimeSettingsClusterStore,
-    RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
+    AdminConfig, AdminServer, AdminServerError, CoordinationMembershipManager,
+    RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
 };
 use fibril_broker::{
     broker::{Broker, BrokerConfig, FollowerReplicationWorkerConfig, OwnAllQueues, QueueOwnership},
@@ -21,13 +21,14 @@ use fibril_broker::{
         StickyConsumerGroupAssignor,
     },
     queue_engine::{
-        KeratinConfig, QueueEngine as _, SnapshotConfig, StromaEngine, StromaKeratinConfig,
+        KeratinConfig, QueueEngine as _, SnapshotConfig, StromaEngine, StromaError,
+        StromaKeratinConfig,
     },
     runtime_settings::{
         ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, ConsumerGroupRuntimeSettings,
         DeliveryRuntimeSettings, IdleQueueCleanupRuntimeSettings, PartitioningRuntimeSettings,
-        ReplicationRuntimeSettings, RuntimeSettings, RuntimeSettingsLocks, RuntimeSettingsManager,
-        RuntimeSettingsSnapshot,
+        ReplicationRuntimeSettings, RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLocks,
+        RuntimeSettingsManager, RuntimeSettingsSnapshot,
     },
 };
 use fibril_config::{
@@ -41,12 +42,14 @@ use fibril_coordination_ganglion::{
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::{
     ClientTopologySource, ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings,
-    ConnectionSettings, QueueDeclareCoordinator, run_server as run_protocol_server,
+    ConnectionSettings, ProtocolServerError, QueueDeclareCoordinator,
+    run_server as run_protocol_server,
 };
 use fibril_protocol::v1::{Partition, QueueTopologyEntry, TopologyOk};
 use fibril_util::StaticAuthHandler;
 use ganglion_openraft::{
     FileRaftLogStore, GanglionRaftConfig, TcpNetworkFactory, TcpRaftServer, WireFormat,
+    WireFormatParseError,
     openraft::{BasicNode, RaftNetworkFactory, storage::RaftLogStorage},
 };
 
@@ -119,6 +122,34 @@ pub struct GanglionBrokerTaskHandles {
     pub cohort_controller: tokio::task::JoinHandle<()>,
     pub cohort_owner_watcher: tokio::task::JoinHandle<()>,
     pub repartition_watcher: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FibrilServerError {
+    #[error("failed to open storage engine: {0}")]
+    Storage(#[source] StromaError),
+    #[error("failed to load runtime settings: {0}")]
+    RuntimeSettings(#[from] RuntimeSettingsError),
+    #[error("coordination.ganglion.wire_format: {0}")]
+    CoordinationWireFormat(#[source] WireFormatParseError),
+    #[error("embedded coordinator failed to start: {0}")]
+    EmbeddedCoordinatorStart(String),
+    #[error("peer id `{id}` is not a u64: {source}")]
+    InvalidPeerId {
+        id: String,
+        #[source]
+        source: ParseIntError,
+    },
+    #[error("ganglion consensus config: {0}")]
+    GanglionConsensusConfig(String),
+    #[error(transparent)]
+    AssignmentDurability(#[from] AssignmentDurabilityConfigError),
+    #[error("admin.auth.password must be set when admin auth is enabled")]
+    MissingAdminPassword,
+    #[error("broker listener failed: {0}")]
+    BrokerListener(#[source] ProtocolServerError),
+    #[error("admin listener failed: {0}")]
+    AdminListener(#[source] AdminServerError),
 }
 
 /// Live-repartition trigger for the admin endpoint: decides grow vs shrink from
@@ -230,7 +261,7 @@ impl CoordinationMembershipManager for GanglionCoordinationMembershipManager {
 /// returned ownership provider.
 pub async fn open_tcp_ganglion_parts(
     config: &ServerConfig,
-) -> anyhow::Result<Option<TcpGanglionParts>> {
+) -> Result<Option<TcpGanglionParts>, FibrilServerError> {
     match config.coordination.mode {
         CoordinationMode::Static => Ok(None),
         CoordinationMode::Ganglion => {
@@ -245,7 +276,7 @@ pub async fn open_tcp_ganglion_parts(
             let wire_format: WireFormat = section
                 .wire_format
                 .parse()
-                .map_err(|error| anyhow::anyhow!("coordination.ganglion.wire_format: {error}"))?;
+                .map_err(FibrilServerError::CoordinationWireFormat)?;
             let (node, raft_server) =
                 ganglion_openraft::RaftMetadataNode::start_durable_tcp_with_format(
                     section.raft_node_id,
@@ -255,9 +286,7 @@ pub async fn open_tcp_ganglion_parts(
                     wire_format,
                 )
                 .await
-                .map_err(|error| {
-                    anyhow::anyhow!("embedded coordinator failed to start: {error}")
-                })?;
+                .map_err(|error| FibrilServerError::EmbeddedCoordinatorStart(error.to_string()))?;
             let raft_server = Arc::new(raft_server);
 
             if section.bootstrap {
@@ -266,12 +295,16 @@ pub async fn open_tcp_ganglion_parts(
                     .iter()
                     .map(|(id, addr)| {
                         Ok((
-                            id.parse::<u64>()
-                                .map_err(|_| anyhow::anyhow!("peer id `{id}` is not a u64"))?,
+                            id.parse::<u64>().map_err(|source| {
+                                FibrilServerError::InvalidPeerId {
+                                    id: id.clone(),
+                                    source,
+                                }
+                            })?,
                             BasicNode::new(addr.clone()),
                         ))
                     })
-                    .collect::<anyhow::Result<_>>()?;
+                    .collect::<Result<_, FibrilServerError>>()?;
                 // Re-running initialize after first boot is rejected by raft.
                 // That is the expected restart path, not a startup failure.
                 if let Err(error) = node.initialize(members).await {
@@ -310,10 +343,10 @@ pub async fn open_tcp_ganglion_parts(
 
 fn raft_config_from_config(
     config: &ServerConfig,
-) -> anyhow::Result<Arc<ganglion_openraft::openraft::Config>> {
+) -> Result<Arc<ganglion_openraft::openraft::Config>, FibrilServerError> {
     let section = &config.coordination.ganglion.raft;
     let mut raft_config = ganglion_openraft::default_raft_config()
-        .map_err(|error| anyhow::anyhow!("raft config: {error}"))?
+        .map_err(|error| FibrilServerError::GanglionConsensusConfig(error.to_string()))?
         .as_ref()
         .clone();
     raft_config.heartbeat_interval = section.heartbeat_interval_ms;
@@ -322,7 +355,7 @@ fn raft_config_from_config(
     raft_config
         .validate()
         .map(Arc::new)
-        .map_err(|error| anyhow::anyhow!("raft config: {error}"))
+        .map_err(|error| FibrilServerError::GanglionConsensusConfig(error.to_string()))
 }
 
 fn forwarded_write_policy_from_config(config: &ServerConfig) -> ForwardedWritePolicy {
@@ -366,23 +399,11 @@ fn assignment_durability_from_config(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AssignmentDurabilityConfigError {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AssignmentDurabilityConfigError {
+    #[error("coordination.ganglion.assignment_durability.nodes is required for {mode}")]
     MissingReplicaNodes { mode: &'static str },
 }
-
-impl std::fmt::Display for AssignmentDurabilityConfigError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::MissingReplicaNodes { mode } => write!(
-                formatter,
-                "coordination.ganglion.assignment_durability.nodes is required for {mode}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for AssignmentDurabilityConfigError {}
 
 /// Ownership provider used by the broker: cluster assignments in Ganglion mode,
 /// own-all standalone behavior otherwise.
@@ -689,7 +710,7 @@ pub fn declare_coordinator_for_ganglion(
 /// The binary is intentionally a thin wrapper around this function. Keeping the
 /// server composition here lets integration tests reuse production wiring
 /// without shelling out to `fibril-server`.
-pub async fn run_server_from_config(config: ServerConfig) -> anyhow::Result<()> {
+pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilServerError> {
     let metrics = Metrics::new(3 * 60 * 60);
     let keratin_default = KeratinConfig::default();
     let keratin_message_cfg = KeratinConfig {
@@ -713,7 +734,8 @@ pub async fn run_server_from_config(config: ServerConfig) -> anyhow::Result<()> 
         },
         SnapshotConfig::default(),
     )
-    .await?;
+    .await
+    .map_err(FibrilServerError::Storage)?;
 
     let runtime_seed = runtime_seed_from_config(&config);
     let runtime_settings = Arc::new(
@@ -776,9 +798,12 @@ pub async fn run_server_from_config(config: ServerConfig) -> anyhow::Result<()> 
 
     let auth_handler = StaticAuthHandler::new("fibril".to_string(), "fibril".to_string());
     let admin_auth_handler = if config.admin.auth.enabled {
-        let password = config.admin.auth.password.clone().ok_or_else(|| {
-            anyhow::anyhow!("admin.auth.password must be set when admin auth is enabled")
-        })?;
+        let password = config
+            .admin
+            .auth
+            .password
+            .clone()
+            .ok_or(FibrilServerError::MissingAdminPassword)?;
         Some(StaticAuthHandler::new(
             config.admin.auth.username.clone(),
             password,
@@ -894,9 +919,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> anyhow::Result<()> 
             declare_coordinator,
         )
         .await
-        .context("broker listener failed")
+        .map_err(FibrilServerError::BrokerListener)
     };
-    let admin_server_fut = async move { admin.run().await.context("admin listener failed") };
+    let admin_server_fut =
+        async move { admin.run().await.map_err(FibrilServerError::AdminListener) };
 
     tokio::try_join!(broker_server_fut, admin_server_fut)?;
 

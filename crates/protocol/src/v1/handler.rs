@@ -10,11 +10,10 @@ use std::{
 
 use crate::v1::{
     frame::{Frame, ProtoCodec},
-    helper::{error_frame, try_decode, try_encode},
+    helper::{ProtocolError, error_frame, try_decode, try_encode},
     replication_payload::encode_replication_read_ok,
     *,
 };
-use anyhow::Context;
 use arc_swap::ArcSwap;
 use fibril_broker::{
     broker::{
@@ -42,6 +41,46 @@ use uuid::Uuid;
 type SubKey = (Topic, Partition, Option<Group>); // (topic, partition, group)
 type FrameSink = mpsc::Sender<Frame>;
 const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolServerError {
+    #[error("failed to bind protocol listener at {addr}: {source}")]
+    Bind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to accept protocol connection: {0}")]
+    Accept(#[source] std::io::Error),
+    #[error("failed to configure TCP_NODELAY for {peer}: {source}")]
+    ConfigureSocket {
+        peer: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolConnectionError {
+    #[error("connection closed before HELLO")]
+    ClosedBeforeHello,
+    #[error("connection IO failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("protocol frame error: {0}")]
+    Protocol(#[from] ProtocolError),
+    #[error("connection frame channel closed")]
+    FrameChannelClosed,
+    #[error("protocol compliance marker mismatch")]
+    ComplianceMarkerMismatch,
+    #[error("connection task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+}
+
+impl From<mpsc::error::SendError<Frame>> for ProtocolConnectionError {
+    fn from(_: mpsc::error::SendError<Frame>) -> Self {
+        Self::FrameChannelClosed
+    }
+}
 
 /// Server-side source of client-facing topology, injected into the protocol
 /// handler so it can answer `Op::Topology` and emit `Op::Redirect` on not-owner.
@@ -151,7 +190,7 @@ async fn send_error_response(
     request_id: u64,
     code: u16,
     message: impl Into<String>,
-) -> anyhow::Result<()> {
+) -> Result<(), ProtocolConnectionError> {
     tx.send(error_frame(request_id, code, message)?).await?;
     Ok(())
 }
@@ -1438,13 +1477,20 @@ pub async fn run_server(
     connection_settings: ConnectionSettings,
     topology_source: Option<Arc<dyn ClientTopologySource>>,
     declare_coordinator: Option<Arc<dyn QueueDeclareCoordinator>>,
-) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+) -> Result<(), ProtocolServerError> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|source| ProtocolServerError::Bind { addr, source })?;
     print_banner(&addr);
 
     loop {
-        let (socket, peer) = listener.accept().await?;
-        socket.set_nodelay(true)?;
+        let (socket, peer) = listener
+            .accept()
+            .await
+            .map_err(ProtocolServerError::Accept)?;
+        socket
+            .set_nodelay(true)
+            .map_err(|source| ProtocolServerError::ConfigureSocket { peer, source })?;
         tcp_stats.connection_opened();
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         let broker = broker.clone();
@@ -1501,7 +1547,7 @@ pub async fn handle_connection(
     connection_settings: ConnectionSettings,
     topology_source: Option<Arc<dyn ClientTopologySource>>,
     declare_coordinator: Option<Arc<dyn QueueDeclareCoordinator>>,
-) -> anyhow::Result<()> {
+) -> Result<(), ProtocolConnectionError> {
     let heartbeat_interval = connection_settings
         .heartbeat_interval
         .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
@@ -1532,7 +1578,7 @@ pub async fn handle_connection(
     let frame = reader
         .next()
         .await
-        .context("connection closed before HELLO")??;
+        .ok_or(ProtocolConnectionError::ClosedBeforeHello)??;
 
     if frame.opcode != Op::Hello as u16 {
         writer
@@ -1606,7 +1652,7 @@ pub async fn handle_connection(
             got = %hello_ok.compliance,
             "Invariant violated: compliance marker altered or missing"
         );
-        anyhow::bail!("Protocol compliance marker mismatch");
+        return Err(ProtocolConnectionError::ComplianceMarkerMismatch);
     }
 
     let writer_task = tokio::spawn(async move {
@@ -1758,10 +1804,11 @@ pub async fn handle_connection(
                     if require_confirm {
                         let send_res =
                             match try_encode(Op::PublishOk, request_id, &PublishOk { offset }) {
-                                Ok(frame) => {
-                                    frame_tx_pub.send(frame).await.map_err(anyhow::Error::from)
-                                }
-                                Err(err) => Err(anyhow::Error::from(err)),
+                                Ok(frame) => frame_tx_pub
+                                    .send(frame)
+                                    .await
+                                    .map_err(ProtocolConnectionError::from),
+                                Err(err) => Err(ProtocolConnectionError::from(err)),
                             };
 
                         if let Err(err) = send_res {

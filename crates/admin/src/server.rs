@@ -77,6 +77,18 @@ pub struct AdminConfig {
     pub auth: Option<StaticAuthHandler>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AdminServerError {
+    #[error("failed to bind admin listener at {bind}: {source}")]
+    Bind {
+        bind: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("admin listener failed: {0}")]
+    Serve(#[source] std::io::Error),
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StartupConfigSummary {
     pub data_dir: String,
@@ -182,15 +194,22 @@ impl AdminServer {
         self
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    pub async fn run(self) -> Result<(), AdminServerError> {
         let state = Arc::new(self);
 
         let app = Self::router(state.clone());
 
-        let listener = TcpListener::bind(&state.config.bind).await?;
+        let listener = TcpListener::bind(&state.config.bind)
+            .await
+            .map_err(|source| AdminServerError::Bind {
+                bind: state.config.bind.clone(),
+                source,
+            })?;
         print_admin_banner(&state.config.bind, state.config.auth.is_some());
         tracing::info!("listening on {}", state.config.bind);
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .await
+            .map_err(AdminServerError::Serve)?;
         Ok(())
     }
 
@@ -565,7 +584,7 @@ mod tests {
     use fibril_protocol::v1::{
         Deliver, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Partition, Publish, Subscribe,
         frame::{Frame, ProtoCodec},
-        handler::{ConnectionSettings, handle_connection},
+        handler::{ConnectionSettings, ProtocolConnectionError, handle_connection},
         helper::{try_decode, try_encode},
     };
     use fibril_util::unix_millis;
@@ -705,7 +724,7 @@ mod tests {
         broker: Arc<Broker<StromaEngine>>,
     ) -> (
         Framed<TcpStream, ProtoCodec>,
-        tokio::task::JoinHandle<anyhow::Result<()>>,
+        tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
     ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2239,8 +2258,9 @@ mod tests {
         assert!(body.contains("Global Dead Letter Queue"));
         assert!(body.contains("Queue Dead Letter Policy"));
         assert!(body.contains("Optional queue group for the target queue."));
+        assert!(body.contains("Default partition count"));
+        assert!(body.contains("Target partitions per consumer"));
         assert!(!body.contains("Queue partition"));
-        assert!(!body.contains("Target partition"));
         assert!(!body.contains("consumer group"));
         assert!(body.contains("Save settings"));
         assert!(!body.contains("Log out"));

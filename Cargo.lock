@@ -1036,6 +1036,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-error",
@@ -1046,7 +1047,6 @@ dependencies = [
 name = "fibril-admin"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "askama",
  "async-trait",
  "axum",
@@ -1066,6 +1066,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tower",

@@ -9,5 +9,5 @@ static GLOBAL: MiMalloc = MiMalloc;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
-    run_server_from_config(ServerConfig::load()?).await
+    Ok(run_server_from_config(ServerConfig::load()?).await?)
 }
