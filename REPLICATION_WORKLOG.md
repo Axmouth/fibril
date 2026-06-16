@@ -165,6 +165,25 @@ Useful but not merge-blocking:
 - Repository split for Stroma and Keratin, once it helps iteration more than it
   disrupts the replication branch.
 
+DONE — Stroma snapshot recovery replay boundary (Keratin commit "Fix snapshot
+recovery replay start", 2026-06-16): recovery now treats the snapshot event
+offset as an inclusive "state is applied through here" boundary and starts event
+log scanning at exactly `snapshot_offset + 1`. This matters for ordinary restart
+latency and for replication checkpoint repair, because recovery should not read
+or apply events already covered by the snapshot.
+
+Details:
+- `recover_one_log_with_handle` sets the replay cursor to
+  `applied_upto.saturating_add(1)` after loading a snapshot.
+- `recover_events_from_log` now stores `applied_upto` as the last applied event
+  offset, not the next event offset, matching normal append and promotion checks.
+- `QueueInternalState::encode_snapshot` writes the supplied snapshot event offset
+  into the snapshot blob metadata, so the blob and snapshot file boundary agree.
+- Tests lock both dimensions: a recovery test records the exact event-log scan
+  start and asserts it is the next offset after the snapshot, while also proving
+  post-snapshot events apply and the snapshot-boundary event is not applied
+  twice. A state test verifies snapshot metadata records the supplied offset.
+
 DOCS HOUSEKEEPING (at some point, user request): do a relevance pass over all the
 .md files we have collected. We should not keep them all, especially planning and
 handoff docs that go stale. Prune or fold the dead ones. While at it, give the
