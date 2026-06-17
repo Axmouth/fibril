@@ -374,12 +374,83 @@ primitive + fibril glue, end to end.
 REMAINING — live repartitioning follow-ons (polish):
 3. Shrink choreography hardening: v1 relies on the watcher applying survivor holds
    within ~1 tick of the marker before the bump; a stricter version has owners ack
-   "held" before the leader bumps (see DESIGN_NOTES). Low risk for a rare op.
+   "held" before the leader bumps (see DESIGN_NOTES). Low risk for a rare op. This
+   same owners-ack-before-leader-clears shape is what makes full-destroy (2b)
+   airtight at the cluster level (a "destroyed" report mirroring the drained
+   report), so do both together: it closes the destroy slow-follower TOCTOU and
+   the survivor-hold race in one choreography pass.
 5. Optional: a repartition_to(target) helper that composes shrink-to-gcd then
    grow-to-target for arbitrary N.
 
-BACKGROUND AUDIT: an audit has been running in the background (separate from this
-log). Check its findings once it is done and fold anything actionable in here.
+AUDITS — DONE (2026-06-14..16, background; detail lives in each file, AUDITS.md is
+the status board). Replication/cluster transition safety is no longer the gap;
+the gap is testability + perf measurement of clustered paths. The high-leverage
+findings, folded here as actionable items:
+
+- LOCK_USAGE_AUDIT.md + PERFORMANCE_SENSITIVE_PATHS_AUDIT.md (the replication
+  optimization arc). Hot paths are mostly sound (publish batching, atomics-based
+  progress, cohort gate reads an atomic, settings via cheap snapshots). The real
+  next-work, in priority order:
+  1. Committed-watermark progress for replica-durable confirm. Today
+     ReplicationConfirmGate::await_confirm locks a per-queue Mutex<HashMap<follower,
+     progress>> and scans it per offset (LOCK_USAGE #1). Replace the DATA path with
+     a cheap per-queue atomic committed watermark (committed_message_next /
+     committed_event_next): on a follower progress update recompute the watermark
+     once, store atomically, notify range waiters; keep the follower map only for
+     ISR/observability/slow path. This is the single highest-payoff lock removal
+     and aligns confirm with mature replicated-log designs. Decide the
+     replica-durable VISIBILITY contract at the same time (can a locally-appended
+     message be delivered before the follower durability gate? mature systems gate
+     visibility on the committed watermark too).
+  2. Cluster benchmark profiles (PERF #2): replica-confirm-low-rate,
+     replica-confirm-knee, partitioned-fan-in, redirect-publish. Optimizing
+     standalone misses cluster regressions. Measured ceiling so far ~10-15k/s
+     replica-durable 1KiB confirmed (3-node local), p99 ~17-18ms; idle confirm can
+     add up to caught_up_poll_ms (1000ms) for the first message after idle.
+  3. Follower replication worker budget + wakeups (PERF replica-durable notes).
+     The tick/batch follower loop (max 256/read * 8 reads / 100ms ~= 20k/s gross)
+     is the throughput limiter, not Keratin writes. The read-budget knobs are
+     ALREADY config/runtime-backed (runtime_seed.replication: caught_up_poll_ms,
+     retry_poll_ms, max_messages_per_read, max_iterations_per_tick) so
+     settings-discipline is satisfied. Remaining: add owner-notify / long-poll so
+     caught-up followers do not depend on caught_up_poll_ms, and attack the tick/
+     apply cost itself. Latest timing says the 50k/s latency is
+     dominated by follower apply (~19ms) and whole follower ticks (~552ms), not the
+     post-append replica wait (~0.03ms) - separate local-append-completion from
+     replica-gate-wait before retuning poll cadence.
+  4. Protocol payload codecs (PERF #3, partly STARTED). The outer frame is already
+     custom binary; MessagePack payloads are the remaining cost (1KiB publish
+     encode+decode ~6us MsgPack vs ~0.38us raw; 64KiB ~341us vs ~5.7us; borrowed
+     decode ~18ns). "Add binary protocol codecs" landed the benchmark + initial
+     raw codecs; next is wiring opcode-specific raw codecs for Publish/Deliver/
+     PublishOk/Ack/Nack on the hot path with BORROWED server-ingress decode, behind
+     a flag/version. Keep admin/control-plane on MessagePack. Needs roundtrip +
+     truncation + interop + before/after throughput + a replica-durable run after.
+  5. Lower-priority lock items: concurrent duplicate-subscribe needs a reservation
+     state on LogicalConnection.state (check/await/insert race; LOCK_USAGE #4) +
+     regression test. ProtocolOwnerReplicationPeer request serialization is a
+     transport-shape limit, not a lock to remove (LOCK_USAGE #2 / PERF #4) - needs
+     a many-followed-queue benchmark before pipelining/stream-split. Delivery-tag
+     DashMaps + global unsubscribe scan (LOCK_USAGE #3) wait on a high-inflight
+     benchmark. Keep the Stroma replication cache opt-in.
+
+- REPLICATION_TRANSITION_SAFETY_AUDIT.md: roles/broker-loop/pull-replication/
+  failover/publish-confirm all Addressed; remaining is adversarial multi-node
+  testing. Server bootstrap was EXTRACTED from server.rs into library code (the 3
+  cohort spawns + repartition watcher now live in crates/fibril/src/lib.rs), which
+  unblocks multi-node integration tests. Priority adversarial scenarios: owner
+  death+return, partition during failover, cached owner endpoint changes mid
+  follower-worker, checkpoint-required catch-up interrupted+resumed, stale-topology
+  redirect loop bounded by client settings, publish-confirm timeout / min-in-sync
+  refusal visible to caller.
+- Other audits (status board in AUDITS.md): ADMIN_OPERATIONS_SURFACE,
+  GANGLION_INTEGRATION_BOUNDARY, RUNTIME_SETTINGS_GANGLION (Addressed),
+  SINGLE_NODE_GUARDRAIL (Addressed - every clustered change must keep a single-node
+  regression), USER_FACING_DOCUMENTATION_SHAPE (needs a clustered-queues +
+  replication explainer). Client API parity (Rust vs TS) is still Pending.
+  RACE_WINDOWS.md is marked deprecated/review - its live items (ack-vs-redelivery
+  idempotency via generation, restart in-flight redelivery) are at-least-once
+  behavior, documented as acceptable.
 
 CODE POINTERS: cohort assignor/router/controller-brain + membership types =
 crates/broker/src/coordination.rs. Gate + ExclusiveGroupRouter + apply path =
