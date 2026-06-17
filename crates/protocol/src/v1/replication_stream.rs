@@ -272,18 +272,60 @@ pub trait FollowerStreamSink: Send + Sync + 'static {
 /// handled a checkpoint). Ends when the reader channel closes (stream torn down)
 /// or an apply error occurs. The reader feeds `batch_rx`; the transport encodes
 /// `control_tx` items to frames.
+///
+/// `message_from`/`event_from` is the starting durable cursor. When no batch
+/// arrives within `keepalive` (the follower is caught up), a zero-credit progress
+/// frame is sent so the owner's in-sync freshness check stays satisfied for an
+/// idle-but-current follower (the pull path gets this for free via caught-up
+/// polling). `keepalive` of zero disables the keepalive.
 pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     sink: Arc<S>,
     mut batch_rx: mpsc::Receiver<ReplicationReadOk>,
     control_tx: mpsc::Sender<FollowerStreamControl>,
+    message_from: u64,
+    event_from: u64,
+    keepalive: std::time::Duration,
 ) -> ApplierExit {
-    while let Some(batch) = batch_rx.recv().await {
+    let mut message_next = message_from;
+    let mut event_next = event_from;
+    loop {
+        // Ok(Some) = batch, Ok(None) = reader closed, Err(()) = idle keepalive tick.
+        let received: Result<Option<ReplicationReadOk>, ()> = if keepalive.is_zero() {
+            Ok(batch_rx.recv().await)
+        } else {
+            tokio::time::timeout(keepalive, batch_rx.recv())
+                .await
+                .map_err(|_| ())
+        };
+
+        let batch = match received {
+            Ok(Some(batch)) => batch,
+            Ok(None) => return ApplierExit::ReaderClosed,
+            Err(()) => {
+                // Caught-up keepalive: refresh durable progress, no credit change.
+                if control_tx
+                    .send(FollowerStreamControl::Progress {
+                        durable_message_next: message_next,
+                        durable_event_next: event_next,
+                        credit_add_bytes: 0,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return ApplierExit::ReaderClosed;
+                }
+                continue;
+            }
+        };
+
         match sink.apply(batch).await {
             FollowerApplyOutcome::Applied {
                 durable_message_next,
                 durable_event_next,
                 bytes,
             } => {
+                message_next = durable_message_next;
+                event_next = durable_event_next;
                 if control_tx
                     .send(FollowerStreamControl::Progress {
                         durable_message_next,
@@ -302,7 +344,6 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
             FollowerApplyOutcome::Error(err) => return ApplierExit::Error(err),
         }
     }
-    ApplierExit::ReaderClosed
 }
 
 #[cfg(test)]
@@ -585,7 +626,7 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, mut control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(sink.clone(), batch_rx, control_tx));
+        let task = tokio::spawn(run_follower_stream_applier(sink.clone(), batch_rx, control_tx, 0, 0, std::time::Duration::ZERO));
 
         batch_tx.send(batch_from(0, 2)).await.unwrap();
         batch_tx.send(batch_from(2, 3)).await.unwrap();
@@ -624,7 +665,7 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, _control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx));
+        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx, 0, 0, std::time::Duration::ZERO));
 
         batch_tx.send(batch_from(40, 1)).await.unwrap();
         let exit = tokio::time::timeout(Duration::from_secs(2), task)

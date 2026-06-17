@@ -606,6 +606,11 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     record-count credit (bound per-batch overhead / many tiny records) or other
     dimensions - granted/refilled alongside bytes, owner pauses when ANY dimension
     is exhausted. Bytes alone is fine for now; revisit when workloads show a need.
+  * FUTURE (note): credit refill PACING. v1 refills credit_add = bytes-applied per
+    batch (keeps the budget ~constant) and 0 on idle keepalive (don't inflate past
+    granted). Could explore asymptotic/paced top-up (slow the grant as credit nears
+    a cap) during active streaming, and what credit to grant when idle. Investigate
+    once there's a workload that stresses the flow control.
   * CREDIT flow control (bounds follower memory, no stop-and-wait): unit = bytes.
     Follower grants initial credit; owner streams batches decrementing it, pauses
     the stream when credit < next batch. Follower refills at a LOW-WATERMARK (once
@@ -681,6 +686,13 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     sender/reader; not required for correctness, pairs with making streaming default.
     HARDEST PART (done) = owner sender state machine
     + credit accounting + failover/gap interaction, NOT the message defs.
+- FUTURE (your idea): 3-stage follower pipeline. Today the stream overlaps in 2
+  stages: reader (socket fetch + decode) || applier (durable apply). Split into 3
+  parallel stages - FETCH (raw frame off socket) || DECODE (wire -> batch) || APPLY
+  (durable) - each its own task + bounded channel. Decode is cheap now (binary) so
+  the win is mostly at large payloads (alloc/copy), but it frees the fetch task to
+  keep the socket drained while decode+apply run. Easy follow-on once streaming is
+  the default.
 - ALSO (your idea, payload-size dependent): streamed/borrowed apply+decode -
   apply rebuilds owned Vec<Message>/Vec<Event> from the raw frame and re-encodes
   events; writing payload bytes straight from the read buffer avoids the copy,

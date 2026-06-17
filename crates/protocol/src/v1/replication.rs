@@ -707,6 +707,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         message_from: Offset,
         event_from: Offset,
         credit_bytes: u64,
+        keepalive_ms: u64,
         buffer_batches: usize,
         apply: Arc<dyn BrokerReplicationStreamApply>,
         shutdown: CancellationToken,
@@ -726,6 +727,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 message_from,
                 event_from,
                 credit_bytes,
+                keepalive_ms,
                 self.reporter_node_id.clone(),
                 stream_id,
                 buffer_batches,
@@ -1171,6 +1173,7 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
     message_from: Offset,
     event_from: Offset,
     credit_bytes: u64,
+    keepalive_ms: u64,
     reporter_node_id: Option<String>,
     stream_id: u64,
     buffer_batches: usize,
@@ -1277,7 +1280,14 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
 
     let applier_exit = tokio::select! {
         _ = shutdown.cancelled() => None,
-        exit = run_follower_stream_applier(sink, batch_rx, control_tx) => Some(exit),
+        exit = run_follower_stream_applier(
+            sink,
+            batch_rx,
+            control_tx,
+            message_from,
+            event_from,
+            std::time::Duration::from_millis(keepalive_ms),
+        ) => Some(exit),
     };
 
     let exit = match applier_exit {
@@ -1457,6 +1467,7 @@ mod stream_transport_tests {
             0,
             0,
             8 * 1024 * 1024,
+            0, // keepalive disabled for the test
             Some("broker-2".into()),
             42,
             4,
