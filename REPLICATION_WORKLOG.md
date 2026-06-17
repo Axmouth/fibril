@@ -517,9 +517,12 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   drained, in_sync. publish->deliver p50 9ms -> 368ms - that IS the fix: delivery
   now waits for replica-durable commit (publish->deliver ~= publish->commit <=
   confirm) instead of exposing uncommitted data. Delivery latency now moves WITH
-  the confirm window (smaller window drops both together). SYNTHESIS realized: the
-  committed watermark now exists; switching await_confirm to read the atomic
-  (LOCK_USAGE #1 confirm-path lock removal) is now a cheap follow-on, not new work.
+  the confirm window (smaller window drops both together). SINGLE-NODE VERIFIED
+  unaffected (guardrail): standalone local-durable, target 150k -> 149.9k/s,
+  publish->deliver p50 11ms (ungated, immediate), 0 missing - the gate is a no-op
+  with no cached assignment / nodes=1. SYNTHESIS realized: the committed watermark
+  now exists; switching await_confirm to read the atomic (LOCK_USAGE #1 confirm-
+  path lock removal) is now a cheap follow-on, not new work.
 - NEXT (structural, the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
