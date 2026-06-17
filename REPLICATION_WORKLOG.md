@@ -465,12 +465,20 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   So replication misses the group-commit publish already has, AND it bypasses
   fsync_interval_ms (cadence) + linger entirely - those knobs have ZERO effect on
   replication today.
-- DONE (low-risk, biggest predicted lever): raised replication read batch
+- DONE (low-risk, biggest lever) + MEASURED: raised replication read batch
   256 -> 2048 (one fsync amortizes over ~8x more records; max_bytes_per_read 8MiB
   still bounds memory). Math: at 256, 50k/s 1KiB needs ~390 fsync/s across both
   logs which saturates a contended SSD (~the observed 10-15k/s ceiling); at 2048
-  it is ~8x under budget. Verify on the 3-node tryout: expect the replica-durable
-  ceiling to rise toward offered load with p99 roughly flat.
+  it is ~8x under budget. MEASURED on the 3-node ganglion tryout, replica_durable:2,
+  1KiB, SAME config the audit ceiling was taken at (confirm_window=8192, target
+  50k/s): confirmed throughput ~14.9k/s (audit, 256) -> 49,998/s (now, 2048),
+  ~3.3x, 0 errors, 0 missing, follower cursors in_sync. Follower apply avg
+  19.2ms -> 2.86ms, follower tick avg 552ms -> 71ms (~8x), owner replica-confirm
+  wait 0.19ms (negligible, confirms watermark-confirm stays deprioritized). The
+  ~1.6s publish->confirm latency at this point is client confirm-window backlog
+  (10 writers x 8192 / 50k ~= 1.64s, Little's law), NOT a replication stall; a
+  smaller window drops it while throughput holds. Next bench: push target higher
+  to find the new ceiling, and a small-window low-latency point.
 - NEXT (structural, the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
