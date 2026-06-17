@@ -26,7 +26,8 @@ use fibril_broker::{
         StaticCoordination,
     },
     queue_engine::{
-        Deliverable, EvictOutcome, FollowerStateCheckpointInstall, InspectMode, IoError,
+        Deliverable, DestroyOutcome, EvictOutcome, FollowerStateCheckpointInstall, InspectMode,
+        IoError,
         KeratinAppendCompletion, Message, MessageHeaders, OwnerReplicationBatch,
         OwnerReplicationRead, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome,
         ReplayDeadLetterOutcome, ReplayDeadLettersReport, SettleRequest as EngineSettleRequest,
@@ -260,6 +261,15 @@ impl QueueEngine for FailingPublishEngine {
         _part: u32,
         _group: Option<&str>,
     ) -> Result<EvictOutcome, StromaError> {
+        unimplemented!()
+    }
+
+    async fn destroy_partition(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+    ) -> Result<DestroyOutcome, StromaError> {
         unimplemented!()
     }
 

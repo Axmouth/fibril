@@ -329,48 +329,49 @@ DONE (background, VERIFY against the merged branch):
    This makes them INACTIVE but does NOT fully delete their storage on the former
    owner.
 
+DONE — 2b FULL removal of retired partitions (free storage). Stroma-owned
+primitive + fibril glue, end to end.
+  LOW LEVEL (stroma-core, airtight, adversarially tested): Stroma::destroy_partition
+  drops the registry entry AND deletes the on-disk message/event/snapshot dirs.
+  Airtight against a concurrent materialize via a DESTROYING TOMBSTONE: a slot
+  marked evicting is CAS-swapped into the ArcSwap registry FIRST, so any in-flight
+  or fresh materialize parks in queue_handle (which now waits-then-revalidates its
+  slot identity on the slow path; fast path is unchanged - two atomic loads, no
+  lock). The dir is then renamed aside (atomic O(1) sibling rename to
+  <dir>.trash-<uuid>) before the tombstone is removed and the unhurried
+  remove_dir_all runs. A recreate that arrives after gets a brand-new empty dir at
+  the original path; the delete only ever walks the renamed-aside tree, so the two
+  never share a path. So a create never happens mid-delete and a delete never
+  happens mid-create on a node. Refuses (HasInflight) if leased work remains.
+  Implementation realities vs the old plan: the registry is lock-free ArcSwap +
+  per-slot eviction, NOT a Mutex-guarded index, so "rename under the index lock"
+  became "tombstone + rename + queue_handle slot-revalidation". No keratin-log
+  change. Tests: destroy_partition_removes_index_entry_and_on_disk_storage,
+  destroy_partition_absent_is_a_noop, destroy_and_materialize_race_never_corrupts
+  _or_leaks (200 rounds racing destroy vs materialize, asserts fresh-not-stale +
+  no trash leak), concurrent_destroyers_and_materializers_stay_consistent (storm).
+  GLUE (fibril): QueueEngine::destroy_partition -> StromaEngine -> Broker::
+  retire_partition(tp, part, group) (drops local loop state + frees storage). The
+  repartition watcher, on shrink completion (all old drained cluster-wide), has
+  EVERY node retire its own copies of the merged-away indices [n_new, n_old) under
+  a STILL-RETIRED FENCE (skip any index that p < live partition_count, i.e. a grow
+  brought it back). The leader also deregisters + clears the marker last. Plus
+  repartition starts are now SERIALIZED per (topic,group): the manager refuses a
+  new grow/shrink while a transition marker is active, so a recreate cannot overlap
+  a retirement.
+  RESIDUAL (high level, not low level) - see logic-pass note below. The low-level
+  storage race is closed. The remaining theoretical gap is a cluster-level cutover
+  TOCTOU: a SLOW follower that misses the marker window could keep stale storage
+  for a reused index. Blast radius: a follower auto-heals (re-syncs from the owner
+  on reassignment); only an OWNER reusing a stale index with already-acked writes
+  could lose data, and that requires a back-to-back grow-after-shrink inside a tiny
+  window that serialization already makes very unlikely. Provable closure = either
+  (a) destroyed-report choreography (leader clears marker only after owners ack
+  destroyed, mirrors the existing drained-report) or (b) destroy-before-materialize
+  on grow reuse, or (c) a per-partition incarnation epoch. Recommended next if we
+  want airtight-not-just-unlikely; folded into item 3.
+
 REMAINING — live repartitioning follow-ons (polish):
-2b. FULL removal of retired partitions (next): after deregistration, actually free
-    the former owner's storage for the removed partitions, not just unassign them.
-    A true destroy = (1) drop the partition from the in-memory index (unmaterialize
-    already does this) + (2) delete its on-disk path. So it is SMALL, not a big
-    addition. It belongs in keratin (a destroy_partition that, UNDER THE INDEX
-    LOCK, removes from index + deletes its own dir) for two reasons: keratin owns
-    the segment-dir layout (fibril hardcoding it couples to keratin internals), and
-    the index lock closes the rematerialize-during-delete race that fibril cannot
-    take the lock for. Then surface it through QueueEngine + a broker
-    retire_partition(tp, part, group), and have each node call it for ITS removed
-    partitions on shrink completion (safe: drained/empty, already deregistered).
-    LAYERING: this is a STROMA concept, NOT keratin-log (keratin-log knows nothing
-    of topics/partitions/groups; it is logs-at-paths). stroma owns the
-    (tp,part,group)->dir mapping + the index. So destroy_partition lives in
-    stroma-core; it removes its index entry and deletes the partition dir it owns.
-    No keratin-log change.
-
-    TWO independent safety needs:
-    - Mid-flight barge-in (a recreate creating a fresh dir at the SAME reused index
-      path while a slow remove_dir_all is walking it). Serialize delete vs create.
-    - Killing a NEWER incarnation (shrink removes index 3, a later grow re-adds
-      index 3, a lagging destroy nukes the fresh one). Needs an epoch / still-
-      retired FENCE: under the lock, skip destroy if the current instance is newer
-      than the one being retired (or the catalogue has re-registered it).
-
-    Two ways to get the serialization (both need the epoch fence):
-    - Per-key async lock (DashMap<Key, Arc<tokio::Mutex>>): clone the Arc, DROP the
-      dashmap guard, then .lock().await -> safe to hold the async lock across the
-      slow delete. CLEAN but requires materialize to ALSO take the lock (touches
-      stroma's hot path) -> bigger.
-    - Rename-under-the-existing-index-lock: under the index lock (sync, O(1) dir
-      rename to dir.trash-<uuid>) remove entry + rename; release; stop actor; delete
-      trash unlocked. materialize is UNTOUCHED (it finds no entry, creates a fresh
-      dir at the original path; the delete only walks the trash) -> SMALLER. The
-      "counterintuitive" rename is actually the lower-touch airtight option.
-
-    Then surface via QueueEngine::destroy_partition -> broker retire_partition ->
-    watcher calls it per-owner on shrink completion (with the still-retired check).
-    NOT small (stroma-core internals + epoch fence + cross-repo); do with fresh
-    context post-compaction, or the keratin author does the stroma primitive and
-    fibril wires the broker+watcher glue.
 3. Shrink choreography hardening: v1 relies on the watcher applying survivor holds
    within ~1 tick of the marker before the bump; a stricter version has owners ack
    "held" before the leader bumps (see DESIGN_NOTES). Low risk for a rare op.

@@ -10,7 +10,7 @@ use stroma_core::{
     StromaMetrics,
 };
 pub use stroma_core::{
-    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome,
+    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, EvictOutcome,
     FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, GlobalDLQ,
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KDurability,
     KeratinAppendCompletion, KeratinConfig, Message, MessageContentType, MessageHeaders,
@@ -226,6 +226,16 @@ pub trait QueueEngine {
         part: u32,
         group: Option<&str>,
     ) -> Result<EvictOutcome, StromaError>;
+
+    /// Fully remove a partition: drop it from the registry AND delete its
+    /// on-disk storage. Stronger than `unmaterialize` (which keeps the data).
+    /// Used to free storage for partitions a repartition has retired.
+    async fn destroy_partition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<DestroyOutcome, StromaError>;
 
     fn is_materialized(&self, tp: &str, part: u32, group: Option<&str>) -> bool;
 
@@ -909,6 +919,15 @@ impl QueueEngine for StromaEngine {
         group: Option<&str>,
     ) -> Result<EvictOutcome, StromaError> {
         self.inner.unmaterialize(tp, part, group).await
+    }
+
+    async fn destroy_partition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<DestroyOutcome, StromaError> {
+        self.inner.destroy_partition(tp, part, group).await
     }
 
     fn is_materialized(&self, tp: &str, part: u32, group: Option<&str>) -> bool {

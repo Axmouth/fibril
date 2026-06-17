@@ -27,7 +27,8 @@ use crate::coordination::{
     StickyConsumerGroupAssignor, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
-    EvictOutcome, FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome,
+    DestroyOutcome, EvictOutcome, FollowerStateCheckpointInstall,
+    FollowerStateCheckpointInstallOutcome,
     KDurability, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedAppendOutcome,
     ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SettleKind,
     SettleRequest as EngineSettleRequest, StromaEngine,
@@ -3455,6 +3456,32 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 }
             }
         }
+    }
+
+    /// Fully retire a partition this node holds: drop its local delivery loop
+    /// state and free its on-disk storage. Used on shrink completion to reclaim
+    /// the storage of merged-away partitions, once they are deregistered and
+    /// drained.
+    ///
+    /// The storage delete is airtight against a concurrent materialize at the
+    /// engine layer (a destroying tombstone parks any reopen, the dir is renamed
+    /// aside before deletion). Callers must still ensure the partition is no
+    /// longer a live routing target (the still-retired fence) so a freshly
+    /// recreated incarnation is never destroyed.
+    pub async fn retire_partition(
+        &self,
+        topic: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<DestroyOutcome, BrokerError> {
+        // Drop the local loop state so the delivery loop stops referencing it.
+        self.queues.retain(|qk, _| {
+            !(qk.tp == topic && qk.part.id() == part && qk.group.as_deref() == group)
+        });
+        Ok(self
+            .engine
+            .destroy_partition(topic, part, group)
+            .await?)
     }
 
     fn lock_exclusive_groups(&self) -> std::sync::MutexGuard<'_, ExclusiveGroupRouter> {

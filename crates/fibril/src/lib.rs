@@ -172,6 +172,19 @@ impl fibril_admin::QueueRepartitionManager for GanglionQueueRepartitionManager {
         group: Option<String>,
         partition_count: u32,
     ) -> Result<serde_json::Value, String> {
+        // Serialize repartitions per (topic, group): refuse to start a new one
+        // while a transition is still in flight. This keeps a fresh grow from
+        // overlapping a shrink whose merged-away partitions are still being
+        // drained and retired, so a recreate never races a retirement.
+        if self
+            .coordination
+            .repartition_transition(&topic, group.as_deref())
+            .is_some()
+        {
+            return Err(format!(
+                "queue `{topic}` (group {group:?}) already has a repartition in progress"
+            ));
+        }
         let current = self
             .coordination
             .queue_partitioning(&topic, group.as_deref())
@@ -646,24 +659,51 @@ pub fn spawn_ganglion_broker_tasks(
                     group.as_deref(),
                     drained.clone(),
                 );
-                // The leader retires the transition once every old partition has
-                // drained cluster-wide.
+                // Once every old partition has drained cluster-wide, the shrink's
+                // merged-away partitions (>= n_new) can be retired.
                 let complete = (0..doc.n_old).all(|r| drained.contains(&r));
-                if complete && coordination.is_leader().await {
-                    // Shrink: the merged-away partitions (>= n_new) are now drained,
-                    // so deregister them from the catalogue. That unassigns them, so
-                    // owners stop serving them and the existing eviction path frees
-                    // the empty queues; clients drop them when the stream closes.
+                if complete {
+                    let is_leader = coordination.is_leader().await;
                     if doc.n_new < doc.n_old {
+                        // Still-retired fence: only touch indices that are still
+                        // outside the live partition count. If a later grow has
+                        // already brought an index back, partition_count covers it
+                        // again and we must not destroy the fresh incarnation.
+                        // Retire runs only while this shrink's marker is active
+                        // (we are iterating it), so a recreate cannot have started
+                        // for a still-retired index.
+                        let live_count = coordination
+                            .queue_partitioning(&topic, group.as_deref())
+                            .map(|partitioning| partitioning.partition_count)
+                            .unwrap_or(doc.n_new);
                         for p in doc.n_new..doc.n_old {
-                            let queue =
-                                QueueIdentity::new(topic.clone(), Partition::new(p), group.as_deref());
-                            let _ = coordination.deregister_queue(&queue).await;
+                            if p < live_count {
+                                // A grow re-added this index; leave it alone.
+                                continue;
+                            }
+                            // The leader removes it from the catalogue (idempotent)
+                            // so it is no longer assigned or routed to.
+                            if is_leader {
+                                let queue = QueueIdentity::new(
+                                    topic.clone(),
+                                    Partition::new(p),
+                                    group.as_deref(),
+                                );
+                                let _ = coordination.deregister_queue(&queue).await;
+                            }
+                            // Every node frees its own on-disk storage for the
+                            // retired index. No-op where this node holds nothing.
+                            let _ = repartition_broker
+                                .retire_partition(&topic, p, group.as_deref())
+                                .await;
                         }
                     }
-                    let _ = coordination
-                        .clear_repartition_transition(&topic, group.as_deref())
-                        .await;
+                    // The leader clears the marker last, ending the transition.
+                    if is_leader {
+                        let _ = coordination
+                            .clear_repartition_transition(&topic, group.as_deref())
+                            .await;
+                    }
                 }
             }
         }
