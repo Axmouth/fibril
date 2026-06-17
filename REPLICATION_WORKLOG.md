@@ -665,7 +665,27 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     falls back to the proven pull+checkpoint path, then re-streams (no checkpoint
     logic in the stream transport). STREAMING MECHANISM IS COMPLETE + TESTED (owner
     sender + follower applier + transport + broker apply).
-    (4) GO-LIVE (production enablement; the remaining step): a follower-stream
+    (4) DONE + VALIDATED (f182c99 + keepalive/cursor fixes). The follower worker
+    runs a stream tick when replication.stream_enabled (runtime setting +
+    FIBRIL_REPLICATION_STREAM_ENABLED, default OFF); on checkpoint it falls back to
+    the pull+checkpoint path for a tick then re-streams; cursor shared with pull
+    state and advanced LIVE per applied batch. Injected via
+    BrokerOwnerReplicationPeer::stream_replication (broker trait, ProtocolOwner-
+    ReplicationPeer impl, default-unsupported) + BrokerReplicationStreamApply
+    (WorkerStreamApply). LIVE-VALIDATED (3-node, replica_durable:2, 1KiB, window
+    2048, target 120k, streaming ON): 119.4k/s (vs ~86k pull at same config), 0
+    missing, cursors converge in_sync, follower apply ~1.37ms (vs ~5.6ms pull),
+    confirm p50 273ms, deliver p50 16ms. FAILOVER SMOKE PASSED with streaming on
+    (owner kill -> follower promote epoch 2 -> all pre-failover messages consumed,
+    post-failover publish/consume ok). TWO BUGS the live test caught + fixed +
+    regression-tested: (a) idle keepalive - a caught-up streaming follower sent no
+    frames so the owner's in-sync went stale; applier now sends a zero-credit
+    progress on keepalive timeout. (b) live cursor - worker-state cursor was synced
+    only at stream exit (stale at 0 during a long stream; a fallback would
+    re-replicate from 0); WorkerStreamApply now advances it per applied batch.
+    DEFAULT STAYS OFF pending more adversarial runs (checkpoint-fallback path,
+    owner-return, repeated failover, large payloads) before flipping to default.
+    (was: GO-LIVE production enablement) a follower-stream
     SUPERVISOR that actually drives run_follower_replication_stream for followed
     partitions, behind a runtime setting (default OFF first). LAYERING: the broker
     assignment watcher spawns pull workers (broker.rs:4703) but can't call protocol;
