@@ -91,6 +91,9 @@ struct CliArgs {
     keratin_fsync_interval_ms: Option<u64>,
 
     #[arg(long)]
+    keratin_batch_linger_ms: Option<u64>,
+
+    #[arg(long)]
     keratin_message_log_segment_max_bytes: Option<u64>,
 
     #[arg(long)]
@@ -316,6 +319,10 @@ impl ServerConfig {
             self.storage.keratin.fsync_interval_ms =
                 parse_env("FIBRIL_KERATIN_FSYNC_INTERVAL_MS", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_BATCH_LINGER_MS")? {
+            self.storage.keratin.batch_linger_ms =
+                parse_env("FIBRIL_KERATIN_BATCH_LINGER_MS", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES")? {
             self.storage.keratin.message_log.segment_max_bytes =
                 parse_env("FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES", &value)?;
@@ -391,6 +398,9 @@ impl ServerConfig {
         if let Some(fsync_interval_ms) = args.keratin_fsync_interval_ms {
             self.storage.keratin.fsync_interval_ms = fsync_interval_ms;
         }
+        if let Some(batch_linger_ms) = args.keratin_batch_linger_ms {
+            self.storage.keratin.batch_linger_ms = batch_linger_ms;
+        }
         if let Some(segment_max_bytes) = args.keratin_message_log_segment_max_bytes {
             self.storage.keratin.message_log.segment_max_bytes = segment_max_bytes;
         }
@@ -447,6 +457,11 @@ impl ServerConfig {
         if self.storage.keratin.fsync_interval_ms == 0 {
             return Err(ConfigError::validation(
                 "storage.keratin.fsync_interval_ms must be at least 1",
+            ));
+        }
+        if self.storage.keratin.batch_linger_ms == 0 {
+            return Err(ConfigError::validation(
+                "storage.keratin.batch_linger_ms must be at least 1",
             ));
         }
         if self.storage.keratin.message_log.segment_max_bytes == 0 {
@@ -892,10 +907,16 @@ pub struct StorageSection {
 #[serde(default)]
 pub struct KeratinStorageSection {
     pub fsync_interval_ms: u64,
+    #[serde(default = "default_batch_linger_ms")]
+    pub batch_linger_ms: u64,
     #[serde(default = "default_message_log_section")]
     pub message_log: KeratinLogSection,
     #[serde(default = "default_event_log_section")]
     pub event_log: KeratinLogSection,
+}
+
+fn default_batch_linger_ms() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -914,6 +935,7 @@ impl Default for KeratinStorageSection {
     fn default() -> Self {
         Self {
             fsync_interval_ms: 5,
+            batch_linger_ms: default_batch_linger_ms(),
             message_log: default_message_log_section(),
             event_log: default_event_log_section(),
         }
