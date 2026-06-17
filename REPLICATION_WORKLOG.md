@@ -492,6 +492,18 @@ window 256, 4 writers, 3-node replica_durable:2, 1KiB):
   win; async-fsync still helps on the uncontended ssd (216ms deliver = real fsync
   round-trip, coalescing would cut it).
 
+SINGLE-NODE MATRIX (2026-06-18, local durability, no replication, window 2048,
+16 writers, 1KiB, honest confirm metric). achieved / confirm p50:
+  tmpfs:  50k=49,960/10ms  100k=99,897/11ms  150k=149,836/12ms  200k=198,222/13ms
+  disk:   50k=49,963/15ms  100k=99,941/86ms  150k=146,831/128ms 200k=167,729/159ms
+  confirm ~= deliver throughout (fix holds). KEY: single-node DISK is healthy
+  (~168k ceiling; 50k @ 15ms) - the write path is fine on real disk. The replicated
+  SHARED-disk ceiling (~29k) is ~5-6x lower because replica_durable does 4 fsyncs
+  (owner msg+event, follower msg+event) all on ONE shared drive. So the two perf
+  levers map to the two causes: async-fsync (collapse the fsync multiplication) +
+  drive-per-node (kill contention; 2-node uncontended ssd already showed ~45k vs
+  29k shared). tmpfs single-node is line-rate to 200k+ (CPU/protocol bound, not IO).
+
 BENCH CONFIRM-METRIC FIX (2026-06-18, DONE). The old steady_c measured confirm
 latency at a FIFO window DRAIN (it only read acks when the window was full, in
 order), so it reported window-depth-in-time (writers*window/throughput), NOT the
