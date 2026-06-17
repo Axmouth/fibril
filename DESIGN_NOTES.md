@@ -82,6 +82,57 @@ are a cluster-issued signed token (HMAC over the id with a shared cluster secret
 verified locally on any broker, no per-subscribe round-trip) or full
 coordinator-issued identity.
 
+## Load-aware placement and partition routing
+
+Two related signals should stay separate:
+
+- Node load: "how good is this broker as an owner/follower candidate?"
+- Partition load: "which partition of this queue should keyless traffic prefer?"
+
+Node load is a cluster-placement hint. It belongs on the coordination heartbeat
+path as a compact, advisory report, not as high-frequency durable state. The
+controller should write durable assignment decisions, not every transient load
+sample. A useful report carries both a score and the dimensions that explain it:
+CPU/RSS pressure, total ready/inflight work, owned/followed partition counts,
+connection counts, replication lag pressure, and an observed-at timestamp. A
+single score is useful for sorting, but the raw dimensions are needed for
+operators and tests.
+
+Partition load is a routing hint. It should be partition-aware at the metrics
+surface first; topic+group queue stats are not enough once sharding is active.
+The first useful fields are `ready_count`, `inflight_count`, and later maybe
+`oldest_ready_age_ms` per `(topic, partition, group)`. These hints can be shown
+in admin/topology and optionally returned in topic-scoped topology responses.
+Avoid putting every queue partition's live counters into committed coordination
+labels by default; for larger clusters that turns a lossy routing hint into
+metadata churn.
+
+Publishing and consuming use different policies:
+
+- Keyed publish keeps stable hash routing by default. This preserves per-key
+  affinity and ordering expectations.
+- Keyless publish may use an advisory policy: round-robin, sticky, least-backlog,
+  or power-of-two least-backlog. Do not always pick the globally emptiest
+  partition; stale hints and herd behavior can make that unstable.
+- Consuming should not blindly prefer empty partitions. For drain throughput it
+  should bias toward backlog. For fairness or tail latency it can reserve pulls
+  for sparse partitions. This is a separate policy from publish routing.
+
+Initial implementation order:
+
+1. Make queue stats partition-aware and surface them in admin/topology.
+2. Publish compact node load reports through the existing heartbeat-label path.
+3. Add optional partition load hints to topology for requested topic/group
+   snapshots, with TTL/staleness handling.
+4. Use node load as a tie-breaker for new owner/follower placement first.
+5. Add explicit keyless publish routing policies behind config/runtime settings.
+6. Consider consumer scheduling policy after we have evidence from partitioned
+   workloads.
+
+Correctness rule: load data is never authority. Missing or stale load data must
+fall back to the existing routing/placement behavior. Assignment epochs, owner
+fences, and queue gates remain the correctness mechanisms.
+
 ## Live repartitioning (changing partition_count on an existing queue)
 
 Easier than for a log: fibril is a work queue (consumed = gone), so there is no
