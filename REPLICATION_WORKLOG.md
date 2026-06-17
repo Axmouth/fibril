@@ -627,7 +627,30 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   so these knobs only help the owner's local half, never the cluster bottleneck.
   This empirically gates the next item: async-fsync must land before linger/cadence
   (or any cluster latency-floor work) can matter for replication.
-- NEXT (structural, the real "batch-optimized replicated append like publish"):
+- ASYNC-FSYNC IN PROGRESS (2026-06-18). Sequencing (justified by single-node disk
+  ~168k vs replicated shared-disk ~29k = fsync x4 + contention):
+  STEP 1 = parallel follower msg+event fsync (smallest real-disk win, preserves the
+  events-not-before-message gate via stage/sync split). STEP 2 = full async-fsync
+  pipeline (below). STEP 3 = follower-applier pipelining (the big coalescing win).
+  STEP 1a DONE (keratin b15b290): added Keratin::sync() (WriterCmd::Sync) = fsync
+  staged data + advance durable watermark, WITHOUT appending. Test
+  sync_makes_after_write_durable. Additive, no existing path changed.
+  STEP 1b NEXT (stroma, the actual win): restructure
+  stroma/core/src/stroma.rs apply_replicated_queue_batch (currently: msg
+  append_replicated_batch(AfterFsync).await THEN event append(AfterFsync).await =
+  two SEQUENTIAL inline fsyncs). Change to:
+    1. msg = msg_log.append_replicated_batch(..., AfterWrite).await  // stage, no fsync, get outcome
+    2. if message_append_allows_events(msg): event = event_log.append_replicated_batch(AfterWrite) + in-mem apply  // GATE preserved (msg outcome known from stage)
+    3. tokio::join!(qh.msg_log().sync(), qh.event_log().sync())  // PARALLEL fsync on the two writer threads
+    4. return outcome (now durable). Report progress only after the syncs (durable).
+  This halves the per-batch fsync wait on the critical path AND keeps the
+  failover-safety gate (event durable only if msg accepted). qh.msg_log()/event_log()
+  are separate Keratin instances (separate writer threads) so the two sync()s run
+  concurrently. NOTE: append_replicated_batch is on the Keratin trait; AfterWrite
+  already supported (durability param). VALIDATE: stroma roles/replay tests + the
+  3-node replica_durable failover smoke + a DISK steady bench (expect follower apply
+  fsync ~halved, disk replicated ceiling up from ~29k). Keep streaming default-off.
+- NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
   thread stops blocking on fsync, (b) pipelined/concurrent replicated appends
