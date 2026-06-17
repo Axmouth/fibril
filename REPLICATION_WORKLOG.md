@@ -475,6 +475,12 @@ window 256, 4 writers, 3-node replica_durable:2, 1KiB):
   durable replication - on disk the writer blocks on every replicated fsync;
   coalescing/pipelining it attacks both the apply cost and the throughput ceiling.
   Also: re-bench with a drive per node (separate mounts) for a realistic number.
+  SUB-CAPACITY disk point (target 1k, window 64): only 295/s, deliver/confirm p50
+    ~827ms (window-bound: 256 outstanding / 295). SMALLER window gave LOWER
+    throughput than window 256 (1521/s) - on a fsync-bound disk you need more
+    in-flight to amortize fsync, but that raises latency. So there is NO good
+    operating point on the shared drive until fsync is COALESCED (async-fsync).
+    This is the strongest argument yet for the async-fsync replicated-append work.
 
 REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
 - ROOT CAUSE of the replica-durable throughput ceiling is follower FSYNC RATE,
