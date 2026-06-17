@@ -492,6 +492,17 @@ window 256, 4 writers, 3-node replica_durable:2, 1KiB):
   win; async-fsync still helps on the uncontended ssd (216ms deliver = real fsync
   round-trip, coalescing would cut it).
 
+BENCH CONFIRM-METRIC FIX (2026-06-18, DONE). The old steady_c measured confirm
+latency at a FIFO window DRAIN (it only read acks when the window was full, in
+order), so it reported window-depth-in-time (writers*window/throughput), NOT the
+real round trip - e.g. 655ms on tmpfs while the true confirm was ~14ms (= deliver).
+Fixed: the window now gates the INPUT (publish only while in-flight < window) and
+confirms are recorded the instant they resolve (FuturesUnordered), so confirm =
+real round trip. VALIDATED: tmpfs 50k confirm p50 655ms -> 16ms (now ~= deliver
+14ms); saturated disk confirm p50 3063ms ~= deliver 3061ms (stays real, not
+hidden). 0 missing, cursors converge. So pre-fix "confirm" numbers in this log are
+window-depth artifacts; trust deliver for those, and confirm post-fix.
+
 METRIC MEANINGS (benches/bin/e2e_c.rs): publish->deliver = consumer_now -
 msg.published (producer's publish timestamp embedded in the message) = true
 end-to-end publish->consumer, GATED by the replica-durable visibility watermark.
