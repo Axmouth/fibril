@@ -49,8 +49,8 @@ impl Default for ProtocolReplicationCatchUpOptions {
         Self {
             message_from: 0,
             event_from: 0,
-            max_messages_per_read: 256,
-            max_events_per_read: 256,
+            max_messages_per_read: 2048,
+            max_events_per_read: 2048,
             max_bytes_per_read: 8 * 1024 * 1024,
             max_iterations: 1024,
             request_id_start: 10_000,

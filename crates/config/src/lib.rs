@@ -1007,8 +1007,14 @@ impl Default for ReplicationSettings {
             caught_up_poll_ms: 1_000,
             retry_poll_ms: 100,
             checkpoint_retry_poll_ms: 5_000,
-            max_messages_per_read: 256,
-            max_events_per_read: 256,
+            // The follower does one fsync per replicated append call (per log),
+            // so each fsync amortizes over at most this many records. At 256 the
+            // fsync rate (msg + event logs, x iterations) saturates a contended
+            // disk well below useful replica-durable throughput. 2048 cuts the
+            // fsync rate ~8x; max_bytes_per_read still bounds per-batch memory for
+            // large payloads.
+            max_messages_per_read: 2048,
+            max_events_per_read: 2048,
             max_bytes_per_read: 8 * 1024 * 1024,
             max_iterations_per_tick: 8,
             min_in_sync_replicas: 1,

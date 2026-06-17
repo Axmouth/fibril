@@ -392,8 +392,11 @@ impl Default for BrokerConfig {
             replication_caught_up_poll_ms: 1_000,
             replication_retry_poll_ms: 100,
             replication_checkpoint_retry_poll_ms: 5_000,
-            replication_max_messages_per_read: 256,
-            replication_max_events_per_read: 256,
+            // One fsync per replicated append call, so amortize over more records
+            // (see ReplicationSettings::default for the rationale). max_bytes_per_read
+            // bounds per-batch memory for large payloads.
+            replication_max_messages_per_read: 2048,
+            replication_max_events_per_read: 2048,
             replication_max_bytes_per_read: 8 * 1024 * 1024,
             replication_max_iterations_per_tick: 8,
             replication_min_in_sync_replicas: 1,
@@ -526,8 +529,8 @@ impl Default for BrokerReplicationCatchUpOptions {
         Self {
             message_from: 0,
             event_from: 0,
-            max_messages_per_read: 256,
-            max_events_per_read: 256,
+            max_messages_per_read: 2048,
+            max_events_per_read: 2048,
             max_bytes_per_read: 8 * 1024 * 1024,
             max_iterations: 1024,
             max_wait_ms: 0,
@@ -583,8 +586,8 @@ pub struct FollowerReplicationWorkerConfig {
 impl Default for FollowerReplicationWorkerConfig {
     fn default() -> Self {
         Self {
-            max_messages_per_read: 256,
-            max_events_per_read: 256,
+            max_messages_per_read: 2048,
+            max_events_per_read: 2048,
             max_bytes_per_read: 8 * 1024 * 1024,
             max_iterations_per_tick: 8,
             allow_checkpoint_install: false,
