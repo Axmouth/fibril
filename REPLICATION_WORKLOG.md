@@ -477,8 +477,40 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   wait 0.19ms (negligible, confirms watermark-confirm stays deprioritized). The
   ~1.6s publish->confirm latency at this point is client confirm-window backlog
   (10 writers x 8192 / 50k ~= 1.64s, Little's law), NOT a replication stall; a
-  smaller window drops it while throughput holds. Next bench: push target higher
-  to find the new ceiling, and a small-window low-latency point.
+  smaller window drops it while throughput holds.
+- MEASURED SWEEP (2026-06-17, replica_durable:2, 1KiB, 3-node local, 2048 batch).
+  New confirmed ceiling ~90k/s (was ~15k, ~6x). Latency is purely confirm-window
+  governed (Little's law: latency = outstanding / throughput, fits every point):
+    window 256,  10w, target 50k  -> 28.0k/s, confirm p50/p99 119/130 ms
+    window 2048, 16w, target 120k -> 86.3k/s, confirm p50/p99 377/461 ms (sweet spot)
+    window 8192, 10w, target 50k  -> 50.0k/s, confirm p50/p99 1638/1643 ms
+    window 16384,16w, target 150k -> 89.5k/s, confirm p50/p99 2942/3315 ms
+  All runs: 0 errors, 0 missing, follower cursors in_sync. Takeaway: pick the
+  window to fill the pipe (~2048 gives near-ceiling at ~8x lower latency than
+  16384), do not overfill. Sub-~120ms latency hits the follower pull/apply round-
+  trip floor - that floor is what the structural async-fsync + owner-push work
+  below would lower (raw throughput is no longer the limiter at these rates).
+- VISIBILITY CONTRACT GAP (deliver-before-confirm) - the audit's open question,
+  now confirmed in code. The delivery loop (broker.rs poll_ready path) gates only
+  on repartition holds (is_delivery_held / hold_above_offset) and the cohort
+  assignee - NOTHING tied to replica durability. So on a replica_durable queue the
+  owner leases/delivers a message to a consumer as soon as it is LOCALLY enqueued,
+  before the follower has it. Failover hazard: a consumer can lease+ack (consumed =
+  gone) a message that is not yet replica-durable; if the owner dies before
+  replicating it and a follower is promoted, the new owner never had it, yet a
+  consumer already acted on it, and the producer (still unconfirmed) retries ->
+  duplicate work. Durability contract (confirmed = survives) and visibility
+  contract (what consumers see) are decoupled. FIX: a replica-durable VISIBILITY
+  gate - on a replica_durable queue, delivery holds offsets at/above the durable-
+  replicated watermark (Kafka high-watermark model: consumers see only committed
+  data). This reuses the hold_above_offset delivery machinery (shrink path) driven
+  by replicated-durable progress. SYNTHESIS: that watermark is exactly LOCK_USAGE
+  #1's committed watermark - deprioritized for confirm latency (0.19ms), but
+  VISIBILITY makes it a CORRECTNESS need, and building it once serves both (clean
+  visibility gate + confirm-path lock removal as a bonus). Decide the contract
+  first (does replica_durable imply committed-only delivery? almost certainly yes),
+  then build the watermark and gate poll_ready on it for replica_durable queues;
+  local_durable queues deliver on local append as today.
 - NEXT (structural, the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
