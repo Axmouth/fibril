@@ -523,6 +523,16 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   with no cached assignment / nodes=1. SYNTHESIS realized: the committed watermark
   now exists; switching await_confirm to read the atomic (LOCK_USAGE #1 confirm-
   path lock removal) is now a cheap follow-on, not new work.
+- LINGER/FSYNC EXPERIMENT (2026-06-17, batch_linger_ms now configurable). Ran
+  solo + cluster at linger=fsync= 5/2/1 ms (rate 10k, window 64, confirmed).
+  SOLO local-durable publish->deliver p50: 5ms=11ms, 2ms=6ms, 1ms=6ms - the knobs
+  cut the local append latency by ~the linger amount. CLUSTER replica_durable:2:
+  NO consistent change (5ms and 2ms identical at confirm p50 ~26ms; 1ms noisier/
+  worse), tail ~115-155ms across all three. CONFIRMS the asymmetry: the follower
+  replicated-append path bypasses linger + fsync cadence (inline fsync per batch),
+  so these knobs only help the owner's local half, never the cluster bottleneck.
+  This empirically gates the next item: async-fsync must land before linger/cadence
+  (or any cluster latency-floor work) can matter for replication.
 - NEXT (structural, the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
