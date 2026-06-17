@@ -602,6 +602,10 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     ReplicationStreamReset (follower->owner: message_from/event_from - rewind on
     gap/after checkpoint), ReplicationStreamStop (follower->owner), and an
     owner->follower "stream ended/not-owner" signal (reuse Error or a Fin op).
+  * FUTURE (note): consider additional credit dimensions beyond bytes - e.g. a
+    record-count credit (bound per-batch overhead / many tiny records) or other
+    dimensions - granted/refilled alongside bytes, owner pauses when ANY dimension
+    is exhausted. Bytes alone is fine for now; revisit when workloads show a need.
   * CREDIT flow control (bounds follower memory, no stop-and-wait): unit = bytes.
     Follower grants initial credit; owner streams batches decrementing it, pauses
     the stream when credit < next batch. Follower refills at a LOW-WATERMARK (once
