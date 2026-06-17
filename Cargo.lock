@@ -1092,6 +1092,7 @@ dependencies = [
  "fibril-metrics",
  "fibril-storage",
  "fibril-util",
+ "futures",
  "mimalloc",
  "thiserror 2.0.18",
  "tokio",

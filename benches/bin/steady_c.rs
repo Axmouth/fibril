@@ -11,6 +11,7 @@ use std::{
 use clap::{Parser, ValueEnum};
 use fibril_client::{ClientOptions, InflightMessage, NewMessage, PublishConfirmation};
 use fibril_util::unix_millis;
+use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::{
     sync::mpsc,
     time::{Instant, MissedTickBehavior, timeout},
@@ -480,44 +481,90 @@ async fn run_rate_limited_writers(
                 .unwrap();
             let publisher = client.publisher(&topic).unwrap();
             let mut stats = WriterStats::default();
-            let mut pending_confirms = VecDeque::<PendingConfirm>::new();
 
             let period = Duration::from_secs_f64(1.0 / writer_rate as f64);
             let mut tick = tokio::time::interval(period);
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
+            // Confirms are recorded WHEN THEY RESOLVE (event-driven). The window
+            // gates the INPUT (publish only while in-flight < window) rather than
+            // withholding confirm reads, so confirm latency reflects the real
+            // round trip, not how long an already-arrived ack sat in a FIFO drain.
+            let mut inflight = FuturesUnordered::new();
+
+            let record_confirm =
+                |stats: &mut WriterStats, measured: bool, sent_at: Instant, result: Result<(), ()>| {
+                    match result {
+                        Ok(()) => {
+                            stats.confirmed_total += 1;
+                            if measured {
+                                stats.confirm_latency_ms.push(sent_at.elapsed().as_millis() as u64);
+                            }
+                        }
+                        Err(()) => stats.confirm_errors += 1,
+                    }
+                };
+
             loop {
-                tick.tick().await;
-                let now = Instant::now();
-                if now >= measure_end {
-                    break;
-                }
-
-                let measured = now >= measure_start;
-                let mut payload = vec![8u8; payload_size];
-                if measured {
-                    payload[0] = 1;
-                }
-
-                publish_one(
-                    writer_id,
-                    &publisher,
-                    payload,
-                    measured,
-                    confirmed,
-                    confirm_window,
-                    &mut pending_confirms,
-                    &mut stats,
-                )
-                .await;
-
-                if measured {
-                    stats.measured_sent += 1;
-                    measured_sent_total.fetch_add(1, Ordering::AcqRel);
+                tokio::select! {
+                    biased;
+                    // Reap each confirm the instant it resolves.
+                    Some((measured, sent_at, result)) = inflight.next(), if !inflight.is_empty() => {
+                        record_confirm(&mut stats, measured, sent_at, result);
+                    }
+                    // Publish, paced by the tick, gated by the in-flight window.
+                    _ = tick.tick(), if Instant::now() < measure_end
+                        && (!confirmed || inflight.len() < confirm_window) => {
+                        let now = Instant::now();
+                        if now >= measure_end {
+                            break;
+                        }
+                        let measured = now >= measure_start;
+                        let mut payload = vec![8u8; payload_size];
+                        if measured {
+                            payload[0] = 1;
+                        }
+                        if confirmed {
+                            let sent_at = Instant::now();
+                            match publisher
+                                .publish_with_confirmation(NewMessage::raw(payload))
+                                .await
+                            {
+                                Ok(confirmation) => {
+                                    stats.sent_total += 1;
+                                    if measured {
+                                        stats.measured_sent += 1;
+                                        measured_sent_total.fetch_add(1, Ordering::AcqRel);
+                                    }
+                                    inflight.push(async move {
+                                        let result =
+                                            confirmation.confirmed().await.map(|_| ()).map_err(|_| ());
+                                        (measured, sent_at, result)
+                                    });
+                                }
+                                Err(_) => stats.publish_errors += 1,
+                            }
+                        } else {
+                            match publisher.publish(NewMessage::raw(payload)).await {
+                                Ok(_) => {
+                                    stats.sent_total += 1;
+                                    if measured {
+                                        stats.measured_sent += 1;
+                                        measured_sent_total.fetch_add(1, Ordering::AcqRel);
+                                    }
+                                }
+                                Err(_) => stats.publish_errors += 1,
+                            }
+                        }
+                    }
+                    else => break,
                 }
             }
 
-            drain_confirms(writer_id, &mut pending_confirms, &mut stats).await;
+            // Drain remaining in-flight confirms (still recorded at resolution).
+            while let Some((measured, sent_at, result)) = inflight.next().await {
+                record_confirm(&mut stats, measured, sent_at, result);
+            }
             stats
         }));
     }

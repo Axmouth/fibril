@@ -16,7 +16,7 @@ use fibril_broker::{
     },
     coordination::{Coordination, NodeInfo, PartitionAssignment},
     queue_engine::{
-        Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, StromaEngine,
+        Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
         StromaEvent,
     },
 };
