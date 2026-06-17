@@ -645,33 +645,41 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     (3a) DONE (f49b720) follower applier core: run_follower_stream_applier in
     replication_stream.rs drains in-order batches from the reader, applies each via
     a FollowerStreamSink, sends combined progress+credit per batch + Reset on
-    checkpoint. Unit-tested with a mock sink. (3b) NEXT - transport wiring to make
-    streaming LIVE (the big, failover-critical integration; keep behind a setting
-    default-OFF so the pull path is untouched / no regression):
-      - split the owner Conn (Framed = Stream+Sink) into a reader half + control
-        writer half (futures StreamExt::split).
-      - follower stream worker: send ReplicationStreamStart (cursor from queue
-        tails + initial credit + reporter id); reader task demuxes recv() frames -
-        ReplicationStreamBatch -> decode_replication_stream_batch ->
-        BrokerOwnerReplicationRecords (REUSE the converter at protocol
-        replication.rs:1008) -> bounded batch_tx; ReplicationStreamEnd -> handle
-        (checkpoint-required / not-owner / closed) -> stop; control-writer task
-        encodes FollowerStreamControl (Progress/Reset) -> frames -> sink half.
-      - BrokerFollowerStreamSink: apply(batch) -> broker.apply_follower_replication_
-        records -> map to FollowerApplyOutcome (Applied{new durable offsets,bytes}
-        or Reset after a checkpoint export+install).
-      - on STREAM_END_CHECKPOINT_REQUIRED: run the existing checkpoint export+install
-        then re-Start/Reset the stream at the new offset. on not-owner / conn error:
-        tear down, re-resolve owner, re-subscribe (mirror the pull path's NotOwner).
-      - wire as an alternative to spawn_follower_replication_worker_loop
-        (broker.rs:4703), selected by a new runtime setting (default off); cfg from
-        the runtime replication settings (also fixes the OwnerStreamConfig default
-        note). Keep pull as fallback.
-      - VALIDATE: protocol/broker tests green + a live 3-node tryout with streaming
-        ON (expect the ~100ms tick to drop as read+apply overlap) + the failover
-        smoke (owner kill, promotion, no data loss) before making it default.
-    (4) gap/checkpoint via Reset; (5) bench (expect the ~100ms tick to drop as
-    read+apply overlap) + failover smoke. HARDEST PART = owner sender state machine
+    checkpoint. Unit-tested with a mock sink. (3b) DONE (33190dd) follower transport
+    + broker apply, PROVEN over real TCP. Broker::apply_replicated_stream_batch
+    reuses the proven pull apply+progress path (owner_read_batch_progress +
+    apply_follower_replication_records + replicated_append_progress_after_apply) to
+    apply one batch and report the advanced cursor or CheckpointRequired (->
+    fallback). run_follower_replication_stream (protocol): splits the Conn, sends
+    Start, reader demuxes ReplicationStreamBatch -> bounded buffer, applier drains
+    durably + sends combined progress+credit, returns FollowerStreamExit (Closed /
+    CheckpointRequired / Error). BrokerBackedFollowerSink bridges to the broker.
+    Real-TCP round-trip test (mock owner <-> transport): Start, 3 batches demuxed +
+    applied, 3 progress+credit frames received, StreamEnd closes clean. The
+    checkpoint design is SIMPLE+SAFE: on checkpoint the stream EXITS and the caller
+    falls back to the proven pull+checkpoint path, then re-streams (no checkpoint
+    logic in the stream transport). STREAMING MECHANISM IS COMPLETE + TESTED (owner
+    sender + follower applier + transport + broker apply).
+    (4) GO-LIVE (production enablement; the remaining step): a follower-stream
+    SUPERVISOR that actually drives run_follower_replication_stream for followed
+    partitions, behind a runtime setting (default OFF first). LAYERING: the broker
+    assignment watcher spawns pull workers (broker.rs:4703) but can't call protocol;
+    so either (a) inject the transport into the broker via a trait (mirror
+    BrokerOwnerReplicationPeerResolver: a broker trait, protocol impl, fibril-wired)
+    or (b) run the supervisor in fibril and gate the broker's pull-worker spawn when
+    streaming is on. Supervisor per followed partition: get cursor from queue tails,
+    open a conn (peer connect cfg / take_conn), run the transport with a
+    BrokerBackedFollowerSink; on CheckpointRequired -> one pull+checkpoint catch-up
+    (catch_up_replication_follower_from_owner_with_checkpoint) then re-stream; on
+    Error -> delay + re-resolve + retry; on owner change -> stop. cfg from runtime
+    replication settings (also fixes the OwnerStreamConfig::default note). Then
+    VALIDATE: live 3-node tryout with streaming ON (expect the ~100ms tick to drop
+    as read+apply overlap) + failover smoke (owner kill, promote, no data loss),
+    THEN flip default to streaming (pre-1.0; pull stays as fallback). RELATED future
+    cleanup: dedicated replication LISTENER/handler separate from client connections
+    (cluster auth, isolated backpressure+metrics) - cleaner home for the stream
+    sender/reader; not required for correctness, pairs with making streaming default.
+    HARDEST PART (done) = owner sender state machine
     + credit accounting + failover/gap interaction, NOT the message defs.
 - ALSO (your idea, payload-size dependent): streamed/borrowed apply+decode -
   apply rebuilds owned Vec<Message>/Vec<Event> from the raw frame and re-encodes
