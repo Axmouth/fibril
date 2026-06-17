@@ -10,17 +10,18 @@ use std::{
 use fibril_broker::{
     Offset, Partition,
     broker::{
-        BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
-        BrokerOwnerReplicationRecords,
+        Broker, BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
+        BrokerOwnerReplicationRecords, ReplicatedStreamApply,
     },
     coordination::{Coordination, NodeInfo, PartitionAssignment},
     queue_engine::{
-        Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, StromaEvent,
+        Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, StromaEngine,
+        StromaEvent,
     },
 };
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
-use tokio::{net::TcpStream, sync::Mutex};
+use tokio::{net::TcpStream, sync::Mutex, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::v1::{
@@ -28,8 +29,13 @@ use crate::v1::{
     ReplicationApplyOk, ReplicationCheckpointExport, ReplicationCheckpointExportOk,
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead, ReplicationReadOk,
+    ReplicationStreamProgress, ReplicationStreamReset, ReplicationStreamStart,
     frame::{Frame, ProtoCodec},
     helper::{Conn, ProtocolError, try_decode, try_encode},
+    replication_stream::{
+        self, ApplierExit, FollowerApplyOutcome, FollowerStreamControl, FollowerStreamSink,
+        run_follower_stream_applier,
+    },
     wire,
 };
 
@@ -1087,4 +1093,390 @@ fn to_broker_event_read(
             }
         }
     })
+}
+
+// ===========================================================================
+// Follower side: credit-based streaming transport (increment 3b).
+// ===========================================================================
+
+/// Why a follower replication stream ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowerStreamExit {
+    /// The owner closed the stream cleanly (or we shut it down).
+    Closed,
+    /// A checkpoint is required; the caller falls back to pull+checkpoint, then
+    /// re-streams from the post-checkpoint cursor.
+    CheckpointRequired,
+    /// The connection failed, the owner errored, or it is no longer owner. The
+    /// caller should re-resolve the owner and retry.
+    Error(String),
+}
+
+fn stream_batch_bytes(batch: &ReplicationReadOk) -> u64 {
+    let messages = match &batch.messages {
+        ReplicationMessageRead::Batch { records, .. } => records
+            .iter()
+            .map(|record| (record.headers.len() + record.payload.len()) as u64)
+            .sum(),
+        ReplicationMessageRead::CheckpointRequired(_) => 0,
+    };
+    let events = match &batch.events {
+        ReplicationEventRead::Batch { records, .. } => {
+            records.iter().map(|record| record.payload.len() as u64).sum()
+        }
+        ReplicationEventRead::CheckpointRequired(_) => 0,
+    };
+    messages + events
+}
+
+/// Run one follower replication stream over an established connection: send
+/// `ReplicationStreamStart`, then a reader demuxes pushed `ReplicationStreamBatch`
+/// frames into a bounded in-order buffer while an applier drains it (durably,
+/// in order) and sends combined progress+credit back. Returns why the stream
+/// ended. `buffer_batches` bounds the in-flight buffer; the granted `credit_bytes`
+/// bounds in-flight bytes.
+pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
+    conn: Conn,
+    sink: Arc<S>,
+    topic: String,
+    partition: Partition,
+    group: Option<String>,
+    message_from: Offset,
+    event_from: Offset,
+    credit_bytes: u64,
+    reporter_node_id: Option<String>,
+    stream_id: u64,
+    buffer_batches: usize,
+    shutdown: CancellationToken,
+) -> FollowerStreamExit {
+    let (mut conn_sink, mut conn_stream) = conn.split();
+
+    let start = ReplicationStreamStart {
+        topic,
+        group,
+        partition,
+        message_from,
+        event_from,
+        credit_bytes,
+        reporter_node_id,
+    };
+    match wire::encode_replication_stream_start(stream_id, &start) {
+        Ok(frame) => {
+            if conn_sink.send(frame).await.is_err() {
+                return FollowerStreamExit::Error("failed to send stream start".into());
+            }
+        }
+        Err(err) => return FollowerStreamExit::Error(err.to_string()),
+    }
+
+    let (batch_tx, batch_rx) = mpsc::channel::<ReplicationReadOk>(buffer_batches.max(1));
+    let (control_tx, mut control_rx) = mpsc::channel::<FollowerStreamControl>(64);
+
+    // Reader: demux pushed frames into the buffer; return the stream-end reason.
+    let reader = tokio::spawn(async move {
+        loop {
+            match conn_stream.next().await {
+                Some(Ok(frame)) => {
+                    if frame.opcode == Op::ReplicationStreamBatch as u16 {
+                        match wire::decode_replication_stream_batch(&frame) {
+                            Ok(batch) => {
+                                if batch_tx.send(batch).await.is_err() {
+                                    return FollowerStreamExit::Closed;
+                                }
+                            }
+                            Err(err) => {
+                                return FollowerStreamExit::Error(format!(
+                                    "decode stream batch: {err}"
+                                ));
+                            }
+                        }
+                    } else if frame.opcode == Op::ReplicationStreamEnd as u16 {
+                        let code = wire::decode_replication_stream_end(&frame)
+                            .map(|end| end.code)
+                            .unwrap_or(replication_stream::STREAM_END_ERROR);
+                        return if code == replication_stream::STREAM_END_CHECKPOINT_REQUIRED {
+                            FollowerStreamExit::CheckpointRequired
+                        } else if code == replication_stream::STREAM_END_CLOSED {
+                            FollowerStreamExit::Closed
+                        } else {
+                            FollowerStreamExit::Error("owner ended stream".into())
+                        };
+                    }
+                    // ignore unrelated opcodes on this connection
+                }
+                Some(Err(err)) => return FollowerStreamExit::Error(format!("stream recv: {err}")),
+                None => return FollowerStreamExit::Error("connection closed".into()),
+            }
+        }
+    });
+
+    // Control writer: encode progress/reset back to the owner.
+    let writer = tokio::spawn(async move {
+        while let Some(control) = control_rx.recv().await {
+            let frame = match control {
+                FollowerStreamControl::Progress {
+                    durable_message_next,
+                    durable_event_next,
+                    credit_add_bytes,
+                } => wire::encode_replication_stream_progress(
+                    stream_id,
+                    &ReplicationStreamProgress {
+                        durable_message_next,
+                        durable_event_next,
+                        credit_add_bytes,
+                    },
+                ),
+                FollowerStreamControl::Reset {
+                    message_from,
+                    event_from,
+                } => wire::encode_replication_stream_reset(
+                    stream_id,
+                    &ReplicationStreamReset {
+                        message_from,
+                        event_from,
+                    },
+                ),
+            };
+            match frame {
+                Ok(frame) => {
+                    if conn_sink.send(frame).await.is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let applier_exit = tokio::select! {
+        _ = shutdown.cancelled() => None,
+        exit = run_follower_stream_applier(sink, batch_rx, control_tx) => Some(exit),
+    };
+
+    let exit = match applier_exit {
+        // The applier stopped because the reader closed the buffer; the reader
+        // knows why (StreamEnd code or connection error).
+        Some(ApplierExit::ReaderClosed) => match reader.await {
+            Ok(reason) => reason,
+            Err(_) => FollowerStreamExit::Error("reader task aborted".into()),
+        },
+        Some(ApplierExit::CheckpointRequired) => {
+            reader.abort();
+            FollowerStreamExit::CheckpointRequired
+        }
+        Some(ApplierExit::Error(err)) => {
+            reader.abort();
+            FollowerStreamExit::Error(err)
+        }
+        // Shutdown cancelled the applier.
+        None => {
+            reader.abort();
+            FollowerStreamExit::Closed
+        }
+    };
+    writer.abort();
+    exit
+}
+
+/// Follower stream sink backed by the broker's durable apply path. Built by the
+/// follower-stream supervisor (which sees both broker and protocol) and handed to
+/// [`run_follower_replication_stream`].
+pub struct BrokerBackedFollowerSink {
+    broker: Arc<Broker<StromaEngine>>,
+    topic: String,
+    partition: Partition,
+    group: Option<String>,
+}
+
+impl BrokerBackedFollowerSink {
+    pub fn new(
+        broker: Arc<Broker<StromaEngine>>,
+        topic: String,
+        partition: Partition,
+        group: Option<String>,
+    ) -> Self {
+        Self {
+            broker,
+            topic,
+            partition,
+            group,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl FollowerStreamSink for BrokerBackedFollowerSink {
+    async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
+        let bytes = stream_batch_bytes(&batch);
+        let records = match to_broker_owner_replication_records(batch) {
+            Ok(records) => records,
+            Err(err) => return FollowerApplyOutcome::Error(err.to_string()),
+        };
+        match self
+            .broker
+            .apply_replicated_stream_batch(
+                &self.topic,
+                self.partition,
+                self.group.as_deref(),
+                records,
+            )
+            .await
+        {
+            Ok(ReplicatedStreamApply::Applied {
+                message_next,
+                event_next,
+            }) => FollowerApplyOutcome::Applied {
+                durable_message_next: message_next,
+                durable_event_next: event_next,
+                bytes,
+            },
+            Ok(ReplicatedStreamApply::CheckpointRequired) => FollowerApplyOutcome::CheckpointRequired,
+            Err(err) => FollowerApplyOutcome::Error(err.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_transport_tests {
+    use super::*;
+    use crate::v1::{ReplicationMessageRecord, ReplicationStreamEnd};
+    use std::sync::Mutex as StdMutex;
+    use tokio::net::TcpListener;
+    use tokio_util::codec::Framed;
+
+    struct RecordingSink {
+        applied: StdMutex<Vec<(u64, u64)>>, // (message_next, bytes) per batch
+    }
+
+    #[async_trait::async_trait]
+    impl FollowerStreamSink for RecordingSink {
+        async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
+            let bytes = stream_batch_bytes(&batch);
+            let (message_next, event_next) = match (&batch.messages, &batch.events) {
+                (
+                    ReplicationMessageRead::Batch {
+                        next_offset: m, ..
+                    },
+                    ReplicationEventRead::Batch {
+                        next_offset: e, ..
+                    },
+                ) => (*m, *e),
+                _ => return FollowerApplyOutcome::CheckpointRequired,
+            };
+            self.applied.lock().unwrap().push((message_next, bytes));
+            FollowerApplyOutcome::Applied {
+                durable_message_next: message_next,
+                durable_event_next: event_next,
+                bytes,
+            }
+        }
+    }
+
+    fn sample_batch(first_offset: u64, count: u64) -> ReplicationReadOk {
+        let records = (0..count)
+            .map(|i| ReplicationMessageRecord {
+                offset: first_offset + i,
+                flags: 0,
+                headers: Vec::new(),
+                payload: vec![7u8; 100],
+            })
+            .collect();
+        ReplicationReadOk {
+            messages: ReplicationMessageRead::Batch {
+                epoch: 1,
+                requested_offset: first_offset,
+                next_offset: first_offset + count,
+                records,
+            },
+            events: ReplicationEventRead::Batch {
+                epoch: 1,
+                requested_offset: 0,
+                next_offset: 0,
+                records: Vec::new(),
+            },
+        }
+    }
+
+    // Mock owner ↔ real follower transport over a real TCP connection: proves the
+    // wire round-trip (Start, batch demux, progress+credit, StreamEnd handling).
+    #[tokio::test]
+    async fn follower_stream_round_trips_over_tcp() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        // Mock owner: recv Start, push 3 batches, recv 3 progress, send StreamEnd.
+        let owner = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut conn = Framed::new(socket, ProtoCodec);
+
+            let start_frame = conn.next().await.unwrap().unwrap();
+            let start = wire::decode_replication_stream_start(&start_frame).unwrap();
+            assert_eq!(start.topic, "orders");
+            assert_eq!(start.message_from, 0);
+            assert!(start.credit_bytes > 0);
+            let stream_id = start_frame.request_id;
+
+            for (first, count) in [(0u64, 2u64), (2, 3), (5, 1)] {
+                let frame =
+                    wire::encode_replication_stream_batch(stream_id, &sample_batch(first, count))
+                        .unwrap();
+                conn.send(frame).await.unwrap();
+            }
+
+            let mut progress = Vec::new();
+            while progress.len() < 3 {
+                let frame = conn.next().await.unwrap().unwrap();
+                if frame.opcode == Op::ReplicationStreamProgress as u16 {
+                    progress.push(wire::decode_replication_stream_progress(&frame).unwrap());
+                }
+            }
+
+            let end = wire::encode_replication_stream_end(
+                stream_id,
+                &ReplicationStreamEnd {
+                    code: replication_stream::STREAM_END_CLOSED,
+                    message: "done".into(),
+                },
+            )
+            .unwrap();
+            conn.send(end).await.unwrap();
+            progress
+        });
+
+        let socket = TcpStream::connect(addr).await.unwrap();
+        let conn = Framed::new(socket, ProtoCodec);
+        let sink = Arc::new(RecordingSink {
+            applied: StdMutex::new(Vec::new()),
+        });
+        let exit = run_follower_replication_stream(
+            conn,
+            sink.clone(),
+            "orders".into(),
+            Partition::new(0),
+            None,
+            0,
+            0,
+            8 * 1024 * 1024,
+            Some("broker-2".into()),
+            42,
+            4,
+            CancellationToken::new(),
+        )
+        .await;
+
+        assert_eq!(exit, FollowerStreamExit::Closed);
+        let applied = sink.applied.lock().unwrap().clone();
+        assert_eq!(
+            applied,
+            vec![(2, 200), (5, 300), (6, 100)],
+            "applied 3 batches with correct next-offset + bytes"
+        );
+
+        let progress = owner.await.unwrap();
+        // Combined progress+credit: durable advances and credit = bytes applied.
+        assert_eq!(progress[0].durable_message_next, 2);
+        assert_eq!(progress[0].credit_add_bytes, 200);
+        assert_eq!(progress[2].durable_message_next, 6);
+        assert_eq!(progress[2].credit_add_bytes, 100);
+    }
 }

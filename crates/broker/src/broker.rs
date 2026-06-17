@@ -567,6 +567,16 @@ pub enum FollowerReplicationWorkerLoopExit {
     OwnerChanged { ticks: usize },
 }
 
+/// Outcome of [`Broker::apply_replicated_stream_batch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicatedStreamApply {
+    /// Applied durably; the advanced durable cursor.
+    Applied { message_next: Offset, event_next: Offset },
+    /// A checkpoint is required (offset gap / epoch fence); the stream caller
+    /// should fall back to the pull + checkpoint path, then re-stream.
+    CheckpointRequired,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FollowerReplicationWorkerConfig {
     pub max_messages_per_read: usize,
@@ -5204,6 +5214,70 @@ impl Broker<StromaEngine> {
             .apply_replicated_queue_batch(topic, partition.id(), group, messages, events)
             .await?;
         Ok(BrokerFollowerReplicationApply::Applied(outcome))
+    }
+
+    /// Apply one streamed replication batch and report the advanced durable
+    /// cursor, reusing the exact apply + progress path the pull catch-up uses.
+    /// `CheckpointRequired` tells the stream caller to fall back to the pull +
+    /// checkpoint path (offset gap / epoch fence), then re-stream.
+    pub async fn apply_replicated_stream_batch(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        records: BrokerOwnerReplicationRecords,
+    ) -> Result<ReplicatedStreamApply, BrokerError> {
+        let message_progress = owner_read_batch_progress("message", &records.messages)?;
+        let event_progress = owner_read_batch_progress("event", &records.events)?;
+        let (message_progress, event_progress) = match (message_progress, event_progress) {
+            (Some(message_progress), Some(event_progress)) => (message_progress, event_progress),
+            // The owner read itself signalled a checkpoint is required.
+            _ => {
+                let _ = self
+                    .apply_follower_replication_records(topic, partition, group, records)
+                    .await?;
+                return Ok(ReplicatedStreamApply::CheckpointRequired);
+            }
+        };
+
+        let apply = {
+            let _follower_apply_timer = self.replication_timing.follower_apply.timer();
+            self.apply_follower_replication_records(topic, partition, group, records)
+                .await?
+        };
+
+        let outcome = match apply {
+            BrokerFollowerReplicationApply::Applied(outcome) => outcome,
+            BrokerFollowerReplicationApply::CheckpointRequired { .. } => {
+                return Ok(ReplicatedStreamApply::CheckpointRequired);
+            }
+        };
+
+        let message_next = match replicated_append_progress_after_apply(
+            "message",
+            &message_progress,
+            outcome.message_log.as_ref(),
+        )? {
+            ReplicatedAppendProgress::Advanced(next_offset) => next_offset,
+            ReplicatedAppendProgress::CheckpointRequired(_) => {
+                return Ok(ReplicatedStreamApply::CheckpointRequired);
+            }
+        };
+        let event_next = match replicated_append_progress_after_apply(
+            "event",
+            &event_progress,
+            outcome.event_log.as_ref(),
+        )? {
+            ReplicatedAppendProgress::Advanced(next_offset) => next_offset,
+            ReplicatedAppendProgress::CheckpointRequired(_) => {
+                return Ok(ReplicatedStreamApply::CheckpointRequired);
+            }
+        };
+
+        Ok(ReplicatedStreamApply::Applied {
+            message_next,
+            event_next,
+        })
     }
 
     pub async fn promote_replication_follower_if_caught_up(

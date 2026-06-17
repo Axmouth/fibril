@@ -241,10 +241,22 @@ pub enum FollowerApplyOutcome {
         durable_event_next: u64,
         bytes: u64,
     },
-    /// The batch could not be applied in place (offset gap / epoch fence) and the
-    /// follower has handled the checkpoint; rewind the owner stream to here.
-    Reset { message_from: u64, event_from: u64 },
-    /// Fatal apply error; the applier stops (the transport tears down the stream).
+    /// The batch needs a checkpoint (offset gap / epoch fence). The stream stops
+    /// so the worker can fall back to the proven pull+checkpoint path, then
+    /// re-stream from the post-checkpoint cursor.
+    CheckpointRequired,
+    /// Fatal apply error; the applier stops.
+    Error(String),
+}
+
+/// Why a follower stream applier loop ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplierExit {
+    /// The reader closed the batch channel (stream torn down upstream).
+    ReaderClosed,
+    /// An apply needs a checkpoint; the caller should fall back to pull.
+    CheckpointRequired,
+    /// A fatal apply error.
     Error(String),
 }
 
@@ -264,7 +276,7 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     sink: Arc<S>,
     mut batch_rx: mpsc::Receiver<ReplicationReadOk>,
     control_tx: mpsc::Sender<FollowerStreamControl>,
-) {
+) -> ApplierExit {
     while let Some(batch) = batch_rx.recv().await {
         match sink.apply(batch).await {
             FollowerApplyOutcome::Applied {
@@ -281,27 +293,16 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
                     .await
                     .is_err()
                 {
-                    break;
+                    return ApplierExit::ReaderClosed;
                 }
             }
-            FollowerApplyOutcome::Reset {
-                message_from,
-                event_from,
-            } => {
-                if control_tx
-                    .send(FollowerStreamControl::Reset {
-                        message_from,
-                        event_from,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
+            FollowerApplyOutcome::CheckpointRequired => {
+                return ApplierExit::CheckpointRequired;
             }
-            FollowerApplyOutcome::Error(_) => break,
+            FollowerApplyOutcome::Error(err) => return ApplierExit::Error(err),
         }
     }
+    ApplierExit::ReaderClosed
 }
 
 #[cfg(test)]
@@ -608,39 +609,29 @@ mod tests {
         assert_eq!(sink.applied.lock().unwrap().as_slice(), &[0, 2]);
 
         drop(batch_tx); // reader closed -> applier ends
-        tokio::time::timeout(Duration::from_secs(2), task)
+        let exit = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("applier did not stop")
             .unwrap();
+        assert_eq!(exit, ApplierExit::ReaderClosed);
     }
 
     #[tokio::test]
-    async fn applier_emits_reset_on_checkpoint() {
+    async fn applier_exits_checkpoint_required_for_fallback() {
         let sink = Arc::new(MockSink {
-            outcomes: Mutex::new(
-                [FollowerApplyOutcome::Reset {
-                    message_from: 40,
-                    event_from: 9,
-                }]
-                .into(),
-            ),
+            outcomes: Mutex::new([FollowerApplyOutcome::CheckpointRequired].into()),
             applied: Mutex::new(Vec::new()),
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
-        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let (control_tx, _control_rx) = mpsc::channel(8);
         let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx));
 
         batch_tx.send(batch_from(40, 1)).await.unwrap();
-        assert_eq!(
-            control_rx.recv().await.unwrap(),
-            FollowerStreamControl::Reset {
-                message_from: 40,
-                event_from: 9,
-            }
-        );
-
-        drop(batch_tx);
-        let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        let exit = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("applier did not stop")
+            .unwrap();
+        assert_eq!(exit, ApplierExit::CheckpointRequired);
     }
 }
 
