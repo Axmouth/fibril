@@ -341,17 +341,36 @@ REMAINING — live repartitioning follow-ons (polish):
     take the lock for. Then surface it through QueueEngine + a broker
     retire_partition(tp, part, group), and have each node call it for ITS removed
     partitions on shrink completion (safe: drained/empty, already deregistered).
-    CHOSEN airtight design (move-to-trash, no long lock, no await-under-lock):
-    in stroma, UNDER THE INDEX LOCK (brief, no await): remove the partition entry
-    AND rename its dir to dir.trash-<uuid> (O(1) metadata). Drop the lock. Then
-    stop the queue actor (await, after unlock) so it closes its segment FDs. Then
-    remove_dir_all(trash) unlocked. Airtight vs delete-vs-recreate: the delete only
-    ever touches the renamed-away snapshot; a recreate after the lock release finds
-    no index entry and creates a FRESH dir at the original path, which the in-flight
-    delete never sees. Unix rename keeps the actor's open FDs valid in the tiny
-    window (harmless), and stopping the actor before the final delete frees space.
-    No tombstone needed. Then surface via QueueEngine + broker retire_partition,
-    watcher calls it per-owner on shrink completion.
+    LAYERING: this is a STROMA concept, NOT keratin-log (keratin-log knows nothing
+    of topics/partitions/groups; it is logs-at-paths). stroma owns the
+    (tp,part,group)->dir mapping + the index. So destroy_partition lives in
+    stroma-core; it removes its index entry and deletes the partition dir it owns.
+    No keratin-log change.
+
+    TWO independent safety needs:
+    - Mid-flight barge-in (a recreate creating a fresh dir at the SAME reused index
+      path while a slow remove_dir_all is walking it). Serialize delete vs create.
+    - Killing a NEWER incarnation (shrink removes index 3, a later grow re-adds
+      index 3, a lagging destroy nukes the fresh one). Needs an epoch / still-
+      retired FENCE: under the lock, skip destroy if the current instance is newer
+      than the one being retired (or the catalogue has re-registered it).
+
+    Two ways to get the serialization (both need the epoch fence):
+    - Per-key async lock (DashMap<Key, Arc<tokio::Mutex>>): clone the Arc, DROP the
+      dashmap guard, then .lock().await -> safe to hold the async lock across the
+      slow delete. CLEAN but requires materialize to ALSO take the lock (touches
+      stroma's hot path) -> bigger.
+    - Rename-under-the-existing-index-lock: under the index lock (sync, O(1) dir
+      rename to dir.trash-<uuid>) remove entry + rename; release; stop actor; delete
+      trash unlocked. materialize is UNTOUCHED (it finds no entry, creates a fresh
+      dir at the original path; the delete only walks the trash) -> SMALLER. The
+      "counterintuitive" rename is actually the lower-touch airtight option.
+
+    Then surface via QueueEngine::destroy_partition -> broker retire_partition ->
+    watcher calls it per-owner on shrink completion (with the still-retired check).
+    NOT small (stroma-core internals + epoch fence + cross-repo); do with fresh
+    context post-compaction, or the keratin author does the stroma primitive and
+    fibril wires the broker+watcher glue.
 3. Shrink choreography hardening: v1 relies on the watcher applying survivor holds
    within ~1 tick of the marker before the bump; a stricter version has owners ack
    "held" before the leader bumps (see DESIGN_NOTES). Low risk for a rare op.
