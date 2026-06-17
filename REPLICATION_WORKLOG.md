@@ -627,8 +627,19 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   * BUILD ORDER (incremental): (1) DONE (393d3e6) ops 93-98 + stream message
     structs + binary wire codecs + roundtrip/wrong-opcode tests (protocol lib 37
     green, additive, zero behavior change); batch frame reuses the ReplicationReadOk
-    body, frames key off request_id as stream id. (2) owner per-stream sender behind
-    a setting, old pull as fallback; (3) follower reader/applier + credit refill;
+    body, frames key off request_id as stream id. (2) DONE (652086b) owner
+    per-stream sender: crates/protocol/src/v1/replication_stream.rs holds the send
+    loop (per-stream credit in bytes + cursor, long-polls the owner log, pushes
+    ReplicationStreamBatch until credit exhausted, reacts to Progress/Reset/Stop
+    via a control channel). Unit-tested with a mock source (credit gate, refill,
+    progress recording, reset). Handler spawns one task per StreamStart + routes
+    progress/reset/stop by stream id (BrokerOwnerStreamSource bridges to
+    read_owner_replication_records + record_follower_replication_progress). DORMANT
+    until the follower sends Start (increment 3), so zero behavior change. NOTE:
+    OwnerStreamConfig is ::default() for now; wire it to runtime replication
+    settings when the path goes live in increment 3.
+    (3) NEXT: follower reader/applier + credit refill (and wire OwnerStreamConfig
+    to runtime settings; behind a setting with old pull as fallback);
     (4) gap/checkpoint via Reset; (5) bench (expect the ~100ms tick to drop as
     read+apply overlap) + failover smoke. HARDEST PART = owner sender state machine
     + credit accounting + failover/gap interaction, NOT the message defs.
