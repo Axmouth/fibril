@@ -396,8 +396,17 @@ start_node() {
   local i="$1"
   local broker_port=$((BASE_BROKER_PORT + i))
   local admin_port=$((BASE_ADMIN_PORT + i))
+  # Per-node data-dir override (poor-man's separate-disk test): if
+  # CLUSTER_TRYOUT_NODE<i>_ROOT is set, this node's data lives there instead of
+  # under RUN_DIR, so different nodes can sit on different filesystems.
+  local node_root_var="CLUSTER_TRYOUT_NODE${i}_ROOT"
+  local node_data="$RUN_DIR/node-$i"
+  if [[ -n "${!node_root_var:-}" ]]; then
+    mkdir -p "${!node_root_var}"
+    node_data="${!node_root_var}/node-$i"
+  fi
   local env_vars=(
-    "FIBRIL_DATA_DIR=$RUN_DIR/node-$i"
+    "FIBRIL_DATA_DIR=$node_data"
     "FIBRIL_BROKER_BIND=127.0.0.1:$broker_port"
     "FIBRIL_ADMIN_BIND=127.0.0.1:$admin_port"
   )
