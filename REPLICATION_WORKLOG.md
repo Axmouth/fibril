@@ -481,6 +481,15 @@ window 256, 4 writers, 3-node replica_durable:2, 1KiB):
     in-flight to amortize fsync, but that raises latency. So there is NO good
     operating point on the shared drive until fsync is COALESCED (async-fsync).
     This is the strongest argument yet for the async-fsync replicated-append work.
+  DRIVE-SEPARATION TEST (idea, needs tryout support for per-node data roots):
+    approximate separate-drives by putting the owner's data on one fs and the
+    follower's on another (e.g. owner=tmpfs, follower=ssd). For replica_durable:2
+    the confirm gate = owner-durable + follower-durable; with no shared-drive
+    contention the slower fs (ssd follower) gates confirm, isolating one drive's
+    real fsync cost from the self-contention. cluster-tryout currently uses a
+    single CLUSTER_TRYOUT_RUN_ROOT for all nodes - add a per-node-root option to
+    enable this. Also gathering a 2x2 rate image (tmpfs/disk x 50k/100k) to find
+    the IO saturation knee.
 
 REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
 - ROOT CAUSE of the replica-durable throughput ceiling is follower FSYNC RATE,
