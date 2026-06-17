@@ -452,6 +452,17 @@ findings, folded here as actionable items:
   idempotency via generation, restart in-flight redelivery) are at-least-once
   behavior, documented as acceptable.
 
+PERF BENCH CAVEAT (2026-06-18): the cluster-tryout + steady bench default to
+/tmp which is TMPFS (RAM) on this box, so fsync is nearly free. ALL recorded
+throughput/latency/apply numbers are best-case (RAM), NOT real-disk. fsync cost
+(and thus the value of batch amortization + async-fsync) is understated. MUST
+re-validate on a real drive: CLUSTER_TRYOUT_RUN_ROOT=<ext4 path> (e.g.
+/home/.fibril-benchdisk on /dev/sdb4). Test BOTH tmpfs and disk. Also note the
+3 nodes share one drive, so disk runs include self-contention. Confirm latency
+in the high-rate runs is window-backlog (Little's law: outstanding/throughput),
+not the system - lower confirm_window to drop it; the real service floor shows at
+low offered rate.
+
 REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
 - ROOT CAUSE of the replica-durable throughput ceiling is follower FSYNC RATE,
   not the confirm gate (which the audit data already showed at ~0.03ms wait).
