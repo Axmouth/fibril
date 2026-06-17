@@ -157,6 +157,13 @@ Feature work still considered in-scope before or shortly after merge:
   gate.
 - Cooperative incremental rebalance. The leader-change churn piece is already
   handled by controller seeding, but whole-set recompute can still be improved.
+- Load-aware node placement and partition routing, starting as observability and
+  advisory hints only. See DESIGN_NOTES.md "Load-aware placement and partition
+  routing". First implementation steps: make queue stats partition-aware, publish
+  compact node load through heartbeat labels, expose partition load hints in
+  topology/admin, then use node load only as a tie-breaker before any automated
+  rebalancing. Keyed publishes must keep stable hash routing by default; keyless
+  publish and consumer scheduling get separate policies.
 
 Useful but not merge-blocking:
 - sub_id-scoped leave for cross-connection reconnect takeover.
@@ -309,17 +316,31 @@ survivor holds a moved key until the removed source drains, then delivers it.
 Grow and shrink now both work, so arbitrary-N is reachable by composing them via
 gcd (shrink to gcd then grow), no per-key gate ever needed.
 
-REMAINING — live repartitioning follow-ons (all ergonomics/polish, core is done):
-1. Operator surface: an admin endpoint + fibrilctl command calling
-   grow_queue / shrink_queue (today they are only reachable programmatically).
-2. Removed-partition retirement: a shrink leaves merged-away partitions
-   registered and draining forever; deregister + unmaterialize them once drained
-   (safe to defer, no data loss meanwhile).
+DONE (background, VERIFY against the merged branch):
+1. Operator surface: admin POST /admin/api/repartition + `fibrilctl admin
+   repartition <topic> <count> [--group]`, routed to grow_queue/shrink_queue via
+   the QueueRepartitionManager trait (impl GanglionQueueRepartitionManager in
+   fibril). Done in the background; confirm it built and runs.
+4. Live-cluster grow + shrink smoke via scripts/cluster-tryout.sh. Done in the
+   background; confirm the flag/scenario.
+2. Removed-partition retirement (this session, PARTIAL): on shrink completion the
+   leader deregisters the merged-away partitions (>= n_new), now drained, from the
+   catalogue, so they go inactive/unassigned. (crates/fibril/src/lib.rs watcher.)
+   This makes them INACTIVE but does NOT fully delete their storage on the former
+   owner.
+
+REMAINING — live repartitioning follow-ons (polish):
+2b. FULL removal of retired partitions (next): after deregistration, actually free
+    the former owner's storage for the removed partitions, not just unassign them.
+    Plan: surface a delete through QueueEngine (stroma-core has
+    cleanup_topic_partition = truncate settled, plus unmaterialize = unload; a true
+    destroy that removes the empty segment dir may need a small keratin addition),
+    add a broker retire_partition(tp, part, group) that unmaterializes + deletes,
+    and have each node call it for ITS removed partitions on shrink completion
+    (safe: they are drained/empty). Destructive, so guard on completion only.
 3. Shrink choreography hardening: v1 relies on the watcher applying survivor holds
    within ~1 tick of the marker before the bump; a stricter version has owners ack
    "held" before the leader bumps (see DESIGN_NOTES). Low risk for a rare op.
-4. Live-cluster grow + shrink smoke via scripts/cluster-tryout.sh (unit/integration
-   tests prove the pieces; this proves it in a real cluster).
 5. Optional: a repartition_to(target) helper that composes shrink-to-gcd then
    grow-to-target for arbitrary N.
 
