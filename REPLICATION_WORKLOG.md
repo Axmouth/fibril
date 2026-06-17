@@ -544,6 +544,35 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   only resolve durable AFTER the covering fsync). Pair with a follower-apply
   benchmark. The committed-watermark confirm (LOCK_USAGE #1) stays deprioritized
   until a benchmark shows confirm-gate contention.
+  VALIDATED DESIGN (2026-06-17, feasibility confirmed in keratin internals; ready
+  to implement): the inline fsync lives in writer.rs stage_replicated_req (it does
+  stage_replicated_append_batch then flush_buffers+flush+fsync inline). Key facts
+  that make this contained: (1) prepare_fsync_job() already calls flush_buffers()
+  and captures through_offset = staged_end_offset, and finish_fsync_job() advances
+  durable_offset to it - so a STAGED-but-not-fsynced replicated batch is flushed +
+  fsynced + marked durable by the existing commit pipeline, no Log change needed;
+  (2) owner (normal Append) and follower (ReplicatedAppend) roles are mutually
+  exclusive per log, so a PARALLEL replicated pending queue never interleaves with
+  the normal one and the normal path stays untouched. PLAN (Option A, writer.rs):
+  - add ReplicatedPendingAck { end_offset, respond_to: oneshot<Result<Replicated
+    AppendOutcome,IoError>>, outcome } and a pending_replicated: VecDeque in
+    writer_loop_inner.
+  - stage_replicated_req becomes stage-only: stage_replicated_append_batch -> for
+    a REJECTED / no-end-offset outcome respond immediately; for AfterWrite flush
+    (no fsync) + respond immediately; for AfterFsync push ReplicatedPendingAck and
+    do NOT respond (commit pipeline resolves it).
+  - pending_needs_fsync + commit_due also consider pending_replicated; commit()
+    must SEND the FsyncReq even when normal `ready` is empty if pending_replicated
+    is non-empty (follower has no normal pending).
+  - drain_fsync_done: after finish_fsync_job advances durable_offset, drain
+    pending_replicated entries with end_offset <= durable_offset and respond Ok
+    (carrying outcome); on fsync error fail them. (Resolving from durable_offset
+    avoids threading replicated acks through FsyncReq/FsyncDone.)
+  - TESTS: roles.rs replicated tests must still pass; add (a) a replicated
+    AfterFsync append resolves only after a fsync and reports durable, (b) two
+    pipelined replicated appends coalesce into fewer fsyncs (stats.batches), (c)
+    fsync error fails the waiter. Then live cluster bench (expect cluster latency
+    floor + linger/cadence knobs to finally respond) + the failover smoke.
 - NEXT (transport, "stream + keep fetching while applying"): replication is
   strict request->response per batch today - the follower sends a read, waits,
   applies (fsync), THEN sends the next read, so it is idle on the wire while
