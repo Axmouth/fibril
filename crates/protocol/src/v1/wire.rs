@@ -14,6 +14,7 @@ use crate::v1::{
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
     ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
+    ReplicationStreamEnd, ReplicationStreamProgress, ReplicationStreamReset, ReplicationStreamStart,
     ResumeIdentity, ResumeOutcome, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
     frame::Frame,
 };
@@ -688,6 +689,129 @@ pub fn decode_replication_read_ok(frame: &Frame) -> WireResult<ReplicationReadOk
     let events = reader.replication_event_read()?;
     reader.finish()?;
     Ok(ReplicationReadOk { messages, events })
+}
+
+pub fn encode_replication_stream_start(
+    stream_id: u64,
+    start: &ReplicationStreamStart,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSS1");
+    put_queue_key(&mut out, &start.topic, start.partition, start.group.as_deref())?;
+    out.put_u64(start.message_from);
+    out.put_u64(start.event_from);
+    out.put_u64(start.credit_bytes);
+    put_optional_str(&mut out, start.reporter_node_id.as_deref())?;
+    Ok(frame(Op::ReplicationStreamStart, stream_id, out.freeze()))
+}
+
+pub fn decode_replication_stream_start(frame: &Frame) -> WireResult<ReplicationStreamStart> {
+    expect_op(frame, Op::ReplicationStreamStart)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSS1", "replication stream start")?;
+    let (topic, partition, group) = reader.queue_key()?;
+    let start = ReplicationStreamStart {
+        topic,
+        group,
+        partition,
+        message_from: reader.u64()?,
+        event_from: reader.u64()?,
+        credit_bytes: reader.u64()?,
+        reporter_node_id: reader.optional_str()?.map(ToOwned::to_owned),
+    };
+    reader.finish()?;
+    Ok(start)
+}
+
+/// A streamed record batch reuses the `ReplicationReadOk` body verbatim; only the
+/// opcode (and the `request_id` as stream id) differ from the pull response.
+pub fn encode_replication_stream_batch(
+    stream_id: u64,
+    batch: &ReplicationReadOk,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSB1");
+    put_replication_message_read(&mut out, &batch.messages)?;
+    put_replication_event_read(&mut out, &batch.events)?;
+    Ok(frame(Op::ReplicationStreamBatch, stream_id, out.freeze()))
+}
+
+pub fn decode_replication_stream_batch(frame: &Frame) -> WireResult<ReplicationReadOk> {
+    expect_op(frame, Op::ReplicationStreamBatch)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSB1", "replication stream batch")?;
+    let messages = reader.replication_message_read()?;
+    let events = reader.replication_event_read()?;
+    reader.finish()?;
+    Ok(ReplicationReadOk { messages, events })
+}
+
+pub fn encode_replication_stream_progress(
+    stream_id: u64,
+    progress: &ReplicationStreamProgress,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSP1");
+    out.put_u64(progress.durable_message_next);
+    out.put_u64(progress.durable_event_next);
+    out.put_u64(progress.credit_add_bytes);
+    Ok(frame(Op::ReplicationStreamProgress, stream_id, out.freeze()))
+}
+
+pub fn decode_replication_stream_progress(
+    frame: &Frame,
+) -> WireResult<ReplicationStreamProgress> {
+    expect_op(frame, Op::ReplicationStreamProgress)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSP1", "replication stream progress")?;
+    let progress = ReplicationStreamProgress {
+        durable_message_next: reader.u64()?,
+        durable_event_next: reader.u64()?,
+        credit_add_bytes: reader.u64()?,
+    };
+    reader.finish()?;
+    Ok(progress)
+}
+
+pub fn encode_replication_stream_reset(
+    stream_id: u64,
+    reset: &ReplicationStreamReset,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSR1");
+    out.put_u64(reset.message_from);
+    out.put_u64(reset.event_from);
+    Ok(frame(Op::ReplicationStreamReset, stream_id, out.freeze()))
+}
+
+pub fn decode_replication_stream_reset(frame: &Frame) -> WireResult<ReplicationStreamReset> {
+    expect_op(frame, Op::ReplicationStreamReset)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSR1", "replication stream reset")?;
+    let reset = ReplicationStreamReset {
+        message_from: reader.u64()?,
+        event_from: reader.u64()?,
+    };
+    reader.finish()?;
+    Ok(reset)
+}
+
+pub fn encode_replication_stream_end(
+    stream_id: u64,
+    end: &ReplicationStreamEnd,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSE1");
+    out.put_u16(end.code);
+    put_str(&mut out, &end.message)?;
+    Ok(frame(Op::ReplicationStreamEnd, stream_id, out.freeze()))
+}
+
+pub fn decode_replication_stream_end(frame: &Frame) -> WireResult<ReplicationStreamEnd> {
+    expect_op(frame, Op::ReplicationStreamEnd)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSE1", "replication stream end")?;
+    let end = ReplicationStreamEnd {
+        code: reader.u16()?,
+        message: reader.str()?.to_owned(),
+    };
+    reader.finish()?;
+    Ok(end)
 }
 
 pub fn encode_replication_apply(request_id: u64, apply: &ReplicationApply) -> WireResult<Frame> {
@@ -2153,5 +2277,86 @@ mod tests {
                 actual: Op::Deliver as u16
             }
         );
+    }
+
+    #[test]
+    fn replication_stream_start_roundtrips() {
+        let start = ReplicationStreamStart {
+            topic: "orders".into(),
+            group: Some("workers".into()),
+            partition: Partition::new(7),
+            message_from: 100,
+            event_from: 42,
+            credit_bytes: 8 * 1024 * 1024,
+            reporter_node_id: Some("broker-2".into()),
+        };
+        let frame = encode_replication_stream_start(555, &start).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationStreamStart as u16);
+        assert_eq!(frame.request_id, 555);
+        assert_eq!(decode_replication_stream_start(&frame).unwrap(), start);
+    }
+
+    #[test]
+    fn replication_stream_batch_roundtrips_reusing_read_ok_body() {
+        let batch = sample_replication_read_ok();
+        let frame = encode_replication_stream_batch(900, &batch).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationStreamBatch as u16);
+        assert_eq!(frame.request_id, 900);
+        assert_eq!(decode_replication_stream_batch(&frame).unwrap(), batch);
+    }
+
+    #[test]
+    fn replication_stream_progress_roundtrips() {
+        let progress = ReplicationStreamProgress {
+            durable_message_next: 1_000,
+            durable_event_next: 250,
+            credit_add_bytes: 4 * 1024 * 1024,
+        };
+        let frame = encode_replication_stream_progress(900, &progress).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationStreamProgress as u16);
+        assert_eq!(decode_replication_stream_progress(&frame).unwrap(), progress);
+    }
+
+    #[test]
+    fn replication_stream_reset_roundtrips() {
+        let reset = ReplicationStreamReset {
+            message_from: 500,
+            event_from: 120,
+        };
+        let frame = encode_replication_stream_reset(900, &reset).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationStreamReset as u16);
+        assert_eq!(decode_replication_stream_reset(&frame).unwrap(), reset);
+    }
+
+    #[test]
+    fn replication_stream_end_roundtrips() {
+        let end = ReplicationStreamEnd {
+            code: 1,
+            message: "not owner".into(),
+        };
+        let frame = encode_replication_stream_end(900, &end).unwrap();
+        assert_eq!(frame.opcode, Op::ReplicationStreamEnd as u16);
+        assert_eq!(decode_replication_stream_end(&frame).unwrap(), end);
+    }
+
+    #[test]
+    fn replication_stream_batch_rejects_wrong_opcode() {
+        let frame = encode_replication_stream_start(
+            1,
+            &ReplicationStreamStart {
+                topic: "t".into(),
+                group: None,
+                partition: Partition::new(0),
+                message_from: 0,
+                event_from: 0,
+                credit_bytes: 1,
+                reporter_node_id: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            decode_replication_stream_batch(&frame),
+            Err(WireError::UnexpectedOpcode { .. })
+        ));
     }
 }

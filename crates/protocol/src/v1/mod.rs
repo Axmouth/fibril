@@ -78,6 +78,22 @@ pub enum Op {
     TopologyOk = 91,
     Redirect = 92,
 
+    // Streaming replication (credit-based). The frame `request_id` is the stream
+    // id, so batch/progress/reset/stop frames identify their stream without
+    // repeating the queue key.
+    /// follower->owner: open a replication stream with an initial send budget.
+    ReplicationStreamStart = 93,
+    /// owner->follower PUSH: one record batch (reuses the `ReplicationReadOk` body).
+    ReplicationStreamBatch = 94,
+    /// follower->owner: durable progress plus a credit refill (combined).
+    ReplicationStreamProgress = 95,
+    /// follower->owner: rewind the stream to an offset (gap / post-checkpoint).
+    ReplicationStreamReset = 96,
+    /// follower->owner: close the stream.
+    ReplicationStreamStop = 97,
+    /// owner->follower: the stream ended (not-owner, closed, or fenced).
+    ReplicationStreamEnd = 98,
+
     Error = 255,
 }
 
@@ -462,6 +478,49 @@ pub struct ReplicationApply {
 pub struct ReplicationApplyOk {
     pub messages_applied: bool,
     pub events_applied: bool,
+}
+
+/// follower->owner: open a credit-based replication stream for one partition.
+/// Subsequent frames on this stream are keyed by the frame `request_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStreamStart {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: Partition,
+    pub message_from: u64,
+    pub event_from: u64,
+    /// Initial send budget in bytes. The owner streams batches up to this and
+    /// pauses until the follower refills (see `ReplicationStreamProgress`).
+    pub credit_bytes: u64,
+    /// Follower identity for owner-side durable progress tracking. Followers
+    /// apply durably, so reported offsets are honest durable progress.
+    pub reporter_node_id: Option<String>,
+}
+
+/// follower->owner: durable apply progress plus a credit refill, in one frame.
+/// The progress half feeds the publish-confirm gate and the replica-durable
+/// visibility watermark; the credit half extends the owner's send budget.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStreamProgress {
+    pub durable_message_next: u64,
+    pub durable_event_next: u64,
+    pub credit_add_bytes: u64,
+}
+
+/// follower->owner: rewind the stream to these offsets (an apply gap, or after a
+/// checkpoint install) so the owner reseeks its cursor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStreamReset {
+    pub message_from: u64,
+    pub event_from: u64,
+}
+
+/// owner->follower: the stream ended. `code` distinguishes not-owner / fenced /
+/// closed so the follower can re-resolve the owner and re-subscribe if needed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStreamEnd {
+    pub code: u16,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

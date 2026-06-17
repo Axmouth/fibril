@@ -101,6 +101,22 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
             wire::encode_topology_ok(req_id, msg)
         }),
         Op::Redirect => encode_typed(msg, "Redirect", |msg| wire::encode_redirect(req_id, msg)),
+        Op::ReplicationStreamStart => encode_typed(msg, "ReplicationStreamStart", |msg| {
+            wire::encode_replication_stream_start(req_id, msg)
+        }),
+        Op::ReplicationStreamBatch => encode_typed(msg, "ReplicationStreamBatch", |msg| {
+            wire::encode_replication_stream_batch(req_id, msg)
+        }),
+        Op::ReplicationStreamProgress => encode_typed(msg, "ReplicationStreamProgress", |msg| {
+            wire::encode_replication_stream_progress(req_id, msg)
+        }),
+        Op::ReplicationStreamReset => encode_typed(msg, "ReplicationStreamReset", |msg| {
+            wire::encode_replication_stream_reset(req_id, msg)
+        }),
+        Op::ReplicationStreamStop => encode_unit_like(op, req_id, msg),
+        Op::ReplicationStreamEnd => encode_typed(msg, "ReplicationStreamEnd", |msg| {
+            wire::encode_replication_stream_end(req_id, msg)
+        }),
         Op::Error => encode_error_like(op, req_id, msg),
     }
 }
