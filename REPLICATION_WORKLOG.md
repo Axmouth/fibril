@@ -503,14 +503,23 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   contract (what consumers see) are decoupled. FIX: a replica-durable VISIBILITY
   gate - on a replica_durable queue, delivery holds offsets at/above the durable-
   replicated watermark (Kafka high-watermark model: consumers see only committed
-  data). This reuses the hold_above_offset delivery machinery (shrink path) driven
-  by replicated-durable progress. SYNTHESIS: that watermark is exactly LOCK_USAGE
-  #1's committed watermark - deprioritized for confirm latency (0.19ms), but
-  VISIBILITY makes it a CORRECTNESS need, and building it once serves both (clean
-  visibility gate + confirm-path lock removal as a bonus). Decide the contract
-  first (does replica_durable imply committed-only delivery? almost certainly yes),
-  then build the watermark and gate poll_ready on it for replica_durable queues;
-  local_durable queues deliver on local append as today.
+  data). DONE (2026-06-17). Implemented as an exclusive deliverable ceiling on
+  poll_ready: stroma poll_ready_and_mark takes an `upper` (u64::MAX = no gate);
+  the broker keeps a per-queue committed_message_offset atomic on QueueLoopState
+  (sentinel u64::MAX = ungated) computed as the (nodes-1)-th largest follower
+  durable message_next (refresh_visibility_ceiling, called from
+  record_follower_replication_progress + cache_queue_assignment + queue-loop
+  setup), and the delivery loop passes min(visibility_ceiling, shrink hold) as the
+  poll upper. Local-durable queues stay ungated (single-node unaffected). Tests:
+  stroma poll_ready_upper_gates_leasing_to_committed_offsets; broker 117 green.
+  MEASURED (3-node, replica_durable:2, 1KiB, window 2048, target 120k): throughput
+  84.2k/s (was 86.3k pre-gate, unchanged within noise), 0 missing, queue fully
+  drained, in_sync. publish->deliver p50 9ms -> 368ms - that IS the fix: delivery
+  now waits for replica-durable commit (publish->deliver ~= publish->commit <=
+  confirm) instead of exposing uncommitted data. Delivery latency now moves WITH
+  the confirm window (smaller window drops both together). SYNTHESIS realized: the
+  committed watermark now exists; switching await_confirm to read the atomic
+  (LOCK_USAGE #1 confirm-path lock removal) is now a cheap follow-on, not new work.
 - NEXT (structural, the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
@@ -522,6 +531,25 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   only resolve durable AFTER the covering fsync). Pair with a follower-apply
   benchmark. The committed-watermark confirm (LOCK_USAGE #1) stays deprioritized
   until a benchmark shows confirm-gate contention.
+- NEXT (transport, "stream + keep fetching while applying"): replication is
+  strict request->response per batch today - the follower sends a read, waits,
+  applies (fsync), THEN sends the next read, so it is idle on the wire while
+  applying and idle applying while fetching (part of the ~6ms owner-read await +
+  tick cost). TCP already guarantees in-order, reliable delivery on one
+  connection, so ordering needs no round-trips. Move to a STREAM: owner pushes (or
+  long-poll streams) offset-ordered batches down one connection; the follower runs
+  a READER (socket -> bounded in-memory queue) and an APPLIER (queue -> log)
+  concurrently, so the next batch arrives/buffers while the current one fsyncs.
+  Apply in arrival order (TCP order = owner send order); the existing checkpoint-
+  required check still guards offset gaps. CAUTIONS: bound the in-flight buffer by
+  bytes/records (existing caps) so a slow applier cannot OOM the follower; one
+  stream per OWNER (low connection count, but a slow partition head-of-line-blocks
+  others on the shared stream) vs per-PARTITION (no HoL, more connections) - start
+  per-owner + bounded buffer (evolve ProtocolOwnerReplicationPeer, which already
+  serializes one connection), measure, split per-partition only if HoL shows up.
+  Combines with the async-fsync change above to lower the latency FLOOR the bench
+  sweep bottomed at (~120ms); raw throughput is already ~90k/s so this targets
+  floor + headroom, not the ceiling.
 - ALSO (your idea, payload-size dependent): streamed/borrowed apply+decode -
   apply rebuilds owned Vec<Message>/Vec<Event> from the raw frame and re-encodes
   events; writing payload bytes straight from the read buffer avoids the copy,
