@@ -391,6 +391,65 @@ fn to_replication_read_ok(
     })
 }
 
+/// Broker-backed source for an owner replication stream sender. Bridges the
+/// generic [`replication_stream::OwnerStreamSource`] to the broker's read +
+/// follower-progress calls (the same ones the pull `ReplicationRead` path uses).
+struct BrokerOwnerStreamSource {
+    broker: Arc<Broker<StromaEngine>>,
+}
+
+#[async_trait::async_trait]
+impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
+    async fn read(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        message_from: u64,
+        event_from: u64,
+        max_messages: usize,
+        max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+    ) -> Result<ReplicationReadOk, String> {
+        let records = self
+            .broker
+            .read_owner_replication_records(
+                topic,
+                partition,
+                group,
+                message_from,
+                event_from,
+                max_messages,
+                max_events,
+                max_bytes,
+                max_wait_ms,
+            )
+            .await
+            .map_err(|err| broker_error_response(&err).1.to_string())?;
+        to_replication_read_ok(records).map_err(|err| err.to_string())
+    }
+
+    fn record_progress(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        reporter: &str,
+        durable_message_next: u64,
+        durable_event_next: u64,
+    ) {
+        self.broker.record_follower_replication_progress(
+            topic,
+            partition,
+            group,
+            reporter,
+            durable_message_next,
+            durable_event_next,
+        );
+    }
+}
+
 fn ensure_contiguous_offsets<I>(offsets: I) -> Result<(), String>
 where
     I: IntoIterator<Item = u64>,
@@ -1874,6 +1933,12 @@ pub async fn handle_connection(
         };
     }
 
+    // Owner-side replication streams opened by followers on this connection,
+    // keyed by stream id (the frame request_id). Dropping a control sender (on
+    // Stop or when this map drops at connection end) makes its sender task exit.
+    let mut owner_streams: HashMap<u64, mpsc::Sender<replication_stream::OwnerStreamControl>> =
+        HashMap::new();
+
     loop {
         let loop_event = tokio::select! {
             // ---- Heartbeat tick ----
@@ -2101,6 +2166,65 @@ pub async fn handle_connection(
                         .await;
                     }
                 }
+            }
+
+            // -------- REPLICATION STREAM (credit-based) --------------------
+            x if x == Op::ReplicationStreamStart as u16 => {
+                let start: ReplicationStreamStart =
+                    decode_wire_or_400!(frame, frame_tx_high_prio, metrics, wire::decode_replication_stream_start);
+                let stream_id = frame.request_id;
+                let (control_tx, control_rx) = mpsc::channel(64);
+                // Replace any existing stream on this id (drops the old sender,
+                // which makes the old task exit).
+                owner_streams.insert(stream_id, control_tx);
+                let source = Arc::new(BrokerOwnerStreamSource {
+                    broker: broker.clone(),
+                });
+                tokio::spawn(replication_stream::run_owner_replication_stream(
+                    source,
+                    frame_tx_high_prio.clone(),
+                    stream_id,
+                    start,
+                    control_rx,
+                    replication_stream::OwnerStreamConfig::default(),
+                ));
+            }
+            x if x == Op::ReplicationStreamProgress as u16 => {
+                let progress: ReplicationStreamProgress = decode_wire_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    wire::decode_replication_stream_progress
+                );
+                if let Some(control) = owner_streams.get(&frame.request_id) {
+                    let _ = control
+                        .send(replication_stream::OwnerStreamControl::Progress {
+                            durable_message_next: progress.durable_message_next,
+                            durable_event_next: progress.durable_event_next,
+                            credit_add_bytes: progress.credit_add_bytes,
+                        })
+                        .await;
+                }
+            }
+            x if x == Op::ReplicationStreamReset as u16 => {
+                let reset: ReplicationStreamReset = decode_wire_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    wire::decode_replication_stream_reset
+                );
+                if let Some(control) = owner_streams.get(&frame.request_id) {
+                    let _ = control
+                        .send(replication_stream::OwnerStreamControl::Reset {
+                            message_from: reset.message_from,
+                            event_from: reset.event_from,
+                        })
+                        .await;
+                }
+            }
+            x if x == Op::ReplicationStreamStop as u16 => {
+                // Dropping the control sender makes the sender task exit.
+                owner_streams.remove(&frame.request_id);
             }
 
             // -------- REPLICATION CHECKPOINT EXPORT ------------------------
