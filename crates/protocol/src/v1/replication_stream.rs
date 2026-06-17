@@ -212,6 +212,98 @@ async fn send_stream_end(frame_tx: &mpsc::Sender<Frame>, stream_id: u64, code: u
     }
 }
 
+// ---------------------------------------------------------------------------
+// Follower side: the applier loop.
+// ---------------------------------------------------------------------------
+
+/// Control the follower needs to send back to the owner as it applies. The
+/// transport encodes these to `ReplicationStreamProgress` / `ReplicationStreamReset`
+/// frames on the stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowerStreamControl {
+    /// Durable progress plus a credit refill (combined). Sent per applied batch
+    /// so progress is prompt (confirm latency) and the budget stays topped up.
+    Progress {
+        durable_message_next: u64,
+        durable_event_next: u64,
+        credit_add_bytes: u64,
+    },
+    /// Rewind the owner stream cursor (the follower handled a checkpoint).
+    Reset { message_from: u64, event_from: u64 },
+}
+
+/// Outcome of durably applying one streamed batch.
+pub enum FollowerApplyOutcome {
+    /// Applied durably; here is the new durable cursor and the bytes applied
+    /// (the credit to return).
+    Applied {
+        durable_message_next: u64,
+        durable_event_next: u64,
+        bytes: u64,
+    },
+    /// The batch could not be applied in place (offset gap / epoch fence) and the
+    /// follower has handled the checkpoint; rewind the owner stream to here.
+    Reset { message_from: u64, event_from: u64 },
+    /// Fatal apply error; the applier stops (the transport tears down the stream).
+    Error(String),
+}
+
+/// What the follower applier does with a received batch. A trait so the loop is
+/// unit-testable without a live engine.
+#[async_trait]
+pub trait FollowerStreamSink: Send + Sync + 'static {
+    async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome;
+}
+
+/// Drain in-order batches from the reader and apply them durably, sending a
+/// combined progress+credit refill after each one (and a reset when the sink
+/// handled a checkpoint). Ends when the reader channel closes (stream torn down)
+/// or an apply error occurs. The reader feeds `batch_rx`; the transport encodes
+/// `control_tx` items to frames.
+pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
+    sink: Arc<S>,
+    mut batch_rx: mpsc::Receiver<ReplicationReadOk>,
+    control_tx: mpsc::Sender<FollowerStreamControl>,
+) {
+    while let Some(batch) = batch_rx.recv().await {
+        match sink.apply(batch).await {
+            FollowerApplyOutcome::Applied {
+                durable_message_next,
+                durable_event_next,
+                bytes,
+            } => {
+                if control_tx
+                    .send(FollowerStreamControl::Progress {
+                        durable_message_next,
+                        durable_event_next,
+                        credit_add_bytes: bytes,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            FollowerApplyOutcome::Reset {
+                message_from,
+                event_from,
+            } => {
+                if control_tx
+                    .send(FollowerStreamControl::Reset {
+                        message_from,
+                        event_from,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            FollowerApplyOutcome::Error(_) => break,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,6 +510,136 @@ mod tests {
         assert_eq!(after, vec![0], "reset must rewind the cursor to 0");
 
         control_tx.send(OwnerStreamControl::Stop).await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+    }
+
+    // ---- follower applier ----
+
+    struct MockSink {
+        // Scripted outcomes, one per applied batch (front = next).
+        outcomes: Mutex<std::collections::VecDeque<FollowerApplyOutcome>>,
+        applied: Mutex<Vec<u64>>, // first message offset of each applied batch
+    }
+
+    #[async_trait]
+    impl FollowerStreamSink for MockSink {
+        async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
+            if let ReplicationMessageRead::Batch { records, .. } = &batch.messages
+                && let Some(first) = records.first()
+            {
+                self.applied.lock().unwrap().push(first.offset);
+            }
+            self.outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(FollowerApplyOutcome::Error("no scripted outcome".into()))
+        }
+    }
+
+    fn batch_from(first_offset: u64, count: u64) -> ReplicationReadOk {
+        let records = (0..count)
+            .map(|i| ReplicationMessageRecord {
+                offset: first_offset + i,
+                flags: 0,
+                headers: Vec::new(),
+                payload: vec![0u8; REC_BYTES as usize],
+            })
+            .collect();
+        ReplicationReadOk {
+            messages: ReplicationMessageRead::Batch {
+                epoch: 1,
+                requested_offset: first_offset,
+                next_offset: first_offset + count,
+                records,
+            },
+            events: ReplicationEventRead::Batch {
+                epoch: 1,
+                requested_offset: 0,
+                next_offset: 0,
+                records: Vec::new(),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn applier_sends_progress_and_credit_per_batch() {
+        let sink = Arc::new(MockSink {
+            outcomes: Mutex::new(
+                [
+                    FollowerApplyOutcome::Applied {
+                        durable_message_next: 2,
+                        durable_event_next: 0,
+                        bytes: 2 * REC_BYTES,
+                    },
+                    FollowerApplyOutcome::Applied {
+                        durable_message_next: 5,
+                        durable_event_next: 0,
+                        bytes: 3 * REC_BYTES,
+                    },
+                ]
+                .into(),
+            ),
+            applied: Mutex::new(Vec::new()),
+        });
+        let (batch_tx, batch_rx) = mpsc::channel(8);
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_follower_stream_applier(sink.clone(), batch_rx, control_tx));
+
+        batch_tx.send(batch_from(0, 2)).await.unwrap();
+        batch_tx.send(batch_from(2, 3)).await.unwrap();
+
+        assert_eq!(
+            control_rx.recv().await.unwrap(),
+            FollowerStreamControl::Progress {
+                durable_message_next: 2,
+                durable_event_next: 0,
+                credit_add_bytes: 2 * REC_BYTES,
+            }
+        );
+        assert_eq!(
+            control_rx.recv().await.unwrap(),
+            FollowerStreamControl::Progress {
+                durable_message_next: 5,
+                durable_event_next: 0,
+                credit_add_bytes: 3 * REC_BYTES,
+            }
+        );
+        assert_eq!(sink.applied.lock().unwrap().as_slice(), &[0, 2]);
+
+        drop(batch_tx); // reader closed -> applier ends
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("applier did not stop")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn applier_emits_reset_on_checkpoint() {
+        let sink = Arc::new(MockSink {
+            outcomes: Mutex::new(
+                [FollowerApplyOutcome::Reset {
+                    message_from: 40,
+                    event_from: 9,
+                }]
+                .into(),
+            ),
+            applied: Mutex::new(Vec::new()),
+        });
+        let (batch_tx, batch_rx) = mpsc::channel(8);
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx));
+
+        batch_tx.send(batch_from(40, 1)).await.unwrap();
+        assert_eq!(
+            control_rx.recv().await.unwrap(),
+            FollowerStreamControl::Reset {
+                message_from: 40,
+                event_from: 9,
+            }
+        );
+
+        drop(batch_tx);
         let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
     }
 }
