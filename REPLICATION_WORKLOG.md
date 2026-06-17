@@ -624,8 +624,10 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     not-owner -> follower re-resolves + re-subscribes (like today's NotOwner);
     gap/checkpoint via Reset. Keep the old ReplicationRead pull path as fallback
     behind a flag until the stream path proves out (A/B + failover smoke).
-  * BUILD ORDER (incremental): (1) ops + stream message structs + wire codecs +
-    roundtrip/truncation tests [safe, additive]; (2) owner per-stream sender behind
+  * BUILD ORDER (incremental): (1) DONE (393d3e6) ops 93-98 + stream message
+    structs + binary wire codecs + roundtrip/wrong-opcode tests (protocol lib 37
+    green, additive, zero behavior change); batch frame reuses the ReplicationReadOk
+    body, frames key off request_id as stream id. (2) owner per-stream sender behind
     a setting, old pull as fallback; (3) follower reader/applier + credit refill;
     (4) gap/checkpoint via Reset; (5) bench (expect the ~100ms tick to drop as
     read+apply overlap) + failover smoke. HARDEST PART = owner sender state machine
