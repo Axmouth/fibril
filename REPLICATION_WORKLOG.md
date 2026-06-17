@@ -332,12 +332,17 @@ DONE (background, VERIFY against the merged branch):
 REMAINING — live repartitioning follow-ons (polish):
 2b. FULL removal of retired partitions (next): after deregistration, actually free
     the former owner's storage for the removed partitions, not just unassign them.
-    Plan: surface a delete through QueueEngine (stroma-core has
-    cleanup_topic_partition = truncate settled, plus unmaterialize = unload; a true
-    destroy that removes the empty segment dir may need a small keratin addition),
-    add a broker retire_partition(tp, part, group) that unmaterializes + deletes,
-    and have each node call it for ITS removed partitions on shrink completion
-    (safe: they are drained/empty). Destructive, so guard on completion only.
+    A true destroy = (1) drop the partition from the in-memory index (unmaterialize
+    already does this) + (2) delete its on-disk path. So it is SMALL, not a big
+    addition. It belongs in keratin (a destroy_partition that, UNDER THE INDEX
+    LOCK, removes from index + deletes its own dir) for two reasons: keratin owns
+    the segment-dir layout (fibril hardcoding it couples to keratin internals), and
+    the index lock closes the rematerialize-during-delete race that fibril cannot
+    take the lock for. Then surface it through QueueEngine + a broker
+    retire_partition(tp, part, group), and have each node call it for ITS removed
+    partitions on shrink completion (safe: drained/empty, already deregistered).
+    Alternative without touching keratin: fibril unmaterialize + remove_dir_all,
+    accepting layout coupling + a small rematerialize race (low, since deregistered).
 3. Shrink choreography hardening: v1 relies on the watcher applying survivor holds
    within ~1 tick of the marker before the bump; a stricter version has owners ack
    "held" before the leader bumps (see DESIGN_NOTES). Low risk for a rare op.
