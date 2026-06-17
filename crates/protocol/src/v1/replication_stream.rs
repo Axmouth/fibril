@@ -674,6 +674,94 @@ mod tests {
             .unwrap();
         assert_eq!(exit, ApplierExit::CheckpointRequired);
     }
+
+    // Regression: an idle/caught-up follower must keep reporting durable progress
+    // (zero-credit) so the owner's in-sync freshness does not go stale.
+    #[tokio::test]
+    async fn applier_sends_keepalive_progress_when_idle() {
+        let sink = Arc::new(MockSink {
+            outcomes: Mutex::new(std::collections::VecDeque::new()),
+            applied: Mutex::new(Vec::new()),
+        });
+        let (_batch_tx, batch_rx) = mpsc::channel(8);
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        // Start cursor (5, 2); no batches arrive -> keepalive should fire.
+        let _task = tokio::spawn(run_follower_stream_applier(
+            sink,
+            batch_rx,
+            control_tx,
+            5,
+            2,
+            Duration::from_millis(20),
+        ));
+
+        let ctrl = tokio::time::timeout(Duration::from_secs(2), control_rx.recv())
+            .await
+            .expect("keepalive timed out")
+            .unwrap();
+        assert_eq!(
+            ctrl,
+            FollowerStreamControl::Progress {
+                durable_message_next: 5,
+                durable_event_next: 2,
+                credit_add_bytes: 0,
+            },
+            "idle keepalive reports the current cursor with zero credit"
+        );
+    }
+
+    // Regression: the keepalive must report the LATEST applied cursor, not the
+    // start cursor (so a stream that applied then went idle stays honest).
+    #[tokio::test]
+    async fn applier_keepalive_uses_latest_applied_cursor() {
+        let sink = Arc::new(MockSink {
+            outcomes: Mutex::new(
+                [FollowerApplyOutcome::Applied {
+                    durable_message_next: 100,
+                    durable_event_next: 40,
+                    bytes: 2 * REC_BYTES,
+                }]
+                .into(),
+            ),
+            applied: Mutex::new(Vec::new()),
+        });
+        let (batch_tx, batch_rx) = mpsc::channel(8);
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let _task = tokio::spawn(run_follower_stream_applier(
+            sink,
+            batch_rx,
+            control_tx,
+            0,
+            0,
+            Duration::from_millis(20),
+        ));
+
+        batch_tx.send(batch_from(0, 2)).await.unwrap();
+        // First: the per-batch progress (credit = bytes).
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), control_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            FollowerStreamControl::Progress {
+                durable_message_next: 100,
+                durable_event_next: 40,
+                credit_add_bytes: 2 * REC_BYTES,
+            }
+        );
+        // Then: idle keepalive reports the advanced cursor with zero credit.
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), control_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            FollowerStreamControl::Progress {
+                durable_message_next: 100,
+                durable_event_next: 40,
+                credit_add_bytes: 0,
+            }
+        );
+    }
 }
 
 /// Drive one owner replication stream until the follower stops it, the
