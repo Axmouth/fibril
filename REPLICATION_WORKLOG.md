@@ -481,6 +481,27 @@ window 256, 4 writers, 3-node replica_durable:2, 1KiB):
     in-flight to amortize fsync, but that raises latency. So there is NO good
     operating point on the shared drive until fsync is COALESCED (async-fsync).
     This is the strongest argument yet for the async-fsync replicated-append work.
+  POOR-MAN'S SEPARATE DISK (2026-06-18, 2-node replica_durable:2, streaming ON,
+  window 2048, via the new per-node CLUSTER_TRYOUT_NODE<i>_ROOT). @ 50k target:
+    both tmpfs:            49,997/s, deliver p50 14ms,  confirm 655ms
+    node1 tmpfs+node2 SSD: 44,950/s, deliver p50 216ms, confirm 655ms (one
+      UNCONTENDED ssd in the durability path)
+  vs 3-node SHARED disk @ 50k: 29k/s, deliver 1022ms. So a single uncontended ssd
+  ~45k/s vs ~29k shared - self-contention (3 nodes/1 drive) roughly halved
+  throughput and ~5x'd deliver latency. Drive-per-node is a big real-deployment
+  win; async-fsync still helps on the uncontended ssd (216ms deliver = real fsync
+  round-trip, coalescing would cut it).
+
+METRIC MEANINGS (benches/bin/e2e_c.rs): publish->deliver = consumer_now -
+msg.published (producer's publish timestamp embedded in the message) = true
+end-to-end publish->consumer, GATED by the replica-durable visibility watermark.
+publish confirmation = producer's time to its replica-durable ack, which is
+inflated by the PRODUCER's confirm-window backlog (Little: writers*window /
+throughput), NOT the commit time (owner replica_confirm_wait is ~0.1ms). So on an
+unsaturated fs deliver << confirm (e.g. 14ms vs 655ms) is EXPECTED and does not
+mean the gate leaks uncommitted data; on a saturated disk the two converge
+(disk bounds both). server-receive->deliver = consumer_now - msg.publish_received
+(server-stamped).
   DRIVE-SEPARATION TEST (idea, needs tryout support for per-node data roots):
     approximate separate-drives by putting the owner's data on one fs and the
     follower's on another (e.g. owner=tmpfs, follower=ssd). For replica_durable:2
