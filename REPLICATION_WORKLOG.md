@@ -341,8 +341,17 @@ REMAINING — live repartitioning follow-ons (polish):
     take the lock for. Then surface it through QueueEngine + a broker
     retire_partition(tp, part, group), and have each node call it for ITS removed
     partitions on shrink completion (safe: drained/empty, already deregistered).
-    Alternative without touching keratin: fibril unmaterialize + remove_dir_all,
-    accepting layout coupling + a small rematerialize race (low, since deregistered).
+    CHOSEN airtight design (move-to-trash, no long lock, no await-under-lock):
+    in stroma, UNDER THE INDEX LOCK (brief, no await): remove the partition entry
+    AND rename its dir to dir.trash-<uuid> (O(1) metadata). Drop the lock. Then
+    stop the queue actor (await, after unlock) so it closes its segment FDs. Then
+    remove_dir_all(trash) unlocked. Airtight vs delete-vs-recreate: the delete only
+    ever touches the renamed-away snapshot; a recreate after the lock release finds
+    no index entry and creates a FRESH dir at the original path, which the in-flight
+    delete never sees. Unix rename keeps the actor's open FDs valid in the tiny
+    window (harmless), and stopping the actor before the final delete frees space.
+    No tombstone needed. Then surface via QueueEngine + broker retire_partition,
+    watcher calls it per-owner on shrink completion.
 3. Shrink choreography hardening: v1 relies on the watcher applying survivor holds
    within ~1 tick of the marker before the bump; a stricter version has owners ack
    "held" before the leader bumps (see DESIGN_NOTES). Low risk for a rare op.
