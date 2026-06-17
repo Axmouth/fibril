@@ -573,25 +573,63 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     pipelined replicated appends coalesce into fewer fsyncs (stats.batches), (c)
     fsync error fails the waiter. Then live cluster bench (expect cluster latency
     floor + linger/cadence knobs to finally respond) + the failover smoke.
-- NEXT (transport, "stream + keep fetching while applying"): replication is
-  strict request->response per batch today - the follower sends a read, waits,
-  applies (fsync), THEN sends the next read, so it is idle on the wire while
-  applying and idle applying while fetching (part of the ~6ms owner-read await +
-  tick cost). TCP already guarantees in-order, reliable delivery on one
-  connection, so ordering needs no round-trips. Move to a STREAM: owner pushes (or
-  long-poll streams) offset-ordered batches down one connection; the follower runs
-  a READER (socket -> bounded in-memory queue) and an APPLIER (queue -> log)
-  concurrently, so the next batch arrives/buffers while the current one fsyncs.
-  Apply in arrival order (TCP order = owner send order); the existing checkpoint-
-  required check still guards offset gaps. CAUTIONS: bound the in-flight buffer by
-  bytes/records (existing caps) so a slow applier cannot OOM the follower; one
-  stream per OWNER (low connection count, but a slow partition head-of-line-blocks
-  others on the shared stream) vs per-PARTITION (no HoL, more connections) - start
-  per-owner + bounded buffer (evolve ProtocolOwnerReplicationPeer, which already
-  serializes one connection), measure, split per-partition only if HoL shows up.
-  Combines with the async-fsync change above to lower the latency FLOOR the bench
-  sweep bottomed at (~120ms); raw throughput is already ~90k/s so this targets
-  floor + headroom, not the ceiling.
+- RE-PRIORITIZED (2026-06-17, data-driven): STREAMING is the next high-value
+  lever, NOT async-fsync. After the batch-size change the follower apply (the two
+  fsyncs) is only ~3-5ms; the ~71-101ms follower tick is ~6-8 SEQUENTIAL
+  iterations of (owner-read await ~7ms + apply ~5ms) with no overlap. So fsync is
+  no longer the bottleneck - the pull round-trip + read/apply serialization is.
+  async-fsync demoted to a smaller follow-on (marginal latency now; its real value
+  is unlocking linger/cadence for replication, which the experiment showed needs
+  it). Parallel msg+event apply (item 3) also deferred - it touches the failover
+  gate, smaller win than streaming.
+- DONE (context for streaming): wire protocol is now FULLY custom binary
+  (crates/protocol/src/v1/wire.rs, 60 codecs; handler hot path uses
+  wire::decode_publish/ack/nack + encode_deliver/publish_ok/replication_read_ok).
+  Remaining rmp_serde/serde_json is only the client helper for the USER payload
+  body (NewMessage::json/.msg_pack), not framing. This is the audit perf-4 win
+  (big CPU save on large payloads -> fewer scheduler stalls/timeouts). The stream
+  batch frame reuses encode_replication_read_ok, so the batch path is binary/cheap.
+- NEXT (transport, "stream + keep fetching while applying", CREDIT-BASED). The
+  transport substrate already exists: server->client PUSH (AssignmentChanged=43
+  precedent), frame request_id reusable as a multiplexed STREAM ID, and the raw
+  batch payload codec (encode_replication_read_ok). So this is ADDITIVE protocol +
+  new owner/follower tasks, not a transport rewrite. Design:
+  * NEW ops (free slots 93-98): ReplicationStreamStart (follower->owner: stream_id,
+    tp/part/group, message_from, event_from, initial_credit_bytes), Replication
+    StreamBatch (owner->follower PUSH: stream_id + raw ReplicationReadOk payload),
+    ReplicationStreamProgress (follower->owner: durable_message_next,
+    durable_event_next, credit_add_bytes - COMBINED progress+credit in one frame),
+    ReplicationStreamReset (follower->owner: message_from/event_from - rewind on
+    gap/after checkpoint), ReplicationStreamStop (follower->owner), and an
+    owner->follower "stream ended/not-owner" signal (reuse Error or a Fin op).
+  * CREDIT flow control (bounds follower memory, no stop-and-wait): unit = bytes.
+    Follower grants initial credit; owner streams batches decrementing it, pauses
+    the stream when credit < next batch. Follower refills at a LOW-WATERMARK (once
+    ~half the granted credit is applied/freed), not at zero, so the pipe never
+    drains. Per-stream credit so a slow partition cannot starve others (app-level
+    HoL guard; TCP byte-level HoL still argues against over-multiplexing).
+  * ASYNC confirms: the applier sends ReplicationStreamProgress as it durably
+    applies (decoupled from any request); it feeds the SAME
+    record_follower_replication_progress -> confirm gate + visibility watermark
+    unchanged.
+  * FOLLOWER = reader task (socket -> bounded in-order buffer; TCP order = owner
+    send order) + applier task (buffer -> UNCHANGED apply_replicated_queue_batch,
+    still sequential msg->event so the failover-safety gate is untouched). This is
+    what overlaps the read await with the apply.
+  * OWNER = per-stream sender task {cursor, credit}, woken by replication_notify
+    (new publish) or a credit refill; reads up to credit+max-batch, pushes a batch,
+    advances cursor. One task per follower-partition (bounded new state). On Reset,
+    seek cursor; checkpoint export/install stay request/response (rare).
+  * SAFETY: apply path unchanged; epoch carried per batch fences a stale owner;
+    not-owner -> follower re-resolves + re-subscribes (like today's NotOwner);
+    gap/checkpoint via Reset. Keep the old ReplicationRead pull path as fallback
+    behind a flag until the stream path proves out (A/B + failover smoke).
+  * BUILD ORDER (incremental): (1) ops + stream message structs + wire codecs +
+    roundtrip/truncation tests [safe, additive]; (2) owner per-stream sender behind
+    a setting, old pull as fallback; (3) follower reader/applier + credit refill;
+    (4) gap/checkpoint via Reset; (5) bench (expect the ~100ms tick to drop as
+    read+apply overlap) + failover smoke. HARDEST PART = owner sender state machine
+    + credit accounting + failover/gap interaction, NOT the message defs.
 - ALSO (your idea, payload-size dependent): streamed/borrowed apply+decode -
   apply rebuilds owned Vec<Message>/Vec<Event> from the raw frame and re-encodes
   events; writing payload bytes straight from the read buffer avoids the copy,
