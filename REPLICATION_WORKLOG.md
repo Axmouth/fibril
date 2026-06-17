@@ -642,8 +642,34 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     until the follower sends Start (increment 3), so zero behavior change. NOTE:
     OwnerStreamConfig is ::default() for now; wire it to runtime replication
     settings when the path goes live in increment 3.
-    (3) NEXT: follower reader/applier + credit refill (and wire OwnerStreamConfig
-    to runtime settings; behind a setting with old pull as fallback);
+    (3a) DONE (f49b720) follower applier core: run_follower_stream_applier in
+    replication_stream.rs drains in-order batches from the reader, applies each via
+    a FollowerStreamSink, sends combined progress+credit per batch + Reset on
+    checkpoint. Unit-tested with a mock sink. (3b) NEXT - transport wiring to make
+    streaming LIVE (the big, failover-critical integration; keep behind a setting
+    default-OFF so the pull path is untouched / no regression):
+      - split the owner Conn (Framed = Stream+Sink) into a reader half + control
+        writer half (futures StreamExt::split).
+      - follower stream worker: send ReplicationStreamStart (cursor from queue
+        tails + initial credit + reporter id); reader task demuxes recv() frames -
+        ReplicationStreamBatch -> decode_replication_stream_batch ->
+        BrokerOwnerReplicationRecords (REUSE the converter at protocol
+        replication.rs:1008) -> bounded batch_tx; ReplicationStreamEnd -> handle
+        (checkpoint-required / not-owner / closed) -> stop; control-writer task
+        encodes FollowerStreamControl (Progress/Reset) -> frames -> sink half.
+      - BrokerFollowerStreamSink: apply(batch) -> broker.apply_follower_replication_
+        records -> map to FollowerApplyOutcome (Applied{new durable offsets,bytes}
+        or Reset after a checkpoint export+install).
+      - on STREAM_END_CHECKPOINT_REQUIRED: run the existing checkpoint export+install
+        then re-Start/Reset the stream at the new offset. on not-owner / conn error:
+        tear down, re-resolve owner, re-subscribe (mirror the pull path's NotOwner).
+      - wire as an alternative to spawn_follower_replication_worker_loop
+        (broker.rs:4703), selected by a new runtime setting (default off); cfg from
+        the runtime replication settings (also fixes the OwnerStreamConfig default
+        note). Keep pull as fallback.
+      - VALIDATE: protocol/broker tests green + a live 3-node tryout with streaming
+        ON (expect the ~100ms tick to drop as read+apply overlap) + the failover
+        smoke (owner kill, promotion, no data loss) before making it default.
     (4) gap/checkpoint via Reset; (5) bench (expect the ~100ms tick to drop as
     read+apply overlap) + failover smoke. HARDEST PART = owner sender state machine
     + credit accounting + failover/gap interaction, NOT the message defs.
