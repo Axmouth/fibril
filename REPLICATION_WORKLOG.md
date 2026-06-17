@@ -452,6 +452,41 @@ findings, folded here as actionable items:
   idempotency via generation, restart in-flight redelivery) are at-least-once
   behavior, documented as acceptable.
 
+REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
+- ROOT CAUSE of the replica-durable throughput ceiling is follower FSYNC RATE,
+  not the confirm gate (which the audit data already showed at ~0.03ms wait).
+  The follower apply does TWO sequential durable appends per iteration
+  (msg_log then event_log, both AfterFsync) up to max_iterations (8) per tick =
+  up to ~16 serial fsync waits/tick. SMOKING GUN: keratin's replicated-append
+  path (writer.rs stage_replicated_req) does a SYNCHRONOUS inline log.fsync() on
+  the writer thread per call, while NORMAL publish (WriterCmd::Append) goes
+  through the batcher + ASYNC fsync pipeline (fsync_tx / drain_fsync_done) that
+  coalesces many appends into one fsync and never blocks the writer thread.
+  So replication misses the group-commit publish already has, AND it bypasses
+  fsync_interval_ms (cadence) + linger entirely - those knobs have ZERO effect on
+  replication today.
+- DONE (low-risk, biggest predicted lever): raised replication read batch
+  256 -> 2048 (one fsync amortizes over ~8x more records; max_bytes_per_read 8MiB
+  still bounds memory). Math: at 256, 50k/s 1KiB needs ~390 fsync/s across both
+  logs which saturates a contended SSD (~the observed 10-15k/s ceiling); at 2048
+  it is ~8x under budget. Verify on the 3-node tryout: expect the replica-durable
+  ceiling to rise toward offered load with p99 roughly flat.
+- NEXT (structural, the real "batch-optimized replicated append like publish"):
+  route replicated AfterFsync through the async fsync pipeline (pending-ack +
+  fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
+  thread stops blocking on fsync, (b) pipelined/concurrent replicated appends
+  coalesce, and (c) fsync_interval_ms + linger finally apply to replication so the
+  low-linger/cadence experiment becomes meaningful. Keratin writer change, safety-
+  sensitive (the response must still carry the stage OUTCOME so the follower can
+  gate event apply on the message outcome - the failover-safety invariant - and
+  only resolve durable AFTER the covering fsync). Pair with a follower-apply
+  benchmark. The committed-watermark confirm (LOCK_USAGE #1) stays deprioritized
+  until a benchmark shows confirm-gate contention.
+- ALSO (your idea, payload-size dependent): streamed/borrowed apply+decode -
+  apply rebuilds owned Vec<Message>/Vec<Event> from the raw frame and re-encodes
+  events; writing payload bytes straight from the read buffer avoids the copy,
+  biggest at large payloads. Pairs with the opcode raw-codec work (perf item 4).
+
 CODE POINTERS: cohort assignor/router/controller-brain + membership types =
 crates/broker/src/coordination.rs. Gate + ExclusiveGroupRouter + apply path =
 crates/broker/src/broker.rs. Wire fields + handler join/leave/reconcile =
