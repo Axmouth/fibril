@@ -633,23 +633,15 @@ pub trait BrokerReplicationStreamApply: Send + Sync {
 const FOLLOWER_STREAM_BUFFER_BATCHES: usize = 8;
 
 /// Follower-worker apply object handed to a streaming peer. Applies each batch
-/// through the broker and tracks the latest durable cursor so the worker can sync
-/// its state when the stream ends.
+/// through the broker and advances the worker-state cursor LIVE (per batch), so a
+/// stream-to-pull fallback resumes from the right place and the worker's reported
+/// cursor stays current during a long-lived stream.
 struct WorkerStreamApply {
     broker: Arc<Broker<StromaEngine>>,
     topic: String,
     partition: Partition,
     group: Option<String>,
-    last: std::sync::Mutex<(Offset, Offset)>,
-}
-
-impl WorkerStreamApply {
-    fn last_cursor(&self) -> (Offset, Offset) {
-        *self
-            .last
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    worker: Arc<AsyncMutex<FollowerReplicationWorkerState>>,
 }
 
 impl BrokerReplicationStreamApply for WorkerStreamApply {
@@ -672,11 +664,10 @@ impl BrokerReplicationStreamApply for WorkerStreamApply {
                 event_next,
             } = outcome
             {
-                *self
-                    .last
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    (message_next, event_next);
+                let mut state = self.worker.lock().await;
+                state.message_next_offset = message_next;
+                state.event_next_offset = event_next;
+                state.status = FollowerReplicationWorkerStatus::CaughtUp;
             }
             Ok(outcome)
         })
@@ -5821,12 +5812,14 @@ impl Broker<StromaEngine> {
             (state.message_next_offset, state.event_next_offset)
         };
 
+        // The apply object advances the worker-state cursor live (per batch), so
+        // a fallback/next tick resumes from the right place without an exit sync.
         let apply = Arc::new(WorkerStreamApply {
             broker: self.clone(),
             topic: queue.topic.to_string(),
             partition: queue.partition,
             group: queue.group.as_ref().map(|g| g.to_string()),
-            last: std::sync::Mutex::new((message_from, event_from)),
+            worker: worker.clone(),
         });
 
         let exit = owner
@@ -5844,15 +5837,8 @@ impl Broker<StromaEngine> {
             )
             .await?;
 
-        // Sync the worker cursor to where the stream got, so a pull/checkpoint
-        // fallback (or the next stream) resumes from the right place.
-        let (message_next, event_next) = apply.last_cursor();
-        {
-            let mut state = worker.lock().await;
-            state.message_next_offset = message_next;
-            state.event_next_offset = event_next;
-        }
-
+        // The worker-state cursor was advanced live by `apply`, so a fallback or
+        // next tick already resumes from the right place.
         match exit {
             FollowerStreamExit::Closed => Ok(()),
             FollowerStreamExit::CheckpointRequired => {
