@@ -650,6 +650,17 @@ pub fn spawn_ganglion_broker_tasks(
                 // drained cluster-wide.
                 let complete = (0..doc.n_old).all(|r| drained.contains(&r));
                 if complete && coordination.is_leader().await {
+                    // Shrink: the merged-away partitions (>= n_new) are now drained,
+                    // so deregister them from the catalogue. That unassigns them, so
+                    // owners stop serving them and the existing eviction path frees
+                    // the empty queues; clients drop them when the stream closes.
+                    if doc.n_new < doc.n_old {
+                        for p in doc.n_new..doc.n_old {
+                            let queue =
+                                QueueIdentity::new(topic.clone(), Partition::new(p), group.as_deref());
+                            let _ = coordination.deregister_queue(&queue).await;
+                        }
+                    }
                     let _ = coordination
                         .clear_repartition_transition(&topic, group.as_deref())
                         .await;
