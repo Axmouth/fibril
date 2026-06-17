@@ -490,6 +490,17 @@ window 256, 4 writers, 3-node replica_durable:2, 1KiB):
     single CLUSTER_TRYOUT_RUN_ROOT for all nodes - add a per-node-root option to
     enable this. Also gathering a 2x2 rate image (tmpfs/disk x 50k/100k) to find
     the IO saturation knee.
+  2x2 RATE IMAGE (2026-06-18, streaming ON, window 2048, 16 writers, 3-node
+  replica_durable:2, 1KiB), achieved / deliver p50 / confirm p50:
+    tmpfs 50k  -> 49,976/s / 14ms / 655ms (window backlog 32768/50k)
+    tmpfs 100k -> 99,694/s / 15ms / 327ms (clean; tmpfs ceiling ~120k)
+    disk  50k  -> 29,024/s / 1022ms / 1039ms (SATURATED ~29k)
+    disk  100k -> 19,946/s / 1645ms / 1652ms (CONGESTION COLLAPSE: more offered
+      load -> LOWER throughput; concurrent fsync contention degrades the 1 drive)
+    All 0 missing, cursors converge. Disk latency = confirm window / achieved
+    throughput (Little) on top of the fsync-limited ceiling. tmpfs clean past 100k,
+    disk (shared) saturates ~29k and collapses beyond. -> async-fsync (coalesce
+    fsyncs) to raise the disk ceiling is the clear next perf work.
 
 REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
 - ROOT CAUSE of the replica-durable throughput ceiling is follower FSYNC RATE,
