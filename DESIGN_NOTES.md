@@ -342,6 +342,82 @@ of truth for durability or follower progress. Cache population happens after
 the durable owner operation completes, and follower progress still advances only
 after the follower applies records locally.
 
+### Replica-durable visibility: consumers see only committed data
+
+Durability (when a publish is confirmed) and visibility (when a consumer may
+receive a message) must agree. Before this, a replica-durable queue delivered a
+message to a consumer as soon as it was locally enqueued on the owner, before any
+follower had it. A consumer could then lease and ack a message that a promoted
+follower never received, while the producer, still unconfirmed, retried and
+caused duplicate work.
+
+So a replica-durable queue gates delivery on the committed-replicated watermark:
+delivery leases only offsets below the highest offset durable on the required
+number of replicas (the Kafka high-watermark model). The watermark is the
+(nodes - 1)-th largest follower durable `message_next`, since the owner is always
+durable locally. It is maintained from the same follower progress reports that
+drive the publish-confirm gate, so the two stay consistent by construction, and
+it is exposed to the delivery loop as a single per-queue atomic ceiling so the
+hot path stays lock-free.
+
+Local-durable queues are never gated. There is no committed watermark to wait on
+when the owner alone defines durability, so single-node and local-durable
+delivery are unchanged. The mechanism is an exclusive deliverable ceiling on the
+storage poll (`poll_ready` upper bound), reused from the same primitive a shrink
+uses to hold delivery above a boundary.
+
+A consequence worth stating: on a replica-durable queue delivery latency is now
+bounded below by commit latency. That is correct, not a regression. Consumers
+trade a few milliseconds of delivery delay for never acting on data that could
+vanish on failover.
+
+## Streaming replication (credit-based)
+
+Replication catch-up was strict request then response per batch. A follower sent
+a read, waited, applied it, then sent the next read. It was idle on the wire
+while applying and idle applying while fetching. Once batch sizes made the fsync
+cost small, this serialization (an owner-read round trip plus an apply, repeated
+several times per tick) became the dominant cluster latency, not durability.
+
+The model is a continuous stream with credit-based flow control. The follower
+opens a stream and grants the owner a send budget in bytes. The owner pushes
+offset-ordered record batches down one connection, decrementing the budget, and
+pauses a stream when the remaining credit is below the next batch. The follower
+runs a reader (socket into a bounded in-order buffer) and an applier (buffer into
+the log) concurrently, so the next batch arrives while the current one is being
+applied. TCP already guarantees in-order, reliable delivery on one connection, so
+ordering needs no per-batch round trips. The applier still applies sequentially
+through the unchanged durable apply path, so the failover-safety ordering (events
+never outrun accepted messages) is untouched. Only fetching is overlapped.
+
+Credit is refilled at a low watermark, not at zero. When the follower has applied
+and freed about half the granted budget it sends more credit, so the pipe never
+drains and there is no stop and wait. Credit is per stream so a slow partition
+cannot starve others sharing a connection. The unit is bytes because that bounds
+follower memory regardless of payload size.
+
+Progress and credit travel on the same follower-to-owner frame. As the applier
+durably applies, it reports its durable `message_next` / `event_next` and adds
+credit in one message. The progress half feeds the existing follower-progress
+path, so the confirm gate and the replica-durable visibility watermark keep
+working with no change. Confirms therefore become asynchronous: there is no read
+request to attach them to, they ride the stream.
+
+Gaps and checkpoints use a rewind. If an apply needs a checkpoint (an offset gap
+or an epoch fence), the follower tells the owner to reset the stream to an offset,
+or it runs the existing checkpoint export and install (kept as request/response
+because it is rare) and then resets the stream to the new offset. A stale owner is
+fenced by the epoch carried on each batch, and a not-owner signal makes the
+follower re-resolve the owner and re-subscribe, exactly as the pull path does
+today.
+
+This is additive on the wire. The transport already has server-to-client push,
+a frame id usable as a multiplexed stream id, and the raw batch payload codec, so
+streaming adds message types and owner/follower tasks rather than a transport
+rewrite. The owner gains a per-stream sender holding a cursor and remaining
+credit, woken by a new publish or a credit refill. The old pull path stays as a
+fallback until the stream path is proven, including under failover.
+
 ## Dependency boundaries
 
 ### Future: a single top-level ganglion crate to depend on
