@@ -455,13 +455,26 @@ findings, folded here as actionable items:
 PERF BENCH CAVEAT (2026-06-18): the cluster-tryout + steady bench default to
 /tmp which is TMPFS (RAM) on this box, so fsync is nearly free. ALL recorded
 throughput/latency/apply numbers are best-case (RAM), NOT real-disk. fsync cost
-(and thus the value of batch amortization + async-fsync) is understated. MUST
-re-validate on a real drive: CLUSTER_TRYOUT_RUN_ROOT=<ext4 path> (e.g.
-/home/.fibril-benchdisk on /dev/sdb4). Test BOTH tmpfs and disk. Also note the
-3 nodes share one drive, so disk runs include self-contention. Confirm latency
-in the high-rate runs is window-backlog (Little's law: outstanding/throughput),
-not the system - lower confirm_window to drop it; the real service floor shows at
-low offered rate.
+(and thus the value of batch amortization + async-fsync) is understated. Re-run
+on a real drive with CLUSTER_TRYOUT_RUN_ROOT=<ext4 path> (e.g.
+/home/.fibril-benchdisk on /dev/sdb4). Note the 3 nodes share ONE drive =
+worst-case self-contention (a drive-per-node deployment removes most of it).
+Confirm latency in high-rate runs is window-backlog (Little's law:
+outstanding/throughput), not the system.
+
+TMPFS vs REAL-DISK measured (2026-06-18, streaming ON, low-rate 5k target,
+window 256, 4 writers, 3-node replica_durable:2, 1KiB):
+  TMPFS: 4999/s, follower_apply avg 0.22ms/max 2.8ms, deliver p50/p99 18/26ms,
+    confirm p99 205ms (window backlog). fsync ~free.
+  REAL DISK (shared): 1521/s (disk-SATURATED, could not reach 5k), follower_apply
+    avg 4.99ms/max 76ms (~23x tmpfs = real fsync), deliver p50/p99 72/3049ms,
+    confirm p99 3047ms. 0 missing, cursors converge - correct, just disk-bound.
+  TAKEAWAY: fsync is THE bottleneck on real disk; tmpfs hid it entirely. The
+  multi-second tail is OVERLOAD (offered 5k > ~1.5k disk capacity for this
+  config). This makes ASYNC-FSYNC (deferred earlier) the clear top perf lever for
+  durable replication - on disk the writer blocks on every replicated fsync;
+  coalescing/pipelining it attacks both the apply cost and the throughput ceiling.
+  Also: re-bench with a drive per node (separate mounts) for a realistic number.
 
 REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
 - ROOT CAUSE of the replica-durable throughput ceiling is follower FSYNC RATE,
