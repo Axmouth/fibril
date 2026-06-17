@@ -86,6 +86,7 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
             max_iterations_per_tick: config.runtime_seed.replication.max_iterations_per_tick,
             min_in_sync_replicas: config.runtime_seed.replication.min_in_sync_replicas,
             isr_timeout_ms: config.runtime_seed.replication.isr_timeout_ms,
+            stream_enabled: config.runtime_seed.replication.stream_enabled,
         },
         partitioning: PartitioningRuntimeSettings {
             default_partition_count: config.runtime_seed.partitioning.default_partition_count,
@@ -547,6 +548,7 @@ pub fn spawn_ganglion_broker_tasks(
         FollowerReplicationWorkerConfig {
             allow_checkpoint_install: true,
             follow_runtime_settings: true,
+            stream_enabled: false,
             ..Default::default()
         },
     );

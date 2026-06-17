@@ -28,21 +28,6 @@ Because this occurs inside your state-transition engine, doing .to_string() on a
 You are passing node identifiers as String everywhere. For maximum memory efficiency and to keep memory safely flat below your 1GB target, consider introducing an explicit type alias or light wrapper for NodeId (e.g., using Arc<str> or an internal CompactString crate) if you expect your cluster sizes to scale into dozens or hundreds of nodes.
 
 
-* **Replication**
-
-  * Queue data replicated across nodes so a single broker failure does not result in queue loss.
-  * Explicit durability and failover semantics rather than relying on backup/restore strategies.
-
-* **Sharding / Partition Ownership**
-
-  * Queues distributed across a cluster instead of a single broker process.
-  * Ownership managed centrally, allowing the system to scale beyond one node while preserving queue semantics.
-
-* **etcd-backed Cluster Coordination**
-
-  * Shared source of truth for cluster membership and ownership decisions.
-  * Makes failover, leader election, and shard reassignment predictable and observable.
-
 * **Broker Restart Reconciliation**
 
   * Sessions can be recovered even after broker restart or failover.

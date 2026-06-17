@@ -323,6 +323,10 @@ impl ServerConfig {
             self.storage.keratin.batch_linger_ms =
                 parse_env("FIBRIL_KERATIN_BATCH_LINGER_MS", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_REPLICATION_STREAM_ENABLED")? {
+            self.runtime_seed.replication.stream_enabled =
+                parse_env("FIBRIL_REPLICATION_STREAM_ENABLED", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES")? {
             self.storage.keratin.message_log.segment_max_bytes =
                 parse_env("FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES", &value)?;
@@ -1020,6 +1024,10 @@ pub struct ReplicationSettings {
     pub max_iterations_per_tick: usize,
     pub min_in_sync_replicas: usize,
     pub isr_timeout_ms: u64,
+    /// Use credit-based streaming replication on the follower (default false;
+    /// pull stays the fallback until streaming is proven on the deployment).
+    #[serde(default)]
+    pub stream_enabled: bool,
 }
 
 impl Default for ReplicationSettings {
@@ -1041,6 +1049,7 @@ impl Default for ReplicationSettings {
             max_iterations_per_tick: 8,
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
+            stream_enabled: false,
         }
     }
 }

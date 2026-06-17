@@ -10,8 +10,9 @@ use std::{
 use fibril_broker::{
     Offset, Partition,
     broker::{
-        Broker, BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
-        BrokerOwnerReplicationRecords, ReplicatedStreamApply,
+        BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
+        BrokerOwnerReplicationRecords, BrokerReplicationStreamApply, FollowerStreamExit,
+        ReplicatedStreamApply,
     },
     coordination::{Coordination, NodeInfo, PartitionAssignment},
     queue_engine::{
@@ -697,6 +698,45 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
             })
         })
     }
+
+    fn stream_replication<'a>(
+        &'a self,
+        topic: &'a str,
+        partition: Partition,
+        group: Option<&'a str>,
+        message_from: Offset,
+        event_from: Offset,
+        credit_bytes: u64,
+        buffer_batches: usize,
+        apply: Arc<dyn BrokerReplicationStreamApply>,
+        shutdown: CancellationToken,
+    ) -> futures::future::BoxFuture<'a, Result<FollowerStreamExit, BrokerError>> {
+        Box::pin(async move {
+            // The stream owns a connection for its lifetime (no concurrent
+            // request/response on it). take_conn reconnects if needed.
+            let conn = self.take_conn().await?;
+            let stream_id = self.next_request_id();
+            let sink = Arc::new(StreamApplyAdapterSink { apply });
+            let exit = run_follower_replication_stream(
+                conn,
+                sink,
+                topic.to_string(),
+                partition,
+                group.map(str::to_string),
+                message_from,
+                event_from,
+                credit_bytes,
+                self.reporter_node_id.clone(),
+                stream_id,
+                buffer_batches,
+                shutdown,
+            )
+            .await;
+            // The connection is consumed/closed by the transport on exit; the
+            // next take_conn reconnects.
+            Ok(exit)
+        })
+    }
 }
 /// Pull replicated log records from an owner connection and apply them to a
 /// follower connection until both streams return empty or a limit is reached.
@@ -1099,19 +1139,6 @@ fn to_broker_event_read(
 // Follower side: credit-based streaming transport (increment 3b).
 // ===========================================================================
 
-/// Why a follower replication stream ended.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FollowerStreamExit {
-    /// The owner closed the stream cleanly (or we shut it down).
-    Closed,
-    /// A checkpoint is required; the caller falls back to pull+checkpoint, then
-    /// re-streams from the post-checkpoint cursor.
-    CheckpointRequired,
-    /// The connection failed, the owner errored, or it is no longer owner. The
-    /// caller should re-resolve the owner and retry.
-    Error(String),
-}
-
 fn stream_batch_bytes(batch: &ReplicationReadOk) -> u64 {
     let messages = match &batch.messages {
         ReplicationMessageRead::Batch { records, .. } => records
@@ -1278,50 +1305,23 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
     exit
 }
 
-/// Follower stream sink backed by the broker's durable apply path. Built by the
-/// follower-stream supervisor (which sees both broker and protocol) and handed to
-/// [`run_follower_replication_stream`].
-pub struct BrokerBackedFollowerSink {
-    broker: Arc<Broker<StromaEngine>>,
-    topic: String,
-    partition: Partition,
-    group: Option<String>,
-}
-
-impl BrokerBackedFollowerSink {
-    pub fn new(
-        broker: Arc<Broker<StromaEngine>>,
-        topic: String,
-        partition: Partition,
-        group: Option<String>,
-    ) -> Self {
-        Self {
-            broker,
-            topic,
-            partition,
-            group,
-        }
-    }
+/// Adapts a broker-side [`BrokerReplicationStreamApply`] (which speaks broker
+/// records) to the protocol [`FollowerStreamSink`] the transport drives. Decodes
+/// the batch to broker records, computes the credit (bytes) to return, and maps
+/// the broker apply outcome.
+struct StreamApplyAdapterSink {
+    apply: Arc<dyn BrokerReplicationStreamApply>,
 }
 
 #[async_trait::async_trait]
-impl FollowerStreamSink for BrokerBackedFollowerSink {
+impl FollowerStreamSink for StreamApplyAdapterSink {
     async fn apply(&self, batch: ReplicationReadOk) -> FollowerApplyOutcome {
         let bytes = stream_batch_bytes(&batch);
         let records = match to_broker_owner_replication_records(batch) {
             Ok(records) => records,
             Err(err) => return FollowerApplyOutcome::Error(err.to_string()),
         };
-        match self
-            .broker
-            .apply_replicated_stream_batch(
-                &self.topic,
-                self.partition,
-                self.group.as_deref(),
-                records,
-            )
-            .await
-        {
+        match self.apply.apply_stream_batch(records).await {
             Ok(ReplicatedStreamApply::Applied {
                 message_next,
                 event_next,

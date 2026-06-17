@@ -372,6 +372,9 @@ pub struct BrokerConfig {
     pub replication_min_in_sync_replicas: usize,
     /// How recently a follower must have reported progress to count as in-sync.
     pub replication_isr_timeout_ms: u64,
+    /// Use credit-based streaming replication on the follower instead of the
+    /// pull loop. Default false (pull) until proven; pull stays as the fallback.
+    pub replication_stream_enabled: bool,
     /// Partition count for a queue declared without an explicit count.
     pub default_partition_count: u32,
     /// Soft target partitions-per-consumer for exclusive consumer groups. When
@@ -401,6 +404,7 @@ impl Default for BrokerConfig {
             replication_max_iterations_per_tick: 8,
             replication_min_in_sync_replicas: 1,
             replication_isr_timeout_ms: 10_000,
+            replication_stream_enabled: false,
             default_partition_count: 1,
             default_consumer_target: None,
         }
@@ -487,6 +491,28 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
         partition: Partition,
         group: Option<&'a str>,
     ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>>;
+
+    /// Run a credit-based replication stream from this owner, applying batches
+    /// through `apply` until the stream ends. The default reports it unsupported
+    /// so the follower worker falls back to pull. Streaming peers override it.
+    fn stream_replication<'a>(
+        &'a self,
+        _topic: &'a str,
+        _partition: Partition,
+        _group: Option<&'a str>,
+        _message_from: Offset,
+        _event_from: Offset,
+        _credit_bytes: u64,
+        _buffer_batches: usize,
+        _apply: Arc<dyn BrokerReplicationStreamApply>,
+        _shutdown: CancellationToken,
+    ) -> BoxFuture<'a, Result<FollowerStreamExit, BrokerError>> {
+        Box::pin(async {
+            Err(BrokerError::Unknown(
+                "replication streaming not supported by this peer".into(),
+            ))
+        })
+    }
 }
 
 pub trait BrokerOwnerReplicationPeerResolver: Send + Sync {
@@ -577,6 +603,85 @@ pub enum ReplicatedStreamApply {
     CheckpointRequired,
 }
 
+/// Why a follower replication stream ended (returned by
+/// [`BrokerOwnerReplicationPeer::stream_replication`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowerStreamExit {
+    /// The owner closed the stream cleanly (or it was shut down).
+    Closed,
+    /// A checkpoint is required; the caller falls back to pull+checkpoint, then
+    /// re-streams from the post-checkpoint cursor.
+    CheckpointRequired,
+    /// The connection failed or the owner errored / is no longer owner; the
+    /// caller should re-resolve the owner and retry.
+    Error(String),
+}
+
+/// Durable apply for one streamed batch, provided by the follower worker to a
+/// streaming peer. Lets the protocol transport apply through the broker without
+/// the broker depending on the protocol crate (mirrors the resolver injection).
+pub trait BrokerReplicationStreamApply: Send + Sync {
+    fn apply_stream_batch<'a>(
+        &'a self,
+        records: BrokerOwnerReplicationRecords,
+    ) -> BoxFuture<'a, Result<ReplicatedStreamApply, BrokerError>>;
+}
+
+/// In-flight batch buffer depth for a follower stream (bounds memory together
+/// with the byte credit).
+const FOLLOWER_STREAM_BUFFER_BATCHES: usize = 8;
+
+/// Follower-worker apply object handed to a streaming peer. Applies each batch
+/// through the broker and tracks the latest durable cursor so the worker can sync
+/// its state when the stream ends.
+struct WorkerStreamApply {
+    broker: Arc<Broker<StromaEngine>>,
+    topic: String,
+    partition: Partition,
+    group: Option<String>,
+    last: std::sync::Mutex<(Offset, Offset)>,
+}
+
+impl WorkerStreamApply {
+    fn last_cursor(&self) -> (Offset, Offset) {
+        *self
+            .last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl BrokerReplicationStreamApply for WorkerStreamApply {
+    fn apply_stream_batch<'a>(
+        &'a self,
+        records: BrokerOwnerReplicationRecords,
+    ) -> BoxFuture<'a, Result<ReplicatedStreamApply, BrokerError>> {
+        Box::pin(async move {
+            let outcome = self
+                .broker
+                .apply_replicated_stream_batch(
+                    &self.topic,
+                    self.partition,
+                    self.group.as_deref(),
+                    records,
+                )
+                .await?;
+            if let ReplicatedStreamApply::Applied {
+                message_next,
+                event_next,
+            } = outcome
+            {
+                *self
+                    .last
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    (message_next, event_next);
+            }
+            Ok(outcome)
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FollowerReplicationWorkerConfig {
     pub max_messages_per_read: usize,
@@ -591,6 +696,10 @@ pub struct FollowerReplicationWorkerConfig {
     /// runtime settings every tick (the production watcher path). Explicit
     /// poll values above are then only the pre-first-snapshot fallback.
     pub follow_runtime_settings: bool,
+    /// Use credit-based streaming for catch-up instead of the pull tick (pull is
+    /// the fallback on checkpoint/error). Read from runtime settings when
+    /// `follow_runtime_settings` is set.
+    pub stream_enabled: bool,
 }
 
 impl Default for FollowerReplicationWorkerConfig {
@@ -605,6 +714,7 @@ impl Default for FollowerReplicationWorkerConfig {
             retry_poll_ms: 100,
             checkpoint_retry_poll_ms: 5000,
             follow_runtime_settings: false,
+            stream_enabled: false,
         }
     }
 }
@@ -5563,7 +5673,7 @@ impl Broker<StromaEngine> {
     }
 
     pub async fn run_follower_replication_worker_loop(
-        &self,
+        self: &Arc<Self>,
         assignment: PartitionAssignment,
         resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
         cfg: FollowerReplicationWorkerConfig,
@@ -5581,6 +5691,7 @@ impl Broker<StromaEngine> {
                     caught_up_poll_ms: snap.replication_caught_up_poll_ms,
                     retry_poll_ms: snap.replication_retry_poll_ms,
                     checkpoint_retry_poll_ms: snap.replication_checkpoint_retry_poll_ms,
+                    stream_enabled: snap.replication_stream_enabled,
                     ..cfg
                 }
             } else {
@@ -5623,11 +5734,25 @@ impl Broker<StromaEngine> {
                 _ = runtime.shutdown.cancelled() => {
                     return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
                 }
-                outcome = self.run_follower_replication_worker_once(
-                    owner.as_ref(),
-                    &assignment.queue,
-                    cfg,
-                ) => outcome,
+                outcome = async {
+                    if cfg.stream_enabled {
+                        self.run_follower_replication_stream_tick(
+                            owner.as_ref(),
+                            &assignment.queue,
+                            cfg,
+                            runtime.shutdown.clone(),
+                        )
+                        .await
+                    } else {
+                        self.run_follower_replication_worker_once(
+                            owner.as_ref(),
+                            &assignment.queue,
+                            cfg,
+                        )
+                        .await
+                        .map(|_| ())
+                    }
+                } => outcome,
             };
 
             match tick_result {
@@ -5673,6 +5798,74 @@ impl Broker<StromaEngine> {
 
             let delay_ms = runtime.state.lock().await.next_delay_ms;
             wait_for_follower_worker_delay(delay_ms, &shutdown, &runtime.shutdown).await;
+        }
+    }
+
+    /// One streaming catch-up: open a credit-based stream from the owner, apply
+    /// through the broker, and on a checkpoint requirement fall back to the proven
+    /// pull+checkpoint path for one tick (then the loop re-streams). The cursor
+    /// starts from and is synced back to the worker state, so pull and stream
+    /// share one authoritative cursor.
+    async fn run_follower_replication_stream_tick(
+        self: &Arc<Self>,
+        owner: &dyn BrokerOwnerReplicationPeer,
+        queue: &crate::coordination::QueueIdentity,
+        cfg: FollowerReplicationWorkerConfig,
+        shutdown: CancellationToken,
+    ) -> Result<(), BrokerError> {
+        let _follower_tick_timer = self.replication_timing.follower_tick.timer();
+        let worker = self.follower_replication_worker(queue)?;
+        let (message_from, event_from) = {
+            let state = worker.lock().await;
+            (state.message_next_offset, state.event_next_offset)
+        };
+
+        let apply = Arc::new(WorkerStreamApply {
+            broker: self.clone(),
+            topic: queue.topic.to_string(),
+            partition: queue.partition,
+            group: queue.group.as_ref().map(|g| g.to_string()),
+            last: std::sync::Mutex::new((message_from, event_from)),
+        });
+
+        let exit = owner
+            .stream_replication(
+                queue.topic.as_str(),
+                queue.partition,
+                queue.group.as_deref(),
+                message_from,
+                event_from,
+                cfg.max_bytes_per_read as u64,
+                FOLLOWER_STREAM_BUFFER_BATCHES,
+                apply.clone(),
+                shutdown,
+            )
+            .await?;
+
+        // Sync the worker cursor to where the stream got, so a pull/checkpoint
+        // fallback (or the next stream) resumes from the right place.
+        let (message_next, event_next) = apply.last_cursor();
+        {
+            let mut state = worker.lock().await;
+            state.message_next_offset = message_next;
+            state.event_next_offset = event_next;
+        }
+
+        match exit {
+            FollowerStreamExit::Closed => Ok(()),
+            FollowerStreamExit::CheckpointRequired => {
+                let fallback = FollowerReplicationWorkerConfig {
+                    allow_checkpoint_install: true,
+                    stream_enabled: false,
+                    ..cfg
+                };
+                let outcome = self
+                    .run_follower_replication_worker_once(owner, queue, fallback)
+                    .await?;
+                worker.lock().await.record_catch_up(fallback, &outcome);
+                Ok(())
+            }
+            FollowerStreamExit::Error(err) => Err(BrokerError::Unknown(err)),
         }
     }
 

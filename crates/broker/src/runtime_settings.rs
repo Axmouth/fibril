@@ -157,6 +157,8 @@ pub struct ReplicationRuntimeSettings {
     pub min_in_sync_replicas: usize,
     /// How recently a follower must have reported to count as in-sync.
     pub isr_timeout_ms: u64,
+    /// Use credit-based streaming replication on the follower (default false).
+    pub stream_enabled: bool,
 }
 
 impl Default for ReplicationRuntimeSettings {
@@ -172,6 +174,7 @@ impl Default for ReplicationRuntimeSettings {
             max_iterations_per_tick: 8,
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
+            stream_enabled: false,
         }
     }
 }
@@ -427,6 +430,7 @@ impl BrokerConfig {
             replication_max_iterations_per_tick: settings.replication.max_iterations_per_tick,
             replication_min_in_sync_replicas: settings.replication.min_in_sync_replicas,
             replication_isr_timeout_ms: settings.replication.isr_timeout_ms,
+            replication_stream_enabled: settings.replication.stream_enabled,
             default_partition_count: settings.partitioning.default_partition_count,
             default_consumer_target: settings.consumer_groups.default_target_per_consumer,
         }
