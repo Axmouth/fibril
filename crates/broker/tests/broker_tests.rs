@@ -62,6 +62,7 @@ impl QueueEngine for FailingPublishEngine {
         _group: Option<&str>,
         _max: usize,
         _lease_deadline: u64,
+        _upper: Offset,
     ) -> Result<Vec<Deliverable>, StromaError> {
         unimplemented!()
     }

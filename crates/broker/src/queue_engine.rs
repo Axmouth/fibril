@@ -70,6 +70,10 @@ pub enum ReplayDeadLetterOutcome {
 
 #[async_trait]
 pub trait QueueEngine {
+    /// Lease up to `max` ready messages with offset strictly below `upper`. For a
+    /// replica-durable queue `upper` is the committed-replicated watermark, so a
+    /// consumer never sees an offset that is not yet durable on enough replicas.
+    /// Pass `u64::MAX` to disable the ceiling (local-durable queues).
     async fn poll_ready(
         &self,
         tp: &str,
@@ -77,6 +81,7 @@ pub trait QueueEngine {
         group: Option<&str>,
         max: usize,
         lease_deadline: UnixMillis,
+        upper: Offset,
     ) -> Result<Vec<Deliverable>, StromaError>;
 
     async fn ack(
@@ -612,10 +617,11 @@ impl QueueEngine for StromaEngine {
         group: Option<&str>,
         max: usize,
         lease_deadline: UnixMillis,
+        upper: Offset,
     ) -> Result<Vec<Deliverable>, StromaError> {
         let v = self
             .inner
-            .poll_ready(tp, part, group, max, lease_deadline)
+            .poll_ready(tp, part, group, max, lease_deadline, upper)
             .await?;
 
         Ok(v.into_iter()

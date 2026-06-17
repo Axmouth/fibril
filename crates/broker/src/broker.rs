@@ -1161,6 +1161,13 @@ struct QueueLoopState {
     /// messages are still in a merged-away partition) until every merge source has
     /// drained. Sentinel `NO_HOLD_ABOVE` (u64::MAX) means no shrink hold.
     hold_above_offset: AtomicU64,
+    /// Replica-durable VISIBILITY gate: the committed-replicated message
+    /// watermark (next offset, exclusive). Delivery leases only offsets BELOW
+    /// this, so a consumer never sees a message that is not yet durable on enough
+    /// replicas (Kafka high-watermark model). Maintained from follower durable
+    /// progress reports. Sentinel `NO_VISIBILITY_CEILING` (u64::MAX) means no gate
+    /// (local-durable queues deliver as soon as a message is locally ready).
+    committed_message_offset: AtomicU64,
 }
 
 /// Sentinel for [`QueueLoopState::exclusive_assignee`] meaning "no exclusive
@@ -1170,6 +1177,10 @@ const NO_EXCLUSIVE_ASSIGNEE: u64 = u64::MAX;
 /// Sentinel for [`QueueLoopState::hold_above_offset`] meaning "no shrink hold"
 /// (deliver every offset).
 const NO_HOLD_ABOVE: u64 = u64::MAX;
+
+/// Sentinel for [`QueueLoopState::committed_message_offset`] meaning "no
+/// replica-durable visibility gate" (deliver every locally-ready offset).
+const NO_VISIBILITY_CEILING: u64 = u64::MAX;
 
 impl QueueLoopState {
     fn new() -> Self {
@@ -1186,6 +1197,7 @@ impl QueueLoopState {
             exclusive_assignee: AtomicU64::new(NO_EXCLUSIVE_ASSIGNEE),
             delivery_held: AtomicBool::new(false),
             hold_above_offset: AtomicU64::new(NO_HOLD_ABOVE),
+            committed_message_offset: AtomicU64::new(NO_VISIBILITY_CEILING),
         }
     }
     fn wake(&self) {
@@ -1244,6 +1256,40 @@ impl QueueLoopState {
     fn set_hold_above_offset(&self, boundary: Option<Offset>) {
         self.hold_above_offset
             .store(boundary.unwrap_or(NO_HOLD_ABOVE), Ordering::Release);
+        self.wake();
+    }
+
+    /// The replica-durable visibility ceiling (exclusive): deliver only offsets
+    /// below this. `u64::MAX` (the sentinel) means no gate. Read on the delivery
+    /// hot path, so it is a single atomic load with no lock.
+    fn visibility_ceiling(&self) -> Offset {
+        self.committed_message_offset.load(Ordering::Acquire)
+    }
+
+    /// Set the replica-durable visibility ceiling. `None` removes the gate
+    /// (local-durable). Monotonic for a given incarnation: the committed
+    /// watermark only advances, so a stale lower report never regresses it (a
+    /// real reset, e.g. demotion/eviction, recreates the queue loop state).
+    /// Wakes the delivery loop so newly-committed messages flow immediately.
+    fn set_visibility_ceiling(&self, ceiling: Option<Offset>) {
+        let next = ceiling.unwrap_or(NO_VISIBILITY_CEILING);
+        let mut current = self.committed_message_offset.load(Ordering::Acquire);
+        loop {
+            // Never regress a real ceiling; setting the no-gate sentinel (MAX) or
+            // a higher ceiling always wins.
+            if next != NO_VISIBILITY_CEILING && next <= current && current != NO_VISIBILITY_CEILING {
+                return;
+            }
+            match self.committed_message_offset.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
         self.wake();
     }
 
@@ -1917,7 +1963,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         };
         let cell = self
             .replication_progress
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
             .clone();
         {
@@ -1936,6 +1982,55 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
         self.replication_timing.record_follower_progress_report();
         cell.changed.notify_waiters();
+        // Advance the replica-durable visibility ceiling so newly-committed
+        // messages become deliverable.
+        self.refresh_visibility_ceiling(&key);
+    }
+
+    /// Recompute the replica-durable visibility ceiling for a queue from its
+    /// cached assignment and follower durable progress, and store it on the
+    /// queue loop state for the delivery gate. The committed watermark is the
+    /// (nodes-1)-th largest follower `message_next` (the owner is always durable
+    /// locally), i.e. the highest offset durable on the required number of
+    /// replicas. Local-durable queues (nodes <= 1) are left ungated. No-op when
+    /// the queue is not yet known locally.
+    fn refresh_visibility_ceiling(&self, key: &QueueKey) {
+        let Some(assignment) = self.assignment_cache.get(key).map(|entry| entry.clone()) else {
+            return;
+        };
+        let Ok(requirement) = assignment.durability_requirement() else {
+            return;
+        };
+        if requirement.nodes <= 1 {
+            // Local-durable: deliver as soon as locally ready (no gate).
+            return;
+        }
+        let required_followers = requirement.nodes - 1;
+        let Some(qs) = self.queues.get(key).map(|entry| entry.value().clone()) else {
+            return;
+        };
+
+        // A follower that has not reported counts as 0. The committed watermark
+        // is the required-th largest follower message_next.
+        let mut follower_nexts: Vec<Offset> = {
+            match self.replication_progress.get(key) {
+                Some(cell) => {
+                    let followers = cell.lock_followers();
+                    assignment
+                        .followers
+                        .iter()
+                        .map(|node| followers.get(node).map(|p| p.message_next).unwrap_or(0))
+                        .collect()
+                }
+                None => vec![0; assignment.followers.len()],
+            }
+        };
+        follower_nexts.sort_unstable_by(|a, b| b.cmp(a));
+        let watermark = follower_nexts
+            .get(required_followers - 1)
+            .copied()
+            .unwrap_or(0);
+        qs.set_visibility_ceiling(Some(watermark));
     }
 
     /// Reported follower durable progress for one queue (observability/tests).
@@ -1966,14 +2061,15 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     /// Cache the assignment governing a local queue (watcher-maintained).
     pub fn cache_queue_assignment(&self, assignment: &PartitionAssignment) {
-        self.assignment_cache.insert(
-            QueueKey {
-                tp: assignment.queue.topic.to_string(),
-                part: assignment.queue.partition,
-                group: assignment.queue.group.clone(),
-            },
-            assignment.clone(),
-        );
+        let key = QueueKey {
+            tp: assignment.queue.topic.to_string(),
+            part: assignment.queue.partition,
+            group: assignment.queue.group.clone(),
+        };
+        self.assignment_cache.insert(key.clone(), assignment.clone());
+        // A newly cached replica-durable assignment installs the visibility gate
+        // (no-op for local-durable or an unmaterialized queue).
+        self.refresh_visibility_ceiling(&key);
     }
 
     /// Shareable confirm gate for spawned per-queue confirm loops.
@@ -3080,6 +3176,11 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         // spawn settle loop for this consumer
         self.spawn_settle_loop(consumer.clone(), settle_rx);
 
+        // Initialize the replica-durable visibility gate before any delivery so
+        // a replica-durable queue never leases an uncommitted offset (it blocks
+        // at 0 until followers report). No-op for local-durable queues.
+        self.refresh_visibility_ceiling(&key);
+
         // spawn delivery loop once per queue
         if !qs.started.swap(true, Ordering::SeqCst) {
             tracing::debug!(
@@ -4136,6 +4237,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     let cfg = broker.config_snapshot();
                     let lease_deadline = unix_millis() + cfg.inflight_ttl_ms;
 
+                    // Replica-durable visibility gate: never lease an offset that
+                    // is not yet committed on enough replicas (sentinel u64::MAX =
+                    // no gate). Combine with the shrink hold boundary; both are
+                    // exclusive deliverable ceilings, so the lower one wins. When
+                    // nothing is committed yet poll returns empty and the loop
+                    // parks until set_visibility_ceiling wakes it.
+                    let poll_upper = qs
+                        .visibility_ceiling()
+                        .min(hold_above.unwrap_or(u64::MAX));
+
                     // TODO: Also limit each poll batch based on size of aggreated messages
                     let deliverables = match broker
                         .engine
@@ -4145,6 +4256,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                             key.group.as_deref(),
                             total_cap,
                             lease_deadline,
+                            poll_upper,
                         )
                         .await
                     {
