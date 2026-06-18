@@ -15,6 +15,10 @@ path = "bin/e2e_c.rs"
 name = "steady_c"
 path = "bin/steady_c.rs"
 
+[[bin]]
+name = "failover_verify"
+path = "bin/failover_verify.rs"
+
 [dependencies]
 fibril-broker = { path = "../crates/broker" }
 fibril-client = { path = "../crates/client" }

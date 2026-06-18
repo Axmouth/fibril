@@ -964,6 +964,23 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   TODO(config-knobs, expert tier): PUBLISH_RETRY_INITIAL/MAX_BACKOFF_MS and
   SUBSCRIPTION_OWNER_CHECK_MS are hardcoded client consts -> promote to ClientOptions
   in the later settings pass (with publish_timeout_ms).
+  IDENTITY-BASED FAILOVER VERIFICATION (2026-06-18, Jepsen-lite). New bench bin
+  benches/bin/failover_verify.rs: single producer tags each message with
+  MARKER+seq and records the CONFIRMED (durable) set; concurrent consumer records
+  the received MULTISET; external orchestrator kills the owner mid-run; at the end
+  it decomposes by IDENTITY (not counts): loss = confirmed - received (must be 0),
+  phantom = received - attempted (must be 0), duplicates = received count>1,
+  unconfirmed_delivered = received - confirmed (saved-but-unacked, fine).
+  RESULT (150k @ 10k, owner killed mid-run, streaming+fold, replica_durable:2):
+    attempted 150,000; send_failures 0; confirmed 149,703; received_unique 149,853;
+    duplicates 114; unconfirmed_delivered 150; LOSS 0; PHANTOM 0; VERDICT PASS.
+  Arithmetic checks out: received_unique = confirmed + unconfirmed_delivered
+  (149,853 = 149,703 + 150) and confirmed - received = 0. So EVERY confirmed id was
+  delivered at least once across an owner kill under load, zero phantoms = the
+  durability guarantee proven at the identity level (not inferred from counts). The
+  150 unconfirmed_delivered are exactly the saved-but-unacked set (appended +
+  replicated before the kill, confirm failed, delivered because committed).
+  This is the repeatable failover-correctness check the harness-mode TODO wanted.
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
