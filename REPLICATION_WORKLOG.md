@@ -917,6 +917,23 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   on subscription stream break, re-resolve owner + re-subscribe to the new owner,
   mirroring the producer retry). The producer-failover goal (smooth the 150k-error
   gap) is DONE.
+  NO-LOSS MATERIALLY VERIFIED (2026-06-18, before building Piece 4): same failover-
+  under-load run, then a FRESH consumer drains the new owner. confirmed=172,057,
+  original (stalled) reader received=124,146 -> 47,911 unconsumed; fresh consumer
+  DRAINED 48,067 from the new owner. So every confirmed-but-unconsumed message was
+  durably queued on the new owner and fully retrievable = ZERO LOSS, the "missing"
+  is purely consumer stall. (drained slightly > unconsumed = at-least-once
+  redelivery of inflight-at-shutdown leases; drained+received ~= confirmed+overlap.)
+  Confirms the producer side is sound and Piece 4 is the right next fix.
+  CONSUMER-SIDE ROOT CAUSE (read for Piece 4): partition_resubscribe_loop only
+  subscribes partitions NOT already in `known` (new ones from a grow); a partition
+  whose OWNER changed is never re-subscribed, and forward_into just stops when the
+  per-partition stream breaks. subscribe_partition_manual/auto retry only Redirect,
+  not transient transport errors. So an owner death silently kills that partition's
+  consumption. PIECE 4 = a supervised per-partition forward: on stream break (owner
+  died) re-resolve owner + re-subscribe to the new owner (subscribe_partition_* with
+  transient retry like the producer), resume forwarding; stop only on user-close,
+  topic-gone (not-found), or partition no longer ours.
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
