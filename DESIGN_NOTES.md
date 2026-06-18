@@ -545,3 +545,38 @@ and failover latency is dominated by reassignment, so it is not worth the
 double-subscribe/cancel complexity yet. Minor wart: the dead owner's connection
 slot lingers in the pool after a failover (the engine keeps retrying it) - harmless,
 a future pool-prune.
+
+## Idempotent producer (effectively-once producer->broker) — roadmap
+
+The client failover retry is at-least-once: a confirmed-publish whose confirm
+errors mid-failover has an UNKNOWN outcome, so re-publishing can duplicate. Today
+the caller decides via `FibrilError::is_retryable()` / `retry_advice()` (the manual
+path - it knows which ids failed and can re-publish, tolerating duplicates). The
+automatic path is an idempotent producer:
+
+- Each producer gets a stable **producer-id**; each message a **monotonic
+  sequence** per (producer-id, partition).
+- The owner keeps a small **dedup window** of recently-seen (producer-id, seq)
+  and drops a re-send it already has, returning the original outcome. The window
+  travels with replication (so a failover owner still dedups) and is bounded
+  (seq high-watermark per producer + a recent ring).
+- The client then **auto-retries unconfirmed publishes** safely: no duplicate, and
+  order preserved (re-send in seq order). This is the Kafka idempotent-producer
+  model; it turns the producer->broker hop into effectively-once.
+
+`failover_verify` is the proof harness: with this, `unconfirmed_delivered` and
+`duplicate deliveries` go to ~0 across a failover. Scope: a producer-id/seq field
+on the publish wire op + an owner-side dedup map (replicated) + client auto-retry.
+Until then, `is_retryable()` + caller retry is the documented, honest stopgap.
+
+Helper layering (opt-in, addable before the broker side lands): a client-side
+`ReliablePublisher` wrapper that (a) stamps a producer-id + monotonic sequence
+header on each message and (b) retries-until-confirmed using `is_retryable()`.
+With no broker dedup it is at-least-once-no-miss (every message eventually
+confirmed; duplicates possible - documented); once the owner-side dedup map lands
+the SAME helper becomes effectively-once with NO API change, because the ids are
+already on the wire. So the whole "zero-missed" pipeline (ids + retry) can ship as
+an opt-in helper now and get wired to real dedup later. Pair it with copy-paste
+DOC EXAMPLES (the `match ... is_retryable()` pattern, ReliablePublisher usage,
+later the idempotent-producer config) - reliability patterns belong in docs, not
+rediscovered per user.
