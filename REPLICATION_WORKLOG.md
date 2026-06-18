@@ -772,6 +772,20 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   NEXT: sweep stream_apply_linger_us (e.g. 0 / 250us / 500us / 1ms / 2ms / 5ms) on
   the mixed layout to map the latency/throughput knee, then step 3 (adversarial +
   failover validation) before flipping streaming default-on.
+  TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
+  factor >= 3 the owner runs one independent stream sender per follower, each
+  re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
+  scales with replica count. (Log reads themselves are cheap/page-cache;
+  owner_read ~0.3-0.75ms in benches. Encode is the real duplication. No effect at
+  RF2 = one follower, which is why current benches do not show it.) DESIGN: a
+  "shared tail, private catch-up" model - the owner keeps ONE tail reader, reads +
+  encodes each frame ONCE and fans the identical bytes to all followers in the
+  caught-up/live set; each follower still keeps its OWN cursor, credit, and progress
+  report (confirm gate + per-follower in-sync unchanged). A follower that falls
+  behind drops into an individual catch-up stream from its cursor and REJOINS the
+  broadcast once it converges to the live offset. Owner-side; complementary to the
+  follower-side fold (that amortizes fsync; this de-duplicates read/encode). Slot
+  after the throughput/latency + validation work since it only pays off at RF>=3.
 - NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
