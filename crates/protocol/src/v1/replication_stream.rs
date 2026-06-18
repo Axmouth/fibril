@@ -339,18 +339,20 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     message_from: u64,
     event_from: u64,
     keepalive: std::time::Duration,
+    apply_linger: std::time::Duration,
 ) -> ApplierExit {
     // Microbatch the apply: streamed frames arrive small (the owner reads whatever
     // has trickled in), and applying each one separately means one follower fsync
     // per frame, which collapses durable-replication throughput on real disk. So
     // fold contiguous same-epoch frames into one apply. Under backlog the queued
-    // frames fold immediately (zero added latency); when data only trickles, a
-    // short one-shot linger gathers a few first. Bounds: at most one linger wait
-    // per apply (so added latency is APPLY_LINGER, not unbounded), and a byte cap
-    // so a deep backlog still applies in reasonable chunks.
-    // NOTE: hardcoded for now to measure the win; promote to a replication runtime
-    // setting if it pays off.
-    const APPLY_LINGER: std::time::Duration = std::time::Duration::from_millis(2);
+    // frames fold immediately (zero added latency); when data only trickles, the
+    // one-shot `apply_linger` gathers a few first. Bounds: at most one linger wait
+    // per apply (so added latency is `apply_linger`, not unbounded), and a byte cap
+    // so a deep backlog still applies in reasonable chunks. `apply_linger` is a
+    // replication runtime setting (stream_apply_linger_us); 0 = drain-only.
+    // TODO: promote MAX_MERGE_BYTES to a replication runtime setting too - it is
+    // the other microbatch lever (caps how large a coalesced apply can grow, i.e.
+    // memory vs fsync-amortization), pairs with stream_apply_linger_us.
     const MAX_MERGE_BYTES: u64 = 16 * 1024 * 1024;
 
     let mut message_next = message_from;
@@ -399,13 +401,13 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
             let next = match batch_rx.try_recv() {
                 Ok(batch) => Some(batch),
                 Err(mpsc::error::TryRecvError::Empty) => {
-                    if lingered || APPLY_LINGER.is_zero() {
+                    if lingered || apply_linger.is_zero() {
                         None
                     } else {
                         lingered = true;
                         // Ok(None) = reader closed (apply what we have; the next
                         // loop's receive returns the close). Err = linger elapsed.
-                        tokio::time::timeout(APPLY_LINGER, batch_rx.recv())
+                        tokio::time::timeout(apply_linger, batch_rx.recv())
                             .await
                             .ok()
                             .flatten()
@@ -735,6 +737,7 @@ mod tests {
             0,
             0,
             std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
         ));
 
         // Both queued before the applier drains -> they fold (0..2 then 2..5).
@@ -796,6 +799,7 @@ mod tests {
             0,
             0,
             std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
         ));
 
         batch_tx.send(batch_from(0, 2)).await.unwrap(); // 0..2
@@ -835,7 +839,7 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, _control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx, 0, 0, std::time::Duration::ZERO));
+        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx, 0, 0, std::time::Duration::ZERO, std::time::Duration::ZERO));
 
         batch_tx.send(batch_from(40, 1)).await.unwrap();
         let exit = tokio::time::timeout(Duration::from_secs(2), task)
@@ -863,6 +867,7 @@ mod tests {
             5,
             2,
             Duration::from_millis(20),
+            std::time::Duration::ZERO,
         ));
 
         let ctrl = tokio::time::timeout(Duration::from_secs(2), control_rx.recv())
@@ -904,6 +909,7 @@ mod tests {
             0,
             0,
             Duration::from_millis(20),
+            std::time::Duration::ZERO,
         ));
 
         batch_tx.send(batch_from(0, 2)).await.unwrap();

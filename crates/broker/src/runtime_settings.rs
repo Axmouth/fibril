@@ -159,6 +159,10 @@ pub struct ReplicationRuntimeSettings {
     pub isr_timeout_ms: u64,
     /// Use credit-based streaming replication on the follower (default false).
     pub stream_enabled: bool,
+    /// Linger (microseconds) the streaming follower spends gathering more
+    /// contiguous frames before applying them as one fsynced batch. Higher trades
+    /// apply latency for better fsync amortization (throughput); 0 = drain-only.
+    pub stream_apply_linger_us: u64,
 }
 
 impl Default for ReplicationRuntimeSettings {
@@ -175,6 +179,7 @@ impl Default for ReplicationRuntimeSettings {
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
             stream_enabled: false,
+            stream_apply_linger_us: 2_000,
         }
     }
 }
@@ -431,6 +436,7 @@ impl BrokerConfig {
             replication_min_in_sync_replicas: settings.replication.min_in_sync_replicas,
             replication_isr_timeout_ms: settings.replication.isr_timeout_ms,
             replication_stream_enabled: settings.replication.stream_enabled,
+            replication_stream_apply_linger_us: settings.replication.stream_apply_linger_us,
             default_partition_count: settings.partitioning.default_partition_count,
             default_consumer_target: settings.consumer_groups.default_target_per_consumer,
         }

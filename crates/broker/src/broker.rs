@@ -375,6 +375,9 @@ pub struct BrokerConfig {
     /// Use credit-based streaming replication on the follower instead of the
     /// pull loop. Default false (pull) until proven; pull stays as the fallback.
     pub replication_stream_enabled: bool,
+    /// Linger (microseconds) the streaming follower spends gathering more
+    /// contiguous frames before applying them as one fsynced batch. 0 = drain-only.
+    pub replication_stream_apply_linger_us: u64,
     /// Partition count for a queue declared without an explicit count.
     pub default_partition_count: u32,
     /// Soft target partitions-per-consumer for exclusive consumer groups. When
@@ -405,6 +408,7 @@ impl Default for BrokerConfig {
             replication_min_in_sync_replicas: 1,
             replication_isr_timeout_ms: 10_000,
             replication_stream_enabled: false,
+            replication_stream_apply_linger_us: 2_000,
             default_partition_count: 1,
             default_consumer_target: None,
         }
@@ -504,6 +508,7 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
         _event_from: Offset,
         _credit_bytes: u64,
         _keepalive_ms: u64,
+        _apply_linger_us: u64,
         _buffer_batches: usize,
         _apply: Arc<dyn BrokerReplicationStreamApply>,
         _shutdown: CancellationToken,
@@ -692,6 +697,9 @@ pub struct FollowerReplicationWorkerConfig {
     /// the fallback on checkpoint/error). Read from runtime settings when
     /// `follow_runtime_settings` is set.
     pub stream_enabled: bool,
+    /// Linger (microseconds) the streaming applier spends gathering more
+    /// contiguous frames before applying them as one fsynced batch. 0 = drain-only.
+    pub stream_apply_linger_us: u64,
 }
 
 impl Default for FollowerReplicationWorkerConfig {
@@ -707,6 +715,7 @@ impl Default for FollowerReplicationWorkerConfig {
             checkpoint_retry_poll_ms: 5000,
             follow_runtime_settings: false,
             stream_enabled: false,
+            stream_apply_linger_us: 2_000,
         }
     }
 }
@@ -5684,6 +5693,7 @@ impl Broker<StromaEngine> {
                     retry_poll_ms: snap.replication_retry_poll_ms,
                     checkpoint_retry_poll_ms: snap.replication_checkpoint_retry_poll_ms,
                     stream_enabled: snap.replication_stream_enabled,
+                    stream_apply_linger_us: snap.replication_stream_apply_linger_us,
                     ..cfg
                 }
             } else {
@@ -5831,6 +5841,7 @@ impl Broker<StromaEngine> {
                 event_from,
                 cfg.max_bytes_per_read as u64,
                 cfg.caught_up_poll_ms,
+                cfg.stream_apply_linger_us,
                 FOLLOWER_STREAM_BUFFER_BATCHES,
                 apply.clone(),
                 shutdown,

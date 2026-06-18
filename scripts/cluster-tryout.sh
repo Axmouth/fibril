@@ -44,6 +44,7 @@ REPLICATION_MAX_MESSAGES_PER_READ="${REPLICATION_MAX_MESSAGES_PER_READ:-}"
 REPLICATION_MAX_EVENTS_PER_READ="${REPLICATION_MAX_EVENTS_PER_READ:-}"
 REPLICATION_MAX_BYTES_PER_READ="${REPLICATION_MAX_BYTES_PER_READ:-}"
 REPLICATION_MAX_ITERATIONS_PER_TICK="${REPLICATION_MAX_ITERATIONS_PER_TICK:-}"
+REPLICATION_STREAM_APPLY_LINGER_US="${REPLICATION_STREAM_APPLY_LINGER_US:-}"
 CLUSTER_TRYOUT_RUN_ROOT="${CLUSTER_TRYOUT_RUN_ROOT:-/tmp}"
 ADMIN_WAIT_SECS=5
 CLUSTER_WAIT_SECS=90
@@ -123,6 +124,13 @@ for numeric_env in \
 do
   require_positive_int_env "$numeric_env"
 done
+
+# Apply linger may be 0 (drain-only), so it is non-negative rather than positive.
+if [[ -n "$REPLICATION_STREAM_APPLY_LINGER_US" ]] \
+  && ! [[ "$REPLICATION_STREAM_APPLY_LINGER_US" =~ ^[0-9]+$ ]]; then
+  echo "FAIL: REPLICATION_STREAM_APPLY_LINGER_US must be a non-negative integer" >&2
+  exit 2
+fi
 
 cluster_attempts() {
   # Cluster checks sleep 0.3s between attempts. Round up so the configured
@@ -1256,6 +1264,10 @@ if [[ "$GANGLION" == true ]]; then
   if [[ -n "${REPLICATION_MAX_ITERATIONS_PER_TICK:-}" ]]; then
     settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_MAX_ITERATIONS_PER_TICK" \
       '.replication.max_iterations_per_tick = $value')"
+  fi
+  if [[ -n "${REPLICATION_STREAM_APPLY_LINGER_US:-}" ]]; then
+    settings="$(echo "$settings" | jq -c --argjson value "$REPLICATION_STREAM_APPLY_LINGER_US" \
+      '.replication.stream_apply_linger_us = $value')"
   fi
   body="$(jq -cn --argjson v "$expected_version" --argjson settings "$settings" \
     '{expected_version: $v, settings: $settings}')"

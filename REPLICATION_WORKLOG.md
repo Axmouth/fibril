@@ -758,6 +758,20 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   PIDs); default root is /tmp (tmpfs) so repeated runs leaked GBs of RAM. Clean
   /tmp/fibril-cluster-tryout.* periodically (or always set CLUSTER_TRYOUT_RUN_ROOT
   off-tmpfs). Worth a real fix: rm RUN_DIR on clean exit.
+  STEP 2 DONE (2026-06-18): APPLY_LINGER promoted to a cluster-replicated
+  replication runtime setting `stream_apply_linger_us` (default 2000us=2ms; 0 =
+  drain-only). Wired config ReplicationSettings -> ReplicationRuntimeSettings ->
+  BrokerConfig -> FollowerReplicationWorkerConfig -> stream_replication trait ->
+  transport -> run_follower_stream_applier (param replaces the const). cluster-
+  tryout passes REPLICATION_STREAM_APPLY_LINGER_US (non-negative) through the
+  runtime-settings PUT so it is live-sweepable. Tests green.
+  TODO (user-requested lever): promote MAX_MERGE_BYTES (the coalesced-apply size
+  cap, currently 16MiB const in run_follower_stream_applier) to a replication
+  runtime setting too - the other microbatch lever (memory vs fsync amortization),
+  pairs with stream_apply_linger_us.
+  NEXT: sweep stream_apply_linger_us (e.g. 0 / 250us / 500us / 1ms / 2ms / 5ms) on
+  the mixed layout to map the latency/throughput knee, then step 3 (adversarial +
+  failover validation) before flipping streaming default-on.
 - NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer

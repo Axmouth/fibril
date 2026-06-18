@@ -3528,6 +3528,7 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
         checkpoint_retry_poll_ms: 5000,
         follow_runtime_settings: false,
         stream_enabled: false,
+        stream_apply_linger_us: 2_000,
     };
     let state = FollowerReplicationWorkerState::new(23, 29);
 

@@ -1028,6 +1028,17 @@ pub struct ReplicationSettings {
     /// pull stays the fallback until streaming is proven on the deployment).
     #[serde(default)]
     pub stream_enabled: bool,
+    /// How long the streaming follower lingers to gather more contiguous frames
+    /// before applying (and fsyncing) them as one batch. The applier always drains
+    /// frames already queued (free coalescing under backlog); this bounds the extra
+    /// wait it spends gathering more when nearly caught up. Higher = better fsync
+    /// amortization (throughput) at the cost of apply latency; 0 = drain-only.
+    #[serde(default = "default_stream_apply_linger_us")]
+    pub stream_apply_linger_us: u64,
+}
+
+fn default_stream_apply_linger_us() -> u64 {
+    2_000
 }
 
 impl Default for ReplicationSettings {
@@ -1050,6 +1061,7 @@ impl Default for ReplicationSettings {
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
             stream_enabled: false,
+            stream_apply_linger_us: default_stream_apply_linger_us(),
         }
     }
 }
