@@ -580,3 +580,63 @@ an opt-in helper now and get wired to real dedup later. Pair it with copy-paste
 DOC EXAMPLES (the `match ... is_retryable()` pattern, ReliablePublisher usage,
 later the idempotent-producer config) - reliability patterns belong in docs, not
 rediscovered per user.
+
+## Plexus — a fan-out / stream consumption mode (future direction)
+
+"Plexus" (anatomical: a branching nerve/vessel network that fans one signal to
+many) is the working name for a JetStream-like fan-out / message-bus capability:
+each consumer gets EVERY message (pub/sub + persistent streams), versus the
+work-queue core where each message goes to one consumer (consumed=gone).
+
+### Distribution: a mode within Fibril, NOT a separate product
+
+Precedent is unanimous - nobody ships fan-out as a separate product: Pulsar
+(subscription type over one BookKeeper log), Kafka (consumer groups over the log),
+NATS (JetStream is a mode inside the server), Redis/RabbitMQ (streams added as a
+type within the same broker). "The thing everyone connects to" REQUIRES one
+cluster, one client, one operational surface. A separate product would
+re-implement the hardened part (replication/coordination/log) and drift.
+
+So Plexus is a per-topic (or per-subscription, Pulsar-style) MODE on the same
+cluster/binary/client, selected by a topic-type / subscription-type knob.
+
+### The enabling refactor: substrate vs consumption semantics
+
+Fibril is already log-backed (keratin-log) with the work-queue semantics layered
+on as events. The move is to make that layering explicit:
+
+- SHARED SUBSTRATE (the hardened 80%, already trending toward a clustering module):
+  keratin-log + partitioning + replication + cohorts + coordination (ganglion) +
+  cursor plumbing + the client failover/fan-in machinery.
+- PLUGGABLE CONSUMPTION ENGINES over it, via the existing stroma `QueueEngine` seam:
+    - WorkQueueEngine (today): events -> lease/ack/consumed-gone.
+    - StreamEngine (Plexus, new): retention policy + per-consumer DURABLE CURSORS +
+      fan-out delivery + subjects/wildcards.
+  Broker routes by topic-type to the right engine. New crate (e.g. stroma-stream /
+  plexus) beside stroma-core, both on the substrate - not a fork, not client-only.
+
+The physical log already retains (for replication/recovery); work-queue "removal"
+is logical state, so a retained-stream mode coexists at the substrate level.
+
+### What Plexus adds vs reuses
+
+REUSES (no rebuild): replicated partitioned log, raft coordination, partitioning,
+failover, per-partition ordering, client fan-in + producer/consumer failover retry.
+ADDS: (1) retention mode (time/size/count) instead of consume-removal - starting
+point is the existing retention-via-checkpoint; (2) per-consumer durable cursor (the
+core new primitive; stored + replicated like assignments); (3) fan-out = N cursors
+over one log (no per-subscriber copy, cheaper than RabbitMQ); (4) subject hierarchy
++ wildcard routing; (5) the bus surface (smart client exposing both modes).
+HARDER/LATER: two modes coexisting without product confusion (clear topic-type
+semantics - "no core fan-out" was deliberate, so this is a scoped expansion);
+exactly-once (overlaps the idempotent-producer work); JetStream extras (KV/object
+store, mirrors/sources) as features on top of streams.
+
+### Why this shape
+
+One thing to connect to (the goal), zero duplication of the hard parts, client
+reuse, one cluster to operate. The mode selector (topic/subscription type) is the
+intuitive user knob - Pulsar shows users grok "pick your subscription type" - and
+fits the "just works" smart-client philosophy. Verdict: high usability upside, and
+a layer rather than a rewrite, because the substrate already supports
+log-with-many-cursors.
