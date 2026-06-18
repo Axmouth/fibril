@@ -680,6 +680,10 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
        now marginal and the safe form costs a recovery-path change. Re-validate the
        ACTUAL current disk bottleneck before spending that.
   STEP 1a (Keratin::sync) stands either way - additive, safe, useful for B too.
+  DECISION (2026-06-18): going with B - shelve parallel-fsync, re-measure the real
+  DISK replicated bottleneck now that streaming has landed, before spending
+  recovery-path risk on a now-marginal fsync win. The recovery gate (option A /
+  "just the recovery gate") stays available as a standalone robustness item.
 - NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
