@@ -772,6 +772,21 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   NEXT: sweep stream_apply_linger_us (e.g. 0 / 250us / 500us / 1ms / 2ms / 5ms) on
   the mixed layout to map the latency/throughput knee, then step 3 (adversarial +
   failover validation) before flipping streaming default-on.
+  MULTI-PARTITION AGGREGATE (2026-06-18, Goal B test: does partitioning recover the
+  throughput a single replicated partition loses?). Shared SSD, 3-node
+  replica_durable:2, streaming+fold, BENCH_PARTITION_COUNT, target >= offered:
+    1 part:  90,292/s    6 parts: 146,085/s    12 parts: 145,476/s (plateau)
+  READ: single-partition (90k) is PER-PARTITION serialization-bound, not disk-bound;
+  spreading to 6 partitions aggregates to ~146k (1.6x), plateauing at ~146k because
+  12 == 6 -> the cap is the SINGLE SHARED SSD (all owner+follower fsync on one
+  drive), not software/coordination (which scales across nodes). 146k replicated
+  aggregate is ~87% of the 168k single-node local-durable ceiling WHILE paying the
+  full replication tax (4 fsync/msg) on one disk. GOAL B (partitioned cluster does
+  not lose throughput vs single node) HOLDS: partitioning recovers the per-partition
+  replication loss to ~87% of single-node even on a shared disk; drive-per-node
+  (each node already did 146k for ONE partition in the mixed test) removes the disk
+  cap so aggregate scales past single-node. Latency at saturation is multi-second
+  (offered > capacity backlog) - the linger sweep measures latency at a sane load.
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
