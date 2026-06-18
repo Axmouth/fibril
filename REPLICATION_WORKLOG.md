@@ -858,6 +858,25 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   owner transition (smooth the failover gap); (2) owner-side read/encode fan-out for
   RF>=3; (3) MAX_MERGE_BYTES as a 2nd microbatch setting; (4) formalize
   --failover-under-load harness mode; (5) future parallel-fsync + recovery gate.
+  CLIENT FAILOVER RETRY - PIECE 1 (2026-06-18): confirmed publish now retries
+  transient transport failures (Disconnection/BrokenPipe/Eof = owner unreachable
+  mid-failover) instead of erroring immediately. publish_confirmed loop: on a
+  transient error it refreshes topology from any reachable node
+  (refresh_topology_throttled - seeds + pooled endpoints, cooldown-gated; assignment
+  is raft-replicated so any one live node gives the authoritative owner) and retries
+  with exp backoff (10->500ms + jitter) until a new ClientOptions knob
+  publish_timeout_ms (default 30s; 0 = fail fast = old behavior). engine_for is
+  in-loop so it re-resolves the new owner once the controller reassigns. "No owner
+  yet" is DERIVED (cluster reachable + named owner unreachable -> keep retrying),
+  not a distinct code yet (Piece 2). ERR_NOT_OWNER stays fail-fast; Redirect retry
+  unchanged. Tests: is_transient classifier, nap bounds, option default/builder;
+  redirect-to-dead test updated to the opt-out (publish_timeout_ms(0)) fail-fast
+  path. SCOPE = publish_confirmed only; pipelined publish_with_confirmation +
+  ordering-under-window = Piece 3.
+  TODO (user-flagged 2026-06-18): the retry backoff constants should become options
+  too - but knobs are proliferating, so this needs a SETTINGS TIERING model (basic /
+  advanced / expert + collapsible categories in the admin panel) so expert knobs do
+  not clutter the default view. Recorded in DESIGN_NOTES.md.
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that

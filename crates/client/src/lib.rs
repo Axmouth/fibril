@@ -44,6 +44,7 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 use tokio::{
@@ -128,8 +129,39 @@ pub enum FibrilError {
     Unexpected { msg: String },
 }
 
+impl FibrilError {
+    /// Whether this error is a transient transport failure worth retrying against
+    /// a refreshed owner. During an owner failover the routed owner is briefly
+    /// unreachable (it died, and the cluster has not committed the reassignment
+    /// yet), which surfaces as a connect/severed-connection error rather than a
+    /// structured response. Structured server errors (including a terminal
+    /// not-owner) are NOT transient here and stay fail-fast.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            FibrilError::Disconnection { .. } | FibrilError::BrokenPipe | FibrilError::Eof
+        )
+    }
+}
+
 /// Result alias used by the Fibril Rust client.
 pub type FibrilResult<T> = Result<T, FibrilError>;
+
+/// Confirmed-publish retry backoff bounds (transient owner-failover retries).
+const PUBLISH_RETRY_INITIAL_BACKOFF_MS: u64 = 10;
+const PUBLISH_RETRY_MAX_BACKOFF_MS: u64 = 500;
+
+/// One backoff nap: `base_ms` plus up to `base_ms` of jitter, so many publishers
+/// retrying a shared failover do not resynchronize into retry storms.
+fn publish_retry_nap(base_ms: u64) -> Duration {
+    let span = base_ms.max(1);
+    let jitter = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0)
+        % span;
+    Duration::from_millis(base_ms + jitter)
+}
 
 // TODO: Explore From<..> impls for relevant error types
 // TODO: Add opt in event per message sent/received
@@ -1566,21 +1598,33 @@ impl Publisher {
             .shared
             .route_partition(topic, group, message.partition_key.as_deref());
         let mut attempts = 0u32;
+        // Bound transient (owner-failover) retries by the configured budget. 0
+        // disables retry: a transport failure fails fast, the pre-existing behavior.
+        let deadline = (self.shared.opts.publish_timeout_ms > 0)
+            .then(|| Instant::now() + Duration::from_millis(self.shared.opts.publish_timeout_ms));
+        let mut backoff_ms = PUBLISH_RETRY_INITIAL_BACKOFF_MS;
         loop {
-            let engine = self.shared.engine_for(topic, partition, group).await?;
-            // Clone per attempt so a redirect can re-send on the new owner.
-            let confirmation = engine
-                .publish_with_confirmation(
-                    topic.to_string(),
-                    group.map(str::to_string),
-                    partition,
-                    partitioning_version,
-                    message.content_type.clone(),
-                    message.headers.clone(),
-                    message.payload.clone(),
-                )
-                .await?;
-            match confirmation.confirmed().await {
+            // Resolve the owner, send, and await the confirm as one attempt so a
+            // transport failure at any step (dead owner during failover) is caught
+            // and retried together. Clone per attempt so a retry re-sends cleanly.
+            let attempt = async {
+                let engine = self.shared.engine_for(topic, partition, group).await?;
+                let confirmation = engine
+                    .publish_with_confirmation(
+                        topic.to_string(),
+                        group.map(str::to_string),
+                        partition,
+                        partitioning_version,
+                        message.content_type.clone(),
+                        message.headers.clone(),
+                        message.payload.clone(),
+                    )
+                    .await?;
+                confirmation.confirmed().await
+            }
+            .await;
+
+            match attempt {
                 Ok(offset) => return Ok(offset),
                 Err(FibrilError::Redirect(redirect)) => {
                     if attempts >= self.shared.opts.max_redirects {
@@ -1594,6 +1638,22 @@ impl Publisher {
                     }
                     self.shared.apply_redirect(&redirect);
                     attempts += 1;
+                }
+                // Transient transport failure = the owner is unreachable mid-failover.
+                // Refresh topology from a reachable node (so engine_for picks up the
+                // new owner once the controller reassigns) and retry with backoff
+                // until the deadline, instead of surfacing the failover gap as errors.
+                Err(err) if err.is_transient() => {
+                    let Some(deadline) = deadline else {
+                        return Err(err);
+                    };
+                    if Instant::now() >= deadline {
+                        return Err(err);
+                    }
+                    self.shared.refresh_topology_throttled().await;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    tokio::time::sleep(publish_retry_nap(backoff_ms).min(remaining)).await;
+                    backoff_ms = (backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
                 }
                 Err(other) => return Err(other),
             }
@@ -2046,6 +2106,47 @@ impl ClientShared {
                 .await;
         }
         self.engine_for_operation().await
+    }
+
+    /// Refresh the whole topology cache from any reachable node, throttled by
+    /// `topology_refresh_cooldown_ms` so concurrent retriers do not storm the
+    /// cluster. The assignment table is raft-replicated, so any one live node
+    /// returns the authoritative current owners - we just need to reach one. Tries
+    /// the configured seeds first, then any already-pooled endpoint (a likely
+    /// survivor), and stops at the first that answers. Best-effort: on total
+    /// failure the cache is left as-is and the caller's retry will try again.
+    async fn refresh_topology_throttled(&self) {
+        let now = unix_millis();
+        let last = self.topology.load().last_refresh_ms;
+        if now.saturating_sub(last) < self.opts.topology_refresh_cooldown_ms {
+            return;
+        }
+
+        let mut candidates: Vec<SocketAddr> = self.bootstrap.clone();
+        candidates.extend(self.pool.read().keys().copied());
+        let mut seen = std::collections::HashSet::new();
+        for addr in candidates {
+            if !seen.insert(addr) {
+                continue;
+            }
+            let Ok(slot) = self.engine_slot(addr).await else {
+                continue;
+            };
+            let Ok(engine) = slot.engine_for_operation().await else {
+                continue;
+            };
+            let Ok(topology) = engine.fetch_topology().await else {
+                continue;
+            };
+            let refreshed_at = unix_millis();
+            self.topology.rcu(|old| {
+                let mut updated = (**old).clone();
+                updated.replace(topology.clone());
+                updated.last_refresh_ms = refreshed_at;
+                updated
+            });
+            return;
+        }
     }
 
     /// Update the routing cache from a broker redirect (point-update to the new
@@ -3555,6 +3656,13 @@ pub struct ClientOptions {
     /// subscribe time). Higher values reduce background traffic at the cost of
     /// slower pickup of new partitions.
     pub partition_resubscribe_interval_ms: Option<u64>,
+    /// How long a confirmed publish keeps retrying across a transient owner
+    /// failover (ms) before giving up. On a transport failure to the owner the
+    /// client refreshes topology from another node and retries with backoff until
+    /// this deadline, so a publish issued during a failover blocks for the
+    /// reassignment window and then succeeds against the new owner instead of
+    /// erroring. `0` disables the retry (fail fast on the first transport error).
+    pub publish_timeout_ms: u64,
 }
 
 impl ClientOptions {
@@ -3574,6 +3682,16 @@ impl ClientOptions {
             topology_refresh_cooldown_ms: 1_000,
             topology_warm_timeout_ms: Some(5_000),
             partition_resubscribe_interval_ms: Some(5_000),
+            publish_timeout_ms: 30_000,
+        }
+    }
+
+    /// Return a copy with a custom confirmed-publish failover retry budget (ms).
+    /// `0` disables retry (fail fast on the first transient transport error).
+    pub fn publish_timeout_ms(self, timeout_ms: u64) -> Self {
+        Self {
+            publish_timeout_ms: timeout_ms,
+            ..self
         }
     }
 
@@ -3680,6 +3798,54 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::time::Duration;
+
+    #[test]
+    fn transient_errors_are_retryable_structured_errors_are_not() {
+        // Transport failures (owner unreachable mid-failover) are retryable.
+        assert!(FibrilError::BrokenPipe.is_transient());
+        assert!(FibrilError::Eof.is_transient());
+        assert!(
+            FibrilError::Disconnection {
+                msg: "connection refused".into()
+            }
+            .is_transient()
+        );
+        // Structured server errors (incl. terminal not-owner) are fail-fast.
+        assert!(
+            !FibrilError::Failure {
+                code: ERR_NOT_OWNER,
+                msg: "no owner".into()
+            }
+            .is_transient()
+        );
+        assert!(
+            !FibrilError::SerializationFailure {
+                msg: "bad payload".into()
+            }
+            .is_transient()
+        );
+    }
+
+    #[test]
+    fn publish_retry_nap_stays_within_base_and_double() {
+        for base in [1u64, 10, 100, 500] {
+            for _ in 0..50 {
+                let nap = publish_retry_nap(base).as_millis() as u64;
+                assert!(nap >= base, "nap {nap} below base {base}");
+                assert!(nap < base * 2, "nap {nap} >= 2x base {base}");
+            }
+        }
+    }
+
+    #[test]
+    fn publish_timeout_defaults_on_and_is_configurable() {
+        assert_eq!(ClientOptions::new().publish_timeout_ms, 30_000);
+        assert_eq!(ClientOptions::new().publish_timeout_ms(0).publish_timeout_ms, 0);
+        assert_eq!(
+            ClientOptions::new().publish_timeout_ms(5_000).publish_timeout_ms,
+            5_000
+        );
+    }
 
     #[test]
     fn fnv1a_is_deterministic_and_distributes() {

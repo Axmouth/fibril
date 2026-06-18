@@ -440,3 +440,31 @@ retry count (`no_leader_retries`) defaults to a small non-zero value so a freshl
 started or churning standby waits briefly for its leader view to converge instead
 of failing instantly. Tests run it at zero to prove the deterministic forward and
 hint-redirect path carries the write without leaning on retry-spam.
+
+## Settings tiering (admin panel) — basic / advanced / expert
+
+We are settings-disciplined: every tunable is configurable (no magic numbers).
+But that means a LOT of knobs (replication has confirm/poll/read-budget/stream
+linger/merge-bytes/retry-backoff/... and each subsystem adds more), and dumping
+them all into the admin panel buries the handful that operators actually touch.
+
+Decision: settings carry a visibility TIER, and the admin panel shows tiers
+progressively rather than all at once.
+
+- **Basic** — the few an operator changes routinely (e.g. durability defaults,
+  partition count default, inflight TTL). Shown by default.
+- **Advanced** — tuning knobs for a specific workload (poll intervals, read
+  budgets, stream apply linger). Behind an "Advanced" expander per category.
+- **Expert** — internal/rarely-correct-to-touch dials (retry backoff bounds,
+  merge-byte caps, jitter). Behind a further "Expert" reveal; changing them is
+  a "you'd better know why" action.
+
+UI shape: collapsible per-category sections (Replication, Delivery, Partitioning,
+...), each expandable, and within a category the Advanced/Expert knobs are hidden
+until revealed. So the default view is small; depth is opt-in.
+
+Implementation hook: tag each setting with its tier in the settings schema
+(the same place the runtime-settings document is defined), so the panel renders
+tiers from metadata instead of hard-coding which knob goes where. This keeps the
+"every knob is configurable" guarantee while keeping the surface approachable.
+New knobs (e.g. the client publish retry backoff bounds) default to Expert.

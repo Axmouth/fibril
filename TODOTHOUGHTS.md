@@ -1,3 +1,5 @@
+fibril "jetstreams" (bit with bio theme still) with fanout etc built on top of fibril
+
 1. Split-Brain Mitigation via Epoch Comparison
 
 In DeterministicPartitionPlacement::plan, you determine whether an assignment's epoch changes:

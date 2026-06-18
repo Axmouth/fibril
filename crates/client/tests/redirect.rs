@@ -264,15 +264,21 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
     addr
 }
 
-/// A redirect to an unreachable owner surfaces a clean connection error — it
-/// does NOT hang.
+/// With failover retry disabled (`publish_timeout_ms = 0`), a redirect to an
+/// unreachable owner surfaces a clean connection error fast — it does NOT hang.
+/// (The default config retries such transient transport failures across an owner
+/// failover until the budget; that bounded-retry path is exercised by the
+/// failover-under-load harness rather than this fail-fast unit.)
 #[tokio::test]
 async fn redirect_to_dead_endpoint_errors_without_hanging() {
     // 127.0.0.1:1 is privileged and unbound -> connection refused fast.
     let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
     let mock = spawn_mock(MockBehavior::RedirectTo(dead)).await;
 
-    let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
+    // Disable the failover retry so a dead redirect fails fast (the opt-out path).
+    let client = Client::connect(mock, ClientOptions::new().publish_timeout_ms(0))
+        .await
+        .unwrap();
     let publisher = client.publisher("jobs").unwrap();
 
     let result = tokio::time::timeout(
