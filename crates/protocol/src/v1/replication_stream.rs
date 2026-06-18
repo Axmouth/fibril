@@ -157,6 +157,60 @@ fn classify(batch: &ReplicationReadOk) -> BatchOutcome {
     }
 }
 
+fn batch_bytes(batch: &ReplicationReadOk) -> u64 {
+    let msg = message_side(&batch.messages).map(|(_, b)| b).unwrap_or(0);
+    let evt = event_side(&batch.events).map(|(_, b)| b).unwrap_or(0);
+    msg + evt
+}
+
+/// Fold `next` into `acc` so the follower can apply (and fsync) several streamed
+/// frames as one batch. Succeeds only when both the message and event sides
+/// continue `acc` contiguously at the same epoch and neither side is a checkpoint
+/// frame. On success `acc` covers both frames; on failure `next` is handed back
+/// untouched so the caller applies `acc` and carries `next` to the next apply
+/// (this is how an epoch change, an offset gap, or a checkpoint frame stops a
+/// merge run without losing data).
+fn try_fold_streamed(
+    acc: &mut ReplicationReadOk,
+    next: ReplicationReadOk,
+) -> Result<(), ReplicationReadOk> {
+    let messages_continue = matches!(
+        (&acc.messages, &next.messages),
+        (
+            ReplicationMessageRead::Batch { epoch: ae, next_offset: an, .. },
+            ReplicationMessageRead::Batch { epoch: be, requested_offset: br, .. },
+        ) if ae == be && an == br
+    );
+    let events_continue = matches!(
+        (&acc.events, &next.events),
+        (
+            ReplicationEventRead::Batch { epoch: ae, next_offset: an, .. },
+            ReplicationEventRead::Batch { epoch: be, requested_offset: br, .. },
+        ) if ae == be && an == br
+    );
+    if !(messages_continue && events_continue) {
+        return Err(next);
+    }
+
+    if let (
+        ReplicationMessageRead::Batch { next_offset: an, records: ar, .. },
+        ReplicationMessageRead::Batch { next_offset: bn, records: br, .. },
+    ) = (&mut acc.messages, next.messages)
+    {
+        ar.extend(br);
+        *an = bn;
+    }
+    if let (
+        ReplicationEventRead::Batch { next_offset: an, records: ar, .. },
+        ReplicationEventRead::Batch { next_offset: bn, records: br, .. },
+    ) = (&mut acc.events, next.events)
+    {
+        ar.extend(br);
+        *an = bn;
+    }
+    Ok(())
+}
+
 /// Apply a control message. Returns `false` when the stream should stop.
 fn apply_control<S: OwnerStreamSource>(
     control: OwnerStreamControl,
@@ -286,39 +340,92 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     event_from: u64,
     keepalive: std::time::Duration,
 ) -> ApplierExit {
+    // Microbatch the apply: streamed frames arrive small (the owner reads whatever
+    // has trickled in), and applying each one separately means one follower fsync
+    // per frame, which collapses durable-replication throughput on real disk. So
+    // fold contiguous same-epoch frames into one apply. Under backlog the queued
+    // frames fold immediately (zero added latency); when data only trickles, a
+    // short one-shot linger gathers a few first. Bounds: at most one linger wait
+    // per apply (so added latency is APPLY_LINGER, not unbounded), and a byte cap
+    // so a deep backlog still applies in reasonable chunks.
+    // NOTE: hardcoded for now to measure the win; promote to a replication runtime
+    // setting if it pays off.
+    const APPLY_LINGER: std::time::Duration = std::time::Duration::from_millis(2);
+    const MAX_MERGE_BYTES: u64 = 16 * 1024 * 1024;
+
     let mut message_next = message_from;
     let mut event_next = event_from;
+    let mut carry: Option<ReplicationReadOk> = None;
     loop {
-        // Ok(Some) = batch, Ok(None) = reader closed, Err(()) = idle keepalive tick.
-        let received: Result<Option<ReplicationReadOk>, ()> = if keepalive.is_zero() {
-            Ok(batch_rx.recv().await)
-        } else {
-            tokio::time::timeout(keepalive, batch_rx.recv())
-                .await
-                .map_err(|_| ())
-        };
-
-        let batch = match received {
-            Ok(Some(batch)) => batch,
-            Ok(None) => return ApplierExit::ReaderClosed,
-            Err(()) => {
-                // Caught-up keepalive: refresh durable progress, no credit change.
-                if control_tx
-                    .send(FollowerStreamControl::Progress {
-                        durable_message_next: message_next,
-                        durable_event_next: event_next,
-                        credit_add_bytes: 0,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return ApplierExit::ReaderClosed;
+        // First frame for this apply: a carried-over unmergeable frame, otherwise
+        // a fresh receive. Ok(Some) = batch, Ok(None) = reader closed, Err(()) =
+        // idle keepalive tick.
+        let first = match carry.take() {
+            Some(batch) => batch,
+            None => {
+                let received: Result<Option<ReplicationReadOk>, ()> = if keepalive.is_zero() {
+                    Ok(batch_rx.recv().await)
+                } else {
+                    tokio::time::timeout(keepalive, batch_rx.recv())
+                        .await
+                        .map_err(|_| ())
+                };
+                match received {
+                    Ok(Some(batch)) => batch,
+                    Ok(None) => return ApplierExit::ReaderClosed,
+                    Err(()) => {
+                        // Caught-up keepalive: refresh durable progress, no credit.
+                        if control_tx
+                            .send(FollowerStreamControl::Progress {
+                                durable_message_next: message_next,
+                                durable_event_next: event_next,
+                                credit_add_bytes: 0,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return ApplierExit::ReaderClosed;
+                        }
+                        continue;
+                    }
                 }
-                continue;
             }
         };
 
-        match sink.apply(batch).await {
+        // Fold as many contiguous frames as are ready (plus a one-shot linger).
+        let mut merged = first;
+        let mut lingered = false;
+        while batch_bytes(&merged) < MAX_MERGE_BYTES {
+            let next = match batch_rx.try_recv() {
+                Ok(batch) => Some(batch),
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    if lingered || APPLY_LINGER.is_zero() {
+                        None
+                    } else {
+                        lingered = true;
+                        // Ok(None) = reader closed (apply what we have; the next
+                        // loop's receive returns the close). Err = linger elapsed.
+                        tokio::time::timeout(APPLY_LINGER, batch_rx.recv())
+                            .await
+                            .ok()
+                            .flatten()
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => None,
+            };
+            match next {
+                Some(batch) => match try_fold_streamed(&mut merged, batch) {
+                    Ok(()) => continue,
+                    Err(unmerged) => {
+                        carry = Some(unmerged);
+                        break;
+                    }
+                },
+                None => break,
+            }
+        }
+
+        match sink.apply(merged).await {
             FollowerApplyOutcome::Applied {
                 durable_message_next,
                 durable_event_next,
@@ -604,8 +711,64 @@ mod tests {
         }
     }
 
+    // Contiguous same-epoch frames that are already queued fold into ONE apply
+    // (one follower fsync) and report a single combined progress + credit refill.
     #[tokio::test]
-    async fn applier_sends_progress_and_credit_per_batch() {
+    async fn applier_coalesces_contiguous_frames_into_one_apply() {
+        let sink = Arc::new(MockSink {
+            outcomes: Mutex::new(
+                [FollowerApplyOutcome::Applied {
+                    durable_message_next: 5,
+                    durable_event_next: 0,
+                    bytes: 5 * REC_BYTES,
+                }]
+                .into(),
+            ),
+            applied: Mutex::new(Vec::new()),
+        });
+        let (batch_tx, batch_rx) = mpsc::channel(8);
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let task = tokio::spawn(run_follower_stream_applier(
+            sink.clone(),
+            batch_rx,
+            control_tx,
+            0,
+            0,
+            std::time::Duration::ZERO,
+        ));
+
+        // Both queued before the applier drains -> they fold (0..2 then 2..5).
+        batch_tx.send(batch_from(0, 2)).await.unwrap();
+        batch_tx.send(batch_from(2, 3)).await.unwrap();
+
+        assert_eq!(
+            control_rx.recv().await.unwrap(),
+            FollowerStreamControl::Progress {
+                durable_message_next: 5,
+                durable_event_next: 0,
+                credit_add_bytes: 5 * REC_BYTES,
+            },
+            "two contiguous frames coalesce into one progress + combined credit"
+        );
+        assert_eq!(
+            sink.applied.lock().unwrap().as_slice(),
+            &[0],
+            "only one apply (started at the first frame's offset)"
+        );
+
+        drop(batch_tx); // reader closed -> applier ends
+        let exit = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("applier did not stop")
+            .unwrap();
+        assert_eq!(exit, ApplierExit::ReaderClosed);
+    }
+
+    // A non-contiguous frame (offset gap) must NOT fold: the first frame applies,
+    // the gapped frame is carried to its own apply. Same shape guards an epoch
+    // change or a checkpoint frame from being merged into the wrong batch.
+    #[tokio::test]
+    async fn applier_does_not_fold_across_offset_gap() {
         let sink = Arc::new(MockSink {
             outcomes: Mutex::new(
                 [
@@ -615,9 +778,9 @@ mod tests {
                         bytes: 2 * REC_BYTES,
                     },
                     FollowerApplyOutcome::Applied {
-                        durable_message_next: 5,
+                        durable_message_next: 11,
                         durable_event_next: 0,
-                        bytes: 3 * REC_BYTES,
+                        bytes: REC_BYTES,
                     },
                 ]
                 .into(),
@@ -626,10 +789,17 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, mut control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(sink.clone(), batch_rx, control_tx, 0, 0, std::time::Duration::ZERO));
+        let task = tokio::spawn(run_follower_stream_applier(
+            sink.clone(),
+            batch_rx,
+            control_tx,
+            0,
+            0,
+            std::time::Duration::ZERO,
+        ));
 
-        batch_tx.send(batch_from(0, 2)).await.unwrap();
-        batch_tx.send(batch_from(2, 3)).await.unwrap();
+        batch_tx.send(batch_from(0, 2)).await.unwrap(); // 0..2
+        batch_tx.send(batch_from(10, 1)).await.unwrap(); // gap: 10..11
 
         assert_eq!(
             control_rx.recv().await.unwrap(),
@@ -642,14 +812,14 @@ mod tests {
         assert_eq!(
             control_rx.recv().await.unwrap(),
             FollowerStreamControl::Progress {
-                durable_message_next: 5,
+                durable_message_next: 11,
                 durable_event_next: 0,
-                credit_add_bytes: 3 * REC_BYTES,
+                credit_add_bytes: REC_BYTES,
             }
         );
-        assert_eq!(sink.applied.lock().unwrap().as_slice(), &[0, 2]);
+        assert_eq!(sink.applied.lock().unwrap().as_slice(), &[0, 10]);
 
-        drop(batch_tx); // reader closed -> applier ends
+        drop(batch_tx);
         let exit = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("applier did not stop")
