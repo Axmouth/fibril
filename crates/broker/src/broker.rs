@@ -373,7 +373,8 @@ pub struct BrokerConfig {
     /// How recently a follower must have reported progress to count as in-sync.
     pub replication_isr_timeout_ms: u64,
     /// Use credit-based streaming replication on the follower instead of the
-    /// pull loop. Default false (pull) until proven; pull stays as the fallback.
+    /// pull loop. Default true (fold + failover validated); pull stays the
+    /// automatic fallback on checkpoint/error.
     pub replication_stream_enabled: bool,
     /// Linger (microseconds) the streaming follower spends gathering more
     /// contiguous frames before applying them as one fsynced batch. 0 = drain-only.
@@ -407,7 +408,7 @@ impl Default for BrokerConfig {
             replication_max_iterations_per_tick: 8,
             replication_min_in_sync_replicas: 1,
             replication_isr_timeout_ms: 10_000,
-            replication_stream_enabled: false,
+            replication_stream_enabled: true,
             replication_stream_apply_linger_us: 2_000,
             default_partition_count: 1,
             default_consumer_target: None,

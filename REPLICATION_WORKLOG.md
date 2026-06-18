@@ -844,6 +844,20 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   raft detect+reassign+client topology refresh) - acceptable but not seamless.
   TODO: formalize this as a committed --failover-under-load harness mode (currently
   a throwaway script in /var/tmp).
+  STREAMING DEFAULT-ON (2026-06-18): flipped replication.stream_enabled default
+  false -> true across the production-path defaults (config ReplicationSettings,
+  ReplicationRuntimeSettings, BrokerConfig). FollowerReplicationWorkerConfig::default
+  stays false (test/pre-snapshot only; production sets follow_runtime_settings=true
+  and reads the snapshot = true). Pull remains the AUTOMATIC fallback on
+  checkpoint/error. Justified by: fold throughput (99.9k vs 49k seq), multi-partition
+  Goal B (~146k aggregate), failover smoke + failover-UNDER-LOAD (zero confirmed
+  loss, cursors converge). config(13) + broker(190) tests green; failover smoke with
+  NO env (default config) validates the default path. The microbatch lever
+  (stream_apply_linger_us=2ms) and pull fallback make this safe to ship on by
+  default. REMAINING (non-blocking) TODOs: (1) client publish retry/backoff across
+  owner transition (smooth the failover gap); (2) owner-side read/encode fan-out for
+  RF>=3; (3) MAX_MERGE_BYTES as a 2nd microbatch setting; (4) formalize
+  --failover-under-load harness mode; (5) future parallel-fsync + recovery gate.
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that

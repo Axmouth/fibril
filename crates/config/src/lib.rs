@@ -1024,9 +1024,10 @@ pub struct ReplicationSettings {
     pub max_iterations_per_tick: usize,
     pub min_in_sync_replicas: usize,
     pub isr_timeout_ms: u64,
-    /// Use credit-based streaming replication on the follower (default false;
-    /// pull stays the fallback until streaming is proven on the deployment).
-    #[serde(default)]
+    /// Use credit-based streaming replication on the follower (default true after
+    /// the microbatch fold + failover-under-load validation; pull stays the
+    /// automatic fallback on checkpoint/error).
+    #[serde(default = "default_stream_enabled")]
     pub stream_enabled: bool,
     /// How long the streaming follower lingers to gather more contiguous frames
     /// before applying (and fsyncing) them as one batch. The applier always drains
@@ -1060,10 +1061,14 @@ impl Default for ReplicationSettings {
             max_iterations_per_tick: 8,
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
-            stream_enabled: false,
+            stream_enabled: default_stream_enabled(),
             stream_apply_linger_us: default_stream_apply_linger_us(),
         }
     }
+}
+
+fn default_stream_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

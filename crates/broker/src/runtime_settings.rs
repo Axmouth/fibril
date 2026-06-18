@@ -157,7 +157,8 @@ pub struct ReplicationRuntimeSettings {
     pub min_in_sync_replicas: usize,
     /// How recently a follower must have reported to count as in-sync.
     pub isr_timeout_ms: u64,
-    /// Use credit-based streaming replication on the follower (default false).
+    /// Use credit-based streaming replication on the follower (default true after
+    /// fold + failover validation; pull is the automatic fallback).
     pub stream_enabled: bool,
     /// Linger (microseconds) the streaming follower spends gathering more
     /// contiguous frames before applying them as one fsynced batch. Higher trades
@@ -178,7 +179,7 @@ impl Default for ReplicationRuntimeSettings {
             max_iterations_per_tick: 8,
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
-            stream_enabled: false,
+            stream_enabled: true,
             stream_apply_linger_us: 2_000,
         }
     }
