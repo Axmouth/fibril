@@ -129,18 +129,74 @@ pub enum FibrilError {
     Unexpected { msg: String },
 }
 
+/// Whether and how a caller should retry a failed operation. Get it from
+/// [`FibrilError::retry_advice`] (or the [`FibrilError::is_retryable`] shortcut).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryAdvice {
+    /// Retry: a transient condition - the broker was briefly unreachable, an owner
+    /// is failing over, or the request hit a topology/ownership conflict. Retrying
+    /// (against a refreshed owner) is expected to succeed once the cluster settles.
+    ///
+    /// IMPORTANT for confirmed publishes: a retryable error means the outcome is
+    /// UNKNOWN. The broker may already have made the write durable but the confirm
+    /// did not get back to you. Re-publishing is therefore at-least-once and can
+    /// create a DUPLICATE (and, mid-window, a reorder). Tolerate duplicates, use an
+    /// idempotent producer (planned: producer-id + sequence + broker dedup), or
+    /// treat the publish as best-effort. The client already auto-retries the
+    /// transport-level cases up to `publish_timeout_ms`, so an error you actually
+    /// receive has usually outlived that budget.
+    Retry,
+    /// Do not retry: a request/permanent error retrying will not fix - an unknown
+    /// topic/partition, an invalid argument, a bad name, or a payload that failed
+    /// to (de)serialize. Fix the request instead.
+    DoNotRetry,
+}
+
 impl FibrilError {
-    /// Whether this error is a transient transport failure worth retrying against
-    /// a refreshed owner. During an owner failover the routed owner is briefly
-    /// unreachable (it died, and the cluster has not committed the reassignment
-    /// yet), which surfaces as a connect/severed-connection error rather than a
-    /// structured response. Structured server errors (including a terminal
-    /// not-owner) are NOT transient here and stay fail-fast.
-    pub fn is_transient(&self) -> bool {
+    /// Whether this error is a transient transport failure (connect/severed
+    /// connection). Narrow on purpose: this is the subset the client retries
+    /// automatically against a refreshed owner. For the caller-facing "should I
+    /// retry?" question use [`is_retryable`](Self::is_retryable), which also covers
+    /// topology conflicts and server-transient (5xx) errors.
+    pub(crate) fn is_transient(&self) -> bool {
         matches!(
             self,
             FibrilError::Disconnection { .. } | FibrilError::BrokenPipe | FibrilError::Eof
         )
+    }
+
+    /// How a caller should treat this error. The intuitive way to decide whether
+    /// to re-issue an operation - see [`RetryAdvice`] (note the duplicate caveat
+    /// for confirmed publishes).
+    pub fn retry_advice(&self) -> RetryAdvice {
+        match self {
+            // Transport / control-flow: the owner was unreachable or moved.
+            FibrilError::Disconnection { .. }
+            | FibrilError::BrokenPipe
+            | FibrilError::Eof
+            | FibrilError::Redirect(_) => RetryAdvice::Retry,
+            FibrilError::Failure { code, .. } => match *code {
+                // 409 conflict / not-owner: topology moved, a retry re-routes.
+                ERR_NOT_OWNER => RetryAdvice::Retry,
+                // 404 not-found / 400 invalid: the caller must fix the request.
+                ERR_NOT_FOUND | ERR_INVALID => RetryAdvice::DoNotRetry,
+                // Server-side (5xx) is transient; other 4xx are caller errors.
+                code if code >= 500 => RetryAdvice::Retry,
+                _ => RetryAdvice::DoNotRetry,
+            },
+            // Local request errors: retrying as-is cannot help.
+            FibrilError::DeserializationFailure { .. }
+            | FibrilError::SerializationFailure { .. }
+            | FibrilError::InvalidName { .. }
+            | FibrilError::Unexpected { .. } => RetryAdvice::DoNotRetry,
+        }
+    }
+
+    /// `true` when [`retry_advice`](Self::retry_advice) is [`RetryAdvice::Retry`].
+    /// The simple "should I retry this?" check (mind the duplicate caveat for
+    /// confirmed publishes - see [`RetryAdvice::Retry`]).
+    pub fn is_retryable(&self) -> bool {
+        matches!(self.retry_advice(), RetryAdvice::Retry)
     }
 }
 
@@ -4039,8 +4095,8 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn transient_errors_are_retryable_structured_errors_are_not() {
-        // Transport failures (owner unreachable mid-failover) are retryable.
+    fn transient_is_transport_subset() {
+        // is_transient is the narrow transport subset the client auto-retries.
         assert!(FibrilError::BrokenPipe.is_transient());
         assert!(FibrilError::Eof.is_transient());
         assert!(
@@ -4049,7 +4105,8 @@ mod tests {
             }
             .is_transient()
         );
-        // Structured server errors (incl. terminal not-owner) are fail-fast.
+        // A topology conflict is retryable to the caller, but not "transient
+        // transport" (the client handles it via redirect, not the retry loop).
         assert!(
             !FibrilError::Failure {
                 code: ERR_NOT_OWNER,
@@ -4057,12 +4114,34 @@ mod tests {
             }
             .is_transient()
         );
-        assert!(
-            !FibrilError::SerializationFailure {
-                msg: "bad payload".into()
-            }
-            .is_transient()
-        );
+    }
+
+    #[test]
+    fn retry_advice_classifies_intuitively() {
+        use RetryAdvice::*;
+        let retry = |e: FibrilError| assert_eq!(e.retry_advice(), Retry, "{e:?}");
+        let no = |e: FibrilError| assert_eq!(e.retry_advice(), DoNotRetry, "{e:?}");
+
+        // Retry: transport, redirect, topology conflict, server-transient.
+        retry(FibrilError::BrokenPipe);
+        retry(FibrilError::Eof);
+        retry(FibrilError::Disconnection { msg: "refused".into() });
+        retry(FibrilError::Failure { code: ERR_NOT_OWNER, msg: "moved".into() });
+        retry(FibrilError::Failure { code: 503, msg: "server busy".into() });
+
+        // Do not retry: gone, invalid, and local request errors.
+        no(FibrilError::Failure { code: ERR_NOT_FOUND, msg: "no topic".into() });
+        no(FibrilError::Failure { code: ERR_INVALID, msg: "bad arg".into() });
+        no(FibrilError::SerializationFailure { msg: "bad payload".into() });
+        no(FibrilError::InvalidName {
+            kind: "topic",
+            name: "BAD".into(),
+            msg: "uppercase".into(),
+        });
+
+        // is_retryable mirrors retry_advice == Retry.
+        assert!(FibrilError::BrokenPipe.is_retryable());
+        assert!(!FibrilError::Failure { code: ERR_NOT_FOUND, msg: "x".into() }.is_retryable());
     }
 
     #[test]
