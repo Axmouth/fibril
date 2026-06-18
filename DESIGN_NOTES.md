@@ -468,3 +468,48 @@ Implementation hook: tag each setting with its tier in the settings schema
 tiers from metadata instead of hard-coding which knob goes where. This keeps the
 "every knob is configurable" guarantee while keeping the surface approachable.
 New knobs (e.g. the client publish retry backoff bounds) default to Expert.
+
+## Client failover retry (publish across an owner transition)
+
+When an owner dies, the partition is briefly unreachable: the old owner is gone
+and the cluster has not committed the reassignment yet. Without retry, every
+confirmed publish in that window fails, so the app sees an error burst instead of
+a short latency bump (a failover-under-load run showed ~150k publish errors).
+
+Model (client-side):
+
+- **Transient = transport failure** (`Disconnection`/`BrokenPipe`/`Eof`) to the
+  routed owner. Structured server errors (incl. terminal not-owner) are NOT
+  transient and stay fail-fast. A redirect is separate control flow (follow it).
+- On a transient failure the client **refreshes topology from any reachable node**
+  (`refresh_topology_throttled`: seeds + pooled endpoints, cooldown-gated). The
+  assignment table is raft-replicated, so any one live node returns the
+  authoritative current owner — you only need to reach one, not a quorum. The
+  client never picks a new owner itself; only the controller assigns one.
+- It then **retries with bounded backoff** (exp + jitter) until `publish_timeout_ms`
+  (a `ClientOptions` knob; default 30s; `0` = fail fast = old behavior). `engine_for`
+  re-resolves the owner each attempt, so once the controller reassigns, the retry
+  lands on the new owner. Net effect: a publish during failover blocks for the
+  reassignment window then succeeds, instead of erroring.
+
+"No owner yet" is **derived, not a distinct wire code**: the committed assignment
+keeps naming the (dead) old owner during the gap (observed: still old owner at
+t+6s post-kill), so there is no clean "owner = none" signal to read. Instead the
+client distinguishes **transitioning vs gone** from its own topology cache, which
+already separates the two:
+
+- `counts` (partitioning per `(topic, group)`) is populated for every *declared*
+  topic, even when the owner is currently unresolved.
+- `by_queue` (owner endpoint per partition) is populated only when an owner is
+  known.
+
+So after a *successful* refresh against a populated cluster view: topic absent
+from `counts` ⇒ **not declared / gone ⇒ fail fast** (do not burn the whole
+budget); topic present but no `by_queue` owner ⇒ **transitioning ⇒ keep retrying**.
+The "populated view + successful refresh" guard avoids a standalone/cold cache
+(empty topology) being misread as not-found.
+
+Pieces: (1) `publish_confirmed` transient retry + `publish_timeout_ms`. (2) the
+declared-vs-gone fail-fast above (client-side via the cache split; no protocol
+change). (3) the pipelined `publish_with_confirmation` path, which must preserve
+in-flight ordering under the confirm window across a retry — the careful one.

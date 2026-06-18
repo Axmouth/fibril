@@ -877,6 +877,24 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   too - but knobs are proliferating, so this needs a SETTINGS TIERING model (basic /
   advanced / expert + collapsible categories in the admin panel) so expert knobs do
   not clutter the default view. Recorded in DESIGN_NOTES.md.
+  CLIENT FAILOVER RETRY - PIECE 2 (2026-06-18): distinguish a transitioning owner
+  (keep retrying) from a genuinely-gone topic (fail fast) WITHOUT a protocol
+  change. Key realization: the client TopologyCache already separates the two -
+  `counts` (partitioning per topic) is populated for every DECLARED topic even
+  while its owner is unresolved mid-failover, whereas `by_queue` (owner endpoint)
+  is only set when an owner is known. So in the publish_confirmed transient-retry
+  branch: refresh_topology_throttled now returns whether it reached a live node;
+  on a successful refresh against a POPULATED view, if the topic is absent from
+  counts (knows_topic == false) the publish fails fast with ERR_NOT_FOUND (new
+  protocol code 404) instead of burning the whole publish_timeout budget; if
+  present (transitioning) it keeps retrying. The populated-view + successful-refresh
+  guard prevents a standalone/cold empty cache being misread as not-found. No
+  server-side ERR_OWNER_UNAVAILABLE needed - the client already has the
+  authoritative declared-vs-gone info post-refresh (the committed assignment keeps
+  the dead owner during the gap, so "no owner yet" stays derived, not a wire code).
+  Tests: topology_cache_distinguishes_declared_from_gone + the Piece 1 set. Design
+  in DESIGN_NOTES.md. NEXT = PIECE 3 (pipelined publish_with_confirmation + in-flight
+  ordering across retry - the path steady_c uses, where the 150k-error burst was).
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that

@@ -633,6 +633,10 @@ pub const ERR_NOT_OWNER: u16 = ERR_CONFLICT;
 /// Malformed request the client should fix rather than retry (e.g. a nil cohort
 /// member id).
 pub const ERR_INVALID: u16 = 400;
+/// The target topic/partition is not known to the cluster (never declared or
+/// deleted). Distinct from a transient owner transition: the client fails fast
+/// instead of retrying it across the publish budget.
+pub const ERR_NOT_FOUND: u16 = 404;
 
 /// Client request for cluster topology. An empty `topic` filter asks for the
 /// full topology; a set `topic` (optionally with `group`) narrows it.

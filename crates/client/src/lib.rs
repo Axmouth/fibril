@@ -1650,7 +1650,23 @@ impl Publisher {
                     if Instant::now() >= deadline {
                         return Err(err);
                     }
-                    self.shared.refresh_topology_throttled().await;
+                    // Refresh from a live node, then distinguish a transitioning
+                    // owner (declared, keep retrying) from a genuinely-gone topic
+                    // (not declared in the cluster, fail fast rather than burning
+                    // the whole budget). Only trust this when a refresh actually
+                    // landed against a populated cluster view, so a standalone/cold
+                    // empty cache is never misread as "not found".
+                    if self.shared.refresh_topology_throttled().await {
+                        let topo = self.shared.topology.load();
+                        if topo.is_populated() && !topo.knows_topic(topic, group) {
+                            return Err(FibrilError::Failure {
+                                code: ERR_NOT_FOUND,
+                                msg: format!(
+                                    "{topic}/{partition} is not declared in the cluster"
+                                ),
+                            });
+                        }
+                    }
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     tokio::time::sleep(publish_retry_nap(backoff_ms).min(remaining)).await;
                     backoff_ms = (backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
@@ -1922,6 +1938,20 @@ impl TopologyCache {
             .copied()
     }
 
+    /// Whether this `(topic, group)` is declared in the cluster. `counts` is
+    /// populated for every declared queue even while its owner is mid-failover
+    /// (unresolved), so this stays true through a transition and only goes false
+    /// when the topic is genuinely absent (never declared or deleted).
+    fn knows_topic(&self, topic: &str, group: Option<&str>) -> bool {
+        self.partitioning(topic, group).is_some()
+    }
+
+    /// Whether the cache holds a real cluster view (at least one declared queue).
+    /// Used to avoid reading an empty standalone/cold cache as "topic not found".
+    fn is_populated(&self) -> bool {
+        !self.counts.is_empty()
+    }
+
     fn replace(&mut self, topology: TopologyOk) {
         self.generation = topology.generation;
         self.by_queue.clear();
@@ -2115,11 +2145,15 @@ impl ClientShared {
     /// the configured seeds first, then any already-pooled endpoint (a likely
     /// survivor), and stops at the first that answers. Best-effort: on total
     /// failure the cache is left as-is and the caller's retry will try again.
-    async fn refresh_topology_throttled(&self) {
+    ///
+    /// Returns `true` if a live node answered and the cache was updated (so the
+    /// caller may trust the refreshed view, e.g. to fail fast on an unknown
+    /// topic), `false` if nothing answered or the refresh was throttled.
+    async fn refresh_topology_throttled(&self) -> bool {
         let now = unix_millis();
         let last = self.topology.load().last_refresh_ms;
         if now.saturating_sub(last) < self.opts.topology_refresh_cooldown_ms {
-            return;
+            return false;
         }
 
         let mut candidates: Vec<SocketAddr> = self.bootstrap.clone();
@@ -2145,8 +2179,9 @@ impl ClientShared {
                 updated.last_refresh_ms = refreshed_at;
                 updated
             });
-            return;
+            return true;
         }
+        false
     }
 
     /// Update the routing cache from a broker redirect (point-update to the new
@@ -3835,6 +3870,45 @@ mod tests {
                 assert!(nap < base * 2, "nap {nap} >= 2x base {base}");
             }
         }
+    }
+
+    #[test]
+    fn topology_cache_distinguishes_declared_from_gone() {
+        // A declared topic with no resolved owner (mid-failover) stays "known"
+        // (counts present, by_queue absent) -> caller keeps retrying. An absent
+        // topic is "gone" -> caller fails fast. An empty cache is not populated.
+        let empty = TopologyCache {
+            generation: 0,
+            by_queue: HashMap::new(),
+            counts: HashMap::new(),
+            last_refresh_ms: 0,
+        };
+        assert!(!empty.is_populated());
+        assert!(!empty.knows_topic("orders", None));
+
+        let mut counts = HashMap::new();
+        counts.insert(
+            ("orders".to_string(), None),
+            PartitioningEntry {
+                count: 4,
+                version: 1,
+            },
+        );
+        let transitioning = TopologyCache {
+            generation: 1,
+            by_queue: HashMap::new(), // owner unresolved during failover
+            counts,
+            last_refresh_ms: 1,
+        };
+        assert!(transitioning.is_populated());
+        assert!(
+            transitioning.knows_topic("orders", None),
+            "declared topic stays known while its owner is transitioning"
+        );
+        assert!(
+            !transitioning.knows_topic("ghost", None),
+            "an undeclared topic is not known -> fail fast"
+        );
     }
 
     #[test]
