@@ -747,6 +747,17 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     artifact - reused per-node roots accumulate stale data across runs since
     cluster-tryout only cleans its own RUN_DIR; slow recovery then misses the raft
     stability window. Fixed by wiping per-node roots between runs; re-running.)
+  MIXED layout (owner tmpfs / follower SSD), streaming+fold, re-run clean:
+    150k -> 140,775/s   200k -> 145,999/s (ceiling ~146k/s).
+  So removing shared-disk self-contention lifts the ceiling ~92k -> ~146k/s (~3x the
+  old sequential shared 49k). The follower-SSD fsync is the binding constraint at
+  ~146k/s. deliver p50 ~1.35s at saturation (backlog; offered > capacity).
+  CEILING TABLE (streaming+fold, replica_durable:2, 1KiB, real SSD):
+    seq shared (prior): ~49k | fold shared: ~92k | fold drive-per-node: ~146k.
+  HARNESS NOTE: cluster-tryout leaves its mktemp RUN_DIR behind on exit (only kills
+  PIDs); default root is /tmp (tmpfs) so repeated runs leaked GBs of RAM. Clean
+  /tmp/fibril-cluster-tryout.* periodically (or always set CLUSTER_TRYOUT_RUN_ROOT
+  off-tmpfs). Worth a real fix: rm RUN_DIR on clean exit.
 - NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
