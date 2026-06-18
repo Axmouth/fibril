@@ -163,6 +163,26 @@ fn publish_retry_nap(base_ms: u64) -> Duration {
     Duration::from_millis(base_ms + jitter)
 }
 
+/// Per-call state for the confirmed-publish failover retry loop.
+struct PublishRetryState {
+    /// Give-up time for transient retries; `None` when retry is disabled
+    /// (`publish_timeout_ms == 0`) so the first transient error fails fast.
+    deadline: Option<Instant>,
+    redirects: u32,
+    backoff_ms: u64,
+}
+
+impl PublishRetryState {
+    fn new(publish_timeout_ms: u64) -> Self {
+        Self {
+            deadline: (publish_timeout_ms > 0)
+                .then(|| Instant::now() + Duration::from_millis(publish_timeout_ms)),
+            redirects: 0,
+            backoff_ms: PUBLISH_RETRY_INITIAL_BACKOFF_MS,
+        }
+    }
+}
+
 // TODO: Explore From<..> impls for relevant error types
 // TODO: Add opt in event per message sent/received
 
@@ -1583,6 +1603,65 @@ impl Publisher {
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
+    /// Shared retry decision for confirmed-publish paths after one attempt fails.
+    /// Returns `Ok(())` to retry the loop, or `Err(e)` to give up with `e`.
+    ///
+    /// - Redirect: point-update routing to the named owner and retry (bounded by
+    ///   `max_redirects`).
+    /// - Transient transport failure (owner unreachable mid-failover): refresh
+    ///   topology from a reachable node so the next attempt re-resolves the new
+    ///   owner, then back off until the deadline. If a refresh lands against a
+    ///   populated cluster view and the topic is not declared, fail fast
+    ///   (`ERR_NOT_FOUND`) rather than burning the whole budget.
+    /// - Anything else: give up immediately.
+    async fn after_publish_failure(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        partition: Partition,
+        err: FibrilError,
+        state: &mut PublishRetryState,
+    ) -> FibrilResult<()> {
+        match err {
+            FibrilError::Redirect(redirect) => {
+                if state.redirects >= self.shared.opts.max_redirects {
+                    return Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: format!(
+                            "exceeded max redirects ({}) routing {topic}/{partition}",
+                            self.shared.opts.max_redirects
+                        ),
+                    });
+                }
+                self.shared.apply_redirect(&redirect);
+                state.redirects += 1;
+                Ok(())
+            }
+            err if err.is_transient() => {
+                let Some(deadline) = state.deadline else {
+                    return Err(err);
+                };
+                if Instant::now() >= deadline {
+                    return Err(err);
+                }
+                if self.shared.refresh_topology_throttled().await {
+                    let topo = self.shared.topology.load();
+                    if topo.is_populated() && !topo.knows_topic(topic, group) {
+                        return Err(FibrilError::Failure {
+                            code: ERR_NOT_FOUND,
+                            msg: format!("{topic}/{partition} is not declared in the cluster"),
+                        });
+                    }
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                tokio::time::sleep(publish_retry_nap(state.backoff_ms).min(remaining)).await;
+                state.backoff_ms = (state.backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
+                Ok(())
+            }
+            other => Err(other),
+        }
+    }
+
     /// Publish and wait for broker confirmation.
     ///
     /// Resolves with the broker-assigned topic offset.
@@ -1597,12 +1676,9 @@ impl Publisher {
         } = self
             .shared
             .route_partition(topic, group, message.partition_key.as_deref());
-        let mut attempts = 0u32;
         // Bound transient (owner-failover) retries by the configured budget. 0
         // disables retry: a transport failure fails fast, the pre-existing behavior.
-        let deadline = (self.shared.opts.publish_timeout_ms > 0)
-            .then(|| Instant::now() + Duration::from_millis(self.shared.opts.publish_timeout_ms));
-        let mut backoff_ms = PUBLISH_RETRY_INITIAL_BACKOFF_MS;
+        let mut state = PublishRetryState::new(self.shared.opts.publish_timeout_ms);
         loop {
             // Resolve the owner, send, and await the confirm as one attempt so a
             // transport failure at any step (dead owner during failover) is caught
@@ -1626,52 +1702,10 @@ impl Publisher {
 
             match attempt {
                 Ok(offset) => return Ok(offset),
-                Err(FibrilError::Redirect(redirect)) => {
-                    if attempts >= self.shared.opts.max_redirects {
-                        return Err(FibrilError::Failure {
-                            code: ERR_NOT_OWNER,
-                            msg: format!(
-                                "exceeded max redirects ({}) routing {topic}/{partition}",
-                                self.shared.opts.max_redirects
-                            ),
-                        });
-                    }
-                    self.shared.apply_redirect(&redirect);
-                    attempts += 1;
+                Err(err) => {
+                    self.after_publish_failure(topic, group, partition, err, &mut state)
+                        .await?
                 }
-                // Transient transport failure = the owner is unreachable mid-failover.
-                // Refresh topology from a reachable node (so engine_for picks up the
-                // new owner once the controller reassigns) and retry with backoff
-                // until the deadline, instead of surfacing the failover gap as errors.
-                Err(err) if err.is_transient() => {
-                    let Some(deadline) = deadline else {
-                        return Err(err);
-                    };
-                    if Instant::now() >= deadline {
-                        return Err(err);
-                    }
-                    // Refresh from a live node, then distinguish a transitioning
-                    // owner (declared, keep retrying) from a genuinely-gone topic
-                    // (not declared in the cluster, fail fast rather than burning
-                    // the whole budget). Only trust this when a refresh actually
-                    // landed against a populated cluster view, so a standalone/cold
-                    // empty cache is never misread as "not found".
-                    if self.shared.refresh_topology_throttled().await {
-                        let topo = self.shared.topology.load();
-                        if topo.is_populated() && !topo.knows_topic(topic, group) {
-                            return Err(FibrilError::Failure {
-                                code: ERR_NOT_FOUND,
-                                msg: format!(
-                                    "{topic}/{partition} is not declared in the cluster"
-                                ),
-                            });
-                        }
-                    }
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    tokio::time::sleep(publish_retry_nap(backoff_ms).min(remaining)).await;
-                    backoff_ms = (backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
-                }
-                Err(other) => return Err(other),
             }
         }
     }
@@ -1681,6 +1715,15 @@ impl Publisher {
     /// This sends a confirmed publish request but does not wait for the
     /// confirmation before returning. Keep the returned handle and await
     /// [`PublishConfirmation::confirmed`] later to pipeline multiple publishes.
+    ///
+    /// The SEND step retries across a transient owner failover (same policy as
+    /// [`publish_confirmed`](Self::publish_confirmation), bounded by
+    /// `publish_timeout_ms`): because callers await each send before issuing the
+    /// next, retrying the send before returning preserves per-partition send order.
+    /// A failure of the later confirm step (owner died after accepting the send) is
+    /// NOT retried here - re-sending an already-accepted message risks a duplicate
+    /// and a reorder under the confirm window, so that is left to the caller (a
+    /// future idempotent-producer feature).
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_with_confirmation<T: Publishable>(
         &self,
@@ -1695,19 +1738,35 @@ impl Publisher {
         } = self
             .shared
             .route_partition(topic, group, message.partition_key.as_deref());
-        self.shared
-            .engine_for(topic, partition, group)
-            .await?
-            .publish_with_confirmation(
-                topic.to_string(),
-                group.map(str::to_string),
-                partition,
-                partitioning_version,
-                message.content_type,
-                message.headers,
-                message.payload,
-            )
-            .await
+        let mut state = PublishRetryState::new(self.shared.opts.publish_timeout_ms);
+        loop {
+            // Send-only attempt: resolve the owner and hand off the publish. Clone
+            // per attempt so a retry re-sends cleanly. The returned handle's confirm
+            // is awaited by the caller, not here.
+            let attempt = async {
+                let engine = self.shared.engine_for(topic, partition, group).await?;
+                engine
+                    .publish_with_confirmation(
+                        topic.to_string(),
+                        group.map(str::to_string),
+                        partition,
+                        partitioning_version,
+                        message.content_type.clone(),
+                        message.headers.clone(),
+                        message.payload.clone(),
+                    )
+                    .await
+            }
+            .await;
+
+            match attempt {
+                Ok(confirmation) => return Ok(confirmation),
+                Err(err) => {
+                    self.after_publish_failure(topic, group, partition, err, &mut state)
+                        .await?
+                }
+            }
+        }
     }
 
     /// Publish after a relative delay without waiting for broker confirmation.
