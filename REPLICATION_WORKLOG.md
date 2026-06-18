@@ -4168,3 +4168,24 @@ Snapshot/checkpoint concern found during higher-rate sweep:
   (3) what producer ids (fibril.client.*) are for + the at-least-once -> dedup
   path. Also worth a short failover-behavior note (producer + consumer ride
   through; failover_verify proves zero confirmed-id loss). Keep it copy-paste-able.
+
+- PLAN RECONCILIATION (2026-06-19, user-flagged: plan stopped being updated; find
+  missing items). Cross-checked REPLICATION_PLANNING.md success criteria + caveats
+  vs the worklog. Diversions (fold/streaming superseding the original async-fsync
+  ordering, etc.) are expected and fine. Findings:
+  * MISSING (planned, not done) - ADD: recovery-time event->message reference
+    verification with FAIL-LOUD on mismatch (PLANNING.md:451 + success criterion
+    :520), plus the steady-state follower invariant that events never reference
+    message offsets not yet received (:449). recover_events_from_log
+    (stroma.rs:3330) currently replays the event log blindly - no cross-check that
+    referenced messages are durable, no fail-loud, no self-heal guard. This is a
+    standalone durability-correctness gap AND the proper home for the recovery gate
+    flagged earlier for parallel-fsync (events durable ahead of messages -> dangling
+    refs). Highest-value missing item.
+  * MISSING (minor/optional): unclean-leader-election toggle (:487/:500, phase 9) -
+    no `unclean` knob; off-by-default availability escape hatch. Low priority.
+  * STALE CHECKBOXES (actually DONE, plan not updated): ISR refuse-below-min
+    (broker.rs:2277 + tests) :518; delayed-heap snapshot prereq (state.rs:5348
+    snapshot_preserves_delayed_enqueue) :461; orphan handling :466/:519; failover
+    runbook partially (FAILURE_MODES.md + smoke/verify) :523. TODO in the docs/merge
+    pass: tick these through and refresh REPLICATION_PLANNING.md to current reality.
