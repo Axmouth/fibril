@@ -4191,71 +4191,63 @@ Snapshot/checkpoint concern found during higher-rate sweep:
     pass: tick these through and refresh REPLICATION_PLANNING.md to current reality.
 
 ================================================================================
-## CONSOLIDATED FUTURE-TASK INVENTORY (2026-06-19)
-Single-source roll-up so nothing is lost across worklog / REPLICATION_PLANNING.md
-/ DESIGN_NOTES.md / TODOTHOUGHTS.md / memory. Tiered, not strictly ordered.
-Source tags: [WL]=worklog [PLAN]=REPLICATION_PLANNING [DN]=DESIGN_NOTES
-[TT]=TODOTHOUGHTS [MEM]=memory.
+## CONSOLIDATED FUTURE-TASK INVENTORY (2026-06-19, mostly POST-MERGE)
+Roll-up of CURATED sources so nothing is lost: worklog / REPLICATION_PLANNING.md /
+DESIGN_NOTES.md / memory. (TODOTHOUGHTS.md is the author's uncurated scratch - NOT
+pulled in here; raw feature ideas like TTL / time-retention / queue-deletion
+lifecycle / restart-reconciliation / dashboard QoL live there and get curated
+only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 
-### A. Branch-wrap (finish before merging this branch)
+### A. Branch-wrap (the only pre-merge tier; everything below is post-merge)
 - Pre-merge dedup/cleanup pass (consolidate consts/helpers; drop needless code) [WL]
 - failover_verify -> committed cluster-tryout harness mode (--failover-verify) [WL]
 - MAX_MERGE_BYTES -> replication runtime setting (2nd microbatch lever) [WL]
 - Dead-owner EngineSlot pool-prune after failover [WL]
-- Tick/refresh REPLICATION_PLANNING.md success criteria to reality (stale checkboxes) [WL/PLAN]
+- Tick/refresh REPLICATION_PLANNING.md success criteria to reality [WL/PLAN]
 
-### B. Correctness / durability
+### B. Correctness / durability (post-merge)
 - Recovery event->message reference verification + FAIL-LOUD on mismatch; follower
   steady-state invariant (events never ref unreceived msgs) [PLAN:449/451/520] -- MISSING
-- Idempotent producer dedup (broker reads fibril.client.producer_id/seq -> effectively
-  once); headers already on wire [WL/DN/TT/PLAN phase8]
-- Split-brain hardening: reject commands with epoch < local partition epoch [TT/PLAN]
-- Recovery gate prerequisite for parallel-fsync (subsumed by the recovery verification) [WL]
+- Idempotent producer dedup (broker reads fibril.client.producer_id/seq ->
+  effectively-once; headers already on wire) [WL/DN/PLAN phase8]
+- Recovery gate is the prerequisite for parallel-fsync (subsumed by the above) [WL]
 
-### C. Performance / scale
+### C. Performance / scale (post-merge)
 - Owner-side read/encode fan-out (shared tail, private catch-up) for RF>=3 [WL]
 - Parallel-fsync (needs the recovery verification first) [WL]
 - Replication-lag backpressure hook in append_* (slow accept when followers lag) [PLAN:465]
-- Zero-alloc sort in plan_local_assignment_transitions (drop .to_string() churn) [TT]
-- NodeId interning (Arc<str>/CompactString) for large clusters [TT]
 
-### D. Operability / QoL
+### D. Operability / QoL (post-merge)
 - Admin UI node management: add/remove/fence members from topology page [PLAN post-R6]
-- Programmatic scale up/down: join (learner->voter->rebalance) / drain-and-leave flow
-  via fibrilctl + admin API (autoscaler-drivable) [PLAN post-R6]
+- Programmatic scale up/down: join (learner->voter->rebalance) / drain-and-leave via
+  fibrilctl + admin API (autoscaler-drivable) [PLAN post-R6]
 - Unclean-leader-election toggle (off by default) [PLAN:487/500] -- MISSING, minor
-- Dashboard: hide-inactive-queues option + basic search [TT]
 - Settings-tiering pass (basic/advanced/expert + collapsible) [DN/WL]
 - Onboarding/easy-trial: docker one-liner / in-memory mode / 60s quickstart [WL]
 
-### E. Features
-- Plexus: fan-out / stream channel type (own arc; substrate-vs-engine refactor) [DN/TT]
-- Message TTL / expiration (registry in state, wire to expiry worker, not while inflight) [TT]
-- Time-based retention (sparse offset->time, truncate-before, clear state) [TT]
-- Queue deletion lifecycle (freeze + filesystem cleanup); queue expiration option [TT]
-- Queue purge (mostly covered by reset) [TT]
-- Broker restart reconciliation: persistent session continuity beyond live reconnect [TT]
+### E. Features (post-merge)
+- Plexus: fan-out / stream channel type (own arc; substrate-vs-engine refactor) [DN]
+  (further raw feature ideas are in the author's scratch, curated when picked up)
 
-### F. Code health / structure
+### F. Code health / structure (post-merge)
 - Clustering-module separation: dedicated partitioning+replication+cohorts module per
   stack crate (except ganglion) [MEM/DN]
 - substrate-vs-engine split (WorkQueueEngine + StreamEngine over shared substrate);
   enables Plexus [DN]
 - Single top-level `ganglion` umbrella crate (depend on stable surface, not internals) [DN]
 
-### G. Docs
+### G. Docs (post-merge / final docs pass)
 - Client reliability example/tutorial on the docs site (clients.mdx) [WL]
-- User-facing docs inventory + fill gaps (quickstart exists; guide/runbook) [WL]
+- User-facing docs inventory + fill gaps (quickstart exists; guide) [WL]
 - Manual failover runbook (partially: FAILURE_MODES.md) [PLAN:523]
-- Documented failure semantics (disconnect/crash/failover/reconnect/expire/ownership) [TT]
 
 ### H. Far horizon (v2+)
 - Multi-region / geo placement: region/zone labels -> planner; per-queue placement
   hints; activity signals; region-aware PlacementStrategy [PLAN:778/792]
 - Load-aware placement + routing (node/partition load scores; advisory, off-raft,
   hysteresis, P2C); consumer scheduling policy [DN:85/MEM]
-- Live repartitioning beyond fixed-at-create (partition_count versioned; per-key
-  ordering across resize is the hard deferred semantic) [PLAN:260/312/MEM]
+- Live repartitioning beyond fixed-at-create (versioned; per-key ordering across
+  resize is the hard deferred semantic) [PLAN:260/312/MEM]
 - Self-hosted metadata (replace external coordination) -- explicitly deferred [PLAN]
 - Transactional / cross-partition writes -- v2+ [PLAN:507]
 - Follower reads -- REJECTED for the work-queue model (no analog) [PLAN:494]
