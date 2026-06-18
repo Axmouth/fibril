@@ -810,6 +810,21 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   default toward 0 would regress the disk-bound path. STEP 2 (linger) COMPLETE.
   NEXT = STEP 3: adversarial + failover validation of the fold, then flip streaming
   default-on.
+  STEP 3 VALIDATION (2026-06-18): PASSED. (a) fold unit tests (coalesce +
+  epoch/gap-boundary carry + checkpoint-required fallback) green; (b) broker
+  replication integration tests green; (c) failover smoke with streaming+fold ON:
+  10 pre-failover msgs replicated to follower, owner killed, follower promoted
+  (epoch 2), all 10 consumed from the NEW owner + post-failover publish/consume OK.
+  No loss, cursors converge. NOTE: the fold keeps msg-then-event fsync ORDER (no
+  parallel fsync), so it does NOT introduce the recovery-gate durability-ordering
+  risk - the recovery gate stays only needed for the FUTURE parallel-fsync opt.
+  (One CI flake: ganglion_returning_old_owner_is_demoted_and_refuses_publishes -
+  raft-timing-sensitive under parallel load, passes in isolation, unrelated.)
+  CAVEAT: failover smoke is light (10 msgs); a failover-under-steady-load test
+  would harden it further. REMAINING DECISION: flip replication.stream_enabled
+  default false -> true (shipping default). Data strongly supports it (streaming+
+  fold 99.9k vs sequential 49k; failover OK) - pending explicit go-ahead since it
+  changes the shipping default.
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
