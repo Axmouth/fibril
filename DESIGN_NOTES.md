@@ -600,6 +600,17 @@ re-implement the hardened part (replication/coordination/log) and drift.
 So Plexus is a per-topic (or per-subscription, Pulsar-style) MODE on the same
 cluster/binary/client, selected by a topic-type / subscription-type knob.
 
+User-facing framing: the lightest, most intuitive surface is a CHANNEL TYPE - a
+"plexus channel" is just a channel/topic declared with fan-out/stream semantics,
+sitting next to ordinary work-queue channels on the same cluster and client. Not a
+separate subsystem to deploy or connect to - one cluster, and a channel is either a
+queue or a plexus. `declare(name, type: queue | plexus)` (or `channel(name).plexus()`)
+is the whole user-visible footprint. This keeps "increase usability by adding modes"
+genuinely simple: the user picks a channel type, the smart client + server do the
+rest. Matches the precedent (Pulsar subscription types, NATS subjects) and the
+"just works" philosophy - depth is opt-in per channel, the default surface stays
+small.
+
 ### The enabling refactor: substrate vs consumption semantics
 
 Fibril is already log-backed (keratin-log) with the work-queue semantics layered
