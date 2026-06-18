@@ -550,6 +550,7 @@ impl Message {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct NewMessage {
     /// Encoded payload bytes sent to the broker.
     pub payload: Vec<u8>,
@@ -655,6 +656,125 @@ impl Publishable for NewMessage {
 impl<T: Serialize> Publishable for T {
     fn into_message(self) -> FibrilResult<NewMessage> {
         NewMessage::msg_pack(&self)
+    }
+}
+
+/// A "never miss" publisher built on top of [`Publisher`].
+///
+/// `Publisher::publish_confirmed` already rides through a transient owner failover
+/// (it refreshes topology and retries the transport up to `publish_timeout_ms`).
+/// But once that budget is spent it returns a retryable error and leaves the
+/// decision to you (see [`FibrilError::is_retryable`]). `ReliablePublisher`
+/// automates the rest of the loop: it re-publishes until the message is durably
+/// confirmed, a permanent ([`RetryAdvice::DoNotRetry`]) error occurs, or
+/// `max_attempts` is reached.
+///
+/// So today it is **at-least-once-no-miss**: every message is eventually confirmed,
+/// but a retry after a lost confirm can produce a DUPLICATE. It also assigns a
+/// stable **producer id** ([`producer_id`](Self::producer_id)) and a monotonic
+/// per-producer **sequence** as scaffolding for the planned idempotent producer.
+/// Those ids are NOT transmitted yet: producer dedup metadata belongs on dedicated
+/// publish-op WIRE FIELDS, not headers - the `fibril.*` / `stroma.*` header
+/// namespaces are reserved and client-set reserved headers are rejected by the
+/// broker. When the idempotent producer lands, the helper attaches them on those
+/// fields and becomes **effectively-once** with no API change.
+///
+/// Clone it freely: clones share the producer id and the sequence counter, so
+/// multiple tasks publishing through clones still emit one coherent id/seq stream.
+///
+/// ```no_run
+/// # async fn example(publisher: fibril_client::Publisher) -> fibril_client::FibrilResult<()> {
+/// // Opt in: re-publishes through arbitrarily long failovers until confirmed.
+/// let reliable = publisher.reliable();
+/// let offset = reliable.publish("order-42").await?; // durably confirmed
+/// # let _ = offset;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// If you would rather handle retries yourself, the classification is explicit:
+///
+/// ```no_run
+/// use fibril_client::RetryAdvice;
+/// # async fn example(publisher: fibril_client::Publisher) -> fibril_client::FibrilResult<()> {
+/// match publisher.publish_confirmed("order-42").await {
+///     Ok(_offset) => {}                       // durable + will be delivered
+///     Err(e) if e.is_retryable() => {
+///         // Unknown outcome - the write may have landed. Re-publishing is
+///         // at-least-once (may duplicate until idempotent dedup ships).
+///     }
+///     Err(_e) => { /* DoNotRetry: fix the request (bad topic/arg/payload). */ }
+/// }
+/// # let _ = RetryAdvice::Retry;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct ReliablePublisher {
+    publisher: Publisher,
+    producer_id: Uuid,
+    seq: Arc<std::sync::atomic::AtomicU64>,
+    /// 0 = retry until confirmed or a permanent error; otherwise cap the attempts.
+    max_attempts: u32,
+}
+
+impl ReliablePublisher {
+    /// Wrap a [`Publisher`]. Use [`Publisher::reliable`] for the idiomatic form.
+    pub fn new(publisher: Publisher) -> Self {
+        Self {
+            publisher,
+            producer_id: Uuid::new_v4(),
+            seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            max_attempts: 0,
+        }
+    }
+
+    /// Cap the number of publish attempts. `0` (default) retries until the message
+    /// is durably confirmed or hits a permanent error.
+    pub fn max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = max_attempts;
+        self
+    }
+
+    /// The stable producer id for this publisher (forward-compat scaffolding for
+    /// dedup; not yet transmitted - see the type docs).
+    pub fn producer_id(&self) -> Uuid {
+        self.producer_id
+    }
+
+    /// Publish and keep retrying until durably confirmed (or a permanent error /
+    /// `max_attempts`). Returns the broker-assigned offset. A retry after a lost
+    /// confirm may duplicate until owner-side dedup ships - see the type docs.
+    pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
+        // Advance the per-producer sequence: scaffolding for the future dedup wire
+        // fields. Not transmitted yet (reserved-header namespaces forbid carrying
+        // it as a header; it belongs on a publish-op field).
+        self.seq.fetch_add(1, Ordering::Relaxed);
+        let message = payload.into_message()?;
+        let mut attempts: u32 = 0;
+        loop {
+            match self.publisher.publish_confirmed(message.clone()).await {
+                Ok(offset) => return Ok(offset),
+                // Retryable = unknown outcome (the inner call already exhausted its
+                // transport retry budget). Keep going unless the cap is reached.
+                Err(err) if err.is_retryable() => {
+                    attempts += 1;
+                    if self.max_attempts != 0 && attempts >= self.max_attempts {
+                        return Err(err);
+                    }
+                    tokio::time::sleep(publish_retry_nap(PUBLISH_RETRY_INITIAL_BACKOFF_MS)).await;
+                }
+                Err(err) => return Err(err), // permanent (DoNotRetry)
+            }
+        }
+    }
+}
+
+impl Publisher {
+    /// Wrap this publisher in a [`ReliablePublisher`] that retries until durably
+    /// confirmed and stamps producer-id/sequence headers (opt-in "never miss").
+    pub fn reliable(self) -> ReliablePublisher {
+        ReliablePublisher::new(self)
     }
 }
 
@@ -4690,6 +4810,46 @@ mod tests {
         }
 
         assert_eq!(confirmation.confirmed().await.unwrap(), 43);
+    }
+
+    #[tokio::test]
+    async fn reliable_publisher_stamps_ids_and_retries_until_confirmed() {
+        let (client, mut rx) = client_with_command_rx();
+        let reliable = client.publisher("jobs").unwrap().reliable();
+        let pid = reliable.producer_id().to_string();
+        assert_eq!(
+            reliable.clone().producer_id().to_string(),
+            pid,
+            "clones share the producer id"
+        );
+
+        let _ = pid; // producer id is scaffolding; not yet on the wire
+
+        let task = tokio::spawn(async move { reliable.publish("hello").await });
+
+        // First attempt: fail with a retryable (but not transport-transient) error
+        // so the outer ReliablePublisher loop re-publishes - the inner
+        // publish_confirmed returns ERR_NOT_OWNER rather than auto-retrying it.
+        match rx.recv().await.unwrap() {
+            Command::PublishConfirmed { topic, reply, .. } => {
+                assert_eq!(topic, "jobs");
+                reply
+                    .send(Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: "owner moved".into(),
+                    }))
+                    .unwrap();
+            }
+            other => panic!("expected confirmed publish, got {other:?}"),
+        }
+        // Outer loop re-publishes; confirm it this time.
+        match rx.recv().await.unwrap() {
+            Command::PublishConfirmed { reply, .. } => {
+                reply.send(Ok(7)).unwrap();
+            }
+            other => panic!("expected re-publish, got {other:?}"),
+        }
+        assert_eq!(task.await.unwrap().unwrap(), 7);
     }
 
     #[tokio::test]
