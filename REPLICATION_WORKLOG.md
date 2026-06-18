@@ -893,8 +893,30 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   authoritative declared-vs-gone info post-refresh (the committed assignment keeps
   the dead owner during the gap, so "no owner yet" stays derived, not a wire code).
   Tests: topology_cache_distinguishes_declared_from_gone + the Piece 1 set. Design
-  in DESIGN_NOTES.md. NEXT = PIECE 3 (pipelined publish_with_confirmation + in-flight
-  ordering across retry - the path steady_c uses, where the 150k-error burst was).
+  in DESIGN_NOTES.md.
+  CLIENT FAILOVER RETRY - PIECE 3 (2026-06-18): the pipelined
+  publish_with_confirmation (the path steady_c uses, source of the 150k-error burst)
+  now retries its SEND step across failover. Refactor: shared after_publish_failure
+  helper + PublishRetryState used by BOTH publish_confirmed and
+  publish_with_confirmation. Ordering: callers await each send before the next, so
+  retrying the send before returning preserves per-partition send order. The confirm
+  step (owner died AFTER accepting) is NOT retried - re-sending an accepted message
+  risks a duplicate + reorder under the confirm window; left to the caller (future
+  idempotent producer). Tests green (27 client lib + 9 redirect + 5).
+  *** VALIDATION (failover-under-load, Pieces 1-3, real SSD) ***
+    BEFORE: publish_errors 150,230 ; confirmed 124,140 == received 124,140.
+    AFTER:  publish_errors 0 ; confirmed 154,745 ; received 124,148 ; missing 30,880.
+  PRODUCER SIDE FIXED: publish errors 150k -> 0; the publisher block-and-retries
+  through the gap and keeps confirming (124k->154k). No broker loss - all 154k are
+  durable on the new owner (node-2 owns p0 in_sync, node-3 follows at offset
+  172,202). The 30,880 "missing" is NOT loss: it is the CONSUMER side - the
+  subscriber stalled at owner death and did not fail over to the new owner, so it
+  never consumed the ~30k published during/after failover (received ~= pre-failover
+  count). steady_c "missing" conflates producer+consumer; producer is now clean.
+  REVEALED: CONSUMER/SUBSCRIPTION FAILOVER GAP = PIECE 4 (symmetric read-path fix:
+  on subscription stream break, re-resolve owner + re-subscribe to the new owner,
+  mirroring the producer retry). The producer-failover goal (smooth the 150k-error
+  gap) is DONE.
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
