@@ -1090,24 +1090,32 @@ impl<'a> SubscriptionBuilder<'a> {
         // Fan in across every partition the topology cache knows about
         // (default: just partition 0 — see `partition_set`).
         let partitions = partition_set(self.client, &topic, group.as_deref());
-        let mut receivers = Vec::with_capacity(partitions.len());
+        // Keep each partition's Subscribe request so the supervisor can re-subscribe
+        // it to a new owner after a failover.
+        let mut subs = Vec::with_capacity(partitions.len());
         for partition in &partitions {
-            receivers.push(subscribe_partition_manual(self.client, make_req(*partition)).await?);
+            let req = make_req(*partition);
+            let part_rx = subscribe_partition_manual(self.client, req.clone()).await?;
+            subs.push((req, part_rx));
         }
 
         // Static fan-in when auto-resubscribe is disabled.
         let Some(interval_ms) = self.client.shared.opts.partition_resubscribe_interval_ms else {
-            return Ok(Subscription::fan_in(receivers, prefetch));
+            return Ok(Subscription::fan_in(
+                subs.into_iter().map(|(_, rx)| rx).collect(),
+                prefetch,
+            ));
         };
 
-        // Dynamic fan-in: a manager task picks up partitions added by a live grow.
-        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
+        // Dynamic fan-in: supervise each partition (re-subscribe on owner failover)
+        // and a manager task picks up partitions added by a live grow.
+        let cap = (prefetch as usize).max(1) * subs.len().max(1);
         let (tx, rx) = mpsc::channel(cap);
-        for part_rx in receivers {
-            forward_into(part_rx, tx.clone());
+        let client = self.client.clone();
+        for (req, part_rx) in subs {
+            supervise_forward_manual(client.clone(), req, part_rx, tx.clone());
         }
         let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
-        let client = self.client.clone();
         tokio::spawn(partition_resubscribe_loop_manual(
             client,
             topic,
@@ -1149,22 +1157,27 @@ impl<'a> SubscriptionBuilder<'a> {
             member_id,
         };
         let partitions = partition_set(self.client, &topic, group.as_deref());
-        let mut receivers = Vec::with_capacity(partitions.len());
+        let mut subs = Vec::with_capacity(partitions.len());
         for partition in &partitions {
-            receivers.push(subscribe_partition_auto(self.client, make_req(*partition)).await?);
+            let req = make_req(*partition);
+            let part_rx = subscribe_partition_auto(self.client, req.clone()).await?;
+            subs.push((req, part_rx));
         }
 
         let Some(interval_ms) = self.client.shared.opts.partition_resubscribe_interval_ms else {
-            return Ok(AutoAckedSubscription::fan_in(receivers, prefetch));
+            return Ok(AutoAckedSubscription::fan_in(
+                subs.into_iter().map(|(_, rx)| rx).collect(),
+                prefetch,
+            ));
         };
 
-        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
+        let cap = (prefetch as usize).max(1) * subs.len().max(1);
         let (tx, rx) = mpsc::channel(cap);
-        for part_rx in receivers {
-            forward_into(part_rx, tx.clone());
+        let client = self.client.clone();
+        for (req, part_rx) in subs {
+            supervise_forward_auto(client.clone(), req, part_rx, tx.clone());
         }
         let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
-        let client = self.client.clone();
         tokio::spawn(partition_resubscribe_loop_auto(
             client,
             topic,
@@ -1205,13 +1218,99 @@ fn partition_set(client: &Client, topic: &str, group: Option<&str>) -> Vec<Parti
 /// Forward one partition's stream into the merged subscription channel. Ends when
 /// the partition stream closes (e.g. the broker retired it during a shrink) or
 /// the subscription is dropped.
-fn forward_into<M: Send + 'static>(mut part_rx: mpsc::Receiver<M>, tx: mpsc::Sender<M>) {
+/// Boxed re-subscribe future for [`supervise_forward`].
+type ResubscribeFut<M> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = FibrilResult<mpsc::Receiver<M>>> + Send>>;
+
+/// Forward one partition's stream into the fan-in channel, supervising it across
+/// an owner failover. When the per-partition stream ends unexpectedly (the owner
+/// died), this re-resolves the owner and re-subscribes to the new one, then
+/// resumes forwarding - the read-side mirror of the producer publish retry, so a
+/// consumer rides through a failover instead of silently losing that partition.
+///
+/// Stops only when: the consumer drops the subscription (the fan-in sender
+/// closes), the client is shutting down, the topic is gone (a refreshed,
+/// populated topology no longer knows it), or re-subscribe fails permanently.
+/// Unlike the producer there is no fixed deadline: a subscription is long-lived,
+/// so it retries (with backoff) for as long as the consumer keeps it open.
+fn supervise_forward<M, F>(
+    client: Client,
+    req: Subscribe,
+    mut part_rx: mpsc::Receiver<M>,
+    tx: mpsc::Sender<M>,
+    resubscribe: F,
+) where
+    M: Send + 'static,
+    F: Fn(Client, Subscribe) -> ResubscribeFut<M> + Send + 'static,
+{
     tokio::spawn(async move {
-        while let Some(msg) = part_rx.recv().await {
-            if tx.send(msg).await.is_err() {
-                break;
+        loop {
+            // Forward until the stream ends or the consumer goes away.
+            let mut consumer_gone = false;
+            while let Some(msg) = part_rx.recv().await {
+                if tx.send(msg).await.is_err() {
+                    consumer_gone = true;
+                    break;
+                }
+            }
+            if consumer_gone
+                || tx.is_closed()
+                || client.shared.user_shutdown.load(Ordering::Acquire)
+            {
+                return;
+            }
+
+            // The stream ended without the consumer asking - the owner most likely
+            // failed over. Re-resolve and re-subscribe to the new owner, backing
+            // off until it comes up, the consumer leaves, or the topic is gone.
+            let mut backoff_ms = PUBLISH_RETRY_INITIAL_BACKOFF_MS;
+            loop {
+                if tx.is_closed() || client.shared.user_shutdown.load(Ordering::Acquire) {
+                    return;
+                }
+                if client.shared.refresh_topology_throttled().await {
+                    let topo = client.shared.topology.load();
+                    if topo.is_populated() && !topo.knows_topic(&req.topic, req.group.as_deref()) {
+                        return; // topic deleted - stop re-subscribing
+                    }
+                }
+                match resubscribe(client.clone(), req.clone()).await {
+                    Ok(new_rx) => {
+                        part_rx = new_rx;
+                        break;
+                    }
+                    Err(err) if err.is_transient() => {
+                        tokio::time::sleep(publish_retry_nap(backoff_ms)).await;
+                        backoff_ms = (backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
+                    }
+                    Err(_) => return, // permanent (e.g. not-found / max redirects)
+                }
             }
         }
+    });
+}
+
+/// Supervised forward for a manual-ack partition stream.
+fn supervise_forward_manual(
+    client: Client,
+    req: Subscribe,
+    part_rx: mpsc::Receiver<InflightMessage>,
+    tx: mpsc::Sender<InflightMessage>,
+) {
+    supervise_forward(client, req, part_rx, tx, |client, req| {
+        Box::pin(async move { subscribe_partition_manual(&client, req).await })
+    });
+}
+
+/// Supervised forward for an auto-ack partition stream.
+fn supervise_forward_auto(
+    client: Client,
+    req: Subscribe,
+    part_rx: mpsc::Receiver<Message>,
+    tx: mpsc::Sender<Message>,
+) {
+    supervise_forward(client, req, part_rx, tx, |client, req| {
+        Box::pin(async move { subscribe_partition_auto(&client, req).await })
     });
 }
 
@@ -1254,9 +1353,9 @@ async fn partition_resubscribe_loop_manual(
                 consumer_target,
                 member_id,
             };
-            if let Ok(part_rx) = subscribe_partition_manual(&client, req).await {
+            if let Ok(part_rx) = subscribe_partition_manual(&client, req.clone()).await {
                 known.insert(partition);
-                forward_into(part_rx, tx.clone());
+                supervise_forward_manual(client.clone(), req, part_rx, tx.clone());
             }
         }
     }
@@ -1297,9 +1396,9 @@ async fn partition_resubscribe_loop_auto(
                 consumer_target,
                 member_id,
             };
-            if let Ok(part_rx) = subscribe_partition_auto(&client, req).await {
+            if let Ok(part_rx) = subscribe_partition_auto(&client, req.clone()).await {
                 known.insert(partition);
-                forward_into(part_rx, tx.clone());
+                supervise_forward_auto(client.clone(), req, part_rx, tx.clone());
             }
         }
     }
@@ -4545,6 +4644,10 @@ mod tests {
     #[tokio::test]
     async fn subscribe_flags_match_ack_mode() {
         let (client, mut rx) = client_with_command_rx();
+        // Hold the mock stream senders open so the per-partition streams stay live;
+        // otherwise the supervisor (correctly) sees the stream end and re-subscribes,
+        // which would interleave an extra Subscribe with the auto-subscribe below.
+        let mut keep_open: Vec<Box<dyn std::any::Any + Send>> = Vec::new();
         let manual_client = client.clone();
         let manual = tokio::spawn(async move {
             manual_client
@@ -4557,14 +4660,15 @@ mod tests {
         match rx.recv().await.unwrap() {
             Command::Subscribe { req, reply } => {
                 assert!(!req.auto_ack);
-                let (_tx, manual_rx) = mpsc::channel(1);
+                let (tx, manual_rx) = mpsc::channel(1);
+                keep_open.push(Box::new(tx));
                 reply
                     .send(Ok(AckableSubChannel { manual: manual_rx }))
                     .unwrap();
             }
             other => panic!("expected manual subscribe, got {other:?}"),
         }
-        manual.await.unwrap().unwrap();
+        let _manual_sub = manual.await.unwrap().unwrap();
 
         let auto_client = client.clone();
         let auto =
@@ -4575,14 +4679,16 @@ mod tests {
         match rx.recv().await.unwrap() {
             Command::SubscribeAutoAcked { req, reply } => {
                 assert!(req.auto_ack);
-                let (_tx, auto_rx) = mpsc::channel(1);
+                let (tx, auto_rx) = mpsc::channel(1);
+                keep_open.push(Box::new(tx));
                 reply
                     .send(Ok(AutoAckedSubChannel { auto: auto_rx }))
                     .unwrap();
             }
             other => panic!("expected auto subscribe, got {other:?}"),
         }
-        auto.await.unwrap().unwrap();
+        let _auto_sub = auto.await.unwrap().unwrap();
+        drop(keep_open);
     }
 
     #[tokio::test]
