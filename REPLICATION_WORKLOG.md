@@ -705,6 +705,30 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
     (2) pipelining read+apply (streaming) overlaps the 8ms read under the 21ms
         apply and removes per-tick round-trip serialization - the bigger win.
   Streaming-on comparison run next (see below) to quantify (2) before any code.
+  *** STREAMING-ON DISK COMPARISON + MICROBATCH FIX (2026-06-18) ***
+  Same setup (3-node replica_durable:2, shared ext4, target 100k/s, unconfirmed):
+    seq (stream OFF):        48,984/s  apply 21.4ms x940 (~2000/apply)  confirm 0.198ms  drained
+    stream ON, NO fold:       4,822/s  apply  3.9ms x20997 (~7/apply)  confirm 2.49ms   81,932 backlog, 144k undelivered
+    stream ON, + FOLD:       99,858/s  apply 36ms  x884 (~3900/apply)  confirm 0.046ms  drained, 0 missing
+  Root cause of the no-fold collapse: NOT credit (credit=max_bytes_per_read=8MB,
+  plenty). Under the confirm-gated stream the producer trickles, so each owner read
+  finds only ~7 msgs -> the follower applied ~7 msgs per fsync = fsync-bound. The
+  pull path got ~2000/apply only because its per-tick latency let a backlog build.
+  FIX (commit "Microbatch follower stream apply..."): run_follower_stream_applier
+  now FOLDS contiguous same-epoch frames into one apply (one fsync pair) via an
+  opportunistic try_recv drain + a one-shot 2ms linger (hardcoded for now;
+  MAX_MERGE_BYTES 16MiB cap). Under backlog the queued frames fold with zero added
+  latency; on a trickle the 2ms linger recreates the pull path's accumulation.
+  RESULT: streaming 4.8k -> 99.9k/s (~20x) and now ~2x the sequential ceiling,
+  saturating the 100k target. follower_apply count 20997 -> 884. confirm_wait
+  2.49ms -> 0.046ms. CRUCIAL: keeps the msg-then-event fsync ORDER inside the
+  (now larger) apply, so the failover invariant holds with NO recovery gate needed
+  - the gate + parallel fsync stays a separate, smaller, optional follow-on.
+  publish->server-receive p50 1ms; server-receive->deliver p50 202ms (the
+  visibility/confirm pipeline at full rate) - tunable via the linger, a separate
+  latency lever from throughput. NEXT: (a) promote APPLY_LINGER to a replication
+  runtime setting + sweep it (latency/throughput knob); (b) adversarial + failover
+  validation of the fold, THEN consider flipping streaming default-on.
 - NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
