@@ -797,6 +797,19 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   keep where the drain finds little: the SATURATED shared disk and LOW trickle
   rates - running a focused shared-0-vs-2ms + trickle-0-vs-2ms to decide the
   default before lowering it from 2ms.
+  LINGER DEFAULT DECISION (2026-06-18): KEEP 2ms. On the CONTENDED shared disk
+  (100k, near saturation) 2ms BEATS 0 on both axes: 99,883/s deliver p50 733ms vs
+  98,205/s deliver p50 1164ms (0us). Counterintuitive but right: with drain-only,
+  a momentary catch-up fires a small apply+fsync immediately (fragmentation); the
+  2ms linger gathers more per apply (845 vs 904 applies) -> fewer fsyncs -> less
+  disk contention -> lower backlog -> lower latency. At trickle (10k) 2ms also
+  marginally better (p50 29 vs 42ms). In the uncontended mixed layout it is a
+  no-op. So 2ms is a no-op when not disk-bound and a win when disk-bound = correct
+  default shape. It is now a live setting: contended disks can tune UP (5-10ms) for
+  more amortization; latency-sensitive uncontended ones can drop it. Lowering the
+  default toward 0 would regress the disk-bound path. STEP 2 (linger) COMPLETE.
+  NEXT = STEP 3: adversarial + failover validation of the fold, then flip streaming
+  default-on.
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
