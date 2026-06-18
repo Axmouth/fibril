@@ -32,6 +32,10 @@ RESOURCE_SUMMARY=false
 DYNAMIC_MEMBERSHIP=false
 STEADY_BENCH=false
 BENCH_TOPIC="orders"
+# Repartition the steady-bench topic to this many partitions before benching, so a
+# multi-partition cluster's aggregate throughput can be measured (load spreads
+# round-robin across partition owners). 1 = leave single-partition.
+BENCH_PARTITION_COUNT="${BENCH_PARTITION_COUNT:-1}"
 ASSIGNMENT_DURABILITY=""
 FAILOVER_SMOKE=false
 REPARTITION_SMOKE=false
@@ -804,7 +808,7 @@ run_steady_benchmark() {
   echo "  steady benchmark summary: $summary_file"
   sed -n '1,4p' "$summary_file"
 
-  if [[ "$GANGLION" == true && -n "$BENCH_FOLLOWER_NODE" ]]; then
+  if [[ "$GANGLION" == true && -n "$BENCH_FOLLOWER_NODE" && "$BENCH_PARTITION_COUNT" -le 1 ]]; then
     min_tail="$(sed -n 's/^Confirmed total: //p' "$results_file" | head -n1)"
     if [[ -z "$min_tail" ]]; then
       min_tail="$(sed -n 's/^Sent total: //p' "$results_file" | head -n1)"
@@ -1304,6 +1308,18 @@ if [[ "$STEADY_BENCH" == true ]]; then
     echo "declaring queue '$BENCH_TOPIC' on standalone node-1 for steady benchmark..."
     "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + 1))" queue declare "$BENCH_TOPIC" >/dev/null \
       || { echo "FAIL: standalone benchmark queue declare failed" >&2; FAILED=1; }
+  fi
+  if [[ "$FAILED" -eq 0 && "$BENCH_PARTITION_COUNT" -gt 1 ]]; then
+    echo "repartitioning '$BENCH_TOPIC' to $BENCH_PARTITION_COUNT partitions for the bench..."
+    repart="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + 1))" admin repartition "$BENCH_TOPIC" "$BENCH_PARTITION_COUNT")"
+    got_count="$(echo "$repart" | jq -r '.partitioning.partition_count // empty')"
+    if [[ "$got_count" != "$BENCH_PARTITION_COUNT" ]]; then
+      echo "FAIL: repartition to $BENCH_PARTITION_COUNT returned: $repart" >&2
+      FAILED=1
+    elif [[ "$GANGLION" == true ]]; then
+      wait_all_nodes_see_topic_partition "$BENCH_TOPIC" "$((BENCH_PARTITION_COUNT - 1))" || FAILED=1
+      echo "  $BENCH_TOPIC now has $BENCH_PARTITION_COUNT partitions visible cluster-wide"
+    fi
   fi
   if [[ "$FAILED" -eq 0 ]]; then
     run_steady_benchmark "$BENCH_BROKER_NODE" "$BENCH_ADMIN_NODE" "$BENCH_DURABILITY_LABEL" \
