@@ -740,6 +740,13 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   agreed with user: (1) find limits (higher-rate sweep, in progress), (2) promote
   APPLY_LINGER to a replication runtime setting, (3) adversarial + failover
   validation before flipping streaming default-on.
+  LIMIT SWEEP (2026-06-18, streaming+fold). all-SSD shared (3 nodes/1 drive):
+    100k -> 99,858/s (deliver 202ms)   150k -> 92,454/s (saturated, deliver 2174ms)
+    200k -> 87,486/s (overload, dips below 150k). So shared-SSD ceiling ~92k/s,
+    ~2x the sequential 49k. (Mixed-layout 150k/200k cells first FAILED on a HARNESS
+    artifact - reused per-node roots accumulate stale data across runs since
+    cluster-tryout only cleans its own RUN_DIR; slow recovery then misses the raft
+    stability window. Fixed by wiping per-node roots between runs; re-running.)
 - NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
