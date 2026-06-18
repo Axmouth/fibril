@@ -650,6 +650,36 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   already supported (durability param). VALIDATE: stroma roles/replay tests + the
   3-node replica_durable failover smoke + a DISK steady bench (expect follower apply
   fsync ~halved, disk replicated ceiling up from ~29k). Keep streaming default-off.
+  *** SAFETY FLAW FOUND IN STEP 1b PLAN (2026-06-18, audit-the-audit) ***
+  The plan above is UNSAFE AS WRITTEN. The "GATE preserved" claim conflated msg
+  ACCEPTED (stage outcome, known pre-fsync) with msg DURABLE. Recovery
+  (stroma recover_events_from_log) replays ALL durable events up to
+  event_log.next_offset() and applies them with NO cross-check against the message
+  log's durable watermark. The sequential code (msg fsync fully completes BEFORE
+  event fsync starts) is what guarantees "event durable => referenced messages
+  durable". tokio::join! of the two fsyncs lets the EVENT log win the race, so a
+  crash can leave a durable Enqueue/EnqueueMany event referencing a message offset
+  that did NOT survive -> recovery applies a dangling message reference.
+  Mitigating context (why it likely self-heals, but is too subtle to rely on
+  silently): on rejoin the owner backfills the missing messages on the independent
+  message cursor, and promotion is (should be) gated on in_sync, so the dangling
+  in-mem state is transient and converges before the follower can serve as owner -
+  PROVIDED followers never serve consumer reads while behind AND promotion really
+  is in_sync-gated. Both need verifying; relying on them is exactly the
+  technically-correct-but-broken trap.
+  CORRECT SAFE FORM (two options):
+    A. Parallel fsync + RECOVERY GATE: during recovery, never apply an event whose
+       referenced message offsets exceed the message log's durable tail; clamp the
+       event replay tail accordingly (self-heals via owner backfill). Makes parallel
+       fsync correct regardless of the read/promotion assumptions. Strict robustness
+       win, but touches the failover-critical recovery path -> needs an adversarial
+       crash test (event durable ahead of message).
+    B. Keep ordering, shelve the parallel-fsync micro-opt. Note fsync is no longer
+       the bottleneck (see RE-PRIORITIZED below: follower apply fsync ~3-5ms post
+       batch-size change; streaming was the real win and is DONE). So 1b's value is
+       now marginal and the safe form costs a recovery-path change. Re-validate the
+       ACTUAL current disk bottleneck before spending that.
+  STEP 1a (Keratin::sync) stands either way - additive, safe, useful for B too.
 - NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
