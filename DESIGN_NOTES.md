@@ -611,6 +611,14 @@ rest. Matches the precedent (Pulsar subscription types, NATS subjects) and the
 "just works" philosophy - depth is opt-in per channel, the default surface stays
 small.
 
+Naming (decided): **Fibril queues** (the default work queue) and **Plexus
+channels** (fan-out). The queue keeps its plain name - it is the default, so it
+does not need a special codename; `plexus` is the one themed type name, used for
+the fan-out channel and the "queue vs plexus" contrast in docs. (Shortlist once
+considered for a queue codename, not adopted: synapse - apt but overused; bouton -
+neural/distinctive; bolus - consumed=gone; conduit - rejected, off the organic
+theme. Left here only as a record.)
+
 ### The enabling refactor: substrate vs consumption semantics
 
 Fibril is already log-backed (keratin-log) with the work-queue semantics layered
