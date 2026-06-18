@@ -825,6 +825,25 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   default false -> true (shipping default). Data strongly supports it (streaming+
   fold 99.9k vs sequential 49k; failover OK) - pending explicit go-ahead since it
   changes the shipping default.
+  FAILOVER-UNDER-LOAD (2026-06-18, "harden first" - exploratory orchestration, not
+  yet a committed harness mode): 3-node release cluster, replica_durable:2,
+  streaming+fold ON, confirmed load 10k/25s through a survivor, owner killed at
+  t~13s. RESULT: Confirmed total 124,140 == Received total 124,140 -> ZERO
+  confirmed-message loss across the failover under active load. Measured missing
+  (270) == confirm_errors (270): those are publishes whose confirm failed in the
+  failover window (legitimately not durable, correctly not delivered). Cursors
+  converged on survivors (node-2 owns p0 in_sync, node-3 follows). DURABILITY
+  INVARIANT HOLDS UNDER LOAD. So streaming+fold survives owner death mid-stream
+  with no confirmed loss = hardening PASSES.
+  SEPARATE OBSERVATION (client resilience, NOT durability/streaming): ~150k publish
+  ERRORS during the raft reassignment gap - the client surfaces the owner-transition
+  window as publish errors rather than transparently retrying/blocking; it recovers
+  and resumes confirming once the new owner is promoted, but the gap is multi-second
+  and noisy. TODO: client publish retry/backoff across owner transition (smooth the
+  failover gap). Reassignment also took >6s to observe in this run (failover latency,
+  raft detect+reassign+client topology refresh) - acceptable but not seamless.
+  TODO: formalize this as a committed --failover-under-load harness mode (currently
+  a throwaway script in /var/tmp).
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
