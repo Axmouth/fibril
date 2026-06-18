@@ -4159,3 +4159,12 @@ Snapshot/checkpoint concern found during higher-rate sweep:
   duplicated constants + helpers across crates (header namespaces were one
   instance, now shared), and remove needless extra code that only adds maintenance
   burden. The branch grew huge in scope; a tidy pass keeps the merge clean.
+
+- DOCS TODO (for the final big documentation pass, user-flagged 2026-06-19): the
+  client reliability story deserves a short example/tutorial on the docs SITE, not
+  just rustdoc. Home: website/src/content/docs/latest/clients.mdx (Astro). Cover:
+  (1) confirmed publish + the is_retryable()/retry_advice() match pattern (handle
+  the unknown-outcome set); (2) ReliablePublisher opt-in "never miss" usage;
+  (3) what producer ids (fibril.client.*) are for + the at-least-once -> dedup
+  path. Also worth a short failover-behavior note (producer + consumer ride
+  through; failover_verify proves zero confirmed-id loss). Keep it copy-paste-able.
