@@ -147,9 +147,21 @@ impl FibrilError {
 /// Result alias used by the Fibril Rust client.
 pub type FibrilResult<T> = Result<T, FibrilError>;
 
+// TODO(config-knobs, expert tier): the three failover-retry constants below are
+// hardcoded for now. Promote them to `ClientOptions` knobs in the later settings
+// pass (client-side tunables, expert tier per the settings-tiering design in
+// DESIGN_NOTES.md), alongside the existing `publish_timeout_ms`. Tracked:
+//   - PUBLISH_RETRY_INITIAL_BACKOFF_MS / PUBLISH_RETRY_MAX_BACKOFF_MS
+//   - SUBSCRIPTION_OWNER_CHECK_MS
+
 /// Confirmed-publish retry backoff bounds (transient owner-failover retries).
 const PUBLISH_RETRY_INITIAL_BACKOFF_MS: u64 = 10;
 const PUBLISH_RETRY_MAX_BACKOFF_MS: u64 = 500;
+
+/// How often a supervised subscription re-checks the topology owner to detect a
+/// failover (the engine keeps the stream alive across reconnects to the same
+/// endpoint, so an owner *move* is not seen via the stream - only via topology).
+const SUBSCRIPTION_OWNER_CHECK_MS: u64 = 1_000;
 
 /// One backoff nap: `base_ms` plus up to `base_ms` of jitter, so many publishers
 /// retrying a shared failover do not resynchronize into retry storms.
@@ -1244,25 +1256,59 @@ fn supervise_forward<M, F>(
     F: Fn(Client, Subscribe) -> ResubscribeFut<M> + Send + 'static,
 {
     tokio::spawn(async move {
+        let check = Duration::from_millis(SUBSCRIPTION_OWNER_CHECK_MS);
+        let owner_of = |client: &Client, req: &Subscribe| {
+            client
+                .shared
+                .topology
+                .load()
+                .lookup(&req.topic, req.partition, req.group.as_deref())
+                .map(|entry| entry.endpoint)
+        };
         loop {
-            // Forward until the stream ends or the consumer goes away.
-            let mut consumer_gone = false;
-            while let Some(msg) = part_rx.recv().await {
-                if tx.send(msg).await.is_err() {
-                    consumer_gone = true;
-                    break;
+            // The owner this stream is bound to. The engine keeps a subscription
+            // alive across reconnects to the SAME endpoint (good for blips), so a
+            // failover (owner moves to a new node) does NOT close this stream -
+            // we detect it by watching the topology owner instead, and migrate
+            // once the controller commits the new owner.
+            let bound_owner = owner_of(&client, &req);
+
+            // Forward until the stream ends, the consumer leaves, or the owner moves.
+            let migrate = loop {
+                tokio::select! {
+                    msg = part_rx.recv() => match msg {
+                        Some(msg) => {
+                            if tx.send(msg).await.is_err() {
+                                return; // consumer dropped the subscription
+                            }
+                        }
+                        None => break true, // stream closed (owner gone / engine gave up)
+                    },
+                    _ = tokio::time::sleep(check) => {
+                        if tx.is_closed()
+                            || client.shared.user_shutdown.load(Ordering::Acquire)
+                        {
+                            return;
+                        }
+                        // Refresh (throttled) so the cache reflects a committed
+                        // reassignment, then migrate if the owner endpoint changed.
+                        client.shared.refresh_topology_throttled().await;
+                        let current = owner_of(&client, &req);
+                        if current.is_some() && current != bound_owner {
+                            break true;
+                        }
+                    }
                 }
+            };
+            if !migrate {
+                return;
             }
-            if consumer_gone
-                || tx.is_closed()
-                || client.shared.user_shutdown.load(Ordering::Acquire)
-            {
+            if tx.is_closed() || client.shared.user_shutdown.load(Ordering::Acquire) {
                 return;
             }
 
-            // The stream ended without the consumer asking - the owner most likely
-            // failed over. Re-resolve and re-subscribe to the new owner, backing
-            // off until it comes up, the consumer leaves, or the topic is gone.
+            // Re-resolve and re-subscribe to the new owner, backing off until it
+            // comes up, the consumer leaves, or the topic is gone.
             let mut backoff_ms = PUBLISH_RETRY_INITIAL_BACKOFF_MS;
             loop {
                 if tx.is_closed() || client.shared.user_shutdown.load(Ordering::Acquire) {

@@ -513,3 +513,35 @@ Pieces: (1) `publish_confirmed` transient retry + `publish_timeout_ms`. (2) the
 declared-vs-gone fail-fast above (client-side via the cache split; no protocol
 change). (3) the pipelined `publish_with_confirmation` path, which must preserve
 in-flight ordering under the confirm window across a retry — the careful one.
+
+### Consumer-side failover (and why it does not clash with reconnect-to-same)
+
+The producer retry has a read-side mirror: a consumer must keep consuming a
+partition across an owner failover, not stall. The subtlety is that two desirable
+behaviors look like they conflict but operate at different layers:
+
+- **Connection-level reconnect-to-same-endpoint** (engine): a TCP blip where the
+  owner is still the owner. The engine reconnects the same endpoint and reconciles
+  every subscription on it. The stream "survives reconnects" - cheap, no churn.
+- **Subscription-level migrate-on-owner-change** (supervisor): the owner actually
+  moved (failover). The subscription must re-resolve and re-subscribe to the new
+  node.
+
+Because "stream survives reconnects" means a failover does NOT close the
+per-partition stream, a supervisor that only watches the stream never fires. So
+failover is detected via TOPOLOGY instead: each supervised partition captures the
+owner endpoint it bound to, periodically refreshes topology (throttled), and
+migrates only when the committed owner endpoint actually changes
+(`current.is_some() && current != bound`). A blip leaves the owner unchanged (or
+briefly unknown) so it does not trigger migration - the engine handles it. They
+are disjoint triggers at disjoint layers, so there is no compromise: blips →
+reconnect-to-same, failover → migrate. Re-subscribe also degrades gracefully
+(`engine_for` re-resolves the current owner, same or new), so it is always
+correct.
+
+Deferred: a "first wins" race (reconnect-to-same vs re-resolve) in the ambiguous
+stream-close window would cut recovery latency, but blips never close the stream
+and failover latency is dominated by reassignment, so it is not worth the
+double-subscribe/cancel complexity yet. Minor wart: the dead owner's connection
+slot lingers in the pool after a failover (the engine keeps retrying it) - harmless,
+a future pool-prune.

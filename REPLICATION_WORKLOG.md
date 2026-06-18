@@ -934,6 +934,36 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   died) re-resolve owner + re-subscribe to the new owner (subscribe_partition_* with
   transient retry like the producer), resume forwarding; stop only on user-close,
   topic-gone (not-found), or partition no longer ours.
+  CLIENT FAILOVER RETRY - PIECE 4 (2026-06-18): consumer/subscription failover.
+  FIRST CUT (supervisor on stream-close) did NOT fire: the engine deliberately keeps
+  a subscription alive ACROSS reconnects to the SAME endpoint ("stream survives
+  reconnects", good for blips) and AutoReconnect is once-per-op, so a failover (owner
+  MOVES to a new node) never closes the per-partition stream -> the supervisor parked
+  on recv() forever (validation: received unchanged ~124k, missing 27,680).
+  FIX: detect failover via TOPOLOGY, not the stream. supervise_forward now selects on
+  part_rx.recv() AND a periodic owner-change check (SUBSCRIPTION_OWNER_CHECK_MS=1s):
+  it captures the owner endpoint it bound to, refreshes topology (throttled), and if
+  the committed owner endpoint changed it migrates (re-subscribe to the new owner).
+  Guard `current.is_some() && current != bound` so a blip (owner unchanged / briefly
+  unknown) does NOT trigger migration - blips stay handled by the engine's
+  reconnect-to-same, failover by the supervisor. No double-recovery/double-delivery.
+  VALIDATION (failover-under-load): publish_errors 0; confirmed 154,266; RECEIVED
+  154,417 (>= confirmed; +151 = at-least-once redelivery of leased-but-unacked at
+  failover); measured missing 27,680 -> 150 (window noise). Tail deliver max ~12s
+  for the few messages caught in the reassignment gap (p50 22ms) - delayed not lost.
+  PRODUCER + CONSUMER BOTH RIDE THROUGH FAILOVER NOW.
+  DESIGN NOTE (the two features do NOT clash): connection-level reconnect-to-same
+  (blips, all subs on an EngineSlot) and subscription-level migrate-on-owner-change
+  (failover, one partition) are different layers + disjoint triggers; decoupling
+  failover detection from the stream lifecycle is what lets both coexist. "First
+  wins" (race reconnect-to-same vs re-resolve in the ambiguous stream-close window)
+  is a deferred latency optimization - not needed since blips never close the stream
+  and failover latency is dominated by reassignment anyway. MINOR WART: the dead
+  owner's EngineSlot lingers in the pool post-failover (engine keeps retrying it) -
+  harmless; future pool-prune. Recorded in DESIGN_NOTES.md.
+  TODO(config-knobs, expert tier): PUBLISH_RETRY_INITIAL/MAX_BACKOFF_MS and
+  SUBSCRIPTION_OWNER_CHECK_MS are hardcoded client consts -> promote to ClientOptions
+  in the later settings pass (with publish_timeout_ms).
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
