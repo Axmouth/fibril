@@ -787,6 +787,16 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   (each node already did 146k for ONE partition in the mixed test) removes the disk
   cap so aggregate scales past single-node. Latency at saturation is multi-second
   (offered > capacity backlog) - the linger sweep measures latency at a sane load.
+  LINGER SWEEP (2026-06-18, mixed layout owner-tmpfs/follower-ssd, 100k, 1 part):
+    0us: 99,850/s deliver p50 39/p95 123   500us: 99,773/s 43/135   1ms: 99,785/s
+    43/153   2ms: 99,809/s 43/204   5ms: 99,690/s 28/77   (250us run: harness flake)
+  READ: at this HEALTHY (uncontended, below-ceiling) point the linger is ~a no-op -
+  throughput flat (all hit 100k, 0 missing), p50 wanders 28-43ms within single-run
+  noise (5ms being lowest is noise, not signal). Expected: the opportunistic drain
+  already coalesces enough here, so linger adds nothing. The linger only earns its
+  keep where the drain finds little: the SATURATED shared disk and LOW trickle
+  rates - running a focused shared-0-vs-2ms + trickle-0-vs-2ms to decide the
+  default before lowering it from 2ms.
   TODO (owner-side read/encode fan-out, user-flagged 2026-06-18): at replication
   factor >= 3 the owner runs one independent stream sender per follower, each
   re-reading and RE-ENCODING the same tail -> duplicated CPU (encode) + memory that
