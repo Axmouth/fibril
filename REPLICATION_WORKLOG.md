@@ -684,6 +684,27 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   DISK replicated bottleneck now that streaming has landed, before spending
   recovery-path risk on a now-marginal fsync win. The recovery gate (option A /
   "just the recovery gate") stays available as a standalone robustness item.
+  *** REAL-DISK RE-MEASURE (2026-06-18, the data the decision asked for) ***
+  Setup: 3-node ganglion, replica_durable:2, all node data on ext4 /dev/sdb4 via
+  CLUSTER_TRYOUT_RUN_ROOT=/var/tmp (NOT tmpfs - real fsync, but SHARED disk across
+  all 3 nodes). steady_c mixed, 10w/10r, 1KiB, target 100k/s, unconfirmed.
+  SEQUENTIAL (streaming OFF, current shipping path): ~48984/s actual (disk-bound
+  ceiling). Replication timing (the useful part - latency pctiles are pure backlog
+  in unconfirmed mode, ignore them):
+    owner replica_confirm_wait avg 0.198ms (count 1.9M) -> confirm gate NOT the
+      bottleneck (re-confirmed on disk).
+    follower follower_apply avg 21.4ms  <- the TWO SEQUENTIAL fsyncs on the
+      contended disk; real cost now (was ~free on tmpfs). ~2000 msgs/apply so
+      already well batch-amortized; 21ms is the disk-sync floor per apply.
+    follower follower_owner_read avg 8.0ms.
+    follower follower_tick avg 233ms doing ~8 applies/tick (940 applies/119 ticks)
+      = ~8 x (read 8ms + apply 21ms) SEQUENTIAL, no overlap. This serialization IS
+      the structural ceiling, exactly as predicted.
+  READ: on disk BOTH levers are real (unlike tmpfs where apply was ~free):
+    (1) parallel/async fsync would roughly halve the 21ms apply;
+    (2) pipelining read+apply (streaming) overlaps the 8ms read under the 21ms
+        apply and removes per-tick round-trip serialization - the bigger win.
+  Streaming-on comparison run next (see below) to quantify (2) before any code.
 - NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
