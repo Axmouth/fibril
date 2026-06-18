@@ -4133,3 +4133,29 @@ Snapshot/checkpoint concern found during higher-rate sweep:
      push/pull, or Keratin raw scan/append APIs may still matter.
   6. Caught-up poll cadence for low-load idle cases. Keep this in scope, but do
      not treat it as the dominant 50k/s bottleneck without a low-load benchmark.
+
+- CLIENT FAILOVER RETRY - HELPERS + HEADER NAMESPACE (2026-06-19):
+  * ReliablePublisher (opt-in, fibril-client): retry-until-confirmed on top of
+    publish_confirmed (handles the unknown-outcome set is_retryable() flags),
+    bounded by max_attempts (0 = until confirmed/permanent). Stamps a stable
+    producer id + monotonic seq for forward-compat dedup. + rustdoc examples
+    (the reliability doc-examples). NewMessage now derives Clone.
+  * Header namespace: fibril.* / stroma.* are server-owned (broker rejects client
+    publishes that set them). Added fibril.client.* carve-out = library-owned,
+    client-writable (broker reads recognized keys, ignores rest). ReliablePublisher
+    stamps fibril.client.producer_id / fibril.client.producer_seq there.
+    NewMessage::header() guards user code from setting ANY reserved key (silently
+    dropped); NewMessage::system_header() (pub(crate)) is the library bypass.
+  * SHARED (single source of truth in fibril-protocol v1): RESERVED_HEADER_PREFIXES,
+    CLIENT_HEADER_PREFIX, HEADER_PRODUCER_ID/SEQ, is_reserved_header_key,
+    is_server_owned_header_key. handler.rs (broker) and client both use them so the
+    rejection rule and the client guard cannot drift. Client re-exports the consts.
+  * Producer-dedup OPTIMIZATION path (user-noted): not a bespoke wire field -
+    promote the fibril.client.* dedup headers to TYPED "hot header" fields on
+    PublishRequest later (the same pattern content_type/not_before already use:
+    typed fields beside an `extra` map). Generic headers now, hot-promote when hot.
+- TODO (PRE-MERGE PASS for this branch, user-flagged 2026-06-19): before merging
+  the (very large) replication branch, do a dedup/cleanup sweep - consolidate
+  duplicated constants + helpers across crates (header namespaces were one
+  instance, now shared), and remove needless extra code that only adds maintenance
+  burden. The branch grew huge in scope; a tidy pass keeps the merge clean.

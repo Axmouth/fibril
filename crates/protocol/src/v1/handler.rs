@@ -40,7 +40,6 @@ use uuid::Uuid;
 
 type SubKey = (Topic, Partition, Option<Group>); // (topic, partition, group)
 type FrameSink = mpsc::Sender<Frame>;
-const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolServerError {
@@ -127,11 +126,8 @@ struct ConnState {
 }
 
 fn has_reserved_headers(headers: &HashMap<String, String>) -> bool {
-    headers.keys().any(|key| {
-        RESERVED_HEADER_PREFIXES
-            .iter()
-            .any(|prefix| key.starts_with(prefix))
-    })
+    // Server-owned = reserved minus the `fibril.client.*` client carve-out.
+    headers.keys().any(|key| is_server_owned_header_key(key))
 }
 
 fn to_storage_content_type(content_type: Option<ContentType>) -> Option<MessageContentType> {

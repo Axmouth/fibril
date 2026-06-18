@@ -64,6 +64,11 @@ use fibril_protocol::v1::{
 // ===== Public API ============================================================
 
 pub use fibril_protocol::v1::ReconcilePolicy;
+// Shared header namespace constants (single source of truth in the protocol crate)
+// so the client guard and broker rejection cannot drift.
+pub use fibril_protocol::v1::{
+    CLIENT_HEADER_PREFIX, HEADER_PRODUCER_ID, HEADER_PRODUCER_SEQ, RESERVED_HEADER_PREFIXES,
+};
 
 /// A push from the broker telling this client that its assignment within an
 /// exclusive consumer group changed (see [`SubscriptionBuilder::consumer_group`]).
@@ -593,14 +598,31 @@ impl NewMessage {
     ///
     /// Fibril reserves `fibril.*` and `stroma.*` headers for system metadata;
     /// user code should avoid those prefixes.
+    /// Set a user header. The `fibril.` and `stroma.` prefixes are reserved for
+    /// system metadata and are silently ignored here (the broker rejects them, and
+    /// the `fibril.client.*` carve-out is library-owned - see [`ReliablePublisher`]),
+    /// so user code cannot set or spoof them.
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         let key = key.into();
         let value = value.into();
         if key.eq_ignore_ascii_case("content-type") {
             self.content_type = Some(ContentType::from_header(value));
+        } else if is_reserved_header_key(&key) {
+            // System namespace - not user-settable. Drop it.
         } else {
             self.headers.insert(key, value);
         }
+        self
+    }
+
+    /// Set a library-owned system header (the `fibril.client.*` carve-out).
+    /// Bypasses the user guard in [`header`](Self::header); for internal use only.
+    pub(crate) fn system_header(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.headers.insert(key.into(), value.into());
         self
     }
 
@@ -670,14 +692,13 @@ impl<T: Serialize> Publishable for T {
 /// `max_attempts` is reached.
 ///
 /// So today it is **at-least-once-no-miss**: every message is eventually confirmed,
-/// but a retry after a lost confirm can produce a DUPLICATE. It also assigns a
-/// stable **producer id** ([`producer_id`](Self::producer_id)) and a monotonic
-/// per-producer **sequence** as scaffolding for the planned idempotent producer.
-/// Those ids are NOT transmitted yet: producer dedup metadata belongs on dedicated
-/// publish-op WIRE FIELDS, not headers - the `fibril.*` / `stroma.*` header
-/// namespaces are reserved and client-set reserved headers are rejected by the
-/// broker. When the idempotent producer lands, the helper attaches them on those
-/// fields and becomes **effectively-once** with no API change.
+/// but a retry after a lost confirm can produce a DUPLICATE. It stamps every
+/// message with a stable **producer id** ([`HEADER_PRODUCER_ID`]) and a monotonic
+/// per-producer **sequence** ([`HEADER_PRODUCER_SEQ`]) under the broker's
+/// library-owned `fibril.client.*` header carve-out (user code cannot set those).
+/// The broker ignores them today; once it dedups on these keys the SAME helper
+/// becomes **effectively-once** with no API change. (A later hot-header
+/// optimization can promote them to typed fields, like `content_type` already is.)
 ///
 /// Clone it freely: clones share the producer id and the sequence counter, so
 /// multiple tasks publishing through clones still emit one coherent id/seq stream.
@@ -746,11 +767,16 @@ impl ReliablePublisher {
     /// `max_attempts`). Returns the broker-assigned offset. A retry after a lost
     /// confirm may duplicate until owner-side dedup ships - see the type docs.
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
-        // Advance the per-producer sequence: scaffolding for the future dedup wire
-        // fields. Not transmitted yet (reserved-header namespaces forbid carrying
-        // it as a header; it belongs on a publish-op field).
-        self.seq.fetch_add(1, Ordering::Relaxed);
-        let message = payload.into_message()?;
+        // Stamp the producer id + monotonic sequence as library-owned system
+        // headers (the broker's `fibril.client.*` carve-out). The broker ignores
+        // them today, so this stays at-least-once; once it dedups on these keys the
+        // SAME helper is effectively-once. (A later hot-header optimization can
+        // promote them to typed fields, like content_type/not_before already are.)
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let message = payload
+            .into_message()?
+            .system_header(HEADER_PRODUCER_ID, self.producer_id.to_string())
+            .system_header(HEADER_PRODUCER_SEQ, seq.to_string());
         let mut attempts: u32 = 0;
         loop {
             match self.publisher.publish_confirmed(message.clone()).await {
@@ -4823,16 +4849,16 @@ mod tests {
             "clones share the producer id"
         );
 
-        let _ = pid; // producer id is scaffolding; not yet on the wire
-
         let task = tokio::spawn(async move { reliable.publish("hello").await });
 
-        // First attempt: fail with a retryable (but not transport-transient) error
-        // so the outer ReliablePublisher loop re-publishes - the inner
-        // publish_confirmed returns ERR_NOT_OWNER rather than auto-retrying it.
+        // First attempt: producer id/seq stamped under the fibril.client.* carve-out;
+        // fail with a retryable (but not transport-transient) error so the outer
+        // ReliablePublisher loop re-publishes (inner publish_confirmed returns
+        // ERR_NOT_OWNER rather than auto-retrying it).
         match rx.recv().await.unwrap() {
-            Command::PublishConfirmed { topic, reply, .. } => {
-                assert_eq!(topic, "jobs");
+            Command::PublishConfirmed { headers, reply, .. } => {
+                assert_eq!(headers.get(HEADER_PRODUCER_ID), Some(&pid));
+                assert_eq!(headers.get(HEADER_PRODUCER_SEQ), Some(&"0".to_string()));
                 reply
                     .send(Err(FibrilError::Failure {
                         code: ERR_NOT_OWNER,
@@ -4842,14 +4868,32 @@ mod tests {
             }
             other => panic!("expected confirmed publish, got {other:?}"),
         }
-        // Outer loop re-publishes; confirm it this time.
+        // Re-publish keeps the SAME sequence, then confirms.
         match rx.recv().await.unwrap() {
-            Command::PublishConfirmed { reply, .. } => {
+            Command::PublishConfirmed { headers, reply, .. } => {
+                assert_eq!(
+                    headers.get(HEADER_PRODUCER_SEQ),
+                    Some(&"0".to_string()),
+                    "a retry re-sends the same seq"
+                );
                 reply.send(Ok(7)).unwrap();
             }
             other => panic!("expected re-publish, got {other:?}"),
         }
         assert_eq!(task.await.unwrap().unwrap(), 7);
+    }
+
+    #[test]
+    fn user_headers_cannot_set_reserved_namespaces() {
+        let msg = NewMessage::raw(vec![1])
+            .header("trace-id", "abc")
+            .header("fibril.client.producer_id", "spoofed")
+            .header("fibril.retries", "9")
+            .header("stroma.dlq.source_topic", "evil");
+        assert_eq!(msg.headers().get("trace-id"), Some(&"abc".to_string()));
+        assert!(msg.headers().get("fibril.client.producer_id").is_none());
+        assert!(msg.headers().get("fibril.retries").is_none());
+        assert!(msg.headers().get("stroma.dlq.source_topic").is_none());
     }
 
     #[tokio::test]

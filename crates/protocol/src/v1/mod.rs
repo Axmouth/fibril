@@ -638,6 +638,35 @@ pub const ERR_INVALID: u16 = 400;
 /// instead of retrying it across the publish budget.
 pub const ERR_NOT_FOUND: u16 = 404;
 
+// ----- Header namespaces (shared by broker rejection + client guard) ---------
+
+/// Header key prefixes reserved for system metadata. A client publish that sets
+/// any reserved key is rejected by the broker, EXCEPT the client carve-out below.
+/// Shared so the client can guard user code from setting them too.
+pub const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
+/// The carve-out within the reserved namespace that clients MAY set: library-owned
+/// system metadata (e.g. producer dedup ids). The broker reads recognized keys and
+/// ignores the rest; user code still cannot set it (only the client library can).
+pub const CLIENT_HEADER_PREFIX: &str = "fibril.client.";
+/// Library-owned producer-id header (under `fibril.client.*`): set by the client
+/// ReliablePublisher today, read by broker producer-dedup later.
+pub const HEADER_PRODUCER_ID: &str = "fibril.client.producer_id";
+/// Library-owned per-producer monotonic sequence header (under `fibril.client.*`).
+pub const HEADER_PRODUCER_SEQ: &str = "fibril.client.producer_seq";
+
+/// Whether `key` is in a reserved system namespace at all (the client guard).
+pub fn is_reserved_header_key(key: &str) -> bool {
+    RESERVED_HEADER_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
+}
+
+/// Whether `key` is SERVER-owned: reserved but NOT in the client carve-out, i.e.
+/// the broker rejects it when a client publish sets it.
+pub fn is_server_owned_header_key(key: &str) -> bool {
+    is_reserved_header_key(key) && !key.starts_with(CLIENT_HEADER_PREFIX)
+}
+
 /// Client request for cluster topology. An empty `topic` filter asks for the
 /// full topology; a set `topic` (optionally with `group`) narrows it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -686,4 +715,25 @@ pub struct Redirect {
     pub group: Option<String>,
     pub owner_endpoint: String,
     pub partitioning_version: u64,
+}
+
+#[cfg(test)]
+mod header_namespace_tests {
+    use super::*;
+
+    #[test]
+    fn client_carveout_is_writable_rest_is_server_owned() {
+        // Server-owned: reserved and NOT in the client carve-out -> broker rejects.
+        assert!(is_server_owned_header_key("fibril.retries"));
+        assert!(is_server_owned_header_key("stroma.dlq.source_topic"));
+        // Client carve-out: reserved namespace, but client-writable -> not rejected.
+        assert!(is_reserved_header_key(HEADER_PRODUCER_ID));
+        assert!(!is_server_owned_header_key(HEADER_PRODUCER_ID));
+        assert!(!is_server_owned_header_key("fibril.client.anything"));
+        // User space: neither reserved nor server-owned.
+        assert!(!is_reserved_header_key("trace-id"));
+        assert!(!is_server_owned_header_key("trace-id"));
+        assert!(HEADER_PRODUCER_ID.starts_with(CLIENT_HEADER_PREFIX));
+        assert!(HEADER_PRODUCER_SEQ.starts_with(CLIENT_HEADER_PREFIX));
+    }
 }
