@@ -729,6 +729,17 @@ REPLICATION PERF — investigation (2026-06-17, "audit the audit"):
   latency lever from throughput. NEXT: (a) promote APPLY_LINGER to a replication
   runtime setting + sweep it (latency/throughput knob); (b) adversarial + failover
   validation of the fold, THEN consider flipping streaming default-on.
+  MIXED STORAGE (2026-06-18, streaming+fold, owner=broker-1 on TMPFS, follower=
+  broker-2 on SSD via per-node roots; verified from logged assignment). @100k:
+    all-SSD shared:           99,858/s  deliver p50 202ms  apply 36ms x884
+    owner tmpfs/follower SSD: 99,856/s  deliver p50  43ms  apply 17.8ms x1693
+  Same throughput (both saturate the 100k OFFERED rate - not the true ceiling), but
+  the mixed layout cuts deliver latency 4.7x. Two causes: owner fsync free on tmpfs,
+  and owner/follower on SEPARATE drives (no shared-disk self-contention). Confirms
+  drive-per-node is a big real-deployment latency win on top of the fold. Order
+  agreed with user: (1) find limits (higher-rate sweep, in progress), (2) promote
+  APPLY_LINGER to a replication runtime setting, (3) adversarial + failover
+  validation before flipping streaming default-on.
 - NEXT (structural, STEP 2 - the real "batch-optimized replicated append like publish"):
   route replicated AfterFsync through the async fsync pipeline (pending-ack +
   fsync_tx + drain_fsync_done) instead of the inline fsync, so (a) the writer
