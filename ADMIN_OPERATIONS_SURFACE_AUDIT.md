@@ -15,7 +15,7 @@ requiring the operator to understand internal broker machinery.
   query interface.
 - DLQ replay should be explicit, bounded, and non-destructive.
 - Cluster topology should show ownership, followers, epochs, and coordination
-  health without requiring Raft knowledge for routine use.
+  health without requiring coordination-internals knowledge for routine use.
 
 ## Findings
 

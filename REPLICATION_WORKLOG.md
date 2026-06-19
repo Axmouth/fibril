@@ -4247,7 +4247,22 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 - De-raft Fibril: keep "raft" out of fibril code + docs - raft is ganglion's
   internal impl detail / a ganglion setting, tucked away. Fibril speaks
   "coordination/leader/owner", never raft, EXCEPT where a raft type is literally
-  imported. Sweep .rs + .md. [user 2026-06-19]
+  imported. [user 2026-06-19]
+  * DOCS SWEEP DONE (2026-06-19): user-facing website docs were ALREADY raft-free
+    (0 hits). Fixed 3 gratuitous fibril-facing mentions (DESIGN_NOTES: "raft-
+    replicated"->"coordination-replicated", "raft coordination"->"coordination";
+    SINGLE_NODE audit: "Raft transport"->"its transport") + softened 1 (ADMIN audit).
+    Left: on-message lines ("not exposing Raft internals"), the ganglion-boundary +
+    coordination-tryout docs (raft is the legit subject), the literal `ganglion-
+    openraft` crate name, and historical worklog/planning log entries (do not
+    rewrite history).
+  * CODE/API de-raft REMAINING (higher value, has blast radius - separate task):
+    admin topology JSON exposes a top-level `"raft"` key (crates/admin/src/
+    routes.rs:520) + `RaftTopologyProvider` / with_raft_topology naming
+    (admin/server.rs). Rename to coordination (e.g. `"coordination"` block /
+    CoordinationTopologyProvider); updates admin UI dashboard, cluster-tryout.sh
+    (.raft.leader/.voters), and admin server tests. coordination-ganglion's
+    ganglion_openraft::* imports are LEGIT (literal raft types) - keep.
 
 ### G. Docs (post-merge / final docs pass)
 - Client reliability example/tutorial on the docs site (clients.mdx) [WL]

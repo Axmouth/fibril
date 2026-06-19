@@ -24,7 +24,7 @@ cluster runtime settings authority.
 Status: Addressed
 
 The config default remains `coordination.mode = "static"`. The server only
-constructs Ganglion coordination, Raft transport, runtime settings cluster store,
+constructs Ganglion coordination, its transport, runtime settings cluster store,
 replication loops, and controller tasks when Ganglion mode is selected.
 
 Coverage:

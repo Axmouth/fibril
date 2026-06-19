@@ -483,7 +483,7 @@ Model (client-side):
   transient and stay fail-fast. A redirect is separate control flow (follow it).
 - On a transient failure the client **refreshes topology from any reachable node**
   (`refresh_topology_throttled`: seeds + pooled endpoints, cooldown-gated). The
-  assignment table is raft-replicated, so any one live node returns the
+  assignment table is coordination-replicated, so any one live node returns the
   authoritative current owner — you only need to reach one, not a quorum. The
   client never picks a new owner itself; only the controller assigns one.
 - It then **retries with bounded backoff** (exp + jitter) until `publish_timeout_ms`
@@ -639,7 +639,7 @@ is logical state, so a retained-stream mode coexists at the substrate level.
 
 ### What Plexus adds vs reuses
 
-REUSES (no rebuild): replicated partitioned log, raft coordination, partitioning,
+REUSES (no rebuild): replicated partitioned log, coordination, partitioning,
 failover, per-partition ordering, client fan-in + producer/consumer failover retry.
 ADDS: (1) retention mode (time/size/count) instead of consume-removal - starting
 point is the existing retention-via-checkpoint; (2) per-consumer durable cursor (the
