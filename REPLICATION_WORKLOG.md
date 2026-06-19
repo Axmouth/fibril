@@ -4295,3 +4295,13 @@ init/no-overwrite queue declare option; website/docs UX (fibril.sh redirect, doc
 page transitions, stroma/keratin sub-doc pages, dashboard CSS/themes, TUI overhaul);
 the durability-knob proverbs (a delightful UX touch on the confirm/deliver-visibility
 setting - "you are overriding the default safety assumptions").
+- [D settings, user-flagged 2026-06-19] Relational settings nudges (SOFT warn, not
+  reject): warn when a failover-sensitive timeout is set below the failure-detection
+  cadence - e.g. confirm_timeout_ms / client publish_timeout_ms / no_leader_retries
+  below ~2-3x heartbeat_interval_ms (or < liveness_ttl_ms), and liveness_ttl_ms
+  below ~2-3x heartbeat_interval_ms (spurious-failover risk). Such a value gives up
+  before the cluster can detect-and-reassign, so it fails during the exact event it
+  exists for. New pattern: today config validate() only HARD-errors single-value
+  bounds; this needs cross-setting X>=k*Y advisories at config-load + runtime PUT,
+  plus an inline admin-panel hint (same spirit as the durability-knob proverbs /
+  "you are overriding the default safety assumptions"). Pairs with settings-tiering.
