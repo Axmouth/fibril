@@ -482,7 +482,7 @@ wait_admin() {
 show_node() {
   local i="$1"
   "$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + $1))" admin topology --json 2>/dev/null \
-    | jq -c '{leader: .raft.leader, voters: .raft.voters, healthy: .raft.healthy, brokers: (.coordination.nodes | length)}'
+    | jq -c '{leader: .consensus.leader, voters: .consensus.voters, healthy: .consensus.healthy, brokers: (.coordination.nodes | length)}'
 }
 
 wait_voters() {
@@ -496,7 +496,7 @@ wait_voters() {
       local json=""
       json="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + i))" admin topology --json 2>/dev/null || echo '{}')"
       local voters=""
-      voters="$(echo "$json" | jq -c '.raft.voters // []')"
+      voters="$(echo "$json" | jq -c '.consensus.voters // []')"
       last_seen="${last_seen} node-$i=$voters"
       if [[ "$voters" != "$expected" ]]; then
         ready=false
@@ -516,7 +516,7 @@ current_leader_id() {
   local leader=""
   for attempt in $(seq 1 "$(cluster_attempts)"); do
     for i in $(seq 1 "$NODES"); do
-      leader="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + i))" admin topology --json 2>/dev/null | jq -r '.raft.leader // empty' || true)"
+      leader="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + i))" admin topology --json 2>/dev/null | jq -r '.consensus.leader // empty' || true)"
       if [[ "$leader" =~ ^[0-9]+$ ]]; then
         echo "$leader"
         return 0
@@ -1034,8 +1034,8 @@ if [[ "$GANGLION" == true ]]; then
     expected_voters=""
     for i in $(seq 1 "$NODES"); do
       json="$("$CTL" --admin "127.0.0.1:$((BASE_ADMIN_PORT + i))" admin topology --json 2>/dev/null || echo '{}')"
-      leader="$(echo "$json" | jq -r '.raft.leader')"
-      voters="$(echo "$json" | jq -c '.raft.voters')"
+      leader="$(echo "$json" | jq -r '.consensus.leader')"
+      voters="$(echo "$json" | jq -c '.consensus.voters')"
       registered="$(echo "$json" | jq -r '.coordination.nodes | length')"
       if [[ "$leader" == "null" || -z "$leader" || "$registered" -lt "$NODES" ]]; then
         ready=false
@@ -1089,8 +1089,8 @@ for i in $(seq 1 "$NODES"); do
   json="$("$CTL" --admin "127.0.0.1:$admin_port" admin topology --json)"
   if [[ "$GANGLION" == true ]]; then
     # Shared-cluster checks: a real raft block with one leader and all voters.
-    leader="$(echo "$json" | jq -r '.raft.leader')"
-    voters="$(echo "$json" | jq -c '.raft.voters')"
+    leader="$(echo "$json" | jq -r '.consensus.leader')"
+    voters="$(echo "$json" | jq -c '.consensus.voters')"
     if [[ "$leader" == "null" ]]; then
       echo "FAIL: node-$i reports no raft leader" >&2
       FAILED=1

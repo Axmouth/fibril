@@ -77,7 +77,7 @@ enum AdminCommand {
     /// Show queue state and sparse queue activity from the admin API.
     Queues,
     /// Show cluster topology: nodes, queue assignments, and (when an embedded
-    /// coordinator is active) raft consensus state.
+    /// coordinator is active) consensus state.
     Topology(TopologyArgs),
     /// Coordination membership operations.
     Coordination {
@@ -805,8 +805,8 @@ fn print_topology(topology: &serde_json::Value) {
         }
     }
 
-    let raft = &topology["raft"];
-    if !raft.is_null() {
+    let consensus = &topology["consensus"];
+    if !consensus.is_null() {
         let render_ids = |ids: &serde_json::Value| {
             ids.as_array()
                 .map(|ids| {
@@ -821,18 +821,18 @@ fn print_topology(topology: &serde_json::Value) {
         println!("\nraft (embedded coordinator):");
         println!(
             "  local={} leader={} voters=[{}] learners=[{}] applied={} committed_generation={}",
-            raft["local_id"].as_u64().unwrap_or(0),
-            raft["leader"]
+            consensus["local_id"].as_u64().unwrap_or(0),
+            consensus["leader"]
                 .as_u64()
                 .map(|id| id.to_string())
                 .unwrap_or_else(|| "none".to_string()),
-            render_ids(&raft["voters"]),
-            render_ids(&raft["learners"]),
-            raft["last_applied_index"]
+            render_ids(&consensus["voters"]),
+            render_ids(&consensus["learners"]),
+            consensus["last_applied_index"]
                 .as_u64()
                 .map(|index| index.to_string())
                 .unwrap_or_else(|| "-".to_string()),
-            raft["committed_generation"].as_u64().unwrap_or(0),
+            consensus["committed_generation"].as_u64().unwrap_or(0),
         );
     }
 }

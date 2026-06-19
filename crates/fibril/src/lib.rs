@@ -106,11 +106,11 @@ pub type TcpGanglionCoordination = GanglionCoordination<FileRaftLogStore, TcpNet
 
 /// Started Ganglion coordination pieces for the TCP-backed server path.
 ///
-/// The raft server handle must be kept alive for as long as the broker serves.
+/// The coordination server handle must be kept alive for as long as the broker serves.
 /// The controller status is shared with the admin topology endpoint.
 pub struct TcpGanglionParts {
     pub coordination: Arc<TcpGanglionCoordination>,
-    pub raft_server: Arc<TcpRaftServer>,
+    pub consensus_server: Arc<TcpRaftServer>,
     pub controller_task: tokio::task::JoinHandle<()>,
     pub controller_status: Arc<RwLock<ControllerStatus>>,
 }
@@ -256,7 +256,7 @@ impl CoordinationMembershipManager for GanglionCoordinationMembershipManager {
             .filter(|voter| *voter != id)
             .collect::<Vec<_>>();
         if voters.is_empty() {
-            return Err("refusing to remove the last raft voter".to_string());
+            return Err("refusing to remove the last coordination voting member".to_string());
         }
 
         self.coordination
@@ -287,22 +287,22 @@ pub async fn open_tcp_ganglion_parts(
                 section.data_dir.clone()
             };
 
-            let raft_config = raft_config_from_config(config)?;
+            let consensus_config = consensus_config_from_config(config)?;
             let wire_format: WireFormat = section
                 .wire_format
                 .parse()
                 .map_err(FibrilServerError::CoordinationWireFormat)?;
-            let (node, raft_server) =
+            let (node, consensus_server) =
                 ganglion_openraft::RaftMetadataNode::start_durable_tcp_with_format(
                     section.raft_node_id,
-                    raft_config,
+                    consensus_config,
                     section.listen,
                     &data_dir,
                     wire_format,
                 )
                 .await
                 .map_err(|error| FibrilServerError::EmbeddedCoordinatorStart(error.to_string()))?;
-            let raft_server = Arc::new(raft_server);
+            let consensus_server = Arc::new(consensus_server);
 
             if section.bootstrap {
                 let members: std::collections::BTreeMap<u64, BasicNode> = section
@@ -320,7 +320,7 @@ pub async fn open_tcp_ganglion_parts(
                         ))
                     })
                     .collect::<Result<_, FibrilServerError>>()?;
-                // Re-running initialize after first boot is rejected by raft.
+                // Re-running initialize after first boot is rejected by coordination.
                 // That is the expected restart path, not a startup failure.
                 if let Err(error) = node.initialize(members).await {
                     tracing::info!("coordinator initialize skipped: {error}");
@@ -348,7 +348,7 @@ pub async fn open_tcp_ganglion_parts(
 
             Ok(Some(TcpGanglionParts {
                 coordination,
-                raft_server,
+                consensus_server,
                 controller_task,
                 controller_status,
             }))
@@ -356,18 +356,18 @@ pub async fn open_tcp_ganglion_parts(
     }
 }
 
-fn raft_config_from_config(
+fn consensus_config_from_config(
     config: &ServerConfig,
 ) -> Result<Arc<ganglion_openraft::openraft::Config>, FibrilServerError> {
     let section = &config.coordination.ganglion.raft;
-    let mut raft_config = ganglion_openraft::default_raft_config()
+    let mut consensus_config = ganglion_openraft::default_raft_config()
         .map_err(|error| FibrilServerError::GanglionConsensusConfig(error.to_string()))?
         .as_ref()
         .clone();
-    raft_config.heartbeat_interval = section.heartbeat_interval_ms;
-    raft_config.election_timeout_min = section.election_timeout_min_ms;
-    raft_config.election_timeout_max = section.election_timeout_max_ms;
-    raft_config
+    consensus_config.heartbeat_interval = section.heartbeat_interval_ms;
+    consensus_config.election_timeout_min = section.election_timeout_min_ms;
+    consensus_config.election_timeout_max = section.election_timeout_max_ms;
+    consensus_config
         .validate()
         .map(Arc::new)
         .map_err(|error| FibrilServerError::GanglionConsensusConfig(error.to_string()))
@@ -908,18 +908,18 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         Some(runtime_settings.clone()),
     );
 
-    // The raft listener handle must outlive the server futures.
-    let mut _raft_server = None;
+    // The coordination listener handle must outlive the server futures.
+    let mut _consensus_server = None;
     let admin = match ganglion_parts {
         None => admin.with_coordination(single_node_admin_coordination(&config)),
         Some(parts) => {
-            _raft_server = Some(parts.raft_server.clone());
+            _consensus_server = Some(parts.consensus_server.clone());
             let topology_source = parts.coordination.clone();
-            let raft_server = parts.raft_server;
+            let consensus_server = parts.consensus_server;
             let controller_status = parts.controller_status;
             admin
                 .with_coordination(parts.coordination.clone())
-                .with_raft_topology(Arc::new(move || {
+                .with_consensus_topology(Arc::new(move || {
                     let mut value = serde_json::to_value(topology_source.raft_node().topology())
                         .unwrap_or(serde_json::Value::Null);
                     if let Some(object) = value.as_object_mut() {
@@ -929,7 +929,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
                         );
                         object.insert(
                             "listener_serving".into(),
-                            serde_json::Value::Bool(raft_server.is_serving()),
+                            serde_json::Value::Bool(consensus_server.is_serving()),
                         );
                         if let Ok(status) = controller_status.read() {
                             object.insert(

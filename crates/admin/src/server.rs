@@ -31,9 +31,9 @@ use fibril_metrics::Metrics;
 pub type BrokerQueueObservability = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
 
 /// Producer of the optional consensus-internals block in `GET /admin/api/topology`
-/// (e.g. ganglion's `RaftTopology` serialized to JSON). Kept as an opaque JSON
+/// (the coordination backend's consensus state serialized to JSON). Opaque JSON
 /// callback so the admin crate stays independent of the coordination backend.
-pub type RaftTopologyProvider = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
+pub type ConsensusTopologyProvider = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
 
 #[async_trait]
 pub trait CoordinationMembershipManager: Send + Sync + 'static {
@@ -112,7 +112,7 @@ pub struct AdminServer {
     pub runtime_settings: Option<Arc<RuntimeSettingsManager>>,
     pub sessions: AdminSessions,
     pub coordination: Option<Arc<dyn fibril_broker::Coordination>>,
-    pub raft_topology: Option<Arc<RaftTopologyProvider>>,
+    pub consensus_topology: Option<Arc<ConsensusTopologyProvider>>,
     pub coordination_membership: Option<Arc<dyn CoordinationMembershipManager>>,
     /// Optional live-repartition trigger (grow/shrink a queue's partition count).
     pub queue_repartition: Option<Arc<dyn QueueRepartitionManager>>,
@@ -151,7 +151,7 @@ impl AdminServer {
             runtime_settings,
             sessions: AdminSessions::default(),
             coordination: None,
-            raft_topology: None,
+            consensus_topology: None,
             coordination_membership: None,
             queue_repartition: None,
             runtime_settings_cluster: None,
@@ -165,8 +165,8 @@ impl AdminServer {
     }
 
     /// Attach the optional consensus-internals block for the topology endpoint.
-    pub fn with_raft_topology(mut self, provider: Arc<RaftTopologyProvider>) -> Self {
-        self.raft_topology = Some(provider);
+    pub fn with_consensus_topology(mut self, provider: Arc<ConsensusTopologyProvider>) -> Self {
+        self.consensus_topology = Some(provider);
         self
     }
 
@@ -847,9 +847,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert!(body["coordination"].is_null());
-        assert!(body["raft"].is_null());
+        assert!(body["consensus"].is_null());
 
-        // With a provider + raft block attached, the endpoint reports both.
+        // With a provider + consensus block attached, the endpoint reports both.
         let queue = QueueIdentity::new("orders", Partition::ZERO, Some("workers"));
         let mut nodes = std::collections::HashMap::new();
         nodes.insert(
@@ -878,7 +878,7 @@ mod tests {
         let wired = Arc::try_unwrap(wired).ok().expect("sole owner");
         let wired = wired
             .with_coordination(Arc::new(coordination))
-            .with_raft_topology(Arc::new(|| serde_json::json!({"local_id": 1, "leader": 1})));
+            .with_consensus_topology(Arc::new(|| serde_json::json!({"local_id": 1, "leader": 1})));
         let app = AdminServer::router(Arc::new(wired));
 
         let response = app
@@ -901,7 +901,7 @@ mod tests {
         assert_eq!(assignment["owner"], "broker-a");
         assert_eq!(assignment["epoch"], 3);
         assert_eq!(assignment["followers"][0], "broker-b");
-        assert_eq!(body["raft"]["leader"], 1);
+        assert_eq!(body["consensus"]["leader"], 1);
     }
 
     #[tokio::test]

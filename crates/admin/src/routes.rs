@@ -510,14 +510,14 @@ pub async fn topology(
         None => serde_json::Value::Null,
     };
 
-    let raft = match &server.raft_topology {
+    let consensus = match &server.consensus_topology {
         Some(provider) => provider(),
         None => serde_json::Value::Null,
     };
 
     Ok(Json(serde_json::json!({
         "coordination": coordination,
-        "raft": raft,
+        "consensus": consensus,
     })))
 }
 

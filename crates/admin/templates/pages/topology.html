@@ -60,7 +60,7 @@ function escapeHtml(value) {
 
 function renderSummary(data) {
   const coordination = data.coordination;
-  const raft = data.raft;
+  const raft = data.consensus;
   const parts = [];
   if (coordination) {
     parts.push(`reporting node <b>${escapeHtml(coordination.node_id)}</b>`);
@@ -88,7 +88,7 @@ function renderDiagram(data) {
     return;
   }
 
-  const raft = data.raft ?? {};
+  const raft = data.consensus ?? {};
   // Raft id -> address lets us mark which broker hosts the leader; broker
   // records and raft members are correlated by admin/broker address when the
   // deployment registers them (best effort, display only).
@@ -145,14 +145,14 @@ function renderDiagram(data) {
   });
 
   // Consensus ring badge: leader + voters (raft ids), drawn in the middle.
-  if (data.raft) {
+  if (data.consensus) {
     svg.appendChild(el("text", {
       x: centerX, y: centerY - 6, "text-anchor": "middle",
       fill: "#e8b65b", "font-size": 13, "font-weight": 600,
-    }, `consensus leader: ${data.raft.leader ?? "none"}`));
+    }, `consensus leader: ${data.consensus.leader ?? "none"}`));
     svg.appendChild(el("text", {
       x: centerX, y: centerY + 12, "text-anchor": "middle", fill: "#8a93a6", "font-size": 11,
-    }, `voters [${data.raft.voters.join(", ")}] · applied ${data.raft.last_applied_index ?? "-"}`));
+    }, `voters [${data.consensus.voters.join(", ")}] · applied ${data.consensus.last_applied_index ?? "-"}`));
   }
 }
 

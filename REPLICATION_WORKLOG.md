@@ -4256,13 +4256,19 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
     coordination-tryout docs (raft is the legit subject), the literal `ganglion-
     openraft` crate name, and historical worklog/planning log entries (do not
     rewrite history).
-  * CODE/API de-raft REMAINING (higher value, has blast radius - separate task):
-    admin topology JSON exposes a top-level `"raft"` key (crates/admin/src/
-    routes.rs:520) + `RaftTopologyProvider` / with_raft_topology naming
-    (admin/server.rs). Rename to coordination (e.g. `"coordination"` block /
-    CoordinationTopologyProvider); updates admin UI dashboard, cluster-tryout.sh
-    (.raft.leader/.voters), and admin server tests. coordination-ganglion's
-    ganglion_openraft::* imports are LEGIT (literal raft types) - keep.
+  * CODE/API de-raft DONE (2026-06-20): admin topology JSON `"raft"` block ->
+    `"consensus"` (leader/voters/healthy; distinct from the existing
+    `"coordination"` membership/assignments block). Renamed end-to-end:
+    RaftTopologyProvider->ConsensusTopologyProvider, raft_topology->consensus_topology,
+    with_raft_topology->with_consensus_topology (admin routes.rs/server.rs);
+    wiring (fibril/lib.rs); CLI (topology["consensus"], "consensus (embedded
+    coordinator):"); dashboard topology.html (data.consensus - it already LABELED
+    it "consensus"); cluster-tryout.sh (.consensus.leader/.voters/.healthy); admin
+    tests. Also de-rafted fibril-side comments + the "last coordination voting
+    member" error string. LEFT (legit): config.coordination.ganglion.raft (the
+    tucked-away ganglion setting) and coordination-ganglion's ganglion_openraft::*
+    imports (literal raft types). Build + admin(33)/cli(8) tests green; zero "raft"
+    JSON key / data.raft residue. de-raft of fibril is now complete (docs + code).
 
 ### G. Docs (post-merge / final docs pass)
 - Client reliability example/tutorial on the docs site (clients.mdx) [WL]
@@ -4320,3 +4326,20 @@ setting - "you are overriding the default safety assumptions").
   bounds; this needs cross-setting X>=k*Y advisories at config-load + runtime PUT,
   plus an inline admin-panel hint (same spirit as the durability-knob proverbs /
   "you are overriding the default safety assumptions"). Pairs with settings-tiering.
+- DE-RAFT follow-up (2026-06-20): renamed fibril-local names raft_config/
+  raft_config_from_config -> consensus_config(_from_config) and the raft_server
+  field/vars -> consensus_server (fibril/lib.rs; preserved literal ganglion fn
+  default_raft_config). REMAINING fibril-side raft names: coordination.raft_node()
+  method (coordination-ganglion/src/lib.rs:2020 + ~10 fibril callers) -> rename to
+  consensus_node() (cross-crate but in-repo); a couple test-local raft_addr vars;
+  LEAVE config.coordination.ganglion.raft.* (the tucked-away ganglion setting) and
+  the literal ganglion_openraft types fibril imports (FileRaftLogStore,
+  TcpRaftServer, RaftMetadataNode, GanglionRaftConfig, default_raft_config, ...).
+  STRUCTURAL de-raft (user direction): there is NO top-level `ganglion` umbrella
+  crate yet (ganglion repo has ganglion-core/-coordination/-openraft/-storage);
+  fibril imports `ganglion-openraft` DIRECTLY. Create the umbrella `ganglion` crate
+  that re-exports the surface fibril needs, so fibril depends on `ganglion` (stable)
+  not `ganglion-openraft` (raft-named internals) - then the raft-crate name leaves
+  fibril's deps and the remaining literal-type imports get a clean coordination-
+  named surface. This IS the tracked "ganglion umbrella crate" item [DN], now with
+  the concrete driver + exact surface to re-export. Cross-repo (ganglion).
