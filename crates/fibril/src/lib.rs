@@ -1210,18 +1210,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tcp_ganglion_bootstrap_exposes_declare_coordinator() {
         let root = temp_root("tcp-ganglion-bootstrap");
-        let raft_addr = free_loopback_addr();
+        let coordination_addr = free_loopback_addr();
         let mut config = ServerConfig::default();
         config.server.data_dir = root.join("data");
         config.coordination.mode = CoordinationMode::Ganglion;
         config.coordination.node_id = "broker-a".into();
         config.coordination.ganglion.raft_node_id = 1;
-        config.coordination.ganglion.listen = raft_addr;
+        config.coordination.ganglion.listen = coordination_addr;
         config
             .coordination
             .ganglion
             .peers
-            .insert("1".into(), raft_addr.to_string());
+            .insert("1".into(), coordination_addr.to_string());
         config.coordination.ganglion.bootstrap = true;
         config.coordination.ganglion.data_dir = root.join("coordination");
         config.coordination.ganglion.heartbeat_interval_ms = 50;
