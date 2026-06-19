@@ -4382,3 +4382,52 @@ setting - "you are overriding the default safety assumptions").
   use ganglion-openraft (the binding crate, legit); could also route through the
   umbrella later. The bigger approach-B (move raft-node construction up out of
   fibril) stays optional.
+
+================================================================================
+## CLUSTERING-MODULE SEPARATION — IN PROGRESS (resume here, 2026-06-20)
+Goal: per-crate dedicated replication/clustering module (memory: replication-module
+-separation), "stroma and up", to the extent easy/convenient. protocol is ALREADY
+done (replication.rs + replication_stream.rs). coordination.rs (cohorts) already
+split in broker. Doing broker first (in-repo, clear seam), then stroma (keratin
+repo), then client/fibril lighter. Then a follow-on: split stroma into more files.
+
+BROKER — BRICK 1 DONE (green): created crates/broker/src/replication.rs and moved
+the replication DATA TYPES + TRAITS there (was broker.rs lines 473-635):
+BrokerOwnerReplicationRecords, BrokerOwnerReplicationPeer,
+BrokerOwnerReplicationPeerResolver, BrokerReplicationCheckpointRequired,
+BrokerFollowerReplicationApply, BrokerReplicationCatchUpOptions(+Default),
+BrokerReplicationCatchUpProgress, BrokerReplicationCatchUp,
+FollowerReplicationWorkerLoopExit, ReplicatedStreamApply, FollowerStreamExit,
+BrokerReplicationStreamApply. lib.rs gained `pub mod replication;`; broker.rs gained
+`pub use crate::replication::*;` so fibril_broker::broker::* paths still resolve.
+`cargo build -p fibril-broker` = 0 errors.
+
+IMMEDIATE NEXT (do first on resume):
+  1. Verify dependents: `cargo build -p fibril-protocol -p fibril` + `cargo test
+     -p fibril-broker` (the re-export should keep paths; confirm).
+  2. Commit if not already (this entry is committed with brick 1).
+BROKER — REMAINING BRICKS (move into replication.rs, build green each):
+  - Brick 2: follower-worker TYPES: WorkerStreamApply(+impl), FollowerReplication
+    WorkerConfig(+impl), FollowerReplicationWorkerStatus, FollowerReplicationWorker
+    State(+impl), observability structs (~1011-1062), ReplicationTiming* (~1062-
+    1167), FollowerReplicationWorkerRuntime(~1795), FollowerReplicationTickGuard
+    (~1851), ReplicationConfirmGate(~1950), FollowerProgress, ReplicationProgressCell.
+    NOTE WorkerStreamApply uses Broker<StromaEngine> + apply_replicated_stream_batch
+    -> needs `use crate::broker::Broker` etc.
+  - Brick 3: the `impl Broker<E>` replication METHODS (grep: read_owner_replication_
+    records, become_replication_follower*, apply_follower_replication_records,
+    apply_replicated_stream_batch, promote_replication_follower*, catch_up_replication
+    _follower*, run_follower_replication_worker*, run_follower_replication_stream_tick,
+    spawn_follower_replication_worker_loop, record_follower_replication_progress,
+    replication_confirm_gate, await_replication_confirm, ensure/stop/runtime worker
+    fns, ~5062-5872 + scattered). Move via a SECOND `impl<E..> Broker<E> {}` block in
+    replication.rs (Rust allows split impl across files; same crate). Move private
+    free fns they use too: cap_owner_replication_records, approximate_replication_
+    message_bytes, stroma_event_available_for_replicated_messages, owner_replication
+    _records_empty, ReplicatedAppendProgress + replicated_append_progress_after_apply
+    (~6038-6250). Make any shared private helpers pub(crate) if used by both sides.
+THEN: stroma-core (keratin repo) — extract apply_replicated_queue_batch, roles
+(become_follower/owner), replicated recovery, replication outcomes from stroma.rs
+(7157 lines) into stroma/replication.rs. THEN client/fibril (lighter). THEN the
+separate stroma file-split (state.rs etc.). Keep streaming default-on; tests green.
+================================================================================
