@@ -4370,3 +4370,15 @@ setting - "you are overriding the default safety assumptions").
   focused ganglion-repo work. Cleaner alt (approach B): move the raft-node
   construction (fibril/lib.rs ~290-370) UP into coordination-ganglion/ganglion so
   fibril never touches raft types at all - bigger, but the real fix.
+- DE-RAFT UMBRELLA DONE (2026-06-20): created `ganglion` umbrella crate (ganglion
+  repo, re-exports ganglion-openraft surface), and swapped fibril to depend on
+  `ganglion` (local path dep) + import `ganglion::` instead of `ganglion_openraft::`.
+  No remote push needed - the repo already builds off local [patch]/path deps to
+  ../ganglion, so a direct path dep resolves locally; the umbrella's transitive
+  ganglion-openraft unifies with the existing git+patch one. Whole workspace builds;
+  fibril tests green. Fibril no longer names `ganglion-openraft` at all. FIBRIL-SIDE
+  DE-RAFT FULLY COMPLETE (API/JSON, names, method, docs, test vars, crate dep).
+  Remaining is optional/elsewhere: protocol dev-dep + coordination-ganglion still
+  use ganglion-openraft (the binding crate, legit); could also route through the
+  umbrella later. The bigger approach-B (move raft-node construction up out of
+  fibril) stays optional.

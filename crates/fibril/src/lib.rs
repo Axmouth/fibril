@@ -47,7 +47,7 @@ use fibril_protocol::v1::handler::{
 };
 use fibril_protocol::v1::{Partition, QueueTopologyEntry, TopologyOk};
 use fibril_util::StaticAuthHandler;
-use ganglion_openraft::{
+use ganglion::{
     FileRaftLogStore, GanglionRaftConfig, TcpNetworkFactory, TcpRaftServer, WireFormat,
     WireFormatParseError,
     openraft::{BasicNode, RaftNetworkFactory, storage::RaftLogStorage},
@@ -293,7 +293,7 @@ pub async fn open_tcp_ganglion_parts(
                 .parse()
                 .map_err(FibrilServerError::CoordinationWireFormat)?;
             let (node, consensus_server) =
-                ganglion_openraft::RaftMetadataNode::start_durable_tcp_with_format(
+                ganglion::RaftMetadataNode::start_durable_tcp_with_format(
                     section.raft_node_id,
                     consensus_config,
                     section.listen,
@@ -358,9 +358,9 @@ pub async fn open_tcp_ganglion_parts(
 
 fn consensus_config_from_config(
     config: &ServerConfig,
-) -> Result<Arc<ganglion_openraft::openraft::Config>, FibrilServerError> {
+) -> Result<Arc<ganglion::openraft::Config>, FibrilServerError> {
     let section = &config.coordination.ganglion.raft;
-    let mut consensus_config = ganglion_openraft::default_raft_config()
+    let mut consensus_config = ganglion::default_raft_config()
         .map_err(|error| FibrilServerError::GanglionConsensusConfig(error.to_string()))?
         .as_ref()
         .clone();
