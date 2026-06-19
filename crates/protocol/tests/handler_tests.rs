@@ -2064,7 +2064,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         }
     );
 
-    coordination.raft_node().shutdown().await.unwrap();
+    coordination.consensus_node().shutdown().await.unwrap();
     resolver.close_all().await;
     follower_broker.shutdown().await;
     owner_broker.shutdown().await;
@@ -2278,7 +2278,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         "exactly the replicated history plus the post-failover publish"
     );
 
-    coordination.raft_node().shutdown().await.unwrap();
+    coordination.consensus_node().shutdown().await.unwrap();
     resolver.close_all().await;
     follower_broker.shutdown().await;
     owner_broker.shutdown().await;
@@ -2463,7 +2463,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
     .await
     .expect("demoted old owner must refuse new publishes");
 
-    coordination.raft_node().shutdown().await.unwrap();
+    coordination.consensus_node().shutdown().await.unwrap();
     owner_broker.shutdown().await;
 }
 

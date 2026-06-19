@@ -2017,7 +2017,7 @@ where
     }
 
     /// Access the underlying raft node (membership changes, waits, shutdown).
-    pub fn raft_node(&self) -> &RaftMetadataNode<LS, NF> {
+    pub fn consensus_node(&self) -> &RaftMetadataNode<LS, NF> {
         &self.node
     }
 }
@@ -2353,7 +2353,7 @@ mod tests {
             .expect_err("stale generation must be rejected");
         assert!(matches!(err, OpenraftAdapterError::StaleGeneration));
 
-        coordination.raft_node().shutdown().await.expect("shutdown");
+        coordination.consensus_node().shutdown().await.expect("shutdown");
     }
 
     /// Failover choreography: the raft leader IS the controller. The controller
@@ -2397,11 +2397,11 @@ mod tests {
             .collect();
         let controller = providers
             .iter()
-            .find(|provider| provider.raft_node().node_id() == leader_raft_id)
+            .find(|provider| provider.consensus_node().node_id() == leader_raft_id)
             .expect("leader provider");
         let standby = providers
             .iter()
-            .find(|provider| provider.raft_node().node_id() != leader_raft_id)
+            .find(|provider| provider.consensus_node().node_id() != leader_raft_id)
             .expect("standby provider");
 
         // Standbys never act as controller.
@@ -2502,7 +2502,7 @@ mod tests {
         .expect("standby should observe the failover");
 
         for provider in &providers {
-            provider.raft_node().shutdown().await.expect("shutdown");
+            provider.consensus_node().shutdown().await.expect("shutdown");
         }
     }
 
@@ -2581,7 +2581,7 @@ mod tests {
             "the ungrouped queue is unaffected by the grouped declare"
         );
 
-        provider.raft_node().shutdown().await.expect("shutdown");
+        provider.consensus_node().shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2670,7 +2670,7 @@ mod tests {
             Some(grown_again)
         );
 
-        provider.raft_node().shutdown().await.expect("shutdown");
+        provider.consensus_node().shutdown().await.expect("shutdown");
     }
 
     /// A logical queue can be declared through any broker in the raft group,
@@ -2734,14 +2734,14 @@ mod tests {
             .collect();
         let standby = providers
             .iter()
-            .find(|provider| provider.raft_node().node_id() != leader_raft_id)
+            .find(|provider| provider.consensus_node().node_id() != leader_raft_id)
             .expect("standby provider");
 
         // The standby must observe the elected leader before it can forward
         // deterministically, since with zero blind retries there is no fallback
         // wait while its leader view converges.
         standby
-            .raft_node()
+            .consensus_node()
             .wait_for_any_leader(timeout)
             .await
             .expect("standby observes the leader");
@@ -2781,7 +2781,7 @@ mod tests {
         ));
 
         for provider in &providers {
-            provider.raft_node().shutdown().await.expect("shutdown");
+            provider.consensus_node().shutdown().await.expect("shutdown");
         }
         for server in &servers {
             server.shutdown();
@@ -2871,7 +2871,7 @@ mod tests {
         provider.deregister_queue(&queue).await.expect("deregister");
         assert!(provider.registered_queues().is_empty());
 
-        provider.raft_node().shutdown().await.expect("shutdown");
+        provider.consensus_node().shutdown().await.expect("shutdown");
     }
 
     /// Loop-level controller test: assigns catalogue queues for live brokers,
@@ -3009,7 +3009,7 @@ mod tests {
         .expect("controller moves ownership off the dead broker");
 
         controller.abort();
-        provider.raft_node().shutdown().await.expect("shutdown");
+        provider.consensus_node().shutdown().await.expect("shutdown");
     }
 
     /// A runtime-settings update published on one broker becomes
@@ -3112,7 +3112,7 @@ mod tests {
             .expect_err("invalid settings are rejected before cluster publish");
         assert!(matches!(err, OpenraftAdapterError::Config(_)));
 
-        provider.raft_node().shutdown().await.expect("shutdown");
+        provider.consensus_node().shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3145,7 +3145,7 @@ mod tests {
                 if message.contains("decode runtime settings cluster document")
         ));
 
-        provider.raft_node().shutdown().await.expect("shutdown");
+        provider.consensus_node().shutdown().await.expect("shutdown");
     }
 
     /// Candidate selection: with multiple followers, failover prefers the
@@ -3248,7 +3248,7 @@ mod tests {
             "the displaced candidate stays in the replica set: {moved:?}"
         );
 
-        provider.raft_node().shutdown().await.expect("shutdown");
+        provider.consensus_node().shutdown().await.expect("shutdown");
     }
 
     /// Self-registration merges into the shared node table (no clobbering)
@@ -3295,7 +3295,7 @@ mod tests {
         // The watch/trait surface sees the registrations too.
         assert_eq!(provider.snapshot().nodes.len(), 2);
 
-        provider.raft_node().shutdown().await.expect("shutdown");
+        provider.consensus_node().shutdown().await.expect("shutdown");
     }
 
     /// The ganglion provider must satisfy the same contract as every other
@@ -3350,7 +3350,7 @@ mod tests {
         })
         .await
         .expect("contract suite should pass")
-        .raft_node()
+        .consensus_node()
         .shutdown()
         .await
         .expect("shutdown");
@@ -3402,7 +3402,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        coordination.raft_node().shutdown().await.expect("shutdown");
+        coordination.consensus_node().shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3480,7 +3480,7 @@ mod tests {
             Err(RepartitionQueueError::NotIntegerMultipleGrowth { .. })
         ));
 
-        coordination.raft_node().shutdown().await.expect("shutdown");
+        coordination.consensus_node().shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3551,7 +3551,7 @@ mod tests {
             Err(RepartitionQueueError::NotIntegerFactorShrink { .. })
         ));
 
-        coordination.raft_node().shutdown().await.expect("shutdown");
+        coordination.consensus_node().shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3621,7 +3621,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        coordination.raft_node().shutdown().await.expect("shutdown");
+        coordination.consensus_node().shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3711,7 +3711,7 @@ mod tests {
             .expect("publish b");
         await_generation(1, plan_b.assignment.clone()).await;
 
-        coordination.raft_node().shutdown().await.expect("shutdown");
+        coordination.consensus_node().shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3798,7 +3798,7 @@ mod tests {
         assert_eq!(loads.get("m1").copied(), Some(2));
         assert_eq!(loads.get("m2").copied(), Some(2));
 
-        coordination.raft_node().shutdown().await.expect("shutdown");
+        coordination.consensus_node().shutdown().await.expect("shutdown");
     }
 
     /// The end-to-end cross-broker case the single-node label test cannot show:
@@ -3962,6 +3962,6 @@ mod tests {
             "rebalance should bump the plan generation"
         );
 
-        coordination.raft_node().shutdown().await.expect("shutdown");
+        coordination.consensus_node().shutdown().await.expect("shutdown");
     }
 }

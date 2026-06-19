@@ -4343,3 +4343,12 @@ setting - "you are overriding the default safety assumptions").
   fibril's deps and the remaining literal-type imports get a clean coordination-
   named surface. This IS the tracked "ganglion umbrella crate" item [DN], now with
   the concrete driver + exact surface to re-export. Cross-repo (ganglion).
+- DE-RAFT (2026-06-20, cont.): renamed the public accessor
+  coordination.raft_node() -> consensus_node() (def in coordination-ganglion +
+  36 call sites across coordination-ganglion/fibril/protocol-tests/example). Return
+  type stays the literal ganglion `RaftMetadataNode`; coordination-ganglion's
+  INTERNAL `raft_node` field + test-local vars stay (raft-binding crate internals).
+  Verified: coordination-ganglion(28) tests pass; protocol+fibril test targets
+  compile. REMAINING fibril-side de-raft: a couple test-local `raft_addr` vars
+  (minor) + the structural one (create `ganglion` umbrella crate so fibril imports
+  `ganglion`, not `ganglion-openraft` directly - cross-repo, tracked).

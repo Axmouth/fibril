@@ -245,7 +245,7 @@ fn main() {
         }
 
         for provider in &playground.providers {
-            let _ = provider.raft_node().shutdown().await;
+            let _ = provider.consensus_node().shutdown().await;
         }
         println!("playground stopped");
     });

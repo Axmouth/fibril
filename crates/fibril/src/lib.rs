@@ -217,7 +217,7 @@ impl GanglionCoordinationMembershipManager {
     }
 
     fn topology_json(&self) -> Result<serde_json::Value, String> {
-        serde_json::to_value(self.coordination.raft_node().topology())
+        serde_json::to_value(self.coordination.consensus_node().topology())
             .map_err(|error| error.to_string())
     }
 }
@@ -226,19 +226,19 @@ impl GanglionCoordinationMembershipManager {
 impl CoordinationMembershipManager for GanglionCoordinationMembershipManager {
     async fn add_voting_member(&self, id: u64, addr: String) -> Result<serde_json::Value, String> {
         self.coordination
-            .raft_node()
+            .consensus_node()
             .add_learner(id, BasicNode::new(addr), true)
             .await
             .map_err(|error| error.to_string())?;
 
-        let mut voters = self.coordination.raft_node().topology().voters;
+        let mut voters = self.coordination.consensus_node().topology().voters;
         if !voters.contains(&id) {
             voters.push(id);
             voters.sort_unstable();
         }
 
         self.coordination
-            .raft_node()
+            .consensus_node()
             .change_membership(voters, false)
             .await
             .map_err(|error| error.to_string())?;
@@ -249,7 +249,7 @@ impl CoordinationMembershipManager for GanglionCoordinationMembershipManager {
     async fn remove_voting_member(&self, id: u64) -> Result<serde_json::Value, String> {
         let voters = self
             .coordination
-            .raft_node()
+            .consensus_node()
             .topology()
             .voters
             .into_iter()
@@ -260,7 +260,7 @@ impl CoordinationMembershipManager for GanglionCoordinationMembershipManager {
         }
 
         self.coordination
-            .raft_node()
+            .consensus_node()
             .change_membership(voters, false)
             .await
             .map_err(|error| error.to_string())?;
@@ -920,7 +920,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             admin
                 .with_coordination(parts.coordination.clone())
                 .with_consensus_topology(Arc::new(move || {
-                    let mut value = serde_json::to_value(topology_source.raft_node().topology())
+                    let mut value = serde_json::to_value(topology_source.consensus_node().topology())
                         .unwrap_or(serde_json::Value::Null);
                     if let Some(object) = value.as_object_mut() {
                         object.insert(
@@ -1234,7 +1234,7 @@ mod tests {
             .expect("ganglion parts");
         parts
             .coordination
-            .raft_node()
+            .consensus_node()
             .wait_for_leader(1, Duration::from_secs(10))
             .await
             .expect("leader");
@@ -1263,7 +1263,7 @@ mod tests {
         parts.controller_task.abort();
         parts
             .coordination
-            .raft_node()
+            .consensus_node()
             .shutdown()
             .await
             .expect("shutdown");
