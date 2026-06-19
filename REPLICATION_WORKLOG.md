@@ -4211,6 +4211,10 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 - Idempotent producer dedup (broker reads fibril.client.producer_id/seq ->
   effectively-once; headers already on wire) [WL/DN/PLAN phase8]
 - Recovery gate is the prerequisite for parallel-fsync (subsumed by the above) [WL]
+- Split-brain: BELIEVED ADDRESSED (epoch fencing in Keratin + Stroma freeze);
+  VERIFY + add adversarial tests for the reappearing-stale-owner case (reject any
+  write/replicate whose epoch < local partition epoch). No hurt checking more.
+  [PLAN:455]
 
 ### C. Performance / scale (post-merge)
 - Owner-side read/encode fan-out (shared tail, private catch-up) for RF>=3 [WL]
@@ -4225,16 +4229,25 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 - Settings-tiering pass (basic/advanced/expert + collapsible) [DN/WL]
 - Onboarding/easy-trial: docker one-liner / in-memory mode / 60s quickstart [WL]
 
-### E. Features (post-merge)
+### E. Features (post-merge, replication-related only)
 - Plexus: fan-out / stream channel type (own arc; substrate-vs-engine refactor) [DN]
-  (further raw feature ideas are in the author's scratch, curated when picked up)
+  NOTE: non-replication features (TTL/expiration, time-based retention,
+  queue-deletion lifecycle) are the author's FIRST post-wrap nice-to-haves -
+  self-contained, elevate Fibril feature-wise - but tracked in their OWN track, not
+  this replication roadmap. Same for restart reconciliation (not replication).
 
 ### F. Code health / structure (post-merge)
 - Clustering-module separation: dedicated partitioning+replication+cohorts module per
   stack crate (except ganglion) [MEM/DN]
 - substrate-vs-engine split (WorkQueueEngine + StreamEngine over shared substrate);
   enables Plexus [DN]
-- Single top-level `ganglion` umbrella crate (depend on stable surface, not internals) [DN]
+- Ganglion domain hygiene: ganglion crate exists; ongoing work is keeping all
+  coordination-domain code IN ganglion (not leaking into fibril), so fibril depends
+  on a stable surface, not internals [DN/MEM]
+- De-raft Fibril: keep "raft" out of fibril code + docs - raft is ganglion's
+  internal impl detail / a ganglion setting, tucked away. Fibril speaks
+  "coordination/leader/owner", never raft, EXCEPT where a raft type is literally
+  imported. Sweep .rs + .md. [user 2026-06-19]
 
 ### G. Docs (post-merge / final docs pass)
 - Client reliability example/tutorial on the docs site (clients.mdx) [WL]
@@ -4252,3 +4265,33 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 - Transactional / cross-partition writes -- v2+ [PLAN:507]
 - Follower reads -- REJECTED for the work-queue model (no analog) [PLAN:494]
 ================================================================================
+
+### Filtered from 2nd scratch dump (replication-relevant only, 2026-06-19)
+- [B correctness] Ex-owner returns to the cluster after it lost privileges while
+  its replicas were NOT fully caught up and its data was not shared - define +
+  handle the mechanics (ties to split-brain epoch fencing + recovery verification).
+- [B correctness] Verify snapshot replay strictly begins at the offset AFTER the
+  snapshot (believed done: recovery_replays_only_events_after_snapshot_offset).
+- [B/C] Ensure follower queues are materialized in memory on demand.
+- [C perf/arch] Replication streamed decode (decode while fetching/applying).
+- [C perf/arch] Separate payload/event replication streams.
+- [C perf/arch] More push-focused replication architecture.
+- [Testing] Adversarial tests through ALL layers; realistic CHAOTIC benchmark
+  (bursty, non-steady supply/consume/bandwidth - no steady saturation).
+- [Testing] Test pass: ensure tests pin CORRECT behavior, not current bugs.
+- [H load-aware, enrich] per-node load score(s); per-queue load metadata so nodes
+  holding only inactive queues are not starved (sparse, trend-based, low churn);
+  client room-aware publish routing (prefer nodes/partitions with fewer ready);
+  per-consumer override of the global partition target.
+- [F health] replace ::MAX config branches with Options for clearer semantics;
+  mutex-refactor pass (concurrency-primitive discipline).
+- [coordination/catalogue] Assess persisting the queue catalogue (which queues +
+  path) in the stroma store instead of filesystem discovery (fs likely good enough).
+NON-REPLICATION (kept OUT of this roadmap, noted so not lost - own tracks/scratch):
+TTL/expiration, time-retention, queue-deletion lifecycle (first post-wrap features);
+restart reconciliation; DLQ replay polish; CLI fibrilctl pub/sub helpers; settings
+presets + default-safe-for-most philosophy; runtime-settings corruption recovery;
+init/no-overwrite queue declare option; website/docs UX (fibril.sh redirect, doc
+page transitions, stroma/keratin sub-doc pages, dashboard CSS/themes, TUI overhaul);
+the durability-knob proverbs (a delightful UX touch on the confirm/deliver-visibility
+setting - "you are overriding the default safety assumptions").
