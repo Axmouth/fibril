@@ -4352,3 +4352,21 @@ setting - "you are overriding the default safety assumptions").
   compile. REMAINING fibril-side de-raft: a couple test-local `raft_addr` vars
   (minor) + the structural one (create `ganglion` umbrella crate so fibril imports
   `ganglion`, not `ganglion-openraft` directly - cross-repo, tracked).
+- DE-RAFT (2026-06-20, in-fibril COMPLETE): also renamed test-local raft_addr ->
+  coordination_addr. Fibril-side raft is now gone from API/JSON, names, the public
+  method, docs, and test vars. The ONLY remaining raft in fibril is importing the
+  `ganglion-openraft` crate for literal ganglion types (allowed exception).
+  UMBRELLA CRATE (the structural finish) - PUSH-GATED, cross-repo, cosmetic value:
+  fibril's ganglion deps are git(ganglion.git@main)+[patch]->local. A `ganglion`
+  umbrella crate must EXIST on ganglion.git@main for fibril to depend on it (the
+  local patch cannot resolve a package absent from the remote ref; a pure local
+  path-dep builds here but breaks CI/remote). So it needs: (1) create crates/ganglion
+  in the ganglion repo re-exporting fibril's surface (FileRaftLogStore, TcpRaftServer,
+  RaftMetadataNode, GanglionRaftConfig, WireFormat, WireFormatParseError,
+  default_raft_config, openraft::{BasicNode, RaftNetworkFactory, RaftLogStorage},
+  InProcessRouter for tests); (2) PUSH to ganglion remote (outward); (3) swap fibril
+  dep + ganglion_openraft::->ganglion::. Net effect: removes only the crate NAME
+  from fibril deps (imported items are literal ganglion types = allowed). Do as
+  focused ganglion-repo work. Cleaner alt (approach B): move the raft-node
+  construction (fibril/lib.rs ~290-370) UP into coordination-ganglion/ganglion so
+  fibril never touches raft types at all - bigger, but the real fix.
