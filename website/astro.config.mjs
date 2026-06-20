@@ -33,9 +33,12 @@ export default defineConfig({
           items: [
             { label: "Core model", slug: "latest/concepts/core-model" },
             { label: "Consumer groups", slug: "latest/concepts/consumer-groups" },
+            { label: "Clustering and coordination", slug: "latest/concepts/clustering" },
             { label: "Reliability semantics", slug: "latest/reliability/semantics" },
             { label: "Retries and delays", slug: "latest/reliability/retries-delays" },
             { label: "Dead lettering", slug: "latest/reliability/dead-lettering" },
+            { label: "Replication", slug: "latest/reliability/replication" },
+            { label: "Recovery quarantine", slug: "latest/reliability/recovery-quarantine" },
             { label: "Backpressure", slug: "latest/concepts/backpressure" },
             { label: "Many idle queues", slug: "latest/concepts/many-idle-queues" },
             { label: "Benchmarks", slug: "latest/benchmarks" },

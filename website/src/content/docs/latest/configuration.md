@@ -119,10 +119,30 @@ These fields are read on process start.
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.message_log.segment_max_bytes` | `FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES` | `--keratin-message-log-segment-max-bytes` | `268435456` |
 | `storage.keratin.event_log.segment_max_bytes` | `FIBRIL_KERATIN_EVENT_LOG_SEGMENT_MAX_BYTES` | `--keratin-event-log-segment-max-bytes` | `33554432` |
+| `coordination.mode` | `FIBRIL_COORDINATION_MODE` | none | `static` |
 | `coordination.ganglion.heartbeat_interval_ms` | `FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS` | none | `3000` |
 | `coordination.ganglion.liveness_ttl_ms` | `FIBRIL_COORDINATION_LIVENESS_TTL_MS` | none | `9000` |
+| `coordination.ganglion.target_followers` | none | none | `1` |
+| `coordination.ganglion.assignment_durability` | `FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY` | none | `local_durable` |
+| `recovery.on_mismatch` | `FIBRIL_RECOVERY_ON_MISMATCH` | none | `quarantine` |
 
 Changing these generally requires restarting the server.
+
+`coordination.mode` is `static` for a standalone single-broker deployment (the
+default) or `ganglion` to run the embedded coordinator and form a cluster. The
+`coordination.ganglion.*` settings only apply in `ganglion` mode. See
+[clustering](/latest/concepts/clustering/) and
+[replication](/latest/reliability/replication/).
+
+`coordination.ganglion.target_followers` is the desired follower count per
+partition. `coordination.ganglion.assignment_durability` is the default durability
+policy for new assignments (`local_durable`, `replica_accepted`, `replica_durable`,
+or `majority_durable`).
+
+`recovery.on_mismatch` controls what happens when recovery finds a damaged queue
+log: `quarantine` (default) isolates the partition, `refuse` reports not ready,
+and `ignore` truncates to the last valid record. See
+[recovery quarantine](/latest/reliability/recovery-quarantine/).
 
 `admin.auth.enabled = true` requires both `admin.auth.username` and `admin.auth.password`.
 The admin password is intentionally not shown in the dashboard startup summary.
@@ -188,6 +208,10 @@ These settings apply to the experimental cluster replication path.
 | `runtime_seed.replication.max_iterations_per_tick` | `8` | Maximum pull/apply iterations a follower performs before yielding. |
 | `runtime_seed.replication.min_in_sync_replicas` | `1` | Minimum recently in-sync replicas required before accepting replica-durable publishes. `1` disables the floor. |
 | `runtime_seed.replication.isr_timeout_ms` | `10000` | How recently a follower must report durable progress to count as in sync. |
+| `runtime_seed.replication.stream_enabled` | `true` | Use credit-based streaming replication on followers. When disabled, followers fall back to polling pulls. |
+| `runtime_seed.replication.stream_apply_linger_us` | `2000` | Microseconds a streaming follower gathers contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization; `0` is drain-only. |
+| `runtime_seed.replication.stream_apply_max_merge_bytes` | `16777216` | Byte cap on a single coalesced streaming apply (peak memory versus fsync amortization). |
+| `runtime_seed.replication.stream_buffer_batches` | `8` | In-flight batch buffer depth (credit window) for the streaming follower. Applied on the next stream. |
 
 The read-budget settings are useful when tuning replica-durable throughput.
 Small values reduce per-tick work, while larger values let a follower catch up

@@ -1,0 +1,87 @@
+---
+title: Clustering and coordination
+description: How Fibril assigns partition ownership across brokers, fences stale owners, and moves ownership on failure.
+---
+
+A single broker is simple: it owns every queue and answers every request. To
+spread queues across machines and to survive losing a machine, brokers need to
+agree on who owns what.
+
+Fibril's clustering is experimental. It adds a coordination layer that assigns
+each queue partition to a broker, fences stale owners, and reassigns ownership
+when a broker fails.
+
+## Two modes
+
+- **Standalone (default, `coordination.mode = "static"`).** One broker owns all
+  queues. There is no coordination, no ownership negotiation, and no replication.
+  This is the simplest deployment and needs no cluster configuration.
+- **Coordinated (Ganglion mode).** Each broker runs an embedded coordinator and
+  they form one consensus group. A controller assigns ownership, and clients are
+  routed to the current owner of each partition. Enable it with `[coordination]
+  mode = "ganglion"` (see [configuration](/latest/configuration/)).
+
+The embedded coordinator currently uses the Raft consensus protocol under the
+hood. You do not configure Raft directly beyond its timings: Fibril's surface
+talks in terms of coordination, owners, followers, and a leader, and the
+consensus protocol is an implementation detail of the coordinator.
+
+## What Fibril does in coordinated mode
+
+- **Brokers register themselves.** Each broker publishes itself into a shared
+  node table and keeps a heartbeat fresh. A broker whose heartbeat goes stale
+  stops counting as live.
+- **A controller assigns ownership.** The consensus leader acts as the
+  controller. It assigns every partition an **owner** and, when followers are
+  configured, a follower set, and it spreads a queue's partitions across distinct
+  nodes before reusing a node.
+- **Fencing epochs prevent split-brain.** Each assignment carries an epoch.
+  Whenever ownership moves, the epoch is bumped. A broker that believes it is
+  still the owner cannot keep serving once the epoch has advanced: writes and
+  replication carrying a stale epoch are rejected.
+- **Clients follow ownership.** A producer or consumer that contacts a
+  non-owner is redirected to the current owner, and clients refresh their
+  topology and retry. This is transparent in the Rust client.
+
+Ownership, followers, and epochs are visible per partition on the admin
+[topology page](/latest/admin-dashboard/) and through `fibrilctl topology`.
+
+## Operator actions
+
+In coordinated mode the topology page and admin API expose cluster operations:
+
+- **Repartition** a queue (grow or shrink its partition count).
+- **Add or remove a consensus voting member** to change the coordination quorum.
+
+Change voting membership deliberately and one member at a time, since quorum
+changes affect availability.
+
+## Activation and conditions
+
+- Standalone mode needs no coordination configuration and keeps single-node
+  behavior.
+- Coordinated mode is enabled per node with `[coordination] mode = "ganglion"`
+  and its `[coordination.ganglion]` settings (consensus timings, follower target,
+  assignment durability).
+- The intended shape for large clusters is a small voting set with many brokers
+  participating as registered coordination clients, not every broker becoming a
+  voter.
+- Ownership assignment and failover are gated by epochs plus each broker's local
+  promotion checks, so a returning stale owner is demoted rather than allowed to
+  double-serve.
+
+## Tradeoffs and limits
+
+- Clustering is experimental and needs more failure testing before it is
+  production-ready high availability.
+- Cross-broker aggregation of replication lag and in-sync state into one cluster
+  view is still pending.
+- Coordination outages do not take the broker down: assignment work retries, and
+  brokers keep serving what they already own.
+
+## See also
+
+- [Replication](/latest/reliability/replication/) for follower catch-up and replica-durable confirms.
+- [Recovery quarantine](/latest/reliability/recovery-quarantine/) for damaged-log handling on restart.
+- [Partitioned queues](/latest/concepts/consumer-groups/) and [partition routing](/latest/development/partition-routing/) for how clients address partitions.
+- [Configuration](/latest/configuration/) for coordination settings.
