@@ -1031,7 +1031,7 @@ dependencies = [
  "fibril-storage",
  "fibril-util",
  "futures",
- "ganglion-openraft",
+ "ganglion",
  "mimalloc",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -1475,6 +1475,13 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
+]
+
+[[package]]
+name = "ganglion"
+version = "0.1.0"
+dependencies = [
+ "ganglion-openraft",
 ]
 
 [[package]]
