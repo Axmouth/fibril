@@ -10,7 +10,7 @@ use std::{
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use fibril_metrics::{BrokerStats, QueuesStateSnapshot};
-use futures::{FutureExt, future::BoxFuture};
+use futures::FutureExt;
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -27,8 +27,8 @@ use crate::coordination::{
     StickyConsumerGroupAssignor, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
-    DestroyOutcome, EvictOutcome, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome,
-    SettleKind, SettleRequest as EngineSettleRequest, StromaEngine,
+    DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, SettleKind,
+    SettleRequest as EngineSettleRequest, StromaEngine,
 };
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
@@ -4329,89 +4329,6 @@ impl Broker<StromaEngine> {
         }
     }
 
-}
-
-impl BrokerOwnerReplicationPeer for Broker<StromaEngine> {
-    fn read_owner_replication_records<'a>(
-        &'a self,
-        topic: &'a str,
-        partition: Partition,
-        group: Option<&'a str>,
-        message_from: Offset,
-        event_from: Offset,
-        max_messages: usize,
-        max_events: usize,
-        max_bytes: usize,
-        max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
-        Box::pin(async move {
-            Broker::<StromaEngine>::read_owner_replication_records(
-                self,
-                topic,
-                partition,
-                group,
-                message_from,
-                event_from,
-                max_messages,
-                max_events,
-                max_bytes,
-                max_wait_ms,
-            )
-            .await
-        })
-    }
-
-    fn export_owner_state_checkpoint<'a>(
-        &'a self,
-        topic: &'a str,
-        partition: Partition,
-        group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
-        Box::pin(async move {
-            Broker::<StromaEngine>::export_owner_state_checkpoint(self, topic, partition, group)
-                .await
-        })
-    }
-}
-
-impl<T> BrokerOwnerReplicationPeer for Arc<T>
-where
-    T: BrokerOwnerReplicationPeer + ?Sized,
-{
-    fn read_owner_replication_records<'a>(
-        &'a self,
-        topic: &'a str,
-        partition: Partition,
-        group: Option<&'a str>,
-        message_from: Offset,
-        event_from: Offset,
-        max_messages: usize,
-        max_events: usize,
-        max_bytes: usize,
-        max_wait_ms: u64,
-    ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
-        self.as_ref().read_owner_replication_records(
-            topic,
-            partition,
-            group,
-            message_from,
-            event_from,
-            max_messages,
-            max_events,
-            max_bytes,
-            max_wait_ms,
-        )
-    }
-
-    fn export_owner_state_checkpoint<'a>(
-        &'a self,
-        topic: &'a str,
-        partition: Partition,
-        group: Option<&'a str>,
-    ) -> BoxFuture<'a, Result<OwnerStateCheckpoint, BrokerError>> {
-        self.as_ref()
-            .export_owner_state_checkpoint(topic, partition, group)
-    }
 }
 
 
