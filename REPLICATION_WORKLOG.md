@@ -4200,7 +4200,13 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 
 ### A. Branch-wrap (the only pre-merge tier; everything below is post-merge)
 - Pre-merge dedup/cleanup pass (consolidate consts/helpers; drop needless code) [WL]
-- failover_verify -> committed cluster-tryout harness mode (--failover-verify) [WL]
+- failover_verify -> committed cluster-tryout harness mode (--failover-verify) [WL] -- DONE
+  (fibril 7f45631). scripts/cluster-tryout.sh --failover-verify spins a replica_durable
+  ganglion cluster, runs the identity verifier (confirmed producer + consumer) against a
+  SURVIVOR broker, kills the partition owner mid-load, and requires zero loss + no phantoms
+  (the bin's exit code). Verified end-to-end (3-node: owner killed mid-run -> LOSS 0 PHANTOM
+  0 PASS). Stronger than --failover-smoke (proves the durability contract under load+failover,
+  not just that traffic resumes).
 - MAX_MERGE_BYTES -> replication runtime setting (2nd microbatch lever) [WL] -- DONE
   (stream_apply_max_merge_bytes, threaded config seed -> RuntimeSettings -> snapshot ->
   FollowerReplicationWorkerConfig -> stream_replication -> applier; replaces the const).

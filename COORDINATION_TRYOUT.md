@@ -17,6 +17,7 @@ scripts/cluster-tryout.sh --nodes 5 --ganglion
 scripts/cluster-tryout.sh --nodes 21 --ganglion --summary
 scripts/cluster-tryout.sh --nodes 88 --ganglion --summary --resource-summary --admin-wait-secs 5 --cluster-wait-secs 90
 scripts/cluster-tryout.sh --nodes 3 --ganglion --dynamic-membership --summary
+scripts/cluster-tryout.sh --nodes 3 --failover-verify  # identity zero-loss proof: kill the owner mid-load, require every confirmed id delivered
 scripts/cluster-tryout.sh --ganglion --keep   # leave it running and explore with fibrilctl
 ```
 
