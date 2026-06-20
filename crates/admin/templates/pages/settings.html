@@ -173,6 +173,30 @@
           </select>
         </span>
       </label>
+      <label class="checkbox-label">
+        <input id="replication.stream_enabled" type="checkbox">
+        <span>
+          <span class="settings-label">Streaming replication</span>
+          <span class="settings-help">Use credit-based streaming on followers. When disabled, followers fall back to polling pulls.</span>
+        </span>
+      </label>
+      <div class="settings-grid settings-grid-two">
+        <label class="settings-field">
+          <span class="settings-label">Stream apply linger</span>
+          <span class="settings-help">Microseconds a streaming follower spends gathering contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization; 0 = drain-only.</span>
+          <input id="replication.stream_apply_linger_us" type="number" min="0" step="1">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Stream apply max merge bytes</span>
+          <span class="settings-help">Byte cap on a single coalesced streaming apply (peak memory vs fsync amortization).</span>
+          <input id="replication.stream_apply_max_merge_bytes" type="number" min="1" step="1">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Stream buffer batches</span>
+          <span class="settings-help">In-flight batch buffer depth (credit window) for the streaming follower. Applied on the next stream.</span>
+          <input id="replication.stream_buffer_batches" type="number" min="1" step="1">
+        </label>
+      </div>
     </section>
 
     <section class="settings-section">
@@ -526,6 +550,11 @@ function renderSettings(data) {
   field("replication.max_iterations_per_tick").value = data.settings.replication.max_iterations_per_tick;
   field("replication.min_in_sync_replicas").value = data.settings.replication.min_in_sync_replicas;
   renderDuration("replication.isr_timeout_ms", data.settings.replication.isr_timeout_ms);
+  field("replication.stream_enabled").checked = data.settings.replication.stream_enabled;
+  field("replication.stream_apply_linger_us").value = data.settings.replication.stream_apply_linger_us;
+  field("replication.stream_apply_max_merge_bytes").value =
+    data.settings.replication.stream_apply_max_merge_bytes;
+  field("replication.stream_buffer_batches").value = data.settings.replication.stream_buffer_batches;
   field("partitioning.default_partition_count").value = data.settings.partitioning.default_partition_count;
   field("consumer_groups.default_target_per_consumer").value =
     data.settings.consumer_groups.default_target_per_consumer ?? "";
@@ -596,6 +625,10 @@ function collectSettings() {
       max_iterations_per_tick: numberValue("replication.max_iterations_per_tick"),
       min_in_sync_replicas: numberValue("replication.min_in_sync_replicas"),
       isr_timeout_ms: durationMsValue("replication.isr_timeout_ms"),
+      stream_enabled: field("replication.stream_enabled").checked,
+      stream_apply_linger_us: numberValue("replication.stream_apply_linger_us"),
+      stream_apply_max_merge_bytes: numberValue("replication.stream_apply_max_merge_bytes"),
+      stream_buffer_batches: numberValue("replication.stream_buffer_batches"),
     },
     partitioning: {
       default_partition_count: numberValue("partitioning.default_partition_count"),
