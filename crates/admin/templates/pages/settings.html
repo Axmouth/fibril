@@ -383,6 +383,11 @@
         </label>
       </div>
 
+      <div class="settings-actions">
+        <button class="btn" type="button" id="queue-dlq-load">Load current</button>
+        <span id="queue-dlq-current" class="settings-help"></span>
+      </div>
+
       <div class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Policy</span>
@@ -717,6 +722,34 @@ async function loadGlobalDlq(message = "Global DLQ loaded.") {
   setGlobalDlqMessage(`${message} Current version: ${data.version}.`, "info");
 }
 
+// See-before-declare: show a queue's current DLQ policy (from the live debug
+// view) so an operator is not declaring blind. Materialized queues only; an
+// on-disk-but-unloaded queue reports that its declared values apply on next load.
+async function loadCurrentQueueDlq() {
+  const tp = field("queue-dlq.tp").value.trim();
+  const group = field("queue-dlq.group").value.trim();
+  const el = field("queue-dlq-current");
+  if (!tp) {
+    el.textContent = "Enter a queue topic, then load its current DLQ policy.";
+    return;
+  }
+  const data = await api("/admin/api/queues_debug");
+  const match = (data.queues || []).find(
+    (q) => q.topic === tp && (q.group || "") === group
+  );
+  if (!match) {
+    el.textContent = `No indexed queue "${tp}"${group ? ` (group ${group})` : ""} found.`;
+    return;
+  }
+  if (!match.materialized) {
+    el.textContent = `Queue "${tp}" is on disk but not loaded; its declared DLQ values apply when it next loads.`;
+    return;
+  }
+  const policy = match.state?.dlq_policy ?? "unknown";
+  const maxRetries = match.state?.dlq_max_retries;
+  el.textContent = `Current: policy ${policy}, max retries ${maxRetries ?? "default"}.`;
+}
+
 async function saveSettings(event) {
   event.preventDefault();
   const response = await fetch("/admin/api/runtime-settings", {
@@ -790,6 +823,7 @@ field("settings-form").addEventListener("submit", saveSettings);
 field("reload-settings").addEventListener("click", () => loadSettings("Settings reloaded."));
 field("global-dlq-form").addEventListener("submit", saveGlobalDlq);
 field("reload-global-dlq").addEventListener("click", () => loadGlobalDlq("Global DLQ reloaded."));
+field("queue-dlq-load").addEventListener("click", loadCurrentQueueDlq);
 field("global-dlq.enabled").addEventListener("change", (event) => setGlobalDlqFieldsEnabled(event.target.checked));
 field("queue-dlq-form").addEventListener("submit", saveQueueDlq);
 field("queue-dlq.policy").addEventListener("change", (event) => setQueueDlqTargetFieldsEnabled(event.target.value === "custom"));

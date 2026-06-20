@@ -224,6 +224,7 @@ async function refresh() {
             <td class="text-right">${formatQueueStateValue(item, item.state.ready_count)}</td>
             <td class="text-right">${formatQueueStateValue(item, item.state.inflight_count)}</td>
             <td class="text-right">${formatQueueStateValue(item, item.state.settled_until)}</td>
+            <td>${item.materialized ? escapeHtml(`${item.state.dlq_policy}${item.state.dlq_max_retries != null ? ` (max ${item.state.dlq_max_retries})` : ""}`) : "-"}</td>
             <td><a class="queue-messages-link" href="${inspectHref(item)}" title="Inspect messages">Inspect</a></td>
           </tr>
         `;
@@ -247,6 +248,7 @@ async function refresh() {
               <th class="text-right">Ready</th>
               <th class="text-right">In-flight</th>
               <th class="text-right">Settled until</th>
+              <th>DLQ policy</th>
               <th>Messages</th>
             </tr>
             ${rows}
