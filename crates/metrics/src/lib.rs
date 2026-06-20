@@ -1057,11 +1057,6 @@ impl MetricsRuntime {
     }
 }
 
-fn effective_window(max: usize) -> usize {
-    let now = current_epoch_secs() as usize;
-    now.min(max).max(1)
-}
-
 pub struct MetricsConfig {
     pub log_storage: bool,
     pub log_broker: bool,
@@ -1076,11 +1071,6 @@ fn round1(v: f64) -> f64 {
 #[inline]
 fn fmt2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
-}
-
-#[inline]
-fn round0(v: f64) -> u64 {
-    v.round() as u64
 }
 
 pub async fn run_storage_logger(
@@ -1225,39 +1215,23 @@ type SubId = Uuid;
 type Topic = String;
 type Group = String;
 
-struct PublisherInfo {
-    peer_addr: SocketAddr,
-    connected_at: Instant,
-    last_publish_at: AtomicU64,
-}
-
 struct SubInfo {
-    sub_id: Uuid,
+    // Duplicates the subs-map key. Kept (not read today) for the future
+    // restart-reconnect reconciliation feature, which needs the identity carried
+    // on the value so a SubInfo can be matched back to a reconnecting client
+    // independently of the map.
+    #[allow(dead_code)]
+    sub_id: SubId,
     topic: Topic,
     group: Option<Group>,
     connected_at: Instant,
     auto_ack: bool,
 }
 
-impl SubInfo {
-    pub fn new(
-        sub_id: SubId,
-        topic: Topic,
-        group: Option<Group>,
-        connected_at: Instant,
-        auto_ack: bool,
-    ) -> Self {
-        Self {
-            sub_id,
-            topic,
-            group,
-            connected_at,
-            auto_ack,
-        }
-    }
-}
-
 struct ConnectionState {
+    // Duplicates the connections-map key. Kept for the same reason as
+    // SubInfo::sub_id (restart-reconnect reconciliation).
+    #[allow(dead_code)]
     conn_id: ConnId,
     peer: SocketAddr,
     connected_at: Instant,
@@ -1266,12 +1240,7 @@ struct ConnectionState {
 }
 
 impl ConnectionState {
-    pub fn new(
-        conn_id: ConnId,
-        peer: SocketAddr,
-        connected_at: Instant,
-        authenticated: bool,
-    ) -> Self {
+    pub fn new(conn_id: ConnId, peer: SocketAddr, connected_at: Instant, authenticated: bool) -> Self {
         Self {
             conn_id,
             peer,

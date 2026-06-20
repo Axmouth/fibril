@@ -1063,8 +1063,15 @@ impl ReplicationProgressCell {
 }
 
 impl ReplicationConfirmGate {
-    /// See `Broker::await_replication_confirm`.
-    pub async fn await_confirm(&self, key: &QueueKey, offset: Offset) -> Result<(), BrokerError> {
+    /// Wait until the queue's assignment durability policy is satisfied for a
+    /// message at `offset` (the owner's own durable write already counts). No
+    /// cached assignment (standalone) or `local_durable` returns immediately.
+    /// Fails with a descriptive error on timeout.
+    pub(crate) async fn await_confirm(
+        &self,
+        key: &QueueKey,
+        offset: Offset,
+    ) -> Result<(), BrokerError> {
         let Some(assignment) = self.assignments.get(key).map(|a| a.clone()) else {
             return Ok(());
         };
@@ -2365,19 +2372,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
     }
 
-    /// Wait until the queue's assignment durability policy is satisfied for a
-    /// message at `offset` (the owner's own durable write already counts).
-    /// No cached assignment (standalone) or `local_durable` returns
-    /// immediately. Fails with a descriptive error on timeout.
-    pub async fn await_replication_confirm(
-        &self,
-        key: &QueueKey,
-        offset: Offset,
-    ) -> Result<(), BrokerError> {
-        self.replication_confirm_gate()
-            .await_confirm(key, offset)
-            .await
-    }
 }
 
 impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {

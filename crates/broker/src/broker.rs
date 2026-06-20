@@ -27,8 +27,7 @@ use crate::coordination::{
     StickyConsumerGroupAssignor, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
-    DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, SettleKind,
-    SettleRequest as EngineSettleRequest, StromaEngine,
+    DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StromaEngine,
 };
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
@@ -2937,121 +2936,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                 broker.handle_settle_batch(&consumer, remaining).await;
             }
         });
-    }
-
-    async fn handle_settle(&self, consumer: &Arc<ConsumerState>, req: SettleRequest) {
-        let Some(tag_rec) = self
-            .records_by_tags
-            .remove(&req.delivery_tag)
-            .map(|kv| kv.1)
-        else {
-            // unknown tag -> ignore (or warn)
-            tracing::warn!(
-                "Received settle for unknown delivery tag {:?} from consumer {}",
-                req.delivery_tag,
-                consumer.sub_id
-            );
-            return;
-        };
-        self.tags_by_key_offset
-            .remove(&(tag_rec.key.clone(), tag_rec.offset));
-
-        // validate consumer
-        if tag_rec.consumer_id != consumer.sub_id {
-            // wrong consumer: ignore (or warn)
-            tracing::warn!(
-                "Received settle for delivery tag {:?} from consumer {}, but tag belongs to consumer {}",
-                req.delivery_tag,
-                consumer.sub_id,
-                tag_rec.consumer_id
-            );
-            return;
-        }
-
-        tracing::debug!(
-            "Handling settle for consumer {}: {:?} (tag {:?}) (offset {})",
-            consumer.sub_id,
-            req.settle_type,
-            req.delivery_tag,
-            tag_rec.offset
-        );
-
-        let settle_kind = match req.settle_type {
-            SettleType::Ack => SettleKind::Ack,
-            SettleType::Nack {
-                requeue,
-                not_before,
-            } => SettleKind::Nack {
-                requeue: requeue.unwrap_or(true),
-                not_before,
-            },
-            SettleType::Reject { .. } => SettleKind::Nack {
-                requeue: false,
-                not_before: None,
-            },
-        };
-
-        // IMPORTANT:
-        // Only decrement inflight when the settle append is durably accepted (completion).
-        // So we keep consumer.inflight until completion callback fires.
-
-        let engine = self.engine.clone();
-        let qs = self.queues.get(&tag_rec.key).map(|e| e.value().clone());
-
-        // Make a completion that wakes the queue loop and decrements inflight.
-        let consumer2 = consumer.clone();
-        let pending_settles = self.pending_settles.clone();
-        let settle_drained = self.settle_drained.clone();
-        let metrics = self.metrics.clone();
-        let replication_timing = self.replication_timing.clone();
-        let done = move |ok: bool| {
-            if ok {
-                consumer2.dec_inflight();
-                if let SettleKind::Ack = settle_kind
-                    && let Some(metrics) = metrics
-                {
-                    metrics.acked();
-                }
-
-                if let Some(qs) = &qs {
-                    replication_timing.record_replication_wake();
-                    qs.wake_with_replication();
-                }
-            } else {
-                // If settle append failed, you may want to:
-                // - reinsert tag mapping? (probably no; client should retry)
-                // - or treat as "still inflight" and rely on expiry
-                // For now: keep inflight as-is (conservative).
-                if let Some(qs) = &qs {
-                    qs.wake();
-                }
-            }
-
-            let pending = pending_settles.fetch_sub(1, Ordering::AcqRel);
-            if pending <= 1 {
-                settle_drained.notify_waiters();
-            }
-            tracing::debug!(
-                "Settle completed for consumer {}, pending settles now {}",
-                consumer2.sub_id,
-                pending - 1
-            );
-        };
-
-        // You’ll implement a real completion type; here is the intent:
-        let completion: Box<dyn AppendCompletion<IoError>> = Box::new(SimpleCompletion::new(done));
-        let _ = engine
-            .settle(
-                &tag_rec.key.tp,
-                tag_rec.key.part.id(),
-                tag_rec.key.group.as_deref(),
-                EngineSettleRequest {
-                    offset: tag_rec.offset,
-                    kind: settle_kind,
-                },
-                completion,
-            )
-            .await;
     }
 
     async fn handle_settle_batch(&self, consumer: &Arc<ConsumerState>, reqs: Vec<SettleRequest>) {

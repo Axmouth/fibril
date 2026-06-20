@@ -4348,6 +4348,11 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   refuse a LITERAL refuse-to-start (mismatch caught at boot, not lazily). Not urgent;
   lazy stays the default. [user 2026-06-20]
 - Onboarding/easy-trial: docker one-liner / in-memory mode / 60s quickstart [WL]
+- Snapshot cadence: wire snap_cfg.every_events as an ADDITIONAL knob alongside the
+  time/dirty trigger (events-since-last-snapshot threshold), not a replacement. Gate is
+  currently commented out in periodic_snapshot_step so the setting is ignored;
+  last_snapshot_event_offset tracking is already maintained so wiring is low-risk. Marked
+  #[allow(dead_code)] + FIXME on Stroma.snap_cfg meanwhile. [user 2026-06-20]
 
 ### E. Features (post-merge, replication-related only)
 - Plexus: fan-out / stream channel type (own arc; substrate-vs-engine refactor) [DN]

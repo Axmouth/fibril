@@ -2,21 +2,27 @@ use askama::Template;
 use async_trait::async_trait;
 use axum::{
     Form, Router,
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
+// Path is only used by the release-only embedded static handler.
+#[cfg(not(debug_assertions))]
+use axum::extract::Path;
 use fibril_broker::{
     StromaMetrics,
     queue_engine::QueueEngine,
     runtime_settings::{RuntimeSettings, RuntimeSettingsManager, RuntimeSettingsSnapshot},
 };
 use fibril_util::StaticAuthHandler;
+#[cfg(not(debug_assertions))]
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+// ServeDir backs the debug-only on-disk /static route.
+#[cfg(debug_assertions)]
 use tower_http::services::ServeDir;
 
 use crate::{
@@ -288,10 +294,14 @@ impl AdminServer {
     }
 }
 
+// Release-only: in debug builds /static is served from disk via ServeDir (see
+// router), so the embedded copy and its handler are compiled only for release.
+#[cfg(not(debug_assertions))]
 #[derive(RustEmbed)]
 #[folder = "admin-ui"]
 struct AdminAssets;
 
+#[cfg(not(debug_assertions))]
 async fn admin_static(Path(path): Path<String>) -> impl IntoResponse {
     let path = path.trim_start_matches('/');
     if let Some(file) = AdminAssets::get(path) {
