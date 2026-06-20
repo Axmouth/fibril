@@ -922,6 +922,14 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         Some(runtime_settings.clone()),
     );
 
+    // Per-broker exclusive-cohort view (this node's local cohort membership).
+    let admin = admin.with_cohorts({
+        let broker = broker.clone();
+        Arc::new(move || {
+            serde_json::to_value(broker.local_cohort_membership()).unwrap_or_default()
+        })
+    });
+
     // The coordination listener handle must outlive the server futures.
     let mut _consensus_server = None;
     let admin = match ganglion_parts {

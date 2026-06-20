@@ -2,21 +2,70 @@
 {% block content %}
 <h4 class="metrics-header">Subscriptions</h4>
 <table class="table table-compact narrow metric-table" id="table"></table>
+
+<h4 class="metrics-header" style="margin-top:1.5rem;">Exclusive cohorts (this broker)</h4>
+<p class="settings-note">
+  Exclusive consumer-group membership this node sees. Cohort assignment is broker-local runtime
+  state rather than committed cluster state, so this is a per-node view.
+</p>
+<div id="cohorts"></div>
+
 <script src="/static/js/api.js"></script>
 <script src="/static/js/admin.js"></script>
 <script>
+function esc(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
 async function refresh() {
   const rows = await api('/admin/api/subscriptions');
   const t = document.getElementById("table");
   t.innerHTML = `<tr><th>Topic</th><th>Group</th><th>Uptime</th><th>Auto</th></tr>` +
     rows.map(r=>`<tr>
-      <td>${r.topic}</td>
-      <td>${r.group}</td>
+      <td>${esc(r.topic)}</td>
+      <td>${esc(r.group)}</td>
       <td>${fmtUptime(r.uptime)}</td>
-      <td>${r.auto_ack}</td>
+      <td>${esc(r.auto_ack)}</td>
     </tr>`).join('');
 }
-setInterval(refresh, 2000);
-refresh();
+
+async function refreshCohorts() {
+  const data = await api('/admin/api/cohorts');
+  const container = document.getElementById("cohorts");
+  const cohorts = Array.isArray(data.cohorts) ? data.cohorts : [];
+  if (cohorts.length === 0) {
+    container.innerHTML = `<p class="queue-group-note">No exclusive cohorts on this broker.</p>`;
+    return;
+  }
+  container.innerHTML = `
+    <table class="table table-compact narrow metric-table">
+      <tr><th>Topic</th><th>Group</th><th>Consumer group</th><th class="text-right">Members</th><th>Member (target)</th></tr>
+      ${cohorts.map(c => {
+        const members = (c.members || [])
+          .map(m => esc(m.member) + (m.target != null ? ` (target ${m.target})` : ""))
+          .join(", ") || "none";
+        return `<tr>
+          <td>${esc(c.topic)}</td>
+          <td>${esc(c.group ?? "default")}</td>
+          <td>${esc(c.consumer_group)}</td>
+          <td class="text-right">${(c.members || []).length}</td>
+          <td>${members}</td>
+        </tr>`;
+      }).join("")}
+    </table>`;
+}
+
+function refreshAll() {
+  refresh();
+  refreshCohorts();
+}
+
+setInterval(refreshAll, 2000);
+refreshAll();
 </script>
 {% endblock %}

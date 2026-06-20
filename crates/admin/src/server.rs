@@ -119,6 +119,10 @@ pub struct AdminServer {
     pub sessions: AdminSessions,
     pub coordination: Option<Arc<dyn fibril_broker::Coordination>>,
     pub consensus_topology: Option<Arc<ConsensusTopologyProvider>>,
+    /// Optional per-broker exclusive-cohort view (this node's local cohort
+    /// membership). Cohort assignment is broker-local runtime state, not in the
+    /// committed coordination snapshot, so this is a node-scoped view.
+    pub cohorts: Option<Arc<ConsensusTopologyProvider>>,
     pub coordination_membership: Option<Arc<dyn CoordinationMembershipManager>>,
     /// Optional live-repartition trigger (grow/shrink a queue's partition count).
     pub queue_repartition: Option<Arc<dyn QueueRepartitionManager>>,
@@ -158,6 +162,7 @@ impl AdminServer {
             sessions: AdminSessions::default(),
             coordination: None,
             consensus_topology: None,
+            cohorts: None,
             coordination_membership: None,
             queue_repartition: None,
             runtime_settings_cluster: None,
@@ -173,6 +178,12 @@ impl AdminServer {
     /// Attach the optional consensus-internals block for the topology endpoint.
     pub fn with_consensus_topology(mut self, provider: Arc<ConsensusTopologyProvider>) -> Self {
         self.consensus_topology = Some(provider);
+        self
+    }
+
+    /// Attach the optional per-broker cohort view serving `GET /admin/api/cohorts`.
+    pub fn with_cohorts(mut self, provider: Arc<ConsensusTopologyProvider>) -> Self {
+        self.cohorts = Some(provider);
         self
     }
 
@@ -257,6 +268,7 @@ impl AdminServer {
             )
             .route("/admin/api/startup-config", get(routes::startup_config))
             .route("/admin/api/topology", get(routes::topology))
+            .route("/admin/api/cohorts", get(routes::cohorts))
             .route(
                 "/admin/api/coordination/membership/add-voting-member",
                 axum::routing::post(routes::add_coordination_voting_member),
@@ -1022,6 +1034,51 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = response_json(response).await;
         assert_eq!(body["code"], "repartition_unavailable");
+    }
+
+    #[tokio::test]
+    async fn cohorts_endpoint_returns_null_without_provider() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/cohorts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["cohorts"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cohorts_endpoint_serves_provider_value() {
+        let server = Arc::try_unwrap(test_server(RuntimeSettingsLocks::default()).await)
+            .unwrap_or_else(|_| panic!("test server should have one strong reference"))
+            .with_cohorts(StdArc::new(|| {
+                json!([{ "topic": "orders", "consumer_group": "g1", "members": [{ "member": "c1" }] }])
+            }));
+        let app = AdminServer::router(Arc::new(server));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/cohorts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["cohorts"][0]["topic"], "orders");
+        assert_eq!(body["cohorts"][0]["members"][0]["member"], "c1");
     }
 
     #[tokio::test]

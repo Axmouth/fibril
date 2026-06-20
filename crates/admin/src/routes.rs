@@ -522,6 +522,21 @@ pub async fn topology(
     })))
 }
 
+/// This broker's local exclusive-cohort view (per-cohort members and targets).
+/// Cohort assignment is broker-local runtime state, so this is node-scoped.
+pub async fn cohorts(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let cohorts = match &server.cohorts {
+        Some(provider) => provider(),
+        None => serde_json::Value::Null,
+    };
+    Ok(Json(serde_json::json!({ "cohorts": cohorts })))
+}
+
 pub async fn add_coordination_voting_member(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
