@@ -4201,7 +4201,18 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 ### A. Branch-wrap (the only pre-merge tier; everything below is post-merge)
 - Pre-merge dedup/cleanup pass (consolidate consts/helpers; drop needless code) [WL]
 - failover_verify -> committed cluster-tryout harness mode (--failover-verify) [WL]
-- MAX_MERGE_BYTES -> replication runtime setting (2nd microbatch lever) [WL]
+- MAX_MERGE_BYTES -> replication runtime setting (2nd microbatch lever) [WL] -- DONE
+  (stream_apply_max_merge_bytes, threaded config seed -> RuntimeSettings -> snapshot ->
+  FollowerReplicationWorkerConfig -> stream_replication -> applier; replaces the const).
+  REMAINING constant-promotion candidates caught during this (user-flagged "promote stray
+  constants"): (1) FOLLOWER_STREAM_BUFFER_BATCHES=8 (broker.rs) - the follower stream's
+  in-flight buffer depth, a real streaming lever, same threading; promote next. (2)
+  BLOCKING_DECODE_BYTES=1<<20 (protocol replication.rs) - threshold to offload decode to
+  spawn_blocking; promote AND likely RAISE post-protocol-rework (measured 200x-1000x decode
+  speedups -> decode inline for larger payloads). (REC_BYTES is a test const, ignore.)
+  ALL such settings must follow live-propagation (read at use-time) per the new guiding
+  principle (DESIGN_NOTES "runtime settings propagate LIVE"); the streaming applier knobs
+  (max_merge_bytes/apply_linger/keepalive) are moving to a shared live tunables handle.
 - Dead-owner EngineSlot pool-prune after failover [WL] -- DONE (fibril daac0f3). The CLIENT
   connection pool (addr -> EngineSlot) never pruned; after a full topology refresh
   (fetch_topology / refresh_topology_throttled) it now drops slots whose endpoint no longer

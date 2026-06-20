@@ -866,3 +866,28 @@ partial), NOT on the live apply path - the plan allows events transiently ahead 
 messages during catch-up, so a live-apply hard-fail is wrong (it broke
 follower_promotion_refuses_partial_replication). Fail-fast belongs only where consistency is
 actually required.
+
+## Guiding principle: runtime settings propagate LIVE (read at use-time, not captured)
+
+When a value is a runtime-tunable setting (cluster-replicated RuntimeSettings), the code
+that uses it should read the LIVE value at use-time - per operation / per batch / per apply
+iteration - rather than capturing it once at task or stream start. A change must take effect
+on the NEXT use without a restart, reconnect, or stream re-establishment. This is the
+DEFAULT approach for all runtime settings, not a per-setting decision.
+
+Why: settings exist to be changed on a live cluster; "change it and it quietly does nothing
+until something restarts" is the technically-correct-but-broken outcome. Live read keeps the
+mental model simple (set it -> it applies) and avoids reconnect blips.
+
+How: thread the setting as a shared live handle (e.g. an Arc<...AtomicU64...> "tunables"
+struct the hot loop reads with .load()), or re-read the settings snapshot at the top of each
+iteration - NOT as a scalar captured for the lifetime of a long-lived task/stream. Example:
+the follower worker already rebuilds its cfg from config_snapshot() each tick (so pull-mode
+propagates per tick), but the streaming applier captured its knobs (max_merge_bytes,
+apply_linger, keepalive) for the stream's lifetime - so those are moving to a shared live
+tunables handle read per apply (the canonical instance of this principle).
+
+Exceptions are deliberate: a value that is genuinely fixed for a resource's lifetime (e.g.
+something baked into an on-disk layout at create) is not a runtime setting and does not apply
+here. If live propagation is truly impractical for a setting, say so explicitly and document
+why - do not silently capture.
