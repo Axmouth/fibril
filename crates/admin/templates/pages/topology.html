@@ -13,9 +13,23 @@
     opacity: 0.95;
     stroke-width: 2.25;
   }
-  #topology-diagram .node-card { transition: opacity 0.12s ease; }
+  #topology-diagram .node-card { cursor: pointer; transition: opacity 0.12s ease; }
   #topology-diagram.has-focus .node-card { opacity: 0.35; }
   #topology-diagram.has-focus .node-card.node-active { opacity: 1; }
+  #topology-diagram .node-card.node-selected rect { stroke: #5b8def; stroke-width: 2.5; }
+  .view-toggle { display: inline-flex; gap: 4px; flex: none; }
+  .view-toggle .btn.active { background: #2b3650; color: #e8ecf4; }
+  #broker-detail-panel { margin-top: 12px; }
+  #broker-detail-body details, .broker-list-body details { margin-top: 6px; }
+  #broker-detail-body summary, .broker-list-body summary { cursor: pointer; }
+  .broker-list-item {
+    border: 1px solid #2a3344;
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+  }
+  .broker-list-item > summary { cursor: pointer; font-size: 14px; }
+  .broker-list-body { margin-top: 8px; }
 </style>
 <h4 class="metrics-header">Cluster Topology</h4>
 <p class="settings-note">
@@ -30,14 +44,29 @@
   </div>
 </section>
 
-<section class="overview-panel" aria-label="Topology diagram">
-  <div class="overview-panel-heading">
-    <h5>Diagram</h5>
-    <p>Brokers laid out for the cluster size. Hover a broker to highlight its replication links. The consensus leader is marked.</p>
+<section class="overview-panel" aria-label="Brokers">
+  <div class="overview-panel-heading" style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
+    <div>
+      <h5>Brokers</h5>
+      <p>Hover a broker to highlight its replication links, or click to inspect its assignments. The consensus leader is marked.</p>
+    </div>
+    <div class="view-toggle" role="group" aria-label="View mode">
+      <button type="button" id="view-diagram" class="btn">Diagram</button>
+      <button type="button" id="view-list" class="btn">List</button>
+    </div>
   </div>
-  <svg id="topology-diagram" viewBox="0 0 860 440" width="100%" height="440"
-       preserveAspectRatio="xMidYMid meet"
-       style="background: var(--panel-bg, transparent); border-radius: 8px;"></svg>
+  <div id="diagram-view">
+    <svg id="topology-diagram" viewBox="0 0 860 440" width="100%" height="440"
+         preserveAspectRatio="xMidYMid meet"
+         style="background: var(--panel-bg, transparent); border-radius: 8px;"></svg>
+    <div id="broker-detail-panel">
+      <p id="broker-detail-sub" class="settings-note">Click a broker to inspect its assignments.</p>
+      <div id="broker-detail-body"></div>
+    </div>
+  </div>
+  <div id="list-view" hidden>
+    <div id="broker-list"></div>
+  </div>
 </section>
 
 <section class="overview-panel" aria-label="Assignments">
@@ -91,6 +120,13 @@
 <script src="/static/js/api.js"></script>
 <script>
 const SVG_NS = "http://www.w3.org/2000/svg";
+
+// Selection and view state survive the periodic refresh. renderCtx holds the
+// cards and edges from the most recent diagram render so highlighting can be
+// re-applied without rebuilding listeners.
+let selectedNode = null;
+let viewMode = localStorage.getItem("topology.view") === "list" ? "list" : "diagram";
+let renderCtx = { cards: new Map(), edges: [], data: null };
 
 function el(name, attrs, text) {
   const node = document.createElementNS(SVG_NS, name);
@@ -184,6 +220,9 @@ function renderDiagram(data) {
     svg.setAttribute("height", 440);
     svg.appendChild(el("text", { x: 430, y: 220, "text-anchor": "middle",
       fill: "#8a93a6", "font-size": 15 }, "no registered brokers yet"));
+    renderCtx = { cards: new Map(), edges: [], data };
+    selectedNode = null;
+    renderBrokerDetail(null);
     return;
   }
 
@@ -252,27 +291,149 @@ function renderDiagram(data) {
     cards.set(node.node_id, group);
   });
 
-  // Hover a broker: spotlight the edges it participates in (as owner or
-  // follower) and the brokers on the other end, dimming everything else.
-  function focusNode(id) {
-    svg.classList.add("has-focus");
-    const active = new Set([id]);
-    for (const e of edges) {
-      const on = e.owner === id || e.follower === id;
-      e.line.classList.toggle("edge-active", on);
-      if (on) active.add(e.owner === id ? e.follower : e.owner);
-    }
-    for (const [nodeId, group] of cards) {
-      group.classList.toggle("node-active", active.has(nodeId));
-    }
-  }
-  function clearFocus() {
-    svg.classList.remove("has-focus");
-  }
+  // Stash the rendered cards and edges so hover and selection can re-apply
+  // highlighting across the periodic refresh, then wire the interactions.
+  renderCtx = { cards, edges, data };
   for (const [nodeId, group] of cards) {
-    group.addEventListener("mouseenter", () => focusNode(nodeId));
-    group.addEventListener("mouseleave", clearFocus);
+    group.addEventListener("mouseenter", () => highlight(nodeId));
+    group.addEventListener("mouseleave", () => highlight(selectedNode));
+    group.addEventListener("click", (event) => {
+      event.stopPropagation();
+      selectNode(nodeId);
+    });
   }
+  if (selectedNode && !cards.has(selectedNode)) selectedNode = null;
+  markSelected();
+  highlight(selectedNode);
+  renderBrokerDetail(selectedNode);
+}
+
+// Spotlight the edges a broker participates in (as owner or follower) and the
+// brokers on the other end, dimming everything else. A null id clears.
+function highlight(id) {
+  const svg = document.getElementById("topology-diagram");
+  if (!id) {
+    svg.classList.remove("has-focus");
+    for (const e of renderCtx.edges) e.line.classList.remove("edge-active");
+    for (const [, group] of renderCtx.cards) group.classList.remove("node-active");
+    return;
+  }
+  svg.classList.add("has-focus");
+  const active = new Set([id]);
+  for (const e of renderCtx.edges) {
+    const on = e.owner === id || e.follower === id;
+    e.line.classList.toggle("edge-active", on);
+    if (on) active.add(e.owner === id ? e.follower : e.owner);
+  }
+  for (const [nodeId, group] of renderCtx.cards) {
+    group.classList.toggle("node-active", active.has(nodeId));
+  }
+}
+
+function markSelected() {
+  for (const [nodeId, group] of renderCtx.cards) {
+    group.classList.toggle("node-selected", nodeId === selectedNode);
+  }
+}
+
+function selectNode(id) {
+  selectedNode = selectedNode === id ? null : id;
+  markSelected();
+  highlight(selectedNode);
+  renderBrokerDetail(selectedNode);
+}
+
+function partitionsFor(data, id) {
+  const assignments = data.coordination?.assignments ?? [];
+  return {
+    owned: assignments.filter((a) => a.owner === id),
+    followed: assignments.filter((a) => (a.followers ?? []).includes(id)),
+  };
+}
+
+function brokerRoles(data, id) {
+  const raft = data.consensus;
+  if (!raft) return [];
+  const target = String(id);
+  const roles = [];
+  if (raft.leader != null && String(raft.leader) === target) roles.push("consensus leader");
+  else if ((raft.voters ?? []).map(String).includes(target)) roles.push("voter");
+  if ((raft.learners ?? []).map(String).includes(target)) roles.push("learner");
+  return roles;
+}
+
+function detailTable(rows, mode) {
+  if (!rows.length) return `<p class="settings-note">none</p>`;
+  const head = mode === "owner"
+    ? `<tr><th>Topic</th><th>Part</th><th>Group</th><th class="text-right">Epoch</th></tr>`
+    : `<tr><th>Topic</th><th>Part</th><th>Group</th><th>Owner</th></tr>`;
+  const body = rows.map((a) => mode === "owner"
+    ? `<tr><td>${escapeHtml(a.topic)}</td><td>${escapeHtml(a.partition)}</td><td>${escapeHtml(a.group ?? "-")}</td><td class="text-right">${escapeHtml(a.epoch)}</td></tr>`
+    : `<tr><td>${escapeHtml(a.topic)}</td><td>${escapeHtml(a.partition)}</td><td>${escapeHtml(a.group ?? "-")}</td><td>${escapeHtml(a.owner)}</td></tr>`
+  ).join("");
+  return `<table class="table table-compact narrow metric-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+
+function detailSection(title, rows, mode, open) {
+  return `<details ${open ? "open" : ""}><summary>${escapeHtml(title)} (${rows.length})</summary>${detailTable(rows, mode)}</details>`;
+}
+
+// Diagram-mode inspector: shows the clicked broker's owned and followed
+// partitions below the canvas.
+function renderBrokerDetail(id) {
+  const sub = document.getElementById("broker-detail-sub");
+  const body = document.getElementById("broker-detail-body");
+  const data = renderCtx.data;
+  if (!id || !data) {
+    sub.textContent = "Click a broker to inspect its assignments.";
+    body.innerHTML = "";
+    return;
+  }
+  const node = (data.coordination?.nodes ?? []).find((n) => String(n.node_id) === String(id));
+  const { owned, followed } = partitionsFor(data, id);
+  const roles = brokerRoles(data, id);
+  sub.innerHTML = `<b>${escapeHtml(id)}</b> · ${escapeHtml(node?.broker_addr ?? "unknown addr")}` +
+    (roles.length ? ` · ${escapeHtml(roles.join(", "))}` : "");
+  body.innerHTML = detailSection("Owns", owned, "owner", true) +
+    detailSection("Follows", followed, "follow", false);
+}
+
+// List-mode: every broker as an expandable row, the plain view other cluster
+// dashboards default to.
+function renderList(data) {
+  const host = document.getElementById("broker-list");
+  const nodes = data.coordination?.nodes ?? [];
+  if (!nodes.length) {
+    host.innerHTML = `<p class="settings-note">no registered brokers yet</p>`;
+    return;
+  }
+  host.innerHTML = nodes.map((node) => {
+    const id = node.node_id;
+    const { owned, followed } = partitionsFor(data, id);
+    const roles = brokerRoles(data, id);
+    const tag = roles.length ? ` · ${escapeHtml(roles.join(", "))}` : "";
+    return `<details class="broker-list-item">` +
+      `<summary><b>${escapeHtml(id)}</b> · ${escapeHtml(node.broker_addr)}${tag}` +
+      ` · owns ${owned.length}, follows ${followed.length}</summary>` +
+      `<div class="broker-list-body">` +
+      detailSection("Owns", owned, "owner", true) +
+      detailSection("Follows", followed, "follow", false) +
+      `</div></details>`;
+  }).join("");
+}
+
+function applyViewMode() {
+  const isList = viewMode === "list";
+  document.getElementById("diagram-view").hidden = isList;
+  document.getElementById("list-view").hidden = !isList;
+  document.getElementById("view-diagram").classList.toggle("active", !isList);
+  document.getElementById("view-list").classList.toggle("active", isList);
+}
+
+function setView(mode) {
+  viewMode = mode;
+  localStorage.setItem("topology.view", mode);
+  applyViewMode();
 }
 
 function renderAssignments(data) {
@@ -293,7 +454,9 @@ async function refresh() {
   const data = await api("/admin/api/topology");
   renderSummary(data);
   renderDiagram(data);
+  renderList(data);
   renderAssignments(data);
+  applyViewMode();
 }
 
 function setOpMessage(id, text, kind) {
@@ -353,6 +516,18 @@ async function submitMembership(action) {
 document.getElementById("repartition-submit").addEventListener("click", submitRepartition);
 document.getElementById("membership-add").addEventListener("click", () => submitMembership("add"));
 document.getElementById("membership-remove").addEventListener("click", () => submitMembership("remove"));
+
+document.getElementById("view-diagram").addEventListener("click", () => setView("diagram"));
+document.getElementById("view-list").addEventListener("click", () => setView("list"));
+// Click on empty diagram canvas clears the current selection (card clicks stop
+// propagation, so only background clicks reach here).
+document.getElementById("topology-diagram").addEventListener("click", () => {
+  selectedNode = null;
+  markSelected();
+  highlight(null);
+  renderBrokerDetail(null);
+});
+applyViewMode();
 
 setInterval(refresh, 3000);
 refresh();
