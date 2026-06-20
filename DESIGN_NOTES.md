@@ -844,8 +844,12 @@ leaves inconsistent in-memory state - so truncate-at-the-bad-record is the safe 
 same as dangling. FOLLOW-UP: fold decode/CRC corruption into the quarantine path (currently
 hard-errors).
 
-SURFACING (FUTURE, fibril brick): degraded readiness/health (liveness stays up so admin is
-reachable) reporting which partition + why; admin page that clearly states "X must be
-resolved before this queue continues" with the repair-mode buttons; a metric. Plus the
-config knob recovery.on_mismatch = quarantine|refuse|ignore. Eager opt-in recovery (future)
-makes Refuse a literal refuse-to-start.
+SURFACING (DONE, fibril a17f1d7): config knob recovery.on_mismatch = quarantine|refuse|
+ignore (FIBRIL_RECOVERY_ON_MISMATCH/TOML) applied to the engine at startup; QueueEngine
+trait exposes quarantined_partitions / recovery_mismatch_policy / repair_partition; admin
+GET /admin/api/quarantine + POST /admin/api/quarantine/repair; GET /readyz (200 degraded
+under Quarantine so the broker keeps serving healthy partitions, 503 under Refuse so it
+cannot be missed; /healthz stays liveness "ok"); and a global admin banner on every page
+listing quarantined queues with the reason + a Repair button ("X must be resolved before
+this queue continues"). Eager opt-in recovery (future) makes Refuse a literal
+refuse-to-start. FOLLOW-UP: a per-partition metric for quarantine.

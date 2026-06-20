@@ -4236,8 +4236,18 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   rematerialize-on-completion (deferred, assessed unnecessary). See STROMA_HANDLE_REDESIGN.md.
 
 ### B. Correctness / durability (post-merge)
-- Recovery event->message reference verification + FAIL-LOUD on mismatch; follower
-  steady-state invariant (events never ref unreceived msgs) [PLAN:449/451/520] -- MISSING
+- Recovery event->message reference verification + FAIL-LOUD on mismatch
+  [PLAN:449/451/520] -- DONE (keratin 175550e/5d43528, fibril a17f1d7). Recovery verifies
+  each replayed event's referenced message offset against the message log's durable tail;
+  a dangling forward ref (only possible as a lost-tail SUFFIX by construction - events are
+  written after their messages) stops replay at the first offender. Policy
+  recovery.on_mismatch = quarantine (default: park only that partition, broker stays up) |
+  refuse (readiness 503) | ignore (auto truncate-to-valid + continue). repair_partition
+  truncates-to-valid and clears quarantine (operator-triggered, also via admin banner +
+  /readyz). FOLLOW-UPS: fold decode/CRC record corruption into the same quarantine+truncate
+  path (currently hard-errors); re-replicate-from-owner repair mode (cluster). The
+  steady-state follower invariant (events never ref unreceived msgs) is a separate runtime
+  assert -- still TODO.
 - Idempotent producer dedup (broker reads fibril.client.producer_id/seq ->
   effectively-once; headers already on wire) [WL/DN/PLAN phase8]
 - Recovery gate is the prerequisite for parallel-fsync (subsumed by the above) [WL]
