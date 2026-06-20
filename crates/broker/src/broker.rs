@@ -1268,7 +1268,7 @@ impl std::fmt::Display for WakeReason {
 
 // TODO cleanup old?
 pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
-    cfg: Arc<ArcSwap<BrokerConfig>>,
+    pub(crate) cfg: Arc<ArcSwap<BrokerConfig>>,
     pub(crate) engine: E,
     pub(crate) shutdown_publishers: CancellationToken,
     shutdown_consumers: CancellationToken,
@@ -1298,13 +1298,13 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
 
     /// Per-queue durable replication progress reported by followers (from
     /// stamped replication reads). Drives publish-confirm durability policies.
-    replication_progress: Arc<DashMap<QueueKey, Arc<ReplicationProgressCell>>>,
+    pub(crate) replication_progress: Arc<DashMap<QueueKey, Arc<ReplicationProgressCell>>>,
     /// Broker-local aggregate timings for replicated confirms and follower pull.
     pub(crate) replication_timing: Arc<ReplicationTimingMetrics>,
     /// Latest assignment applied for each local queue (durability policy +
     /// replica set source for confirms). Maintained by the assignment watcher;
     /// empty for standalone brokers (local-durable confirms only).
-    assignment_cache: Arc<DashMap<QueueKey, PartitionAssignment>>,
+    pub(crate) assignment_cache: Arc<DashMap<QueueKey, PartitionAssignment>>,
     /// Opt-in exclusive consumer-group routing: maps cohort membership to the
     /// per-partition delivery gate. Absent cohorts leave delivery competing.
     exclusive_groups: Mutex<ExclusiveGroupRouter>,
@@ -1559,30 +1559,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         // A newly cached replica-durable assignment installs the visibility gate
         // (no-op for local-durable or an unmaterialized queue).
         self.refresh_visibility_ceiling(&key);
-    }
-
-    /// Shareable confirm gate for spawned per-queue confirm loops.
-    pub fn replication_confirm_gate(&self) -> ReplicationConfirmGate {
-        ReplicationConfirmGate {
-            progress: self.replication_progress.clone(),
-            assignments: self.assignment_cache.clone(),
-            cfg: self.cfg.clone(),
-            timing: self.replication_timing.clone(),
-        }
-    }
-
-    /// Wait until the queue's assignment durability policy is satisfied for a
-    /// message at `offset` (the owner's own durable write already counts).
-    /// No cached assignment (standalone) or `local_durable` returns
-    /// immediately. Fails with a descriptive error on timeout.
-    pub async fn await_replication_confirm(
-        &self,
-        key: &QueueKey,
-        offset: Offset,
-    ) -> Result<(), BrokerError> {
-        self.replication_confirm_gate()
-            .await_confirm(key, offset)
-            .await
     }
 }
 

@@ -2258,3 +2258,29 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 
 }
+
+impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
+    /// Shareable confirm gate for spawned per-queue confirm loops.
+    pub fn replication_confirm_gate(&self) -> ReplicationConfirmGate {
+        ReplicationConfirmGate {
+            progress: self.replication_progress.clone(),
+            assignments: self.assignment_cache.clone(),
+            cfg: self.cfg.clone(),
+            timing: self.replication_timing.clone(),
+        }
+    }
+
+    /// Wait until the queue's assignment durability policy is satisfied for a
+    /// message at `offset` (the owner's own durable write already counts).
+    /// No cached assignment (standalone) or `local_durable` returns
+    /// immediately. Fails with a descriptive error on timeout.
+    pub async fn await_replication_confirm(
+        &self,
+        key: &QueueKey,
+        offset: Offset,
+    ) -> Result<(), BrokerError> {
+        self.replication_confirm_gate()
+            .await_confirm(key, offset)
+            .await
+    }
+}
