@@ -4479,17 +4479,25 @@ BROKER — IMPL-METHOD MOVE: VIABLE (REFERENCE - big run already executed as bri
   Same pattern applies to the stroma.rs impl split (its 7157-line file also wants a
   by-concern split for readability independent of replication).
 
-STROMA-CORE (keratin repo) — DATA TYPES DONE (commit keratin 7b87fb0): the owner/
-follower replication batch + read types, apply/checkpoint outcome structs, and the
-owner-read gap/checkpoint helpers extracted to stroma/core/src/replication.rs,
-re-exported via `pub use crate::replication::*` in stroma.rs so stroma_core:: paths
-hold. 251 stroma-core tests green; fibril rebuilds clean across the repo boundary.
-  STILL IN stroma.rs (the impl methods - same scattered category as the broker's
-  were; now PROVEN tractable by broker bricks 4-8): become_queue_owner(_with_epoch),
-  export_owner_state_checkpoint, apply_replicated_queue_batch, install_follower_state_
-  checkpoint, + role transitions / replicated recovery. These interleave with the main
-  Stroma impl and would need Stroma private fields/methods bumped to pub(crate) (same
-  recipe as broker). Do as a follow-on; pairs naturally with the separate stroma.rs
-  file-split (7157 lines wants a by-concern split for readability regardless).
+STROMA-CORE (keratin repo) — DATA TYPES + IMPL METHODS DONE.
+  - Data types (commit keratin 7b87fb0): owner/follower replication batch + read
+    types, apply/checkpoint outcome structs, owner-read gap/checkpoint helpers ->
+    stroma/core/src/replication.rs, re-exported via `pub use crate::replication::*`
+    in stroma.rs so stroma_core:: paths hold.
+  - Impl methods (commit keratin 9c61a38): the contiguous run of replication methods
+    (demote_queue_owner_to_follower, become_queue_follower/owner(_with_epoch),
+    advance_queue_epoch, promote_queue_follower_*, read_owner_message/event_records,
+    export_owner_state_checkpoint, apply_replicated_queue_batch,
+    install_follower_state_checkpoint) -> a split `impl Stroma` block in replication.rs.
+    Recipe identical to broker: ~10 pub(crate) bumps (free fns io_err/decode_err/
+    replicated_append_outcome_allows_state_apply; methods replication_cache_key_for,
+    read_cached_owner_messages/events, snap_dir, apply_event_inmem, write_queue_snapshot)
+    + import wiring (KeratinReplicaExt for the Arc<Keratin> ext methods went into the
+    test module too). stroma.rs 7157 -> 6452 lines; replication.rs 731. 251 tests green;
+    fibril rebuilds clean across the repo boundary.
+  NOT MOVED (intentionally): queue recovery (recover_all/recover_one_log/recover_events
+    _from_log ~3160-3248) is general startup/replay infra, not the replication engine -
+    leave it. The separate stroma.rs by-concern file-split (still 6452 lines) is a
+    distinct readability refactor, independent of replication.
 THEN: client/fibril (lighter). Keep streaming default-on; tests green.
 ================================================================================
