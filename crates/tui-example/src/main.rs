@@ -79,17 +79,17 @@ fn next_req_id() -> u64 {
 }
 
 fn random_idle_duration() -> Duration {
-    // 200ms – 3s idle
+    // 200ms - 3s idle
     Duration::from_millis(fastrand::u64(200..3000))
 }
 
 fn random_burst_size() -> usize {
-    // 1–8 messages per burst
+    // 1-8 messages per burst
     fastrand::usize(1..=1600)
 }
 
 fn random_inter_message_delay() -> Duration {
-    // 20–200ms between messages in a burst
+    // 20-200ms between messages in a burst
     Duration::from_millis(fastrand::u64(20..200))
 }
 
@@ -654,7 +654,7 @@ pub async fn visual_client(
 
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-    // ⬅️ READ THE RESPONSE
+    // Read the response.
     let frame = conn
         .next()
         .await
@@ -703,7 +703,7 @@ pub async fn visual_client(
             let burst = random_burst_size();
 
             for _ in 0..burst {
-                // 🔵 Visual: intent to publish
+                // 🔵 Visual: intent to publish (matches the blue-ball glyph the UI renders)
                 let _ = publish_tx
                     .send(VisualEvent::Publish {
                         pub_id,
