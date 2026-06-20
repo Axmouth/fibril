@@ -4242,6 +4242,31 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   (refreshed the Success criteria scorecard to reality with evidence + honest [ ] for the one
   genuinely-not-done item, idempotent-producer dedup). The 10 success-criteria boxes were the
   only checkboxes in the plan.
+
+- PRE-MERGE DEDUP/CLEANUP SWEEP -- RESUME HERE (checkpoint 2026-06-20, do with FRESH context;
+  the branch is +47663/-1063 over 90 files, too big to review well at the tail of a long
+  session). User wants BOTH: (a) a diff-focused review of the branch changes (sanity-check what
+  we changed), and (b) a broad sweep to consolidate duplicated consts/helpers + drop needless
+  code. Findings so far / concrete starting points:
+  * Our recent-session changes are CLEAN: no leftover dbg!/eprintln! in prod code; touched
+    crates build green; tests pass. So the sweep is about PRE-EXISTING branch cruft, not ours.
+  * Dead code to remove (cargo warnings, pre-existing): keratin-log IdxEntry / append_entry /
+    is_empty / readable_watermark / flushed_watermark / cleanup_orphans / ByteRemainder /
+    decode_header_prefix / DecodedHeader; plus effective_window, round0, PublisherInfo,
+    several `new` fns. ~51 warnings across the touched crates - triage each (remove vs
+    #[allow] vs wire-up). Run `cargo build --workspace 2>&1 | grep -E '^warning'` for the list.
+  * Duplicated consts to consolidate: TARGET_FOLLOWERS (=2 in 3 places, =3 in 1), SMALL_BATCH
+    (8 vs 32), DEFAULT_HEARTBEAT_INTERVAL (x2); plus 20 hits of bare `16*1024*1024` /
+    `8*1024*1024` (many are legit per-setting defaults now - check which are real dups vs settings).
+    Header-namespace consts were already consolidated earlier (one prior instance).
+  * Approach: `git diff main --stat` to scope; review per-crate; keep the diff-review and the
+    broad sweep as separate passes; re-run full suite after.
+- MORE PRE-MERGE (user-flagged 2026-06-20): (1) ADMIN SITE audit - check if the admin UI needs
+  updates for the branch's new surfaces (quarantine banner added this session; verify topology/
+  settings/queues pages reflect partitioning/replication/cohorts/runtime-settings). (2) DOCS
+  PASS - "lots needed": the docs site (dev notes + implemented-surface inventory) needs updating
+  for replication/sharding/cohorts/recovery-quarantine/runtime-settings; fold DESIGN_NOTES +
+  these worklog decisions in. Both are sizable, post-feature, pre-merge.
 - FLAKY TEST -> REAL CONCURRENCY BUG -> FIXED (keratin 7dd6c18). stroma::tests::
   concurrent_destroyers_and_materializers_stay_consistent. Amplifying it (destroyers +
   materializers + queue_handle reader victims, in rounds) proved a genuine concurrency
