@@ -4434,17 +4434,21 @@ BROKER — IMPL-METHOD MOVE: DONE for the clean parts (bricks 4 + 5).
     chase was trivial. 190 broker tests green.
   - Brick 5 (commit 6bec442): the BrokerOwnerReplicationPeer trait impls
     (for Broker<StromaEngine> and for Arc<T>) - pure delegation, zero new visibility.
-  STILL IN broker.rs (the messier, lower-priority tail - scattered impl<E> Broker<E>
-  methods interleaved with core broker logic): record_follower_replication_progress
-  (~1439), follower_replication_progress (~1526), replication_confirm_gate +
-  await_replication_confirm (~1565-1589, a clean pair), the follower-worker lifecycle
-  run (has_/snapshot/ensure/stop/stop_all_follower_replication_worker(s) +
-  follower_replication_worker_runtime/worker, ~2047-2132, contiguous), and the
-  observability reports (owned_replica_observability_report ~2239,
-  follower_replication_observability_report ~2332). These are small + interleaved;
-  move opportunistically (the worker-lifecycle run and the confirm pair are the two
-  cleanest contiguous candidates). Original measured-viability notes for the big run
-  (now executed) preserved below for reference:
+  - Brick 6 (commit 14b8c02): follower-worker lifecycle run (has/snapshot/ensure/
+    stop/stop_all + runtime/worker) into an impl<E> split block.
+  - Brick 7 (commit 5c34532): replication_confirm_gate + await_replication_confirm
+    pair (3 field pub(crate) bumps: cfg, replication_progress, assignment_cache).
+  - Brick 8 (commit 576af8a): the last scattered impl<E> methods -
+    record_follower_replication_progress, follower_replication_progress, and the
+    owned/follower observability report builders (bumped ownership field +
+    refresh_visibility_ceiling helper to pub(crate)).
+  BROKER REPLICATION ENGINE IS NOW FULLY SEPARATED. broker.rs 6438 -> 4153 lines;
+  replication.rs holds 2504. What still mentions "replication"/"follower" in broker.rs
+  is legitimately NOT the engine: publish_no_confirm* (publish path), the QueueLoop
+  State wake helpers (wake_replication_followers/wake_with_replication), and the
+  assignment-watcher glue (spawn_assignment_watcher_with_follower_replication /
+  apply_assignment_snapshot_transitions_with_follower_replication = coordination, not
+  engine). Leave those. Original measured-viability notes preserved below for ref:
 
 BROKER — IMPL-METHOD MOVE: VIABLE (REFERENCE - big run already executed as brick 4):
   Splitting an impl across files in the same crate is idiomatic and is what every
@@ -4475,8 +4479,17 @@ BROKER — IMPL-METHOD MOVE: VIABLE (REFERENCE - big run already executed as bri
   Same pattern applies to the stroma.rs impl split (its 7157-line file also wants a
   by-concern split for readability independent of replication).
 
-NEXT: stroma-core (keratin repo) — extract apply_replicated_queue_batch, roles
-(become_follower/owner), replicated recovery, replication outcomes from stroma.rs
-(7157 lines) into stroma/replication.rs. THEN client/fibril (lighter). THEN the
-separate stroma file-split (state.rs etc.). Keep streaming default-on; tests green.
+STROMA-CORE (keratin repo) — DATA TYPES DONE (commit keratin 7b87fb0): the owner/
+follower replication batch + read types, apply/checkpoint outcome structs, and the
+owner-read gap/checkpoint helpers extracted to stroma/core/src/replication.rs,
+re-exported via `pub use crate::replication::*` in stroma.rs so stroma_core:: paths
+hold. 251 stroma-core tests green; fibril rebuilds clean across the repo boundary.
+  STILL IN stroma.rs (the impl methods - same scattered category as the broker's
+  were; now PROVEN tractable by broker bricks 4-8): become_queue_owner(_with_epoch),
+  export_owner_state_checkpoint, apply_replicated_queue_batch, install_follower_state_
+  checkpoint, + role transitions / replicated recovery. These interleave with the main
+  Stroma impl and would need Stroma private fields/methods bumped to pub(crate) (same
+  recipe as broker). Do as a follow-on; pairs naturally with the separate stroma.rs
+  file-split (7157 lines wants a by-concern split for readability regardless).
+THEN: client/fibril (lighter). Keep streaming default-on; tests green.
 ================================================================================
