@@ -19,6 +19,7 @@ use fibril_broker::{
         Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
         StromaEvent,
     },
+    replication::StreamApplyTunablesFn,
 };
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
@@ -707,9 +708,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         message_from: Offset,
         event_from: Offset,
         credit_bytes: u64,
-        keepalive_ms: u64,
-        apply_linger_us: u64,
-        max_merge_bytes: u64,
+        tunables: StreamApplyTunablesFn,
         buffer_batches: usize,
         apply: Arc<dyn BrokerReplicationStreamApply>,
         shutdown: CancellationToken,
@@ -729,9 +728,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 message_from,
                 event_from,
                 credit_bytes,
-                keepalive_ms,
-                apply_linger_us,
-                max_merge_bytes,
+                tunables,
                 self.reporter_node_id.clone(),
                 stream_id,
                 buffer_batches,
@@ -1177,9 +1174,7 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
     message_from: Offset,
     event_from: Offset,
     credit_bytes: u64,
-    keepalive_ms: u64,
-    apply_linger_us: u64,
-    max_merge_bytes: u64,
+    tunables: StreamApplyTunablesFn,
     reporter_node_id: Option<String>,
     stream_id: u64,
     buffer_batches: usize,
@@ -1292,9 +1287,7 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
             control_tx,
             message_from,
             event_from,
-            std::time::Duration::from_millis(keepalive_ms),
-            std::time::Duration::from_micros(apply_linger_us),
-            max_merge_bytes,
+            tunables,
         ) => Some(exit),
     };
 
@@ -1475,16 +1468,18 @@ mod stream_transport_tests {
             0,
             0,
             8 * 1024 * 1024,
-            0, // keepalive disabled for the test
-            0, // apply linger disabled for the test
-            // max_merge_bytes = 1: below any batch, so the applier never folds and
-            // each batch applies separately. This test verifies the per-batch
-            // round-trip over TCP (transport + apply offset/bytes + progress/credit
-            // + stream close); its assertions always expected 3 distinct applies.
-            // Folding is non-deterministic over a fast loopback (queued frames
-            // coalesce) and is covered on its own by the applier unit tests, so we
-            // pin it off here rather than racing it.
-            1,
+            // keepalive/linger disabled; max_merge_bytes = 1 is below any batch, so
+            // the applier never folds and each batch applies separately. This test
+            // verifies the per-batch round-trip over TCP (transport + apply
+            // offset/bytes + progress/credit + stream close); its assertions always
+            // expected 3 distinct applies. Folding is non-deterministic over a fast
+            // loopback (queued frames coalesce) and is covered on its own by the
+            // applier unit tests, so we pin it off here rather than racing it.
+            Arc::new(|| fibril_broker::replication::StreamApplyTunables {
+                keepalive_ms: 0,
+                apply_linger_us: 0,
+                max_merge_bytes: 1,
+            }),
             Some("broker-2".into()),
             42,
             4,

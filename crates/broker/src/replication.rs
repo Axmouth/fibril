@@ -64,9 +64,7 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
         _message_from: Offset,
         _event_from: Offset,
         _credit_bytes: u64,
-        _keepalive_ms: u64,
-        _apply_linger_us: u64,
-        _max_merge_bytes: u64,
+        _tunables: StreamApplyTunablesFn,
         _buffer_batches: usize,
         _apply: Arc<dyn BrokerReplicationStreamApply>,
         _shutdown: CancellationToken,
@@ -278,6 +276,41 @@ impl Default for FollowerReplicationWorkerConfig {
             stream_apply_max_merge_bytes: 16 * 1024 * 1024,
         }
     }
+}
+
+/// The streaming-applier knobs that are runtime-tunable. Read LIVE at the top of
+/// each apply iteration (via [`StreamApplyTunablesFn`]) so a runtime-settings
+/// change takes effect on the next apply with no stream restart - the
+/// live-settings-propagation principle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamApplyTunables {
+    /// Idle keepalive (ms); 0 disables the keepalive tick.
+    pub keepalive_ms: u64,
+    /// Linger (us) gathering more contiguous frames before applying; 0 = drain-only.
+    pub apply_linger_us: u64,
+    /// Byte cap on one coalesced apply.
+    pub max_merge_bytes: u64,
+}
+
+/// A live reader of [`StreamApplyTunables`]: the applier calls it once per apply
+/// iteration. The broker backs it with its live runtime-settings snapshot so
+/// changes propagate mid-stream; tests back it with fixed/mutable values.
+pub type StreamApplyTunablesFn = Arc<dyn Fn() -> StreamApplyTunables + Send + Sync>;
+
+/// Build a live tunables reader backed by the broker's current config snapshot.
+/// Each call reads the latest `cfg`, so a runtime-settings update propagates to
+/// the streaming applier on its next apply iteration without a stream restart.
+pub(crate) fn stream_apply_tunables_from(
+    cfg: Arc<arc_swap::ArcSwap<crate::broker::BrokerConfig>>,
+) -> StreamApplyTunablesFn {
+    Arc::new(move || {
+        let c = cfg.load();
+        StreamApplyTunables {
+            keepalive_ms: c.replication_caught_up_poll_ms,
+            apply_linger_us: c.replication_stream_apply_linger_us,
+            max_merge_bytes: c.replication_stream_apply_max_merge_bytes,
+        }
+    })
 }
 
 impl FollowerReplicationWorkerConfig {
@@ -1119,6 +1152,53 @@ impl ReplicationConfirmGate {
                 )));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stream_tunables_tests {
+    use super::*;
+    use crate::broker::BrokerConfig;
+    use arc_swap::ArcSwap;
+
+    /// A runtime-settings change must propagate to the live tunables reader: a
+    /// later config snapshot is reflected on the NEXT read (no restart needed) -
+    /// the live-settings-propagation principle, at the source.
+    #[test]
+    fn stream_apply_tunables_reads_live_config() {
+        let cfg = Arc::new(ArcSwap::from_pointee(BrokerConfig {
+            replication_caught_up_poll_ms: 333,
+            replication_stream_apply_linger_us: 222,
+            replication_stream_apply_max_merge_bytes: 111,
+            ..BrokerConfig::default()
+        }));
+
+        let tunables = stream_apply_tunables_from(cfg.clone());
+        assert_eq!(
+            tunables(),
+            StreamApplyTunables {
+                keepalive_ms: 333,
+                apply_linger_us: 222,
+                max_merge_bytes: 111,
+            }
+        );
+
+        // Simulate a live runtime-settings update.
+        cfg.store(Arc::new(BrokerConfig {
+            replication_caught_up_poll_ms: 777,
+            replication_stream_apply_linger_us: 888,
+            replication_stream_apply_max_merge_bytes: 999,
+            ..BrokerConfig::default()
+        }));
+        assert_eq!(
+            tunables(),
+            StreamApplyTunables {
+                keepalive_ms: 777,
+                apply_linger_us: 888,
+                max_merge_bytes: 999,
+            },
+            "live config change must be reflected on the next read"
+        );
     }
 }
 
@@ -2011,6 +2091,11 @@ impl Broker<StromaEngine> {
             worker: worker.clone(),
         });
 
+        // Live tunables: read from the broker's current config snapshot on each
+        // apply iteration, so a runtime-settings change takes effect mid-stream
+        // (no restart). See the live-settings-propagation principle.
+        let tunables = stream_apply_tunables_from(self.cfg.clone());
+
         let exit = owner
             .stream_replication(
                 queue.topic.as_str(),
@@ -2019,9 +2104,7 @@ impl Broker<StromaEngine> {
                 message_from,
                 event_from,
                 cfg.max_bytes_per_read as u64,
-                cfg.caught_up_poll_ms,
-                cfg.stream_apply_linger_us,
-                cfg.stream_apply_max_merge_bytes,
+                tunables,
                 FOLLOWER_STREAM_BUFFER_BATCHES,
                 apply.clone(),
                 shutdown,

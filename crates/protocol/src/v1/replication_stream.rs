@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use fibril_broker::replication::StreamApplyTunablesFn;
 use tokio::sync::mpsc;
 
 use crate::v1::{
@@ -338,9 +339,7 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     control_tx: mpsc::Sender<FollowerStreamControl>,
     message_from: u64,
     event_from: u64,
-    keepalive: std::time::Duration,
-    apply_linger: std::time::Duration,
-    max_merge_bytes: u64,
+    tunables: StreamApplyTunablesFn,
 ) -> ApplierExit {
     // Microbatch the apply: streamed frames arrive small (the owner reads whatever
     // has trickled in), and applying each one separately means one follower fsync
@@ -359,6 +358,14 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     let mut event_next = event_from;
     let mut carry: Option<ReplicationReadOk> = None;
     loop {
+        // Read the tunables LIVE each iteration (not captured once at start), so a
+        // runtime-settings change takes effect on the next apply with no stream
+        // restart.
+        let knobs = tunables();
+        let keepalive = std::time::Duration::from_millis(knobs.keepalive_ms);
+        let apply_linger = std::time::Duration::from_micros(knobs.apply_linger_us);
+        let max_merge_bytes = knobs.max_merge_bytes;
+
         // First frame for this apply: a carried-over unmergeable frame, otherwise
         // a fresh receive. Ok(Some) = batch, Ok(None) = reader closed, Err(()) =
         // idle keepalive tick.
@@ -459,10 +466,24 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
 mod tests {
     use super::*;
     use crate::v1::{ReplicationMessageRecord, ReplicationStreamProgress};
+    use fibril_broker::replication::StreamApplyTunables;
     use std::sync::Mutex;
     use std::time::Duration;
 
     const REC_BYTES: u64 = 100;
+
+    /// Fixed tunables for a test (no live changes).
+    fn fixed_tunables(
+        keepalive_ms: u64,
+        apply_linger_us: u64,
+        max_merge_bytes: u64,
+    ) -> StreamApplyTunablesFn {
+        Arc::new(move || StreamApplyTunables {
+            keepalive_ms,
+            apply_linger_us,
+            max_merge_bytes,
+        })
+    }
 
     /// A mock log of `total` message records (REC_BYTES each, offsets 0..total)
     /// and no events. Each read returns the records from `message_from` that fit
@@ -736,9 +757,7 @@ mod tests {
             control_tx,
             0,
             0,
-            std::time::Duration::ZERO,
-            std::time::Duration::ZERO,
-            16 * 1024 * 1024,
+            fixed_tunables(0, 0, 16 * 1024 * 1024),
         ));
 
         // Both queued before the applier drains -> they fold (0..2 then 2..5).
@@ -766,6 +785,80 @@ mod tests {
             .expect("applier did not stop")
             .unwrap();
         assert_eq!(exit, ApplierExit::ReaderClosed);
+    }
+
+    // The applier reads the tunables LIVE once per apply iteration (not captured
+    // once at start), which is what lets a runtime-settings change propagate
+    // mid-stream. (The source side - a config change reaching the reader - is
+    // covered by broker stream_apply_tunables_reads_live_config.)
+    #[tokio::test]
+    async fn applier_reads_tunables_live_each_iteration() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let sink = Arc::new(MockSink {
+            outcomes: Mutex::new(
+                [
+                    FollowerApplyOutcome::Applied {
+                        durable_message_next: 2,
+                        durable_event_next: 0,
+                        bytes: 2 * REC_BYTES,
+                    },
+                    FollowerApplyOutcome::Applied {
+                        durable_message_next: 5,
+                        durable_event_next: 0,
+                        bytes: 3 * REC_BYTES,
+                    },
+                ]
+                .into(),
+            ),
+            applied: Mutex::new(Vec::new()),
+        });
+        let (batch_tx, batch_rx) = mpsc::channel(8);
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+
+        // max_merge_bytes = 1 so frames never fold (each batch is its own apply);
+        // the closure tallies how many times the applier reads it.
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reads_in = reads.clone();
+        let tunables: StreamApplyTunablesFn = Arc::new(move || {
+            reads_in.fetch_add(1, Ordering::Relaxed);
+            StreamApplyTunables {
+                keepalive_ms: 0,
+                apply_linger_us: 0,
+                max_merge_bytes: 1,
+            }
+        });
+
+        let task = tokio::spawn(run_follower_stream_applier(
+            sink.clone(),
+            batch_rx,
+            control_tx,
+            0,
+            0,
+            tunables,
+        ));
+
+        batch_tx.send(batch_from(0, 2)).await.unwrap();
+        control_rx.recv().await.unwrap();
+        batch_tx.send(batch_from(2, 3)).await.unwrap();
+        control_rx.recv().await.unwrap();
+
+        drop(batch_tx);
+        let exit = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("applier did not stop")
+            .unwrap();
+        assert_eq!(exit, ApplierExit::ReaderClosed);
+
+        assert!(
+            reads.load(Ordering::Relaxed) >= 2,
+            "tunables read live once per apply iteration; reads={}",
+            reads.load(Ordering::Relaxed)
+        );
+        assert_eq!(
+            sink.applied.lock().unwrap().as_slice(),
+            &[0, 2],
+            "two separate applies (max_merge_bytes=1 disables folding)"
+        );
     }
 
     // A non-contiguous frame (offset gap) must NOT fold: the first frame applies,
@@ -799,9 +892,7 @@ mod tests {
             control_tx,
             0,
             0,
-            std::time::Duration::ZERO,
-            std::time::Duration::ZERO,
-            16 * 1024 * 1024,
+            fixed_tunables(0, 0, 16 * 1024 * 1024),
         ));
 
         batch_tx.send(batch_from(0, 2)).await.unwrap(); // 0..2
@@ -841,7 +932,7 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, _control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx, 0, 0, std::time::Duration::ZERO, std::time::Duration::ZERO, 16 * 1024 * 1024));
+        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx, 0, 0, fixed_tunables(0, 0, 16 * 1024 * 1024)));
 
         batch_tx.send(batch_from(40, 1)).await.unwrap();
         let exit = tokio::time::timeout(Duration::from_secs(2), task)
@@ -868,9 +959,7 @@ mod tests {
             control_tx,
             5,
             2,
-            Duration::from_millis(20),
-            std::time::Duration::ZERO,
-            16 * 1024 * 1024,
+            fixed_tunables(20, 0, 16 * 1024 * 1024),
         ));
 
         let ctrl = tokio::time::timeout(Duration::from_secs(2), control_rx.recv())
@@ -911,9 +1000,7 @@ mod tests {
             control_tx,
             0,
             0,
-            Duration::from_millis(20),
-            std::time::Duration::ZERO,
-            16 * 1024 * 1024,
+            fixed_tunables(20, 0, 16 * 1024 * 1024),
         ));
 
         batch_tx.send(batch_from(0, 2)).await.unwrap();
