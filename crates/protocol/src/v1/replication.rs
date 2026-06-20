@@ -961,13 +961,15 @@ where
     // batches (which do more per-record work than this payload-memcpy-bound bench).
     // Re-bench the actual ReplicationReadOk many-records case before raising further.
     //
-    // FUTURE (adaptive): instead of a static value tuned on one CPU, sample real
-    // decode times on the inline path (EWMA of ns vs bytes) and set the threshold
-    // = block-budget / observed-rate, clamped + slow-moving. Decode is ~linear
-    // WITHIN a cache tier but has a knee when the payload spills L2/L3 (measured
-    // ~0.018 ns/B in-cache -> ~0.048 ns/B at 16 MiB), so a flat rate underestimates
-    // big decodes - sample at representative sizes or pad. A startup calibration
-    // (measure once on this machine) is a simpler first step than continuous EWMA.
+    // FUTURE (adaptive): instead of a static value tuned on one CPU, FIT A
+    // FUNCTION of decode-time vs bytes from a few real samples and solve
+    // f(bytes) = block-budget for the threshold (the "breaking point"). Time
+    // scales NON-linearly: ~linear within a cache tier but with a knee when the
+    // payload spills L2/L3 (measured ~0.018 ns/B in-cache -> ~0.048 ns/B at
+    // 16 MiB), so a single ns/B is wrong for large sizes - a 2-regime / piecewise
+    // model (in-cache slope + out-of-cache slope, knee near cache size) fit from a
+    // small and a large sample captures it. Sample on the inline path (EWMA per
+    // regime, clamped + slow-moving); a startup calibration is a simpler first step.
     // Also account for the LOWER bound: spawn_blocking is not free (handoff to the
     // blocking pool + a oneshot await + a finite pool slot), so there is a
     // break-even floor - never offload a decode cheaper than the handoff. (Measure

@@ -4212,9 +4212,11 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   (REC_BYTES is a test const, ignored.)
   FUTURE (BLOCKING_DECODE_BYTES, low prio, user 2026-06-20): make it adaptive instead of a
   CPU-tuned const - sample real decode times (EWMA ns vs bytes on the inline path) and set
-  threshold = block-budget / observed-rate, clamped + slow-moving; account for the cache-knee
-  non-linearity (~0.018 ns/B in-cache -> ~0.048 ns/B at 16 MiB) by sampling at representative
-  sizes or padding. Startup calibration is a simpler first step than continuous EWMA. Also
+  FIT A FUNCTION of decode-time vs bytes from a few samples and solve f(bytes)=block-budget
+  for the breaking point. Time scales NON-linearly (~0.018 ns/B in-cache -> ~0.048 ns/B at
+  16 MiB as it spills L2/L3), so use a 2-regime/piecewise model (in-cache + out-of-cache
+  slopes, knee near cache size) fit from a small and a large sample, not a single ns/B.
+  Startup calibration is a simpler first step than continuous EWMA. Also
   measure the spawn_blocking handoff cost (blocking-pool queue + oneshot await + a finite
   pool slot) to set the break-even FLOOR (never offload a decode cheaper than the handoff).
   Note details live in the BLOCKING_DECODE_BYTES code comment.
