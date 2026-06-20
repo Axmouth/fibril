@@ -960,6 +960,18 @@ where
     // inline. That fits a ~150us cooperative budget with headroom for replication
     // batches (which do more per-record work than this payload-memcpy-bound bench).
     // Re-bench the actual ReplicationReadOk many-records case before raising further.
+    //
+    // FUTURE (adaptive): instead of a static value tuned on one CPU, sample real
+    // decode times on the inline path (EWMA of ns vs bytes) and set the threshold
+    // = block-budget / observed-rate, clamped + slow-moving. Decode is ~linear
+    // WITHIN a cache tier but has a knee when the payload spills L2/L3 (measured
+    // ~0.018 ns/B in-cache -> ~0.048 ns/B at 16 MiB), so a flat rate underestimates
+    // big decodes - sample at representative sizes or pad. A startup calibration
+    // (measure once on this machine) is a simpler first step than continuous EWMA.
+    // Also account for the LOWER bound: spawn_blocking is not free (handoff to the
+    // blocking pool + a oneshot await + a finite pool slot), so there is a
+    // break-even floor - never offload a decode cheaper than the handoff. (Measure
+    // the handoff cost to set that floor; 4 MiB is well above it.)
     const BLOCKING_DECODE_BYTES: usize = 4 << 20;
 
     if frame.payload.len() < BLOCKING_DECODE_BYTES {

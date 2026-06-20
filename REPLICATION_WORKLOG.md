@@ -4210,6 +4210,14 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   BLOCKING_DECODE_BYTES -> RAISED 1->4 MiB, bench-derived (fibril 097d510); kept a const
   (internal scheduler-fairness heuristic, not an operator knob); NOT promoted to a setting.
   (REC_BYTES is a test const, ignored.)
+  FUTURE (BLOCKING_DECODE_BYTES, low prio, user 2026-06-20): make it adaptive instead of a
+  CPU-tuned const - sample real decode times (EWMA ns vs bytes on the inline path) and set
+  threshold = block-budget / observed-rate, clamped + slow-moving; account for the cache-knee
+  non-linearity (~0.018 ns/B in-cache -> ~0.048 ns/B at 16 MiB) by sampling at representative
+  sizes or padding. Startup calibration is a simpler first step than continuous EWMA. Also
+  measure the spawn_blocking handoff cost (blocking-pool queue + oneshot await + a finite
+  pool slot) to set the break-even FLOOR (never offload a decode cheaper than the handoff).
+  Note details live in the BLOCKING_DECODE_BYTES code comment.
 - LIVE-SETTINGS-PROPAGATION (Option B) DONE (fibril 6f44a24): the streaming applier reads its
   tunables (max_merge_bytes/apply_linger/keepalive) LIVE per apply iteration via a closure
   the broker backs with the live config snapshot, so a settings change applies mid-stream
