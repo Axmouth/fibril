@@ -16,7 +16,8 @@
 #   scripts/cluster-tryout.sh --nodes 3 --failover-verify   # identity zero-loss check under owner kill
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --steady-bench
 #   scripts/cluster-tryout.sh --nodes 100 --ganglion --summary --resource-summary --admin-wait-secs 5 --cluster-wait-secs 90
-#   scripts/cluster-tryout.sh --keep       # leave the cluster running to play with
+#   scripts/cluster-tryout.sh --keep       # leave the cluster running to play with (detaches, prints a kill command)
+#   scripts/cluster-tryout.sh --ganglion --hold   # like --keep but stay attached; Ctrl-C tears the whole cluster down
 #
 # In --ganglion mode the servers share an embedded raft coordinator over real
 # TCP: the script asserts all nodes agree on one leader and voter set.
@@ -25,6 +26,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 NODES=3
 KEEP=false
+HOLD=false
 GANGLION=false
 STAGGERED=false
 SUMMARY=false
@@ -67,6 +69,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --nodes) NODES="$2"; shift 2 ;;
     --keep) KEEP=true; shift ;;
+    --hold) HOLD=true; shift ;;
     --ganglion) GANGLION=true; shift ;;
     --staggered) GANGLION=true; STAGGERED=true; shift ;;
     --summary) SUMMARY=true; shift ;;
@@ -115,6 +118,10 @@ if [[ "$FAILOVER_VERIFY" == true && "$NODES" -lt 3 ]]; then
 fi
 if [[ "$REPARTITION_SMOKE" == true && "$NODES" -lt 2 ]]; then
   echo "FAIL: --repartition-smoke needs at least two nodes to exercise routed client traffic" >&2
+  exit 2
+fi
+if [[ "$HOLD" == true && "$KEEP" == true ]]; then
+  echo "FAIL: --hold and --keep are mutually exclusive (--keep detaches and leaves the cluster after exit; --hold stays attached and tears it down on Ctrl-C)" >&2
   exit 2
 fi
 
@@ -1442,4 +1449,20 @@ if [[ "$KEEP" == true ]]; then
     echo "  $CTL --admin 127.0.0.1:$((BASE_ADMIN_PORT + i)) admin topology"
   done
   echo "logs/data: $RUN_DIR ; stop with: kill ${PIDS[*]}"
+fi
+
+if [[ "$HOLD" == true ]]; then
+  echo
+  echo "cluster held open (--hold). Admin dashboards:"
+  for i in $(seq 1 "$NODES"); do
+    admin_port=$((BASE_ADMIN_PORT + i))
+    echo "  node-$i: http://127.0.0.1:$admin_port/   (topology: http://127.0.0.1:$admin_port/admin/topology)"
+  done
+  echo "logs/data: $RUN_DIR"
+  echo
+  echo "press Ctrl-C to stop all $NODES servers and clean up."
+  # Stay attached. Ctrl-C (or a TERM) runs this trap, and the EXIT trap then
+  # tears every node down because KEEP is false in hold mode.
+  trap 'echo; echo "stopping cluster..."; exit 0' INT TERM
+  wait
 fi
