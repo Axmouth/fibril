@@ -763,3 +763,27 @@ acquired only on the cold open/close paths (queue_handle BUILD slow-path, destro
 evict); the materialized fast path and all hot publish/consume paths are untouched.
 mouse 10/10 + bear 3/3 deterministic; full stroma-core suite green. The broader
 ticket/re-resolve redesign (orphan-pin leak) remains a separate, lower-urgency item.
+
+### RESOLVED (2026-06-20): ticket/re-resolve redesign (the orphan-pin leak)
+QueueHandle is now a TICKET, not the state: the log-owning `QueueHandleInner` lives only
+in the registry slot (sole strong owner); a handed-out `QueueHandle` holds `{registry,
+key, Weak<Inner>}`. `resolve()` upgrades the Weak, or on a rotated/gone incarnation
+re-looks-up the slot by key (transparent failover, else `ActorGone`). It returns a
+`Resolved<'a>` guard that is lifetime-bound to the ticket, so a resolved handle CANNOT be
+moved into a `'static` task or stashed in a longer-lived field - parking a strong handle
+and pinning the logs forever is now a COMPILE error, not a latent leak. The control task
+and periodic_snapshot task hold the ticket (Weak) and resolve per use, so they never pin;
+an orphaned task self-exits when `resolve()` fails. Contained to stroma-core (broker/
+fibril/ganglion never touch QueueHandle). Bench: resolve() ~3.9 ns/op (one Weak upgrade,
+done once per batch on hot paths -> amortized ~0/record); handing out a ticket is cheaper
+than the old ~25-Arc clone-bundle. Full keratin workspace 285 passed; fibril builds across
+the boundary. Flow diagrams + lessons-learned + the evict/destroy teardown-contract
+assessment: keratin/stroma/core/src/STROMA_HANDLE_REDESIGN.md.
+
+Teardown-contract note (from this work): evict/destroy guard only on inflight_len (leased
+deliveries), NOT on the owner-operation lease, and force-shutdown the logs. They are safe
+only on a QUIESCED partition - the caller must freeze + drain owner operations first
+(freeze_queue_for_transition), which destroy already documents. The ticket change does not
+regress this (it was already unprotected if the contract is violated) and degrades more
+gracefully (ActorGone, no flock leak). Optional belt-and-suspenders: drain owner ops inside
+evict/destroy so the contract is self-enforced. Rematerialize-on-completion deferred.
