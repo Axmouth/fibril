@@ -168,6 +168,9 @@ pub struct ReplicationRuntimeSettings {
     /// apply can grow: peak memory vs fsync amortization). Pairs with
     /// `stream_apply_linger_us`.
     pub stream_apply_max_merge_bytes: u64,
+    /// In-flight batch buffer depth (credit window) for the streaming follower.
+    /// Read at stream establish (setup-time): a change applies on the next stream.
+    pub stream_buffer_batches: usize,
 }
 
 impl Default for ReplicationRuntimeSettings {
@@ -186,6 +189,7 @@ impl Default for ReplicationRuntimeSettings {
             stream_enabled: true,
             stream_apply_linger_us: 2_000,
             stream_apply_max_merge_bytes: 16 * 1024 * 1024,
+            stream_buffer_batches: 8,
         }
     }
 }
@@ -446,6 +450,7 @@ impl BrokerConfig {
             replication_stream_apply_max_merge_bytes: settings
                 .replication
                 .stream_apply_max_merge_bytes,
+            replication_stream_buffer_batches: settings.replication.stream_buffer_batches,
             default_partition_count: settings.partitioning.default_partition_count,
             default_consumer_target: settings.consumer_groups.default_target_per_consumer,
         }

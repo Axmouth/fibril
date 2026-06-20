@@ -1090,6 +1090,12 @@ pub struct ReplicationSettings {
     /// memory per apply. Pairs with `stream_apply_linger_us`.
     #[serde(default = "default_stream_apply_max_merge_bytes")]
     pub stream_apply_max_merge_bytes: u64,
+
+    /// How many replicated batches the streaming follower buffers in flight (the
+    /// credit window depth). Read at stream establish (setup-time), so a change
+    /// takes effect on the next stream, not mid-stream.
+    #[serde(default = "default_stream_buffer_batches")]
+    pub stream_buffer_batches: usize,
 }
 
 fn default_stream_apply_linger_us() -> u64 {
@@ -1098,6 +1104,10 @@ fn default_stream_apply_linger_us() -> u64 {
 
 fn default_stream_apply_max_merge_bytes() -> u64 {
     16 * 1024 * 1024
+}
+
+fn default_stream_buffer_batches() -> usize {
+    8
 }
 
 impl Default for ReplicationSettings {
@@ -1122,6 +1132,7 @@ impl Default for ReplicationSettings {
             stream_enabled: default_stream_enabled(),
             stream_apply_linger_us: default_stream_apply_linger_us(),
             stream_apply_max_merge_bytes: default_stream_apply_max_merge_bytes(),
+            stream_buffer_batches: default_stream_buffer_batches(),
         }
     }
 }

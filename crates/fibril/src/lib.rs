@@ -92,6 +92,7 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
                 .runtime_seed
                 .replication
                 .stream_apply_max_merge_bytes,
+            stream_buffer_batches: config.runtime_seed.replication.stream_buffer_batches,
         },
         partitioning: PartitioningRuntimeSettings {
             default_partition_count: config.runtime_seed.partitioning.default_partition_count,

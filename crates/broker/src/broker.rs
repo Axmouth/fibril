@@ -384,6 +384,9 @@ pub struct BrokerConfig {
     /// Byte cap on a single coalesced streaming-apply (peak memory vs fsync
     /// amortization). Pairs with `replication_stream_apply_linger_us`.
     pub replication_stream_apply_max_merge_bytes: u64,
+    /// In-flight batch buffer depth (credit window) for the streaming follower
+    /// (setup-time: applies on the next stream).
+    pub replication_stream_buffer_batches: usize,
     /// Partition count for a queue declared without an explicit count.
     pub default_partition_count: u32,
     /// Soft target partitions-per-consumer for exclusive consumer groups. When
@@ -416,6 +419,7 @@ impl Default for BrokerConfig {
             replication_stream_enabled: true,
             replication_stream_apply_linger_us: 2_000,
             replication_stream_apply_max_merge_bytes: 16 * 1024 * 1024,
+            replication_stream_buffer_batches: FOLLOWER_STREAM_BUFFER_BATCHES,
             default_partition_count: 1,
             default_consumer_target: None,
         }

@@ -257,6 +257,9 @@ pub struct FollowerReplicationWorkerConfig {
     /// Byte cap on a single coalesced streaming-apply. Pairs with
     /// `stream_apply_linger_us`.
     pub stream_apply_max_merge_bytes: u64,
+    /// In-flight batch buffer depth (credit window) for the streaming follower
+    /// (setup-time: applies on the next stream).
+    pub stream_buffer_batches: usize,
 }
 
 impl Default for FollowerReplicationWorkerConfig {
@@ -274,6 +277,7 @@ impl Default for FollowerReplicationWorkerConfig {
             stream_enabled: false,
             stream_apply_linger_us: 2_000,
             stream_apply_max_merge_bytes: 16 * 1024 * 1024,
+            stream_buffer_batches: FOLLOWER_STREAM_BUFFER_BATCHES,
         }
     }
 }
@@ -1953,6 +1957,7 @@ impl Broker<StromaEngine> {
                     stream_enabled: snap.replication_stream_enabled,
                     stream_apply_linger_us: snap.replication_stream_apply_linger_us,
                     stream_apply_max_merge_bytes: snap.replication_stream_apply_max_merge_bytes,
+                    stream_buffer_batches: snap.replication_stream_buffer_batches,
                     ..cfg
                 }
             } else {
@@ -2105,7 +2110,7 @@ impl Broker<StromaEngine> {
                 event_from,
                 cfg.max_bytes_per_read as u64,
                 tunables,
-                FOLLOWER_STREAM_BUFFER_BATCHES,
+                cfg.stream_buffer_batches,
                 apply.clone(),
                 shutdown,
             )
