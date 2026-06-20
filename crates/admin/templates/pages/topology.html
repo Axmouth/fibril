@@ -1,5 +1,22 @@
 {% extends "layout.html" %}
 {% block content %}
+<style>
+  #topology-diagram .edge {
+    stroke: #5b8def;
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+    opacity: 0.4;
+    transition: opacity 0.12s ease, stroke-width 0.12s ease;
+  }
+  #topology-diagram.has-focus .edge { opacity: 0.06; }
+  #topology-diagram.has-focus .edge.edge-active {
+    opacity: 0.95;
+    stroke-width: 2.25;
+  }
+  #topology-diagram .node-card { transition: opacity 0.12s ease; }
+  #topology-diagram.has-focus .node-card { opacity: 0.35; }
+  #topology-diagram.has-focus .node-card.node-active { opacity: 1; }
+</style>
 <h4 class="metrics-header">Cluster Topology</h4>
 <p class="settings-note">
   Committed coordination view: registered brokers, queue ownership with fencing epochs, and the
@@ -16,9 +33,10 @@
 <section class="overview-panel" aria-label="Topology diagram">
   <div class="overview-panel-heading">
     <h5>Diagram</h5>
-    <p>Brokers around the ring; the consensus leader is highlighted.</p>
+    <p>Brokers laid out for the cluster size. Hover a broker to highlight its replication links. The consensus leader is marked.</p>
   </div>
-  <svg id="topology-diagram" viewBox="0 0 860 420" width="100%" height="420"
+  <svg id="topology-diagram" viewBox="0 0 860 440" width="100%" height="440"
+       preserveAspectRatio="xMidYMid meet"
        style="background: var(--panel-bg, transparent); border-radius: 8px;"></svg>
 </section>
 
@@ -110,42 +128,92 @@ function renderSummary(data) {
   document.getElementById("topology-summary").innerHTML = parts.join(" · ");
 }
 
+const CARD_W = 180, CARD_H = 64;
+
+// Small clusters read best on an ellipse. Past a handful of brokers the ring
+// crowds and the follower edges become a hairball, so switch to a centered grid
+// that grows with the cluster. Both layouts return absolute card centers plus
+// the viewBox the canvas should adopt.
+function computeLayout(nodes) {
+  const n = nodes.length;
+  const positions = new Map();
+  const bannerTop = 52;
+
+  if (n <= 6) {
+    const width = 860, height = 440;
+    const cx = width / 2, cy = (height + bannerTop) / 2 + 8;
+    const rx = n <= 1 ? 0 : 320, ry = n <= 1 ? 0 : 132;
+    nodes.forEach((node, i) => {
+      const angle = n === 1 ? -Math.PI / 2 : (2 * Math.PI * i) / n - Math.PI / 2;
+      positions.set(node.node_id, { x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) });
+    });
+    return { positions, width, height };
+  }
+
+  const gapX = 34, gapY = 30;
+  const cols = Math.min(5, Math.ceil(Math.sqrt(n)));
+  const rows = Math.ceil(n / cols);
+  const width = cols * CARD_W + (cols + 1) * gapX;
+  const height = bannerTop + rows * CARD_H + (rows + 1) * gapY;
+  nodes.forEach((node, i) => {
+    const r = Math.floor(i / cols), c = i % cols;
+    // Center the (possibly short) final row under the rest.
+    const inRow = r === rows - 1 ? n - cols * r : cols;
+    const rowWidth = inRow * CARD_W + (inRow - 1) * gapX;
+    const startX = (width - rowWidth) / 2 + CARD_W / 2;
+    positions.set(node.node_id, {
+      x: startX + c * (CARD_W + gapX),
+      y: bannerTop + gapY + CARD_H / 2 + r * (CARD_H + gapY),
+    });
+  });
+  return { positions, width, height };
+}
+
 function renderDiagram(data) {
   const svg = document.getElementById("topology-diagram");
   svg.replaceChildren();
+  svg.classList.remove("has-focus");
   const coordination = data.coordination;
   if (!coordination || coordination.nodes.length === 0) {
-    svg.appendChild(el("text", { x: 430, y: 210, "text-anchor": "middle",
+    svg.setAttribute("viewBox", "0 0 860 440");
+    svg.setAttribute("height", 440);
+    svg.appendChild(el("text", { x: 430, y: 220, "text-anchor": "middle",
       fill: "#8a93a6", "font-size": 15 }, "no registered brokers yet"));
     return;
   }
 
   const raft = data.consensus ?? {};
-  // Raft id -> address lets us mark which broker hosts the leader; broker
-  // records and raft members are correlated by admin/broker address when the
-  // deployment registers them (best effort, display only).
+  // Raft id -> broker correlation is best effort and display only: a card is
+  // marked as leader only when its node_id matches the reported raft leader.
+  const leaderId = raft.leader != null ? String(raft.leader) : null;
   const nodes = coordination.nodes;
-  const centerX = 430, centerY = 205, radiusX = 320, radiusY = 140;
-  const positions = new Map();
-  nodes.forEach((node, index) => {
-    const angle = (2 * Math.PI * index) / nodes.length - Math.PI / 2;
-    positions.set(node.node_id, {
-      x: centerX + radiusX * Math.cos(angle),
-      y: centerY + radiusY * Math.sin(angle),
-    });
-  });
+  const { positions, width, height } = computeLayout(nodes);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("height", height);
 
-  // Owner -> follower edges first (under the cards).
+  // Consensus banner across the top, present for either layout.
+  if (data.consensus) {
+    svg.appendChild(el("text", {
+      x: width / 2, y: 24, "text-anchor": "middle",
+      fill: "#e8b65b", "font-size": 14, "font-weight": 600,
+    }, `consensus leader: ${data.consensus.leader ?? "none"}`));
+    svg.appendChild(el("text", {
+      x: width / 2, y: 44, "text-anchor": "middle", fill: "#8a93a6", "font-size": 11,
+    }, `voters [${(data.consensus.voters ?? []).join(", ")}] · applied ${data.consensus.last_applied_index ?? "-"}`));
+  }
+
+  // Owner -> follower edges first (drawn under the opaque cards). Track each
+  // edge with its endpoints so hovering a broker can highlight just its links.
+  const edges = [];
   for (const assignment of coordination.assignments) {
     const from = positions.get(assignment.owner);
     if (!from) continue;
     for (const follower of assignment.followers) {
       const to = positions.get(follower);
       if (!to) continue;
-      svg.appendChild(el("line", {
-        x1: from.x, y1: from.y, x2: to.x, y2: to.y,
-        stroke: "#5b8def", "stroke-width": 1.5, "stroke-dasharray": "6 4", opacity: 0.7,
-      }));
+      const line = el("line", { class: "edge", x1: from.x, y1: from.y, x2: to.x, y2: to.y });
+      svg.appendChild(line);
+      edges.push({ line, owner: assignment.owner, follower });
     }
   }
 
@@ -154,37 +222,51 @@ function renderDiagram(data) {
     ownedCount.set(assignment.owner, (ownedCount.get(assignment.owner) ?? 0) + 1);
   }
 
+  const cards = new Map();
   nodes.forEach((node) => {
     const pos = positions.get(node.node_id);
     const owned = ownedCount.get(node.node_id) ?? 0;
-    const group = el("g", {});
-    const width = 180, height = 64;
+    const isLeader = leaderId != null && String(node.node_id) === leaderId;
+    const group = el("g", { class: "node-card", "data-node": node.node_id });
     group.appendChild(el("rect", {
-      x: pos.x - width / 2, y: pos.y - height / 2, width, height,
-      rx: 10, fill: "#1d2433", stroke: "#3a4761", "stroke-width": 1.5,
+      x: pos.x - CARD_W / 2, y: pos.y - CARD_H / 2, width: CARD_W, height: CARD_H,
+      rx: 10, fill: "#1d2433",
+      stroke: isLeader ? "#e8b65b" : "#3a4761", "stroke-width": isLeader ? 2.25 : 1.5,
     }));
     group.appendChild(el("text", {
       x: pos.x, y: pos.y - 10, "text-anchor": "middle",
       fill: "#e8ecf4", "font-size": 15, "font-weight": 600,
-    }, node.node_id));
+    }, isLeader ? `${node.node_id} ★` : node.node_id));
     group.appendChild(el("text", {
       x: pos.x, y: pos.y + 10, "text-anchor": "middle", fill: "#8a93a6", "font-size": 12,
     }, node.broker_addr));
     group.appendChild(el("text", {
       x: pos.x, y: pos.y + 26, "text-anchor": "middle", fill: "#5b8def", "font-size": 11,
-    }, owned ? `owns ${owned} partition(s)` : "no owned partitions"));
+    }, owned ? `owns ${owned} partition(s)` : "no owned partitions");
     svg.appendChild(group);
+    cards.set(node.node_id, group);
   });
 
-  // Consensus ring badge: leader + voters (raft ids), drawn in the middle.
-  if (data.consensus) {
-    svg.appendChild(el("text", {
-      x: centerX, y: centerY - 6, "text-anchor": "middle",
-      fill: "#e8b65b", "font-size": 13, "font-weight": 600,
-    }, `consensus leader: ${data.consensus.leader ?? "none"}`));
-    svg.appendChild(el("text", {
-      x: centerX, y: centerY + 12, "text-anchor": "middle", fill: "#8a93a6", "font-size": 11,
-    }, `voters [${data.consensus.voters.join(", ")}] · applied ${data.consensus.last_applied_index ?? "-"}`));
+  // Hover a broker: spotlight the edges it participates in (as owner or
+  // follower) and the brokers on the other end, dimming everything else.
+  function focusNode(id) {
+    svg.classList.add("has-focus");
+    const active = new Set([id]);
+    for (const e of edges) {
+      const on = e.owner === id || e.follower === id;
+      e.line.classList.toggle("edge-active", on);
+      if (on) active.add(e.owner === id ? e.follower : e.owner);
+    }
+    for (const [nodeId, group] of cards) {
+      group.classList.toggle("node-active", active.has(nodeId));
+    }
+  }
+  function clearFocus() {
+    svg.classList.remove("has-focus");
+  }
+  for (const [nodeId, group] of cards) {
+    group.addEventListener("mouseenter", () => focusNode(nodeId));
+    group.addEventListener("mouseleave", clearFocus);
   }
 }
 
