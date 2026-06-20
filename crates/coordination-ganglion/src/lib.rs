@@ -16,12 +16,9 @@ use fibril_broker::coordination::{
     PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity, ReplicationDurabilityPolicy,
 };
 use fibril_storage::Partition;
-use ganglion_openraft::openraft::storage::RaftLogStorage;
-use ganglion_openraft::openraft::RaftNetworkFactory;
 use ganglion_openraft::{
-    client_write_remote_with_hint, GanglionLogStore, GanglionRaftConfig, InProcessRouter,
-    MetadataRaftCommand, MetadataRaftResponse, MetadataRejection, OpenraftAdapterError,
-    RaftMetadataNode, RemoteWriteError, WireFormat,
+    client_write_remote_with_hint, MetadataRaftCommand, MetadataRaftResponse, MetadataRejection,
+    OpenraftAdapterError, RaftMetadataNode, RemoteWriteError, WireFormat,
 };
 use tokio::sync::watch;
 
@@ -671,24 +668,16 @@ impl std::error::Error for ControlError {}
 /// Reads serve from a fibril-side watch channel fed by ganglion's
 /// committed-snapshot stream; a background task forwards updates. Proposals go
 /// through [`GanglionCoordination::propose`], which is leader-only.
-pub struct GanglionCoordination<LS = GanglionLogStore, NF = InProcessRouter<LS>>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: RaftNetworkFactory<GanglionRaftConfig>,
-{
+pub struct GanglionCoordination {
     node_id: String,
-    node: RaftMetadataNode<LS, NF>,
+    node: RaftMetadataNode,
     tx: watch::Sender<CoordinationSnapshot>,
     forwarder: tokio::task::JoinHandle<()>,
     wire_format: WireFormat,
     forwarded_write_policy: ForwardedWritePolicy,
 }
 
-impl<LS, NF> std::fmt::Debug for GanglionCoordination<LS, NF>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: RaftNetworkFactory<GanglionRaftConfig>,
-{
+impl std::fmt::Debug for GanglionCoordination {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GanglionCoordination")
             .field("node_id", &self.node_id)
@@ -697,18 +686,14 @@ where
     }
 }
 
-impl<LS, NF> GanglionCoordination<LS, NF>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: RaftNetworkFactory<GanglionRaftConfig>,
-{
+impl GanglionCoordination {
     /// Wrap a started raft node as a fibril coordination provider.
     ///
     /// `node_id` is the fibril-side node identity (string); the raft node id
     /// (u64) is an internal transport concern and need not match.
     ///
     /// Must be called from within a tokio runtime (spawns the watch forwarder).
-    pub fn new(node_id: impl Into<String>, node: RaftMetadataNode<LS, NF>) -> Self {
+    pub fn new(node_id: impl Into<String>, node: RaftMetadataNode) -> Self {
         Self::new_with_wire_format(node_id, node, WireFormat::default())
     }
 
@@ -716,7 +701,7 @@ where
     /// heartbeats sent to the leader). Pass from startup configuration.
     pub fn new_with_wire_format(
         node_id: impl Into<String>,
-        node: RaftMetadataNode<LS, NF>,
+        node: RaftMetadataNode,
         wire_format: WireFormat,
     ) -> Self {
         Self::new_with_forwarded_write_policy(
@@ -729,7 +714,7 @@ where
 
     pub fn new_with_forwarded_write_policy(
         node_id: impl Into<String>,
-        node: RaftMetadataNode<LS, NF>,
+        node: RaftMetadataNode,
         wire_format: WireFormat,
         forwarded_write_policy: ForwardedWritePolicy,
     ) -> Self {
@@ -1568,9 +1553,6 @@ where
         self: &std::sync::Arc<Self>,
         manager: std::sync::Arc<fibril_broker::runtime_settings::RuntimeSettingsManager>,
     ) -> tokio::task::JoinHandle<()>
-    where
-        LS: 'static,
-        NF: 'static,
     {
         let provider = std::sync::Arc::clone(self);
         tokio::spawn(async move {
@@ -1650,9 +1632,6 @@ where
         tokio::task::JoinHandle<()>,
         std::sync::Arc<std::sync::RwLock<ControllerStatus>>,
     )
-    where
-        LS: 'static,
-        NF: 'static,
     {
         let provider = std::sync::Arc::clone(self);
         let status = std::sync::Arc::new(std::sync::RwLock::new(ControllerStatus::default()));
@@ -1721,8 +1700,6 @@ where
     where
         ListFn: Fn() -> ListFut + Send + 'static,
         ListFut: std::future::Future<Output = Vec<QueueIdentity>> + Send,
-        LS: 'static,
-        NF: 'static,
     {
         let provider = std::sync::Arc::clone(self);
         tokio::spawn(async move {
@@ -1753,9 +1730,6 @@ where
         info: NodeInfo,
         interval: std::time::Duration,
     ) -> tokio::task::JoinHandle<()>
-    where
-        LS: 'static,
-        NF: 'static,
     {
         self.spawn_heartbeat_with_labels(info, interval, || std::collections::BTreeMap::new())
     }
@@ -1769,8 +1743,6 @@ where
     ) -> tokio::task::JoinHandle<()>
     where
         LabelsFn: Fn() -> std::collections::BTreeMap<String, String> + Send + 'static,
-        LS: 'static,
-        NF: 'static,
     {
         let provider = std::sync::Arc::clone(self);
         tokio::spawn(async move {
@@ -2017,16 +1989,12 @@ where
     }
 
     /// Access the underlying raft node (membership changes, waits, shutdown).
-    pub fn consensus_node(&self) -> &RaftMetadataNode<LS, NF> {
+    pub fn consensus_node(&self) -> &RaftMetadataNode {
         &self.node
     }
 }
 
-impl<LS, NF> Drop for GanglionCoordination<LS, NF>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: RaftNetworkFactory<GanglionRaftConfig>,
-{
+impl Drop for GanglionCoordination {
     fn drop(&mut self) {
         self.forwarder.abort();
     }
@@ -2034,11 +2002,7 @@ where
 
 /// Queue-ownership gate view: in cluster mode brokers serve only queues the
 /// committed snapshot assigns to them.
-impl<LS, NF> fibril_broker::broker::QueueOwnership for GanglionCoordination<LS, NF>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: RaftNetworkFactory<GanglionRaftConfig>,
-{
+impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
     fn owns_queue(
         &self,
         topic: &str,
@@ -2049,11 +2013,7 @@ where
     }
 }
 
-impl<LS, NF> Coordination for GanglionCoordination<LS, NF>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: RaftNetworkFactory<GanglionRaftConfig>,
-{
+impl Coordination for GanglionCoordination {
     fn node_id(&self) -> &str {
         &self.node_id
     }
@@ -2720,7 +2680,7 @@ mod tests {
             no_leader_retries: 0,
             ..ForwardedWritePolicy::default()
         };
-        let providers: Vec<GanglionCoordination<_, _>> = raft_nodes
+        let providers: Vec<GanglionCoordination> = raft_nodes
             .into_iter()
             .enumerate()
             .map(|(index, node)| {

@@ -48,9 +48,8 @@ use fibril_protocol::v1::handler::{
 use fibril_protocol::v1::{Partition, QueueTopologyEntry, TopologyOk};
 use fibril_util::StaticAuthHandler;
 use ganglion::{
-    FileRaftLogStore, GanglionRaftConfig, TcpNetworkFactory, TcpRaftServer, WireFormat,
-    WireFormatParseError,
-    openraft::{BasicNode, RaftNetworkFactory, storage::RaftLogStorage},
+    TcpRaftServer, WireFormat, WireFormatParseError,
+    openraft::BasicNode,
 };
 
 /// Map the startup config's runtime-seed section into the broker's
@@ -107,7 +106,11 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
 }
 
 /// Production Ganglion coordination provider used by `fibril-server`.
-pub type TcpGanglionCoordination = GanglionCoordination<FileRaftLogStore, TcpNetworkFactory>;
+///
+/// `GanglionCoordination` is not generic over the log store or network factory
+/// (the raft handle is type-erased), so this is a plain alias kept for naming
+/// continuity at the server call sites.
+pub type TcpGanglionCoordination = GanglionCoordination;
 
 /// Started Ganglion coordination pieces for the TCP-backed server path.
 ///
@@ -996,30 +999,18 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     Ok(())
 }
 
-pub struct GanglionRuntimeSettingsStore<LS, NF>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: RaftNetworkFactory<GanglionRaftConfig>,
-{
-    coordination: Arc<GanglionCoordination<LS, NF>>,
+pub struct GanglionRuntimeSettingsStore {
+    coordination: Arc<GanglionCoordination>,
 }
 
-impl<LS, NF> GanglionRuntimeSettingsStore<LS, NF>
-where
-    LS: RaftLogStorage<GanglionRaftConfig>,
-    NF: RaftNetworkFactory<GanglionRaftConfig>,
-{
-    pub fn new(coordination: Arc<GanglionCoordination<LS, NF>>) -> Self {
+impl GanglionRuntimeSettingsStore {
+    pub fn new(coordination: Arc<GanglionCoordination>) -> Self {
         Self { coordination }
     }
 }
 
 #[async_trait]
-impl<LS, NF> RuntimeSettingsClusterStore for GanglionRuntimeSettingsStore<LS, NF>
-where
-    LS: RaftLogStorage<GanglionRaftConfig> + 'static,
-    NF: RaftNetworkFactory<GanglionRaftConfig> + 'static,
-{
+impl RuntimeSettingsClusterStore for GanglionRuntimeSettingsStore {
     async fn current_runtime_settings(&self) -> Result<Option<RuntimeSettingsSnapshot>, String> {
         self.coordination
             .runtime_settings_document()
