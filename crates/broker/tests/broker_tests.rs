@@ -27,8 +27,7 @@ use fibril_broker::{
     },
     queue_engine::{
         Deliverable, DestroyOutcome, EvictOutcome, FollowerStateCheckpointInstall, InspectMode,
-        IoError,
-        KeratinAppendCompletion, Message, MessageHeaders, OwnerReplicationBatch,
+        IoError, KeratinAppendCompletion, Message, MessageHeaders, OwnerReplicationBatch,
         OwnerReplicationRead, OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome,
         ReplayDeadLetterOutcome, ReplayDeadLettersReport, SettleRequest as EngineSettleRequest,
         StromaEngine,

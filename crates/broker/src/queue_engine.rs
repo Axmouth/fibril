@@ -15,8 +15,8 @@ pub use stroma_core::{
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KDurability,
     KeratinAppendCompletion, KeratinConfig, Message, MessageContentType, MessageHeaders,
     MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead,
-    OwnerStateCheckpoint, QueueInspectionState, QueuePromotionOutcome, ReplicatedAppendOutcome,
-    QuarantineInfo, RecoveryMismatchPolicy, ReplicatedEventBatch, ReplicatedMessageBatch,
+    OwnerStateCheckpoint, QuarantineInfo, QueueInspectionState, QueuePromotionOutcome,
+    RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
     ReplicatedQueueApplyOutcome, SnapshotConfig, Stroma, StromaError, StromaEvent,
     StromaKeratinConfig,
 };
