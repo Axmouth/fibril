@@ -18,10 +18,12 @@ use tokio_util::sync::CancellationToken;
 use fibril_storage::{Offset, Partition};
 use stroma_core::{Message, OwnerReplicationRead, StromaEvent};
 
-use crate::broker::{Broker, BrokerConfig, BrokerError, QueueKey};
+use crate::broker::{Broker, BrokerConfig, BrokerError, FOLLOWER_STREAM_BUFFER_BATCHES, QueueKey};
 use crate::coordination::PartitionAssignment;
 use crate::queue_engine::{
-    OwnerStateCheckpoint, ReplicatedAppendOutcome, ReplicatedQueueApplyOutcome, StromaEngine,
+    FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, KDurability,
+    OwnerStateCheckpoint, QueuePromotionOutcome, ReplicatedAppendOutcome, ReplicatedEventBatch,
+    ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, StromaEngine,
 };
 
 #[derive(Debug)]
@@ -1223,5 +1225,864 @@ mod replication_byte_limit_tests {
                 .collect::<Vec<_>>(),
             vec![20, 21]
         );
+    }
+}
+
+// ---------------- impl Broker<StromaEngine>: replication engine methods ----------------
+
+impl Broker<StromaEngine> {
+    pub async fn read_owner_replication_records(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+    ) -> Result<BrokerOwnerReplicationRecords, BrokerError> {
+        if max_messages == 0 || max_events == 0 || max_bytes == 0 {
+            return Err(BrokerError::InvalidArgument(
+                "replication read limits must be greater than zero".into(),
+            ));
+        }
+
+        if max_wait_ms == 0 {
+            return self
+                .read_owner_replication_records_now(
+                    topic,
+                    partition,
+                    group,
+                    message_from,
+                    event_from,
+                    max_messages,
+                    max_events,
+                    max_bytes,
+                )
+                .await;
+        }
+
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        let qs = self.queue(&key).await;
+        let notified = qs.replication_notify.notified();
+        tokio::pin!(notified);
+
+        let records = self
+            .read_owner_replication_records_now(
+                topic,
+                partition,
+                group,
+                message_from,
+                event_from,
+                max_messages,
+                max_events,
+                max_bytes,
+            )
+            .await?;
+        if !owner_replication_records_empty(&records) {
+            return Ok(records);
+        }
+
+        tokio::select! {
+            _ = &mut notified => {}
+            _ = self.shutdown_publishers.cancelled() => {}
+            _ = tokio::time::sleep(Duration::from_millis(max_wait_ms)) => {}
+        }
+
+        self.read_owner_replication_records_now(
+            topic,
+            partition,
+            group,
+            message_from,
+            event_from,
+            max_messages,
+            max_events,
+            max_bytes,
+        )
+        .await
+    }
+
+    async fn read_owner_replication_records_now(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        message_from: Offset,
+        event_from: Offset,
+        max_messages: usize,
+        max_events: usize,
+        max_bytes: usize,
+    ) -> Result<BrokerOwnerReplicationRecords, BrokerError> {
+        self.ensure_queue_owner(topic, partition, group)?;
+        let _owner_read_timer = self.replication_timing.owner_read.timer();
+        let messages = self
+            .engine
+            .read_owner_message_records(topic, partition.id(), group, message_from, max_messages)
+            .await?;
+        let events = self
+            .engine
+            .read_owner_event_records(topic, partition.id(), group, event_from, max_events)
+            .await?;
+
+        Ok(cap_owner_replication_records(
+            BrokerOwnerReplicationRecords { messages, events },
+            max_bytes,
+        ))
+    }
+
+    pub async fn become_replication_follower(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Result<(), BrokerError> {
+        self.engine
+            .become_queue_follower(topic, partition.id(), group)
+            .await?;
+        Ok(())
+    }
+
+    /// Fence both queue logs at `epoch` (persisted, monotonic). Also the
+    /// substrate for future manual-fence operator tooling.
+    pub async fn advance_replication_epoch(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<u64, BrokerError> {
+        self.engine
+            .advance_queue_epoch(topic, partition.id(), group, epoch)
+            .await
+            .map_err(BrokerError::from)
+    }
+
+    /// `become_replication_follower` fenced at the assignment epoch.
+    pub async fn become_replication_follower_with_epoch(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), BrokerError> {
+        self.engine
+            .become_queue_follower_with_epoch(topic, partition.id(), group, epoch)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn export_owner_state_checkpoint(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Result<OwnerStateCheckpoint, BrokerError> {
+        self.ensure_queue_owner(topic, partition, group)?;
+        Ok(self
+            .engine
+            .export_owner_state_checkpoint(topic, partition.id(), group)
+            .await?)
+    }
+
+    pub async fn install_follower_state_checkpoint(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        install: FollowerStateCheckpointInstall,
+    ) -> Result<FollowerStateCheckpointInstallOutcome, BrokerError> {
+        Ok(self
+            .engine
+            .install_follower_state_checkpoint(topic, partition.id(), group, install)
+            .await?)
+    }
+
+    pub async fn apply_follower_replication_records(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        records: BrokerOwnerReplicationRecords,
+    ) -> Result<BrokerFollowerReplicationApply, BrokerError> {
+        let messages = match records.messages {
+            OwnerReplicationRead::Batch(batch) if !batch.records.is_empty() => {
+                Some(ReplicatedMessageBatch {
+                    epoch: batch.epoch,
+                    first_offset: batch.records[0].0,
+                    records: batch
+                        .records
+                        .into_iter()
+                        .map(|(_, message)| message)
+                        .collect(),
+                    // Followers apply durably so their reported pull offsets
+                    // are honest DURABLE progress for owner confirm policies
+                    // (replica_durable/majority_durable).
+                    durability: Some(KDurability::AfterFsync),
+                })
+            }
+            OwnerReplicationRead::Batch(_) => None,
+            OwnerReplicationRead::CheckpointRequired {
+                epoch,
+                requested_offset,
+                head_offset,
+                next_offset,
+            } => {
+                tracing::debug!(
+                    topic,
+                    partition = partition.id(),
+                    group,
+                    requested_offset,
+                    head_offset,
+                    next_offset,
+                    "replication message read requires checkpoint before follower apply"
+                );
+                return Ok(BrokerFollowerReplicationApply::CheckpointRequired {
+                    messages: Some(BrokerReplicationCheckpointRequired {
+                        epoch,
+                        requested_offset,
+                        head_offset,
+                        next_offset,
+                    }),
+                    events: checkpoint_required(&records.events),
+                });
+            }
+        };
+        let events = match records.events {
+            OwnerReplicationRead::Batch(batch) if !batch.records.is_empty() => {
+                Some(ReplicatedEventBatch {
+                    epoch: batch.epoch,
+                    first_offset: batch.records[0].0,
+                    events: batch.records.into_iter().map(|(_, event)| event).collect(),
+                    // Followers apply durably so their reported pull offsets
+                    // are honest DURABLE progress for owner confirm policies
+                    // (replica_durable/majority_durable).
+                    durability: Some(KDurability::AfterFsync),
+                })
+            }
+            OwnerReplicationRead::Batch(_) => None,
+            OwnerReplicationRead::CheckpointRequired {
+                epoch,
+                requested_offset,
+                head_offset,
+                next_offset,
+            } => {
+                tracing::debug!(
+                    topic,
+                    partition = partition.id(),
+                    group,
+                    requested_offset,
+                    head_offset,
+                    next_offset,
+                    "replication event read requires checkpoint before follower apply"
+                );
+                return Ok(BrokerFollowerReplicationApply::CheckpointRequired {
+                    messages: None,
+                    events: Some(BrokerReplicationCheckpointRequired {
+                        epoch,
+                        requested_offset,
+                        head_offset,
+                        next_offset,
+                    }),
+                });
+            }
+        };
+
+        let outcome = self
+            .engine
+            .apply_replicated_queue_batch(topic, partition.id(), group, messages, events)
+            .await?;
+        Ok(BrokerFollowerReplicationApply::Applied(outcome))
+    }
+
+    /// Apply one streamed replication batch and report the advanced durable
+    /// cursor, reusing the exact apply + progress path the pull catch-up uses.
+    /// `CheckpointRequired` tells the stream caller to fall back to the pull +
+    /// checkpoint path (offset gap / epoch fence), then re-stream.
+    pub async fn apply_replicated_stream_batch(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        records: BrokerOwnerReplicationRecords,
+    ) -> Result<ReplicatedStreamApply, BrokerError> {
+        let message_progress = owner_read_batch_progress("message", &records.messages)?;
+        let event_progress = owner_read_batch_progress("event", &records.events)?;
+        let (message_progress, event_progress) = match (message_progress, event_progress) {
+            (Some(message_progress), Some(event_progress)) => (message_progress, event_progress),
+            // The owner read itself signalled a checkpoint is required.
+            _ => {
+                let _ = self
+                    .apply_follower_replication_records(topic, partition, group, records)
+                    .await?;
+                return Ok(ReplicatedStreamApply::CheckpointRequired);
+            }
+        };
+
+        let apply = {
+            let _follower_apply_timer = self.replication_timing.follower_apply.timer();
+            self.apply_follower_replication_records(topic, partition, group, records)
+                .await?
+        };
+
+        let outcome = match apply {
+            BrokerFollowerReplicationApply::Applied(outcome) => outcome,
+            BrokerFollowerReplicationApply::CheckpointRequired { .. } => {
+                return Ok(ReplicatedStreamApply::CheckpointRequired);
+            }
+        };
+
+        let message_next = match replicated_append_progress_after_apply(
+            "message",
+            &message_progress,
+            outcome.message_log.as_ref(),
+        )? {
+            ReplicatedAppendProgress::Advanced(next_offset) => next_offset,
+            ReplicatedAppendProgress::CheckpointRequired(_) => {
+                return Ok(ReplicatedStreamApply::CheckpointRequired);
+            }
+        };
+        let event_next = match replicated_append_progress_after_apply(
+            "event",
+            &event_progress,
+            outcome.event_log.as_ref(),
+        )? {
+            ReplicatedAppendProgress::Advanced(next_offset) => next_offset,
+            ReplicatedAppendProgress::CheckpointRequired(_) => {
+                return Ok(ReplicatedStreamApply::CheckpointRequired);
+            }
+        };
+
+        Ok(ReplicatedStreamApply::Applied {
+            message_next,
+            event_next,
+        })
+    }
+
+    pub async fn promote_replication_follower_if_caught_up(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        expected_message_next_offset: Offset,
+        expected_event_next_offset: Offset,
+    ) -> Result<QueuePromotionOutcome, BrokerError> {
+        self.engine
+            .promote_queue_follower_if_caught_up(
+                topic,
+                partition.id(),
+                group,
+                expected_message_next_offset,
+                expected_event_next_offset,
+            )
+            .await
+            .map_err(BrokerError::from)
+    }
+
+    /// Failover promotion at the follower's own tails (see the
+    /// `PromoteFollowerToOwner` transition arm for the safety argument).
+    pub async fn promote_replication_follower_to_local_tail(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<QueuePromotionOutcome, BrokerError> {
+        self.engine
+            .promote_queue_follower_to_local_tail(topic, partition.id(), group, epoch)
+            .await
+            .map_err(BrokerError::from)
+    }
+
+    pub async fn catch_up_replication_follower_from_owner(
+        &self,
+        owner: &dyn BrokerOwnerReplicationPeer,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        options: BrokerReplicationCatchUpOptions,
+    ) -> Result<BrokerReplicationCatchUp, BrokerError> {
+        if options.max_messages_per_read == 0
+            || options.max_events_per_read == 0
+            || options.max_bytes_per_read == 0
+            || options.max_iterations == 0
+        {
+            return Err(BrokerError::InvalidArgument(
+                "replication catch-up limits must be greater than zero".into(),
+            ));
+        }
+
+        let mut progress = BrokerReplicationCatchUpProgress {
+            message_next_offset: options.message_from,
+            event_next_offset: options.event_from,
+            ..Default::default()
+        };
+
+        for _ in 0..options.max_iterations {
+            let records = {
+                let _follower_owner_read_timer =
+                    self.replication_timing.follower_owner_read.timer();
+                owner
+                    .read_owner_replication_records(
+                        topic,
+                        partition,
+                        group,
+                        progress.message_next_offset,
+                        progress.event_next_offset,
+                        options.max_messages_per_read,
+                        options.max_events_per_read,
+                        options.max_bytes_per_read,
+                        options.max_wait_ms,
+                    )
+                    .await?
+            };
+
+            let message_progress = owner_read_batch_progress("message", &records.messages)?;
+            let event_progress = owner_read_batch_progress("event", &records.events)?;
+            let (message_progress, event_progress) = match (message_progress, event_progress) {
+                (Some(message_progress), Some(event_progress)) => {
+                    (message_progress, event_progress)
+                }
+                _ => {
+                    let apply = {
+                        let _follower_apply_timer = self.replication_timing.follower_apply.timer();
+                        self.apply_follower_replication_records(topic, partition, group, records)
+                            .await?
+                    };
+                    return match apply {
+                        BrokerFollowerReplicationApply::CheckpointRequired { messages, events } => {
+                            Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                                progress,
+                                messages,
+                                events,
+                            })
+                        }
+                        BrokerFollowerReplicationApply::Applied(_) => {
+                            tracing::error!(
+                                topic,
+                                partition = partition.id(),
+                                group,
+                                "replication catch-up applied records even though owner read reported checkpoint required"
+                            );
+                            Err(BrokerError::Unknown(
+                                "checkpoint-required owner read unexpectedly applied".into(),
+                            ))
+                        }
+                    };
+                }
+            };
+
+            let apply = {
+                let _follower_apply_timer = self.replication_timing.follower_apply.timer();
+                self.apply_follower_replication_records(topic, partition, group, records)
+                    .await?
+            };
+
+            match apply {
+                BrokerFollowerReplicationApply::Applied(outcome) => {
+                    match replicated_append_progress_after_apply(
+                        "message",
+                        &message_progress,
+                        outcome.message_log.as_ref(),
+                    )? {
+                        ReplicatedAppendProgress::Advanced(next_offset) => {
+                            progress.message_next_offset = next_offset;
+                        }
+                        ReplicatedAppendProgress::CheckpointRequired(checkpoint) => {
+                            return Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                                progress,
+                                messages: Some(checkpoint),
+                                events: None,
+                            });
+                        }
+                    }
+                    match replicated_append_progress_after_apply(
+                        "event",
+                        &event_progress,
+                        outcome.event_log.as_ref(),
+                    )? {
+                        ReplicatedAppendProgress::Advanced(next_offset) => {
+                            progress.event_next_offset = next_offset;
+                        }
+                        ReplicatedAppendProgress::CheckpointRequired(checkpoint) => {
+                            return Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                                progress,
+                                messages: None,
+                                events: Some(checkpoint),
+                            });
+                        }
+                    }
+                }
+                BrokerFollowerReplicationApply::CheckpointRequired { messages, events } => {
+                    return Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                        progress,
+                        messages,
+                        events,
+                    });
+                }
+            }
+
+            progress.iterations += 1;
+            progress.applied_message_records += message_progress.record_count;
+            progress.applied_event_records += event_progress.record_count;
+
+            if message_progress.record_count == 0 && event_progress.record_count == 0 {
+                return Ok(BrokerReplicationCatchUp::CaughtUp(progress));
+            }
+        }
+
+        Ok(BrokerReplicationCatchUp::IterationLimit { progress })
+    }
+
+    pub async fn catch_up_replication_follower_from_owner_with_checkpoint(
+        &self,
+        owner: &dyn BrokerOwnerReplicationPeer,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        options: BrokerReplicationCatchUpOptions,
+    ) -> Result<BrokerReplicationCatchUp, BrokerError> {
+        if options.max_messages_per_read == 0
+            || options.max_events_per_read == 0
+            || options.max_bytes_per_read == 0
+            || options.max_iterations == 0
+        {
+            return Err(BrokerError::InvalidArgument(
+                "replication catch-up limits must be greater than zero".into(),
+            ));
+        }
+
+        let mut options = options;
+        for checkpoint_attempts in 0..=1 {
+            let outcome = self
+                .catch_up_replication_follower_from_owner(owner, topic, partition, group, options)
+                .await?;
+
+            let BrokerReplicationCatchUp::CheckpointRequired {
+                progress,
+                messages,
+                events,
+            } = outcome
+            else {
+                return Ok(outcome);
+            };
+
+            if checkpoint_attempts == 1 {
+                return Ok(BrokerReplicationCatchUp::CheckpointRequired {
+                    progress,
+                    messages,
+                    events,
+                });
+            }
+
+            let checkpoint = owner
+                .export_owner_state_checkpoint(topic, partition, group)
+                .await?;
+            self.install_follower_state_checkpoint(
+                topic,
+                partition,
+                group,
+                FollowerStateCheckpointInstall {
+                    message_next_offset: checkpoint.message_checkpoint_offset,
+                    event_next_offset: checkpoint.event_next_offset,
+                    applied_event_offset: checkpoint.applied_event_offset,
+                    state_snapshot: checkpoint.state_snapshot,
+                },
+            )
+            .await?;
+
+            options.message_from = checkpoint.message_checkpoint_offset;
+            options.event_from = checkpoint.event_next_offset;
+        }
+
+        tracing::error!(
+            topic,
+            partition = partition.id(),
+            group,
+            "checkpoint-aware catch-up loop reached an unreachable state"
+        );
+        unreachable!("checkpoint_attempts loop always returns");
+    }
+
+    pub async fn run_follower_replication_worker_once(
+        &self,
+        owner: &dyn BrokerOwnerReplicationPeer,
+        queue: &crate::coordination::QueueIdentity,
+        cfg: FollowerReplicationWorkerConfig,
+    ) -> Result<BrokerReplicationCatchUp, BrokerError> {
+        let _follower_tick_timer = self.replication_timing.follower_tick.timer();
+        let worker = self.follower_replication_worker(queue)?;
+        let options = {
+            let state = worker.lock().await;
+            state.catch_up_options(cfg)
+        };
+
+        let outcome = if cfg.allow_checkpoint_install {
+            self.catch_up_replication_follower_from_owner_with_checkpoint(
+                owner,
+                queue.topic.as_str(),
+                queue.partition,
+                queue.group.as_deref(),
+                options,
+            )
+            .await?
+        } else {
+            self.catch_up_replication_follower_from_owner(
+                owner,
+                queue.topic.as_str(),
+                queue.partition,
+                queue.group.as_deref(),
+                options,
+            )
+            .await?
+        };
+
+        worker.lock().await.record_catch_up(cfg, &outcome);
+        Ok(outcome)
+    }
+
+    pub async fn run_follower_replication_worker_loop(
+        self: &Arc<Self>,
+        assignment: PartitionAssignment,
+        resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
+        cfg: FollowerReplicationWorkerConfig,
+        shutdown: CancellationToken,
+    ) -> Result<FollowerReplicationWorkerLoopExit, BrokerError> {
+        let mut ticks = 0;
+        loop {
+            let cfg = if cfg.follow_runtime_settings {
+                let snap = self.config_snapshot();
+                FollowerReplicationWorkerConfig {
+                    max_messages_per_read: snap.replication_max_messages_per_read,
+                    max_events_per_read: snap.replication_max_events_per_read,
+                    max_bytes_per_read: snap.replication_max_bytes_per_read,
+                    max_iterations_per_tick: snap.replication_max_iterations_per_tick,
+                    caught_up_poll_ms: snap.replication_caught_up_poll_ms,
+                    retry_poll_ms: snap.replication_retry_poll_ms,
+                    checkpoint_retry_poll_ms: snap.replication_checkpoint_retry_poll_ms,
+                    stream_enabled: snap.replication_stream_enabled,
+                    stream_apply_linger_us: snap.replication_stream_apply_linger_us,
+                    ..cfg
+                }
+            } else {
+                cfg
+            };
+            let Ok(runtime) = self.follower_replication_worker_runtime(&assignment.queue) else {
+                return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+            };
+
+            if shutdown.is_cancelled() {
+                return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
+            }
+
+            let Some(owner) = resolver.resolve_owner_peer(&assignment).await? else {
+                tracing::warn!(
+                    topic = %assignment.queue.topic,
+                    partition = assignment.queue.partition.id(),
+                    group = ?assignment.queue.group,
+                    owner = %assignment.owner,
+                    "follower replication worker could not resolve owner peer"
+                );
+                wait_for_follower_worker_delay(cfg.retry_poll_ms, &shutdown, &runtime.shutdown)
+                    .await;
+                continue;
+            };
+
+            let Some(_tick_guard) = runtime.begin_tick() else {
+                return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+            };
+
+            if shutdown.is_cancelled() {
+                return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
+            }
+
+            let tick_result = tokio::select! {
+                biased;
+                _ = shutdown.cancelled() => {
+                    return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
+                }
+                _ = runtime.shutdown.cancelled() => {
+                    return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+                }
+                outcome = async {
+                    if cfg.stream_enabled {
+                        self.run_follower_replication_stream_tick(
+                            owner.as_ref(),
+                            &assignment.queue,
+                            cfg,
+                            runtime.shutdown.clone(),
+                        )
+                        .await
+                    } else {
+                        self.run_follower_replication_worker_once(
+                            owner.as_ref(),
+                            &assignment.queue,
+                            cfg,
+                        )
+                        .await
+                        .map(|_| ())
+                    }
+                } => outcome,
+            };
+
+            match tick_result {
+                Ok(_) => {
+                    ticks += 1;
+                }
+                Err(BrokerError::InvalidArgument(_))
+                    if !self
+                        .follower_replication_workers
+                        .contains_key(&assignment.queue) =>
+                {
+                    return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+                }
+                Err(BrokerError::NotOwner { .. }) => {
+                    tracing::warn!(
+                        topic = %assignment.queue.topic,
+                        partition = assignment.queue.partition.id(),
+                        group = ?assignment.queue.group,
+                        owner = %assignment.owner,
+                        "follower replication worker owner peer is no longer owner"
+                    );
+                    return Ok(FollowerReplicationWorkerLoopExit::OwnerChanged { ticks });
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        topic = %assignment.queue.topic,
+                        partition = assignment.queue.partition.id(),
+                        group = ?assignment.queue.group,
+                        owner = %assignment.owner,
+                        "follower replication worker tick failed: {err:?}"
+                    );
+                    drop(_tick_guard);
+                    wait_for_follower_worker_delay(cfg.retry_poll_ms, &shutdown, &runtime.shutdown)
+                        .await;
+                    continue;
+                }
+            }
+            drop(_tick_guard);
+
+            let Ok(runtime) = self.follower_replication_worker_runtime(&assignment.queue) else {
+                return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
+            };
+
+            let delay_ms = runtime.state.lock().await.next_delay_ms;
+            wait_for_follower_worker_delay(delay_ms, &shutdown, &runtime.shutdown).await;
+        }
+    }
+
+    /// One streaming catch-up: open a credit-based stream from the owner, apply
+    /// through the broker, and on a checkpoint requirement fall back to the proven
+    /// pull+checkpoint path for one tick (then the loop re-streams). The cursor
+    /// starts from and is synced back to the worker state, so pull and stream
+    /// share one authoritative cursor.
+    async fn run_follower_replication_stream_tick(
+        self: &Arc<Self>,
+        owner: &dyn BrokerOwnerReplicationPeer,
+        queue: &crate::coordination::QueueIdentity,
+        cfg: FollowerReplicationWorkerConfig,
+        shutdown: CancellationToken,
+    ) -> Result<(), BrokerError> {
+        let _follower_tick_timer = self.replication_timing.follower_tick.timer();
+        let worker = self.follower_replication_worker(queue)?;
+        let (message_from, event_from) = {
+            let state = worker.lock().await;
+            (state.message_next_offset, state.event_next_offset)
+        };
+
+        // The apply object advances the worker-state cursor live (per batch), so
+        // a fallback/next tick resumes from the right place without an exit sync.
+        let apply = Arc::new(WorkerStreamApply {
+            broker: self.clone(),
+            topic: queue.topic.to_string(),
+            partition: queue.partition,
+            group: queue.group.as_ref().map(|g| g.to_string()),
+            worker: worker.clone(),
+        });
+
+        let exit = owner
+            .stream_replication(
+                queue.topic.as_str(),
+                queue.partition,
+                queue.group.as_deref(),
+                message_from,
+                event_from,
+                cfg.max_bytes_per_read as u64,
+                cfg.caught_up_poll_ms,
+                cfg.stream_apply_linger_us,
+                FOLLOWER_STREAM_BUFFER_BATCHES,
+                apply.clone(),
+                shutdown,
+            )
+            .await?;
+
+        // The worker-state cursor was advanced live by `apply`, so a fallback or
+        // next tick already resumes from the right place.
+        match exit {
+            FollowerStreamExit::Closed => Ok(()),
+            FollowerStreamExit::CheckpointRequired => {
+                let fallback = FollowerReplicationWorkerConfig {
+                    allow_checkpoint_install: true,
+                    stream_enabled: false,
+                    ..cfg
+                };
+                let outcome = self
+                    .run_follower_replication_worker_once(owner, queue, fallback)
+                    .await?;
+                worker.lock().await.record_catch_up(fallback, &outcome);
+                Ok(())
+            }
+            FollowerStreamExit::Error(err) => Err(BrokerError::Unknown(err)),
+        }
+    }
+
+    pub fn spawn_follower_replication_worker_loop(
+        self: &Arc<Self>,
+        assignment: PartitionAssignment,
+        resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
+        cfg: FollowerReplicationWorkerConfig,
+    ) -> Result<bool, BrokerError> {
+        let runtime = self.follower_replication_worker_runtime(&assignment.queue)?;
+        if runtime.started.swap(true, Ordering::AcqRel) {
+            return Ok(false);
+        }
+
+        let broker = self.clone();
+        let shutdown = runtime.shutdown.clone();
+        self.task_group
+            .spawn("follower_replication_worker", async move {
+                let topic = assignment.queue.topic.to_string();
+                let partition = assignment.queue.partition;
+                let group = assignment.queue.group.clone();
+                match broker
+                    .run_follower_replication_worker_loop(assignment, resolver, cfg, shutdown)
+                    .await
+                {
+                    Ok(outcome) => {
+                        tracing::debug!(
+                            topic,
+                            partition = partition.id(),
+                            group = ?group,
+                            outcome = ?outcome,
+                            "follower replication worker loop exited"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            topic,
+                            partition = partition.id(),
+                            group = ?group,
+                            "follower replication worker loop failed: {err:?}"
+                        );
+                    }
+                }
+            });
+
+        Ok(true)
     }
 }
