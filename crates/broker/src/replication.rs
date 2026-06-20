@@ -159,7 +159,10 @@ pub enum FollowerReplicationWorkerLoopExit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplicatedStreamApply {
     /// Applied durably; the advanced durable cursor.
-    Applied { message_next: Offset, event_next: Offset },
+    Applied {
+        message_next: Offset,
+        event_next: Offset,
+    },
     /// A checkpoint is required (offset gap / epoch fence); the stream caller
     /// should fall back to the pull + checkpoint path, then re-stream.
     CheckpointRequired,
@@ -2358,7 +2361,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .state
             .clone())
     }
-
 }
 
 impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
@@ -2371,7 +2373,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             timing: self.replication_timing.clone(),
         }
     }
-
 }
 
 impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {

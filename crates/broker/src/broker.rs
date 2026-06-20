@@ -479,11 +479,9 @@ impl OwnedQueue {
     }
 }
 
-
 /// In-flight batch buffer depth for a follower stream (bounds memory together
 /// with the byte credit).
 pub(crate) const FOLLOWER_STREAM_BUFFER_BATCHES: usize = 8;
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrokerAssignmentTransitionApply {
@@ -544,7 +542,10 @@ struct QueueActivity {
 
 impl QueueActivity {
     fn snapshot(&self) -> QueueActivitySnapshot {
-        let state = self.state.lock().expect("queue activity lock poisoned");
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let last_used_ms = self.last_used_ms.load(Ordering::Acquire);
         QueueActivitySnapshot {
             active_publishers: state.active_publishers,
@@ -555,7 +556,10 @@ impl QueueActivity {
     }
 
     fn add_publisher(self: &Arc<Self>) -> PublisherLease {
-        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = unix_millis();
         state.active_publishers += 1;
         state.idle_since_ms = None;
@@ -569,14 +573,20 @@ impl QueueActivity {
     }
 
     fn drop_publisher(&self) {
-        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         debug_assert!(state.active_publishers > 0);
         state.active_publishers = state.active_publishers.saturating_sub(1);
         Self::mark_idle_if_empty(&mut state, &self.last_used_ms);
     }
 
     fn add_subscriber(self: &Arc<Self>) -> ConsumerLease {
-        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = unix_millis();
         state.active_subscribers += 1;
         state.idle_since_ms = None;
@@ -590,7 +600,10 @@ impl QueueActivity {
     }
 
     fn drop_subscriber(&self) {
-        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         debug_assert!(state.active_subscribers > 0);
         state.active_subscribers = state.active_subscribers.saturating_sub(1);
         Self::mark_idle_if_empty(&mut state, &self.last_used_ms);
@@ -601,7 +614,10 @@ impl QueueActivity {
     }
 
     fn mark_idle_if_no_leases(&self) {
-        let mut state = self.state.lock().expect("queue activity lock poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::mark_idle_if_empty(&mut state, &self.last_used_ms);
     }
 
@@ -879,7 +895,8 @@ impl QueueLoopState {
         loop {
             // Never regress a real ceiling; setting the no-gate sentinel (MAX) or
             // a higher ceiling always wins.
-            if next != NO_VISIBILITY_CEILING && next <= current && current != NO_VISIBILITY_CEILING {
+            if next != NO_VISIBILITY_CEILING && next <= current && current != NO_VISIBILITY_CEILING
+            {
                 return;
             }
             match self.committed_message_offset.compare_exchange_weak(
@@ -1493,7 +1510,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             part: assignment.queue.partition,
             group: assignment.queue.group.clone(),
         };
-        self.assignment_cache.insert(key.clone(), assignment.clone());
+        self.assignment_cache
+            .insert(key.clone(), assignment.clone());
         // A newly cached replica-durable assignment installs the visibility gate
         // (no-op for local-durable or an unmaterialized queue).
         self.refresh_visibility_ceiling(&key);
@@ -2655,10 +2673,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.queues.retain(|qk, _| {
             !(qk.tp == topic && qk.part.id() == part && qk.group.as_deref() == group)
         });
-        Ok(self
-            .engine
-            .destroy_partition(topic, part, group)
-            .await?)
+        Ok(self.engine.destroy_partition(topic, part, group).await?)
     }
 
     fn lock_exclusive_groups(&self) -> std::sync::MutexGuard<'_, ExclusiveGroupRouter> {
@@ -3894,9 +3909,7 @@ impl Broker<StromaEngine> {
             }
         }
     }
-
 }
-
 
 // ---------------- Completion helper (sketch) ----------------
 // TODO:
