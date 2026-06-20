@@ -857,4 +857,12 @@ under Quarantine so the broker keeps serving healthy partitions, 503 under Refus
 cannot be missed; /healthz stays liveness "ok"); and a global admin banner on every page
 listing quarantined queues with the reason + a Repair button ("X must be resolved before
 this queue continues"). Eager opt-in recovery (future) makes Refuse a literal
-refuse-to-start. FOLLOW-UP: a per-partition metric for quarantine.
+refuse-to-start. METRIC (DONE, keratin 7a54423): recovery.quarantined gauge +
+quarantines_total counter, surfaced in the recovery snapshot (admin overview).
+
+INVARIANT PLACEMENT (resolved): the steady-state follower invariant "events never reference
+unreceived messages" is enforced at recovery (persisted-log scan) and at promotion (refuse
+partial), NOT on the live apply path - the plan allows events transiently ahead of their
+messages during catch-up, so a live-apply hard-fail is wrong (it broke
+follower_promotion_refuses_partial_replication). Fail-fast belongs only where consistency is
+actually required.

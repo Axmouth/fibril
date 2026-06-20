@@ -4248,9 +4248,13 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   quarantine+truncate machinery (keratin 7b392d2); re-replicate-from-owner for FOLLOWERS
   needs no new code - truncate-to-valid drops the bad suffix and the existing follower
   replication worker re-fetches it from the owner on its next catch-up (it retries through
-  the quarantine), documented + stated in the admin banner. REMAINING (small, optional): a
-  per-partition quarantine metric for scraping (admin/readyz already surface it); the
-  steady-state follower invariant (events never ref unreceived msgs) as a runtime assert.
+  the quarantine), documented + stated in the admin banner. Quarantine METRIC DONE (keratin
+  7a54423): recovery.quarantined gauge + quarantines_total counter, in the recovery snapshot
+  (admin overview). Steady-state follower invariant: RESOLVED as already-enforced - it lives
+  at recovery (persisted-log scan -> quarantine) and at promotion (refuse partial); a
+  live-apply assert is intentionally NOT added because the plan allows events transiently
+  ahead of messages during catch-up (an over-eager assert broke that, caught by
+  follower_promotion_refuses_partial_replication). => Recovery feature fully closed.
 - Idempotent producer dedup (broker reads fibril.client.producer_id/seq ->
   effectively-once; headers already on wire) [WL/DN/PLAN phase8]
 - Recovery gate is the prerequisite for parallel-fsync (subsumed by the above) [WL]
