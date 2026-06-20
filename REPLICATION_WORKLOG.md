@@ -4422,24 +4422,34 @@ build clean):
   replication.rs is now ~1050 lines; broker.rs shed ~700. All cross-file refs use
   pub(crate) + the `pub use crate::replication::*` re-export so external paths hold.
 
-BROKER — DELIBERATELY NOT MOVED (coupling exceeds the "easy and convenient" bar):
-  The `impl Broker<E>` / `impl Broker<StromaEngine>` replication METHODS
-  (read_owner_replication_records, become_replication_follower*, apply_follower_
-  replication_records, apply_replicated_stream_batch, promote_*, catch_up_*,
-  run_follower_replication_worker*, run_follower_replication_stream_tick,
-  spawn_follower_replication_worker_loop, record_follower_replication_progress,
-  replication_confirm_gate, await_replication_confirm, ensure/stop/runtime worker
-  fns). The StromaEngine ones form a contiguous run (broker.rs read_owner_
-  replication_records .. spawn_follower_replication_worker_loop, ~850 lines, tail of
-  the impl Broker<StromaEngine> block) and COULD move as one new impl block in
-  replication.rs, but every Broker private field (engine, cfg, replication_progress,
-  replication_timing, assignment_cache, follower_replication_workers, ...) + private
-  helper methods they touch would have to become pub(crate). That exposes most of
-  Broker's guts for the sake of file placement -> defer unless we decide the trade is
-  worth it. The impl<E> ones (1442-2335 region) are interleaved with non-replication
-  methods, messier still. If revisited: cut the contiguous StromaEngine run into a
-  `impl Broker<StromaEngine>` block in replication.rs, then chase pub(crate) privacy
-  errors from the compiler.
+BROKER — IMPL-METHOD MOVE: VIABLE, NOT YET DONE (execution-ready plan below).
+  Splitting an impl across files in the same crate is idiomatic and is what every
+  brick above already relies on; pub(crate) never leaks past the crate, so the move
+  is NOT an encapsulation regression - the real costs are (a) a wider pub(crate)
+  internal surface and (b) re-deriving the import set for ~850 lines of method bodies
+  (the multi-iteration compiler chase, the main budget risk). Not a design blocker.
+  MEASURED blast radius for the cleanest candidate - the contiguous
+  `impl Broker<StromaEngine>` replication run (broker.rs read_owner_replication_
+  records .. spawn_follower_replication_worker_loop, the TAIL of the StromaEngine
+  impl block, ~850 lines, currently broker.rs 4335-5188; line 5189 is the impl close):
+    - Broker FIELDS it touches -> bump to pub(crate): engine, replication_timing,
+      task_group, shutdown_publishers.
+    - Broker METHODS it calls that STAY in broker.rs -> bump to pub(crate):
+      ensure_queue_owner, config_snapshot, queue, follower_replication_worker_runtime,
+      follower_replication_worker. (Most moved methods are already `pub`, so broker.rs
+      callers like the assignment-watcher fns at ~4005/4079 keep working; the two
+      private ones - read_owner_replication_records_now, run_follower_replication_
+      stream_tick - are only called from within the run, so they stay private.)
+  EXECUTE: cut 4335-5188 into a new `impl Broker<StromaEngine> { ... }` block in
+  replication.rs; add the imports the compiler asks for (Group/QueueKey/BrokerError/
+  config types + stroma_core + storage + tokio/tracing); apply the ~9 pub(crate)
+  bumps; build + `cargo test -p fibril-broker` + rebuild fibril-protocol/fibril.
+  The impl<E> replication methods (record_follower_replication_progress,
+  replication_confirm_gate, await_replication_confirm, has/ensure/stop/runtime worker
+  fns, follower_replication_observability_report) are interleaved with non-replication
+  methods in the 1442-2335 region -> messier, lower priority; do after the clean run.
+  Same pattern applies to the stroma.rs impl split (its 7157-line file also wants a
+  by-concern split for readability independent of replication).
 
 NEXT: stroma-core (keratin repo) — extract apply_replicated_queue_batch, roles
 (become_follower/owner), replicated recovery, replication outcomes from stroma.rs
