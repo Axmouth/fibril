@@ -4402,31 +4402,46 @@ BrokerReplicationStreamApply. lib.rs gained `pub mod replication;`; broker.rs ga
 `pub use crate::replication::*;` so fibril_broker::broker::* paths still resolve.
 `cargo build -p fibril-broker` = 0 errors.
 
-IMMEDIATE NEXT (do first on resume):
-  1. Verify dependents: `cargo build -p fibril-protocol -p fibril` + `cargo test
-     -p fibril-broker` (the re-export should keep paths; confirm).
-  2. Commit if not already (this entry is committed with brick 1).
-BROKER — REMAINING BRICKS (move into replication.rs, build green each):
-  - Brick 2: follower-worker TYPES: WorkerStreamApply(+impl), FollowerReplication
-    WorkerConfig(+impl), FollowerReplicationWorkerStatus, FollowerReplicationWorker
-    State(+impl), observability structs (~1011-1062), ReplicationTiming* (~1062-
-    1167), FollowerReplicationWorkerRuntime(~1795), FollowerReplicationTickGuard
-    (~1851), ReplicationConfirmGate(~1950), FollowerProgress, ReplicationProgressCell.
-    NOTE WorkerStreamApply uses Broker<StromaEngine> + apply_replicated_stream_batch
-    -> needs `use crate::broker::Broker` etc.
-  - Brick 3: the `impl Broker<E>` replication METHODS (grep: read_owner_replication_
-    records, become_replication_follower*, apply_follower_replication_records,
-    apply_replicated_stream_batch, promote_replication_follower*, catch_up_replication
-    _follower*, run_follower_replication_worker*, run_follower_replication_stream_tick,
-    spawn_follower_replication_worker_loop, record_follower_replication_progress,
-    replication_confirm_gate, await_replication_confirm, ensure/stop/runtime worker
-    fns, ~5062-5872 + scattered). Move via a SECOND `impl<E..> Broker<E> {}` block in
-    replication.rs (Rust allows split impl across files; same crate). Move private
-    free fns they use too: cap_owner_replication_records, approximate_replication_
-    message_bytes, stroma_event_available_for_replicated_messages, owner_replication
-    _records_empty, ReplicatedAppendProgress + replicated_append_progress_after_apply
-    (~6038-6250). Make any shared private helpers pub(crate) if used by both sides.
-THEN: stroma-core (keratin repo) — extract apply_replicated_queue_batch, roles
+BROKER — DONE (bricks 1, 2, 3a, 3b; all build + 190 broker tests green; dependents
+build clean):
+  - Brick 1 (commit 5a499d2): replication DATA TYPES + TRAITS.
+  - Brick 2 (commit dceb3c2): follower-worker TYPES (WorkerStreamApply,
+    FollowerReplicationWorkerConfig/Status/State, FollowerReplicationWorkerRuntime,
+    FollowerReplicationTickGuard) + observability structs (FollowerReplication
+    WorkerObservability/Summary, FollowerReplicaObservability, OwnedQueueReplica
+    Observability/Summary) + ReplicationTiming* (Snapshot/PhaseSnapshot/Metrics/
+    Phase/Guard) + ns_to_ms.
+  - Brick 3a (commit 3050ab4): catch-up helper free fns (wait_for_follower_worker_
+    delay, checkpoint_required, cap_owner_replication_records + cappers,
+    owner_replication_records_empty, owner_read_batch_progress,
+    replicated_append_progress_after_apply, OwnerBatchProgress/MessageReadCap,
+    ReplicatedAppendProgress) + the replication_byte_limit_tests module.
+  - Brick 3b (commit 01f89ed): publish-confirm gate + progress cells
+    (ReplicationConfirmGate + impl await_confirm, ReplicationProgressCell + impl,
+    FollowerProgress). Required bumping QueueKey (+fields) to pub(crate).
+  replication.rs is now ~1050 lines; broker.rs shed ~700. All cross-file refs use
+  pub(crate) + the `pub use crate::replication::*` re-export so external paths hold.
+
+BROKER — DELIBERATELY NOT MOVED (coupling exceeds the "easy and convenient" bar):
+  The `impl Broker<E>` / `impl Broker<StromaEngine>` replication METHODS
+  (read_owner_replication_records, become_replication_follower*, apply_follower_
+  replication_records, apply_replicated_stream_batch, promote_*, catch_up_*,
+  run_follower_replication_worker*, run_follower_replication_stream_tick,
+  spawn_follower_replication_worker_loop, record_follower_replication_progress,
+  replication_confirm_gate, await_replication_confirm, ensure/stop/runtime worker
+  fns). The StromaEngine ones form a contiguous run (broker.rs read_owner_
+  replication_records .. spawn_follower_replication_worker_loop, ~850 lines, tail of
+  the impl Broker<StromaEngine> block) and COULD move as one new impl block in
+  replication.rs, but every Broker private field (engine, cfg, replication_progress,
+  replication_timing, assignment_cache, follower_replication_workers, ...) + private
+  helper methods they touch would have to become pub(crate). That exposes most of
+  Broker's guts for the sake of file placement -> defer unless we decide the trade is
+  worth it. The impl<E> ones (1442-2335 region) are interleaved with non-replication
+  methods, messier still. If revisited: cut the contiguous StromaEngine run into a
+  `impl Broker<StromaEngine>` block in replication.rs, then chase pub(crate) privacy
+  errors from the compiler.
+
+NEXT: stroma-core (keratin repo) — extract apply_replicated_queue_batch, roles
 (become_follower/owner), replicated recovery, replication outcomes from stroma.rs
 (7157 lines) into stroma/replication.rs. THEN client/fibril (lighter). THEN the
 separate stroma file-split (state.rs etc.). Keep streaming default-on; tests green.
