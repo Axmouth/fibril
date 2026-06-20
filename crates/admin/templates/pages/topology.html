@@ -38,6 +38,38 @@
   </table>
 </section>
 
+<section class="overview-panel" aria-label="Repartition queue">
+  <div class="overview-panel-heading">
+    <h5>Repartition queue</h5>
+    <p>Set a partitioned queue's partition count. The controller assigns owners and followers for the new layout.</p>
+  </div>
+  <div id="repartition-message" class="settings-message"></div>
+  <div class="settings-grid settings-grid-two">
+    <label class="settings-field"><span class="settings-label">Topic</span><input id="repartition.topic" placeholder="orders.created"></label>
+    <label class="settings-field"><span class="settings-label">Group</span><input id="repartition.group" placeholder="blank for default"></label>
+    <label class="settings-field"><span class="settings-label">Partition count</span><input id="repartition.partition_count" type="number" min="1" step="1"></label>
+  </div>
+  <div class="settings-actions">
+    <button class="btn btn-primary" type="button" id="repartition-submit">Repartition</button>
+  </div>
+</section>
+
+<section class="overview-panel" aria-label="Coordination membership">
+  <div class="overview-panel-heading">
+    <h5>Coordination membership</h5>
+    <p>Add or remove a voting member of the consensus group. Quorum changes affect availability; change one member at a time.</p>
+  </div>
+  <div id="membership-message" class="settings-message"></div>
+  <div class="settings-grid settings-grid-two">
+    <label class="settings-field"><span class="settings-label">Member id</span><input id="membership.id" type="number" min="1" step="1"></label>
+    <label class="settings-field"><span class="settings-label">Member address</span><input id="membership.addr" placeholder="127.0.0.1:7181"></label>
+  </div>
+  <div class="settings-actions">
+    <button class="btn btn-primary" type="button" id="membership-add">Add voter</button>
+    <button class="btn" type="button" id="membership-remove">Remove voter</button>
+  </div>
+</section>
+
 <script src="/static/js/api.js"></script>
 <script>
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -176,6 +208,64 @@ async function refresh() {
   renderDiagram(data);
   renderAssignments(data);
 }
+
+function setOpMessage(id, text, kind) {
+  const node = document.getElementById(id);
+  node.textContent = text;
+  node.dataset.kind = kind || "info";
+}
+
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* no body */ }
+  return { ok: res.ok, data };
+}
+
+function opError(data) {
+  return data?.message || data?.error || "request failed";
+}
+
+async function submitRepartition() {
+  const topic = document.getElementById("repartition.topic").value.trim();
+  const group = document.getElementById("repartition.group").value.trim();
+  const count = Number(document.getElementById("repartition.partition_count").value);
+  if (!topic) return setOpMessage("repartition-message", "Enter a topic.", "warning");
+  if (!(count >= 1)) return setOpMessage("repartition-message", "Partition count must be at least 1.", "warning");
+  if (!confirm(`Repartition "${topic}" to ${count} partition(s)? This changes placement.`)) return;
+  const { ok, data } = await postJson("/admin/api/repartition", {
+    topic, group: group || null, partition_count: count,
+  });
+  setOpMessage("repartition-message",
+    ok ? `Repartitioned "${topic}" to ${count} partition(s).` : `Failed: ${opError(data)}`,
+    ok ? "info" : "warning");
+  if (ok) refresh();
+}
+
+async function submitMembership(action) {
+  const id = Number(document.getElementById("membership.id").value);
+  const addr = document.getElementById("membership.addr").value.trim();
+  if (!(id >= 1)) return setOpMessage("membership-message", "Enter a member id.", "warning");
+  if (action === "add" && !addr) return setOpMessage("membership-message", "Enter a member address.", "warning");
+  const adding = action === "add";
+  if (!confirm(`${adding ? "Add" : "Remove"} voting member ${id}? Quorum changes affect availability.`)) return;
+  const url = adding
+    ? "/admin/api/coordination/membership/add-voting-member"
+    : "/admin/api/coordination/membership/remove-voting-member";
+  const { ok, data } = await postJson(url, adding ? { id, addr } : { id });
+  setOpMessage("membership-message",
+    ok ? `Voting member ${id} ${adding ? "added" : "removed"}.` : `Failed: ${opError(data)}`,
+    ok ? "info" : "warning");
+  if (ok) refresh();
+}
+
+document.getElementById("repartition-submit").addEventListener("click", submitRepartition);
+document.getElementById("membership-add").addEventListener("click", () => submitMembership("add"));
+document.getElementById("membership-remove").addEventListener("click", () => submitMembership("remove"));
 
 setInterval(refresh, 3000);
 refresh();
