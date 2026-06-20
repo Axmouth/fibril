@@ -162,7 +162,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                 }
             });
 
-            tokio::join!(reader, pubber, acker, sink_task);
+            let _ = tokio::join!(reader, pubber, acker, sink_task);
         }));
     }
 

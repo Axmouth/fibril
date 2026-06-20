@@ -4362,6 +4362,11 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   this replication roadmap. Same for restart reconciliation (not replication).
 
 ### F. Code health / structure (post-merge)
+- Rework the tui-example (crates/tui-example): it has disabled/commented-out
+  instrumentation (latency tracking + compute_stats were dead, removed in the dedup
+  sweep). Bring it back to a clean, illustrative client example. The bench binary
+  benches/bin/bench_e2e.rs is in a similar half-disabled state (dead prod_id/res
+  channels, hardcoded reporter/broker params) and wants the same treatment. [user 2026-06-20]
 - Clustering-module separation: dedicated partitioning+replication+cohorts module per
   stack crate (except ganglion) [MEM/DN]
 - substrate-vs-engine split (WorkQueueEngine + StreamEngine over shared substrate);

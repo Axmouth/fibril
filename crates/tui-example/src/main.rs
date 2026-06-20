@@ -74,10 +74,6 @@ fn get_path<'a>(app: &'a mut App, from: &Node, to: &Node) -> &'a [(u16, u16)] {
         .or_insert_with(|| route_path(from, to))
 }
 
-fn invalidate_paths(app: &mut App) {
-    app.path_cache.clear();
-}
-
 fn next_req_id() -> u64 {
     REQ.fetch_add(1, Ordering::Relaxed)
 }
@@ -782,8 +778,6 @@ pub async fn visual_client(
         }
     });
 
-    // let mut latencies = Vec::new();
-    let mut last_laten = Instant::now();
     while let Some(frame) = stream.next().await {
         let frame = frame?;
         tracing::debug!("Received frame with code {:?}", frame.opcode);
@@ -832,42 +826,6 @@ pub async fn visual_client(
     }
 
     Ok(())
-}
-
-fn compute_stats(mut data: Vec<u64>) {
-    assert!(!data.is_empty(), "data cannot be empty");
-
-    let n = data.len();
-
-    // Sort ascending
-    data.sort_unstable();
-
-    // Mean
-    let sum: u128 = data.iter().map(|&x| x as u128).sum();
-    let mean = sum as f64 / n as f64;
-
-    // Median (p50)
-    let median = if n % 2 == 0 {
-        (data[n / 2 - 1] + data[n / 2]) as f64 / 2.0
-    } else {
-        data[n / 2] as f64
-    };
-
-    // Percentile helper
-    let percentile = |p: f64| -> u64 {
-        let rank = (p * (n as f64 - 1.0)).round() as usize;
-        data[rank]
-    };
-
-    let p50 = percentile(0.50);
-    let p95 = percentile(0.95);
-    let p99 = percentile(0.99);
-
-    println!("mean: {:.2}", mean);
-    println!("median: {:.2}", median);
-    println!("p50: {}", p50);
-    println!("p95: {}", p95);
-    println!("p99: {}", p99);
 }
 
 async fn connect_to_server() -> anyhow::Result<Conn> {

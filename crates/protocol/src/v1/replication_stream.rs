@@ -465,7 +465,7 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v1::{ReplicationMessageRecord, ReplicationStreamProgress};
+    use crate::v1::ReplicationMessageRecord;
     use fibril_broker::replication::StreamApplyTunables;
     use std::sync::Mutex;
     use std::time::Duration;

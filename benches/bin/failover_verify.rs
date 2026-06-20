@@ -25,7 +25,7 @@ use clap::Parser;
 use fibril_client::{ClientOptions, NewMessage};
 use fibril_util::unix_millis;
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
 
 /// Identifies this run's messages in a topic that may also hold others.
 const MARKER: u32 = 0xF1B2_0001;
