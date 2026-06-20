@@ -57,6 +57,7 @@ use uuid::Uuid;
 
 use fibril_protocol::v1::{
     frame::{Frame, ProtoCodec},
+    handler::DEFAULT_HEARTBEAT_INTERVAL,
     helper::*,
     wire, *,
 };
@@ -2710,7 +2711,8 @@ fn apply_reconcile_result(
     Ok(restored)
 }
 
-const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
+// DEFAULT_HEARTBEAT_INTERVAL is shared from the protocol crate (single source of
+// truth) so the client fallback and the server default cannot drift apart.
 const PUBLISH_FLUSH_MESSAGES: usize = 128;
 const PUBLISH_FLUSH_BYTES: usize = 1024 * 1024;
 const PUBLISH_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_micros(250);
