@@ -13,6 +13,7 @@
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --dynamic-membership
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --replica-durable
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --replica-durable --failover-smoke
+#   scripts/cluster-tryout.sh --nodes 3 --failover-verify   # identity zero-loss check under owner kill
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --steady-bench
 #   scripts/cluster-tryout.sh --nodes 100 --ganglion --summary --resource-summary --admin-wait-secs 5 --cluster-wait-secs 90
 #   scripts/cluster-tryout.sh --keep       # leave the cluster running to play with
@@ -38,6 +39,9 @@ BENCH_TOPIC="orders"
 BENCH_PARTITION_COUNT="${BENCH_PARTITION_COUNT:-1}"
 ASSIGNMENT_DURABILITY=""
 FAILOVER_SMOKE=false
+FAILOVER_VERIFY=false
+FAILOVER_VERIFY_COUNT="${FAILOVER_VERIFY_COUNT:-30000}"
+FAILOVER_VERIFY_RATE="${FAILOVER_VERIFY_RATE:-5000}"
 REPARTITION_SMOKE=false
 COORDINATION_HEARTBEAT_INTERVAL_MS="${COORDINATION_HEARTBEAT_INTERVAL_MS:-}"
 COORDINATION_LIVENESS_TTL_MS="${COORDINATION_LIVENESS_TTL_MS:-}"
@@ -74,6 +78,10 @@ while [[ $# -gt 0 ]]; do
     --replica-durable) GANGLION=true; ASSIGNMENT_DURABILITY="replica_durable:2"; shift ;;
     --assignment-durability) GANGLION=true; ASSIGNMENT_DURABILITY="$2"; shift 2 ;;
     --failover-smoke) GANGLION=true; FAILOVER_SMOKE=true; shift ;;
+    --failover-verify)
+      GANGLION=true; FAILOVER_VERIFY=true
+      [[ -z "$ASSIGNMENT_DURABILITY" ]] && ASSIGNMENT_DURABILITY="replica_durable:2"
+      shift ;;
     --repartition-smoke) GANGLION=true; REPARTITION_SMOKE=true; shift ;;
     --admin-wait-secs) ADMIN_WAIT_SECS="$2"; shift 2 ;;
     --cluster-wait-secs) CLUSTER_WAIT_SECS="$2"; shift 2 ;;
@@ -99,6 +107,10 @@ if [[ -n "$ASSIGNMENT_DURABILITY" && "$ASSIGNMENT_DURABILITY" =~ ^replica_ && "$
 fi
 if [[ "$FAILOVER_SMOKE" == true && "$NODES" -lt 3 ]]; then
   echo "FAIL: --failover-smoke needs at least three nodes so raft keeps quorum after one death" >&2
+  exit 2
+fi
+if [[ "$FAILOVER_VERIFY" == true && "$NODES" -lt 3 ]]; then
+  echo "FAIL: --failover-verify needs at least three nodes so raft keeps quorum after one death" >&2
   exit 2
 fi
 if [[ "$REPARTITION_SMOKE" == true && "$NODES" -lt 2 ]]; then
@@ -384,12 +396,14 @@ for i in $(seq 1 "$EXPECTED_PROCESSES"); do
   done
 done
 
-if [[ "$STEADY_BENCH" == true ]]; then
-  echo "building release fibril-server, fibrilctl, and steady_c..."
+if [[ "$STEADY_BENCH" == true || "$FAILOVER_VERIFY" == true ]]; then
+  echo "building release fibril-server, fibrilctl, and bench bins..."
   cargo build --quiet --release -p fibril -p fibril-cli
-  cargo build --quiet --release -p fibril-benches --bin steady_c
+  [[ "$STEADY_BENCH" == true ]] && cargo build --quiet --release -p fibril-benches --bin steady_c
+  [[ "$FAILOVER_VERIFY" == true ]] && cargo build --quiet --release -p fibril-benches --bin failover_verify
   SERVER=target/release/fibril-server
   CTL=target/release/fibrilctl
+  VERIFY_BIN=target/release/failover_verify
 else
   echo "building fibril-server and fibrilctl..."
   cargo build --quiet -p fibril -p fibril-cli
@@ -923,6 +937,77 @@ run_failover_smoke() {
   echo "  failover smoke delivered pre- and post-failover messages"
 }
 
+# Identity-based failover correctness: run the Jepsen-lite verifier (a confirmed
+# producer + a concurrent consumer) against a SURVIVOR broker, kill the partition
+# owner mid-run, and require zero loss (every confirmed id delivered) + no phantoms.
+# Stronger than the smoke: it proves the durability contract under load + failover,
+# not just that traffic resumes.
+run_failover_verify() {
+  local topic="${BENCH_TOPIC}-failover-verify"
+  local assignment durability_mode owner follower owner_node follower_node connect_node
+  local owner_pid verify_pid vexit
+  local vdir="$RUN_DIR/failover-verify"
+  local vlog="$vdir/verify.log"
+  mkdir -p "$vdir"
+
+  echo
+  echo "running identity-based failover VERIFY with topic '$topic'..."
+  if ! "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + 1))" queue declare "$topic" >/dev/null; then
+    echo "FAIL: failover-verify could not declare '$topic'" >&2
+    return 1
+  fi
+  assignment="$(wait_assignment_for_topic "$topic")"
+  echo "  initial assignment: $assignment"
+  durability_mode="$(echo "$assignment" | jq -r '.durability.mode // "local_durable"')"
+  if [[ "$durability_mode" != "replica_durable" && "$durability_mode" != "majority_durable" ]]; then
+    echo "FAIL: failover-verify needs a durable replica assignment, got $durability_mode" >&2
+    return 1
+  fi
+  owner="$(echo "$assignment" | jq -r '.owner')"
+  follower="$(echo "$assignment" | jq -r '.followers[0] // empty')"
+  if [[ -z "$follower" ]]; then
+    echo "FAIL: failover-verify assignment has no follower: $assignment" >&2
+    return 1
+  fi
+  owner_node="${owner#broker-}"
+  follower_node="${follower#broker-}"
+  if ! [[ "$owner_node" =~ ^[0-9]+$ && "$follower_node" =~ ^[0-9]+$ ]]; then
+    echo "FAIL: failover-verify owner/follower not broker-N: owner=$owner follower=$follower" >&2
+    return 1
+  fi
+  # Connect to a SURVIVOR (the follower) so when the owner dies the client refreshes
+  # topology and routes to the promoted owner (ride-through, not a dead bootstrap).
+  connect_node="$follower_node"
+
+  echo "  launching verifier (count=$FAILOVER_VERIFY_COUNT rate=$FAILOVER_VERIFY_RATE/s) against survivor broker-$connect_node; owner=broker-$owner_node will be killed mid-run"
+  "$VERIFY_BIN" \
+    --broker-addr "127.0.0.1:$((BASE_BROKER_PORT + connect_node))" \
+    --topic "$topic" \
+    --count "$FAILOVER_VERIFY_COUNT" \
+    --rate-per-sec "$FAILOVER_VERIFY_RATE" \
+    >"$vlog" 2>&1 &
+  verify_pid=$!
+
+  # Let load ramp and replicate so there are confirmed+replicated ids to lose.
+  sleep 3
+  owner_pid="${PIDS[$((owner_node - 1))]}"
+  echo "  killing owner $owner pid=$owner_pid mid-run"
+  kill "$owner_pid" 2>/dev/null || true
+  wait "$owner_pid" 2>/dev/null || true
+
+  echo "  waiting for the verifier to finish (producer + consumer ride-through)..."
+  if wait "$verify_pid"; then vexit=0; else vexit=$?; fi
+
+  echo "  --- verifier verdict ---"
+  grep -E "CONFIRMED|RECEIVED|LOSS|PHANTOM|DUPLICATE|unconfirmed|PASS|FAIL" "$vlog" | sed 's/^/  /' || true
+  echo "  ------------------------"
+  if [[ "$vexit" -ne 0 ]]; then
+    echo "FAIL: failover-verify reported loss/phantom (exit $vexit); full log: $vlog" >&2
+    return 1
+  fi
+  echo "  failover-verify: every confirmed id survived the owner kill (zero loss, no phantoms)"
+}
+
 run_repartition_smoke() {
   local topic="${BENCH_TOPIC}-repartition"
   local admin_node=1
@@ -1331,12 +1416,18 @@ if [[ "$FAILOVER_SMOKE" == true && "$FAILED" -eq 0 ]]; then
   run_failover_smoke || FAILED=1
 fi
 
+if [[ "$FAILOVER_VERIFY" == true && "$FAILED" -eq 0 ]]; then
+  run_failover_verify || FAILED=1
+fi
+
 if [[ "$FAILED" -ne 0 ]]; then
   echo "cluster-tryout: FAILED"
   exit 1
 fi
 
-if [[ "$FAILOVER_SMOKE" == true ]]; then
+if [[ "$FAILOVER_VERIFY" == true ]]; then
+  echo "cluster-tryout: all checks passed, including identity-verified zero-loss failover under load"
+elif [[ "$FAILOVER_SMOKE" == true ]]; then
   echo "cluster-tryout: all checks passed, including intentional owner kill/failover"
 elif [[ "$REPARTITION_SMOKE" == true ]]; then
   echo "cluster-tryout: all checks passed, including live repartition grow/shrink"
