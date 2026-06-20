@@ -4499,5 +4499,68 @@ STROMA-CORE (keratin repo) — DATA TYPES + IMPL METHODS DONE.
     _from_log ~3160-3248) is general startup/replay infra, not the replication engine -
     leave it. The separate stroma.rs by-concern file-split (still 6452 lines) is a
     distinct readability refactor, independent of replication.
-THEN: client/fibril (lighter). Keep streaming default-on; tests green.
+CLIENT (fibril-client) — DONE (commit fibril 7059898): extracted client-side
+clustering/failover into client/src/failover.rs - RetryAdvice + the FibrilError
+retry/transient classification (split impl), the confirmed-publish failover retry
+state (PublishRetryState + publish_retry_nap + backoff consts), and the subscription
+failover supervisor (supervise_forward / _manual / _auto + ResubscribeFut). Moved
+the 3 dedicated tests too (transient_is_transport_subset, retry_advice_classifies_
+intuitively, publish_retry_nap_stays_within_base_and_double). Re-exported via
+`pub use failover::*`. lib.rs 5159 -> 4855; failover.rs 337. 46 client tests green.
+~6 pub(crate) bumps on lib.rs internals (Client.shared, ClientShared.topology/
+user_shutdown, refresh_topology_throttled, subscribe_partition_manual/auto). The
+publish retry loop helper (after_publish_failure) + ReliablePublisher stay in lib.rs
+(they reach PublishRetryState's now-pub(crate) fields).
+
+CLUSTERING-MODULE SEPARATION STATUS: broker DONE, stroma-core DONE, client DONE.
+(protocol was already done; storage/config have little/none; ganglion is all-clustering
+so needs no submodule.) Streaming stays default-on; all suites green both repos.
+================================================================================
+
+## STROMA.RS BY-CONCERN FILE-SPLIT — SKETCH (QUEUED POST-MERGE, do NOT do pre-merge)
+stroma.rs is 6452 lines (one giant module: the Stroma struct + ~4 impl blocks +
+many free types/fns). This is a READABILITY refactor, independent of clustering
+(replication.rs already carved out). Proposed stroma/core/src/ layout:
+
+  Low-risk free-move modules (brick-1 style: pub types/fns, re-export via
+  `pub use <mod>::*` from stroma.rs or lib.rs so paths hold):
+    - config.rs       SnapshotConfig, ReplicationCacheConfig, StromaOptions,
+                      StromaKeratinConfig, derived_event_log_config
+    - global_dlq.rs   GlobalDLQ + GlobalDlqSnapshot/UpdateOutcome/Record,
+                      global_dlq_key/snapshot_from_value, GLOBAL_DLQ_* consts
+                      (+ the Stroma global-dlq glue methods via split impl)
+    - completion.rs   ApplyThenComplete, MsgBatchCompletion, CompletionItem
+    - task_group.rs   TaskGroup (+ Drop)
+    - message.rs      MessageContentType, MessageHeaders, MessageInspectionPage/
+                      Item, validate_user_message_headers
+    - slot.rs         QueueSlot, EvictionState/Guard, EvictOutcome, DestroyOutcome,
+                      Registry, slot_lookup_no_alloc
+    - util.rs         io_err/decode_err/encode_err/event_msg, collect_parts(_decoded),
+                      contiguous_spans, replicated_append_outcome_allows_state_apply
+
+  Engine impl-Stroma split (same proven pub(crate) recipe as broker bricks 4-8 /
+  the stroma replication move; split `impl Stroma` blocks across files, build green
+  each, chase E0616/E0624 with pub(crate) bumps):
+    - engine/ingest.rs     enqueue_event_inmem, append_events_durable(_leased),
+                           append_message(_batch/_unchecked)
+    - engine/consume.rs    mark_inflight_batch, ack_batch/ack_enqueue(_many),
+                           nack_enqueue(_many), release_inflight_many, requeue,
+                           add_to_redelivery, lowest_unacked_offset, is_inflight_or_
+                           acked, is_ready, filter_not_enqueued, next_deliverable
+    - engine/expiry.rs     deadline_waker, next_expiry_hint, signal/wait_for_earlier_
+                           deadline, collect_expired, requeue_expired
+    - engine/snapshot.rs   periodic_snapshot(_step), write_snapshots_for_partition,
+                           read_queue_snapshot
+    - engine/recovery.rs   recover_all/_one_log(_with_handle), recover_events_from_log,
+                           discover_partitions, index_existing_queues
+    - engine/lifecycle.rs  open(_with_options), queue_handle(_sync), materialize/
+                           unmaterialize/evict/destroy_partition/remove_queue/declare/
+                           freeze_queue_for_transition, swap_slot, paths (root/*_root,
+                           enc/dec_component, *_dir, snap_*), shutdown
+    - engine/dlq.rs        resolve_dlq_targets, dlq_copy_then_commit, commit_dlq_event
+    - engine/inspect.rs    debug_snapshot, debug_report, queue_keys_snapshot,
+                           is_materialized, has_inflight, metrics
+  Keep the Stroma struct def + `mod` orchestration in stroma.rs (shrinks to a few
+  hundred lines). Do the low-risk type modules FIRST (cheap, high readability win),
+  then the engine split incrementally. Sequence behind the merge.
 ================================================================================
