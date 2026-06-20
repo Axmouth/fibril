@@ -3,9 +3,9 @@ title: Fibril documentation
 description: Start here for the current Fibril documentation.
 ---
 
-Fibril is a lightweight message broker focused on durable delivery, explicit acknowledgements, leasing, retries, and asynchronous workflow coordination. The broker is implemented in Rust, but the user-facing model is about durable messaging rather than a Rust-only ecosystem.
+Fibril is a lightweight message broker focused on durable delivery, explicit acknowledgements, leasing, retries, and asynchronous workflow coordination. It also has partitioned queues for scale, exclusive consumer groups for ordered parallel consumption, and an experimental clustered mode with partition ownership, replication, and failover. The broker is implemented in Rust, but the user-facing model is about durable messaging rather than a Rust-only ecosystem.
 
-It is currently pre-alpha. The useful baseline is working, but APIs, persistence formats, protocol details, and operational behavior can still change.
+It is currently pre-alpha. The useful baseline is working, but APIs, persistence formats, protocol details, and operational behavior can still change. The clustering and replication paths are experimental and not yet production-ready high availability.
 
 ## Where to start
 
@@ -14,6 +14,8 @@ It is currently pre-alpha. The useful baseline is working, but APIs, persistence
 - Use the [admin dashboard guide](/latest/admin-dashboard/) for queues, settings, message inspection, and DLQ replay.
 - Read the [core model](/latest/concepts/core-model/) for the queue lifecycle.
 - Read [retries and delays](/latest/reliability/retries-delays/) and [dead lettering](/latest/reliability/dead-lettering/) for reliability features and their current limits.
+- Read [consumer groups](/latest/concepts/consumer-groups/) for ordered, scalable consumption across many consumer instances.
+- Read [clustering](/latest/concepts/clustering/) and [replication](/latest/reliability/replication/) for the experimental multi-broker ownership, replication, and failover path.
 - Read [many idle queues](/latest/concepts/many-idle-queues/) if your workload defines many queues but only uses a few at once.
 - Check [project status](/latest/status/) before depending on a feature.
 - Check [implemented surface](/latest/implemented-surface/) when you need the detailed answer for whether a path is wired and under what conditions.
