@@ -794,3 +794,58 @@ no owner ops). Test: unmaterialize_waits_for_in_flight_owner_operation_to_drain.
 Rematerialize-on-completion deferred (assessed unnecessary). Separately, the snapshot task
 is now spawned only AFTER recovery (keratin 7ec115f) so a failed build never leaves a task
 parked in wait_recovery_complete pinning the dead incarnation.
+
+## Recovery: event->message reference verification, quarantine, and repair (2026-06-20)
+On startup recovery (lazy, per-partition via queue_handle), the event log is replayed.
+An event may reference a message offset the MESSAGE log has not durably accepted - a
+dangling forward reference - e.g. the event log was fsynced ahead of the message log and
+a crash lost the message tail. PLANNING.md:451 requires: verify references resolve, FAIL
+LOUD, do NOT silently self-heal.
+
+DETECTION (keratin stroma-core): during the event-log scan, each event's
+max_referenced_msg_offset() is compared to the message log's durable tail
+(next_offset). The first event with a reference >= tail is the truncation point; the scan
+stops there and returns the valid prefix + the mismatch (event-log offset + dangling msg
+offset).
+
+POLICY (RecoveryMismatchPolicy, settable; default Quarantine):
+- Quarantine (default): park ONLY that partition (it does not serve; queue_handle returns
+  QueueQuarantined); the broker stays up and every other partition works. Blast radius =
+  the one queue. Surfaced for an operator to repair.
+- Refuse (louder): stroma still quarantines + returns RecoveryMismatch; the caller
+  (broker) escalates (refuse to serve / exit) so it cannot be missed. For strict
+  deployments. (Becomes a literal refuse-to-start once eager opt-in recovery lands.)
+- Ignore ("screw it"): auto-apply truncate-to-valid and continue with a loud warning.
+  Never the default; for operators who accept the possible data loss.
+
+WHY TRUNCATE-TO-VALID IS THE ONLY SHAPE (not just the common case): a mid-log dangling
+reference is impossible by construction. An Enqueue{off} event is written only AFTER its
+message is durable (msg fsync -> then event), so the event log can only reference a missing
+message if it got AHEAD and a crash lost the message TAIL - which leaves a contiguous
+SUFFIX of dangling events, never a hole in the middle. (This check is precisely the
+prerequisite for parallel-fsync, where that suffix gap first becomes possible.) So an
+earlier "drop scattered dangling events (surgical)" idea was dropped: there is nothing
+scattered to drop.
+
+REPAIR (operator-triggered, never auto - except the Ignore policy):
+- Truncate-to-valid (BUILT, default + only repair for dangling refs): drop the event-log
+  suffix from the first dangling ref (Keratin destructive_reset_to_checkpoint, follower-
+  gated, so we briefly assume follower role). Since the missing messages are a contiguous
+  tail, this drops exactly all events for the missing messages.
+- Re-replicate from owner (FUTURE, cluster): a follower drops its local log and refetches
+  the authoritative one. Invents nothing. Cleanest when a healthy peer exists.
+
+RELATED, SEPARATE: corrupt RECORD (CRC/decode failure) mid-log. THIS is the real mid-log
+failure (a dangling REF cannot be mid-log). Today recover_events_from_log returns
+StromaError::Decode and aborts. It SHOULD reuse this same quarantine+truncate machinery:
+"bad event at offset N -> quarantine -> repair = truncate to N". Key point: skip-the-bad-
+record-and-keep-scanning is UNSAFE - dropping a mid-log event loses a state transition and
+leaves inconsistent in-memory state - so truncate-at-the-bad-record is the safe repair,
+same as dangling. FOLLOW-UP: fold decode/CRC corruption into the quarantine path (currently
+hard-errors).
+
+SURFACING (FUTURE, fibril brick): degraded readiness/health (liveness stays up so admin is
+reachable) reporting which partition + why; admin page that clearly states "X must be
+resolved before this queue continues" with the repair-mode buttons; a metric. Plus the
+config knob recovery.on_mismatch = quarantine|refuse|ignore. Eager opt-in recovery (future)
+makes Refuse a literal refuse-to-start.

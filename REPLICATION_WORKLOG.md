@@ -4257,6 +4257,16 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   fibrilctl + admin API (autoscaler-drivable) [PLAN post-R6]
 - Unclean-leader-election toggle (off by default) [PLAN:487/500] -- MISSING, minor
 - Settings-tiering pass (basic/advanced/expert + collapsible) [DN/WL]
+- Settings PRESETS (orthogonal to tiers): opinionated bundles - low-latency / hands-off
+  ("just handle it") / power-user ("surface everything, I decide"). A preset selects
+  per-aspect policies (e.g. recovery.on_mismatch, client auto-retry/reconnect vs
+  surface-errors-immediately). Tiers = how much you see; presets = what the defaults do.
+  [user 2026-06-20]
+- Eager OPT-IN startup recovery: recover_all (stroma.rs) exists but is currently unused
+  (recovery is lazy via queue_handle). Add a config to eagerly recover all on-disk
+  partitions at boot - this is the original design, and it makes recovery.on_mismatch=
+  refuse a LITERAL refuse-to-start (mismatch caught at boot, not lazily). Not urgent;
+  lazy stays the default. [user 2026-06-20]
 - Onboarding/easy-trial: docker one-liner / in-memory mode / 60s quickstart [WL]
 
 ### E. Features (post-merge, replication-related only)
