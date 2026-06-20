@@ -4204,15 +4204,19 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 - MAX_MERGE_BYTES -> replication runtime setting (2nd microbatch lever) [WL] -- DONE
   (stream_apply_max_merge_bytes, threaded config seed -> RuntimeSettings -> snapshot ->
   FollowerReplicationWorkerConfig -> stream_replication -> applier; replaces the const).
-  REMAINING constant-promotion candidates caught during this (user-flagged "promote stray
-  constants"): (1) FOLLOWER_STREAM_BUFFER_BATCHES=8 (broker.rs) - the follower stream's
-  in-flight buffer depth, a real streaming lever, same threading; promote next. (2)
-  BLOCKING_DECODE_BYTES=1<<20 (protocol replication.rs) - threshold to offload decode to
-  spawn_blocking; promote AND likely RAISE post-protocol-rework (measured 200x-1000x decode
-  speedups -> decode inline for larger payloads). (REC_BYTES is a test const, ignore.)
-  ALL such settings must follow live-propagation (read at use-time) per the new guiding
-  principle (DESIGN_NOTES "runtime settings propagate LIVE"); the streaming applier knobs
-  (max_merge_bytes/apply_linger/keepalive) are moving to a shared live tunables handle.
+  Constant-promotion candidates caught during this (user "promote stray constants"):
+  (1) FOLLOWER_STREAM_BUFFER_BATCHES -> stream_buffer_batches DONE (fibril cca32c0); setup-
+  time (applies next stream, the documented live-propagation exception). (2)
+  BLOCKING_DECODE_BYTES -> RAISED 1->4 MiB, bench-derived (fibril 097d510); kept a const
+  (internal scheduler-fairness heuristic, not an operator knob); NOT promoted to a setting.
+  (REC_BYTES is a test const, ignored.)
+- LIVE-SETTINGS-PROPAGATION (Option B) DONE (fibril 6f44a24): the streaming applier reads its
+  tunables (max_merge_bytes/apply_linger/keepalive) LIVE per apply iteration via a closure
+  the broker backs with the live config snapshot, so a settings change applies mid-stream
+  with no restart. First instance of the guiding principle (DESIGN_NOTES "runtime settings
+  propagate LIVE" + memory live-settings-propagation). Tests: broker
+  stream_apply_tunables_reads_live_config (source) + protocol
+  applier_reads_tunables_live_each_iteration (consumer).
 - Dead-owner EngineSlot pool-prune after failover [WL] -- DONE (fibril daac0f3). The CLIENT
   connection pool (addr -> EngineSlot) never pruned; after a full topology refresh
   (fetch_topology / refresh_topology_throttled) it now drops slots whose endpoint no longer
