@@ -4202,7 +4202,11 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 - Pre-merge dedup/cleanup pass (consolidate consts/helpers; drop needless code) [WL]
 - failover_verify -> committed cluster-tryout harness mode (--failover-verify) [WL]
 - MAX_MERGE_BYTES -> replication runtime setting (2nd microbatch lever) [WL]
-- Dead-owner EngineSlot pool-prune after failover [WL]
+- Dead-owner EngineSlot pool-prune after failover [WL] -- DONE (fibril daac0f3). The CLIENT
+  connection pool (addr -> EngineSlot) never pruned; after a full topology refresh
+  (fetch_topology / refresh_topology_throttled) it now drops slots whose endpoint no longer
+  owns any partition, keeping bootstrap + slots with active subscriptions. (Note: "EngineSlot"
+  is the client's per-broker connection slot, not a broker-side engine pool.)
 - Tick/refresh REPLICATION_PLANNING.md success criteria to reality [WL/PLAN]
 - FLAKY TEST -> REAL CONCURRENCY BUG -> FIXED (keratin 7dd6c18). stroma::tests::
   concurrent_destroyers_and_materializers_stay_consistent. Amplifying it (destroyers +
