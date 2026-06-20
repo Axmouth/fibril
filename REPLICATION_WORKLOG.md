@@ -4217,9 +4217,18 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   all hot publish/consume paths are untouched. Replaced the weak 32-task one-shot test
   with graduated mouse/bear trip-wires (one helper, two scales). mouse 10/10 + bear 3/3
   deterministic; full stroma-core suite (180 lib) green; fibril builds across boundary.
-  Full analysis + the design exploration (incl. the broader ticket/re-resolve redesign
-  for the orphan-pin leak, still a separate future item) in DESIGN_NOTES.md "Stroma
-  queue-handle lifecycle" + keratin STROMA_HANDLE_REDESIGN.md.
+  Full analysis + the design exploration in DESIGN_NOTES.md "Stroma queue-handle
+  lifecycle" + keratin STROMA_HANDLE_REDESIGN.md.
+- TICKET/RE-RESOLVE REDESIGN -> DONE (keratin ac2c56d). The orphan-pin leak (handles
+  pinning dead incarnations / their flock) is fixed: QueueHandle is now a ticket
+  {registry, key, Weak<Inner>}; Inner lives only in the registry slot; resolve() ->
+  Resolved<'a> guard that is lifetime-bound so a resolved handle cannot escape into a
+  'static task (pinning is a compile error). Control + snapshot tasks hold the ticket
+  (Weak), resolve per use, self-exit when gone. Bench: resolve() ~3.9 ns/op (once per
+  batch on hot paths). Full keratin workspace 285 passed; fibril builds across boundary.
+  Remaining sub-items (low prio): lifecycle_locks map pruning + bench; optional owner-op
+  drain inside evict/destroy (self-enforce the teardown contract); rematerialize-on-
+  completion (deferred, assessed unnecessary). See STROMA_HANDLE_REDESIGN.md.
 
 ### B. Correctness / durability (post-merge)
 - Recovery event->message reference verification + FAIL-LOUD on mismatch; follower
