@@ -16,8 +16,9 @@ pub use stroma_core::{
     KeratinAppendCompletion, KeratinConfig, Message, MessageContentType, MessageHeaders,
     MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead,
     OwnerStateCheckpoint, QueueInspectionState, QueuePromotionOutcome, ReplicatedAppendOutcome,
-    ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, SnapshotConfig,
-    Stroma, StromaError, StromaEvent, StromaKeratinConfig,
+    QuarantineInfo, RecoveryMismatchPolicy, ReplicatedEventBatch, ReplicatedMessageBatch,
+    ReplicatedQueueApplyOutcome, SnapshotConfig, Stroma, StromaError, StromaEvent,
+    StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -288,6 +289,23 @@ pub trait QueueEngine {
     fn metrics(&self) -> Arc<StromaMetrics>;
 
     fn deadline_awaker(&self) -> Arc<Notify>;
+
+    /// Partitions parked because recovery found a dangling event->message
+    /// reference (for health/admin surfacing).
+    fn quarantined_partitions(&self) -> Vec<QuarantineInfo>;
+
+    /// The configured recovery dangling-reference policy (decides whether a
+    /// quarantine should fail readiness: Refuse hard-fails, Quarantine stays
+    /// serving the healthy partitions).
+    fn recovery_mismatch_policy(&self) -> RecoveryMismatchPolicy;
+
+    /// Repair a quarantined partition (truncate-to-valid) and clear it.
+    async fn repair_partition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError>;
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +323,11 @@ impl StromaEngine {
         Ok(Self {
             inner: Arc::new(stroma),
         })
+    }
+
+    /// Set the recovery dangling-reference policy (startup config).
+    pub fn set_recovery_mismatch_policy(&self, policy: RecoveryMismatchPolicy) {
+        self.inner.set_recovery_mismatch_policy(policy);
     }
 
     pub async fn global_store(&self) -> Result<Arc<GlobalStore>, StromaError> {
@@ -986,5 +1009,22 @@ impl QueueEngine for StromaEngine {
 
     fn deadline_awaker(&self) -> Arc<Notify> {
         self.inner.deadline_waker()
+    }
+
+    fn quarantined_partitions(&self) -> Vec<QuarantineInfo> {
+        self.inner.quarantined_partitions()
+    }
+
+    fn recovery_mismatch_policy(&self) -> RecoveryMismatchPolicy {
+        self.inner.recovery_mismatch_policy()
+    }
+
+    async fn repair_partition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner.repair_partition(tp, part, group).await
     }
 }

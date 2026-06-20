@@ -55,6 +55,8 @@ pub enum ConfigError {
         "unknown assignment durability `{value}` (local_durable|replica_accepted|replica_durable|majority_durable)"
     )]
     UnknownAssignmentDurability { value: String },
+    #[error("unknown recovery on_mismatch `{value}` (quarantine|refuse|ignore)")]
+    UnknownRecoveryMismatchMode { value: String },
 }
 
 impl ConfigError {
@@ -122,6 +124,7 @@ pub struct ServerConfig {
     pub runtime_seed: RuntimeSeedSection,
     pub runtime_locks: RuntimeLocksSection,
     pub coordination: CoordinationSection,
+    pub recovery: RecoverySection,
 }
 
 impl Default for ServerConfig {
@@ -134,6 +137,46 @@ impl Default for ServerConfig {
             runtime_seed: RuntimeSeedSection::default(),
             runtime_locks: RuntimeLocksSection::default(),
             coordination: CoordinationSection::default(),
+            recovery: RecoverySection::default(),
+        }
+    }
+}
+
+/// Startup recovery behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct RecoverySection {
+    /// What to do when recovery finds the event log references a message the
+    /// message log never durably accepted (a dangling event->message reference).
+    pub on_mismatch: RecoveryMismatchMode,
+}
+
+/// Policy for a recovery dangling event->message mismatch. Mirrors
+/// `stroma_core::RecoveryMismatchPolicy`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryMismatchMode {
+    /// Park only the affected partition; the broker stays up. (Default.)
+    #[default]
+    Quarantine,
+    /// Treat as fatal: the broker escalates (readiness goes hard-unhealthy) so it
+    /// cannot be missed.
+    Refuse,
+    /// Auto-apply the truncate-to-valid repair and continue, with a loud warning.
+    Ignore,
+}
+
+impl std::str::FromStr for RecoveryMismatchMode {
+    type Err = ConfigError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "quarantine" => Ok(Self::Quarantine),
+            "refuse" => Ok(Self::Refuse),
+            "ignore" => Ok(Self::Ignore),
+            other => Err(ConfigError::UnknownRecoveryMismatchMode {
+                value: other.to_string(),
+            }),
         }
     }
 }
@@ -305,6 +348,9 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY")? {
             self.coordination.ganglion.assignment_durability =
                 parse_env("FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_RECOVERY_ON_MISMATCH")? {
+            self.recovery.on_mismatch = parse_env("FIBRIL_RECOVERY_ON_MISMATCH", &value)?;
         }
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_AUTH_ENABLED")? {
             self.admin.auth.enabled = parse_env("FIBRIL_ADMIN_AUTH_ENABLED", &value)?;
@@ -1567,6 +1613,7 @@ mod tests {
                 "FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY" => {
                     Some(Ok("replica_durable:2".to_string()))
                 }
+                "FIBRIL_RECOVERY_ON_MISMATCH" => Some(Ok("refuse".to_string())),
                 _ => None,
             })
             .unwrap();
@@ -1601,6 +1648,10 @@ mod tests {
                 mode: GanglionAssignmentDurabilityMode::ReplicaDurable,
                 nodes: Some(2),
             }
+        );
+        assert_eq!(
+            config.recovery.on_mismatch,
+            RecoveryMismatchMode::Refuse
         );
     }
 

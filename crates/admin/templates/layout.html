@@ -49,6 +49,7 @@
     </header>
     <div class="content-container">
       <div class="content-area">
+        <div id="quarantine-banner" class="quarantine-banner" hidden></div>
         {% block content %}{% endblock %}
       </div>
     </div>
@@ -90,6 +91,81 @@
         applyTheme(next);
         window.setTimeout(() => root.classList.remove("theme-transition"), 260);
       });
+    })();
+  </script>
+  <script>
+    // Quarantine banner: surfaces partitions parked by recovery (a dangling
+    // event->message reference). Shown on every page so the issue cannot be
+    // missed; offers an operator repair (truncate-to-valid).
+    (() => {
+      const el = document.getElementById("quarantine-banner");
+      if (!el) return;
+
+      function esc(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        })[c]);
+      }
+
+      async function repair(topic, partition, group, btn) {
+        btn.disabled = true;
+        btn.textContent = "Repairing…";
+        const params = new URLSearchParams({ topic, partition: String(partition) });
+        if (group) params.set("group", group);
+        try {
+          const r = await fetch("/admin/api/quarantine/repair?" + params.toString(), {
+            method: "POST",
+          });
+          if (!r.ok) throw new Error(await r.text());
+          load();
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = "Repair failed - retry";
+          console.error("quarantine repair failed", e);
+        }
+      }
+
+      async function load() {
+        let data;
+        try {
+          const r = await fetch("/admin/api/quarantine");
+          if (!r.ok) return;
+          data = await r.json();
+        } catch {
+          return;
+        }
+        const items = (data && data.quarantined) || [];
+        if (!items.length) {
+          el.hidden = true;
+          el.innerHTML = "";
+          return;
+        }
+        const rows = items.map((q) => {
+          const grp = q.group ? `/${esc(q.group)}` : "";
+          return `<li class="quarantine-item">
+            <div>
+              <strong>${esc(q.topic)}/${esc(q.partition)}${grp}</strong>
+              <span class="quarantine-reason">${esc(q.reason)}</span>
+            </div>
+            <button class="quarantine-repair" data-topic="${esc(q.topic)}"
+              data-partition="${esc(q.partition)}" data-group="${esc(q.group || "")}">
+              Repair (truncate-to-valid)
+            </button>
+          </li>`;
+        }).join("");
+        const policy = data.policy ? ` (policy: ${esc(data.policy)})` : "";
+        el.innerHTML = `
+          <div class="quarantine-title">⚠ ${items.length} queue(s) quarantined - must be resolved before they continue${policy}</div>
+          <ul class="quarantine-list">${rows}</ul>`;
+        el.hidden = false;
+        el.querySelectorAll(".quarantine-repair").forEach((btn) => {
+          btn.addEventListener("click", () =>
+            repair(btn.dataset.topic, btn.dataset.partition, btn.dataset.group || null, btn));
+        });
+      }
+
+      load();
+      window.setInterval(load, 15000);
     })();
   </script>
 </body>

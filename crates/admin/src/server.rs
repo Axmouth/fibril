@@ -275,7 +275,13 @@ impl AdminServer {
                 "/admin/api/dlq/replay",
                 axum::routing::post(routes::replay_dead_letters),
             )
+            .route("/admin/api/quarantine", get(routes::quarantine))
+            .route(
+                "/admin/api/quarantine/repair",
+                axum::routing::post(routes::repair_partition),
+            )
             .route("/healthz", get(|| async { "ok" }))
+            .route("/readyz", get(routes::readyz))
             .fallback(not_found)
             .with_state(state);
         app

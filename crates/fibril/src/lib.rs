@@ -21,8 +21,8 @@ use fibril_broker::{
         StickyConsumerGroupAssignor,
     },
     queue_engine::{
-        KeratinConfig, QueueEngine as _, SnapshotConfig, StromaEngine, StromaError,
-        StromaKeratinConfig,
+        KeratinConfig, QueueEngine as _, RecoveryMismatchPolicy, SnapshotConfig, StromaEngine,
+        StromaError, StromaKeratinConfig,
     },
     runtime_settings::{
         ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, ConsumerGroupRuntimeSettings,
@@ -33,7 +33,7 @@ use fibril_broker::{
 };
 use fibril_config::{
     CoordinationMode, GanglionAssignmentDurabilityMode, GanglionAssignmentDurabilitySection,
-    ServerConfig,
+    RecoveryMismatchMode, ServerConfig,
 };
 use fibril_coordination_ganglion::{
     ClientTopology, ClusterRuntimeSettingsUpdateOutcome, ControllerStatus, ForwardedWritePolicy,
@@ -792,6 +792,12 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     )
     .await
     .map_err(FibrilServerError::Storage)?;
+
+    engine.set_recovery_mismatch_policy(match config.recovery.on_mismatch {
+        RecoveryMismatchMode::Quarantine => RecoveryMismatchPolicy::Quarantine,
+        RecoveryMismatchMode::Refuse => RecoveryMismatchPolicy::Refuse,
+        RecoveryMismatchMode::Ignore => RecoveryMismatchPolicy::Ignore,
+    });
 
     let runtime_seed = runtime_seed_from_config(&config);
     let runtime_settings = Arc::new(

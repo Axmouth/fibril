@@ -9,7 +9,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fibril_broker::coordination::ReplicationDurabilityPolicy;
 use fibril_broker::queue_engine::{
     DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
-    InspectMode, MessageHeaders, MessageInspectionStatus, QueueInspectionState, StromaError,
+    InspectMode, MessageHeaders, MessageInspectionStatus, QueueInspectionState,
+    RecoveryMismatchPolicy, StromaError,
 };
 use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLoadIssue, RuntimeSettingsLocks,
@@ -964,4 +965,84 @@ pub async fn replay_dead_letters(
             ))
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct RepairPartitionQuery {
+    pub topic: String,
+    #[serde(default)]
+    pub partition: u32,
+    pub group: Option<String>,
+}
+
+/// List partitions quarantined by recovery (a dangling event->message reference)
+/// plus the active policy, so the admin UI can show "X must be resolved before
+/// this queue continues" and offer a repair.
+pub async fn quarantine(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let quarantined = server.storage.quarantined_partitions();
+    Ok(Json(serde_json::json!({
+        "policy": format!("{:?}", server.storage.recovery_mismatch_policy()),
+        "quarantined": quarantined,
+    })))
+}
+
+/// Repair a quarantined partition (truncate-to-valid) and clear it. The next
+/// access re-recovers the valid prefix. Operator-triggered.
+pub async fn repair_partition(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<RepairPartitionQuery>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let group = normalize_group(query.group);
+    match server
+        .storage
+        .repair_partition(&query.topic, query.partition, group.as_deref())
+        .await
+    {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "repaired": true,
+            "topic": query.topic,
+            "partition": query.partition,
+        }))
+        .into_response()),
+        Err(err) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "repair_failed",
+            err.to_string(),
+        )),
+    }
+}
+
+/// Readiness probe. A quarantined partition means something needs an operator.
+/// Under the Quarantine policy the broker keeps serving the healthy partitions,
+/// so it stays ready (200) but reports `degraded`; under Refuse it fails
+/// readiness (503) so the problem cannot be missed.
+pub async fn readyz(State(server): State<Arc<AdminServer>>) -> Response {
+    let quarantined = server.storage.quarantined_partitions();
+    if quarantined.is_empty() {
+        return (StatusCode::OK, "ok").into_response();
+    }
+    let ready = !matches!(
+        server.storage.recovery_mismatch_policy(),
+        RecoveryMismatchPolicy::Refuse
+    );
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "ready": ready,
+            "degraded": true,
+            "quarantined": quarantined,
+        })),
+    )
+        .into_response()
 }

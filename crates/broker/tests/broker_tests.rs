@@ -323,6 +323,23 @@ impl QueueEngine for FailingPublishEngine {
     fn deadline_awaker(&self) -> Arc<Notify> {
         Arc::new(Notify::new())
     }
+
+    fn quarantined_partitions(&self) -> Vec<stroma_core::QuarantineInfo> {
+        Vec::new()
+    }
+
+    fn recovery_mismatch_policy(&self) -> stroma_core::RecoveryMismatchPolicy {
+        stroma_core::RecoveryMismatchPolicy::Quarantine
+    }
+
+    async fn repair_partition(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        unimplemented!()
+    }
 }
 
 async fn open_test_broker() -> (Arc<Broker<StromaEngine>>, TempDir) {
