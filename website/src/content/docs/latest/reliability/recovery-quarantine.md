@@ -26,7 +26,7 @@ When recovery finds the first bad record, it acts according to the
 
 | Policy | Behavior |
 | --- | --- |
-| `quarantine` (default) | Park only that partition. Its operations return an error; the rest of the broker keeps serving. |
+| `quarantine` (default) | Park only that partition. Its operations return an error, and the rest of the broker keeps serving. |
 | `refuse` | Treat the mismatch as fatal for readiness: the node reports not ready. |
 | `ignore` | Automatically truncate the log to the last valid record and continue. |
 

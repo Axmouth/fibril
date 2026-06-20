@@ -209,7 +209,7 @@ These settings apply to the experimental cluster replication path.
 | `runtime_seed.replication.min_in_sync_replicas` | `1` | Minimum recently in-sync replicas required before accepting replica-durable publishes. `1` disables the floor. |
 | `runtime_seed.replication.isr_timeout_ms` | `10000` | How recently a follower must report durable progress to count as in sync. |
 | `runtime_seed.replication.stream_enabled` | `true` | Use credit-based streaming replication on followers. When disabled, followers fall back to polling pulls. |
-| `runtime_seed.replication.stream_apply_linger_us` | `2000` | Microseconds a streaming follower gathers contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization; `0` is drain-only. |
+| `runtime_seed.replication.stream_apply_linger_us` | `2000` | Microseconds a streaming follower gathers contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization. `0` is drain-only. |
 | `runtime_seed.replication.stream_apply_max_merge_bytes` | `16777216` | Byte cap on a single coalesced streaming apply (peak memory versus fsync amortization). |
 | `runtime_seed.replication.stream_buffer_batches` | `8` | In-flight batch buffer depth (credit window) for the streaming follower. Applied on the next stream. |
 

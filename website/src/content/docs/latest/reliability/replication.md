@@ -41,7 +41,7 @@ is set per cluster through `coordination.ganglion.assignment_durability` (see
 
 | Mode | A confirmed publish returns once... |
 | --- | --- |
-| `local_durable` | the owner has durably written the append (the default; same as a single node) |
+| `local_durable` | the owner has durably written the append (the default, same as a single node) |
 | `replica_accepted` | N assigned nodes (including the owner) have accepted the append (weaker than fsync) |
 | `replica_durable` | N assigned nodes (including the owner) have durably written the append |
 | `majority_durable` | a durable majority of the assigned replica set has the append |
