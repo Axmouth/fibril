@@ -752,3 +752,14 @@ must never spuriously fail, run in rounds) at "mouse" scale (~8 rounds x 24 task
 threads) reproduces the error in round 0; at "bear" scale (~40 x 96, 8 threads) it
 also exposes the hang. Keep both as graduated trip-wires (one parameterized helper,
 two entry points) once the engine is fixed.
+
+### RESOLVED (2026-06-20): per-key lifecycle mutex
+Root cause confirmed by tracing: after a destroy renames a partition dir, two builds
+ran concurrently and both create_dir_all + opened the same path, colliding on the
+.keratin.lock flock (and at bear scale escalating to deadlock). There was no in-memory
+serialization of the Keratin open/close lifecycle - only the advisory, fail-fast flock.
+Fix (keratin 7dd6c18): a per-partition-key lifecycle mutex (Stroma.lifecycle_locks)
+acquired only on the cold open/close paths (queue_handle BUILD slow-path, destroy,
+evict); the materialized fast path and all hot publish/consume paths are untouched.
+mouse 10/10 + bear 3/3 deterministic; full stroma-core suite green. The broader
+ticket/re-resolve redesign (orphan-pin leak) remains a separate, lower-urgency item.

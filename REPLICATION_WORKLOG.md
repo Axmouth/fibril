@@ -4204,22 +4204,22 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 - MAX_MERGE_BYTES -> replication runtime setting (2nd microbatch lever) [WL]
 - Dead-owner EngineSlot pool-prune after failover [WL]
 - Tick/refresh REPLICATION_PLANNING.md success criteria to reality [WL/PLAN]
-- FLAKY TEST -> REAL ARCHITECTURAL ISSUE (high priority, pre-existing, NOT from the
-  clustering split). stroma::tests::concurrent_destroyers_and_materializers_stay_
-  consistent. Amplifying it (destroyers + materializers + queue_handle reader victims,
-  in rounds) proved a genuine concurrency-safety hole in Stroma's per-partition handle
-  lifecycle: queue_handle's lazy init races destroy_partition (No-such-file / File
-  -exists), a strong QueueHandle clone (returned handle + periodic_snapshot task) pins
-  the Keratin flock so destroy can orphan/leak it ("Keratin already open" forever), and
-  at extreme scale it HANGS. FULL analysis + the converged proper fix (handle becomes a
-  re-resolved TICKET = Arc<ArcSwap<Registry>>+key; resolve per op via Weak upgrade or a
-  `with` closure; safe by construction) AND a smaller interim mitigation (reliable
-  always-called flock release + a Keratin wait-for-release with a tri-state/timeout) are
-  written up in DESIGN_NOTES.md "Stroma queue-handle lifecycle". Partial patches
-  (retry / Dekker serialization / self-clean) are UNCOMMITTED and only partial - the
-  issue is architectural. DECISION NEEDED: full ticket redesign vs interim mitigation
-  vs track-and-revert-to-baseline. Reproducer: mouse (~8x24, 4 thr) shows the error in
-  round 0; bear (~40x96, 8 thr) also shows the hang - keep both as graduated trip-wires.
+- FLAKY TEST -> REAL CONCURRENCY BUG -> FIXED (keratin 7dd6c18). stroma::tests::
+  concurrent_destroyers_and_materializers_stay_consistent. Amplifying it (destroyers +
+  materializers + queue_handle reader victims, in rounds) proved a genuine concurrency
+  -safety hole: queue_handle's build, destroy_partition, and evict could run
+  concurrently for the same partition and all create_dir_all + open the same Keratin
+  dir, colliding on the .keratin.lock flock ("Keratin already open"); the bear-scale
+  storm escalated to a deadlock. Root cause (confirmed by tracing): NO in-memory
+  serialization of the Keratin open/close lifecycle - only the advisory fail-fast flock.
+  FIX: a per-partition-key lifecycle mutex (Stroma.lifecycle_locks) on the cold open/
+  close paths only (build slow-path / destroy / evict); the materialized fast path and
+  all hot publish/consume paths are untouched. Replaced the weak 32-task one-shot test
+  with graduated mouse/bear trip-wires (one helper, two scales). mouse 10/10 + bear 3/3
+  deterministic; full stroma-core suite (180 lib) green; fibril builds across boundary.
+  Full analysis + the design exploration (incl. the broader ticket/re-resolve redesign
+  for the orphan-pin leak, still a separate future item) in DESIGN_NOTES.md "Stroma
+  queue-handle lifecycle" + keratin STROMA_HANDLE_REDESIGN.md.
 
 ### B. Correctness / durability (post-merge)
 - Recovery event->message reference verification + FAIL-LOUD on mismatch; follower
