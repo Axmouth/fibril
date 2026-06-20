@@ -4269,12 +4269,59 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   generic). 67 ganglion tests (incl Suite::test_all) + 28 coordination-ganglion + 3 protocol
   failover tests green. Follow-up: save_committed/read_committed durable persistence (kept 0.9
   defaults).
-- MORE PRE-MERGE (user-flagged 2026-06-20): (1) ADMIN SITE audit - check if the admin UI needs
-  updates for the branch's new surfaces (quarantine banner added this session; verify topology/
-  settings/queues pages reflect partitioning/replication/cohorts/runtime-settings). (2) DOCS
-  PASS - "lots needed": the docs site (dev notes + implemented-surface inventory) needs updating
-  for replication/sharding/cohorts/recovery-quarantine/runtime-settings; fold DESIGN_NOTES +
-  these worklog decisions in. Both are sizable, post-feature, pre-merge.
+- MORE PRE-MERGE (user-flagged 2026-06-20): (1) ADMIN SITE audit -- DONE (see checkpoint).
+  (2) DOCS PASS -- DONE (see checkpoint).
+
+- SESSION CHECKPOINT 2026-06-21 (pre-compaction; all 3 repos CLEAN + green, per-brick committed):
+  Repos/branches: fibril `replication-sharding-plan` (HEAD ~"Docs: front page..."), keratin
+  `replication-sharding-plan` (HEAD ~"Handle production unwraps..."), ganglion `main`
+  (HEAD 56f6fde, PUSHED to origin). fibril+keratin NOT pushed (user's call). fibril builds on
+  ganglion via a [patch] in fibril/Cargo.toml pointing ganglion git dep -> local ../ganglion.
+  Done this session, in order:
+  * Dedup/cleanup sweep (both diff-review + broad): removed superseded dead code in keratin-log/
+    stroma/metrics/broker/admin + bench/example; kept scaffolding with allow+comment (NackType,
+    recover_all cluster, snap_cfg FIXME, sub_id/conn_id for future restart-reconnect reconcile);
+    consolidated only DEFAULT_HEARTBEAT_INTERVAL (others context-specific). All workspaces
+    warning-free across --all-targets.
+  * OPENRAFT 0.8->0.9.24 migration in ganglion (Raft<C> type-erasure; dropped LS/NF generics from
+    RaftMetadataNode/InProcessRouter; get_log_state->RaftLogStorage; LogFlushed<C>; OptionalSend
+    bound; async_trait removed from impls; ensure_linearizable added; chunked snapshot Route A;
+    tokio_unstable cfg registered). fibril coordination-ganglion + fibril/src/lib.rs adapted
+    (GanglionCoordination/GanglionRuntimeSettingsStore no longer generic; TcpGanglionCoordination
+    alias). 67 ganglion (incl Suite::test_all) + 28 coordination-ganglion + 3 protocol failover
+    tests green. MERGED to ganglion main + user PUSHED. Follow-up: save_committed/read_committed
+    durable persistence (kept 0.9 defaults).
+  * Poison-safe locks: all prod lock/read/write().unwrap() + broker .expect("queue activity lock
+    poisoned") -> unwrap_or_else(PoisonError::into_inner). Broad prod unwrap/expect pass:
+    invariants -> expect-with-reason (try_into "exact-length slice", String writeln, clock,
+    just-checked pop_front); genuinely-fallible -> propagate (util::all_segments now io::Result;
+    QueueHandle::set_ack_window_from_bytes -> new QueueHandleError::Internal). Test code + dev/
+    bench bins left as-is. User caught 2 fallible-given-expect mis-classifications; both fixed.
+  * Admin audit + features: FIXED settings clobber (form omitted stream_* replication fields +
+    ReplicationRuntimeSettings is #[serde(default)] -> save reset them; now surfaced+round-tripped).
+    Version-CAS confirmed on runtime-settings + global-DLQ (whole-doc replaces); queue-DLQ is a
+    merge so clobber-safe (full CAS deferred). Shipped: queues page follower-replication section +
+    per-partition aggregate/expand + DLQ column (was collapsing multi-partition activity by
+    (topic,group) key -- now per-partition); queue-DLQ "Load current" see-before-declare; topology
+    repartition + coordination-membership controls; per-broker cohort visibility (subscriptions
+    page + /admin/api/cohorts, provider in fibril -> broker.local_cohort_membership). Tests: 39
+    admin (added repartition/readyz/quarantine/cohorts coverage).
+  * Docs pass (website, Starlight/astro; builds clean, 34 pages): NEW user pages concepts/
+    clustering, reliability/replication, reliability/recovery-quarantine; NEW dev notes
+    development/{coordination-internals,replication-design,recovery-internals}; updated
+    implemented-surface (added Recovery Quarantine section, fixed stale "live repartitioning not
+    implemented" -> it's experimental, extended admin+experimental tables), admin-dashboard,
+    configuration (stream_* settings + target_followers/assignment_durability/coordination.mode +
+    recovery.on_mismatch), status, front page (index.md); sidebar wired. Prose policy applied
+    (no semicolons/em-dashes/curly quotes). User OK'd naming Raft in user docs as the current
+    impl (memory fibril-avoids-raft updated with this exception).
+  REMAINING (both deferred by user, aesthetic, do not change docs/shape): topology viz glowup
+  (circle layout breaks past ~7 nodes; needs scalable layout, best done interactively in browser);
+  admin SPA-feel (native View Transitions when support broadens, or ~40-line vanilla boosted-links).
+  Other tracked follow-ups: full queue-DLQ optimistic CAS; eager opt-in startup recovery (recover_all
+  exists, unused); snap_cfg.every_events wire as an ADDITIONAL snapshot-cadence knob; rework
+  tui-example + benches/bin/bench_e2e (disabled instrumentation). NEXT: user deciding between
+  topology glowup vs assessing branch for merge.
 - FLAKY TEST -> REAL CONCURRENCY BUG -> FIXED (keratin 7dd6c18). stroma::tests::
   concurrent_destroyers_and_materializers_stay_consistent. Amplifying it (destroyers +
   materializers + queue_handle reader victims, in rounds) proved a genuine concurrency
