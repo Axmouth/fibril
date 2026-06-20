@@ -152,6 +152,59 @@ async function refresh() {
     </div>
   `;
 
+  const replication = data.replication_summary || {};
+  const followers = data.replication_followers || [];
+  let replicationHtml = "";
+  if ((replication.follower_worker_count ?? 0) > 0 || followers.length > 0) {
+    const repCards = `
+      <div class="queue-summary-grid">
+        <div class="queue-summary-card"><span>Follower workers</span><strong>${replication.follower_worker_count ?? 0}</strong></div>
+        <div class="queue-summary-card"><span>Caught up</span><strong>${replication.caught_up_count ?? 0}</strong></div>
+        <div class="queue-summary-card"><span>Pending retry</span><strong>${replication.pending_retry_count ?? 0}</strong></div>
+        <div class="queue-summary-card"><span>Checkpoint required</span><strong>${replication.checkpoint_required_count ?? 0}</strong></div>
+      </div>
+    `;
+    const repRows = followers
+      .slice()
+      .sort((a, b) => a.topic.localeCompare(b.topic) || (a.partition - b.partition))
+      .map(f => {
+        const status = f.state?.status?.status || "unknown";
+        return `
+        <tr>
+          <td title="${escapeHtml(f.topic)}">${escapeHtml(f.topic)}</td>
+          <td class="text-right">${f.partition ?? 0}</td>
+          <td>${escapeHtml(f.group || "default")}</td>
+          <td><span class="queue-state-pill replica-status-${escapeHtml(status)}">${escapeHtml(humanizeSnake(status))}</span></td>
+          <td class="text-right">${f.state?.message_next_offset ?? 0}</td>
+          <td class="text-right">${f.state?.event_next_offset ?? 0}</td>
+          <td>${escapeHtml(formatTime(f.state?.last_progress))}</td>
+          <td class="text-right">${f.state?.next_delay_ms ?? 0}ms</td>
+          <td>${f.busy ? "yes" : "no"}</td>
+        </tr>`;
+      }).join('');
+    replicationHtml = `
+      <h5 class="metrics-header queue-group-heading">Replication (follower workers on this broker)</h5>
+      <p class="queue-group-note">Queues this broker is replicating from their owners, with how far each has pulled.</p>
+      ${repCards}
+      <div class="queue-table-wrap">
+        <table class="table table-compact narrow metric-table queue-table">
+          <tr>
+            <th>Topic</th>
+            <th class="text-right">Partition</th>
+            <th>Group</th>
+            <th>Status</th>
+            <th class="text-right">Message next</th>
+            <th class="text-right">Event next</th>
+            <th>Last progress</th>
+            <th class="text-right">Next retry in</th>
+            <th>Busy</th>
+          </tr>
+          ${repRows}
+        </table>
+      </div>
+    `;
+  }
+
   const html = Object.entries(grouped)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([group, items]) => {
@@ -202,7 +255,7 @@ async function refresh() {
       `;
     }).join('');
 
-  container.innerHTML = summary + html;
+  container.innerHTML = summary + replicationHtml + html;
 }
 
 setInterval(refresh, 2000);

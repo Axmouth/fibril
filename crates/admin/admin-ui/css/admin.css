@@ -843,6 +843,24 @@ input[type="checkbox"] {
   color: var(--accent);
 }
 
+.replica-status-caught_up {
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 34%, transparent);
+  color: var(--ok);
+}
+
+.replica-status-pending_retry {
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 36%, transparent);
+  color: var(--warn);
+}
+
+.replica-status-checkpoint_required {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+  color: var(--accent);
+}
+
 .message-status-pending_dlq {
   background: var(--bad-soft);
   border-color: color-mix(in srgb, var(--bad) 36%, transparent);
