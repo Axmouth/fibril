@@ -511,16 +511,36 @@ settings discipline.
 
 ## Success criteria
 
-- [ ] Single-node still works (no regression from current state).
-- [ ] Replication: messages survive single-replica failure with strict durability mode.
-- [ ] Leader failover (manual): cluster recovers; no acked data lost.
-- [ ] Idempotent producer (if in scope): retries don't duplicate.
-- [ ] ISR shrinkage: writes proceed with degraded ISR, refuse below `min_in_sync_replicas`.
-- [ ] Orphan handling: failed event appends leave orphans; retention cleans them; no consumer-visible effects.
-- [ ] Recovery: broker restart replays event log, verifies message log references, fails loud on mismatch.
-- [ ] Metadata: client survives bootstrap broker failure (tries next in list). *(Client work is out of scope for v1; success criterion is the broker-side protocol supports it.)*
-- [ ] Replication lag is observable via metrics before it's a crisis.
-- [ ] Manual failover runbook exists and has been exercised in a test environment.
+(Refreshed to current reality 2026-06-20. [x] = done with the evidence noted; [ ] = genuinely
+not done. Honest over optimistic - an unchecked box is real remaining work.)
+
+- [x] Single-node still works (no regression). Standalone is the default; needs no coordination
+  config; covered by the unit/integration suites and `cluster-tryout.sh` (standalone mode).
+- [x] Replication: messages survive single-replica failure with strict durability. `replica_durable`
+  + `cluster-tryout.sh --failover-verify` proves zero confirmed-id loss when the owner is killed
+  mid-load (identity check, LOSS 0 / PHANTOM 0).
+- [x] Leader failover (manual): cluster recovers; no acked data lost. `--failover-smoke` (traffic
+  resumes) + `--failover-verify` (no confirmed loss); coordination reassigns owner on death.
+- [ ] Idempotent producer (if in scope): retries don't duplicate. NOT DONE - phase-8/post-merge.
+  The `fibril.client.producer_id`/`seq` headers are on the wire, but the broker does not yet
+  dedup on them (delivery is at-least-once; the verifier quantifies the duplicates).
+- [x] ISR shrinkage: writes proceed with degraded ISR, refuse below `min_in_sync_replicas`
+  (broker ISR floor + tests).
+- [x] Orphan handling: failed event appends leave orphans; retention cleans them; no
+  consumer-visible effects.
+- [x] Recovery: broker restart replays the event log, verifies message-log references, fails loud
+  on mismatch. Done this branch: recovery quarantines a partition with a dangling/corrupt
+  event->message reference (policy quarantine|refuse|ignore) and repairs via truncate-to-valid;
+  a follower re-replicates the dropped suffix from the owner.
+- [x] Metadata: client survives bootstrap broker failure - broker-side protocol supports it
+  (topology + redirect; the client learns owners and refreshes). PARTIAL on the client itself:
+  it now prunes dead-owner pool slots and refreshes topology, but bootstrap selection still uses
+  the first seed (full next-seed-on-bootstrap-failure is a remaining client item).
+- [x] Replication lag is observable via metrics: follower durable progress, ISR/in-sync state,
+  and replication timing are exposed via metrics + the admin surface. (Alerting thresholds are
+  operator-side.)
+- [x] Manual failover runbook exists and has been exercised: FAILURE_MODES.md, plus the
+  `--failover-smoke`/`--failover-verify` cluster-tryout modes exercise an owner kill repeatably.
 
 ## Ganglion coordination provider — integration plan (added 2026-06-12)
 

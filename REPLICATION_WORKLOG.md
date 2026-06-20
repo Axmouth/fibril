@@ -4238,7 +4238,10 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   (fetch_topology / refresh_topology_throttled) it now drops slots whose endpoint no longer
   owns any partition, keeping bootstrap + slots with active subscriptions. (Note: "EngineSlot"
   is the client's per-broker connection slot, not a broker-side engine pool.)
-- Tick/refresh REPLICATION_PLANNING.md success criteria to reality [WL/PLAN]
+- Tick/refresh REPLICATION_PLANNING.md success criteria to reality [WL/PLAN] -- DONE
+  (refreshed the Success criteria scorecard to reality with evidence + honest [ ] for the one
+  genuinely-not-done item, idempotent-producer dedup). The 10 success-criteria boxes were the
+  only checkboxes in the plan.
 - FLAKY TEST -> REAL CONCURRENCY BUG -> FIXED (keratin 7dd6c18). stroma::tests::
   concurrent_destroyers_and_materializers_stay_consistent. Amplifying it (destroyers +
   materializers + queue_handle reader victims, in rounds) proved a genuine concurrency
