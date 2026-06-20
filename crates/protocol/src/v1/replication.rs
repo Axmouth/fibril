@@ -709,6 +709,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
         credit_bytes: u64,
         keepalive_ms: u64,
         apply_linger_us: u64,
+        max_merge_bytes: u64,
         buffer_batches: usize,
         apply: Arc<dyn BrokerReplicationStreamApply>,
         shutdown: CancellationToken,
@@ -730,6 +731,7 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 credit_bytes,
                 keepalive_ms,
                 apply_linger_us,
+                max_merge_bytes,
                 self.reporter_node_id.clone(),
                 stream_id,
                 buffer_batches,
@@ -1177,6 +1179,7 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
     credit_bytes: u64,
     keepalive_ms: u64,
     apply_linger_us: u64,
+    max_merge_bytes: u64,
     reporter_node_id: Option<String>,
     stream_id: u64,
     buffer_batches: usize,
@@ -1291,6 +1294,7 @@ pub async fn run_follower_replication_stream<S: FollowerStreamSink>(
             event_from,
             std::time::Duration::from_millis(keepalive_ms),
             std::time::Duration::from_micros(apply_linger_us),
+            max_merge_bytes,
         ) => Some(exit),
     };
 
@@ -1473,6 +1477,14 @@ mod stream_transport_tests {
             8 * 1024 * 1024,
             0, // keepalive disabled for the test
             0, // apply linger disabled for the test
+            // max_merge_bytes = 1: below any batch, so the applier never folds and
+            // each batch applies separately. This test verifies the per-batch
+            // round-trip over TCP (transport + apply offset/bytes + progress/credit
+            // + stream close); its assertions always expected 3 distinct applies.
+            // Folding is non-deterministic over a fast loopback (queued frames
+            // coalesce) and is covered on its own by the applier unit tests, so we
+            // pin it off here rather than racing it.
+            1,
             Some("broker-2".into()),
             42,
             4,

@@ -66,6 +66,7 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
         _credit_bytes: u64,
         _keepalive_ms: u64,
         _apply_linger_us: u64,
+        _max_merge_bytes: u64,
         _buffer_batches: usize,
         _apply: Arc<dyn BrokerReplicationStreamApply>,
         _shutdown: CancellationToken,
@@ -255,6 +256,9 @@ pub struct FollowerReplicationWorkerConfig {
     /// Linger (microseconds) the streaming applier spends gathering more
     /// contiguous frames before applying them as one fsynced batch. 0 = drain-only.
     pub stream_apply_linger_us: u64,
+    /// Byte cap on a single coalesced streaming-apply. Pairs with
+    /// `stream_apply_linger_us`.
+    pub stream_apply_max_merge_bytes: u64,
 }
 
 impl Default for FollowerReplicationWorkerConfig {
@@ -271,6 +275,7 @@ impl Default for FollowerReplicationWorkerConfig {
             follow_runtime_settings: false,
             stream_enabled: false,
             stream_apply_linger_us: 2_000,
+            stream_apply_max_merge_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -1867,6 +1872,7 @@ impl Broker<StromaEngine> {
                     checkpoint_retry_poll_ms: snap.replication_checkpoint_retry_poll_ms,
                     stream_enabled: snap.replication_stream_enabled,
                     stream_apply_linger_us: snap.replication_stream_apply_linger_us,
+                    stream_apply_max_merge_bytes: snap.replication_stream_apply_max_merge_bytes,
                     ..cfg
                 }
             } else {
@@ -2015,6 +2021,7 @@ impl Broker<StromaEngine> {
                 cfg.max_bytes_per_read as u64,
                 cfg.caught_up_poll_ms,
                 cfg.stream_apply_linger_us,
+                cfg.stream_apply_max_merge_bytes,
                 FOLLOWER_STREAM_BUFFER_BATCHES,
                 apply.clone(),
                 shutdown,

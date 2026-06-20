@@ -381,6 +381,9 @@ pub struct BrokerConfig {
     /// Linger (microseconds) the streaming follower spends gathering more
     /// contiguous frames before applying them as one fsynced batch. 0 = drain-only.
     pub replication_stream_apply_linger_us: u64,
+    /// Byte cap on a single coalesced streaming-apply (peak memory vs fsync
+    /// amortization). Pairs with `replication_stream_apply_linger_us`.
+    pub replication_stream_apply_max_merge_bytes: u64,
     /// Partition count for a queue declared without an explicit count.
     pub default_partition_count: u32,
     /// Soft target partitions-per-consumer for exclusive consumer groups. When
@@ -412,6 +415,7 @@ impl Default for BrokerConfig {
             replication_isr_timeout_ms: 10_000,
             replication_stream_enabled: true,
             replication_stream_apply_linger_us: 2_000,
+            replication_stream_apply_max_merge_bytes: 16 * 1024 * 1024,
             default_partition_count: 1,
             default_consumer_target: None,
         }

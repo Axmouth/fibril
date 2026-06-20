@@ -88,6 +88,10 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
             isr_timeout_ms: config.runtime_seed.replication.isr_timeout_ms,
             stream_enabled: config.runtime_seed.replication.stream_enabled,
             stream_apply_linger_us: config.runtime_seed.replication.stream_apply_linger_us,
+            stream_apply_max_merge_bytes: config
+                .runtime_seed
+                .replication
+                .stream_apply_max_merge_bytes,
         },
         partitioning: PartitioningRuntimeSettings {
             default_partition_count: config.runtime_seed.partitioning.default_partition_count,

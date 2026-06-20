@@ -1082,10 +1082,22 @@ pub struct ReplicationSettings {
     /// amortization (throughput) at the cost of apply latency; 0 = drain-only.
     #[serde(default = "default_stream_apply_linger_us")]
     pub stream_apply_linger_us: u64,
+
+    /// Byte cap on a single coalesced streaming-apply: the applier folds
+    /// contiguous same-epoch frames into one apply (one follower fsync), but
+    /// stops growing one apply past this so a deep backlog still applies in
+    /// reasonable chunks. Higher = better fsync amortization at the cost of peak
+    /// memory per apply. Pairs with `stream_apply_linger_us`.
+    #[serde(default = "default_stream_apply_max_merge_bytes")]
+    pub stream_apply_max_merge_bytes: u64,
 }
 
 fn default_stream_apply_linger_us() -> u64 {
     2_000
+}
+
+fn default_stream_apply_max_merge_bytes() -> u64 {
+    16 * 1024 * 1024
 }
 
 impl Default for ReplicationSettings {
@@ -1109,6 +1121,7 @@ impl Default for ReplicationSettings {
             isr_timeout_ms: 10_000,
             stream_enabled: default_stream_enabled(),
             stream_apply_linger_us: default_stream_apply_linger_us(),
+            stream_apply_max_merge_bytes: default_stream_apply_max_merge_bytes(),
         }
     }
 }

@@ -340,6 +340,7 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     event_from: u64,
     keepalive: std::time::Duration,
     apply_linger: std::time::Duration,
+    max_merge_bytes: u64,
 ) -> ApplierExit {
     // Microbatch the apply: streamed frames arrive small (the owner reads whatever
     // has trickled in), and applying each one separately means one follower fsync
@@ -350,10 +351,9 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
     // per apply (so added latency is `apply_linger`, not unbounded), and a byte cap
     // so a deep backlog still applies in reasonable chunks. `apply_linger` is a
     // replication runtime setting (stream_apply_linger_us); 0 = drain-only.
-    // TODO: promote MAX_MERGE_BYTES to a replication runtime setting too - it is
-    // the other microbatch lever (caps how large a coalesced apply can grow, i.e.
-    // memory vs fsync-amortization), pairs with stream_apply_linger_us.
-    const MAX_MERGE_BYTES: u64 = 16 * 1024 * 1024;
+    // `max_merge_bytes` is the other microbatch lever (replication runtime
+    // setting stream_apply_max_merge_bytes): caps how large a coalesced apply can
+    // grow, i.e. peak memory vs fsync-amortization. Pairs with apply_linger.
 
     let mut message_next = message_from;
     let mut event_next = event_from;
@@ -397,7 +397,7 @@ pub async fn run_follower_stream_applier<S: FollowerStreamSink>(
         // Fold as many contiguous frames as are ready (plus a one-shot linger).
         let mut merged = first;
         let mut lingered = false;
-        while batch_bytes(&merged) < MAX_MERGE_BYTES {
+        while batch_bytes(&merged) < max_merge_bytes {
             let next = match batch_rx.try_recv() {
                 Ok(batch) => Some(batch),
                 Err(mpsc::error::TryRecvError::Empty) => {
@@ -738,6 +738,7 @@ mod tests {
             0,
             std::time::Duration::ZERO,
             std::time::Duration::ZERO,
+            16 * 1024 * 1024,
         ));
 
         // Both queued before the applier drains -> they fold (0..2 then 2..5).
@@ -800,6 +801,7 @@ mod tests {
             0,
             std::time::Duration::ZERO,
             std::time::Duration::ZERO,
+            16 * 1024 * 1024,
         ));
 
         batch_tx.send(batch_from(0, 2)).await.unwrap(); // 0..2
@@ -839,7 +841,7 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, _control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx, 0, 0, std::time::Duration::ZERO, std::time::Duration::ZERO));
+        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx, 0, 0, std::time::Duration::ZERO, std::time::Duration::ZERO, 16 * 1024 * 1024));
 
         batch_tx.send(batch_from(40, 1)).await.unwrap();
         let exit = tokio::time::timeout(Duration::from_secs(2), task)
@@ -868,6 +870,7 @@ mod tests {
             2,
             Duration::from_millis(20),
             std::time::Duration::ZERO,
+            16 * 1024 * 1024,
         ));
 
         let ctrl = tokio::time::timeout(Duration::from_secs(2), control_rx.recv())
@@ -910,6 +913,7 @@ mod tests {
             0,
             Duration::from_millis(20),
             std::time::Duration::ZERO,
+            16 * 1024 * 1024,
         ));
 
         batch_tx.send(batch_from(0, 2)).await.unwrap();

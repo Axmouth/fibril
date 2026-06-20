@@ -3546,6 +3546,7 @@ fn follower_worker_state_builds_catch_up_options_from_current_offsets() {
         follow_runtime_settings: false,
         stream_enabled: false,
         stream_apply_linger_us: 2_000,
+        stream_apply_max_merge_bytes: 16 * 1024 * 1024,
     };
     let state = FollowerReplicationWorkerState::new(23, 29);
 

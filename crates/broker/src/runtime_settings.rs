@@ -164,6 +164,10 @@ pub struct ReplicationRuntimeSettings {
     /// contiguous frames before applying them as one fsynced batch. Higher trades
     /// apply latency for better fsync amortization (throughput); 0 = drain-only.
     pub stream_apply_linger_us: u64,
+    /// Byte cap on a single coalesced streaming-apply (caps how large one folded
+    /// apply can grow: peak memory vs fsync amortization). Pairs with
+    /// `stream_apply_linger_us`.
+    pub stream_apply_max_merge_bytes: u64,
 }
 
 impl Default for ReplicationRuntimeSettings {
@@ -181,6 +185,7 @@ impl Default for ReplicationRuntimeSettings {
             isr_timeout_ms: 10_000,
             stream_enabled: true,
             stream_apply_linger_us: 2_000,
+            stream_apply_max_merge_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -438,6 +443,9 @@ impl BrokerConfig {
             replication_isr_timeout_ms: settings.replication.isr_timeout_ms,
             replication_stream_enabled: settings.replication.stream_enabled,
             replication_stream_apply_linger_us: settings.replication.stream_apply_linger_us,
+            replication_stream_apply_max_merge_bytes: settings
+                .replication
+                .stream_apply_max_merge_bytes,
             default_partition_count: settings.partitioning.default_partition_count,
             default_consumer_target: settings.consumer_groups.default_target_per_consumer,
         }
