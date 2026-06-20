@@ -4204,6 +4204,13 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 - MAX_MERGE_BYTES -> replication runtime setting (2nd microbatch lever) [WL]
 - Dead-owner EngineSlot pool-prune after failover [WL]
 - Tick/refresh REPLICATION_PLANNING.md success criteria to reality [WL/PLAN]
+- FLAKY TEST (keratin, pre-existing - NOT from clustering split; verified my commits
+  did not touch the test or destroy_partition/materialize/queue_handle): stroma::tests
+  ::concurrent_destroyers_and_materializers_stay_consistent (stroma.rs:6239) fails
+  ~1-in-5 in isolation. The 32-way destroy/materialize storm then a final
+  queue_handle().unwrap() - the final lazy materialize can lose a race with an
+  in-flight destroy. Stabilize the test (or, if it points to a real queue_handle-vs-
+  destroy_partition race, fix the engine). Surfaced by the full-workspace run 2026-06-20.
 
 ### B. Correctness / durability (post-merge)
 - Recovery event->message reference verification + FAIL-LOUD on mismatch; follower
