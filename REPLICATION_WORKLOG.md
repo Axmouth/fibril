@@ -4204,13 +4204,22 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
 - MAX_MERGE_BYTES -> replication runtime setting (2nd microbatch lever) [WL]
 - Dead-owner EngineSlot pool-prune after failover [WL]
 - Tick/refresh REPLICATION_PLANNING.md success criteria to reality [WL/PLAN]
-- FLAKY TEST (keratin, pre-existing - NOT from clustering split; verified my commits
-  did not touch the test or destroy_partition/materialize/queue_handle): stroma::tests
-  ::concurrent_destroyers_and_materializers_stay_consistent (stroma.rs:6239) fails
-  ~1-in-5 in isolation. The 32-way destroy/materialize storm then a final
-  queue_handle().unwrap() - the final lazy materialize can lose a race with an
-  in-flight destroy. Stabilize the test (or, if it points to a real queue_handle-vs-
-  destroy_partition race, fix the engine). Surfaced by the full-workspace run 2026-06-20.
+- FLAKY TEST -> REAL ARCHITECTURAL ISSUE (high priority, pre-existing, NOT from the
+  clustering split). stroma::tests::concurrent_destroyers_and_materializers_stay_
+  consistent. Amplifying it (destroyers + materializers + queue_handle reader victims,
+  in rounds) proved a genuine concurrency-safety hole in Stroma's per-partition handle
+  lifecycle: queue_handle's lazy init races destroy_partition (No-such-file / File
+  -exists), a strong QueueHandle clone (returned handle + periodic_snapshot task) pins
+  the Keratin flock so destroy can orphan/leak it ("Keratin already open" forever), and
+  at extreme scale it HANGS. FULL analysis + the converged proper fix (handle becomes a
+  re-resolved TICKET = Arc<ArcSwap<Registry>>+key; resolve per op via Weak upgrade or a
+  `with` closure; safe by construction) AND a smaller interim mitigation (reliable
+  always-called flock release + a Keratin wait-for-release with a tri-state/timeout) are
+  written up in DESIGN_NOTES.md "Stroma queue-handle lifecycle". Partial patches
+  (retry / Dekker serialization / self-clean) are UNCOMMITTED and only partial - the
+  issue is architectural. DECISION NEEDED: full ticket redesign vs interim mitigation
+  vs track-and-revert-to-baseline. Reproducer: mouse (~8x24, 4 thr) shows the error in
+  round 0; bear (~40x96, 8 thr) also shows the hang - keep both as graduated trip-wires.
 
 ### B. Correctness / durability (post-merge)
 - Recovery event->message reference verification + FAIL-LOUD on mismatch; follower

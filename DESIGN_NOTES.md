@@ -659,3 +659,96 @@ intuitive user knob - Pulsar shows users grok "pick your subscription type" - an
 fits the "just works" smart-client philosophy. Verdict: high usability upside, and
 a layer rather than a rewrite, because the substrate already supports
 log-with-many-cursors.
+
+## queue_handle vs destroy_partition: optimistic retry, with serialization as the escape hatch (2026-06-20)
+
+Stroma's `queue_handle` lazily (re)creates a partition's logs on first access.
+`destroy_partition` tombstones the slot, renames the partition dir aside, and
+deletes it. A concurrent `queue_handle` whose lazy init is mid-flight can race a
+destroy: the dir/log is pulled out from under the init, surfacing as
+`Io("No such file")`, `Io("File exists")`, or `Io("Keratin already open ...")`.
+This was a real (if cold-path) function-level race - it surfaced as a ~1-in-5
+flaky test (concurrent_destroyers_and_materializers), not just test noise.
+
+CHOSEN FIX (optimistic retry): on init failure `queue_handle` re-checks whether a
+destroy swapped its slot (stale -> re-acquire and retry, unbounded since destroy
+churn is finite) and, if the slot is still current, retries a bounded number of
+times for the brief window where a just-destroyed sibling incarnation has not yet
+released its log/dir. A CAS does NOT apply here - the contended resource is the
+filesystem (dir + Keratin log), not an in-memory word; the registry slot-map
+already uses compare_and_swap correctly. So the real design axis is "optimistic
+retry" vs "explicit serialization". Retry wins for now because destroy_partition
+is a cold repartition-retirement path, so a little spin/yield under contention is
+fine, and the fix is ~20 local lines.
+
+FUTURE ESCAPE HATCH (correctness-by-construction, if churn ever gets hot or the
+bounded retry proves insufficient): serialize init against destroy. Mark a slot
+"initializing" (a flag + Notify on QueueSlot); have destroy_partition WAIT for the
+displaced slot's in-flight init to finish (then shut it down) before trashing the
+dir. That closes the window by construction - no no-such-file, no already-open, no
+retry/spin at all - at the cost of more slot state and more teardown edge cases.
+Reach for this if destroy/create contention becomes a hot path or the retry bound
+ever has to grow.
+
+## Stroma queue-handle lifecycle: a real concurrency-safety issue (found 2026-06-20)
+
+A pre-existing flaky test (concurrent_destroyers_and_materializers_stay_consistent)
+turned out to pin a genuine design weakness in Stroma's per-partition handle
+lifecycle, surfaced by amplifying the test (destroyers + materializers + queue_handle
+"reader" victims, run in rounds). Symptoms, in order of discovery:
+  1. queue_handle's lazy init races destroy_partition: the dir/log gets trashed mid
+     init -> Io("No such file") / Io("File exists").
+  2. Io("Keratin already open ..."): a NEW incarnation's init opens a flock
+     (root/.keratin.lock) still held by a prior incarnation's handle.
+  3. At extreme scale the test HANGS (a stuck await / deadlock), not just errors.
+
+ROOT CAUSE (the architectural part): `QueueHandle` is a STRONG handle that owns the
+Keratin logs (and thus the flock). Anyone holding a clone - the returned handle, the
+spawned periodic_snapshot task - pins those logs open. So destroy/evict can never
+truly reclaim a partition while a holder exists; a racing build can be orphaned (its
+slot swapped out after it published) and then nobody shuts it down, leaking the flock
+forever -> permanent "already open". Keratin makes this worse: shutdown() releases the
+flock only AFTER a writer-task ack (ms-scale under load), and Keratin::Drop early
+-returns if shutdown_started is set - so a shutdown() that errors after setting the
+flag but before unlocking leaks the lock permanently (Drop won't retry it), and
+destroy does `shutdown().await.map_err(..)?` so it bails before renaming, leaving a
+locked root behind.
+
+Patches tried (all partial; left UNCOMMITTED): (a) optimistic retry on stale slot;
+(b) Dekker-style begin_init/wait_init_done serialization so destroy waits for an in
+-flight build - but the registry CAS is ArcSwap Acquire/AcqRel, not SeqCst, so the
+double-check is not airtight and destroy can still miss a build; (c) self-cleanup
+(builder shuts down its own handle if its slot went stale) - reduces orphans but does
+not fix the shutdown-latency / shutdown-error-leaks-lock windows. None make it safe by
+construction; it stays whack-a-mole.
+
+PROPER FIX (converged design - handle as a re-resolved ticket, safe by construction):
+  - The log-owning handle lives ONLY in the registry slot; never hand out a strong,
+    storable clone. `queue_handle` returns a lightweight TICKET = { Arc<ArcSwap<
+    Registry>> + key (tp,part,group) }. Each op re-resolves the current live handle
+    from the registry by key, so a stale ticket resolves to the current incarnation or
+    "gone" - it can never pin a dead incarnation's logs. Destroy/recreate just swaps
+    what's under the key.
+  - Non-leakable resolved handle, two API options (offer both):
+      * `resolve() -> Option<Handle>` via Weak upgrade - ergonomic, no closure; a
+        stored Weak does not pin, upgrade fails after destroy.
+      * `with(|h| ...)` closure form - the borrow can't escape the op (strict mode).
+  - Per-op cost is just an ArcSwap load + hash lookup (cheap; cacheable within a
+    batch). This is a real refactor: QueueHandle is used across all Stroma ops and via
+    the stroma_core API (broker/replication), so it touches many call sites.
+  INTERIM (smaller, deterministic) mitigation if the full refactor is deferred: make
+  the flock release reliable + always-called - (1) ensure Keratin releases the lock
+  even when shutdown errors (unlock independent of the writer-ack, and let Drop release
+  if shutdown didn't); (2) ensure every displaced incarnation is shut down (destroy /
+  evict / self-clean) without `?`-bailing before the unlock; (3) consider a Keratin
+  `open` that WAITS for a prior holder's release with a tri-state outcome
+  (nothing-to-wait / already-released / waited) and a timeout that surfaces a real
+  hang instead of spin-retrying. That removes the latency races and the permanent leak
+  without the full ticket refactor, but is not safe-by-construction against future
+  handle-pinning.
+
+REPRODUCER: the amplified test (destroyers + materializers + queue_handle readers that
+must never spuriously fail, run in rounds) at "mouse" scale (~8 rounds x 24 tasks, 4
+threads) reproduces the error in round 0; at "bear" scale (~40 x 96, 8 threads) it
+also exposes the hang. Keep both as graduated trip-wires (one parameterized helper,
+two entry points) once the engine is fixed.
