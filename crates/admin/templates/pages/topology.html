@@ -150,20 +150,25 @@ function computeLayout(nodes) {
     return { positions, width, height };
   }
 
-  const gapX = 34, gapY = 30;
+  const gapX = 34, gapY = 26;
   const cols = Math.min(5, Math.ceil(Math.sqrt(n)));
   const rows = Math.ceil(n / cols);
-  const width = cols * CARD_W + (cols + 1) * gapX;
-  const height = bannerTop + rows * CARD_H + (rows + 1) * gapY;
+  const pitchX = CARD_W + gapX;
+  const rowPitch = CARD_H + gapY;
+  // Stagger alternate rows by half a column so cards meet at the corners
+  // (brick / hex packing) rather than lining up side to side. Each card nestles
+  // into the pocket between two cards in the row above, which also keeps owner
+  // to follower edges from running collinear straight through a whole row.
+  const stagger = pitchX / 2;
+  const blockWidth = (cols - 1) * pitchX + CARD_W + stagger;
+  const width = blockWidth + 2 * gapX;
+  const height = bannerTop + rows * rowPitch + gapY;
+  const originX = (width - blockWidth) / 2 + CARD_W / 2;
   nodes.forEach((node, i) => {
     const r = Math.floor(i / cols), c = i % cols;
-    // Center the (possibly short) final row under the rest.
-    const inRow = r === rows - 1 ? n - cols * r : cols;
-    const rowWidth = inRow * CARD_W + (inRow - 1) * gapX;
-    const startX = (width - rowWidth) / 2 + CARD_W / 2;
     positions.set(node.node_id, {
-      x: startX + c * (CARD_W + gapX),
-      y: bannerTop + gapY + CARD_H / 2 + r * (CARD_H + gapY),
+      x: originX + c * pitchX + (r % 2) * stagger,
+      y: bannerTop + gapY + CARD_H / 2 + r * rowPitch,
     });
   });
   return { positions, width, height };
