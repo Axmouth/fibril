@@ -785,5 +785,12 @@ deliveries), NOT on the owner-operation lease, and force-shutdown the logs. They
 only on a QUIESCED partition - the caller must freeze + drain owner operations first
 (freeze_queue_for_transition), which destroy already documents. The ticket change does not
 regress this (it was already unprotected if the contract is violated) and degrades more
-gracefully (ActorGone, no flock leak). Optional belt-and-suspenders: drain owner ops inside
-evict/destroy so the contract is self-enforced. Rematerialize-on-completion deferred.
+gracefully (ActorGone, no flock leak). NOW SELF-ENFORCED (keratin 6970840): evict +
+destroy_partition call QueueHandleInner::quiesce_for_teardown() before the shutdown
+sequence - it freezes the owner (new owner ops ERROR rather than block, so no hang;
+`pause` would have risked one) and waits for in-flight owner ops to drain, so a
+durable-but-not-yet-applied append is never cut off. Role-agnostic (followers/frozen have
+no owner ops). Test: unmaterialize_waits_for_in_flight_owner_operation_to_drain.
+Rematerialize-on-completion deferred (assessed unnecessary). Separately, the snapshot task
+is now spawned only AFTER recovery (keratin 7ec115f) so a failed build never leaves a task
+parked in wait_recovery_complete pinning the dead incarnation.

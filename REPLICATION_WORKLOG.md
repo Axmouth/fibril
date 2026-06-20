@@ -4226,9 +4226,14 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   'static task (pinning is a compile error). Control + snapshot tasks hold the ticket
   (Weak), resolve per use, self-exit when gone. Bench: resolve() ~3.9 ns/op (once per
   batch on hot paths). Full keratin workspace 285 passed; fibril builds across boundary.
-  Remaining sub-items (low prio): lifecycle_locks map pruning + bench; optional owner-op
-  drain inside evict/destroy (self-enforce the teardown contract); rematerialize-on-
-  completion (deferred, assessed unnecessary). See STROMA_HANDLE_REDESIGN.md.
+  Follow-ups DONE: snapshot task spawned after recovery so a failed build leaves no
+  parked task pinning the dead incarnation (keratin 7ec115f); owner-op drain inside
+  evict/destroy via quiesce_for_teardown so the teardown contract is self-enforced -
+  freezes the owner (new ops error, no hang) + waits in-flight ops to drain
+  (keratin 6970840, with a deterministic drain test).
+  Remaining sub-items (very low prio, unlikely pre-merge): lifecycle_locks map pruning +
+  bench (rare optimization, no latency/throughput impact, memory unlikely to matter);
+  rematerialize-on-completion (deferred, assessed unnecessary). See STROMA_HANDLE_REDESIGN.md.
 
 ### B. Correctness / durability (post-merge)
 - Recovery event->message reference verification + FAIL-LOUD on mismatch; follower
