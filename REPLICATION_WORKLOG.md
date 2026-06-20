@@ -4244,10 +4244,13 @@ only when picked up.) Source tags: [WL] [PLAN] [DN] [MEM]. Tiered, not ordered.
   recovery.on_mismatch = quarantine (default: park only that partition, broker stays up) |
   refuse (readiness 503) | ignore (auto truncate-to-valid + continue). repair_partition
   truncates-to-valid and clears quarantine (operator-triggered, also via admin banner +
-  /readyz). FOLLOW-UPS: fold decode/CRC record corruption into the same quarantine+truncate
-  path (currently hard-errors); re-replicate-from-owner repair mode (cluster). The
-  steady-state follower invariant (events never ref unreceived msgs) is a separate runtime
-  assert -- still TODO.
+  /readyz). FOLLOW-UPS DONE: corrupt-record (decode/CRC) failures folded into the same
+  quarantine+truncate machinery (keratin 7b392d2); re-replicate-from-owner for FOLLOWERS
+  needs no new code - truncate-to-valid drops the bad suffix and the existing follower
+  replication worker re-fetches it from the owner on its next catch-up (it retries through
+  the quarantine), documented + stated in the admin banner. REMAINING (small, optional): a
+  per-partition quarantine metric for scraping (admin/readyz already surface it); the
+  steady-state follower invariant (events never ref unreceived msgs) as a runtime assert.
 - Idempotent producer dedup (broker reads fibril.client.producer_id/seq ->
   effectively-once; headers already on wire) [WL/DN/PLAN phase8]
 - Recovery gate is the prerequisite for parallel-fsync (subsumed by the above) [WL]

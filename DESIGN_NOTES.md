@@ -832,17 +832,22 @@ REPAIR (operator-triggered, never auto - except the Ignore policy):
   suffix from the first dangling ref (Keratin destructive_reset_to_checkpoint, follower-
   gated, so we briefly assume follower role). Since the missing messages are a contiguous
   tail, this drops exactly all events for the missing messages.
-- Re-replicate from owner (FUTURE, cluster): a follower drops its local log and refetches
-  the authoritative one. Invents nothing. Cleanest when a healthy peer exists.
+- Re-replicate from owner (DONE for followers, via EXISTING machinery - no new code):
+  truncate-to-valid drops the bad event-log suffix; on a FOLLOWER the existing follower
+  replication worker then re-fetches exactly that dropped suffix from the owner on its next
+  catch-up tick (it pulls from the now-lower local next_offset). The worker retries through
+  the quarantine (generic error arm -> retry_poll_ms -> continue), so once repair clears the
+  quarantine it catches up automatically. So "follower re-replicates to fix" == truncate +
+  the worker; an owner / single node has no peer, so the suffix is lost. The admin banner
+  states this so an operator does not fear data loss on a follower.
 
-RELATED, SEPARATE: corrupt RECORD (CRC/decode failure) mid-log. THIS is the real mid-log
-failure (a dangling REF cannot be mid-log). Today recover_events_from_log returns
-StromaError::Decode and aborts. It SHOULD reuse this same quarantine+truncate machinery:
-"bad event at offset N -> quarantine -> repair = truncate to N". Key point: skip-the-bad-
-record-and-keep-scanning is UNSAFE - dropping a mid-log event loses a state transition and
-leaves inconsistent in-memory state - so truncate-at-the-bad-record is the safe repair,
-same as dangling. FOLLOW-UP: fold decode/CRC corruption into the quarantine path (currently
-hard-errors).
+RELATED: corrupt RECORD (CRC/decode failure) mid-log - the genuinely mid-log failure (a
+dangling REF can only be a lost-tail suffix). DONE (keratin 7b392d2): folded into the same
+machinery - the first undecodable record stops the scan, quarantines (or ignore=auto-
+truncate / refuse), and repairs by truncating at that offset. Skip-the-bad-record-and-keep-
+scanning is UNSAFE (drops a state transition -> inconsistent state), so truncate-at-the-
+record is the safe repair, same as dangling. RecoveryMismatch + QuarantineInfo carry a
+single human-readable `reason` covering both kinds.
 
 SURFACING (DONE, fibril a17f1d7): config knob recovery.on_mismatch = quarantine|refuse|
 ignore (FIBRIL_RECOVERY_ON_MISMATCH/TOML) applied to the engine at startup; QueueEngine

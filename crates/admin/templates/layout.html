@@ -156,7 +156,11 @@
         const policy = data.policy ? ` (policy: ${esc(data.policy)})` : "";
         el.innerHTML = `
           <div class="quarantine-title">⚠ ${items.length} queue(s) quarantined - must be resolved before they continue${policy}</div>
-          <ul class="quarantine-list">${rows}</ul>`;
+          <ul class="quarantine-list">${rows}</ul>
+          <div class="quarantine-note">Repair drops the unrecoverable event-log suffix.
+            On a <strong>follower</strong> the owner re-replicates the dropped suffix
+            automatically (no data loss); on an <strong>owner / single node</strong> that
+            data is gone.</div>`;
         el.hidden = false;
         el.querySelectorAll(".quarantine-repair").forEach((btn) => {
           btn.addEventListener("click", () =>
