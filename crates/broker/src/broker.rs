@@ -713,10 +713,10 @@ impl Drop for ConsumerLease {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct QueueKey {
-    tp: Topic,
-    part: Partition,
-    group: Option<Group>,
+pub(crate) struct QueueKey {
+    pub(crate) tp: Topic,
+    pub(crate) part: Partition,
+    pub(crate) group: Option<Group>,
 }
 
 /// Tag -> delivery record (so we can validate settle)
@@ -1353,45 +1353,6 @@ fn shrink_sources(r: u32, n_new: u32, n_old: u32) -> impl Iterator<Item = u32> {
     (r..n_old).step_by(step)
 }
 
-/// Cheap shared handle for publish-confirm replication waits inside
-/// per-queue confirm loops.
-#[derive(Clone)]
-pub struct ReplicationConfirmGate {
-    progress: Arc<DashMap<QueueKey, Arc<ReplicationProgressCell>>>,
-    assignments: Arc<DashMap<QueueKey, PartitionAssignment>>,
-    cfg: Arc<ArcSwap<BrokerConfig>>,
-    timing: Arc<ReplicationTimingMetrics>,
-}
-
-/// One follower's last-reported durable progress, with the report time used to
-/// decide in-sync membership (a follower that stopped reporting falls out).
-#[derive(Debug, Clone, Copy)]
-struct FollowerProgress {
-    message_next: Offset,
-    event_next: Offset,
-    last_report: std::time::Instant,
-}
-
-/// Follower durable progress for one queue, plus a waiter wake-up.
-#[derive(Debug, Default)]
-pub struct ReplicationProgressCell {
-    /// follower node id -> last-reported durable progress
-    followers: std::sync::Mutex<std::collections::HashMap<String, FollowerProgress>>,
-    changed: Notify,
-}
-
-impl ReplicationProgressCell {
-    /// Lock the progress map, recovering the guard if a previous holder panicked
-    /// (a poisoned lock here just means slightly stale progress, never unsafe).
-    fn lock_followers(
-        &self,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, FollowerProgress>> {
-        self.followers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-}
-
 impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
     pub fn new(engine: E, cfg: BrokerConfig, metrics: Option<Arc<BrokerStats>>) -> Arc<Self> {
         Self::new_with_ownership(engine, cfg, metrics, Arc::new(OwnAllQueues))
@@ -1625,103 +1586,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.replication_confirm_gate()
             .await_confirm(key, offset)
             .await
-    }
-}
-
-impl ReplicationConfirmGate {
-    /// See `Broker::await_replication_confirm`.
-    pub async fn await_confirm(&self, key: &QueueKey, offset: Offset) -> Result<(), BrokerError> {
-        let Some(assignment) = self.assignments.get(key).map(|a| a.clone()) else {
-            return Ok(());
-        };
-        let requirement = assignment.durability_requirement().map_err(|error| {
-            BrokerError::InvalidArgument(format!(
-                "replication durability unsatisfiable for {}/{}: {error:?}",
-                key.tp, key.part
-            ))
-        })?;
-        // The owner's local durable write is one of the required nodes.
-        let required_followers = requirement.nodes.saturating_sub(1);
-        if required_followers == 0 {
-            return Ok(());
-        }
-        let _replica_confirm_wait_timer = self.timing.replica_confirm_wait.timer();
-
-        let cfg = self.cfg.load();
-        let timeout_ms = cfg.replication_confirm_timeout_ms;
-        let min_in_sync = cfg.replication_min_in_sync_replicas;
-        let isr_timeout = std::time::Duration::from_millis(cfg.replication_isr_timeout_ms);
-
-        let cell = self
-            .progress
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
-            .clone();
-
-        // In-sync replica floor (Kafka min.insync.replicas). A precondition on
-        // current cluster health, NOT something to wait on: if too few replicas
-        // are healthy we refuse fast so a degraded cluster errors immediately
-        // instead of hanging every publish until the confirm timeout. The
-        // briefly-unhealthy cold-start window (a follower that has not pulled
-        // yet) is self-healing — followers report continuously, so a client
-        // retry rides through it. in-sync = owner + followers that reported
-        // within the freshness window. A floor of 1 (the default) is satisfied
-        // by the owner alone, so skip the work entirely.
-        if min_in_sync > 1 {
-            let in_sync = {
-                let followers = cell.lock_followers();
-                let now = std::time::Instant::now();
-                let fresh = assignment
-                    .followers
-                    .iter()
-                    .filter(|follower| {
-                        followers.get(*follower).is_some_and(|progress| {
-                            now.duration_since(progress.last_report) <= isr_timeout
-                        })
-                    })
-                    .count();
-                1 + fresh
-            };
-            if in_sync < min_in_sync {
-                return Err(BrokerError::NotEnoughInSyncReplicas {
-                    topic: key.tp.clone(),
-                    partition: key.part,
-                    in_sync,
-                    required: min_in_sync,
-                });
-            }
-        }
-
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-
-        // Wait for the durability ack count: enough followers durable past this
-        // offset. Unlike the ISR floor, this IS a wait — the acks are in flight
-        // and just need replication to catch up to the offset.
-        loop {
-            let satisfied = {
-                let followers = cell.lock_followers();
-                assignment
-                    .followers
-                    .iter()
-                    .filter(|follower| {
-                        followers
-                            .get(*follower)
-                            .is_some_and(|progress| progress.message_next > offset)
-                    })
-                    .count()
-                    >= required_followers
-            };
-            if satisfied {
-                return Ok(());
-            }
-            let notified = cell.changed.notified();
-            if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return Err(BrokerError::Unknown(format!(
-                    "publish confirm timed out after {timeout_ms}ms: {:?} requires {} follower acknowledgement(s) past offset {offset} on {}/{}",
-                    assignment.durability, required_followers, key.tp, key.part
-                )));
-            }
-        }
     }
 }
 
