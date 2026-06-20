@@ -843,6 +843,18 @@ input[type="checkbox"] {
   color: var(--accent);
 }
 
+.queue-caret {
+  display: inline-block;
+  width: 0.9rem;
+  color: var(--muted, #8a93a6);
+  font-size: 0.7rem;
+}
+
+.queue-part-cell {
+  padding-left: 1.6rem;
+  color: var(--muted, #8a93a6);
+}
+
 .replica-status-caught_up {
   background: var(--ok-soft);
   border-color: color-mix(in srgb, var(--ok) 34%, transparent);

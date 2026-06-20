@@ -25,7 +25,14 @@ function escapeHtml(value) {
 }
 
 function queueKey(item) {
-  return `${item.topic}\u0000${item.group || ""}`;
+  return `${item.topic}\u0000${item.partition}\u0000${item.group || ""}`;
+}
+
+// Topics whose per-partition rows are expanded. Module-level so the state
+// survives the 2s refresh that re-renders the table.
+const expandedTopics = new Set();
+function topicKeyOf(group, topic) {
+  return `${group}\u0000${topic}`;
 }
 
 function formatDuration(ms) {
@@ -108,11 +115,12 @@ async function refresh() {
   const unloading = queues.filter(item => item.evicting).length;
   const tracked = activitySummary.tracked_queue_count ?? data.broker_activity?.length ?? 0;
 
-  const grouped = {};
+  const num = (v) => (typeof v === "number" ? v : 0);
+  const byGroup = {};
   for (const item of queues) {
     const group = item.group || "default";
-    if (!grouped[group]) grouped[group] = [];
-    grouped[group].push(item);
+    (byGroup[group] ||= {});
+    (byGroup[group][item.topic] ||= []).push(item);
   }
 
   const summary = `
@@ -205,16 +213,41 @@ async function refresh() {
     `;
   }
 
-  const html = Object.entries(grouped)
+  const html = Object.entries(byGroup)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([group, items]) => {
-      const rows = items
-        .sort((a, b) => a.topic.localeCompare(b.topic))
-        .map(item => {
+    .map(([group, topics]) => {
+      const topicEntries = Object.entries(topics).sort(([a], [b]) => a.localeCompare(b));
+      const topicRows = topicEntries.map(([topic, parts]) => {
+        parts.sort((a, b) => num(a.partition) - num(b.partition));
+        const open = expandedTopics.has(topicKeyOf(group, topic));
+        const loaded = parts.filter(p => p.materialized).length;
+        const sumAct = (field) => parts.reduce((acc, p) => acc + num(activityByQueue.get(queueKey(p))?.[field]), 0);
+        const sumState = (field) => parts.filter(p => p.materialized).reduce((acc, p) => acc + num(p.state[field]), 0);
+        const dlqItem = parts.find(p => p.materialized);
+        const dlq = dlqItem
+          ? `${dlqItem.state.dlq_policy}${dlqItem.state.dlq_max_retries != null ? ` (max ${dlqItem.state.dlq_max_retries})` : ""}`
+          : "-";
+        const dataAttrs = `data-group="${escapeHtml(group)}" data-topic="${escapeHtml(topic)}"`;
+        const agg = `
+          <tr class="queue-row queue-agg-row" ${dataAttrs} style="cursor:pointer">
+            <td class="queue-topic-cell" title="${escapeHtml(topic)}"><span class="queue-caret">${open ? "▼" : "▶"}</span> ${escapeHtml(topic)}</td>
+            <td>${loaded}/${parts.length} loaded</td>
+            <td class="text-right">${sumAct("active_publishers")}</td>
+            <td class="text-right">${sumAct("active_subscribers")}</td>
+            <td class="text-right">-</td>
+            <td>-</td>
+            <td>-</td>
+            <td class="text-right">${sumState("ready_count")}</td>
+            <td class="text-right">${sumState("inflight_count")}</td>
+            <td class="text-right">-</td>
+            <td>${escapeHtml(dlq)}</td>
+            <td>-</td>
+          </tr>`;
+        const childRows = parts.map(item => {
           const activity = activityByQueue.get(queueKey(item));
           return `
-          <tr class="${rowClass(item, activity)}">
-            <td class="queue-topic-cell" title="${escapeHtml(item.topic)}">${escapeHtml(item.topic)}</td>
+          <tr class="${rowClass(item, activity)} queue-part-row" ${dataAttrs}${open ? "" : ' style="display:none"'}>
+            <td class="queue-part-cell">partition ${num(item.partition)}</td>
             <td><span class="${stateClass(item, activity)}">${escapeHtml(loadStateLabel(item, activity))}</span></td>
             <td class="text-right">${activity?.active_publishers ?? 0}</td>
             <td class="text-right">${activity?.active_subscribers ?? 0}</td>
@@ -226,19 +259,19 @@ async function refresh() {
             <td class="text-right">${formatQueueStateValue(item, item.state.settled_until)}</td>
             <td>${item.materialized ? escapeHtml(`${item.state.dlq_policy}${item.state.dlq_max_retries != null ? ` (max ${item.state.dlq_max_retries})` : ""}`) : "-"}</td>
             <td><a class="queue-messages-link" href="${inspectHref(item)}" title="Inspect messages">Inspect</a></td>
-          </tr>
-        `;
-        }).join('');
+          </tr>`;
+        }).join("");
+        return agg + childRows;
+      }).join("");
 
+      const partCount = topicEntries.reduce((acc, [, parts]) => acc + parts.length, 0);
       return `
         <h5 class="metrics-header queue-group-heading">Group: ${escapeHtml(group)}</h5>
-        <p class="queue-group-note">
-          ${items.filter(item => item.materialized).length} loaded / ${items.length} indexed queue(s)
-        </p>
+        <p class="queue-group-note">${topicEntries.length} topic(s), ${partCount} partition(s) - click a topic to expand its partitions</p>
         <div class="queue-table-wrap">
           <table class="table table-compact narrow metric-table queue-table">
             <tr>
-              <th>Topic</th>
+              <th>Topic / partition</th>
               <th>Memory state</th>
               <th class="text-right">Publishers</th>
               <th class="text-right">Subscribers</th>
@@ -251,7 +284,7 @@ async function refresh() {
               <th>DLQ policy</th>
               <th>Messages</th>
             </tr>
-            ${rows}
+            ${topicRows}
           </table>
         </div>
       `;
@@ -259,6 +292,21 @@ async function refresh() {
 
   container.innerHTML = summary + replicationHtml + html;
 }
+
+document.getElementById("queues").addEventListener("click", (event) => {
+  const row = event.target.closest(".queue-agg-row");
+  if (!row) return;
+  const g = row.dataset.group;
+  const t = row.dataset.topic;
+  const tk = topicKeyOf(g, t);
+  const open = !expandedTopics.has(tk);
+  if (open) expandedTopics.add(tk); else expandedTopics.delete(tk);
+  const caret = row.querySelector(".queue-caret");
+  if (caret) caret.textContent = open ? "▼" : "▶";
+  document.querySelectorAll(".queue-part-row").forEach((r) => {
+    if (r.dataset.group === g && r.dataset.topic === t) r.style.display = open ? "" : "none";
+  });
+});
 
 setInterval(refresh, 2000);
 refresh();
