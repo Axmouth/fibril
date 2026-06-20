@@ -22,8 +22,8 @@ use crate::broker::{Broker, BrokerConfig, BrokerError, FOLLOWER_STREAM_BUFFER_BA
 use crate::coordination::PartitionAssignment;
 use crate::queue_engine::{
     FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, KDurability,
-    OwnerStateCheckpoint, QueuePromotionOutcome, ReplicatedAppendOutcome, ReplicatedEventBatch,
-    ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, StromaEngine,
+    OwnerStateCheckpoint, QueueEngine, QueuePromotionOutcome, ReplicatedAppendOutcome,
+    ReplicatedEventBatch, ReplicatedMessageBatch, ReplicatedQueueApplyOutcome, StromaEngine,
 };
 
 #[derive(Debug)]
@@ -2168,4 +2168,93 @@ where
         self.as_ref()
             .export_owner_state_checkpoint(topic, partition, group)
     }
+}
+
+impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
+    pub fn has_follower_replication_worker(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> bool {
+        self.follower_replication_workers
+            .contains_key(&crate::coordination::QueueIdentity::new(
+                topic, partition, group,
+            ))
+    }
+
+    pub async fn follower_replication_worker_snapshot(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Option<FollowerReplicationWorkerState> {
+        let worker =
+            self.follower_replication_workers
+                .get(&crate::coordination::QueueIdentity::new(
+                    topic, partition, group,
+                ))?;
+        Some(worker.value().state.lock().await.clone())
+    }
+
+    pub(crate) fn ensure_follower_replication_worker(
+        &self,
+        queue: &crate::coordination::QueueIdentity,
+    ) -> Arc<FollowerReplicationWorkerRuntime> {
+        self.follower_replication_workers
+            .entry(queue.clone())
+            .or_insert_with(|| Arc::new(FollowerReplicationWorkerRuntime::new(0, 0)))
+            .value()
+            .clone()
+    }
+
+    pub(crate) async fn stop_follower_replication_worker(
+        &self,
+        queue: &crate::coordination::QueueIdentity,
+    ) -> bool {
+        let Some((_, worker)) = self.follower_replication_workers.remove(queue) else {
+            return false;
+        };
+        worker.stop_and_wait().await;
+        true
+    }
+
+    pub(crate) async fn stop_all_follower_replication_workers(&self) {
+        let queues = self
+            .follower_replication_workers
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        for queue in queues {
+            self.stop_follower_replication_worker(&queue).await;
+        }
+    }
+
+    pub(crate) fn follower_replication_worker_runtime(
+        &self,
+        queue: &crate::coordination::QueueIdentity,
+    ) -> Result<Arc<FollowerReplicationWorkerRuntime>, BrokerError> {
+        self.follower_replication_workers
+            .get(queue)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| {
+                BrokerError::InvalidArgument(format!(
+                    "no follower replication worker registered for {}/{}/{}",
+                    queue.topic,
+                    queue.partition,
+                    queue.group.as_deref().unwrap_or("<default>")
+                ))
+            })
+    }
+
+    pub(crate) fn follower_replication_worker(
+        &self,
+        queue: &crate::coordination::QueueIdentity,
+    ) -> Result<Arc<AsyncMutex<FollowerReplicationWorkerState>>, BrokerError> {
+        Ok(self
+            .follower_replication_worker_runtime(queue)?
+            .state
+            .clone())
+    }
+
 }

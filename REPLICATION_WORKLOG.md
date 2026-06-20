@@ -4422,7 +4422,31 @@ build clean):
   replication.rs is now ~1050 lines; broker.rs shed ~700. All cross-file refs use
   pub(crate) + the `pub use crate::replication::*` re-export so external paths hold.
 
-BROKER — IMPL-METHOD MOVE: VIABLE, NOT YET DONE (execution-ready plan below).
+BROKER — IMPL-METHOD MOVE: DONE for the clean parts (bricks 4 + 5).
+  - Brick 4 (commit 1dcc212): the contiguous `impl Broker<StromaEngine>` replication
+    run (17 methods, ~850 lines: read_owner_replication_records ..
+    spawn_follower_replication_worker_loop) moved into a SPLIT impl block in
+    replication.rs. Cost was as measured: ~11 pub(crate) bumps (fields engine,
+    replication_timing, task_group, shutdown_publishers, follower_replication_workers,
+    replication_notify; type QueueLoopState; methods ensure_queue_owner, queue,
+    follower_replication_worker_runtime, follower_replication_worker; const
+    FOLLOWER_STREAM_BUFFER_BATCHES) + a handful of type imports. The feared import
+    chase was trivial. 190 broker tests green.
+  - Brick 5 (commit 6bec442): the BrokerOwnerReplicationPeer trait impls
+    (for Broker<StromaEngine> and for Arc<T>) - pure delegation, zero new visibility.
+  STILL IN broker.rs (the messier, lower-priority tail - scattered impl<E> Broker<E>
+  methods interleaved with core broker logic): record_follower_replication_progress
+  (~1439), follower_replication_progress (~1526), replication_confirm_gate +
+  await_replication_confirm (~1565-1589, a clean pair), the follower-worker lifecycle
+  run (has_/snapshot/ensure/stop/stop_all_follower_replication_worker(s) +
+  follower_replication_worker_runtime/worker, ~2047-2132, contiguous), and the
+  observability reports (owned_replica_observability_report ~2239,
+  follower_replication_observability_report ~2332). These are small + interleaved;
+  move opportunistically (the worker-lifecycle run and the confirm pair are the two
+  cleanest contiguous candidates). Original measured-viability notes for the big run
+  (now executed) preserved below for reference:
+
+BROKER — IMPL-METHOD MOVE: VIABLE (REFERENCE - big run already executed as brick 4):
   Splitting an impl across files in the same crate is idiomatic and is what every
   brick above already relies on; pub(crate) never leaks past the crate, so the move
   is NOT an encapsulation regression - the real costs are (a) a wider pub(crate)
