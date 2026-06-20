@@ -140,6 +140,18 @@ fn bench_encode_decode(c: &mut Criterion) {
         "64k_no_headers",
         publish_frame(64 * 1024, None, HashMap::new()),
     );
+
+    // Large payloads spanning the BLOCKING_DECODE_BYTES crossover region. Decode
+    // time is ~linear in payload bytes, so timings here give the per-byte decode
+    // rate used to derive the offload threshold (block-time budget / ns-per-byte):
+    // the point is scheduler fairness (don't hog an async worker), not throughput.
+    for &kib in &[256usize, 1024, 4096, 16384] {
+        bench_case(
+            c,
+            &format!("{kib}k_no_headers"),
+            publish_frame(kib * 1024, None, HashMap::new()),
+        );
+    }
 }
 
 fn assert_publish_roundtrip(got: &Publish, expected: &Publish) {

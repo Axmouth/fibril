@@ -949,7 +949,18 @@ async fn decode_response_frame<T>(frame: Frame) -> Result<T, ProtocolReplication
 where
     T: DeserializeOwned + Send + 'static,
 {
-    const BLOCKING_DECODE_BYTES: usize = 1 << 20;
+    // Decode inline below this size, else offload to spawn_blocking. This is a
+    // SCHEDULER-FAIRNESS threshold, not a throughput one: inline decode is faster
+    // (no threadpool handoff), but a long CPU-bound decode hogs the async worker
+    // and starves other tasks. So the threshold is "the payload whose decode
+    // exceeds the time we're willing to block a worker inline".
+    //
+    // Derived from `cargo bench --bench encode -- decode_publish/...`: decode runs
+    // ~20 GB/s (cache-cold large) to ~50 GB/s (in-cache), so 4 MiB is ~80-200us
+    // inline. That fits a ~150us cooperative budget with headroom for replication
+    // batches (which do more per-record work than this payload-memcpy-bound bench).
+    // Re-bench the actual ReplicationReadOk many-records case before raising further.
+    const BLOCKING_DECODE_BYTES: usize = 4 << 20;
 
     if frame.payload.len() < BLOCKING_DECODE_BYTES {
         return try_decode(&frame)
