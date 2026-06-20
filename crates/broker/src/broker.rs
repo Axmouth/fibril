@@ -1294,7 +1294,7 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     pub(crate) task_group: Arc<TaskGroup>,
 
     metrics: Option<Arc<BrokerStats>>,
-    ownership: Arc<dyn QueueOwnership>,
+    pub(crate) ownership: Arc<dyn QueueOwnership>,
 
     /// Per-queue durable replication progress reported by followers (from
     /// stamped replication reads). Drives publish-confirm durability policies.
@@ -1433,49 +1433,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         self.cfg.load_full()
     }
 
-    /// Record a follower's durable replication progress (from a stamped
-    /// replication read: followers apply durably, so their pull offsets are
-    /// durable watermarks). Wakes any publish confirms waiting on policy.
-    pub fn record_follower_replication_progress(
-        &self,
-        topic: &str,
-        partition: Partition,
-        group: Option<&str>,
-        follower_node_id: &str,
-        durable_message_next: Offset,
-        durable_event_next: Offset,
-    ) {
-        let key = QueueKey {
-            tp: topic.to_string(),
-            part: partition,
-            group: group.map(str::to_string),
-        };
-        let cell = self
-            .replication_progress
-            .entry(key.clone())
-            .or_insert_with(|| Arc::new(ReplicationProgressCell::default()))
-            .clone();
-        {
-            let mut followers = cell.lock_followers();
-            let entry = followers
-                .entry(follower_node_id.to_string())
-                .or_insert(FollowerProgress {
-                    message_next: 0,
-                    event_next: 0,
-                    last_report: std::time::Instant::now(),
-                });
-            // Monotonic: late/reordered reports never regress progress.
-            entry.message_next = entry.message_next.max(durable_message_next);
-            entry.event_next = entry.event_next.max(durable_event_next);
-            entry.last_report = std::time::Instant::now();
-        }
-        self.replication_timing.record_follower_progress_report();
-        cell.changed.notify_waiters();
-        // Advance the replica-durable visibility ceiling so newly-committed
-        // messages become deliverable.
-        self.refresh_visibility_ceiling(&key);
-    }
-
     /// Recompute the replica-durable visibility ceiling for a queue from its
     /// cached assignment and follower durable progress, and store it on the
     /// queue loop state for the delivery gate. The committed watermark is the
@@ -1483,7 +1440,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     /// locally), i.e. the highest offset durable on the required number of
     /// replicas. Local-durable queues (nodes <= 1) are left ungated. No-op when
     /// the queue is not yet known locally.
-    fn refresh_visibility_ceiling(&self, key: &QueueKey) {
+    pub(crate) fn refresh_visibility_ceiling(&self, key: &QueueKey) {
         let Some(assignment) = self.assignment_cache.get(key).map(|entry| entry.clone()) else {
             return;
         };
@@ -1520,32 +1477,6 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             .copied()
             .unwrap_or(0);
         qs.set_visibility_ceiling(Some(watermark));
-    }
-
-    /// Reported follower durable progress for one queue (observability/tests).
-    pub fn follower_replication_progress(
-        &self,
-        topic: &str,
-        partition: Partition,
-        group: Option<&str>,
-    ) -> Vec<(String, (Offset, Offset))> {
-        let key = QueueKey {
-            tp: topic.to_string(),
-            part: partition,
-            group: group.map(str::to_string),
-        };
-        self.replication_progress
-            .get(&key)
-            .map(|cell| {
-                let followers = cell.lock_followers();
-                followers
-                    .iter()
-                    .map(|(node, progress)| {
-                        (node.clone(), (progress.message_next, progress.event_next))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
     }
 
     /// Cache the assignment governing a local queue (watcher-maintained).
@@ -2123,155 +2054,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         }
     }
 
-    /// Owner-side replication health: for every queue this broker owns, the
-    /// per-follower durable progress, staleness, and in-sync status against the
-    /// configured floor. Drives replication-lag / ISR-risk topology views.
-    fn owned_replica_observability_report(
-        &self,
-    ) -> (
-        Vec<OwnedQueueReplicaObservability>,
-        OwnedQueueReplicaSummary,
-    ) {
-        let cfg = self.config_snapshot();
-        let isr_timeout = std::time::Duration::from_millis(cfg.replication_isr_timeout_ms);
-        let min_in_sync = cfg.replication_min_in_sync_replicas;
-
-        let mut below_floor_count = 0;
-        let mut owned: Vec<_> =
-            self.assignment_cache
-                .iter()
-                .filter(|entry| {
-                    let key = entry.key();
-                    self.ownership
-                        .owns_queue(&key.tp, key.part, key.group.as_deref())
-                })
-                .map(|entry| {
-                    let key = entry.key();
-                    let assignment = entry.value();
-                    let cell = self.replication_progress.get(key).map(|c| c.clone());
-                    let now = std::time::Instant::now();
-
-                    let followers: Vec<_> = assignment
-                        .followers
-                        .iter()
-                        .map(|node_id| {
-                            let progress = cell
-                                .as_ref()
-                                .and_then(|cell| cell.lock_followers().get(node_id).copied());
-                            let (
-                                durable_message_next,
-                                durable_event_next,
-                                last_report_age_ms,
-                                in_sync,
-                            ) = match progress {
-                                Some(progress) => {
-                                    let age = now.duration_since(progress.last_report);
-                                    (
-                                        progress.message_next,
-                                        progress.event_next,
-                                        Some(age.as_millis().min(u64::MAX as u128) as u64),
-                                        age <= isr_timeout,
-                                    )
-                                }
-                                None => (0, 0, None, false),
-                            };
-                            FollowerReplicaObservability {
-                                node_id: node_id.clone(),
-                                durable_message_next,
-                                durable_event_next,
-                                last_report_age_ms,
-                                in_sync,
-                            }
-                        })
-                        .collect();
-
-                    let in_sync_replicas = 1 + followers.iter().filter(|f| f.in_sync).count();
-                    let below_floor = in_sync_replicas < min_in_sync;
-                    if below_floor {
-                        below_floor_count += 1;
-                    }
-                    OwnedQueueReplicaObservability {
-                        topic: key.tp.clone(),
-                        partition: key.part,
-                        group: key.group.clone(),
-                        durability: format!("{:?}", assignment.durability),
-                        min_in_sync_replicas: min_in_sync,
-                        in_sync_replicas,
-                        below_floor,
-                        followers,
-                    }
-                })
-                .collect();
-        owned.sort_by(|a, b| {
-            a.group
-                .cmp(&b.group)
-                .then_with(|| a.topic.cmp(&b.topic))
-                .then_with(|| a.partition.cmp(&b.partition))
-        });
-        let summary = OwnedQueueReplicaSummary {
-            owned_queue_count: owned.len(),
-            below_floor_count,
-        };
-        (owned, summary)
-    }
-
     pub fn sparse_queue_observability_snapshot(&self) -> Vec<SparseQueueObservability> {
         self.sparse_queue_observability_report().queues
-    }
-
-    fn follower_replication_observability_report(
-        &self,
-    ) -> (
-        Vec<FollowerReplicationWorkerObservability>,
-        FollowerReplicationWorkerSummary,
-    ) {
-        let mut caught_up_count = 0;
-        let mut pending_retry_count = 0;
-        let mut checkpoint_required_count = 0;
-        let mut workers: Vec<_> = self
-            .follower_replication_workers
-            .iter()
-            .map(|entry| {
-                let queue = entry.key();
-                let state = entry
-                    .value()
-                    .state
-                    .try_lock()
-                    .ok()
-                    .map(|state| state.clone());
-                if let Some(state) = &state {
-                    match state.status {
-                        FollowerReplicationWorkerStatus::CaughtUp => caught_up_count += 1,
-                        FollowerReplicationWorkerStatus::PendingRetry => pending_retry_count += 1,
-                        FollowerReplicationWorkerStatus::CheckpointRequired { .. } => {
-                            checkpoint_required_count += 1;
-                        }
-                        FollowerReplicationWorkerStatus::Idle => {}
-                    }
-                }
-                let busy = state.is_none();
-                FollowerReplicationWorkerObservability {
-                    topic: queue.topic.to_string(),
-                    partition: queue.partition,
-                    group: queue.group.as_ref().map(ToString::to_string),
-                    state,
-                    busy,
-                }
-            })
-            .collect();
-        workers.sort_by(|a, b| {
-            a.group
-                .cmp(&b.group)
-                .then_with(|| a.topic.cmp(&b.topic))
-                .then_with(|| a.partition.cmp(&b.partition))
-        });
-        let summary = FollowerReplicationWorkerSummary {
-            follower_worker_count: workers.len(),
-            caught_up_count,
-            pending_retry_count,
-            checkpoint_required_count,
-        };
-        (workers, summary)
     }
 
     pub async fn try_evict_inactive_queue(
