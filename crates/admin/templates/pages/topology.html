@@ -286,7 +286,7 @@ function renderDiagram(data) {
     }, node.broker_addr));
     group.appendChild(el("text", {
       x: pos.x, y: pos.y + 26, "text-anchor": "middle", fill: "#5b8def", "font-size": 11,
-    }, owned ? `owns ${owned} partition(s)` : "no owned partitions");
+    }, owned ? `owns ${owned} partition(s)` : "no owned partitions"));
     svg.appendChild(group);
     cards.set(node.node_id, group);
   });
