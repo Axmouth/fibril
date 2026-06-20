@@ -977,6 +977,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repartition_rejects_zero_partition_count() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/repartition")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "topic": "orders.created", "partition_count": 0 }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_partition_count");
+    }
+
+    #[tokio::test]
+    async fn repartition_reports_unavailable_without_manager() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/repartition")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "topic": "orders.created", "partition_count": 4 }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "repartition_unavailable");
+    }
+
+    #[tokio::test]
+    async fn readyz_ok_when_nothing_quarantined() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn quarantine_get_returns_policy_and_empty_list() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/quarantine")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["policy"].is_string());
+        assert!(body["quarantined"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn coordination_membership_routes_call_manager() {
         let manager = StdArc::new(FakeCoordinationMembershipManager::default());
         let server = Arc::try_unwrap(test_server(RuntimeSettingsLocks::default()).await)
