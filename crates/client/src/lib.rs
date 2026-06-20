@@ -1658,6 +1658,9 @@ impl Client {
             updated.last_refresh_ms = now;
             updated
         });
+        // Full refresh -> prune pooled connections to endpoints that are no
+        // longer owners (e.g. a demoted/dead owner after failover).
+        self.shared.prune_pool_to_topology();
         Ok(topology)
     }
 
@@ -2115,6 +2118,12 @@ impl TopologyCache {
         !self.counts.is_empty()
     }
 
+    /// The set of endpoints that currently own at least one partition. Used to
+    /// prune pooled connections to endpoints that are no longer owners.
+    fn endpoints(&self) -> std::collections::HashSet<SocketAddr> {
+        self.by_queue.values().map(|entry| entry.endpoint).collect()
+    }
+
     fn replace(&mut self, topology: TopologyOk) {
         self.generation = topology.generation;
         self.by_queue.clear();
@@ -2342,9 +2351,35 @@ impl ClientShared {
                 updated.last_refresh_ms = refreshed_at;
                 updated
             });
+            // A full refresh gives the complete current owner set, so prune
+            // pooled connections to endpoints that are no longer owners (e.g. a
+            // demoted/dead owner after failover).
+            self.prune_pool_to_topology();
             return true;
         }
         false
+    }
+
+    /// Drop pooled connections to endpoints that no longer own any partition
+    /// (e.g. a demoted or dead owner after failover), so the pool does not
+    /// accumulate stale slots over a long-lived client's lifetime. Kept:
+    /// - bootstrap endpoints (the always-available fallback route), and
+    /// - any slot that still has active subscriptions (it may be mid-migration;
+    ///   it gets pruned on a later refresh once its subscriptions move).
+    /// A pruned endpoint that is needed again is simply reconnected on demand.
+    fn prune_pool_to_topology(&self) {
+        let live = self.topology.load().endpoints();
+        let bootstrap: std::collections::HashSet<SocketAddr> =
+            self.bootstrap.iter().copied().collect();
+        let mut pool = self.pool.write();
+        pool.retain(|addr, slot| {
+            let has_subscriptions = slot
+                .subscriptions
+                .read()
+                .map(|subs| !subs.is_empty())
+                .unwrap_or(true); // keep on a poisoned lock (conservative)
+            live.contains(addr) || bootstrap.contains(addr) || has_subscriptions
+        });
     }
 
     /// Update the routing cache from a broker redirect (point-update to the new
@@ -4183,6 +4218,55 @@ mod tests {
         let err = publisher.publish("hello").await.unwrap_err();
 
         assert!(matches!(err, FibrilError::Disconnection { .. }));
+    }
+
+    #[tokio::test]
+    async fn prune_pool_drops_dead_owner_after_failover() {
+        let (client, _rx) = client_with_command_rx();
+        let bootstrap_addr = client.shared.bootstrap[0];
+
+        let make_slot = |addr: SocketAddr| -> Arc<EngineSlot> {
+            let (engine, _rx) = engine_with_command_rx();
+            Arc::new(EngineSlot::from_engine(
+                addr,
+                ClientOptions::new(),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(RwLock::new(HashMap::new())),
+                engine,
+                broadcast::channel(ASSIGNMENT_EVENT_CAPACITY).0,
+                Arc::new(std::sync::OnceLock::new()),
+            ))
+        };
+
+        let owner_addr: SocketAddr = "127.0.0.1:7001".parse().unwrap();
+        let dead_addr: SocketAddr = "127.0.0.1:7002".parse().unwrap();
+        {
+            let mut pool = client.shared.pool.write();
+            pool.insert(owner_addr, make_slot(owner_addr));
+            pool.insert(dead_addr, make_slot(dead_addr));
+        }
+
+        // New topology after failover: owner_addr owns a partition, dead_addr
+        // owns nothing.
+        let mut topo = TopologyCache::default();
+        topo.by_queue.insert(
+            ("jobs".to_string(), Partition::new(0), None),
+            OwnerEntry {
+                endpoint: owner_addr,
+                partitioning_version: 0,
+            },
+        );
+        client.shared.topology.store(Arc::new(topo));
+
+        client.shared.prune_pool_to_topology();
+
+        let pool = client.shared.pool.read();
+        assert!(pool.contains_key(&bootstrap_addr), "bootstrap kept");
+        assert!(pool.contains_key(&owner_addr), "current owner kept");
+        assert!(
+            !pool.contains_key(&dead_addr),
+            "dead owner pruned from the pool"
+        );
     }
 
     #[tokio::test]
