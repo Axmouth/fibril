@@ -10,6 +10,7 @@ run() {
 }
 
 run bash -n "$repo_root"/scripts/*.sh
+run bash "$repo_root"/scripts/check-template-js.sh
 run cargo fmt --all -- --check
 rust_test_flags="${RUSTFLAGS:-}"
 if [[ " $rust_test_flags " != *" -Awarnings "* ]]; then
