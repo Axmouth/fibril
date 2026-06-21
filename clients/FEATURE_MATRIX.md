@@ -68,10 +68,10 @@ Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 
 | Feature | Rust | TypeScript |
 | --- | --- | --- |
-| Retry classification (is_retryable / retry_advice) | done | partial (isTransientError only) |
-| Reserved-namespace header validation | done | no |
-| ReliablePublisher helper | done | no |
-| Producer-id dedup headers | done | no |
+| Retry classification (is_retryable / retry_advice) | done | done |
+| Reserved-namespace header validation | done | done |
+| ReliablePublisher helper | done | done |
+| Producer-id dedup headers | done | done (sent; broker dedup pending both sides) |
 | Exclusive consumer groups | done | done (cohort subscribe + member-id mint/carry) |
 | Cohort member id mint/carry | done | done |
 | Assignment events stream (AssignmentChanged) | done | no (broker gate enforces exclusivity; stream deferred) |
