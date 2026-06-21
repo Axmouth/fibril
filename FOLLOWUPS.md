@@ -138,10 +138,23 @@ feature ideas live in their own track, summarized at the end.
     header is unchanged - only bodies moved. Remaining wire fields the protocol
     structs do not carry yet (partition_key, consumer routing) default null/0 and
     get populated by bricks 2-6.
-  - BRICK 2 topology + owner routing: FetchTopology op + cache + owner resolution
-    per (topic, partition) + follow not-owner redirects.
-  - BRICK 3 partitioning: client-side key routing on publish + transparent
-    multi-partition fan-in on subscribe.
+  - BRICK 2 topology + owner routing: DONE (publish path). FetchTopology op +
+    TopologyCache + owner resolution per (topic, partition) + a connection pool
+    keyed by endpoint + follow-redirect retry on confirmed publishes (bounded by
+    maxRedirects). Mirrors the Rust pool/cache shape in idiomatic single-threaded
+    TS (plain Map/object/counter, no locks/atomics). NOTE: subscribe still uses
+    the bootstrap connection - routing subscribes to partition owners is folded
+    into bricks 4-6.
+  - BRICK 3 partitioning: DONE (publish path). routePartition (FNV-1a key routing
+    + keyless round-robin) stamps partition/partition_key/partitioning_version on
+    the wire, byte-exact hashing vs the broker. Still TODO: transparent
+    multi-partition fan-in on subscribe (pairs with the subscribe-routing work in
+    bricks 4-6).
+  - FOLLOWUP (bricks 2-3): a multi-node real-broker smoke for routing/redirects.
+    The unit + integration tests cover routing against the real wire codec, and
+    brick 1 validated the publish path against a live standalone broker, but a
+    ganglion cluster smoke that exercises a real cross-owner redirect is still
+    worth adding (fits the brick 8 examples-as-light-tests runner).
   - BRICK 4 reconnect + reconcile + resume: re-establish subscriptions on reconnect
     including the owner-restart case (wire the already-declared Reconcile* ops, add
     ResumeIdentity/Outcome on Hello).
