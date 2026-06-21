@@ -155,10 +155,17 @@ feature ideas live in their own track, summarized at the end.
     brick 1 validated the publish path against a live standalone broker, but a
     ganglion cluster smoke that exercises a real cross-owner redirect is still
     worth adding (fits the brick 8 examples-as-light-tests runner).
-  - BRICK 4 reconnect + reconcile + resume: re-establish subscriptions on reconnect
-    including the owner-restart case (wire the already-declared Reconcile* ops, add
-    ResumeIdentity/Outcome on Hello).
-  - BRICK 5 failover ride-through (the supervisor equivalent).
+  - BRICK 4 reconnect + reconcile + resume: DONE. ResumeIdentity/Outcome on Hello
+    and the Reconcile* ops were already wired; the gap was the owner-restart case.
+    Reconcile now fires on ANY reconnect that has active subscriptions (not only a
+    resumed session) so a bounced owner's fresh session restores or closes the
+    streams instead of leaving them open-but-unfed. Regression-tested. Still TODO
+    (brick 5): nothing TRIGGERS a reconnect for a purely passive consumer whose
+    connection drops - that needs the subscription supervisor / proactive re-dial.
+  - BRICK 5 failover ride-through (the supervisor equivalent): proactive reconnect
+    of a dropped passive subscription connection + re-subscribe after a Conservative
+    reconcile closes a stream + the transient owner-failover publish retry/backoff
+    deferred from bricks 2-3.
   - BRICK 6 exclusive consumer groups.
   - BRICK 7 reliability: isRetryable/retryAdvice classification, a ReliablePublisher,
     producer-id dedup headers.
