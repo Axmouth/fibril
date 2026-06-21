@@ -1174,3 +1174,59 @@ test("owner restart: reconnect into a fresh session still reconciles subscriptio
     await broker.stop();
   }
 });
+
+test("a confirmed publish retries across a transient owner failure", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let publishAttempts = 0;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        broker.send(s, buildFrame(Op.TopologyOk, f.requestId, { generation: 0n, queues: [] }));
+      } else if (f.opcode === Op.Publish) {
+        publishAttempts += 1;
+        if (publishAttempts === 1) {
+          s.destroy(); // owner drops mid-flight: a transient transport failure
+        } else {
+          broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 5n }));
+        }
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions().withPublishTimeout(5_000),
+    );
+    const offset = await client.publisher("orders").publishConfirmed({ x: 1 });
+    assert.equal(offset, 5n);
+    assert.ok(publishAttempts >= 2, `expected a retry, saw ${publishAttempts} publish attempts`);
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("a confirmed publish with retry disabled fails fast on a transient failure", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Publish) {
+        s.destroy();
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions().withPublishTimeout(0).disableAutoReconnect(),
+    );
+    await assert.rejects(() => client.publisher("orders").publishConfirmed({ x: 1 }));
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});

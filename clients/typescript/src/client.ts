@@ -49,6 +49,13 @@ export interface ClientOptionsInit {
   reconnectReconcilePolicy?: ReconcilePolicy;
   /** Maximum owner redirects to follow for a single confirmed publish. */
   maxRedirects?: number;
+  /**
+   * Budget in milliseconds for retrying a confirmed publish across a transient
+   * owner failover. 0 disables retry so the first transport failure fails fast.
+   */
+  publishTimeoutMs?: number;
+  /** Minimum gap between throttled topology refreshes during retries. */
+  topologyRefreshCooldownMs?: number;
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
@@ -68,6 +75,8 @@ export class ClientOptions {
   readonly autoReconnectAttempts: number;
   readonly reconnectReconcilePolicy: ReconcilePolicy;
   readonly maxRedirects: number;
+  readonly publishTimeoutMs: number;
+  readonly topologyRefreshCooldownMs: number;
 
   constructor(init: ClientOptionsInit = {}) {
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
@@ -78,6 +87,8 @@ export class ClientOptions {
     this.autoReconnectAttempts = init.autoReconnectAttempts ?? 1;
     this.reconnectReconcilePolicy = init.reconnectReconcilePolicy ?? "conservative";
     this.maxRedirects = init.maxRedirects ?? 3;
+    this.publishTimeoutMs = init.publishTimeoutMs ?? 30_000;
+    this.topologyRefreshCooldownMs = init.topologyRefreshCooldownMs ?? 1_000;
   }
 
   /** Return a copy with the given fields overridden. */
@@ -91,6 +102,8 @@ export class ClientOptions {
       autoReconnectAttempts: this.autoReconnectAttempts,
       reconnectReconcilePolicy: this.reconnectReconcilePolicy,
       maxRedirects: this.maxRedirects,
+      publishTimeoutMs: this.publishTimeoutMs,
+      topologyRefreshCooldownMs: this.topologyRefreshCooldownMs,
       ...overrides,
     });
   }
@@ -148,6 +161,17 @@ export class ClientOptions {
       throw new Error("maxRedirects must be a non-negative integer");
     }
     return this.#copy({ maxRedirects });
+  }
+
+  /**
+   * Return a copy with a custom confirmed-publish failover retry budget in
+   * milliseconds. 0 disables retry (the first transport failure fails fast).
+   */
+  withPublishTimeout(timeoutMs: number): ClientOptions {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 0) {
+      throw new Error("timeoutMs must be a non-negative integer");
+    }
+    return this.#copy({ publishTimeoutMs: timeoutMs });
   }
 
   /**
@@ -532,6 +556,7 @@ export class Client {
   async fetchTopology(filter: { topic?: string | null; group?: string | null } = {}): Promise<TopologyOkMsg> {
     const topology = await (await this._engineForOperation()).fetchTopology(filter);
     this.#topology.replace(topology);
+    this.#topology.lastRefreshMs = Date.now();
     // A full refresh is authoritative: drop pooled connections to endpoints that
     // no longer own anything so a failed-over owner's stale connection is gone.
     const live = this.#topology.endpoints();
@@ -559,9 +584,41 @@ export class Client {
     return this.#opts.maxRedirects;
   }
 
+  /** @internal Failover retry budget for a confirmed publish, in milliseconds. */
+  _publishTimeoutMs(): number {
+    return this.#opts.publishTimeoutMs;
+  }
+
+  /**
+   * @internal Refresh topology from a reachable node, throttled by the refresh
+   * cooldown. Returns true if a refresh actually happened. Used by the publish
+   * failover retry to re-resolve the new owner after a transient failure.
+   */
+  async _refreshTopologyThrottled(): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.#topology.lastRefreshMs < this.#opts.topologyRefreshCooldownMs) {
+      return false;
+    }
+    try {
+      await this.fetchTopology();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /** @internal Point-update routing from a redirect (after a misroute). */
   _applyRedirect(redirect: RedirectMsg): void {
     this.#topology.applyRedirect(redirect);
+  }
+
+  /**
+   * @internal True when the cache holds a real cluster view that does not
+   * include this queue, so a publish should fail fast as not-found rather than
+   * burning the failover retry budget on a topic that was never declared.
+   */
+  _isTopicMissing(topic: string, group: string | null): boolean {
+    return this.#topology.isPopulated() && !this.#topology.knowsTopic(topic, group);
   }
 
   /**

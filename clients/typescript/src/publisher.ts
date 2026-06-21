@@ -1,20 +1,34 @@
-import { BrokenPipeError, RedirectError } from "./errors.js";
+import { BrokenPipeError, RedirectError, ServerError, isTransientError } from "./errors.js";
 import type { Command, Engine } from "./engine.js";
 import { deferred, type Deferred } from "./internal/deferred.js";
 import type { Route } from "./internal/topology.js";
+import {
+  bumpBackoff,
+  newPublishRetryState,
+  publishRetryNap,
+  sleep,
+  type PublishRetryState,
+} from "./internal/retry.js";
 import { intoMessage, NewMessage, type Publishable } from "./message.js";
 import type { ContentType, RedirectMsg } from "./protocol.js";
+
+// Broker error code for a queue that is not declared in the cluster. Matches the
+// server ERR_NOT_FOUND used to fail a publish to an unknown topic fast.
+const ERR_NOT_FOUND = 404;
 
 /**
  * Routing surface the Publisher needs from the Client. The Client owns the
  * topology cache and connection pool; the Publisher only asks it where each
- * publish should go and how to react to a redirect.
+ * publish should go and how to react to a redirect or transient failover.
  */
 interface RoutingClient {
   _route(topic: string, group: string | null, key: Uint8Array | null): Route;
   _engineFor(topic: string, partition: number, group: string | null): Promise<Engine>;
   _applyRedirect(redirect: RedirectMsg): void;
   _maxRedirects(): number;
+  _publishTimeoutMs(): number;
+  _refreshTopologyThrottled(): Promise<boolean>;
+  _isTopicMissing(topic: string, group: string | null): boolean;
 }
 
 /**
@@ -219,27 +233,56 @@ export class Publisher {
     await engine.submit(this.#command(spec, route, null));
   }
 
-  // Confirmed publish that awaits the offset. Follows owner redirects up to the
-  // configured limit: a redirect is not a failure, it names the new owner, so
-  // we point-update routing and retry the whole attempt against it.
+  // Confirmed publish that awaits the offset. One attempt resolves the owner,
+  // sends, and awaits the confirm, so a transport failure at any step is caught
+  // and retried together. Two retry kinds, both bounded:
+  //   - redirect: not a failure, names the new owner -> point-update and retry.
+  //   - transient (owner unreachable mid-failover): refresh topology so the next
+  //     attempt re-resolves the new owner, back off, retry until the deadline.
   async #sendConfirmed(spec: SendSpec): Promise<bigint> {
-    let redirects = 0;
+    const state = newPublishRetryState(this.#client._publishTimeoutMs());
     for (;;) {
-      const route = this.#client._route(this.#topic, this.#group, spec.key);
-      const engine = await this.#client._engineFor(this.#topic, route.partition, this.#group);
-      const reply = deferred<bigint>();
-      await engine.submit(this.#command(spec, route, reply));
       try {
+        const route = this.#client._route(this.#topic, this.#group, spec.key);
+        const engine = await this.#client._engineFor(this.#topic, route.partition, this.#group);
+        const reply = deferred<bigint>();
+        await engine.submit(this.#command(spec, route, reply));
         return await reply.promise;
       } catch (err) {
-        if (err instanceof RedirectError && redirects < this.#client._maxRedirects()) {
-          this.#client._applyRedirect(err.redirect);
-          redirects += 1;
-          continue;
-        }
-        throw err;
+        await this.#afterPublishFailure(err, state);
       }
     }
+  }
+
+  // Decide whether to retry after a failed confirmed-publish attempt. Returns to
+  // retry the loop, throws to give up with the surfaced error.
+  async #afterPublishFailure(err: unknown, state: PublishRetryState): Promise<void> {
+    if (err instanceof RedirectError) {
+      if (state.redirects >= this.#client._maxRedirects()) {
+        throw err;
+      }
+      this.#client._applyRedirect(err.redirect);
+      state.redirects += 1;
+      return;
+    }
+    if (isTransientError(err)) {
+      if (state.deadline === null || Date.now() >= state.deadline) {
+        throw err;
+      }
+      // Re-resolve the new owner before the next attempt. If a refresh lands a
+      // populated cluster view that does not know this queue, fail fast rather
+      // than burning the whole budget on a topic that is not declared.
+      if (await this.#client._refreshTopologyThrottled()) {
+        if (this.#client._isTopicMissing(this.#topic, this.#group)) {
+          throw new ServerError(ERR_NOT_FOUND, `${this.#topic} is not declared in the cluster`);
+        }
+      }
+      const remaining = state.deadline - Date.now();
+      await sleep(Math.min(publishRetryNap(state.backoffMs), Math.max(remaining, 0)));
+      bumpBackoff(state);
+      return;
+    }
+    throw err;
   }
 
   // Pipelined confirmed publish: route and send once, hand back the handle

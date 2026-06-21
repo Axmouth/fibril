@@ -98,3 +98,16 @@ export class EofError extends FibrilError {
 export class UnexpectedError extends FibrilError {
   override readonly name = "UnexpectedError";
 }
+
+/**
+ * Whether an error is a transient transport failure: a connect or severed
+ * connection. Narrow on purpose - this is the subset the client retries
+ * automatically against a refreshed owner during a failover.
+ */
+export function isTransientError(err: unknown): boolean {
+  return (
+    err instanceof DisconnectionError ||
+    err instanceof BrokenPipeError ||
+    err instanceof EofError
+  );
+}
