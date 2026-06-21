@@ -106,6 +106,20 @@ feature ideas live in their own track, summarized at the end.
 - Plexus: a fan-out or stream channel type built on its own arc, enabled by the
   substrate-versus-engine split below. [DN]
 
+## Clients
+
+- TypeScript client parity pass (BIG): bring `clients/typescript` up to the
+  current Rust client and protocol now that clustering landed. The TS client
+  exists (client, publisher, subscription, engine, codec, protocol over msgpack,
+  about 3100 lines) but lags the newer surface. Cover at least: partitioned-queue
+  publish with client-side key routing and transparent multi-partition fan-in,
+  exclusive consumer groups, owner redirect plus failover ride-through (refresh
+  topology and retry), and the reliability surface (is_retryable / retry_advice
+  outcome classification, the ReliablePublisher opt-in, producer-id dedup
+  headers). Audit against the Rust client surface first, then close the gaps.
+  Pairs with the AUDITS.md "Client API parity" pending item and the client
+  reliability docs item below. [USER/AUDIT]
+
 ## Code health and structure
 
 - Rework the `tui-example` (it has disabled instrumentation) and
