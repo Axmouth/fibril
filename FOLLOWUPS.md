@@ -153,9 +153,27 @@ first three are admin-thin (the primitive exists, just expose it).
 3. **Hide-inactive-queues toggle + basic search** on the queues page - DONE.
    Frontend-only filter bar (search by topic/group, hide queues with no active
    publishers/subscribers); summary cards stay full counts.
-4. **Admin delete-queue** (deferred per user: "no delete yet"). Stroma primitive
-   `destroy_partition` exists (freeze-then-fs-cleanup, already refuses on
-   inflight). Expose carefully: confirm dialog + drain/inflight guard.
+4. **Admin delete-queue** - WE WANT IT (the earlier "no delete yet" meant "we do
+   not have it", not "skip it"). Split into two:
+   - SINGLE-NODE (DO THIS NEXT, standalone-correct). `destroy_partition(tp, part,
+     group)` is ALREADY on the `QueueEngine` trait
+     (`crates/broker/src/queue_engine.rs:239`), returning
+     `DestroyOutcome::{Destroyed, HasInflight}` (refuses when leased work
+     remains). Add `POST /admin/api/queues/delete` (a `delete_queue` handler in
+     `routes.rs` + `DeleteQueueRequest{ tp, group, partition_count }`), then loop
+     destroy_partition over 0..count, mapping HasInflight -> 409 ("settle or
+     wait") and other errors -> 500. GATE OFF in cluster: if
+     `server.coordination.is_some()`
+     return 501 with code "cluster_delete_unsupported" (single-node only for now).
+     UI: a per-row delete button on the queue agg row in `queues.html` (carry
+     data-group/data-topic/data-count, default-group maps to null group), a
+     confirm dialog, `apiPost` to the delete route, then refresh. Add a
+     validation test (empty topic -> 400) mirroring create_queue.
+   - MULTI-NODE (planned, M): a coordinated teardown - deregister from the
+     coordination catalogue (so the controller stops placing it and the
+     catalogue-sync loop stops re-registering it), destroy on ALL replicas (not
+     just the clicked node), ordered so sync cannot resurrect it between steps.
+     destroy_partition is only the local primitive - this is the real work.
 5. **Time-based retention.** Primitive `safe_message_truncate_before` exists.
    Add a sparse worker: map time -> offset (crude binary search on the stored
    `published` is fine, no new index needed), truncate before the cutoff, and
