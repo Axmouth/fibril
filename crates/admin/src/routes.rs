@@ -77,6 +77,18 @@ pub struct UpdateQueueDlqRequest {
 }
 
 #[derive(Deserialize)]
+pub struct CreateQueueRequest {
+    pub tp: String,
+    pub group: Option<String>,
+    /// Partition count for the new queue (defaults to 1).
+    pub partition_count: Option<u32>,
+    /// Optional dead-letter policy. Absent leaves the queue without one.
+    pub policy: Option<QueueDlqPolicyRequest>,
+    pub target: Option<QueueDlqTargetRequest>,
+    pub max_retries: Option<u32>,
+}
+
+#[derive(Deserialize)]
 pub struct ReplayDeadLettersRequest {
     pub dlq_topic: String,
     pub dlq_group: Option<String>,
@@ -935,6 +947,103 @@ pub async fn update_queue_dlq(
             ))
         }
     }
+}
+
+/// Create a queue from the admin UI. Declares partitions 0..partition_count
+/// locally with an optional dead-letter policy. In cluster mode the catalogue
+/// sync loop then registers them with coordination and the controller spreads
+/// ownership - the same path the client DeclareQueue handler uses (which also
+/// declares locally per partition). partition_count defaults to 1.
+///
+/// First cut: does not yet go through declare_partitioning (authoritative count
+/// + conflict detection). See the queue-lifecycle plan in FOLLOWUPS.md.
+pub async fn create_queue(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<CreateQueueRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    if request.tp.trim().is_empty() {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_topic",
+            "topic must not be empty",
+        ));
+    }
+    let partition_count = request.partition_count.unwrap_or(1).max(1);
+
+    // Optional dead-letter policy (same mapping as update_queue_dlq).
+    let dlq_policy = match &request.policy {
+        None => None,
+        Some(QueueDlqPolicyRequest::Discard) => Some(DLQDiscardPolicyWire::Discard),
+        Some(QueueDlqPolicyRequest::Global) => Some(DLQDiscardPolicyWire::GlobalDQL),
+        Some(QueueDlqPolicyRequest::Custom) => {
+            let Some(target) = &request.target else {
+                return Ok(admin_error(
+                    StatusCode::BAD_REQUEST,
+                    "missing_queue_dlq_target",
+                    "custom queue DLQ policy requires a target",
+                ));
+            };
+            let target_group = normalize_group(target.group.clone());
+            let target = match GlobalDLQ::new(&target.tp, 0, target_group.as_deref()).await {
+                Ok(target) => target,
+                Err(err) => {
+                    return Ok(admin_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_queue_dlq_target",
+                        err.to_string(),
+                    ));
+                }
+            };
+            Some(DLQDiscardPolicyWire::CustomDQL {
+                tp: target.tp.into_boxed_str(),
+                part: target.part,
+                group: target.group.map(String::into_boxed_str),
+            })
+        }
+    };
+
+    let meta = DeclareMeta {
+        dlq_policy,
+        dlq_max_retries: request.max_retries,
+    };
+
+    let group = normalize_group(request.group.clone());
+    for partition in 0..partition_count {
+        match server
+            .storage
+            .declare_queue(&request.tp, partition, group.as_deref(), meta.clone())
+            .await
+        {
+            Ok(()) => {}
+            Err(err @ StromaError::InvalidArgument(_)) => {
+                return Ok(admin_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_queue",
+                    err.to_string(),
+                ));
+            }
+            Err(err) => {
+                tracing::error!("create queue failed: {err}");
+                return Ok(admin_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "create_queue_failed",
+                    "create queue failed",
+                ));
+            }
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "status": "created",
+            "partition_count": partition_count,
+        })),
+    )
+        .into_response())
 }
 
 pub async fn replay_dead_letters(

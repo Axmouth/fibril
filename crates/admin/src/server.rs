@@ -259,7 +259,10 @@ impl AdminServer {
             .route("/admin/api/overview", get(routes::overview))
             .route("/admin/api/connections", get(routes::connections))
             .route("/admin/api/subscriptions", get(routes::subscriptions))
-            .route("/admin/api/queues", get(routes::queues))
+            .route(
+                "/admin/api/queues",
+                get(routes::queues).post(routes::create_queue),
+            )
             .route("/admin/api/queues_debug", get(routes::queues_debug))
             .route("/admin/api/messages", get(routes::inspect_messages))
             .route(
@@ -1034,6 +1037,28 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = response_json(response).await;
         assert_eq!(body["code"], "repartition_unavailable");
+    }
+
+    #[tokio::test]
+    async fn create_queue_rejects_empty_topic() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/queues")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "tp": "  " }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_topic");
     }
 
     #[tokio::test]

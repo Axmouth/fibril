@@ -11,3 +11,20 @@ async function api(path) {
   }
   return r.json();
 }
+
+// POST JSON and return { ok, data } without throwing, so callers can show a
+// message either way. Mirrors the per-page postJson used on the topology page.
+async function apiPost(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data = null;
+  try {
+    data = await r.json();
+  } catch {
+    data = null;
+  }
+  return { ok: r.ok, data };
+}

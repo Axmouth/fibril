@@ -2,6 +2,28 @@
 {% block content %}
 <h4 class="metrics-header">Queues</h4>
 
+<details class="queue-create-panel">
+  <summary>Create a queue</summary>
+  <div class="queue-create-fields">
+    <input id="create.topic" placeholder="topic" />
+    <input id="create.group" placeholder="group (optional)" />
+    <label>partitions
+      <input id="create.partitions" type="number" min="1" value="1" />
+    </label>
+    <select id="create.dlq">
+      <option value="">No dead-letter</option>
+      <option value="discard">Discard</option>
+      <option value="global">Global DLQ</option>
+      <option value="custom">Custom DLQ</option>
+    </select>
+    <input id="create.dlq_topic" placeholder="DLQ topic" style="display:none" />
+    <input id="create.dlq_group" placeholder="DLQ group (optional)" style="display:none" />
+    <input id="create.max_retries" type="number" min="0" placeholder="max retries (optional)" />
+    <button id="create.submit" type="button">Create</button>
+    <span id="create-message" class="op-message"></span>
+  </div>
+</details>
+
 <div id="queues"></div>
 
 <script src="/static/js/api.js"></script>
@@ -307,6 +329,52 @@ document.getElementById("queues").addEventListener("click", (event) => {
     if (r.dataset.group === g && r.dataset.topic === t) r.style.display = open ? "" : "none";
   });
 });
+
+// ---- create queue ----
+function setCreateMessage(text, kind) {
+  const node = document.getElementById("create-message");
+  node.textContent = text;
+  node.dataset.kind = kind || "info";
+}
+
+document.getElementById("create.dlq").addEventListener("change", (event) => {
+  const custom = event.target.value === "custom";
+  document.getElementById("create.dlq_topic").style.display = custom ? "" : "none";
+  document.getElementById("create.dlq_group").style.display = custom ? "" : "none";
+});
+
+async function submitCreateQueue() {
+  const topic = document.getElementById("create.topic").value.trim();
+  const group = document.getElementById("create.group").value.trim();
+  const count = Number(document.getElementById("create.partitions").value) || 1;
+  const dlq = document.getElementById("create.dlq").value;
+  const maxRetriesRaw = document.getElementById("create.max_retries").value.trim();
+  if (!topic) return setCreateMessage("Enter a topic.", "warning");
+  if (!(count >= 1)) return setCreateMessage("Partition count must be at least 1.", "warning");
+
+  const body = { tp: topic, group: group || null, partition_count: count };
+  if (dlq) {
+    body.policy = dlq;
+    if (dlq === "custom") {
+      const dlqTopic = document.getElementById("create.dlq_topic").value.trim();
+      if (!dlqTopic) return setCreateMessage("Custom DLQ needs a target topic.", "warning");
+      const dlqGroup = document.getElementById("create.dlq_group").value.trim();
+      body.target = { tp: dlqTopic, group: dlqGroup || null };
+    }
+  }
+  if (maxRetriesRaw !== "") body.max_retries = Number(maxRetriesRaw);
+
+  const { ok, data } = await apiPost("/admin/api/queues", body);
+  if (ok) {
+    setCreateMessage(`Created "${topic}" with ${data?.partition_count ?? count} partition(s).`, "info");
+    document.getElementById("create.topic").value = "";
+    refresh();
+  } else {
+    setCreateMessage(`Failed: ${data?.message || data?.error || "request failed"}`, "warning");
+  }
+}
+
+document.getElementById("create.submit").addEventListener("click", submitCreateQueue);
 
 setInterval(refresh, 2000);
 refresh();
