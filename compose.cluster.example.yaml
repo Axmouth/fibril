@@ -1,0 +1,75 @@
+# Three-broker Fibril cluster in coordinated (Ganglion) mode, for trying out
+# clustering with no clone and no build. The brokers form one coordination
+# group and each broker's admin dashboard is exposed on the host.
+#
+#   docker compose -f compose.cluster.example.yaml up
+#
+# Then open a dashboard and visit the topology page:
+#   http://127.0.0.1:8081/   http://127.0.0.1:8082/   http://127.0.0.1:8083/
+#
+# Clients can connect to any broker (9876, 9877, 9878) and are routed to the
+# current owner of each partition. Stop and remove everything, including the
+# persisted data volumes, with:
+#
+#   docker compose -f compose.cluster.example.yaml down -v
+#
+# Clustering is experimental and not yet production-ready high availability.
+
+x-broker: &broker
+  image: ghcr.io/axmouth/fibril-server:main
+  restart: unless-stopped
+
+services:
+  broker-1:
+    <<: *broker
+    ports:
+      - "9876:9876"   # broker (client connections)
+      - "8081:8081"   # admin dashboard
+    environment:
+      FIBRIL_BROKER_BIND: 0.0.0.0:9876
+      FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      FIBRIL_COORDINATION_MODE: ganglion
+      FIBRIL_COORDINATION_NODE_ID: broker-1
+      FIBRIL_COORDINATION_RAFT_ID: "1"
+      FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
+      FIBRIL_COORDINATION_PEERS: 1=broker-1:7000,2=broker-2:7000,3=broker-3:7000
+      FIBRIL_COORDINATION_BOOTSTRAP: "true"
+    volumes:
+      - broker-1-data:/app/server_data
+
+  broker-2:
+    <<: *broker
+    ports:
+      - "9877:9876"
+      - "8082:8081"
+    environment:
+      FIBRIL_BROKER_BIND: 0.0.0.0:9876
+      FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      FIBRIL_COORDINATION_MODE: ganglion
+      FIBRIL_COORDINATION_NODE_ID: broker-2
+      FIBRIL_COORDINATION_RAFT_ID: "2"
+      FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
+      FIBRIL_COORDINATION_PEERS: 1=broker-1:7000,2=broker-2:7000,3=broker-3:7000
+    volumes:
+      - broker-2-data:/app/server_data
+
+  broker-3:
+    <<: *broker
+    ports:
+      - "9878:9876"
+      - "8083:8081"
+    environment:
+      FIBRIL_BROKER_BIND: 0.0.0.0:9876
+      FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+      FIBRIL_COORDINATION_MODE: ganglion
+      FIBRIL_COORDINATION_NODE_ID: broker-3
+      FIBRIL_COORDINATION_RAFT_ID: "3"
+      FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
+      FIBRIL_COORDINATION_PEERS: 1=broker-1:7000,2=broker-2:7000,3=broker-3:7000
+    volumes:
+      - broker-3-data:/app/server_data
+
+volumes:
+  broker-1-data:
+  broker-2-data:
+  broker-3-data:

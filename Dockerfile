@@ -4,7 +4,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY benches ./benches
 COPY crates ./crates
-RUN cargo build --release --locked -p fibril --bin fibril-server -p fibril-cli --bin fibrilctl
+RUN cargo build --release -p fibril --bin fibril-server -p fibril-cli --bin fibrilctl
 
 FROM debian:bookworm-slim
 

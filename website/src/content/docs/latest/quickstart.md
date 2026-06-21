@@ -85,3 +85,7 @@ The API is evolving. Treat examples as a guide to the current source tree rather
 For more publishing, subscription, delayed publish, and message encoding examples, see [client usage](/latest/clients/).
 
 For startup config, runtime settings, and idle queue cleanup options, see [configuration](/latest/configuration/).
+
+## Try a cluster
+
+To stand up a real multi-broker cluster locally and watch ownership, replication, and failover from the admin dashboard, see [try a cluster locally](/latest/concepts/clustering/#try-a-cluster-locally). Clustering is experimental.

@@ -76,7 +76,7 @@ jobs:
       - name: Run tests
         env:
           RUSTFLAGS: -Awarnings
-        run: cargo test --quiet --workspace --locked
+        run: cargo test --quiet --workspace
 
   server-binary:
     name: Server release binary
@@ -95,7 +95,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build server release binary
-        run: cargo build --release --locked -p fibril --bin fibril-server
+        run: cargo build --release -p fibril --bin fibril-server
 
       - name: Write server binary checksum
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

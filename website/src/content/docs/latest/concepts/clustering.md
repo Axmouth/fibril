@@ -26,6 +26,34 @@ hood. You do not configure Raft directly beyond its timings: Fibril's surface
 talks in terms of coordination, owners, followers, and a leader, and the
 consensus protocol is an implementation detail of the coordinator.
 
+## Try a cluster locally
+
+You can stand up a real multi-broker cluster on one machine, with no external
+services, using the tryout script. You will need the repository checked out and
+a Rust toolchain, since the first run builds the broker from source. It starts several actual broker processes
+(each with its own ports and data directory), forms one coordination group,
+runs a few checks, and then holds the cluster open so you can explore it:
+
+```bash
+scripts/cluster-tryout.sh --ganglion --nodes 3 --hold
+```
+
+It prints an admin dashboard URL for each node. Open one and visit the topology
+page to watch ownership, followers, and fencing epochs across the three brokers.
+Press Ctrl-C to stop every broker it started and clean up.
+
+A few variations are worth trying:
+
+- `--staggered` starts the nodes one at a time, so you can watch the cluster form
+  (no quorum, then an election, then the remaining members join).
+- `--failover-verify` runs a confirmed producer and consumer against a survivor,
+  kills the partition owner mid-load, and checks that no confirmed message is lost.
+- `--repartition-smoke` grows and then shrinks a queue's partition count under
+  live traffic.
+
+This needs `cargo`, plus `jq` and `curl` for the coordinated-mode checks. The
+first run builds the broker and CLI, so it takes longer than later runs.
+
 ## What Fibril does in coordinated mode
 
 - **Brokers register themselves.** Each broker publishes itself into a shared
