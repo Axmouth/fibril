@@ -85,6 +85,11 @@ class FakeBroker {
     });
   }
 
+  /** Number of currently open client connections to this broker. */
+  get openConnections(): number {
+    return this.#clients.size;
+  }
+
   send(socket: Socket, frame: Frame): void {
     socket.write(encodeFrame(frame));
   }
@@ -1284,5 +1289,63 @@ test("a confirmed publish with retry disabled fails fast on a transient failure"
     await client.shutdown();
   } finally {
     await broker.stop();
+  }
+});
+
+test("a full topology refresh prunes pooled connections to dropped owners", async () => {
+  const owner = new FakeBroker();
+  await owner.start();
+  owner.onFrame = (f, s) => {
+    if (f.opcode === Op.Hello) {
+      owner.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+    } else if (f.opcode === Op.Publish) {
+      owner.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 1n }));
+    }
+  };
+
+  const bootstrap = new FakeBroker();
+  await bootstrap.start();
+  let topoRequests = 0;
+  bootstrap.onFrame = (f, s) => {
+    if (f.opcode === Op.Hello) {
+      bootstrap.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+    } else if (f.opcode === Op.Topology) {
+      topoRequests += 1;
+      const queues =
+        topoRequests === 1
+          ? [
+              {
+                topic: "orders",
+                partition: 0,
+                group: null,
+                owner_endpoint: `127.0.0.1:${owner.port}`,
+                partitioning_version: 1n,
+                partition_count: 1,
+              },
+            ]
+          : []; // after failover the owner owns nothing
+      bootstrap.send(
+        s,
+        buildFrame(Op.TopologyOk, f.requestId, { generation: BigInt(topoRequests), queues }),
+      );
+    }
+  };
+
+  try {
+    const client = await Client.connect(`127.0.0.1:${bootstrap.port}`, new ClientOptions());
+    await client.fetchTopology();
+    await client.publisher("orders").publishConfirmed({ x: 1 });
+    assert.equal(owner.openConnections, 1, "owner connection pooled after a routed publish");
+
+    // A second full refresh shows the owner owning nothing: its pooled
+    // connection must be pruned and closed.
+    await client.fetchTopology();
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(owner.openConnections, 0, "stale owner connection pruned");
+
+    await client.shutdown();
+  } finally {
+    await bootstrap.stop();
+    await owner.stop();
   }
 });
