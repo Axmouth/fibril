@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use fibril_client::{ClientOptions, QueueConfig};
+use fibril_client::{ClientOptions, NewMessage, QueueConfig};
 use fibril_config::ServerConfig;
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +54,10 @@ enum Command {
 enum QueueCommand {
     /// Declare or update queue settings.
     Declare(DeclareQueueArgs),
+    /// Publish one UTF-8 text message and wait for confirmation.
+    Publish(PublishMessageArgs),
+    /// Consume and acknowledge messages from a queue.
+    Consume(ConsumeMessagesArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -72,6 +76,61 @@ enum AdminCommand {
     Messages(InspectMessagesArgs),
     /// Show queue state and sparse queue activity from the admin API.
     Queues,
+    /// Show cluster topology: nodes, queue assignments, and (when an embedded
+    /// coordinator is active) consensus state.
+    Topology(TopologyArgs),
+    /// Coordination membership operations.
+    Coordination {
+        #[command(subcommand)]
+        command: CoordinationCommand,
+    },
+    /// Live-repartition a queue: grow (to a multiple) or shrink (to a factor) of
+    /// its current partition count.
+    Repartition(RepartitionArgs),
+}
+
+#[derive(Debug, Parser)]
+struct RepartitionArgs {
+    /// Topic to repartition.
+    topic: String,
+
+    /// New partition count: a larger integer multiple to grow, a smaller integer
+    /// factor to shrink.
+    partition_count: u32,
+
+    /// Optional group (part of the queue identity).
+    #[arg(long)]
+    group: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct TopologyArgs {
+    /// Print the raw topology JSON instead of tables.
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Debug, Subcommand)]
+enum CoordinationCommand {
+    /// Add a node as a voting coordination member.
+    AddVotingMember(CoordinationAddVotingMemberArgs),
+    /// Remove a node from the voting coordination member set.
+    RemoveVotingMember(CoordinationRemoveVotingMemberArgs),
+}
+
+#[derive(Debug, Parser)]
+struct CoordinationAddVotingMemberArgs {
+    /// Coordination node id to add.
+    id: u64,
+
+    /// Coordination TCP address for the new node.
+    addr: SocketAddr,
+}
+
+#[derive(Debug, Parser)]
+struct CoordinationRemoveVotingMemberArgs {
+    /// Coordination node id to remove.
+    id: u64,
 }
 
 #[derive(Debug, Subcommand)]
@@ -181,6 +240,50 @@ struct DeclareQueueArgs {
     dlq_group: Option<String>,
 }
 
+#[derive(Debug, Parser)]
+struct PublishMessageArgs {
+    /// Queue topic to publish to.
+    topic: String,
+
+    /// Optional queue group namespace.
+    #[arg(long)]
+    group: Option<String>,
+
+    /// UTF-8 text payload.
+    #[arg(long)]
+    message: String,
+
+    /// Optional partition key for partitioned queues.
+    #[arg(long)]
+    partition_key: Option<String>,
+}
+
+#[derive(Debug, Parser)]
+struct ConsumeMessagesArgs {
+    /// Queue topic to consume from.
+    topic: String,
+
+    /// Optional queue group namespace.
+    #[arg(long)]
+    group: Option<String>,
+
+    /// Number of messages to consume and acknowledge.
+    #[arg(long, default_value_t = 1)]
+    count: usize,
+
+    /// Subscription prefetch.
+    #[arg(long, default_value_t = 1)]
+    prefetch: u32,
+
+    /// Per-message wait timeout in milliseconds.
+    #[arg(long, default_value_t = 5_000)]
+    timeout_ms: u64,
+
+    /// Fail if any consumed message payload does not equal this text.
+    #[arg(long)]
+    expect: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum DlqPolicyArg {
     Discard,
@@ -210,6 +313,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
             match command {
                 QueueCommand::Declare(args) => declare_queue(&client, args).await?,
+                QueueCommand::Publish(args) => publish_message(&client, args).await?,
+                QueueCommand::Consume(args) => consume_messages(&client, args).await?,
             }
 
             client.shutdown().await;
@@ -256,6 +361,23 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 },
                 AdminCommand::Messages(args) => print_json(admin.inspect_messages(args).await?)?,
                 AdminCommand::Queues => print_json(admin.queues_debug().await?)?,
+                AdminCommand::Topology(args) => {
+                    let topology = admin.topology().await?;
+                    if args.json {
+                        print_json(topology)?;
+                    } else {
+                        print_topology(&topology);
+                    }
+                }
+                AdminCommand::Coordination { command } => match command {
+                    CoordinationCommand::AddVotingMember(args) => {
+                        print_json(admin.add_coordination_voting_member(args).await?)?
+                    }
+                    CoordinationCommand::RemoveVotingMember(args) => {
+                        print_json(admin.remove_coordination_voting_member(args).await?)?
+                    }
+                },
+                AdminCommand::Repartition(args) => print_json(admin.repartition(args).await?)?,
             }
         }
     }
@@ -306,6 +428,66 @@ async fn declare_queue(
 
     client.declare_queue(config).await?;
     println!("declared queue {topic}");
+    Ok(())
+}
+
+async fn publish_message(
+    client: &fibril_client::Client,
+    args: PublishMessageArgs,
+) -> anyhow::Result<()> {
+    let publisher = match normalize_group_arg(args.group.as_deref()) {
+        Some(group) => client.publisher_grouped(&args.topic, group)?,
+        None => client.publisher(&args.topic)?,
+    };
+    let mut message = NewMessage::content(args.message);
+    if let Some(partition_key) = args.partition_key {
+        message = message.partition_key(partition_key.into_bytes());
+    }
+    let offset = publisher.publish_confirmed(message).await?;
+    println!("published {} at offset {offset}", args.topic);
+    Ok(())
+}
+
+async fn consume_messages(
+    client: &fibril_client::Client,
+    args: ConsumeMessagesArgs,
+) -> anyhow::Result<()> {
+    if args.count == 0 {
+        bail!("--count must be greater than zero");
+    }
+
+    let mut builder = client.subscribe(&args.topic)?.prefetch(args.prefetch);
+    if let Some(group) = normalize_group_arg(args.group.as_deref()) {
+        builder = builder.group(group)?;
+    }
+    let mut subscription = builder.sub_manual_ack().await?;
+
+    for index in 0..args.count {
+        let message = tokio::time::timeout(
+            std::time::Duration::from_millis(args.timeout_ms),
+            subscription.recv(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "timed out after {}ms waiting for message {}",
+                args.timeout_ms,
+                index + 1
+            )
+        })?
+        .with_context(|| format!("subscription closed before message {}", index + 1))?;
+
+        let payload = String::from_utf8_lossy(&message.payload).to_string();
+        if let Some(expected) = &args.expect {
+            if &payload != expected {
+                bail!("expected payload {expected:?}, got {payload:?}");
+            }
+        }
+
+        message.complete().await?;
+        println!("{payload}");
+    }
+
     Ok(())
 }
 
@@ -374,6 +556,25 @@ struct ReplayDlqRequest {
     offsets: Vec<u64>,
 }
 
+#[derive(Debug, Serialize)]
+struct AddCoordinationVotingMemberRequest {
+    id: u64,
+    addr: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoveCoordinationVotingMemberRequest {
+    id: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RepartitionRequest {
+    topic: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    group: Option<String>,
+    partition_count: u32,
+}
+
 impl AdminClient {
     async fn get_global_dlq(&self) -> anyhow::Result<GlobalDlqSnapshot> {
         self.get_json("/admin/api/global-dlq", &[]).await
@@ -435,6 +636,47 @@ impl AdminClient {
 
     async fn queues_debug(&self) -> anyhow::Result<serde_json::Value> {
         self.get_json("/admin/api/queues_debug", &[]).await
+    }
+
+    async fn topology(&self) -> anyhow::Result<serde_json::Value> {
+        self.get_json("/admin/api/topology", &[]).await
+    }
+
+    async fn add_coordination_voting_member(
+        &self,
+        args: CoordinationAddVotingMemberArgs,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.post_json(
+            "/admin/api/coordination/membership/add-voting-member",
+            &AddCoordinationVotingMemberRequest {
+                id: args.id,
+                addr: args.addr.to_string(),
+            },
+        )
+        .await
+    }
+
+    async fn remove_coordination_voting_member(
+        &self,
+        args: CoordinationRemoveVotingMemberArgs,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.post_json(
+            "/admin/api/coordination/membership/remove-voting-member",
+            &RemoveCoordinationVotingMemberRequest { id: args.id },
+        )
+        .await
+    }
+
+    async fn repartition(&self, args: RepartitionArgs) -> anyhow::Result<serde_json::Value> {
+        self.post_json(
+            "/admin/api/repartition",
+            &RepartitionRequest {
+                topic: args.topic,
+                group: normalize_group_arg(args.group.as_deref()).map(str::to_string),
+                partition_count: args.partition_count,
+            },
+        )
+        .await
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(
@@ -511,6 +753,88 @@ fn print_global_dlq(snapshot: GlobalDlqSnapshot) -> anyhow::Result<()> {
 fn print_json(value: impl Serialize) -> anyhow::Result<()> {
     println!("{}", serde_json::to_string_pretty(&value)?);
     Ok(())
+}
+
+fn print_topology(topology: &serde_json::Value) {
+    let coordination = &topology["coordination"];
+    if coordination.is_null() {
+        println!("no coordination provider attached (single-node / static mode)");
+    } else {
+        println!(
+            "cluster: reporting node {} | snapshot generation {}",
+            coordination["node_id"].as_str().unwrap_or("?"),
+            coordination["generation"].as_u64().unwrap_or(0),
+        );
+
+        println!("\nnodes:");
+        println!("  {:<16} {:<22} {:<22}", "NODE", "BROKER", "ADMIN");
+        for node in coordination["nodes"].as_array().into_iter().flatten() {
+            println!(
+                "  {:<16} {:<22} {:<22}",
+                node["node_id"].as_str().unwrap_or("?"),
+                node["broker_addr"].as_str().unwrap_or("?"),
+                node["admin_addr"].as_str().unwrap_or("-"),
+            );
+        }
+
+        println!("\nassignments:");
+        println!(
+            "  {:<20} {:<5} {:<10} {:<16} {:<6} FOLLOWERS",
+            "TOPIC", "PART", "GROUP", "OWNER", "EPOCH"
+        );
+        for assignment in coordination["assignments"].as_array().into_iter().flatten() {
+            let followers = assignment["followers"]
+                .as_array()
+                .map(|followers| {
+                    followers
+                        .iter()
+                        .filter_map(|follower| follower.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            println!(
+                "  {:<20} {:<5} {:<10} {:<16} {:<6} {}",
+                assignment["topic"].as_str().unwrap_or("?"),
+                assignment["partition"].as_u64().unwrap_or(0),
+                assignment["group"].as_str().unwrap_or("-"),
+                assignment["owner"].as_str().unwrap_or("?"),
+                assignment["epoch"].as_u64().unwrap_or(0),
+                followers,
+            );
+        }
+    }
+
+    let consensus = &topology["consensus"];
+    if !consensus.is_null() {
+        let render_ids = |ids: &serde_json::Value| {
+            ids.as_array()
+                .map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| id.as_u64())
+                        .map(|id| id.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default()
+        };
+        println!("\nraft (embedded coordinator):");
+        println!(
+            "  local={} leader={} voters=[{}] learners=[{}] applied={} committed_generation={}",
+            consensus["local_id"].as_u64().unwrap_or(0),
+            consensus["leader"]
+                .as_u64()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            render_ids(&consensus["voters"]),
+            render_ids(&consensus["learners"]),
+            consensus["last_applied_index"]
+                .as_u64()
+                .map(|index| index.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            consensus["committed_generation"].as_u64().unwrap_or(0),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -605,5 +929,66 @@ mod tests {
         else {
             panic!("expected admin queues command");
         };
+    }
+
+    #[test]
+    fn parses_queue_publish_command() {
+        let cli = Cli::try_parse_from([
+            "fibrilctl",
+            "queue",
+            "publish",
+            "orders",
+            "--group",
+            "workers",
+            "--message",
+            "hello",
+            "--partition-key",
+            "customer-7",
+        ])
+        .unwrap();
+
+        let Command::Queue {
+            command: QueueCommand::Publish(args),
+        } = cli.command
+        else {
+            panic!("expected queue publish command");
+        };
+
+        assert_eq!(args.topic, "orders");
+        assert_eq!(args.group.as_deref(), Some("workers"));
+        assert_eq!(args.message, "hello");
+        assert_eq!(args.partition_key.as_deref(), Some("customer-7"));
+    }
+
+    #[test]
+    fn parses_queue_consume_command() {
+        let cli = Cli::try_parse_from([
+            "fibrilctl",
+            "queue",
+            "consume",
+            "orders",
+            "--count",
+            "2",
+            "--prefetch",
+            "4",
+            "--timeout-ms",
+            "250",
+            "--expect",
+            "hello",
+        ])
+        .unwrap();
+
+        let Command::Queue {
+            command: QueueCommand::Consume(args),
+        } = cli.command
+        else {
+            panic!("expected queue consume command");
+        };
+
+        assert_eq!(args.topic, "orders");
+        assert_eq!(args.count, 2);
+        assert_eq!(args.prefetch, 4);
+        assert_eq!(args.timeout_ms, 250);
+        assert_eq!(args.expect.as_deref(), Some("hello"));
     }
 }

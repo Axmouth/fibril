@@ -23,7 +23,7 @@ Memory usage during these runs ranged from a few hundred MB at lower load to rou
 These numbers are useful mostly as a sanity check:
 
 - the durable path is not obviously too slow
-- batching and the actor-like queue model are promising
+- batching and the queue execution model are promising
 - memory behavior still needs tuning
 - larger payloads will shift bottlenecks toward memory, copying, storage, and network I/O
 
@@ -118,8 +118,29 @@ prints a compact summary including publish and confirmation error counts plus
 server RSS average and peak sampled during the benchmark run.
 
 The wrapper starts a local `fibril-server` on the default broker and admin
-ports. Run one wrapper benchmark at a time; a second run will fail if those
-ports are already occupied.
+ports by default. Run one wrapper benchmark at a time. A second run will fail if
+those ports are already occupied.
+
+To target an already running server or a kept cluster, set `START_SERVER=0`,
+`BROKER_ADDR`, and `ADMIN_ADDR`. `DURABILITY_LABEL` is only a result label, but
+it is useful when comparing local, cluster-routed, and later replica-durable
+confirmed runs.
+
+To reuse the real cluster lifecycle checks, run the steady benchmark through the
+tryout script:
+
+```sh
+CONFIRMED=1 RATE_PER_SEC=1000 WARMUP_SECS=2 DURATION_SECS=5 \
+  scripts/cluster-tryout.sh --ganglion --nodes 3 --steady-bench
+```
+
+`cluster-tryout.sh` starts the nodes, waits for the cluster, declares the
+benchmark topic, runs the normal data-plane smoke, then calls
+`bench-steady-c.sh` against the live cluster with `START_SERVER=0`. Use
+`--bench-topic <topic>` when you want the tryout script to declare and benchmark
+a different topic. This path currently measures clustered client routing. Treat
+it as replica-durable only once the assignment and post-run follower state prove
+the chosen follower applied the measured log range.
 
 When `CONFIRMED=1`, writers still run with pipelined publish confirmations by
 default. Set `CONFIRM_WINDOW=1` if you specifically want the older serial
@@ -139,6 +160,11 @@ Useful knobs:
 | `PREFETCH` | `16384` | Reader subscription prefetch |
 | `CONFIRMED` | `0` | Set `1` to require broker publish confirmations |
 | `CONFIRM_WINDOW` | `1024` | In-flight confirmations per writer when `CONFIRMED=1` |
+| `TOPIC` | `topic1` | Queue topic used by the steady benchmark |
+| `START_SERVER` | `1` | Set `0` to target an external server or cluster |
+| `BROKER_ADDR` | `127.0.0.1:9876` | Broker TCP address passed to the benchmark client |
+| `ADMIN_ADDR` | `127.0.0.1:8081` | Admin address used for health checks and queue snapshots |
+| `DURABILITY_LABEL` | `local` | Label printed into results and summary tables |
 | `BUILD` | `1` | Set `0` to skip rebuilding release binaries |
 | `LOG_FILE` | temporary file | Build, server, and noisy runtime logs |
 | `RESULTS_FILE` | temporary file | Deterministic benchmark summary and queue snapshots |
@@ -224,7 +250,7 @@ Pipelined confirmed publishes follow the same pattern. With
 `CONFIRM_WINDOW=1024`, a 400k/s target reached about 385k/s. Raising the window
 to `4096` reached the 400k/s target, and 450k/s also reached target, but latency
 rose into the 1-2 second range. Larger windows are useful for saturating the
-path while preserving publish confirmation correctness; they are not a latency
+path while preserving publish confirmation correctness. They are not a latency
 optimization.
 
 Payload-size spot checks on the same SATA SSD development machine:
@@ -232,12 +258,12 @@ Payload-size spot checks on the same SATA SSD development machine:
 | Payload | Target rate | Actual measured rate | Missing | publish→deliver p50/p95/p99/max | Server RSS avg/peak | Notes |
 | ---: | ---: | ---: | ---: | --- | --- | --- |
 | 8KB | 50k/s | 50,010/s | 0 | 14 / 17 / 19 / 61 ms | not sampled | Clean short run |
-| 8KB | 150k/s | 139,987/s | 0 | 2608 / 3117 / 3168 / 3245 ms | not sampled | Could not reach target; backlog-driven |
+| 8KB | 150k/s | 139,987/s | 0 | 2608 / 3117 / 3168 / 3245 ms | not sampled | Could not reach target, backlog-driven |
 | 64KB | 10k/s | 10,000/s | 0 | 18 / 22 / 23 / 32 ms | not sampled | Clean short run |
-| 64KB | 20k/s | 18,285/s | 0 | 1605 / 1891 / 2144 / 2277 ms | not sampled | Could not reach target; likely storage-bandwidth bound |
+| 64KB | 20k/s | 18,285/s | 0 | 1605 / 1891 / 2144 / 2277 ms | not sampled | Could not reach target, likely storage-bandwidth bound |
 | 512KB | 1k/s | 999/s | 0 | 27 / 34 / 39 / 47 ms | 262.9 / 310.2 MiB | Clean short run |
 | 512KB | 2k/s | 2,000/s | 0 | 1165 / 1669 / 1756 / 1841 ms | 951.4 / 1538.0 MiB | Drains, but backlog-driven |
-| 1MB | 500/s | 498/s | 0 | 33 / 45 / 51 / 63 ms | ~290 / ~334 MiB | Clean short run; reruns varied slightly |
+| 1MB | 500/s | 498/s | 0 | 33 / 45 / 51 / 63 ms | ~290 / ~334 MiB | Clean short run. Reruns varied slightly |
 | 1MB | 1k/s | 1,000/s | 0 | 1812 / 2539 / 2693 / 2801 ms | 847.0 / 1187.5 MiB | Drains, but backlog-driven |
 
 For larger payloads, the bottleneck shifts away from message scheduling and

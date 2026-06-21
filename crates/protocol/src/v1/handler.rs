@@ -10,23 +10,25 @@ use std::{
 
 use crate::v1::{
     frame::{Frame, ProtoCodec},
-    helper::{error_frame, try_decode, try_encode},
+    helper::{ProtocolError, error_frame, try_decode, try_encode},
+    wire::{self, WireError},
     *,
 };
-use anyhow::Context;
 use arc_swap::ArcSwap;
 use fibril_broker::{
     broker::{
-        Broker, BrokerError, ConsumerConfig, ConsumerHandle, ConsumerLease, PublisherHandle,
+        Broker, BrokerError, BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords,
+        ConsumerConfig, ConsumerHandle, ConsumerLease, ExclusiveAssignmentUpdate, PublisherHandle,
         SettleRequest, SettleType,
     },
     queue_engine::{
-        DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, MessageContentType, QueueEngine,
-        StromaEngine, StromaError,
+        DLQDiscardPolicyWire, DeclareMeta, FollowerStateCheckpointInstall, GlobalDLQ, Message,
+        MessageContentType, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
+        QueueEngine, StromaEngine, StromaError, StromaEvent,
     },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
-use fibril_storage::{Group, Topic};
+use fibril_storage::{Group, Partition, Topic};
 use fibril_util::{AuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
 use tokio::{
@@ -36,21 +38,96 @@ use tokio::{
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
-type SubKey = (Topic, Option<Group>); // (topic, group)
+type SubKey = (Topic, Partition, Option<Group>); // (topic, partition, group)
 type FrameSink = mpsc::Sender<Frame>;
-const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolServerError {
+    #[error("failed to bind protocol listener at {addr}: {source}")]
+    Bind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to accept protocol connection: {0}")]
+    Accept(#[source] std::io::Error),
+    #[error("failed to configure TCP_NODELAY for {peer}: {source}")]
+    ConfigureSocket {
+        peer: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolConnectionError {
+    #[error("connection closed before HELLO")]
+    ClosedBeforeHello,
+    #[error("connection IO failed: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("protocol frame error: {0}")]
+    Protocol(#[from] ProtocolError),
+    #[error("protocol wire format error: {0}")]
+    Wire(#[from] WireError),
+    #[error("connection frame channel closed")]
+    FrameChannelClosed,
+    #[error("protocol compliance marker mismatch")]
+    ComplianceMarkerMismatch,
+    #[error("connection task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+}
+
+impl From<mpsc::error::SendError<Frame>> for ProtocolConnectionError {
+    fn from(_: mpsc::error::SendError<Frame>) -> Self {
+        Self::FrameChannelClosed
+    }
+}
+
+/// Server-side source of client-facing topology, injected into the protocol
+/// handler so it can answer `Op::Topology` and emit `Op::Redirect` on not-owner.
+/// Implemented by a coordination adapter in the binary; `None` (standalone)
+/// means there is no routing info and clients use their direct connection.
+pub trait ClientTopologySource: Send + Sync {
+    /// Full client-facing topology snapshot for `Op::Topology`.
+    fn topology(&self) -> TopologyOk;
+    /// Current owner endpoint and partitioning version for one queue partition,
+    /// if known. Used to build an `Op::Redirect`.
+    fn owner_endpoint(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> Option<(String, u64)>;
+}
+
+/// Server-side writer for queue-declaration coordination: records the queue's
+/// partitioning (count + version) in the replicated store, returning the
+/// EFFECTIVE partition count (which may differ from the request if the queue
+/// was already declared). `None` (standalone) means declare is local-only.
+pub trait QueueDeclareCoordinator: Send + Sync {
+    fn declare_partitioning<'a>(
+        &'a self,
+        topic: &'a str,
+        group: Option<&'a str>,
+        partition_count: u32,
+    ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
+}
+
+/// Identifies an exclusive cohort this connection participates in:
+/// `(topic, group, consumer_group)`.
+type CohortKey = (String, Option<String>, String);
 
 struct ConnState {
     authenticated: bool,
     subs: HashMap<SubKey, SubState>,
+    /// One assignment-change forwarder task per exclusive cohort this connection
+    /// is a member of (pushes `AssignmentChanged` frames). Aborted on cleanup.
+    exclusive_forwarders: HashMap<CohortKey, tokio::task::JoinHandle<()>>,
 }
 
 fn has_reserved_headers(headers: &HashMap<String, String>) -> bool {
-    headers.keys().any(|key| {
-        RESERVED_HEADER_PREFIXES
-            .iter()
-            .any(|prefix| key.starts_with(prefix))
-    })
+    // Server-owned = reserved minus the `fibril.client.*` client carve-out.
+    headers.keys().any(|key| is_server_owned_header_key(key))
 }
 
 fn to_storage_content_type(content_type: Option<ContentType>) -> Option<MessageContentType> {
@@ -111,7 +188,7 @@ async fn send_error_response(
     request_id: u64,
     code: u16,
     message: impl Into<String>,
-) -> anyhow::Result<()> {
+) -> Result<(), ProtocolConnectionError> {
     tx.send(error_frame(request_id, code, message)?).await?;
     Ok(())
 }
@@ -129,9 +206,420 @@ async fn send_error_response_and_count(
     metrics.error();
 }
 
+fn broker_error_response(err: &BrokerError) -> (u16, String) {
+    match err {
+        BrokerError::NotOwner { .. } => (ERR_NOT_OWNER, err.to_string()),
+        _ => (500, err.to_string()),
+    }
+}
+
+/// Build an `Op::Redirect` frame for a queue partition if the topology source
+/// can resolve its current owner. Redirect is control flow (not an error): it
+/// tells the client to retry against the right broker. `None` => no source or
+/// owner unknown, so the caller should fall back to its terminal error.
+fn owner_redirect_frame(
+    topology_source: &Option<Arc<dyn ClientTopologySource>>,
+    request_id: u64,
+    topic: &str,
+    partition: Partition,
+    group: Option<&str>,
+) -> Option<Frame> {
+    let (owner_endpoint, partitioning_version) = topology_source
+        .as_ref()?
+        .owner_endpoint(topic, partition, group)?;
+    let redirect = Redirect {
+        topic: topic.to_string(),
+        partition,
+        group: group.map(str::to_string),
+        owner_endpoint,
+        partitioning_version,
+    };
+    try_encode(Op::Redirect, request_id, &redirect).ok()
+}
+
+/// Fence a publish against a stale partitioning view. The client stamps the
+/// partitioning version it routed under; if that lags the queue's authoritative
+/// version, the partition it chose may no longer be correct, so we redirect it
+/// to re-fetch topology and re-route. Returns `true` if a redirect was sent (the
+/// caller must stop processing the publish). A missing topology source, an
+/// unknown owner, or an up-to-date (>=) client version all return `false` so the
+/// publish proceeds — version `0` against a v0 queue is the standalone path.
+async fn fence_stale_partitioning(
+    tx: &FrameSink,
+    request_id: u64,
+    topology_source: &Option<Arc<dyn ClientTopologySource>>,
+    topic: &str,
+    partition: Partition,
+    group: Option<&str>,
+    client_version: u64,
+) -> bool {
+    let Some(source) = topology_source.as_ref() else {
+        return false;
+    };
+    let Some((owner_endpoint, current_version)) = source.owner_endpoint(topic, partition, group)
+    else {
+        return false;
+    };
+    if client_version >= current_version {
+        return false;
+    }
+    let redirect = Redirect {
+        topic: topic.to_string(),
+        partition,
+        group: group.map(str::to_string),
+        owner_endpoint,
+        partitioning_version: current_version,
+    };
+    match try_encode(Op::Redirect, request_id, &redirect) {
+        Ok(frame) => tx.send(frame).await.is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Respond to a client-facing operation error. On `NotOwner`, emit a redirect
+/// when the owner is resolvable; otherwise fall back to the plain error
+/// (terminal `ERR_NOT_OWNER` when the owner is unknown).
+async fn send_owner_redirect_or_error(
+    tx: &FrameSink,
+    metrics: &TcpStats,
+    request_id: u64,
+    topology_source: &Option<Arc<dyn ClientTopologySource>>,
+    topic: &str,
+    partition: Partition,
+    group: Option<&str>,
+    err: &BrokerError,
+) {
+    if matches!(err, BrokerError::NotOwner { .. }) {
+        if let Some(frame) =
+            owner_redirect_frame(topology_source, request_id, topic, partition, group)
+        {
+            if tx.send(frame).await.is_ok() {
+                return;
+            }
+        }
+    }
+    let (code, message) = broker_error_response(err);
+    send_error_response_and_count(tx, metrics, request_id, code, message).await;
+}
+
+fn replication_checkpoint_required(
+    epoch: u64,
+    requested_offset: u64,
+    head_offset: u64,
+    next_offset: u64,
+) -> ReplicationCheckpointRequired {
+    ReplicationCheckpointRequired {
+        epoch,
+        requested_offset,
+        head_offset,
+        next_offset,
+    }
+}
+
+fn to_replication_message_read(read: OwnerReplicationRead<Message>) -> ReplicationMessageRead {
+    match read {
+        OwnerReplicationRead::Batch(batch) => ReplicationMessageRead::Batch {
+            epoch: batch.epoch,
+            requested_offset: batch.requested_offset,
+            next_offset: batch.next_offset,
+            records: batch
+                .records
+                .into_iter()
+                .map(|(offset, message)| ReplicationMessageRecord {
+                    offset,
+                    flags: message.flags,
+                    headers: message.headers,
+                    payload: message.payload,
+                })
+                .collect(),
+        },
+        OwnerReplicationRead::CheckpointRequired {
+            epoch,
+            requested_offset,
+            head_offset,
+            next_offset,
+        } => ReplicationMessageRead::CheckpointRequired(replication_checkpoint_required(
+            epoch,
+            requested_offset,
+            head_offset,
+            next_offset,
+        )),
+    }
+}
+
+fn to_replication_event_read(
+    read: OwnerReplicationRead<StromaEvent>,
+) -> std::io::Result<ReplicationEventRead> {
+    match read {
+        OwnerReplicationRead::Batch(batch) => {
+            let records = batch
+                .records
+                .into_iter()
+                .map(|(offset, event)| {
+                    let payload = event.encode()?;
+                    Ok(ReplicationEventRecord { offset, payload })
+                })
+                .collect::<std::io::Result<Vec<_>>>()?;
+            Ok(ReplicationEventRead::Batch {
+                epoch: batch.epoch,
+                requested_offset: batch.requested_offset,
+                next_offset: batch.next_offset,
+                records,
+            })
+        }
+        OwnerReplicationRead::CheckpointRequired {
+            epoch,
+            requested_offset,
+            head_offset,
+            next_offset,
+        } => Ok(ReplicationEventRead::CheckpointRequired(
+            replication_checkpoint_required(epoch, requested_offset, head_offset, next_offset),
+        )),
+    }
+}
+
+fn to_replication_read_ok(
+    records: BrokerOwnerReplicationRecords,
+) -> std::io::Result<ReplicationReadOk> {
+    Ok(ReplicationReadOk {
+        messages: to_replication_message_read(records.messages),
+        events: to_replication_event_read(records.events)?,
+    })
+}
+
+/// Broker-backed source for an owner replication stream sender. Bridges the
+/// generic [`replication_stream::OwnerStreamSource`] to the broker's read +
+/// follower-progress calls (the same ones the pull `ReplicationRead` path uses).
+struct BrokerOwnerStreamSource {
+    broker: Arc<Broker<StromaEngine>>,
+}
+
+#[async_trait::async_trait]
+impl replication_stream::OwnerStreamSource for BrokerOwnerStreamSource {
+    async fn read(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        message_from: u64,
+        event_from: u64,
+        max_messages: usize,
+        max_events: usize,
+        max_bytes: usize,
+        max_wait_ms: u64,
+    ) -> Result<ReplicationReadOk, String> {
+        let records = self
+            .broker
+            .read_owner_replication_records(
+                topic,
+                partition,
+                group,
+                message_from,
+                event_from,
+                max_messages,
+                max_events,
+                max_bytes,
+                max_wait_ms,
+            )
+            .await
+            .map_err(|err| broker_error_response(&err).1.to_string())?;
+        to_replication_read_ok(records).map_err(|err| err.to_string())
+    }
+
+    fn record_progress(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        reporter: &str,
+        durable_message_next: u64,
+        durable_event_next: u64,
+    ) {
+        self.broker.record_follower_replication_progress(
+            topic,
+            partition,
+            group,
+            reporter,
+            durable_message_next,
+            durable_event_next,
+        );
+    }
+}
+
+fn ensure_contiguous_offsets<I>(offsets: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = u64>,
+{
+    let mut iter = offsets.into_iter();
+    let Some(first) = iter.next() else {
+        return Ok(());
+    };
+    let mut expected = first + 1;
+    for offset in iter {
+        if offset != expected {
+            return Err(format!(
+                "replication apply records must be contiguous; expected offset {expected}, got {offset}"
+            ));
+        }
+        expected += 1;
+    }
+    Ok(())
+}
+
+fn to_owner_message_read(
+    batch: Option<ReplicationMessageApplyBatch>,
+) -> Result<OwnerReplicationRead<Message>, String> {
+    let Some(batch) = batch else {
+        return Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+            epoch: 0,
+            requested_offset: 0,
+            next_offset: 0,
+            records: Vec::new(),
+        }));
+    };
+
+    ensure_contiguous_offsets(batch.records.iter().map(|record| record.offset))?;
+    let requested_offset = batch.records.first().map_or(0, |record| record.offset);
+    let next_offset = batch.records.last().map_or(0, |record| record.offset + 1);
+    let records = batch
+        .records
+        .into_iter()
+        .map(|record| {
+            (
+                record.offset,
+                Message {
+                    flags: record.flags,
+                    headers: record.headers,
+                    payload: record.payload,
+                },
+            )
+        })
+        .collect();
+
+    Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+        epoch: batch.epoch,
+        requested_offset,
+        next_offset,
+        records,
+    }))
+}
+
+fn to_owner_event_read(
+    batch: Option<ReplicationEventApplyBatch>,
+) -> Result<OwnerReplicationRead<StromaEvent>, String> {
+    let Some(batch) = batch else {
+        return Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+            epoch: 0,
+            requested_offset: 0,
+            next_offset: 0,
+            records: Vec::new(),
+        }));
+    };
+
+    ensure_contiguous_offsets(batch.records.iter().map(|record| record.offset))?;
+    let requested_offset = batch.records.first().map_or(0, |record| record.offset);
+    let next_offset = batch.records.last().map_or(0, |record| record.offset + 1);
+    let records = batch
+        .records
+        .into_iter()
+        .map(|record| {
+            let event = StromaEvent::decode(&record.payload).map_err(|err| err.to_string())?;
+            Ok((record.offset, event))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(OwnerReplicationRead::Batch(OwnerReplicationBatch {
+        epoch: batch.epoch,
+        requested_offset,
+        next_offset,
+        records,
+    }))
+}
+
+fn to_owner_replication_records(
+    apply: ReplicationApply,
+) -> Result<BrokerOwnerReplicationRecords, String> {
+    Ok(BrokerOwnerReplicationRecords {
+        messages: to_owner_message_read(apply.messages)?,
+        events: to_owner_event_read(apply.events)?,
+    })
+}
+
+fn to_replication_apply_ok(messages_applied: bool, events_applied: bool) -> ReplicationApplyOk {
+    ReplicationApplyOk {
+        messages_applied,
+        events_applied,
+    }
+}
+
+fn to_replication_state_checkpoint(checkpoint: OwnerStateCheckpoint) -> ReplicationStateCheckpoint {
+    ReplicationStateCheckpoint {
+        message_epoch: checkpoint.message_epoch,
+        event_epoch: checkpoint.event_epoch,
+        message_checkpoint_offset: checkpoint.message_checkpoint_offset,
+        message_next_offset: checkpoint.message_next_offset,
+        event_next_offset: checkpoint.event_next_offset,
+        applied_event_offset: checkpoint.applied_event_offset,
+        state_snapshot: checkpoint.state_snapshot,
+    }
+}
+
+fn to_follower_state_checkpoint_install(
+    checkpoint: ReplicationStateCheckpoint,
+) -> FollowerStateCheckpointInstall {
+    FollowerStateCheckpointInstall {
+        message_next_offset: checkpoint.message_checkpoint_offset,
+        event_next_offset: checkpoint.event_next_offset,
+        applied_event_offset: checkpoint.applied_event_offset,
+        state_snapshot: checkpoint.state_snapshot,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum InstallSubscriptionError {
+    #[error(transparent)]
+    Broker(#[from] BrokerError),
+
+    #[error("already subscribed")]
+    AlreadySubscribed,
+
+    #[error(
+        "queue already has a different exclusive cohort (one cohort per queue; \
+         use a separate group for an unrelated consumer set)"
+    )]
+    CohortConflict,
+
+    #[error("cohort member id must not be nil")]
+    InvalidMemberId,
+
+    #[error(
+        "connection already joined this cohort under a different member id (one \
+         member identity per connection)"
+    )]
+    MemberIdConflict,
+}
+
+fn install_subscription_error_response(err: &InstallSubscriptionError) -> (u16, String) {
+    match err {
+        InstallSubscriptionError::Broker(err) => broker_error_response(err),
+        InstallSubscriptionError::AlreadySubscribed => (ERR_CONFLICT, err.to_string()),
+        InstallSubscriptionError::CohortConflict => (ERR_CONFLICT, err.to_string()),
+        InstallSubscriptionError::InvalidMemberId => (ERR_INVALID, err.to_string()),
+        InstallSubscriptionError::MemberIdConflict => (ERR_CONFLICT, err.to_string()),
+    }
+}
+
 struct SubState {
     sub_id: u64,
-    partition: u32,
+    partition: Partition,
+    /// Exclusive cohort id this subscription joined, if any (drives the
+    /// broker-side leave on unsubscribe/disconnect, and reconnect restore).
+    consumer_group: Option<String>,
+    /// Soft per-consumer target for the cohort (echoed for reconnect restore).
+    consumer_target: Option<u32>,
+    /// Resolved cluster cohort member id for this subscription (the cohort key);
+    /// `Some` iff exclusive. Used for leave and echoed for reconnect.
+    cohort_member: Option<Uuid>,
     auto_ack: bool,
     prefetch: u32,
     stats_sub_id: Option<Uuid>,
@@ -163,6 +651,9 @@ fn reconcile_subscription_from_state(
         partition: sub.partition,
         auto_ack: sub.auto_ack,
         prefetch: sub.prefetch,
+        consumer_group: sub.consumer_group.clone(),
+        consumer_target: sub.consumer_target,
+        member_id: sub.cohort_member,
     }
 }
 
@@ -195,6 +686,7 @@ impl LogicalConnection {
             state: Mutex::new(ConnState {
                 authenticated: false,
                 subs: HashMap::new(),
+                exclusive_forwarders: HashMap::new(),
             }),
             transport,
             generation: AtomicU64::new(0),
@@ -245,18 +737,36 @@ async fn cleanup_connection_state(
 ) {
     broker.wait_for_pending_settles().await;
 
-    let drained_subs = {
+    let (drained_subs, drained_forwarders) = {
         let mut state = logical.state.lock().await;
-        state.subs.drain().collect::<Vec<_>>()
+        let subs = state.subs.drain().collect::<Vec<_>>();
+        let forwarders = state.exclusive_forwarders.drain().collect::<Vec<_>>();
+        (subs, forwarders)
     };
 
-    for ((topic, group), sub) in drained_subs {
+    // Stop assignment forwarders (the broker also drops their senders on leave).
+    for (_cohort, handle) in drained_forwarders {
+        handle.abort();
+    }
+
+    for ((topic, partition, group), sub) in drained_subs {
         sub.task.abort();
         if let Err(err) = broker
             .unsubscribe(&topic, group.as_deref(), sub.partition, sub.sub_id)
             .await
         {
             tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
+        }
+        if let (Some(consumer_group), Some(member)) =
+            (sub.consumer_group.as_deref(), sub.cohort_member)
+        {
+            broker.exclusive_group_leave(
+                &topic,
+                partition,
+                group.as_deref(),
+                consumer_group,
+                &member.to_string(),
+            );
         }
     }
 }
@@ -267,9 +777,10 @@ async fn remove_subscription(
     connection_stats: &Arc<ConnectionStats>,
     conn_id: &Uuid,
     topic: &str,
+    partition: Partition,
     group: Option<&str>,
 ) -> Option<ReconcileSubscription> {
-    let key: SubKey = (topic.to_string(), group.map(str::to_string));
+    let key: SubKey = (topic.to_string(), partition, group.map(str::to_string));
     let sub = {
         let mut state = logical.state.lock().await;
         state.subs.remove(&key)
@@ -286,6 +797,16 @@ async fn remove_subscription(
     {
         tracing::warn!("Failed to unsubscribe consumer {}: {err}", sub.sub_id);
     }
+    if let (Some(consumer_group), Some(member)) = (sub.consumer_group.as_deref(), sub.cohort_member)
+    {
+        broker.exclusive_group_leave(
+            topic,
+            sub.partition,
+            group,
+            consumer_group,
+            &member.to_string(),
+        );
+    }
 
     Some(ReconcileSubscription {
         sub_id: sub.sub_id,
@@ -294,6 +815,48 @@ async fn remove_subscription(
         partition: sub.partition,
         auto_ack: sub.auto_ack,
         prefetch: sub.prefetch,
+        consumer_group: sub.consumer_group.clone(),
+        consumer_target: sub.consumer_target,
+        member_id: sub.cohort_member,
+    })
+}
+
+/// Spawn the per-(connection, cohort) task that forwards exclusive-group
+/// assignment changes to the client as `AssignmentChanged` frames. Ends when the
+/// member leaves the cohort (broker drops the sender) or the connection closes.
+fn spawn_assignment_forwarder(
+    logical: Arc<LogicalConnection>,
+    req_id_gen: Arc<ReqIdGenerator>,
+    metrics: Arc<TcpStats>,
+    mut updates: mpsc::UnboundedReceiver<ExclusiveAssignmentUpdate>,
+) -> tokio::task::JoinHandle<()> {
+    let mut transport_rx = logical.transport.subscribe();
+    tokio::spawn(async move {
+        while let Some(update) = updates.recv().await {
+            let msg = AssignmentChanged {
+                topic: update.topic,
+                group: update.group,
+                consumer_group: update.consumer_group,
+                generation: update.generation,
+                assigned: update.assigned,
+                added: update.added,
+                revoked: update.revoked,
+            };
+            let frame = match try_encode(Op::AssignmentChanged, req_id_gen.next_id(), &msg) {
+                Ok(frame) => frame,
+                Err(err) => {
+                    tracing::error!("Failed to encode AssignmentChanged frame: {err}");
+                    metrics.error();
+                    break;
+                }
+            };
+            if send_to_current_transport(&mut transport_rx, frame)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
     })
 }
 
@@ -306,30 +869,83 @@ struct InstallSubscriptionArgs {
     client_id: Uuid,
     req_id_gen: Arc<ReqIdGenerator>,
     topic: String,
+    partition: Partition,
     group: Option<String>,
     prefetch: u32,
     auto_ack: bool,
+    /// Opt-in exclusive consumer-group id. `None` keeps the default competing
+    /// behavior; `Some(id)` joins the cohort that exclusively divides the
+    /// queue's partitions.
+    consumer_group: Option<String>,
+    /// Soft per-consumer target for the exclusive cohort (member's desired max
+    /// partitions). Ignored without `consumer_group`.
+    consumer_target: Option<usize>,
+    /// Cluster cohort member id the client carries; `None` mints a fresh one.
+    /// Ignored without `consumer_group`.
+    member_id: Option<Uuid>,
 }
 
-async fn install_subscription(args: InstallSubscriptionArgs) -> anyhow::Result<SubscribeOk> {
-    let sub_key: SubKey = (args.topic.clone(), args.group.clone());
+async fn install_subscription(
+    args: InstallSubscriptionArgs,
+) -> Result<SubscribeOk, InstallSubscriptionError> {
+    let sub_key: SubKey = (args.topic.clone(), args.partition, args.group.clone());
 
     if args.logical.state.lock().await.subs.contains_key(&sub_key) {
-        anyhow::bail!("already subscribed");
+        return Err(InstallSubscriptionError::AlreadySubscribed);
     }
+
+    // A queue has a single exclusive cohort; reject a conflicting second cohort
+    // id before creating any subscription state.
+    if let Some(consumer_group) = args.consumer_group.as_deref() {
+        if args.broker.exclusive_cohort_conflicts(
+            &args.topic,
+            args.group.as_deref(),
+            consumer_group,
+        ) {
+            return Err(InstallSubscriptionError::CohortConflict);
+        }
+    }
+
+    // Resolve the cluster cohort member id for an exclusive sub. The broker is
+    // the source of truth for one member identity per connection: the connection
+    // establishes its id on its first exclusive subscribe (the id the client
+    // carried, else a freshly minted one returned in SubscribeOk to echo on its
+    // other brokers / reconnects), and every later exclusive subscribe on the
+    // same connection must reuse it. A nil id is rejected, a mismatching id is a
+    // conflict. `None` for non-exclusive subs.
+    let cohort_member: Option<Uuid> = if args.consumer_group.is_some() {
+        if matches!(args.member_id, Some(id) if id.is_nil()) {
+            return Err(InstallSubscriptionError::InvalidMemberId);
+        }
+        let established = {
+            let state = args.logical.state.lock().await;
+            state.subs.values().find_map(|sub| sub.cohort_member)
+        };
+        let resolved = match (args.member_id, established) {
+            (Some(id), Some(prev)) if id != prev => {
+                return Err(InstallSubscriptionError::MemberIdConflict);
+            }
+            (Some(id), _) => id,
+            (None, Some(prev)) => prev,
+            (None, None) => Uuid::new_v4(),
+        };
+        Some(resolved)
+    } else {
+        None
+    };
 
     let consumer = args
         .broker
         .subscribe(
             &args.topic,
+            args.partition,
             args.group.as_deref(),
             args.client_id,
             ConsumerConfig {
                 prefetch: args.prefetch as usize,
             },
         )
-        .await
-        .context("subscribe failed")?;
+        .await?;
 
     let ConsumerHandle {
         messages,
@@ -339,6 +955,56 @@ async fn install_subscription(args: InstallSubscriptionArgs) -> anyhow::Result<S
         activity_lease,
         ..
     } = consumer;
+
+    // Opt-in exclusive cohort: register this connection (member) on this
+    // partition so the broker can gate delivery to the assigned member. The
+    // queue's delivery loop already exists (subscribe created it).
+    if let (Some(consumer_group), Some(member)) = (args.consumer_group.as_deref(), cohort_member) {
+        let member = member.to_string();
+        // Ensure exactly one assignment-change forwarder per (connection, cohort),
+        // registered BEFORE the join so this member sees its initial assignment.
+        let cohort_key: CohortKey = (
+            args.topic.clone(),
+            args.group.clone(),
+            consumer_group.to_string(),
+        );
+        let needs_forwarder = !args
+            .logical
+            .state
+            .lock()
+            .await
+            .exclusive_forwarders
+            .contains_key(&cohort_key);
+        if needs_forwarder {
+            let updates = args.broker.register_exclusive_member(
+                &args.topic,
+                args.group.as_deref(),
+                consumer_group,
+                member.clone(),
+            );
+            let handle = spawn_assignment_forwarder(
+                args.logical.clone(),
+                args.req_id_gen.clone(),
+                args.metrics.clone(),
+                updates,
+            );
+            args.logical
+                .state
+                .lock()
+                .await
+                .exclusive_forwarders
+                .insert(cohort_key, handle);
+        }
+        args.broker.exclusive_group_join(
+            &args.topic,
+            args.partition,
+            args.group.as_deref(),
+            consumer_group,
+            member,
+            sub_id,
+            args.consumer_target,
+        );
+    }
 
     let mut transport_rx = args.logical.transport.subscribe();
 
@@ -380,7 +1046,7 @@ async fn install_subscription(args: InstallSubscriptionArgs) -> anyhow::Result<S
 
             tracing::debug!("Sending Deliver");
 
-            let frame = match try_encode(Op::Deliver, req_id_gen_clone.next_id(), &deliver) {
+            let frame = match wire::encode_deliver(req_id_gen_clone.next_id(), &deliver) {
                 Ok(frame) => frame,
                 Err(err) => {
                     tracing::error!("Failed to encode Deliver frame: {err}");
@@ -417,6 +1083,9 @@ async fn install_subscription(args: InstallSubscriptionArgs) -> anyhow::Result<S
         SubState {
             sub_id,
             partition: consumer.partition,
+            consumer_group: args.consumer_group.clone(),
+            consumer_target: args.consumer_target.map(|target| target as u32),
+            cohort_member,
             task: handle,
             auto_ack: args.auto_ack,
             prefetch: args.prefetch,
@@ -433,6 +1102,9 @@ async fn install_subscription(args: InstallSubscriptionArgs) -> anyhow::Result<S
         group: args.group,
         partition: consumer.partition,
         prefetch: args.prefetch,
+        consumer_group: args.consumer_group,
+        consumer_target: args.consumer_target.map(|target| target as u32),
+        member_id: cohort_member,
     })
 }
 
@@ -452,7 +1124,7 @@ async fn reconcile_subscriptions(
     metrics.reconcile_request();
 
     for client in reconcile.subscriptions {
-        let key: SubKey = (client.topic.clone(), client.group.clone());
+        let key: SubKey = (client.topic.clone(), client.partition, client.group.clone());
         seen.insert(key.clone(), ());
 
         let server = {
@@ -498,9 +1170,16 @@ async fn reconcile_subscriptions(
                     client_id,
                     req_id_gen: req_id_gen.clone(),
                     topic: client.topic.clone(),
+                    partition: client.partition,
                     group: client.group.clone(),
                     prefetch: client.prefetch,
                     auto_ack: client.auto_ack,
+                    // Restore exclusive membership too: the client carries its
+                    // cohort id + target in the reconcile request, so a reconnect
+                    // rejoins the cohort instead of falling back to competing.
+                    consumer_group: client.consumer_group.clone(),
+                    consumer_target: client.consumer_target.map(|target| target as usize),
+                    member_id: client.member_id,
                 })
                 .await;
 
@@ -516,6 +1195,9 @@ async fn reconcile_subscriptions(
                                 partition: ok.partition,
                                 auto_ack,
                                 prefetch: ok.prefetch,
+                                consumer_group: ok.consumer_group,
+                                consumer_target: ok.consumer_target,
+                                member_id: ok.member_id,
                             }),
                             action: ReconcileAction::Keep,
                             reason: "server_restored".into(),
@@ -553,13 +1235,14 @@ async fn reconcile_subscriptions(
             .collect::<Vec<_>>()
     };
 
-    for (topic, group) in server_only {
+    for (topic, partition, group) in server_only {
         if let Some(server) = remove_subscription(
             &broker,
             &logical,
             &connection_stats,
             &conn_id,
             &topic,
+            partition,
             group.as_deref(),
         )
         .await
@@ -819,7 +1502,7 @@ struct ReqIdGenerator {
 }
 
 fn expire_idle_publishers(
-    publishers: &mut HashMap<(Topic, Option<Group>), CachedPublisher>,
+    publishers: &mut HashMap<(Topic, Partition, Option<Group>), CachedPublisher>,
     idle_timeout_ms: Option<u64>,
 ) {
     let Some(idle_timeout_ms) = idle_timeout_ms else {
@@ -849,13 +1532,22 @@ pub async fn run_server(
     connection_stats: Arc<ConnectionStats>,
     auth: Option<impl AuthHandler + Send + Sync + Clone + 'static>,
     connection_settings: ConnectionSettings,
-) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+    topology_source: Option<Arc<dyn ClientTopologySource>>,
+    declare_coordinator: Option<Arc<dyn QueueDeclareCoordinator>>,
+) -> Result<(), ProtocolServerError> {
+    let listener = TcpListener::bind(addr)
+        .await
+        .map_err(|source| ProtocolServerError::Bind { addr, source })?;
     print_banner(&addr);
 
     loop {
-        let (socket, peer) = listener.accept().await?;
-        socket.set_nodelay(true)?;
+        let (socket, peer) = listener
+            .accept()
+            .await
+            .map_err(ProtocolServerError::Accept)?;
+        socket
+            .set_nodelay(true)
+            .map_err(|source| ProtocolServerError::ConfigureSocket { peer, source })?;
         tcp_stats.connection_opened();
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         let broker = broker.clone();
@@ -864,6 +1556,8 @@ pub async fn run_server(
         let tcp_stats = tcp_stats.clone();
         let connection_stats = connection_stats.clone();
         let connection_settings = connection_settings.clone();
+        let topology_source = topology_source.clone();
+        let declare_coordinator = declare_coordinator.clone();
         tokio::spawn(async move {
             tracing::info!("Connection {conn_id} opening..");
             if let Err(e) = handle_connection(
@@ -874,6 +1568,8 @@ pub async fn run_server(
                 conn_id,
                 auth,
                 connection_settings,
+                topology_source,
+                declare_coordinator,
             )
             .await
             {
@@ -906,7 +1602,9 @@ pub async fn handle_connection(
     conn_id: Uuid,
     auth_handler: Option<impl AuthHandler + Send + Sync>,
     connection_settings: ConnectionSettings,
-) -> anyhow::Result<()> {
+    topology_source: Option<Arc<dyn ClientTopologySource>>,
+    declare_coordinator: Option<Arc<dyn QueueDeclareCoordinator>>,
+) -> Result<(), ProtocolConnectionError> {
     let heartbeat_interval = connection_settings
         .heartbeat_interval
         .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
@@ -937,7 +1635,7 @@ pub async fn handle_connection(
     let frame = reader
         .next()
         .await
-        .context("connection closed before HELLO")??;
+        .ok_or(ProtocolConnectionError::ClosedBeforeHello)??;
 
     if frame.opcode != Op::Hello as u16 {
         writer
@@ -993,7 +1691,7 @@ pub async fn handle_connection(
     let logical = resume.logical.clone();
     let transport_generation = logical.attach_transport(frame_tx_high_prio.clone());
     client_id = resume.client_id;
-    let hello_ok = &HelloOk {
+    let hello_ok = HelloOk {
         protocol_version: PROTOCOL_V1,
         owner_id: connection_settings.resume_sessions.owner_id,
         client_id,
@@ -1011,7 +1709,7 @@ pub async fn handle_connection(
             got = %hello_ok.compliance,
             "Invariant violated: compliance marker altered or missing"
         );
-        anyhow::bail!("Protocol compliance marker mismatch");
+        return Err(ProtocolConnectionError::ComplianceMarkerMismatch);
     }
 
     let writer_task = tokio::spawn(async move {
@@ -1130,13 +1828,10 @@ pub async fn handle_connection(
                         Ok(Ok(offset)) => offset,
                         Ok(Err(err)) => {
                             if require_confirm {
-                                let send_res = send_error_response(
-                                    &frame_tx_pub,
-                                    request_id,
-                                    500,
-                                    err.to_string(),
-                                )
-                                .await;
+                                let (code, message) = broker_error_response(&err);
+                                let send_res =
+                                    send_error_response(&frame_tx_pub, request_id, code, message)
+                                        .await;
 
                                 if let Err(err) = send_res {
                                     tracing::error!("Error sending Publish Confirm: {err}");
@@ -1165,11 +1860,12 @@ pub async fn handle_connection(
                     };
                     if require_confirm {
                         let send_res =
-                            match try_encode(Op::PublishOk, request_id, &PublishOk { offset }) {
-                                Ok(frame) => {
-                                    frame_tx_pub.send(frame).await.map_err(anyhow::Error::from)
-                                }
-                                Err(err) => Err(anyhow::Error::from(err)),
+                            match wire::encode_publish_ok(request_id, &PublishOk { offset }) {
+                                Ok(frame) => frame_tx_pub
+                                    .send(frame)
+                                    .await
+                                    .map_err(ProtocolConnectionError::from),
+                                Err(err) => Err(ProtocolConnectionError::from(err)),
                             };
 
                         if let Err(err) = send_res {
@@ -1178,8 +1874,9 @@ pub async fn handle_connection(
                     }
                 }
                 Err(err) => {
+                    let (code, message) = broker_error_response(&err);
                     let send_res =
-                        send_error_response(&frame_tx_pub, request_id, 500, err.to_string()).await;
+                        send_error_response(&frame_tx_pub, request_id, code, message).await;
 
                     if let Err(err) = send_res {
                         tracing::error!("Error sending Publish Confirm: {err}");
@@ -1190,7 +1887,7 @@ pub async fn handle_connection(
         }
     });
 
-    let mut publishers = HashMap::<(Topic, Option<Group>), CachedPublisher>::new();
+    let mut publishers = HashMap::<(Topic, Partition, Option<Group>), CachedPublisher>::new();
 
     // ---- Main reader loop --------------------------------------------------
     // TODO: Make handling more async? Spawn task per frame, or have a task pool
@@ -1212,6 +1909,31 @@ pub async fn handle_connection(
             }
         };
     }
+
+    macro_rules! decode_wire_or_400 {
+        ($frame:expr, $tx:expr, $metrics:expr, $decoder:path) => {
+            match $decoder(&$frame) {
+                Ok(value) => value,
+                Err(err) => {
+                    send_error_response(
+                        &$tx,
+                        $frame.request_id,
+                        400,
+                        format!("malformed frame: {err}"),
+                    )
+                    .await?;
+                    $metrics.error();
+                    continue;
+                }
+            }
+        };
+    }
+
+    // Owner-side replication streams opened by followers on this connection,
+    // keyed by stream id (the frame request_id). Dropping a control sender (on
+    // Stop or when this map drops at connection end) makes its sender task exit.
+    let mut owner_streams: HashMap<u64, mpsc::Sender<replication_stream::OwnerStreamControl>> =
+        HashMap::new();
 
     loop {
         let loop_event = tokio::select! {
@@ -1370,26 +2092,313 @@ pub async fn handle_connection(
                     .await?;
             }
 
+            // -------- REPLICATION READ --------------------------------------
+            x if x == Op::ReplicationRead as u16 => {
+                let read: ReplicationRead =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, ReplicationRead);
+
+                // A stamped read doubles as the follower's durable-progress
+                // report (followers apply durably; pull offsets = watermarks).
+                if let Some(reporter) = &read.reporter_node_id {
+                    broker.record_follower_replication_progress(
+                        &read.topic,
+                        read.partition,
+                        read.group.as_deref(),
+                        reporter,
+                        read.message_from,
+                        read.event_from,
+                    );
+                }
+
+                match broker
+                    .read_owner_replication_records(
+                        &read.topic,
+                        read.partition,
+                        read.group.as_deref(),
+                        read.message_from,
+                        read.event_from,
+                        read.max_messages as usize,
+                        read.max_events as usize,
+                        usize::try_from(read.max_bytes).unwrap_or(usize::MAX),
+                        read.max_wait_ms as u64,
+                    )
+                    .await
+                {
+                    Ok(records) => {
+                        let response = match to_replication_read_ok(records) {
+                            Ok(response) => response,
+                            Err(err) => {
+                                tracing::error!(
+                                    error = %err,
+                                    "failed to encode replication read response"
+                                );
+                                send_error_response_and_count(
+                                    &frame_tx_high_prio,
+                                    &metrics,
+                                    frame.request_id,
+                                    500,
+                                    "replication read encoding failed",
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
+                        frame_tx_high_prio
+                            .send(wire::encode_replication_read_ok(
+                                frame.request_id,
+                                &response,
+                            )?)
+                            .await?;
+                    }
+                    Err(err) => {
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            // -------- REPLICATION STREAM (credit-based) --------------------
+            x if x == Op::ReplicationStreamStart as u16 => {
+                let start: ReplicationStreamStart =
+                    decode_wire_or_400!(frame, frame_tx_high_prio, metrics, wire::decode_replication_stream_start);
+                let stream_id = frame.request_id;
+                let (control_tx, control_rx) = mpsc::channel(64);
+                // Replace any existing stream on this id (drops the old sender,
+                // which makes the old task exit).
+                owner_streams.insert(stream_id, control_tx);
+                let source = Arc::new(BrokerOwnerStreamSource {
+                    broker: broker.clone(),
+                });
+                tokio::spawn(replication_stream::run_owner_replication_stream(
+                    source,
+                    frame_tx_high_prio.clone(),
+                    stream_id,
+                    start,
+                    control_rx,
+                    replication_stream::OwnerStreamConfig::default(),
+                ));
+            }
+            x if x == Op::ReplicationStreamProgress as u16 => {
+                let progress: ReplicationStreamProgress = decode_wire_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    wire::decode_replication_stream_progress
+                );
+                if let Some(control) = owner_streams.get(&frame.request_id) {
+                    let _ = control
+                        .send(replication_stream::OwnerStreamControl::Progress {
+                            durable_message_next: progress.durable_message_next,
+                            durable_event_next: progress.durable_event_next,
+                            credit_add_bytes: progress.credit_add_bytes,
+                        })
+                        .await;
+                }
+            }
+            x if x == Op::ReplicationStreamReset as u16 => {
+                let reset: ReplicationStreamReset = decode_wire_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    wire::decode_replication_stream_reset
+                );
+                if let Some(control) = owner_streams.get(&frame.request_id) {
+                    let _ = control
+                        .send(replication_stream::OwnerStreamControl::Reset {
+                            message_from: reset.message_from,
+                            event_from: reset.event_from,
+                        })
+                        .await;
+                }
+            }
+            x if x == Op::ReplicationStreamStop as u16 => {
+                // Dropping the control sender makes the sender task exit.
+                owner_streams.remove(&frame.request_id);
+            }
+
+            // -------- REPLICATION CHECKPOINT EXPORT ------------------------
+            x if x == Op::ReplicationCheckpointExport as u16 => {
+                let export: ReplicationCheckpointExport = decode_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    ReplicationCheckpointExport
+                );
+
+                match broker
+                    .export_owner_state_checkpoint(
+                        &export.topic,
+                        export.partition,
+                        export.group.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(checkpoint) => {
+                        let response = ReplicationCheckpointExportOk {
+                            checkpoint: to_replication_state_checkpoint(checkpoint),
+                        };
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::ReplicationCheckpointExportOk,
+                                frame.request_id,
+                                &response,
+                            )?)
+                            .await?;
+                    }
+                    Err(err) => {
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            // -------- REPLICATION CHECKPOINT INSTALL -----------------------
+            x if x == Op::ReplicationCheckpointInstall as u16 => {
+                let install: ReplicationCheckpointInstall = decode_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    ReplicationCheckpointInstall
+                );
+                let topic = install.topic.clone();
+                let group = install.group.clone();
+                let partition = install.partition;
+                let checkpoint = to_follower_state_checkpoint_install(install.checkpoint);
+
+                match broker
+                    .install_follower_state_checkpoint(
+                        &topic,
+                        partition,
+                        group.as_deref(),
+                        checkpoint,
+                    )
+                    .await
+                {
+                    Ok(outcome) => {
+                        let response = ReplicationCheckpointInstallOk {
+                            message_next_offset: outcome.message_next_offset,
+                            event_next_offset: outcome.event_next_offset,
+                            applied_event_offset: outcome.applied_event_offset,
+                        };
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::ReplicationCheckpointInstallOk,
+                                frame.request_id,
+                                &response,
+                            )?)
+                            .await?;
+                    }
+                    Err(err) => {
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            // -------- REPLICATION APPLY -------------------------------------
+            x if x == Op::ReplicationApply as u16 => {
+                let apply: ReplicationApply =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, ReplicationApply);
+                let topic = apply.topic.clone();
+                let group = apply.group.clone();
+                let partition = apply.partition;
+                let records = match to_owner_replication_records(apply) {
+                    Ok(records) => records,
+                    Err(message) => {
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            400,
+                            message,
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
+                match broker
+                    .apply_follower_replication_records(
+                        &topic,
+                        partition,
+                        group.as_deref(),
+                        records,
+                    )
+                    .await
+                {
+                    Ok(BrokerFollowerReplicationApply::Applied(outcome)) => {
+                        let response = to_replication_apply_ok(
+                            outcome.message_log.is_some(),
+                            outcome.event_log.is_some(),
+                        );
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::ReplicationApplyOk,
+                                frame.request_id,
+                                &response,
+                            )?)
+                            .await?;
+                    }
+                    Ok(BrokerFollowerReplicationApply::CheckpointRequired { .. }) => {
+                        tracing::error!(
+                            topic,
+                            partition = partition.id(),
+                            group,
+                            "plain replication apply unexpectedly required a checkpoint"
+                        );
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            500,
+                            "replication apply unexpectedly required checkpoint",
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+            }
+
             // -------- SUBSCRIBE ---------------------------------------------
             x if x == Op::Subscribe as u16 => {
                 let sub: Subscribe = decode_or_400!(frame, frame_tx_high_prio, metrics, Subscribe);
 
-                let sub_key: SubKey = (sub.topic.clone(), sub.group.clone());
-
-                if logical.state.lock().await.subs.contains_key(&sub_key) {
-                    frame_tx_high_prio
-                        .send(try_encode(
-                            Op::SubscribeErr,
-                            frame.request_id,
-                            &ErrorMsg {
-                                code: 409,
-                                message: "already subscribed".into(),
-                            },
-                        )?)
-                        .await?;
-                    metrics.error();
-                    continue;
-                }
+                // Captured for a possible redirect (the identity is moved into
+                // the install args below).
+                let sub_topic = sub.topic.clone();
+                let sub_group = sub.group.clone();
+                let sub_partition = sub.partition;
 
                 let sub_ok = install_subscription(InstallSubscriptionArgs {
                     broker: broker.clone(),
@@ -1400,15 +2409,78 @@ pub async fn handle_connection(
                     client_id,
                     req_id_gen: req_id_gen.clone(),
                     topic: sub.topic,
+                    partition: sub.partition,
                     group: sub.group,
                     prefetch: sub.prefetch,
                     auto_ack: sub.auto_ack,
+                    consumer_group: sub.consumer_group,
+                    consumer_target: sub.consumer_target.map(|target| target as usize),
+                    member_id: sub.member_id,
                 })
-                .await
-                .context("subscribe failed")?;
+                .await;
+
+                let sub_ok = match sub_ok {
+                    Ok(sub_ok) => sub_ok,
+                    Err(err) => {
+                        // Not-owner on subscribe redirects to the current owner
+                        // (when resolvable), just like publish.
+                        if matches!(
+                            &err,
+                            InstallSubscriptionError::Broker(BrokerError::NotOwner { .. })
+                        ) {
+                            if let Some(redirect) = owner_redirect_frame(
+                                &topology_source,
+                                frame.request_id,
+                                &sub_topic,
+                                sub_partition,
+                                sub_group.as_deref(),
+                            ) {
+                                frame_tx_high_prio.send(redirect).await?;
+                                continue;
+                            }
+                        }
+                        let (code, message) = install_subscription_error_response(&err);
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::SubscribeErr,
+                                frame.request_id,
+                                &ErrorMsg { code, message },
+                            )?)
+                            .await?;
+                        metrics.error();
+                        continue;
+                    }
+                };
 
                 frame_tx_high_prio
                     .send(try_encode(Op::SubscribeOk, frame.request_id, &sub_ok)?)
+                    .await?;
+            }
+
+            // -------- TOPOLOGY ----------------------------------------------
+            x if x == Op::Topology as u16 => {
+                let req: TopologyRequest =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, TopologyRequest);
+                // No source (standalone) => empty topology; the client falls
+                // back to its direct connection.
+                let mut topology = topology_source
+                    .as_ref()
+                    .map(|source| source.topology())
+                    .unwrap_or(TopologyOk {
+                        generation: 0,
+                        queues: Vec::new(),
+                    });
+                if let Some(topic) = &req.topic {
+                    topology.queues.retain(|queue| {
+                        &queue.topic == topic
+                            && req
+                                .group
+                                .as_deref()
+                                .is_none_or(|group| queue.group.as_deref() == Some(group))
+                    });
+                }
+                frame_tx_high_prio
+                    .send(try_encode(Op::TopologyOk, frame.request_id, &topology)?)
                     .await?;
             }
 
@@ -1430,50 +2502,87 @@ pub async fn handle_connection(
                     }
                 };
 
-                match broker
-                    .engine()
-                    .declare_queue(&declare.topic, 0, declare.group.as_deref(), meta)
-                    .await
-                {
-                    Ok(()) => {
-                        frame_tx_high_prio
-                            .send(try_encode(
-                                Op::DeclareQueueOk,
+                let requested = declare
+                    .partition_count
+                    .unwrap_or_else(|| broker.config_snapshot().default_partition_count)
+                    .max(1);
+
+                // Record partitioning metadata first (cluster mode): the
+                // returned count is authoritative — an already-declared queue's
+                // count wins, and a conflicting request errors. Standalone uses
+                // the requested count directly.
+                let partition_count = if let Some(coordinator) = &declare_coordinator {
+                    match coordinator
+                        .declare_partitioning(&declare.topic, declare.group.as_deref(), requested)
+                        .await
+                    {
+                        Ok(count) => count,
+                        Err(message) => {
+                            let _ = send_error_response(
+                                &frame_tx_high_prio,
                                 frame.request_id,
-                                &DeclareQueueOk {
-                                    status: "stored".into(),
-                                },
-                            )?)
-                            .await?;
+                                ERR_CONFLICT,
+                                &message,
+                            )
+                            .await;
+                            continue;
+                        }
                     }
-                    Err(err @ StromaError::InvalidArgument(_)) => {
-                        let _ = send_error_response(
-                            &frame_tx_high_prio,
-                            frame.request_id,
-                            400,
-                            &err.to_string(),
+                } else {
+                    requested
+                };
+
+                // Materialize the partitions locally; in cluster mode the
+                // controller assigns ownership and catalogue sync registers them.
+                let mut failure: Option<(u16, String)> = None;
+                for partition in 0..partition_count {
+                    match broker
+                        .engine()
+                        .declare_queue(
+                            &declare.topic,
+                            partition,
+                            declare.group.as_deref(),
+                            meta.clone(),
                         )
-                        .await;
-                    }
-                    Err(err) => {
-                        tracing::error!("Declare queue failed: {err}");
-                        let _ = send_error_response(
-                            &frame_tx_high_prio,
-                            frame.request_id,
-                            500,
-                            "declare queue failed",
-                        )
-                        .await;
+                        .await
+                    {
+                        Ok(()) => {}
+                        Err(err @ StromaError::InvalidArgument(_)) => {
+                            failure = Some((400, err.to_string()));
+                            break;
+                        }
+                        Err(err) => {
+                            tracing::error!("Declare queue failed: {err}");
+                            failure = Some((500, "declare queue failed".into()));
+                            break;
+                        }
                     }
                 }
+                if let Some((code, message)) = failure {
+                    let _ =
+                        send_error_response(&frame_tx_high_prio, frame.request_id, code, &message)
+                            .await;
+                    continue;
+                }
+                frame_tx_high_prio
+                    .send(try_encode(
+                        Op::DeclareQueueOk,
+                        frame.request_id,
+                        &DeclareQueueOk {
+                            status: "stored".into(),
+                            partition_count,
+                        },
+                    )?)
+                    .await?;
             }
 
             // -------- ACK ----------------------------------------------------
             x if x == Op::Ack as u16 => {
                 // TODO: Decline ack when auto ack? Log?
-                let ack: Ack = decode_or_400!(frame, frame_tx_high_prio, metrics, Ack);
+                let ack: Ack =
+                    decode_wire_or_400!(frame, frame_tx_high_prio, metrics, wire::decode_ack);
 
-                let key: SubKey = (ack.topic.clone(), ack.group.clone());
+                let key: SubKey = (ack.topic.clone(), ack.partition, ack.group.clone());
 
                 let settle_target = {
                     let state = logical.state.lock().await;
@@ -1503,7 +2612,8 @@ pub async fn handle_connection(
             // -------- NACK ----------------------------------------------------
             x if x == Op::Nack as u16 => {
                 // TODO: Decline ack when auto ack? Log?
-                let nack: Nack = decode_or_400!(frame, frame_tx_high_prio, metrics, Nack);
+                let nack: Nack =
+                    decode_wire_or_400!(frame, frame_tx_high_prio, metrics, wire::decode_nack);
                 if nack.not_before.is_some() && !nack.requeue {
                     send_error_response_and_count(
                         &frame_tx_high_prio,
@@ -1516,7 +2626,7 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                let key: SubKey = (nack.topic.clone(), nack.group.clone());
+                let key: SubKey = (nack.topic.clone(), nack.partition, nack.group.clone());
 
                 let settle_target = {
                     let state = logical.state.lock().await;
@@ -1549,7 +2659,21 @@ pub async fn handle_connection(
             // -------- PUBLISH ------------------------------------------------
             x if x == Op::Publish as u16 => {
                 let publish_received = unix_millis();
-                let pubreq: Publish = decode_or_400!(frame, frame_tx_low_prio, metrics, Publish);
+                let pubreq: Publish =
+                    decode_wire_or_400!(frame, frame_tx_low_prio, metrics, wire::decode_publish);
+                if fence_stale_partitioning(
+                    &frame_tx_low_prio,
+                    frame.request_id,
+                    &topology_source,
+                    &pubreq.topic,
+                    pubreq.partition,
+                    pubreq.group.as_deref(),
+                    pubreq.partitioning_version,
+                )
+                .await
+                {
+                    continue;
+                }
                 let mut headers = pubreq.headers;
                 let content_type = normalize_content_type(pubreq.content_type, &mut headers);
                 if has_reserved_headers(&headers) {
@@ -1563,13 +2687,29 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                let key = (pubreq.topic.clone(), pubreq.group.clone());
+                let key = (pubreq.topic.clone(), pubreq.partition, pubreq.group.clone());
                 let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
-                    let (pubh, mut conf_stream) = broker
-                        .get_publisher(&pubreq.topic, &pubreq.group)
+                    let (pubh, mut conf_stream) = match broker
+                        .get_publisher(&pubreq.topic, pubreq.partition, &pubreq.group)
                         .await
-                        .context("get publisher failed")?;
+                    {
+                        Ok(publisher) => publisher,
+                        Err(err) => {
+                            send_owner_redirect_or_error(
+                                &frame_tx_low_prio,
+                                &metrics,
+                                frame.request_id,
+                                &topology_source,
+                                &pubreq.topic,
+                                pubreq.partition,
+                                pubreq.group.as_deref(),
+                                &err,
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
 
                     // let conf_sink = frame_tx_low_prio.clone();
                     // let req_id_gen_clone = req_id_gen.clone();
@@ -1647,8 +2787,25 @@ pub async fn handle_connection(
             }
             x if x == Op::PublishDelayed as u16 => {
                 let publish_received = unix_millis();
-                let pubreq: PublishDelayed =
-                    decode_or_400!(frame, frame_tx_low_prio, metrics, PublishDelayed);
+                let pubreq: PublishDelayed = decode_wire_or_400!(
+                    frame,
+                    frame_tx_low_prio,
+                    metrics,
+                    wire::decode_publish_delayed
+                );
+                if fence_stale_partitioning(
+                    &frame_tx_low_prio,
+                    frame.request_id,
+                    &topology_source,
+                    &pubreq.topic,
+                    pubreq.partition,
+                    pubreq.group.as_deref(),
+                    pubreq.partitioning_version,
+                )
+                .await
+                {
+                    continue;
+                }
                 let mut headers = pubreq.headers;
                 let content_type = normalize_content_type(pubreq.content_type, &mut headers);
                 if has_reserved_headers(&headers) {
@@ -1662,13 +2819,29 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                let key = (pubreq.topic.clone(), pubreq.group.clone());
+                let key = (pubreq.topic.clone(), pubreq.partition, pubreq.group.clone());
                 let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
-                    let (pubh, mut conf_stream) = broker
-                        .get_publisher(&pubreq.topic, &pubreq.group)
+                    let (pubh, mut conf_stream) = match broker
+                        .get_publisher(&pubreq.topic, pubreq.partition, &pubreq.group)
                         .await
-                        .context("get publisher failed")?;
+                    {
+                        Ok(publisher) => publisher,
+                        Err(err) => {
+                            send_owner_redirect_or_error(
+                                &frame_tx_low_prio,
+                                &metrics,
+                                frame.request_id,
+                                &topology_source,
+                                &pubreq.topic,
+                                pubreq.partition,
+                                pubreq.group.as_deref(),
+                                &err,
+                            )
+                            .await;
+                            continue;
+                        }
+                    };
 
                     // let conf_sink = frame_tx_low_prio.clone();
                     // let req_id_gen_clone = req_id_gen.clone();

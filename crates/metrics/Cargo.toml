@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 fibril-util = { path = "../util" }
-anyhow = "1.0"
 arc-swap = "1.9"
 async-trait = "0.1"
 dashmap = "6.1"

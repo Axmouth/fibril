@@ -2,10 +2,13 @@ pub mod client;
 pub mod frame;
 pub mod handler;
 pub mod helper;
+pub mod replication;
+pub mod replication_stream;
+pub mod wire;
 
 use std::collections::HashMap;
 
-use fibril_storage::DeliveryTag;
+pub use fibril_storage::{DeliveryTag, Partition};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -49,6 +52,9 @@ pub enum Op {
     Deliver = 40,
     Ack = 41,
     Nack = 42,
+    /// Server->client push: a member's exclusive consumer-group assignment
+    /// changed (informational; the per-partition gate enforces it regardless).
+    AssignmentChanged = 43,
 
     Ping = 50,
     Pong = 51,
@@ -59,6 +65,35 @@ pub enum Op {
     ReconcileClient = 70,
     ReconcileServer = 71,
     ReconcileResult = 72,
+
+    ReplicationRead = 80,
+    ReplicationReadOk = 81,
+    ReplicationApply = 82,
+    ReplicationApplyOk = 83,
+    ReplicationCheckpointExport = 84,
+    ReplicationCheckpointExportOk = 85,
+    ReplicationCheckpointInstall = 86,
+    ReplicationCheckpointInstallOk = 87,
+
+    Topology = 90,
+    TopologyOk = 91,
+    Redirect = 92,
+
+    // Streaming replication (credit-based). The frame `request_id` is the stream
+    // id, so batch/progress/reset/stop frames identify their stream without
+    // repeating the queue key.
+    /// follower->owner: open a replication stream with an initial send budget.
+    ReplicationStreamStart = 93,
+    /// owner->follower PUSH: one record batch (reuses the `ReplicationReadOk` body).
+    ReplicationStreamBatch = 94,
+    /// follower->owner: durable progress plus a credit refill (combined).
+    ReplicationStreamProgress = 95,
+    /// follower->owner: rewind the stream to an offset (gap / post-checkpoint).
+    ReplicationStreamReset = 96,
+    /// follower->owner: close the stream.
+    ReplicationStreamStop = 97,
+    /// owner->follower: the stream ended (not-owner, closed, or fenced).
+    ReplicationStreamEnd = 98,
 
     Error = 255,
 }
@@ -137,7 +172,7 @@ impl ContentType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Publish {
     pub topic: String,
-    pub partition: u32, // keep for later, default 0
+    pub partition: Partition, // explicit partition override; default 0
     pub group: Option<String>,
     pub require_confirm: bool,
     #[serde(default)]
@@ -145,12 +180,24 @@ pub struct Publish {
     pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
     pub published: u64,
+    /// Optional partition key: `hash(key) % partition_count` selects the
+    /// partition (Kafka-style, for per-key ordering). Absent => round-robin.
+    /// Purely partition selection — NOT a RabbitMQ-style routing key.
+    #[serde(default)]
+    pub partition_key: Option<Vec<u8>>,
+    /// The partitioning version the client routed under. The owner fences
+    /// against a stale view: if this lags the queue's authoritative version,
+    /// the chosen partition may no longer be correct, so the owner redirects
+    /// the client to re-fetch topology. `0` is the default/unknown version and
+    /// matches a single-partition v0 queue (standalone / non-cluster path).
+    #[serde(default)]
+    pub partitioning_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishDelayed {
     pub topic: String,
-    pub partition: u32,
+    pub partition: Partition,
     pub group: Option<String>,
     pub require_confirm: bool,
     pub not_before: u64,
@@ -159,6 +206,14 @@ pub struct PublishDelayed {
     pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
     pub published: u64,
+    /// Optional partition key: `hash(key) % partition_count` selects the
+    /// partition (Kafka-style, for per-key ordering). Absent => round-robin.
+    /// Purely partition selection — NOT a RabbitMQ-style routing key.
+    #[serde(default)]
+    pub partition_key: Option<Vec<u8>>,
+    /// The partitioning version the client routed under. See [`Publish`].
+    #[serde(default)]
+    pub partitioning_version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,19 +239,51 @@ pub struct DeclareQueue {
     pub group: Option<String>,
     pub dlq_policy: Option<QueueDlqPolicy>,
     pub dlq_max_retries: Option<u32>,
+    /// Desired partition count for this `(topic, group)` queue. `None` uses the
+    /// cluster default (`default_partition_count`). Serde-default keeps older
+    /// clients wire-compatible.
+    #[serde(default)]
+    pub partition_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeclareQueueOk {
     pub status: String,
+    /// Effective partition count of the declared queue.
+    #[serde(default)]
+    pub partition_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscribe {
     pub topic: String,
+    /// The partition to subscribe to. A multi-partition subscription opens one
+    /// `Subscribe` per partition; single-partition / standalone uses 0. Serde
+    /// default keeps older clients (which omit it) on partition 0.
+    #[serde(default)]
+    pub partition: Partition,
     pub group: Option<String>,
     pub prefetch: u32,
     pub auto_ack: bool,
+    /// Opt-in exclusive consumer-group id. `None` (default) = the normal
+    /// competing-consumer behavior. `Some(id)` joins an exclusive cohort that
+    /// divides the queue's partitions (each partition to one member) for
+    /// per-partition ordering; the server assigns partitions and the wire
+    /// `partition` is ignored for the join.
+    #[serde(default)]
+    pub consumer_group: Option<String>,
+    /// Soft per-consumer target: the member's desired max partitions within its
+    /// exclusive cohort. `None` (default) uses the group default. Only meaningful
+    /// alongside `consumer_group`; coverage always wins over the target.
+    #[serde(default)]
+    pub consumer_target: Option<u32>,
+    /// Cluster-scoped cohort member identity. A consumer that spans brokers
+    /// carries the SAME id on every exclusive subscribe so the cohort recognizes
+    /// it as one member across owners. `None` on the first exclusive subscribe —
+    /// the server mints one and returns it in `SubscribeOk`; the client then
+    /// echoes it. Ignored without `consumer_group`.
+    #[serde(default)]
+    pub member_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,8 +291,20 @@ pub struct SubscribeOk {
     pub sub_id: u64,
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub prefetch: u32,
+    /// Echoes the exclusive cohort id this subscription joined (if any), so the
+    /// client can restore exclusive membership on reconnect-reconcile.
+    #[serde(default)]
+    pub consumer_group: Option<String>,
+    /// Echoes the soft per-consumer target (if any).
+    #[serde(default)]
+    pub consumer_target: Option<u32>,
+    /// The cluster-scoped cohort member id in effect for this subscription
+    /// (server-minted on the first exclusive subscribe). The client caches it and
+    /// echoes it on its other exclusive subscribes and across reconnects.
+    #[serde(default)]
+    pub member_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,10 +312,22 @@ pub struct ReconcileSubscription {
     pub sub_id: u64,
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub auto_ack: bool,
     #[serde(default = "default_prefetch")]
     pub prefetch: u32,
+    /// Exclusive cohort id to restore this subscription into (if any). Carried so
+    /// a reconnect rejoins the cohort instead of silently falling back to
+    /// competing.
+    #[serde(default)]
+    pub consumer_group: Option<String>,
+    /// Soft per-consumer target to restore (if any).
+    #[serde(default)]
+    pub consumer_target: Option<u32>,
+    /// Cohort member id to restore under, so a reconnect keeps the same cluster
+    /// identity rather than being minted a new one.
+    #[serde(default)]
+    pub member_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -266,12 +377,197 @@ pub struct ReconcileResult {
     pub subscriptions: Vec<ReconcileSubscriptionResult>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationRead {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: Partition,
+    pub message_from: u64,
+    pub event_from: u64,
+    pub max_messages: u32,
+    pub max_events: u32,
+    /// Approximate byte budget for returned records. One oversized message may
+    /// still exceed this so replication can make progress.
+    #[serde(default)]
+    pub max_bytes: u64,
+    /// Optional long-poll budget. Zero means an immediate read. Followers use
+    /// this only after they have caught up; ordinary catch-up remains pull.
+    #[serde(default)]
+    pub max_wait_ms: u32,
+    /// Follower identity for owner-side progress tracking (publish-confirm
+    /// durability policies). Followers apply durably, so `message_from` /
+    /// `event_from` are honest durable progress. Optional: old peers simply
+    /// don't report.
+    #[serde(default)]
+    pub reporter_node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationMessageRecord {
+    pub offset: u64,
+    pub flags: u16,
+    pub headers: Vec<u8>,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationEventRecord {
+    pub offset: u64,
+    pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointRequired {
+    pub epoch: u64,
+    pub requested_offset: u64,
+    pub head_offset: u64,
+    pub next_offset: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplicationMessageRead {
+    Batch {
+        epoch: u64,
+        requested_offset: u64,
+        next_offset: u64,
+        records: Vec<ReplicationMessageRecord>,
+    },
+    CheckpointRequired(ReplicationCheckpointRequired),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ReplicationEventRead {
+    Batch {
+        epoch: u64,
+        requested_offset: u64,
+        next_offset: u64,
+        records: Vec<ReplicationEventRecord>,
+    },
+    CheckpointRequired(ReplicationCheckpointRequired),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationReadOk {
+    pub messages: ReplicationMessageRead,
+    pub events: ReplicationEventRead,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationMessageApplyBatch {
+    pub epoch: u64,
+    pub records: Vec<ReplicationMessageRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationEventApplyBatch {
+    pub epoch: u64,
+    pub records: Vec<ReplicationEventRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationApply {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: Partition,
+    pub messages: Option<ReplicationMessageApplyBatch>,
+    pub events: Option<ReplicationEventApplyBatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationApplyOk {
+    pub messages_applied: bool,
+    pub events_applied: bool,
+}
+
+/// follower->owner: open a credit-based replication stream for one partition.
+/// Subsequent frames on this stream are keyed by the frame `request_id`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStreamStart {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: Partition,
+    pub message_from: u64,
+    pub event_from: u64,
+    /// Initial send budget in bytes. The owner streams batches up to this and
+    /// pauses until the follower refills (see `ReplicationStreamProgress`).
+    pub credit_bytes: u64,
+    /// Follower identity for owner-side durable progress tracking. Followers
+    /// apply durably, so reported offsets are honest durable progress.
+    pub reporter_node_id: Option<String>,
+}
+
+/// follower->owner: durable apply progress plus a credit refill, in one frame.
+/// The progress half feeds the publish-confirm gate and the replica-durable
+/// visibility watermark; the credit half extends the owner's send budget.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStreamProgress {
+    pub durable_message_next: u64,
+    pub durable_event_next: u64,
+    pub credit_add_bytes: u64,
+}
+
+/// follower->owner: rewind the stream to these offsets (an apply gap, or after a
+/// checkpoint install) so the owner reseeks its cursor.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStreamReset {
+    pub message_from: u64,
+    pub event_from: u64,
+}
+
+/// owner->follower: the stream ended. `code` distinguishes not-owner / fenced /
+/// closed so the follower can re-resolve the owner and re-subscribe if needed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStreamEnd {
+    pub code: u16,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointExport {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: Partition,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationStateCheckpoint {
+    pub message_epoch: u64,
+    pub event_epoch: u64,
+    pub message_checkpoint_offset: u64,
+    pub message_next_offset: u64,
+    pub event_next_offset: u64,
+    pub applied_event_offset: u64,
+    pub state_snapshot: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointExportOk {
+    pub checkpoint: ReplicationStateCheckpoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointInstall {
+    pub topic: String,
+    pub group: Option<String>,
+    pub partition: Partition,
+    pub checkpoint: ReplicationStateCheckpoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicationCheckpointInstallOk {
+    pub message_next_offset: u64,
+    pub event_next_offset: u64,
+    pub applied_event_offset: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Deliver {
     pub sub_id: u64,
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub offset: u64,
     pub delivery_tag: DeliveryTag,
     pub published: u64,
@@ -282,11 +578,28 @@ pub struct Deliver {
     pub payload: Vec<u8>,
 }
 
+/// Server->client push notifying an exclusive consumer-group member that its
+/// partition assignment changed. Purely informational: the broker's per-partition
+/// delivery gate enforces exclusivity regardless of whether the client acts on
+/// this. `generation` increases per cohort rebalance so stale notifications can be
+/// fenced. `assigned` is the member's full current set; `added`/`revoked` are the
+/// deltas since its previous assignment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AssignmentChanged {
+    pub topic: String,
+    pub group: Option<String>,
+    pub consumer_group: String,
+    pub generation: u64,
+    pub assigned: Vec<Partition>,
+    pub added: Vec<Partition>,
+    pub revoked: Vec<Partition>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ack {
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub tags: Vec<DeliveryTag>, // batch
 }
 
@@ -294,7 +607,7 @@ pub struct Ack {
 pub struct Nack {
     pub topic: String,
     pub group: Option<String>,
-    pub partition: u32,
+    pub partition: Partition,
     pub tags: Vec<DeliveryTag>, // batch
     pub requeue: bool,
     #[serde(default)]
@@ -311,4 +624,116 @@ pub struct Pong;
 pub struct ErrorMsg {
     pub code: u16,
     pub message: String,
+}
+
+pub const ERR_CONFLICT: u16 = 409;
+// Not-owner is a topology or state conflict, not an auth failure. Retrying
+// against the current owner is valid, so 403-style "forbidden" is misleading.
+pub const ERR_NOT_OWNER: u16 = ERR_CONFLICT;
+/// Malformed request the client should fix rather than retry (e.g. a nil cohort
+/// member id).
+pub const ERR_INVALID: u16 = 400;
+/// The target topic/partition is not known to the cluster (never declared or
+/// deleted). Distinct from a transient owner transition: the client fails fast
+/// instead of retrying it across the publish budget.
+pub const ERR_NOT_FOUND: u16 = 404;
+
+// ----- Header namespaces (shared by broker rejection + client guard) ---------
+
+/// Header key prefixes reserved for system metadata. A client publish that sets
+/// any reserved key is rejected by the broker, EXCEPT the client carve-out below.
+/// Shared so the client can guard user code from setting them too.
+pub const RESERVED_HEADER_PREFIXES: &[&str] = &["fibril.", "stroma."];
+/// The carve-out within the reserved namespace that clients MAY set: library-owned
+/// system metadata (e.g. producer dedup ids). The broker reads recognized keys and
+/// ignores the rest; user code still cannot set it (only the client library can).
+pub const CLIENT_HEADER_PREFIX: &str = "fibril.client.";
+/// Library-owned producer-id header (under `fibril.client.*`): set by the client
+/// ReliablePublisher today, read by broker producer-dedup later.
+pub const HEADER_PRODUCER_ID: &str = "fibril.client.producer_id";
+/// Library-owned per-producer monotonic sequence header (under `fibril.client.*`).
+pub const HEADER_PRODUCER_SEQ: &str = "fibril.client.producer_seq";
+
+/// Whether `key` is in a reserved system namespace at all (the client guard).
+pub fn is_reserved_header_key(key: &str) -> bool {
+    RESERVED_HEADER_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
+}
+
+/// Whether `key` is SERVER-owned: reserved but NOT in the client carve-out, i.e.
+/// the broker rejects it when a client publish sets it.
+pub fn is_server_owned_header_key(key: &str) -> bool {
+    is_reserved_header_key(key) && !key.starts_with(CLIENT_HEADER_PREFIX)
+}
+
+/// Client request for cluster topology. An empty `topic` filter asks for the
+/// full topology; a set `topic` (optionally with `group`) narrows it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TopologyRequest {
+    #[serde(default)]
+    pub topic: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+/// One queue partition's ownership, as seen by clients for routing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueTopologyEntry {
+    pub topic: String,
+    pub partition: Partition,
+    pub group: Option<String>,
+    /// Broker endpoint of the owner, if the owner node is known in the registry.
+    pub owner_endpoint: Option<String>,
+    pub partitioning_version: u64,
+    /// Total partition count of this queue `(topic, group)` — authoritative N
+    /// for key routing. Repeated across the queue's partition entries.
+    #[serde(default = "one")]
+    pub partition_count: u32,
+}
+
+fn one() -> u32 {
+    1
+}
+
+/// Topology response: ownership of the requested queue partitions at a given
+/// coordination generation. Clients route from this and refresh on redirects.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyOk {
+    pub generation: u64,
+    pub queues: Vec<QueueTopologyEntry>,
+}
+
+/// Control-flow response telling the client to retry against the current owner.
+/// Distinct from an error: it is not a failure, it carries a routing target,
+/// and it must be retried on a DIFFERENT connection, so the client routing
+/// layer (not the per-connection engine) acts on it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Redirect {
+    pub topic: String,
+    pub partition: Partition,
+    pub group: Option<String>,
+    pub owner_endpoint: String,
+    pub partitioning_version: u64,
+}
+
+#[cfg(test)]
+mod header_namespace_tests {
+    use super::*;
+
+    #[test]
+    fn client_carveout_is_writable_rest_is_server_owned() {
+        // Server-owned: reserved and NOT in the client carve-out -> broker rejects.
+        assert!(is_server_owned_header_key("fibril.retries"));
+        assert!(is_server_owned_header_key("stroma.dlq.source_topic"));
+        // Client carve-out: reserved namespace, but client-writable -> not rejected.
+        assert!(is_reserved_header_key(HEADER_PRODUCER_ID));
+        assert!(!is_server_owned_header_key(HEADER_PRODUCER_ID));
+        assert!(!is_server_owned_header_key("fibril.client.anything"));
+        // User space: neither reserved nor server-owned.
+        assert!(!is_reserved_header_key("trace-id"));
+        assert!(!is_server_owned_header_key("trace-id"));
+        assert!(HEADER_PRODUCER_ID.starts_with(CLIENT_HEADER_PREFIX));
+        assert!(HEADER_PRODUCER_SEQ.starts_with(CLIENT_HEADER_PREFIX));
+    }
 }

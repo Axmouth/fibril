@@ -31,14 +31,22 @@ See also: [core model](/latest/concepts/core-model/) and
 | --- | --- | --- |
 | Topic plus optional group | Implemented | Broker, protocol, Rust client, TypeScript client, admin API, CLI |
 | Default group normalization | Implemented | Empty group and `default` normalize to ungrouped on admin and CLI paths, and in Rust and TypeScript clients |
-| Partition selection | Planned | Protocol/storage still carry partition fields internally, but user-facing APIs should not ask operators to pick partitions |
+| Partitioned queue declaration | Implemented | `DeclareQueue.partition_count`, Rust client declare builder, config default, coordination catalogue |
+| Producer partition routing | Implemented | Rust client topology cache, round-robin keyless routing, `partition_key` stable routing, version-fenced publish frames |
+| Subscription fan-in | Implemented | Rust client opens per-partition subscriptions from topology and merges deliveries into one logical stream |
+| Operator-chosen partition id | Out of scope | Normal user-facing paths should choose queue and optional key, not a partition number |
 
 Conditions and limits:
 
 - A queue is addressed by topic plus optional group.
 - Groups are namespaces, not consumer groups. They do not coordinate competing consumer membership by themselves.
-- Current user-facing paths assume partition `0`.
-- Future sharding should choose partitions inside Fibril.
+- Declared queues can have more than one partition.
+- Partition selection stays inside Fibril. Producers may provide a partition key
+  for stable routing, or omit it for round-robin spread.
+- If topology is unknown or standalone, clients conservatively use partition `0`.
+- Partition count is fixed at creation in standalone mode. In Ganglion mode an
+  experimental live-repartition path can grow or shrink a queue's partition
+  count (see the experimental cluster surface below).
 
 ## Durable Queue State
 
@@ -60,6 +68,28 @@ Conditions and limits:
 - Loading a cold queue has a first-use cost.
 - Queue deletion and message retention by age are not implemented as user-facing features.
 
+## Recovery Quarantine
+
+See also: [recovery quarantine](/latest/reliability/recovery-quarantine/).
+
+| Item | Status | Implemented surface |
+| --- | --- | --- |
+| Recovery reference verification | Implemented | Recovery checks each replayed event's referenced message offset against the message log's durable tail, and decodes every event record |
+| `recovery.on_mismatch` policy | Implemented | Startup config: `quarantine` (default), `refuse`, or `ignore` |
+| Per-partition quarantine | Implemented | A bad partition is parked (its ops error) while the rest of the broker stays up |
+| Operator repair | Implemented | Admin quarantine banner + `/admin/api/quarantine/repair` truncate-to-valid, follower re-fetches the dropped suffix on next catch-up |
+| Readiness health | Implemented | `/readyz` reflects quarantine state and the configured policy |
+| Quarantine metric | Implemented | `recovery.quarantined` gauge and `quarantines_total` counter in the recovery snapshot |
+
+Conditions and limits:
+
+- A dangling event reference is only possible as a lost-tail suffix (events are
+  written after their messages), so truncate-to-valid is a complete repair.
+- A corrupt event record is the genuine mid-log failure and uses the same
+  quarantine and truncate machinery.
+- `refuse` is lazy today (a mismatch is caught when the partition is first used);
+  an eager whole-disk variant at boot is a tracked follow-up.
+
 ## Publish
 
 See also: [client usage](/latest/clients/) and
@@ -73,6 +103,8 @@ See also: [client usage](/latest/clients/) and
 | Delayed publish | Implemented | TCP protocol, broker, Rust client, TypeScript client |
 | Content type metadata | Implemented | Protocol metadata, Rust client, TypeScript client, delivery path |
 | Reserved metadata headers | Implemented | Broker protocol handler rejects `fibril.*` and `stroma.*` user headers |
+| Partition key routing | Implemented | Rust client `NewMessage::partition_key`, protocol publish metadata, server per-partition publish routing |
+| Partitioning-version fence | Implemented | Client stamps routed version, and server redirects stale publishes before appending |
 
 Conditions and limits:
 
@@ -82,6 +114,10 @@ Conditions and limits:
 - Content type is stored outside the user header map for common cases.
 - Manual `content-type` headers are interpreted as content type metadata by clients.
 - Broker-side validation rejects reserved system header prefixes on normal and delayed publish.
+- A partition key affects only partition selection. It is not a RabbitMQ-style
+  routing key and is not part of the durable payload.
+- Stale partitioning topology is handled by redirecting the client to refresh
+  and retry.
 
 ## Subscribe and Delivery
 
@@ -95,6 +131,12 @@ See also: [backpressure](/latest/concepts/backpressure/) and
 | Bounded prefetch | Implemented | Broker delivery path and clients |
 | Backpressure | Implemented | Pull-based delivery bounded by prefetch |
 | Unsubscribe redistribution | Implemented | Broker tests cover prefetched unacked messages returning to active subscribers |
+| Competing consumers (default) | Implemented | Many consumers per queue, fair dispatch, unordered |
+| Exclusive consumer groups | Partial | `.exclusive()` Rust client + TCP protocol, per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
+| Cross-broker cohort coordination | Partial | Member identity + controller (aggregate→plan→publish) + owner apply all wired in cluster bootstrap, coordination-level multi-node rebalance test exists, fuller broker/client scenarios are still growing |
+| Partition fan-in | Implemented | Rust client subscribes to all known partitions and merges deliveries while keeping per-partition settlement routing |
+
+See [consumer groups](/latest/concepts/consumer-groups/) for the user-facing model.
 
 Conditions and limits:
 
@@ -103,6 +145,11 @@ Conditions and limits:
 - Prefetch limits how many messages a subscription can hold at once.
 - If a subscription ends with prefetched but unsettled messages, those messages are returned for redelivery.
 - A message can be delivered more than once under failure, retry, or lease expiry conditions.
+- Exclusive consumer groups are opt-in. Without `.exclusive()`, consumers compete (no ordering). A queue has a single exclusive cohort. The TypeScript client does not yet expose `.exclusive()`.
+- Cross-broker cohort balance is advisory/eventually-consistent. The per-partition delivery gate is always the correctness backstop. Single-node is fully covered by tests.
+- Plain subscriptions fan in over known partitions. A topology warm step at
+  connect prevents pure consumers from staying on partition `0` when topology is
+  available.
 
 ## Reconnects
 
@@ -306,10 +353,15 @@ See also: [admin dashboard](/latest/admin-dashboard/).
 | --- | --- | --- |
 | Overview metrics | Implemented | Dashboard and API |
 | Connections and subscriptions | Implemented | Dashboard and API |
-| Queues page | Implemented | Dashboard and API |
-| Settings page | Implemented | Dashboard and API |
+| Queues page | Implemented | Dashboard and API, per-partition expand, follower-replication view, DLQ-policy column |
+| Settings page | Implemented | Dashboard and API, incl. replication and streaming-replication settings |
 | Message inspection page | Implemented | Dashboard and API |
 | DLQ replay controls | Implemented | Dashboard and API |
+| Topology page | Implemented | Coordination nodes, per-partition ownership/epochs, consensus block |
+| Repartition control | Partial | `/admin/api/repartition` and a topology-page form (Ganglion mode) |
+| Coordination membership control | Partial | Add/remove a consensus voting member from the topology page and API |
+| Cohort visibility | Partial | Per-broker exclusive-cohort membership on the subscriptions page and `/admin/api/cohorts` |
+| Quarantine banner and repair | Implemented | Global banner, `/admin/api/quarantine`, repair endpoint, `/readyz` |
 | Basic admin auth | Implemented | Login, logout, session cookie, auth-disabled mode |
 | Fine-grained admin roles | Planned | Current model is admin access or auth disabled |
 
@@ -365,6 +417,8 @@ does not currently have.
 | Delayed publish | Implemented | Implemented |
 | Manual ack subscription | Implemented | Implemented |
 | Auto ack subscription | Implemented | Implemented |
+| Exclusive consumer group (`.exclusive()`, `.consumer_target()`) | Implemented | Planned |
+| Assignment-change events (`assignment_events()`) | Implemented | Planned |
 | Resume identity handshake | Implemented | Implemented |
 | Explicit reconnect outcome | Implemented | Implemented |
 | Existing publishers after explicit reconnect | Implemented | Implemented |
@@ -435,13 +489,47 @@ Conditions and limits:
 - Persistent broker data should be mounted under the configured data directory.
 - Admin auth should be enabled outside local protected environments.
 
+## Experimental Cluster and Replication Surface
+
+See also: [clustering](/latest/concepts/clustering/) and
+[replication](/latest/reliability/replication/).
+
+| Item | Status | Implemented surface |
+| --- | --- | --- |
+| Ganglion coordination mode | Partial | Startup config, embedded coordinator, TCP transport, broker self-registration, topology endpoint |
+| Queue catalogue and placement controller | Partial | Declared queues register partitions, controller assigns owners and followers, placement is stable and anti-churn |
+| Partition ownership gate | Partial | Broker serves only assigned owners in Ganglion mode. Standalone mode owns all queues |
+| Follower pull replication | Partial | Follower workers pull owner records over protocol, apply durably, install checkpoints when needed |
+| Automatic failover | Partial | Dead owner can trigger epoch-bumped reassignment, follower promotion at local tail, stale owner demotion |
+| Epoch fencing | Implemented | Role transitions advance log epochs before serving or applying replicated batches |
+| Replica-durable confirms | Partial | Owner waits for durable follower progress according to assignment policy, with timeout and ISR floor |
+| `min_in_sync_replicas` | Implemented | Runtime setting, fail-fast publish refusal when healthy ISR is below floor |
+| Live repartitioning | Partial | Grow or shrink a queue's partition count in Ganglion mode (versioned routing, in-flight transition serialization, drain-and-retire on shrink); admin control + API |
+| Topology visibility | Partial | Admin API/page (with repartition + coordination-membership controls) and `fibrilctl topology`. Cross-broker lag aggregation is pending |
+| Cohort visibility (admin) | Partial | Per-broker exclusive-cohort membership on the subscriptions page and `/admin/api/cohorts`; cluster-wide cohort assignment is broker-local, not centrally committed |
+| Multi-node cohort coordinator test | Partial | Coordination-level e2e covers cross-broker membership aggregation and rebalance. Full broker/client scenario coverage is still growing |
+
+Conditions and limits:
+
+- This surface is experimental on the replication/sharding branch.
+- Ganglion mode is the active embedded-coordination path. The older etcd-shaped
+  plan remains useful as a design reference, but the current implementation
+  uses the same coordination trait with Ganglion underneath.
+- Replication is follower-pull. Followers apply durably, then report progress
+  through stamped replication reads.
+- Failover safety relies on assignment epochs plus local Stroma promotion gates.
+- Replica-durable confirms are meaningful only when the assignment durability
+  policy requires more than the owner.
+- Cross-broker topology lag and ISR aggregation into the topology page is still
+  pending.
+- More failure testing is needed before treating this as production-ready HA.
+
 ## Not Implemented or Not Planned
 
 | Item | Status | Notes |
 | --- | --- | --- |
 | Transactions | Out of scope | Not planned |
-| Replication | Planned | Design and implementation pending |
-| Cluster partition ownership | Planned | Design and implementation pending |
+| Production-ready clustered HA | Planned | Experimental coordination, replication, and failover are wired, but hardening and runbooks remain |
 | Queue deletion | Planned or undecided | Not currently exposed as a user feature |
 | Message retention by age | Planned or undecided | Not currently exposed as a user feature |
 | Python client | Planned | Future client priority, including a blocking client |

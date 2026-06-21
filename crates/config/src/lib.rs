@@ -7,6 +7,64 @@ use std::{
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
+pub type ConfigResult<T> = Result<T, ConfigError>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("failed to parse command line arguments: {0}")]
+    Cli(#[from] clap::Error),
+    #[error("failed to read config file {path}: {source}")]
+    ReadFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse config file {path}: {source}")]
+    ParseFile {
+        path: PathBuf,
+        #[source]
+        source: toml::de::Error,
+    },
+    #[error("failed to parse config TOML: {0}")]
+    ParseToml(#[from] toml::de::Error),
+    #[error("{name} is not valid unicode: {source}")]
+    EnvUnicode {
+        name: String,
+        #[source]
+        source: std::env::VarError,
+    },
+    #[error("{name} has invalid value {value:?}: {message}")]
+    EnvParse {
+        name: String,
+        value: String,
+        message: String,
+    },
+    #[error("FIBRIL_COORDINATION_PEERS entry `{entry}` is not id=addr")]
+    CoordinationPeerEntry { entry: String },
+    #[error("{0}")]
+    Validation(String),
+    #[error("unknown coordination mode `{value}` (static|ganglion)")]
+    UnknownCoordinationMode { value: String },
+    #[error("invalid assignment durability node count `{value}`: {source}")]
+    AssignmentDurabilityNodes {
+        value: String,
+        #[source]
+        source: std::num::ParseIntError,
+    },
+    #[error(
+        "unknown assignment durability `{value}` (local_durable|replica_accepted|replica_durable|majority_durable)"
+    )]
+    UnknownAssignmentDurability { value: String },
+    #[error("unknown recovery on_mismatch `{value}` (quarantine|refuse|ignore)")]
+    UnknownRecoveryMismatchMode { value: String },
+}
+
+impl ConfigError {
+    fn validation(message: impl Into<String>) -> Self {
+        Self::Validation(message.into())
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "fibril-server", about = "Run the Fibril broker server")]
 struct CliArgs {
@@ -33,6 +91,9 @@ struct CliArgs {
 
     #[arg(long)]
     keratin_fsync_interval_ms: Option<u64>,
+
+    #[arg(long)]
+    keratin_batch_linger_ms: Option<u64>,
 
     #[arg(long)]
     keratin_message_log_segment_max_bytes: Option<u64>,
@@ -62,6 +123,8 @@ pub struct ServerConfig {
     pub storage: StorageSection,
     pub runtime_seed: RuntimeSeedSection,
     pub runtime_locks: RuntimeLocksSection,
+    pub coordination: CoordinationSection,
+    pub recovery: RecoverySection,
 }
 
 impl Default for ServerConfig {
@@ -73,16 +136,57 @@ impl Default for ServerConfig {
             storage: StorageSection::default(),
             runtime_seed: RuntimeSeedSection::default(),
             runtime_locks: RuntimeLocksSection::default(),
+            coordination: CoordinationSection::default(),
+            recovery: RecoverySection::default(),
+        }
+    }
+}
+
+/// Startup recovery behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct RecoverySection {
+    /// What to do when recovery finds the event log references a message the
+    /// message log never durably accepted (a dangling event->message reference).
+    pub on_mismatch: RecoveryMismatchMode,
+}
+
+/// Policy for a recovery dangling event->message mismatch. Mirrors
+/// `stroma_core::RecoveryMismatchPolicy`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryMismatchMode {
+    /// Park only the affected partition; the broker stays up. (Default.)
+    #[default]
+    Quarantine,
+    /// Treat as fatal: the broker escalates (readiness goes hard-unhealthy) so it
+    /// cannot be missed.
+    Refuse,
+    /// Auto-apply the truncate-to-valid repair and continue, with a loud warning.
+    Ignore,
+}
+
+impl std::str::FromStr for RecoveryMismatchMode {
+    type Err = ConfigError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "quarantine" => Ok(Self::Quarantine),
+            "refuse" => Ok(Self::Refuse),
+            "ignore" => Ok(Self::Ignore),
+            other => Err(ConfigError::UnknownRecoveryMismatchMode {
+                value: other.to_string(),
+            }),
         }
     }
 }
 
 impl ServerConfig {
-    pub fn load() -> anyhow::Result<Self> {
+    pub fn load() -> ConfigResult<Self> {
         Self::load_from_args(std::env::args_os())
     }
 
-    pub fn load_file_and_env(config_path: Option<PathBuf>) -> anyhow::Result<Self> {
+    pub fn load_file_and_env(config_path: Option<PathBuf>) -> ConfigResult<Self> {
         let config_path = match config_path {
             Some(path) => Some(path),
             None => optional_path_env("FIBRIL_CONFIG")?,
@@ -96,7 +200,7 @@ impl ServerConfig {
         Ok(config)
     }
 
-    pub fn load_from_args<I, T>(args: I) -> anyhow::Result<Self>
+    pub fn load_from_args<I, T>(args: I) -> ConfigResult<Self>
     where
         I: IntoIterator<Item = T>,
         T: Into<OsString> + Clone,
@@ -116,13 +220,13 @@ impl ServerConfig {
         Ok(config)
     }
 
-    pub fn from_toml_str(input: &str) -> anyhow::Result<Self> {
+    pub fn from_toml_str(input: &str) -> ConfigResult<Self> {
         let mut config: Self = toml::from_str(input)?;
         config.validate()?;
         Ok(config)
     }
 
-    fn apply_env(&mut self) -> anyhow::Result<()> {
+    fn apply_env(&mut self) -> ConfigResult<()> {
         self.apply_env_from(|name| match optional_string_env(name) {
             Ok(Some(value)) => Some(Ok(value)),
             Ok(None) => None,
@@ -130,9 +234,9 @@ impl ServerConfig {
         })
     }
 
-    fn apply_env_from<F>(&mut self, mut get: F) -> anyhow::Result<()>
+    fn apply_env_from<F>(&mut self, mut get: F) -> ConfigResult<()>
     where
-        F: FnMut(&str) -> Option<anyhow::Result<String>>,
+        F: FnMut(&str) -> Option<ConfigResult<String>>,
     {
         if let Some(value) = env_value(&mut get, "FIBRIL_DATA_DIR")? {
             self.server.data_dir = PathBuf::from(value);
@@ -142,6 +246,111 @@ impl ServerConfig {
         }
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_BIND")? {
             self.admin.listener.bind = parse_env("FIBRIL_ADMIN_BIND", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_MODE")? {
+            self.coordination.mode = parse_env("FIBRIL_COORDINATION_MODE", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_NODE_ID")? {
+            self.coordination.node_id = value;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_RAFT_ID")? {
+            self.coordination.ganglion.raft_node_id =
+                parse_env("FIBRIL_COORDINATION_RAFT_ID", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_LISTEN")? {
+            self.coordination.ganglion.listen = parse_env("FIBRIL_COORDINATION_LISTEN", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_BOOTSTRAP")? {
+            self.coordination.ganglion.bootstrap =
+                parse_env("FIBRIL_COORDINATION_BOOTSTRAP", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_WIRE_FORMAT")? {
+            self.coordination.ganglion.wire_format = value;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS")? {
+            self.coordination.ganglion.heartbeat_interval_ms =
+                parse_env("FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_LIVENESS_TTL_MS")? {
+            self.coordination.ganglion.liveness_ttl_ms =
+                parse_env("FIBRIL_COORDINATION_LIVENESS_TTL_MS", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_RAFT_HEARTBEAT_INTERVAL_MS")?
+        {
+            self.coordination.ganglion.raft.heartbeat_interval_ms =
+                parse_env("FIBRIL_COORDINATION_RAFT_HEARTBEAT_INTERVAL_MS", &value)?;
+        }
+        if let Some(value) =
+            env_value(&mut get, "FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MIN_MS")?
+        {
+            self.coordination.ganglion.raft.election_timeout_min_ms =
+                parse_env("FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MIN_MS", &value)?;
+        }
+        if let Some(value) =
+            env_value(&mut get, "FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MAX_MS")?
+        {
+            self.coordination.ganglion.raft.election_timeout_max_ms =
+                parse_env("FIBRIL_COORDINATION_RAFT_ELECTION_TIMEOUT_MAX_MS", &value)?;
+        }
+        if let Some(value) = env_value(
+            &mut get,
+            "FIBRIL_COORDINATION_FORWARDED_WRITE_REDIRECT_LIMIT",
+        )? {
+            self.coordination.ganglion.forwarded_write.redirect_limit =
+                parse_env("FIBRIL_COORDINATION_FORWARDED_WRITE_REDIRECT_LIMIT", &value)?;
+        }
+        if let Some(value) = env_value(
+            &mut get,
+            "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_RETRIES",
+        )? {
+            self.coordination.ganglion.forwarded_write.no_leader_retries = parse_env(
+                "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_RETRIES",
+                &value,
+            )?;
+        }
+        if let Some(value) = env_value(
+            &mut get,
+            "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_BASE_BACKOFF_MS",
+        )? {
+            self.coordination
+                .ganglion
+                .forwarded_write
+                .no_leader_base_backoff_ms = parse_env(
+                "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_BASE_BACKOFF_MS",
+                &value,
+            )?;
+        }
+        if let Some(value) = env_value(
+            &mut get,
+            "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_MAX_BACKOFF_MS",
+        )? {
+            self.coordination
+                .ganglion
+                .forwarded_write
+                .no_leader_max_backoff_ms = parse_env(
+                "FIBRIL_COORDINATION_FORWARDED_WRITE_NO_LEADER_MAX_BACKOFF_MS",
+                &value,
+            )?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_PEERS")? {
+            // Comma-separated "raft_id=host:port" pairs.
+            let mut peers = std::collections::BTreeMap::new();
+            for pair in value.split(',').filter(|pair| !pair.trim().is_empty()) {
+                let (id, addr) =
+                    pair.split_once('=')
+                        .ok_or_else(|| ConfigError::CoordinationPeerEntry {
+                            entry: pair.to_string(),
+                        })?;
+                peers.insert(id.trim().to_string(), addr.trim().to_string());
+            }
+            self.coordination.ganglion.peers = peers;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY")? {
+            self.coordination.ganglion.assignment_durability =
+                parse_env("FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_RECOVERY_ON_MISMATCH")? {
+            self.recovery.on_mismatch = parse_env("FIBRIL_RECOVERY_ON_MISMATCH", &value)?;
         }
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_AUTH_ENABLED")? {
             self.admin.auth.enabled = parse_env("FIBRIL_ADMIN_AUTH_ENABLED", &value)?;
@@ -155,6 +364,14 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_FSYNC_INTERVAL_MS")? {
             self.storage.keratin.fsync_interval_ms =
                 parse_env("FIBRIL_KERATIN_FSYNC_INTERVAL_MS", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_BATCH_LINGER_MS")? {
+            self.storage.keratin.batch_linger_ms =
+                parse_env("FIBRIL_KERATIN_BATCH_LINGER_MS", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_REPLICATION_STREAM_ENABLED")? {
+            self.runtime_seed.replication.stream_enabled =
+                parse_env("FIBRIL_REPLICATION_STREAM_ENABLED", &value)?;
         }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES")? {
             self.storage.keratin.message_log.segment_max_bytes =
@@ -186,13 +403,15 @@ impl ServerConfig {
         Ok(())
     }
 
-    pub fn from_toml_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub fn from_toml_file(path: impl AsRef<Path>) -> ConfigResult<Self> {
         let path = path.as_ref();
-        let input = std::fs::read_to_string(path).map_err(|err| {
-            anyhow::anyhow!("failed to read config file {}: {err}", path.display())
+        let input = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
+            path: path.to_path_buf(),
+            source,
         })?;
-        let mut config: Self = toml::from_str(&input).map_err(|err| {
-            anyhow::anyhow!("failed to parse config file {}: {err}", path.display())
+        let mut config: Self = toml::from_str(&input).map_err(|source| ConfigError::ParseFile {
+            path: path.to_path_buf(),
+            source,
         })?;
         config.validate()?;
         Ok(config)
@@ -229,6 +448,9 @@ impl ServerConfig {
         if let Some(fsync_interval_ms) = args.keratin_fsync_interval_ms {
             self.storage.keratin.fsync_interval_ms = fsync_interval_ms;
         }
+        if let Some(batch_linger_ms) = args.keratin_batch_linger_ms {
+            self.storage.keratin.batch_linger_ms = batch_linger_ms;
+        }
         if let Some(segment_max_bytes) = args.keratin_message_log_segment_max_bytes {
             self.storage.keratin.message_log.segment_max_bytes = segment_max_bytes;
         }
@@ -253,13 +475,15 @@ impl ServerConfig {
         }
     }
 
-    fn validate(&mut self) -> anyhow::Result<()> {
+    fn validate(&mut self) -> ConfigResult<()> {
         if self.server.data_dir.as_os_str().is_empty() {
-            anyhow::bail!("server.data_dir must not be empty");
+            return Err(ConfigError::validation("server.data_dir must not be empty"));
         }
         if self.admin.auth.enabled {
             if self.admin.auth.username.trim().is_empty() {
-                anyhow::bail!("admin.auth.username must not be empty when admin auth is enabled");
+                return Err(ConfigError::validation(
+                    "admin.auth.username must not be empty when admin auth is enabled",
+                ));
             }
             if self
                 .admin
@@ -270,31 +494,148 @@ impl ServerConfig {
                 .unwrap_or_default()
                 .is_empty()
             {
-                anyhow::bail!("admin.auth.password must be set when admin auth is enabled");
+                return Err(ConfigError::validation(
+                    "admin.auth.password must be set when admin auth is enabled",
+                ));
             }
         }
         if self.runtime_seed.delivery.expiry_batch_max == 0 {
-            anyhow::bail!("runtime_seed.delivery.expiry_batch_max must be at least 1");
+            return Err(ConfigError::validation(
+                "runtime_seed.delivery.expiry_batch_max must be at least 1",
+            ));
         }
         if self.storage.keratin.fsync_interval_ms == 0 {
-            anyhow::bail!("storage.keratin.fsync_interval_ms must be at least 1");
+            return Err(ConfigError::validation(
+                "storage.keratin.fsync_interval_ms must be at least 1",
+            ));
+        }
+        if self.storage.keratin.batch_linger_ms == 0 {
+            return Err(ConfigError::validation(
+                "storage.keratin.batch_linger_ms must be at least 1",
+            ));
         }
         if self.storage.keratin.message_log.segment_max_bytes == 0 {
-            anyhow::bail!("storage.keratin.message_log.segment_max_bytes must be at least 1");
+            return Err(ConfigError::validation(
+                "storage.keratin.message_log.segment_max_bytes must be at least 1",
+            ));
         }
         if self.storage.keratin.event_log.segment_max_bytes == 0 {
-            anyhow::bail!("storage.keratin.event_log.segment_max_bytes must be at least 1");
+            return Err(ConfigError::validation(
+                "storage.keratin.event_log.segment_max_bytes must be at least 1",
+            ));
         }
         if self.runtime_seed.idle_queue_cleanup.sweep_interval_ms == 0 {
-            anyhow::bail!("runtime_seed.idle_queue_cleanup.sweep_interval_ms must be at least 1");
+            return Err(ConfigError::validation(
+                "runtime_seed.idle_queue_cleanup.sweep_interval_ms must be at least 1",
+            ));
+        }
+        if self.runtime_seed.replication.caught_up_poll_ms == 0
+            || self.runtime_seed.replication.retry_poll_ms == 0
+            || self.runtime_seed.replication.checkpoint_retry_poll_ms == 0
+        {
+            return Err(ConfigError::validation(
+                "runtime_seed.replication poll intervals must be at least 1ms",
+            ));
+        }
+        if self.runtime_seed.replication.max_messages_per_read == 0
+            || self.runtime_seed.replication.max_events_per_read == 0
+            || self.runtime_seed.replication.max_bytes_per_read == 0
+            || self.runtime_seed.replication.max_iterations_per_tick == 0
+        {
+            return Err(ConfigError::validation(
+                "runtime_seed.replication read limits must be at least 1",
+            ));
+        }
+        if self.runtime_seed.replication.min_in_sync_replicas == 0 {
+            return Err(ConfigError::validation(
+                "runtime_seed.replication.min_in_sync_replicas must be at least 1",
+            ));
+        }
+        if self.runtime_seed.replication.isr_timeout_ms == 0 {
+            return Err(ConfigError::validation(
+                "runtime_seed.replication.isr_timeout_ms must be at least 1",
+            ));
+        }
+        if self.runtime_seed.partitioning.default_partition_count == 0 {
+            return Err(ConfigError::validation(
+                "runtime_seed.partitioning.default_partition_count must be at least 1",
+            ));
+        }
+        if self.coordination.mode == CoordinationMode::Ganglion
+            && self.runtime_locks.idle_queue_cleanup
+        {
+            return Err(ConfigError::validation(
+                "runtime_locks are standalone-only; in ganglion mode, runtime settings are cluster-authoritative",
+            ));
+        }
+        if self.coordination.mode == CoordinationMode::Ganglion
+            && self.coordination.ganglion.liveness_ttl_ms
+                < 2 * self.coordination.ganglion.heartbeat_interval_ms
+        {
+            return Err(ConfigError::validation(
+                "coordination.ganglion.liveness_ttl_ms must be at least twice \
+                 heartbeat_interval_ms, or healthy nodes will flap dead on a \
+                 single missed heartbeat",
+            ));
+        }
+        let raft = &self.coordination.ganglion.raft;
+        if raft.heartbeat_interval_ms == 0 {
+            return Err(ConfigError::validation(
+                "coordination.ganglion.raft.heartbeat_interval_ms must be at least 1",
+            ));
+        }
+        if raft.election_timeout_min_ms <= raft.heartbeat_interval_ms {
+            return Err(ConfigError::validation(
+                "coordination.ganglion.raft.election_timeout_min_ms must be greater than heartbeat_interval_ms",
+            ));
+        }
+        if raft.election_timeout_min_ms >= raft.election_timeout_max_ms {
+            return Err(ConfigError::validation(
+                "coordination.ganglion.raft.election_timeout_min_ms must be less than election_timeout_max_ms",
+            ));
+        }
+        let forwarded = &self.coordination.ganglion.forwarded_write;
+        if forwarded.redirect_limit == 0 {
+            return Err(ConfigError::validation(
+                "coordination.ganglion.forwarded_write.redirect_limit must be at least 1",
+            ));
+        }
+        if forwarded.no_leader_base_backoff_ms == 0 || forwarded.no_leader_max_backoff_ms == 0 {
+            return Err(ConfigError::validation(
+                "coordination.ganglion.forwarded_write backoff values must be at least 1ms",
+            ));
+        }
+        if forwarded.no_leader_base_backoff_ms > forwarded.no_leader_max_backoff_ms {
+            return Err(ConfigError::validation(
+                "coordination.ganglion.forwarded_write.no_leader_base_backoff_ms must be <= no_leader_max_backoff_ms",
+            ));
+        }
+        let durability = &self.coordination.ganglion.assignment_durability;
+        match durability.mode {
+            GanglionAssignmentDurabilityMode::ReplicaAccepted
+            | GanglionAssignmentDurabilityMode::ReplicaDurable => {
+                if durability.nodes.unwrap_or_default() == 0 {
+                    return Err(ConfigError::validation(
+                        "coordination.ganglion.assignment_durability.nodes must be at least 1 for replica durability",
+                    ));
+                }
+            }
+            GanglionAssignmentDurabilityMode::LocalDurable
+            | GanglionAssignmentDurabilityMode::MajorityDurable => {
+                if durability.nodes.is_some() {
+                    return Err(ConfigError::validation(
+                        "coordination.ganglion.assignment_durability.nodes is only valid for replica durability",
+                    ));
+                }
+            }
         }
         Ok(())
     }
 }
 
-fn env_value<F>(get: &mut F, name: &str) -> anyhow::Result<Option<String>>
+fn env_value<F>(get: &mut F, name: &'static str) -> ConfigResult<Option<String>>
 where
-    F: FnMut(&str) -> Option<anyhow::Result<String>>,
+    F: FnMut(&str) -> Option<ConfigResult<String>>,
 {
     match get(name).transpose()? {
         Some(value) if value.trim().is_empty() => Ok(None),
@@ -302,27 +643,32 @@ where
     }
 }
 
-fn optional_path_env(name: &str) -> anyhow::Result<Option<PathBuf>> {
+fn optional_path_env(name: &'static str) -> ConfigResult<Option<PathBuf>> {
     Ok(optional_string_env(name)?.map(PathBuf::from))
 }
 
-fn optional_string_env(name: &str) -> anyhow::Result<Option<String>> {
+fn optional_string_env(name: &str) -> ConfigResult<Option<String>> {
     match std::env::var(name) {
         Ok(value) if value.trim().is_empty() => Ok(None),
         Ok(value) => Ok(Some(value)),
         Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(err) => Err(anyhow::anyhow!("{name} is not valid unicode: {err}")),
+        Err(source) => Err(ConfigError::EnvUnicode {
+            name: name.to_string(),
+            source,
+        }),
     }
 }
 
-fn parse_env<T>(name: &str, value: &str) -> anyhow::Result<T>
+fn parse_env<T>(name: &str, value: &str) -> ConfigResult<T>
 where
     T: std::str::FromStr,
     T::Err: std::fmt::Display,
 {
-    value
-        .parse::<T>()
-        .map_err(|err| anyhow::anyhow!("{name} has invalid value {value:?}: {err}"))
+    value.parse::<T>().map_err(|err| ConfigError::EnvParse {
+        name: name.to_string(),
+        value: value.to_string(),
+        message: err.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -391,6 +737,216 @@ impl Default for AdminAuthSection {
     }
 }
 
+/// Cluster coordination provider selection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CoordinationSection {
+    /// `static` (single-node, default) or `ganglion` (embedded raft coordinator).
+    pub mode: CoordinationMode,
+    /// This broker's identity in coordination snapshots.
+    pub node_id: String,
+    pub ganglion: GanglionCoordinationSection,
+}
+
+impl Default for CoordinationSection {
+    fn default() -> Self {
+        Self {
+            mode: CoordinationMode::Static,
+            node_id: "local".into(),
+            ganglion: GanglionCoordinationSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationMode {
+    Static,
+    Ganglion,
+}
+
+impl std::str::FromStr for CoordinationMode {
+    type Err = ConfigError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "static" => Ok(Self::Static),
+            "ganglion" => Ok(Self::Ganglion),
+            other => Err(ConfigError::UnknownCoordinationMode {
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+/// Embedded ganglion raft coordinator settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GanglionCoordinationSection {
+    /// Raft node id (u64, transport-level; distinct from `node_id`).
+    pub raft_node_id: u64,
+    /// Raft RPC listen address. Must match this node's entry in `peers`.
+    pub listen: SocketAddr,
+    /// Raft id -> "host:port" for every cluster member, including self.
+    /// (String keys because TOML tables require them.)
+    pub peers: std::collections::BTreeMap<String, String>,
+    /// Initialize the cluster on first boot. Exactly one node sets this;
+    /// restarts ignore it once membership exists.
+    pub bootstrap: bool,
+    /// Raft WAL + snapshot directory. Empty = `<server.data_dir>/coordination`.
+    pub data_dir: PathBuf,
+    /// Outbound raft frame encoding: `msgpack` (default) or `json` (debugging).
+    /// Inbound frames are self-describing, so mixed clusters interoperate.
+    pub wire_format: String,
+    /// Raft timing. Boot-time only: changing it requires node restart.
+    pub raft: GanglionRaftSection,
+    /// Policy for forwarding metadata writes from followers to the current
+    /// raft leader. Boot-time only.
+    pub forwarded_write: GanglionForwardedWriteSection,
+    /// Broker self-registration heartbeat interval (milliseconds).
+    pub heartbeat_interval_ms: u64,
+    /// Controller: desired follower count per queue partition.
+    pub target_followers: usize,
+    /// Controller: default durability policy for newly assigned partitions.
+    pub assignment_durability: GanglionAssignmentDurabilitySection,
+    /// Controller: bounded tick interval (also wakes on snapshot changes).
+    pub controller_tick_ms: u64,
+    /// Controller: heartbeats older than this mark a broker dead. Must exceed
+    /// worst-case election + retry time. Default 3x heartbeat interval.
+    pub liveness_ttl_ms: u64,
+}
+
+impl Default for GanglionCoordinationSection {
+    fn default() -> Self {
+        Self {
+            raft_node_id: 1,
+            listen: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 7301)),
+            peers: std::collections::BTreeMap::new(),
+            bootstrap: false,
+            data_dir: PathBuf::new(),
+            wire_format: "msgpack".into(),
+            raft: GanglionRaftSection::default(),
+            forwarded_write: GanglionForwardedWriteSection::default(),
+            heartbeat_interval_ms: 3000,
+            target_followers: 1,
+            assignment_durability: GanglionAssignmentDurabilitySection::default(),
+            controller_tick_ms: 2000,
+            liveness_ttl_ms: 9000,
+        }
+    }
+}
+
+/// Default durability policy stamped on newly planned queue assignments.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GanglionAssignmentDurabilitySection {
+    pub mode: GanglionAssignmentDurabilityMode,
+    pub nodes: Option<usize>,
+}
+
+impl Default for GanglionAssignmentDurabilitySection {
+    fn default() -> Self {
+        Self {
+            mode: GanglionAssignmentDurabilityMode::LocalDurable,
+            nodes: None,
+        }
+    }
+}
+
+impl std::str::FromStr for GanglionAssignmentDurabilitySection {
+    type Err = ConfigError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let (mode, nodes) = match raw.split_once(':') {
+            Some((mode, nodes)) => (
+                mode,
+                Some(nodes.parse::<usize>().map_err(|source| {
+                    ConfigError::AssignmentDurabilityNodes {
+                        value: nodes.to_string(),
+                        source,
+                    }
+                })?),
+            ),
+            None => (raw, None),
+        };
+        Ok(Self {
+            mode: mode.parse()?,
+            nodes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GanglionAssignmentDurabilityMode {
+    LocalDurable,
+    ReplicaAccepted,
+    ReplicaDurable,
+    MajorityDurable,
+}
+
+impl Default for GanglionAssignmentDurabilityMode {
+    fn default() -> Self {
+        Self::LocalDurable
+    }
+}
+
+impl std::str::FromStr for GanglionAssignmentDurabilityMode {
+    type Err = ConfigError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "local_durable" | "local" => Ok(Self::LocalDurable),
+            "replica_accepted" => Ok(Self::ReplicaAccepted),
+            "replica_durable" => Ok(Self::ReplicaDurable),
+            "majority_durable" | "majority" => Ok(Self::MajorityDurable),
+            other => Err(ConfigError::UnknownAssignmentDurability {
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+/// Embedded raft consensus timing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GanglionRaftSection {
+    pub heartbeat_interval_ms: u64,
+    pub election_timeout_min_ms: u64,
+    pub election_timeout_max_ms: u64,
+}
+
+impl Default for GanglionRaftSection {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_ms: 250,
+            election_timeout_min_ms: 1500,
+            election_timeout_max_ms: 3000,
+        }
+    }
+}
+
+/// Metadata write forwarding policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GanglionForwardedWriteSection {
+    pub redirect_limit: usize,
+    pub no_leader_retries: usize,
+    pub no_leader_base_backoff_ms: u64,
+    pub no_leader_max_backoff_ms: u64,
+}
+
+impl Default for GanglionForwardedWriteSection {
+    fn default() -> Self {
+        Self {
+            redirect_limit: 16,
+            no_leader_retries: 6,
+            no_leader_base_backoff_ms: 25,
+            no_leader_max_backoff_ms: 250,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(default)]
 pub struct StorageSection {
@@ -401,10 +957,16 @@ pub struct StorageSection {
 #[serde(default)]
 pub struct KeratinStorageSection {
     pub fsync_interval_ms: u64,
+    #[serde(default = "default_batch_linger_ms")]
+    pub batch_linger_ms: u64,
     #[serde(default = "default_message_log_section")]
     pub message_log: KeratinLogSection,
     #[serde(default = "default_event_log_section")]
     pub event_log: KeratinLogSection,
+}
+
+fn default_batch_linger_ms() -> u64 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -423,6 +985,7 @@ impl Default for KeratinStorageSection {
     fn default() -> Self {
         Self {
             fsync_interval_ms: 5,
+            batch_linger_ms: default_batch_linger_ms(),
             message_log: default_message_log_section(),
             event_log: default_event_log_section(),
         }
@@ -463,6 +1026,119 @@ pub struct RuntimeSeedSection {
     pub delivery: DeliverySettings,
     pub idle_queue_cleanup: IdleQueueCleanupSettings,
     pub connection: ConnectionSettings,
+    pub replication: ReplicationSettings,
+    pub partitioning: PartitioningSettings,
+    pub consumer_groups: ConsumerGroupSettings,
+}
+
+/// Seed values for the partitioning runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PartitioningSettings {
+    pub default_partition_count: u32,
+}
+
+impl Default for PartitioningSettings {
+    fn default() -> Self {
+        Self {
+            default_partition_count: 1,
+        }
+    }
+}
+
+/// Seed values for exclusive consumer-group runtime settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConsumerGroupSettings {
+    /// Soft target partitions-per-consumer for an exclusive cohort (alert/
+    /// autoscale signal; never reduces coverage). `None` disables it.
+    pub default_target_per_consumer: Option<usize>,
+}
+
+/// Seed values for the replication runtime settings (cluster-replicated
+/// after first boot; this section only sets the initial document).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReplicationSettings {
+    pub confirm_timeout_ms: u64,
+    pub caught_up_poll_ms: u64,
+    pub retry_poll_ms: u64,
+    pub checkpoint_retry_poll_ms: u64,
+    pub max_messages_per_read: usize,
+    pub max_events_per_read: usize,
+    pub max_bytes_per_read: usize,
+    pub max_iterations_per_tick: usize,
+    pub min_in_sync_replicas: usize,
+    pub isr_timeout_ms: u64,
+    /// Use credit-based streaming replication on the follower (default true after
+    /// the microbatch fold + failover-under-load validation; pull stays the
+    /// automatic fallback on checkpoint/error).
+    #[serde(default = "default_stream_enabled")]
+    pub stream_enabled: bool,
+    /// How long the streaming follower lingers to gather more contiguous frames
+    /// before applying (and fsyncing) them as one batch. The applier always drains
+    /// frames already queued (free coalescing under backlog); this bounds the extra
+    /// wait it spends gathering more when nearly caught up. Higher = better fsync
+    /// amortization (throughput) at the cost of apply latency; 0 = drain-only.
+    #[serde(default = "default_stream_apply_linger_us")]
+    pub stream_apply_linger_us: u64,
+
+    /// Byte cap on a single coalesced streaming-apply: the applier folds
+    /// contiguous same-epoch frames into one apply (one follower fsync), but
+    /// stops growing one apply past this so a deep backlog still applies in
+    /// reasonable chunks. Higher = better fsync amortization at the cost of peak
+    /// memory per apply. Pairs with `stream_apply_linger_us`.
+    #[serde(default = "default_stream_apply_max_merge_bytes")]
+    pub stream_apply_max_merge_bytes: u64,
+
+    /// How many replicated batches the streaming follower buffers in flight (the
+    /// credit window depth). Read at stream establish (setup-time), so a change
+    /// takes effect on the next stream, not mid-stream.
+    #[serde(default = "default_stream_buffer_batches")]
+    pub stream_buffer_batches: usize,
+}
+
+fn default_stream_apply_linger_us() -> u64 {
+    2_000
+}
+
+fn default_stream_apply_max_merge_bytes() -> u64 {
+    16 * 1024 * 1024
+}
+
+fn default_stream_buffer_batches() -> usize {
+    8
+}
+
+impl Default for ReplicationSettings {
+    fn default() -> Self {
+        Self {
+            confirm_timeout_ms: 5_000,
+            caught_up_poll_ms: 1_000,
+            retry_poll_ms: 100,
+            checkpoint_retry_poll_ms: 5_000,
+            // The follower does one fsync per replicated append call (per log),
+            // so each fsync amortizes over at most this many records. At 256 the
+            // fsync rate (msg + event logs, x iterations) saturates a contended
+            // disk well below useful replica-durable throughput. 2048 cuts the
+            // fsync rate ~8x; max_bytes_per_read still bounds per-batch memory for
+            // large payloads.
+            max_messages_per_read: 2048,
+            max_events_per_read: 2048,
+            max_bytes_per_read: 8 * 1024 * 1024,
+            max_iterations_per_tick: 8,
+            min_in_sync_replicas: 1,
+            isr_timeout_ms: 10_000,
+            stream_enabled: default_stream_enabled(),
+            stream_apply_linger_us: default_stream_apply_linger_us(),
+            stream_apply_max_merge_bytes: default_stream_apply_max_merge_bytes(),
+            stream_buffer_batches: default_stream_buffer_batches(),
+        }
+    }
+}
+
+fn default_stream_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -557,6 +1233,30 @@ mod tests {
         assert_eq!(config.runtime_seed.delivery.expiry_poll_min_ms, 15_000);
         assert_eq!(config.runtime_seed.delivery.expiry_batch_max, 8192);
         assert_eq!(config.runtime_seed.delivery.delivery_poll_max_ms, 5_000);
+        assert_eq!(
+            config.coordination.ganglion.raft,
+            GanglionRaftSection {
+                heartbeat_interval_ms: 250,
+                election_timeout_min_ms: 1500,
+                election_timeout_max_ms: 3000,
+            }
+        );
+        assert_eq!(
+            config.coordination.ganglion.forwarded_write,
+            GanglionForwardedWriteSection {
+                redirect_limit: 16,
+                no_leader_retries: 6,
+                no_leader_base_backoff_ms: 25,
+                no_leader_max_backoff_ms: 250,
+            }
+        );
+        assert_eq!(
+            config.coordination.ganglion.assignment_durability,
+            GanglionAssignmentDurabilitySection {
+                mode: GanglionAssignmentDurabilityMode::LocalDurable,
+                nodes: None,
+            }
+        );
         assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, None);
         assert_eq!(
             config.idle_queue_cleanup_internal(),
@@ -610,6 +1310,37 @@ mod tests {
             [runtime_seed.connection]
             reconnect_grace_ms = 17
 
+            [runtime_seed.replication]
+            confirm_timeout_ms = 18
+            caught_up_poll_ms = 19
+            retry_poll_ms = 20
+            checkpoint_retry_poll_ms = 21
+            max_messages_per_read = 22
+            max_events_per_read = 23
+            max_bytes_per_read = 24
+            max_iterations_per_tick = 25
+            min_in_sync_replicas = 2
+            isr_timeout_ms = 26
+
+            [coordination.ganglion]
+            heartbeat_interval_ms = 3000
+            liveness_ttl_ms = 12000
+
+            [coordination.ganglion.raft]
+            heartbeat_interval_ms = 300
+            election_timeout_min_ms = 1800
+            election_timeout_max_ms = 3600
+
+            [coordination.ganglion.forwarded_write]
+            redirect_limit = 20
+            no_leader_retries = 2
+            no_leader_base_backoff_ms = 30
+            no_leader_max_backoff_ms = 300
+
+            [coordination.ganglion.assignment_durability]
+            mode = "replica_durable"
+            nodes = 2
+
             [runtime_locks]
             idle_queue_cleanup = true
             "#,
@@ -637,6 +1368,30 @@ mod tests {
             config.storage.keratin.event_log.segment_max_bytes,
             16_777_216
         );
+        assert_eq!(
+            config.coordination.ganglion.raft,
+            GanglionRaftSection {
+                heartbeat_interval_ms: 300,
+                election_timeout_min_ms: 1800,
+                election_timeout_max_ms: 3600,
+            }
+        );
+        assert_eq!(
+            config.coordination.ganglion.forwarded_write,
+            GanglionForwardedWriteSection {
+                redirect_limit: 20,
+                no_leader_retries: 2,
+                no_leader_base_backoff_ms: 30,
+                no_leader_max_backoff_ms: 300,
+            }
+        );
+        assert_eq!(
+            config.coordination.ganglion.assignment_durability,
+            GanglionAssignmentDurabilitySection {
+                mode: GanglionAssignmentDurabilityMode::ReplicaDurable,
+                nodes: Some(2),
+            }
+        );
         assert_eq!(config.runtime_seed.delivery.inflight_ttl_ms, 10);
         assert_eq!(config.runtime_seed.delivery.expiry_poll_min_ms, 11);
         assert_eq!(config.runtime_seed.delivery.expiry_batch_max, 12);
@@ -650,7 +1405,111 @@ mod tests {
             }
         );
         assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, Some(17));
+        assert_eq!(config.runtime_seed.replication.confirm_timeout_ms, 18);
+        assert_eq!(config.runtime_seed.replication.caught_up_poll_ms, 19);
+        assert_eq!(config.runtime_seed.replication.retry_poll_ms, 20);
+        assert_eq!(config.runtime_seed.replication.checkpoint_retry_poll_ms, 21);
+        assert_eq!(config.runtime_seed.replication.max_messages_per_read, 22);
+        assert_eq!(config.runtime_seed.replication.max_events_per_read, 23);
+        assert_eq!(config.runtime_seed.replication.max_bytes_per_read, 24);
+        assert_eq!(config.runtime_seed.replication.max_iterations_per_tick, 25);
+        assert_eq!(config.runtime_seed.replication.min_in_sync_replicas, 2);
+        assert_eq!(config.runtime_seed.replication.isr_timeout_ms, 26);
+        assert_eq!(config.coordination.ganglion.heartbeat_interval_ms, 3000);
+        assert_eq!(config.coordination.ganglion.liveness_ttl_ms, 12000);
         assert!(config.runtime_locks.idle_queue_cleanup);
+    }
+
+    #[test]
+    fn ganglion_mode_rejects_node_local_runtime_locks() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [coordination]
+            mode = "ganglion"
+
+            [runtime_locks]
+            idle_queue_cleanup = true
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("runtime_locks are standalone-only")
+        );
+    }
+
+    #[test]
+    fn static_mode_allows_node_local_runtime_locks() {
+        let config = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [coordination]
+            mode = "static"
+
+            [runtime_locks]
+            idle_queue_cleanup = true
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.coordination.mode, CoordinationMode::Static);
+        assert!(config.runtime_locks.idle_queue_cleanup);
+    }
+
+    #[test]
+    fn runtime_seed_validation_matches_runtime_settings_rules() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [runtime_seed.partitioning]
+            default_partition_count = 0
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("default_partition_count"));
+    }
+
+    #[test]
+    fn ganglion_raft_timing_validation_rejects_unstable_ordering() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [coordination.ganglion.raft]
+            heartbeat_interval_ms = 300
+            election_timeout_min_ms = 300
+            election_timeout_max_ms = 400
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("election_timeout_min_ms"));
+    }
+
+    #[test]
+    fn forwarded_write_validation_rejects_zero_redirect_limit() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [server]
+            data_dir = "data"
+
+            [coordination.ganglion.forwarded_write]
+            redirect_limit = 0
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("redirect_limit"));
     }
 
     #[test]
@@ -773,6 +1632,12 @@ mod tests {
                 "FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS" => Some(Ok("123".to_string())),
                 "FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS" => Some(Ok("".to_string())),
                 "FIBRIL_RECONNECT_GRACE_MS" => Some(Ok("789".to_string())),
+                "FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS" => Some(Ok("1000".to_string())),
+                "FIBRIL_COORDINATION_LIVENESS_TTL_MS" => Some(Ok("20000".to_string())),
+                "FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY" => {
+                    Some(Ok("replica_durable:2".to_string()))
+                }
+                "FIBRIL_RECOVERY_ON_MISMATCH" => Some(Ok("refuse".to_string())),
                 _ => None,
             })
             .unwrap();
@@ -799,6 +1664,19 @@ mod tests {
             }
         );
         assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, Some(789));
+        assert_eq!(config.coordination.ganglion.heartbeat_interval_ms, 1000);
+        assert_eq!(config.coordination.ganglion.liveness_ttl_ms, 20000);
+        assert_eq!(
+            config.coordination.ganglion.assignment_durability,
+            GanglionAssignmentDurabilitySection {
+                mode: GanglionAssignmentDurabilityMode::ReplicaDurable,
+                nodes: Some(2),
+            }
+        );
+        assert_eq!(
+            config.recovery.on_mismatch,
+            RecoveryMismatchMode::Refuse
+        );
     }
 
     #[test]

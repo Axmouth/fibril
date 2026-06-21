@@ -16,6 +16,11 @@ Fibril currently has Rust and TypeScript clients for the same core broker surfac
 
 The examples below are source-tree examples for the current pre-alpha API. They are useful for building against this repository, but not yet a stable package contract.
 
+Current parity note: the Rust client has the branch's partition topology,
+owner-redirect, partition-key routing, and exclusive consumer-group surface.
+The TypeScript client covers the core single-owner queue API and needs a
+cohesive parity pass before it should be treated as cluster/cohort ready.
+
 For reconnect behavior and current limits, see [reconnects](/latest/reliability/reconnects/).
 
 ## Connect
@@ -52,7 +57,7 @@ operation if the previous engine is already closed. Disable that with
 After a successful resume, both clients send their known subscription metadata
 to the broker and read the reconciliation result. Subscriptions that the broker
 confirms with `keep` continue on the existing stream. This does not replay
-in-flight publish operations; see [reconnects](/latest/reliability/reconnects/)
+in-flight publish operations. See [reconnects](/latest/reliability/reconnects/)
 for the current limits.
 
 The default reconciliation policy is conservative. Rust can opt into restoring
@@ -464,7 +469,7 @@ const text = msg.content();
 
 ## Auto Ack
 
-Auto-ack subscriptions are a convenience mode. The current client behavior tracks acknowledgement client-side; use manual ack when processing correctness matters.
+Auto-ack subscriptions are a convenience mode. The current client behavior tracks acknowledgement client-side. Use manual ack when processing correctness matters.
 
 <Tabs syncKey="client-language">
   <TabItem label="Rust">

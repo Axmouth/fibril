@@ -1,6 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
-    hash::{Hash, Hasher},
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -10,16 +9,16 @@ use std::{
 
 use fibril_broker::broker::{ConsumerConfig, SettleRequest};
 use fibril_broker::{
+    Partition,
     broker::SettleType,
     queue_engine::{KeratinConfig, StromaKeratinConfig},
 };
 use fibril_broker::{
     broker::{Broker, BrokerConfig, ConsumerHandle},
-    coordination::NoopCoordination,
     queue_engine::StromaEngine,
 };
 use fibril_metrics::{Metrics, MetricsConfig};
-use fibril_storage::{DeliveryTag, Offset};
+use fibril_storage::DeliveryTag;
 
 use clap::{Parser, ValueEnum};
 use fibril_util::{init_tracing, unix_millis};
@@ -90,13 +89,6 @@ pub enum AckMode {
     None,
 }
 
-#[repr(C)]
-struct BenchPayload {
-    msg_id: u64,
-    producer_id: u32,
-    payload: Vec<u8>,
-}
-
 fn make_payload(msg_id: u64, producer_id: u32, size: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(12 + size);
     buf.extend_from_slice(&msg_id.to_be_bytes());
@@ -107,12 +99,6 @@ fn make_payload(msg_id: u64, producer_id: u32, size: usize) -> Vec<u8> {
     buf.extend_from_slice(&body);
 
     buf
-}
-
-fn decode_payload(buf: &[u8]) -> (u64, u32) {
-    let msg_id = u64::from_be_bytes(buf[0..8].try_into().unwrap());
-    let producer = u32::from_be_bytes(buf[8..12].try_into().unwrap());
-    (msg_id, producer)
 }
 
 struct BenchMetrics {
@@ -159,22 +145,19 @@ async fn producer_task(
     produce_counter: Arc<AtomicU64>,
     total: u64,
     inflight_limit: usize,
-    prod_id_tx: tokio::sync::mpsc::UnboundedSender<(u64, u32)>,
     metrics: Arc<BenchMetrics>,
 ) {
-    // tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
-    let (publisher, mut confirm_stream) = broker.get_publisher(&topic, &None).await.unwrap();
+    let (publisher, mut confirm_stream) = broker
+        .get_publisher(&topic, Partition::ZERO, &None)
+        .await
+        .unwrap();
 
     let metrics_clone = metrics.clone();
 
     tokio::spawn(async move {
-        while let Some(res) = confirm_stream.recv().await {
-            // if res.is_ok() {
+        while confirm_stream.recv().await.is_some() {
             metrics_clone.confirmed.fetch_add(1, Ordering::SeqCst);
             metrics_clone.inflight.fetch_sub(1, Ordering::SeqCst);
-            // } else {
-            //     tracing::error!("Error receiving confirm: {res:?}");
-            // }
         }
     });
 
@@ -222,10 +205,7 @@ async fn consumer_task(
     ack_mode: AckMode,
     metrics: Arc<BenchMetrics>,
     total: u64,
-    res_tx: tokio::sync::mpsc::UnboundedSender<(Offset, DeliveryTag, Vec<u8>)>,
 ) {
-    // tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-
     let (ackq_tx, mut ackq_rx) = tokio::sync::mpsc::unbounded_channel::<DeliveryTag>();
 
     if let AckMode::Async = ack_mode {
@@ -249,9 +229,6 @@ async fn consumer_task(
     }
 
     while let Some(msg) = consumer.messages.recv().await {
-        // res_tx
-        //     .send((msg.message.offset, msg.delivery_tag, msg.message.payload))
-        //     .unwrap();
         let c = metrics.consumed.fetch_add(1, Ordering::SeqCst) + 1;
         if c == total {
             mark_done_once(&metrics.consume_done_at, metrics.start);
@@ -283,12 +260,13 @@ async fn consumer_task(
 
 async fn reporter(
     metrics: Arc<BenchMetrics>,
-    broker: Arc<Broker<StromaEngine>>,
-    topic: String,
-    interval: u64,
+    // Reserved for when per-queue debug reporting (debug_upper) is re-enabled.
+    _broker: Arc<Broker<StromaEngine>>,
+    _topic: String,
+    _interval: u64,
     total: u64,
 ) {
-    let upper = 0; // broker.debug_upper(&topic, 0, &None).await;
+    let upper = 0; // _broker.debug_upper(&_topic, 0, &None).await;
 
     let mut last_awoke = Instant::now();
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -314,7 +292,7 @@ async fn reporter(
     }
 }
 
-async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
+async fn make_broker_with_cfg(_cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
     let cfg = BrokerConfig {
         inflight_ttl_ms: 60_000,
         delivery_poll_max_ms: 100,
@@ -322,6 +300,7 @@ async fn make_broker_with_cfg(cmd: E2EBench) -> Arc<Broker<StromaEngine>> {
         expiry_poll_min_ms: 10000,
         queue_idle_evict_after_ms: None,
         queue_idle_sweep_interval_ms: 60_000,
+        ..Default::default()
     };
 
     let storage_path = format!(
@@ -374,15 +353,12 @@ async fn run_e2e_bench(cmd: E2EBench) {
 
     // Consumers
     let mut c_handles = Vec::new();
-    let (res_tx, mut res_rx) =
-        tokio::sync::mpsc::unbounded_channel::<(Offset, DeliveryTag, Vec<u8>)>();
     let client_id = Uuid::now_v7();
     for _ in 0..cmd.consumers {
-        // let topic = format!("{}_{}", topic, i);
-        let res_tx = res_tx.clone();
         let consumer = broker
             .subscribe(
                 &topic,
+                Partition::ZERO,
                 None,
                 client_id,
                 ConsumerConfig::default().with_prefetch_count(8192 * 8),
@@ -394,7 +370,6 @@ async fn run_e2e_bench(cmd: E2EBench) {
             cmd.ack_mode.clone(),
             metrics.clone(),
             cmd.messages,
-            res_tx,
         ));
         c_handles.push(c_handle);
     }
@@ -403,11 +378,8 @@ async fn run_e2e_bench(cmd: E2EBench) {
     let produce_counter = Arc::new(AtomicU64::new(0));
 
     let mut p_handles = Vec::new();
-    let (prod_id_tx, mut prod_id_rx) = tokio::sync::mpsc::unbounded_channel::<(u64, u32)>();
     for p in 0..cmd.producers {
-        let prod_id_tx = prod_id_tx.clone();
         let produce_counter = produce_counter.clone();
-        // let topic = format!("{}_{}", topic, p);
         let p_handle = tokio::spawn(producer_task(
             broker.clone(),
             topic.clone(),
@@ -415,13 +387,10 @@ async fn run_e2e_bench(cmd: E2EBench) {
             produce_counter,
             cmd.messages,
             cmd.producer_inflight,
-            prod_id_tx,
             metrics.clone(),
         ));
         p_handles.push(p_handle);
     }
-
-    drop(prod_id_tx);
 
     // Reporter
     let handle = tokio::spawn(reporter(
@@ -465,16 +434,8 @@ async fn run_e2e_bench(cmd: E2EBench) {
         tracing::info!("Acked:     {:.0} msg/s, at {secs} secs", total / secs);
     }
 
-    // broker.flush_storage().await.unwrap();
-    let partition = 0;
-
-    // broker_clone.dump_meta_keys().await;
-    // return;
-    // broker.shutdown_graceful().await;
     broker.shutdown().await;
 
-    drop(res_tx);
-    // let mut received = vec![];
     for c_handle in c_handles {
         c_handle.abort();
         // c_handle.await.unwrap();
@@ -620,16 +581,6 @@ async fn run_e2e_bench(cmd: E2EBench) {
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     init_tracing();
-
-    let h = tokio::spawn(async {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        }
-
-        return 1;
-    });
-
-    // console_subscriber::init();
 
     let cmd = Command::parse();
 

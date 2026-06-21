@@ -7,10 +7,12 @@ members = [
     "crates/config",
     "crates/protocol",
     "crates/storage",
+    "crates/common",
     "crates/broker",
     "crates/fibril",
     "crates/metrics",
     "crates/tui-example",
+    "crates/coordination-ganglion",
     "benches",
 ]
 
@@ -24,4 +26,9 @@ policy-url = "https://github.com/axmouth/fibril/blob/main/AI_POLICY.md"
 # dependency lines stay git-sourced for CI, Docker, and release builds.
 [patch."https://github.com/Axmouth/keratin.git"]
 stroma-core = { path = "../keratin/stroma/core" }
+stroma-common = { path = "../keratin/stroma/common" }
 keratin-log = { path = "../keratin/keratin-log" }
+
+[patch."https://github.com/Axmouth/ganglion.git"]
+ganglion-core = { path = "../ganglion/crates/ganglion-core" }
+ganglion-openraft = { path = "../ganglion/crates/ganglion-openraft" }

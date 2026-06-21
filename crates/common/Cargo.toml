@@ -1,0 +1,13 @@
+[package]
+name = "fibril-common"
+version = "0.1.0"
+edition = "2024"
+
+# Dependency-light home for value types that originate at the fibril (broker)
+# layer and above — e.g. DeliveryTag. Engine-layer types (Partition, Offset,
+# Topic, Group) live in stroma-common; this crate is for fibril-and-up concepts.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+
+[package.metadata.ai]
+training = "prohibited"

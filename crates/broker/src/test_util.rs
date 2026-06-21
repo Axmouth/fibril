@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use fibril_storage::{DeliveryTag, Offset};
+use fibril_storage::{DeliveryTag, Offset, Partition};
 use hashbrown::HashMap;
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir};
 use uuid::Uuid;
@@ -133,7 +133,7 @@ impl TestState {
             .ok_or_else(|| BrokerError::Unknown(format!("broker {broker} not started")))?;
 
         let (pubh, _) = broker
-            .get_publisher(topic, &group.map(|s| s.into()))
+            .get_publisher(topic, Partition::ZERO, &group.map(|s| s.into()))
             .await?;
 
         let _off = pubh
@@ -163,7 +163,7 @@ impl TestState {
             .ok_or_else(|| BrokerError::Unknown(format!("broker {broker} not started")))?;
 
         let (pubh, _) = broker
-            .get_publisher(topic, &group.map(|s| s.into()))
+            .get_publisher(topic, Partition::ZERO, &group.map(|s| s.into()))
             .await?;
 
         let mut offsets = Vec::with_capacity(n);
@@ -217,6 +217,7 @@ impl SubBuilder<'_> {
         let handle = self.state.brokers[&self.broker]
             .subscribe(
                 &self.topic,
+                Partition::ZERO,
                 self.group.as_deref(),
                 client_id,
                 ConsumerConfig {
@@ -249,6 +250,7 @@ impl<'a> SubBuilder<'a> {
         let handle = broker
             .subscribe(
                 &self.topic,
+                Partition::ZERO,
                 self.group.as_deref(),
                 client_id,
                 ConsumerConfig {

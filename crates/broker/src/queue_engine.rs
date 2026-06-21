@@ -10,10 +10,14 @@ use stroma_core::{
     StromaMetrics,
 };
 pub use stroma_core::{
-    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, EvictOutcome, GlobalDLQ,
-    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KeratinAppendCompletion,
-    KeratinConfig, MessageContentType, MessageHeaders, MessageInspectionPage,
-    MessageInspectionStatus, QueueInspectionState, SnapshotConfig, Stroma, StromaError,
+    AppendCompletion, DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, EvictOutcome,
+    FollowerStateCheckpointInstall, FollowerStateCheckpointInstallOutcome, GlobalDLQ,
+    GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KDurability,
+    KeratinAppendCompletion, KeratinConfig, Message, MessageContentType, MessageHeaders,
+    MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead,
+    OwnerStateCheckpoint, QuarantineInfo, QueueInspectionState, QueuePromotionOutcome,
+    RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
+    ReplicatedQueueApplyOutcome, SnapshotConfig, Stroma, StromaError, StromaEvent,
     StromaKeratinConfig,
 };
 use tokio::sync::Notify;
@@ -67,6 +71,10 @@ pub enum ReplayDeadLetterOutcome {
 
 #[async_trait]
 pub trait QueueEngine {
+    /// Lease up to `max` ready messages with offset strictly below `upper`. For a
+    /// replica-durable queue `upper` is the committed-replicated watermark, so a
+    /// consumer never sees an offset that is not yet durable on enough replicas.
+    /// Pass `u64::MAX` to disable the ceiling (local-durable queues).
     async fn poll_ready(
         &self,
         tp: &str,
@@ -74,6 +82,7 @@ pub trait QueueEngine {
         group: Option<&str>,
         max: usize,
         lease_deadline: UnixMillis,
+        upper: Offset,
     ) -> Result<Vec<Deliverable>, StromaError>;
 
     async fn ack(
@@ -110,6 +119,15 @@ pub trait QueueEngine {
         part: u32,
         group: Option<&str>,
         items: Vec<NackEventMeta>,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError>;
+
+    async fn release_inflight_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<AckEventMeta>,
         completion: Box<dyn AppendCompletion<IoError>>,
     ) -> Result<(), StromaError>;
 
@@ -200,12 +218,30 @@ pub trait QueueEngine {
         group: Option<&str>,
     ) -> Result<(), StromaError>;
 
+    async fn become_queue_owner_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), StromaError>;
+
     async fn unmaterialize(
         &self,
         tp: &str,
         part: u32,
         group: Option<&str>,
     ) -> Result<EvictOutcome, StromaError>;
+
+    /// Fully remove a partition: drop it from the registry AND delete its
+    /// on-disk storage. Stronger than `unmaterialize` (which keeps the data).
+    /// Used to free storage for partitions a repartition has retired.
+    async fn destroy_partition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<DestroyOutcome, StromaError>;
 
     fn is_materialized(&self, tp: &str, part: u32, group: Option<&str>) -> bool;
 
@@ -216,9 +252,60 @@ pub trait QueueEngine {
         group: Option<&str>,
     ) -> Result<bool, StromaError>;
 
+    /// The lowest offset not yet settled (acked): every offset below it is
+    /// consumed and gone. Used by live repartitioning to tell when a partition
+    /// has drained its pre-cutover backlog (settled offset has reached the
+    /// cutover boundary).
+    async fn lowest_unacked_offset(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<Offset, StromaError>;
+
+    /// The partition's next write offset (high-water). Live repartitioning
+    /// snapshots this at cutover as a partition's boundary: messages below it are
+    /// pre-cutover (v_old), at or above it are post-cutover (v_new).
+    async fn current_next_offset(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<Offset, StromaError>;
+
+    /// The next deliverable offset in `[from, upper)`, or `None` if the range has
+    /// nothing ready. A shrink uses this to hold a surviving partition's
+    /// post-cutover delivery (offset >= boundary) WITHOUT polling/leasing it:
+    /// probe `[0, boundary)` and hold when it is empty.
+    async fn next_deliverable(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        upper: Offset,
+    ) -> Result<Option<Offset>, StromaError>;
+
     fn metrics(&self) -> Arc<StromaMetrics>;
 
     fn deadline_awaker(&self) -> Arc<Notify>;
+
+    /// Partitions parked because recovery found a dangling event->message
+    /// reference (for health/admin surfacing).
+    fn quarantined_partitions(&self) -> Vec<QuarantineInfo>;
+
+    /// The configured recovery dangling-reference policy (decides whether a
+    /// quarantine should fail readiness: Refuse hard-fails, Quarantine stays
+    /// serving the healthy partitions).
+    fn recovery_mismatch_policy(&self) -> RecoveryMismatchPolicy;
+
+    /// Repair a quarantined partition (truncate-to-valid) and clear it.
+    async fn repair_partition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError>;
 }
 
 #[derive(Debug, Clone)]
@@ -238,8 +325,198 @@ impl StromaEngine {
         })
     }
 
+    /// Set the recovery dangling-reference policy (startup config).
+    pub fn set_recovery_mismatch_policy(&self, policy: RecoveryMismatchPolicy) {
+        self.inner.set_recovery_mismatch_policy(policy);
+    }
+
     pub async fn global_store(&self) -> Result<Arc<GlobalStore>, StromaError> {
         self.inner.global_store().await
+    }
+
+    pub async fn read_owner_message_records(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        max: usize,
+    ) -> Result<OwnerReplicationRead<Message>, StromaError> {
+        self.inner
+            .read_owner_message_records(tp, part, group, from, max)
+            .await
+    }
+
+    pub async fn read_owner_event_records(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        max: usize,
+    ) -> Result<OwnerReplicationRead<StromaEvent>, StromaError> {
+        self.inner
+            .read_owner_event_records(tp, part, group, from, max)
+            .await
+    }
+
+    pub async fn export_owner_state_checkpoint(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<OwnerStateCheckpoint, StromaError> {
+        self.inner
+            .export_owner_state_checkpoint(tp, part, group)
+            .await
+    }
+
+    pub async fn install_follower_state_checkpoint(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        install: FollowerStateCheckpointInstall,
+    ) -> Result<FollowerStateCheckpointInstallOutcome, StromaError> {
+        self.inner
+            .install_follower_state_checkpoint(tp, part, group, install)
+            .await
+    }
+
+    pub async fn become_queue_follower(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner.become_queue_follower(tp, part, group).await
+    }
+
+    pub async fn stop_queue_follower_for_transition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .stop_queue_follower_for_transition(tp, part, group)
+            .await
+    }
+
+    pub async fn freeze_queue_for_transition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .freeze_queue_for_transition(tp, part, group)
+            .await
+    }
+
+    pub async fn demote_queue_owner_to_follower(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .demote_queue_owner_to_follower(tp, part, group)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn become_queue_owner(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner.become_queue_owner(tp, part, group).await
+    }
+
+    pub async fn apply_replicated_queue_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        messages: Option<ReplicatedMessageBatch>,
+        events: Option<ReplicatedEventBatch>,
+    ) -> Result<ReplicatedQueueApplyOutcome, StromaError> {
+        self.inner
+            .apply_replicated_queue_batch(tp, part, group, messages, events)
+            .await
+    }
+
+    pub async fn promote_queue_follower_if_caught_up(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        expected_message_next_offset: Offset,
+        expected_event_next_offset: Offset,
+    ) -> Result<QueuePromotionOutcome, StromaError> {
+        self.inner
+            .promote_queue_follower_if_caught_up(
+                tp,
+                part,
+                group,
+                expected_message_next_offset,
+                expected_event_next_offset,
+            )
+            .await
+    }
+
+    /// Failover promotion: accept the follower's own tails, fenced at the
+    /// assignment epoch (persisted before serving).
+    pub async fn promote_queue_follower_to_local_tail(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<QueuePromotionOutcome, StromaError> {
+        self.inner
+            .promote_queue_follower_to_local_tail(tp, part, group, epoch)
+            .await
+    }
+
+    /// Fence both queue logs at the assignment epoch (persisted, monotonic).
+    pub async fn advance_queue_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<u64, StromaError> {
+        self.inner.advance_queue_epoch(tp, part, group, epoch).await
+    }
+
+    /// `become_queue_owner` fenced at the assignment epoch.
+    pub async fn become_queue_owner_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .become_queue_owner_with_epoch(tp, part, group, epoch)
+            .await
+    }
+
+    /// `become_queue_follower` fenced at the assignment epoch: stale-epoch
+    /// owners' replicated batches are rejected from here on.
+    pub async fn become_queue_follower_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .become_queue_follower_with_epoch(tp, part, group, epoch)
+            .await
     }
 
     async fn replay_dead_letter(
@@ -363,10 +640,11 @@ impl QueueEngine for StromaEngine {
         group: Option<&str>,
         max: usize,
         lease_deadline: UnixMillis,
+        upper: Offset,
     ) -> Result<Vec<Deliverable>, StromaError> {
         let v = self
             .inner
-            .poll_ready(tp, part, group, max, lease_deadline)
+            .poll_ready(tp, part, group, max, lease_deadline, upper)
             .await?;
 
         Ok(v.into_iter()
@@ -433,6 +711,19 @@ impl QueueEngine for StromaEngine {
     ) -> Result<(), StromaError> {
         self.inner
             .nack_enqueue_many(tp, part, group, items, completion)
+            .await
+    }
+
+    async fn release_inflight_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        items: Vec<AckEventMeta>,
+        completion: Box<dyn AppendCompletion<IoError>>,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .release_inflight_many(tp, part, group, items, completion)
             .await
     }
 
@@ -638,6 +929,18 @@ impl QueueEngine for StromaEngine {
         self.inner.materialize(tp, part, group).await
     }
 
+    async fn become_queue_owner_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        epoch: u64,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .become_queue_owner_with_epoch(tp, part, group, epoch)
+            .await
+    }
+
     async fn unmaterialize(
         &self,
         tp: &str,
@@ -645,6 +948,15 @@ impl QueueEngine for StromaEngine {
         group: Option<&str>,
     ) -> Result<EvictOutcome, StromaError> {
         self.inner.unmaterialize(tp, part, group).await
+    }
+
+    async fn destroy_partition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<DestroyOutcome, StromaError> {
+        self.inner.destroy_partition(tp, part, group).await
     }
 
     fn is_materialized(&self, tp: &str, part: u32, group: Option<&str>) -> bool {
@@ -660,11 +972,59 @@ impl QueueEngine for StromaEngine {
         self.inner.has_inflight(tp, part, group).await
     }
 
+    async fn lowest_unacked_offset(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<Offset, StromaError> {
+        self.inner.lowest_unacked_offset(tp, part, group).await
+    }
+
+    async fn current_next_offset(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<Offset, StromaError> {
+        self.inner.current_next_offset(tp, part, group).await
+    }
+
+    async fn next_deliverable(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        from: Offset,
+        upper: Offset,
+    ) -> Result<Option<Offset>, StromaError> {
+        self.inner
+            .next_deliverable(tp, part, group, from, upper)
+            .await
+    }
+
     fn metrics(&self) -> Arc<StromaMetrics> {
         self.inner.metrics()
     }
 
     fn deadline_awaker(&self) -> Arc<Notify> {
         self.inner.deadline_waker()
+    }
+
+    fn quarantined_partitions(&self) -> Vec<QuarantineInfo> {
+        self.inner.quarantined_partitions()
+    }
+
+    fn recovery_mismatch_policy(&self) -> RecoveryMismatchPolicy {
+        self.inner.recovery_mismatch_policy()
+    }
+
+    async fn repair_partition(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+    ) -> Result<(), StromaError> {
+        self.inner.repair_partition(tp, part, group).await
     }
 }

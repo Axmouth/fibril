@@ -1,0 +1,19 @@
+[package]
+name = "fibril-coordination-ganglion"
+version = "0.1.0"
+edition = "2021"
+description = "Spike: ganglion raft-backed implementation of fibril's Coordination trait"
+
+[dependencies]
+fibril-broker = { path = "../broker" }
+fibril-storage = { path = "../storage" }
+ganglion-core = { git = "https://github.com/Axmouth/ganglion.git", branch = "main" }
+ganglion-openraft = { git = "https://github.com/Axmouth/ganglion.git", branch = "main", features = ["openraft"] }
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "macros", "time"] }
+tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+fibril-broker = { path = "../broker", features = ["provider-contract-tests"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }

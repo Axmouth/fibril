@@ -1,0 +1,535 @@
+{% extends "layout.html" %}
+{% block content %}
+<style>
+  #topology-diagram .edge {
+    stroke: #5b8def;
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+    opacity: 0.4;
+    transition: opacity 0.12s ease, stroke-width 0.12s ease;
+  }
+  #topology-diagram.has-focus .edge { opacity: 0.06; }
+  #topology-diagram.has-focus .edge.edge-active {
+    opacity: 0.95;
+    stroke-width: 2.25;
+  }
+  #topology-diagram .node-card { cursor: pointer; transition: opacity 0.12s ease; }
+  #topology-diagram.has-focus .node-card { opacity: 0.35; }
+  #topology-diagram.has-focus .node-card.node-active { opacity: 1; }
+  #topology-diagram .node-card.node-selected rect { stroke: #5b8def; stroke-width: 2.5; }
+  .view-toggle { display: inline-flex; gap: 4px; flex: none; }
+  .view-toggle .btn.active { background: #2b3650; color: #e8ecf4; }
+  #broker-detail-panel { margin-top: 12px; }
+  #broker-detail-body details, .broker-list-body details { margin-top: 6px; }
+  #broker-detail-body summary, .broker-list-body summary { cursor: pointer; }
+  .broker-list-item {
+    border: 1px solid #2a3344;
+    border-radius: 8px;
+    padding: 8px 12px;
+    margin-bottom: 8px;
+  }
+  .broker-list-item > summary { cursor: pointer; font-size: 14px; }
+  .broker-list-body { margin-top: 8px; }
+</style>
+<h4 class="metrics-header">Cluster Topology</h4>
+<p class="settings-note">
+  Committed coordination view: registered brokers, queue ownership with fencing epochs, and the
+  embedded consensus group when one is active. Solid edges point from queue owners to followers.
+</p>
+
+<section class="overview-panel" aria-label="Cluster summary">
+  <div class="overview-panel-heading">
+    <h5>Summary</h5>
+    <p id="topology-summary">loading…</p>
+  </div>
+</section>
+
+<section class="overview-panel" aria-label="Brokers">
+  <div class="overview-panel-heading" style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px;">
+    <div>
+      <h5>Brokers</h5>
+      <p>Hover a broker to highlight its replication links, or click to inspect its assignments. The consensus leader is marked.</p>
+    </div>
+    <div class="view-toggle" role="group" aria-label="View mode">
+      <button type="button" id="view-diagram" class="btn">Diagram</button>
+      <button type="button" id="view-list" class="btn">List</button>
+    </div>
+  </div>
+  <div id="diagram-view">
+    <svg id="topology-diagram" viewBox="0 0 860 440" width="100%" height="440"
+         preserveAspectRatio="xMidYMid meet"
+         style="background: var(--panel-bg, transparent); border-radius: 8px;"></svg>
+    <div id="broker-detail-panel">
+      <p id="broker-detail-sub" class="settings-note">Click a broker to inspect its assignments.</p>
+      <div id="broker-detail-body"></div>
+    </div>
+  </div>
+  <div id="list-view" hidden>
+    <div id="broker-list"></div>
+  </div>
+</section>
+
+<section class="overview-panel" aria-label="Assignments">
+  <div class="overview-panel-heading">
+    <h5>Assignments</h5>
+    <p>Queue partition ownership from the committed snapshot.</p>
+  </div>
+  <table class="table table-compact narrow metric-table">
+    <thead>
+      <tr>
+        <th>Topic</th><th>Part</th><th>Group</th><th>Owner</th><th>Followers</th>
+        <th class="text-right">Epoch</th>
+      </tr>
+    </thead>
+    <tbody id="topology-assignments"></tbody>
+  </table>
+</section>
+
+<section class="overview-panel" aria-label="Repartition queue">
+  <div class="overview-panel-heading">
+    <h5>Repartition queue</h5>
+    <p>Set a partitioned queue's partition count. The controller assigns owners and followers for the new layout.</p>
+  </div>
+  <div id="repartition-message" class="settings-message"></div>
+  <div class="settings-grid settings-grid-two">
+    <label class="settings-field"><span class="settings-label">Topic</span><input id="repartition.topic" placeholder="orders.created"></label>
+    <label class="settings-field"><span class="settings-label">Group</span><input id="repartition.group" placeholder="blank for default"></label>
+    <label class="settings-field"><span class="settings-label">Partition count</span><input id="repartition.partition_count" type="number" min="1" step="1"></label>
+  </div>
+  <div class="settings-actions">
+    <button class="btn btn-primary" type="button" id="repartition-submit">Repartition</button>
+  </div>
+</section>
+
+<section class="overview-panel" aria-label="Coordination membership">
+  <div class="overview-panel-heading">
+    <h5>Coordination membership</h5>
+    <p>Add or remove a voting member of the consensus group. Quorum changes affect availability; change one member at a time.</p>
+  </div>
+  <div id="membership-message" class="settings-message"></div>
+  <div class="settings-grid settings-grid-two">
+    <label class="settings-field"><span class="settings-label">Member id</span><input id="membership.id" type="number" min="1" step="1"></label>
+    <label class="settings-field"><span class="settings-label">Member address</span><input id="membership.addr" placeholder="127.0.0.1:7181"></label>
+  </div>
+  <div class="settings-actions">
+    <button class="btn btn-primary" type="button" id="membership-add">Add voter</button>
+    <button class="btn" type="button" id="membership-remove">Remove voter</button>
+  </div>
+</section>
+
+<script src="/static/js/api.js"></script>
+<script>
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+// Selection and view state survive the periodic refresh. renderCtx holds the
+// cards and edges from the most recent diagram render so highlighting can be
+// re-applied without rebuilding listeners.
+let selectedNode = null;
+let viewMode = localStorage.getItem("topology.view") === "list" ? "list" : "diagram";
+let renderCtx = { cards: new Map(), edges: [], data: null };
+
+function el(name, attrs, text) {
+  const node = document.createElementNS(SVG_NS, name);
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function renderSummary(data) {
+  const coordination = data.coordination;
+  const raft = data.consensus;
+  const parts = [];
+  if (coordination) {
+    parts.push(`reporting node <b>${escapeHtml(coordination.node_id)}</b>`);
+    parts.push(`generation <b>${escapeHtml(coordination.generation)}</b>`);
+    parts.push(`${escapeHtml(coordination.nodes.length)} broker(s), ${escapeHtml(coordination.assignments.length)} assignment(s)`);
+  } else {
+    parts.push("no coordination provider attached");
+  }
+  if (raft) {
+    const voters = (raft.voters ?? []).map(escapeHtml).join(", ");
+    const learners = (raft.learners ?? []).map(escapeHtml).join(", ");
+    parts.push(`raft: leader <b>${escapeHtml(raft.leader ?? "none")}</b>, voters [${voters}]` +
+      (learners ? `, learners [${learners}]` : ""));
+  }
+  document.getElementById("topology-summary").innerHTML = parts.join(" · ");
+}
+
+const CARD_W = 180, CARD_H = 64;
+
+// Small clusters read best on an ellipse. Past a handful of brokers the ring
+// crowds and the follower edges become a hairball, so switch to a centered grid
+// that grows with the cluster. Both layouts return absolute card centers plus
+// the viewBox the canvas should adopt.
+function computeLayout(nodes) {
+  const n = nodes.length;
+  const positions = new Map();
+  const bannerTop = 52;
+
+  if (n <= 6) {
+    const width = 860, height = 440;
+    const cx = width / 2, cy = (height + bannerTop) / 2 + 8;
+    const rx = n <= 1 ? 0 : 320, ry = n <= 1 ? 0 : 132;
+    nodes.forEach((node, i) => {
+      const angle = n === 1 ? -Math.PI / 2 : (2 * Math.PI * i) / n - Math.PI / 2;
+      positions.set(node.node_id, { x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) });
+    });
+    return { positions, width, height };
+  }
+
+  const gapX = 34, gapY = 26;
+  const cols = Math.min(5, Math.ceil(Math.sqrt(n)));
+  const rows = Math.ceil(n / cols);
+  const pitchX = CARD_W + gapX;
+  const rowPitch = CARD_H + gapY;
+  // Stagger alternate rows by half a column so cards meet at the corners
+  // (brick / hex packing) rather than lining up side to side. Each card nestles
+  // into the pocket between two cards in the row above, which also keeps owner
+  // to follower edges from running collinear straight through a whole row.
+  const stagger = pitchX / 2;
+  const blockWidth = (cols - 1) * pitchX + CARD_W + stagger;
+  const width = blockWidth + 2 * gapX;
+  const height = bannerTop + rows * rowPitch + gapY;
+  const originX = (width - blockWidth) / 2 + CARD_W / 2;
+  nodes.forEach((node, i) => {
+    const r = Math.floor(i / cols), c = i % cols;
+    positions.set(node.node_id, {
+      x: originX + c * pitchX + (r % 2) * stagger,
+      y: bannerTop + gapY + CARD_H / 2 + r * rowPitch,
+    });
+  });
+  return { positions, width, height };
+}
+
+function renderDiagram(data) {
+  const svg = document.getElementById("topology-diagram");
+  svg.replaceChildren();
+  svg.classList.remove("has-focus");
+  const coordination = data.coordination;
+  if (!coordination || coordination.nodes.length === 0) {
+    svg.setAttribute("viewBox", "0 0 860 440");
+    svg.setAttribute("height", 440);
+    svg.appendChild(el("text", { x: 430, y: 220, "text-anchor": "middle",
+      fill: "#8a93a6", "font-size": 15 }, "no registered brokers yet"));
+    renderCtx = { cards: new Map(), edges: [], data };
+    selectedNode = null;
+    renderBrokerDetail(null);
+    return;
+  }
+
+  const raft = data.consensus ?? {};
+  // Raft id -> broker correlation is best effort and display only: a card is
+  // marked as leader only when its node_id matches the reported raft leader.
+  const leaderId = raft.leader != null ? String(raft.leader) : null;
+  const nodes = coordination.nodes;
+  const { positions, width, height } = computeLayout(nodes);
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("height", height);
+
+  // Consensus banner across the top, present for either layout.
+  if (data.consensus) {
+    svg.appendChild(el("text", {
+      x: width / 2, y: 24, "text-anchor": "middle",
+      fill: "#e8b65b", "font-size": 14, "font-weight": 600,
+    }, `consensus leader: ${data.consensus.leader ?? "none"}`));
+    svg.appendChild(el("text", {
+      x: width / 2, y: 44, "text-anchor": "middle", fill: "#8a93a6", "font-size": 11,
+    }, `voters [${(data.consensus.voters ?? []).join(", ")}] · applied ${data.consensus.last_applied_index ?? "-"}`));
+  }
+
+  // Owner -> follower edges first (drawn under the opaque cards). Track each
+  // edge with its endpoints so hovering a broker can highlight just its links.
+  const edges = [];
+  for (const assignment of coordination.assignments) {
+    const from = positions.get(assignment.owner);
+    if (!from) continue;
+    for (const follower of assignment.followers) {
+      const to = positions.get(follower);
+      if (!to) continue;
+      const line = el("line", { class: "edge", x1: from.x, y1: from.y, x2: to.x, y2: to.y });
+      svg.appendChild(line);
+      edges.push({ line, owner: assignment.owner, follower });
+    }
+  }
+
+  const ownedCount = new Map();
+  for (const assignment of coordination.assignments) {
+    ownedCount.set(assignment.owner, (ownedCount.get(assignment.owner) ?? 0) + 1);
+  }
+
+  const cards = new Map();
+  nodes.forEach((node) => {
+    const pos = positions.get(node.node_id);
+    const owned = ownedCount.get(node.node_id) ?? 0;
+    const isLeader = leaderId != null && String(node.node_id) === leaderId;
+    const group = el("g", { class: "node-card", "data-node": node.node_id });
+    group.appendChild(el("rect", {
+      x: pos.x - CARD_W / 2, y: pos.y - CARD_H / 2, width: CARD_W, height: CARD_H,
+      rx: 10, fill: "#1d2433",
+      stroke: isLeader ? "#e8b65b" : "#3a4761", "stroke-width": isLeader ? 2.25 : 1.5,
+    }));
+    group.appendChild(el("text", {
+      x: pos.x, y: pos.y - 10, "text-anchor": "middle",
+      fill: "#e8ecf4", "font-size": 15, "font-weight": 600,
+    }, isLeader ? `${node.node_id} ★` : node.node_id));
+    group.appendChild(el("text", {
+      x: pos.x, y: pos.y + 10, "text-anchor": "middle", fill: "#8a93a6", "font-size": 12,
+    }, node.broker_addr));
+    group.appendChild(el("text", {
+      x: pos.x, y: pos.y + 26, "text-anchor": "middle", fill: "#5b8def", "font-size": 11,
+    }, owned ? `owns ${owned} partition(s)` : "no owned partitions"));
+    svg.appendChild(group);
+    cards.set(node.node_id, group);
+  });
+
+  // Stash the rendered cards and edges so hover and selection can re-apply
+  // highlighting across the periodic refresh, then wire the interactions.
+  renderCtx = { cards, edges, data };
+  for (const [nodeId, group] of cards) {
+    group.addEventListener("mouseenter", () => highlight(nodeId));
+    group.addEventListener("mouseleave", () => highlight(selectedNode));
+    group.addEventListener("click", (event) => {
+      event.stopPropagation();
+      selectNode(nodeId);
+    });
+  }
+  if (selectedNode && !cards.has(selectedNode)) selectedNode = null;
+  markSelected();
+  highlight(selectedNode);
+  renderBrokerDetail(selectedNode);
+}
+
+// Spotlight the edges a broker participates in (as owner or follower) and the
+// brokers on the other end, dimming everything else. A null id clears.
+function highlight(id) {
+  const svg = document.getElementById("topology-diagram");
+  if (!id) {
+    svg.classList.remove("has-focus");
+    for (const e of renderCtx.edges) e.line.classList.remove("edge-active");
+    for (const [, group] of renderCtx.cards) group.classList.remove("node-active");
+    return;
+  }
+  svg.classList.add("has-focus");
+  const active = new Set([id]);
+  for (const e of renderCtx.edges) {
+    const on = e.owner === id || e.follower === id;
+    e.line.classList.toggle("edge-active", on);
+    if (on) active.add(e.owner === id ? e.follower : e.owner);
+  }
+  for (const [nodeId, group] of renderCtx.cards) {
+    group.classList.toggle("node-active", active.has(nodeId));
+  }
+}
+
+function markSelected() {
+  for (const [nodeId, group] of renderCtx.cards) {
+    group.classList.toggle("node-selected", nodeId === selectedNode);
+  }
+}
+
+function selectNode(id) {
+  selectedNode = selectedNode === id ? null : id;
+  markSelected();
+  highlight(selectedNode);
+  renderBrokerDetail(selectedNode);
+}
+
+function partitionsFor(data, id) {
+  const assignments = data.coordination?.assignments ?? [];
+  return {
+    owned: assignments.filter((a) => a.owner === id),
+    followed: assignments.filter((a) => (a.followers ?? []).includes(id)),
+  };
+}
+
+function brokerRoles(data, id) {
+  const raft = data.consensus;
+  if (!raft) return [];
+  const target = String(id);
+  const roles = [];
+  if (raft.leader != null && String(raft.leader) === target) roles.push("consensus leader");
+  else if ((raft.voters ?? []).map(String).includes(target)) roles.push("voter");
+  if ((raft.learners ?? []).map(String).includes(target)) roles.push("learner");
+  return roles;
+}
+
+function detailTable(rows, mode) {
+  if (!rows.length) return `<p class="settings-note">none</p>`;
+  const head = mode === "owner"
+    ? `<tr><th>Topic</th><th>Part</th><th>Group</th><th class="text-right">Epoch</th></tr>`
+    : `<tr><th>Topic</th><th>Part</th><th>Group</th><th>Owner</th></tr>`;
+  const body = rows.map((a) => mode === "owner"
+    ? `<tr><td>${escapeHtml(a.topic)}</td><td>${escapeHtml(a.partition)}</td><td>${escapeHtml(a.group ?? "-")}</td><td class="text-right">${escapeHtml(a.epoch)}</td></tr>`
+    : `<tr><td>${escapeHtml(a.topic)}</td><td>${escapeHtml(a.partition)}</td><td>${escapeHtml(a.group ?? "-")}</td><td>${escapeHtml(a.owner)}</td></tr>`
+  ).join("");
+  return `<table class="table table-compact narrow metric-table"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+}
+
+function detailSection(title, rows, mode, open) {
+  return `<details ${open ? "open" : ""}><summary>${escapeHtml(title)} (${rows.length})</summary>${detailTable(rows, mode)}</details>`;
+}
+
+// Diagram-mode inspector: shows the clicked broker's owned and followed
+// partitions below the canvas.
+function renderBrokerDetail(id) {
+  const sub = document.getElementById("broker-detail-sub");
+  const body = document.getElementById("broker-detail-body");
+  const data = renderCtx.data;
+  if (!id || !data) {
+    sub.textContent = "Click a broker to inspect its assignments.";
+    body.innerHTML = "";
+    return;
+  }
+  const node = (data.coordination?.nodes ?? []).find((n) => String(n.node_id) === String(id));
+  const { owned, followed } = partitionsFor(data, id);
+  const roles = brokerRoles(data, id);
+  sub.innerHTML = `<b>${escapeHtml(id)}</b> · ${escapeHtml(node?.broker_addr ?? "unknown addr")}` +
+    (roles.length ? ` · ${escapeHtml(roles.join(", "))}` : "");
+  body.innerHTML = detailSection("Owns", owned, "owner", true) +
+    detailSection("Follows", followed, "follow", false);
+}
+
+// List-mode: every broker as an expandable row, the plain view other cluster
+// dashboards default to.
+function renderList(data) {
+  const host = document.getElementById("broker-list");
+  const nodes = data.coordination?.nodes ?? [];
+  if (!nodes.length) {
+    host.innerHTML = `<p class="settings-note">no registered brokers yet</p>`;
+    return;
+  }
+  host.innerHTML = nodes.map((node) => {
+    const id = node.node_id;
+    const { owned, followed } = partitionsFor(data, id);
+    const roles = brokerRoles(data, id);
+    const tag = roles.length ? ` · ${escapeHtml(roles.join(", "))}` : "";
+    return `<details class="broker-list-item">` +
+      `<summary><b>${escapeHtml(id)}</b> · ${escapeHtml(node.broker_addr)}${tag}` +
+      ` · owns ${owned.length}, follows ${followed.length}</summary>` +
+      `<div class="broker-list-body">` +
+      detailSection("Owns", owned, "owner", true) +
+      detailSection("Follows", followed, "follow", false) +
+      `</div></details>`;
+  }).join("");
+}
+
+function applyViewMode() {
+  const isList = viewMode === "list";
+  document.getElementById("diagram-view").hidden = isList;
+  document.getElementById("list-view").hidden = !isList;
+  document.getElementById("view-diagram").classList.toggle("active", !isList);
+  document.getElementById("view-list").classList.toggle("active", isList);
+}
+
+function setView(mode) {
+  viewMode = mode;
+  localStorage.setItem("topology.view", mode);
+  applyViewMode();
+}
+
+function renderAssignments(data) {
+  const body = document.getElementById("topology-assignments");
+  const assignments = data.coordination?.assignments ?? [];
+  body.innerHTML = assignments.map((assignment) => `
+    <tr>
+      <td>${escapeHtml(assignment.topic)}</td>
+      <td>${escapeHtml(assignment.partition)}</td>
+      <td>${escapeHtml(assignment.group ?? "-")}</td>
+      <td>${escapeHtml(assignment.owner)}</td>
+      <td>${escapeHtml(assignment.followers.join(", ") || "-")}</td>
+      <td class="text-right">${escapeHtml(assignment.epoch)}</td>
+    </tr>`).join("") || `<tr><td colspan="6" style="color:#8a93a6">no assignments yet</td></tr>`;
+}
+
+async function refresh() {
+  const data = await api("/admin/api/topology");
+  renderSummary(data);
+  renderDiagram(data);
+  renderList(data);
+  renderAssignments(data);
+  applyViewMode();
+}
+
+function setOpMessage(id, text, kind) {
+  const node = document.getElementById(id);
+  node.textContent = text;
+  node.dataset.kind = kind || "info";
+}
+
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* no body */ }
+  return { ok: res.ok, data };
+}
+
+function opError(data) {
+  return data?.message || data?.error || "request failed";
+}
+
+async function submitRepartition() {
+  const topic = document.getElementById("repartition.topic").value.trim();
+  const group = document.getElementById("repartition.group").value.trim();
+  const count = Number(document.getElementById("repartition.partition_count").value);
+  if (!topic) return setOpMessage("repartition-message", "Enter a topic.", "warning");
+  if (!(count >= 1)) return setOpMessage("repartition-message", "Partition count must be at least 1.", "warning");
+  if (!confirm(`Repartition "${topic}" to ${count} partition(s)? This changes placement.`)) return;
+  const { ok, data } = await postJson("/admin/api/repartition", {
+    topic, group: group || null, partition_count: count,
+  });
+  setOpMessage("repartition-message",
+    ok ? `Repartitioned "${topic}" to ${count} partition(s).` : `Failed: ${opError(data)}`,
+    ok ? "info" : "warning");
+  if (ok) refresh();
+}
+
+async function submitMembership(action) {
+  const id = Number(document.getElementById("membership.id").value);
+  const addr = document.getElementById("membership.addr").value.trim();
+  if (!(id >= 1)) return setOpMessage("membership-message", "Enter a member id.", "warning");
+  if (action === "add" && !addr) return setOpMessage("membership-message", "Enter a member address.", "warning");
+  const adding = action === "add";
+  if (!confirm(`${adding ? "Add" : "Remove"} voting member ${id}? Quorum changes affect availability.`)) return;
+  const url = adding
+    ? "/admin/api/coordination/membership/add-voting-member"
+    : "/admin/api/coordination/membership/remove-voting-member";
+  const { ok, data } = await postJson(url, adding ? { id, addr } : { id });
+  setOpMessage("membership-message",
+    ok ? `Voting member ${id} ${adding ? "added" : "removed"}.` : `Failed: ${opError(data)}`,
+    ok ? "info" : "warning");
+  if (ok) refresh();
+}
+
+document.getElementById("repartition-submit").addEventListener("click", submitRepartition);
+document.getElementById("membership-add").addEventListener("click", () => submitMembership("add"));
+document.getElementById("membership-remove").addEventListener("click", () => submitMembership("remove"));
+
+document.getElementById("view-diagram").addEventListener("click", () => setView("diagram"));
+document.getElementById("view-list").addEventListener("click", () => setView("list"));
+// Click on empty diagram canvas clears the current selection (card clicks stop
+// propagation, so only background clicks reach here).
+document.getElementById("topology-diagram").addEventListener("click", () => {
+  selectedNode = null;
+  markSelected();
+  highlight(null);
+  renderBrokerDetail(null);
+});
+applyViewMode();
+
+setInterval(refresh, 3000);
+refresh();
+</script>
+{% endblock %}

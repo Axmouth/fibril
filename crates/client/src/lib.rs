@@ -29,37 +29,74 @@
 //! # }
 //! ```
 
-use fibril_storage::DeliveryTag;
+use arc_swap::ArcSwap;
+use fibril_storage::{DeliveryTag, Partition};
 use fibril_util::{UnixMillis, unix_millis};
 use futures::{SinkExt, StreamExt};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     collections::HashMap,
     fmt::{self, Debug},
+    mem::size_of,
     net::{SocketAddr, ToSocketAddrs},
     str::FromStr,
     sync::{
         Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
-    sync::{Mutex, Notify, mpsc, oneshot},
+    sync::{Mutex, Notify, broadcast, mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
+use uuid::Uuid;
 
 use fibril_protocol::v1::{
     frame::{Frame, ProtoCodec},
+    handler::DEFAULT_HEARTBEAT_INTERVAL,
     helper::*,
-    *,
+    wire, *,
 };
 
 // ===== Public API ============================================================
 
+// Client-side clustering / failover behavior (retry classification, publish
+// failover retry state, subscription failover supervisor). Re-exported so
+// `fibril_client::RetryAdvice` etc. keep resolving.
+mod failover;
+pub use failover::*;
+
 pub use fibril_protocol::v1::ReconcilePolicy;
+// Shared header namespace constants (single source of truth in the protocol crate)
+// so the client guard and broker rejection cannot drift.
+pub use fibril_protocol::v1::{
+    CLIENT_HEADER_PREFIX, HEADER_PRODUCER_ID, HEADER_PRODUCER_SEQ, RESERVED_HEADER_PREFIXES,
+};
+
+/// A push from the broker telling this client that its assignment within an
+/// exclusive consumer group changed (see [`SubscriptionBuilder::consumer_group`]).
+///
+/// Purely informational — the broker enforces exclusivity server-side regardless
+/// of whether the app reacts. Use it for partition-affinity processing, metrics,
+/// or to drive an app-level drain on `revoked`. Subscribe via
+/// [`Client::assignment_events`]. `generation` increases per cohort rebalance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentEvent {
+    pub topic: String,
+    pub group: Option<String>,
+    pub consumer_group: String,
+    pub generation: u64,
+    /// The member's full current partition set.
+    pub assigned: Vec<Partition>,
+    /// Partitions newly assigned since the previous event.
+    pub added: Vec<Partition>,
+    /// Partitions taken away since the previous event (drain these).
+    pub revoked: Vec<Partition>,
+}
 
 /// Error type returned by the Fibril Rust client.
 ///
@@ -91,6 +128,11 @@ pub enum FibrilError {
     /// The broker rejected a request with a structured error response.
     #[error("Server returned error code {code}: {msg}")]
     Failure { code: u16, msg: String },
+    /// The broker redirected the operation to the current owner. The client
+    /// auto-follows this for confirmed publishes and subscribes; if it surfaces
+    /// to the caller, topology changed mid-operation and the op is retryable.
+    #[error("redirected to owner {} for {}/{}", .0.owner_endpoint, .0.topic, .0.partition)]
+    Redirect(Box<Redirect>),
     /// The connection ended before the expected protocol exchange completed.
     #[error("EOF")]
     Eof,
@@ -99,8 +141,10 @@ pub enum FibrilError {
     Unexpected { msg: String },
 }
 
+
 /// Result alias used by the Fibril Rust client.
 pub type FibrilResult<T> = Result<T, FibrilError>;
+
 
 // TODO: Explore From<..> impls for relevant error types
 // TODO: Add opt in event per message sent/received
@@ -401,11 +445,13 @@ impl Message {
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct NewMessage {
     /// Encoded payload bytes sent to the broker.
     pub payload: Vec<u8>,
     content_type: Option<ContentType>,
     headers: HashMap<String, String>,
+    partition_key: Option<Vec<u8>>,
 }
 
 impl NewMessage {
@@ -429,6 +475,7 @@ impl NewMessage {
             payload,
             content_type: None,
             headers: HashMap::new(),
+            partition_key: None,
         }
     }
 
@@ -441,20 +488,46 @@ impl NewMessage {
     ///
     /// Fibril reserves `fibril.*` and `stroma.*` headers for system metadata;
     /// user code should avoid those prefixes.
+    /// Set a user header. The `fibril.` and `stroma.` prefixes are reserved for
+    /// system metadata and are silently ignored here (the broker rejects them, and
+    /// the `fibril.client.*` carve-out is library-owned - see [`ReliablePublisher`]),
+    /// so user code cannot set or spoof them.
     pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         let key = key.into();
         let value = value.into();
         if key.eq_ignore_ascii_case("content-type") {
             self.content_type = Some(ContentType::from_header(value));
+        } else if is_reserved_header_key(&key) {
+            // System namespace - not user-settable. Drop it.
         } else {
             self.headers.insert(key, value);
         }
         self
     }
 
+    /// Set a library-owned system header (the `fibril.client.*` carve-out).
+    /// Bypasses the user guard in [`header`](Self::header); for internal use only.
+    pub(crate) fn system_header(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.headers.insert(key.into(), value.into());
+        self
+    }
+
     /// Set content type metadata.
     pub fn content_type(self, content_type: impl Into<String>) -> Self {
         self.header("content-type", content_type)
+    }
+
+    /// Set the partition key: `hash(key) % partition_count` selects the
+    /// partition, co-locating same-key messages for per-key ordering. Without a
+    /// key, publishes round-robin across partitions (the default). Accepts a
+    /// string or raw bytes.
+    pub fn partition_key(mut self, key: impl Into<Vec<u8>>) -> Self {
+        self.partition_key = Some(key.into());
+        self
     }
 
     /// Borrow the extra headers that will be sent with this message.
@@ -472,6 +545,7 @@ impl NewMessage {
             payload,
             content_type: Some(ContentType::from_header(content_type)),
             headers: HashMap::new(),
+            partition_key: None,
         }
     }
 }
@@ -494,6 +568,129 @@ impl Publishable for NewMessage {
 impl<T: Serialize> Publishable for T {
     fn into_message(self) -> FibrilResult<NewMessage> {
         NewMessage::msg_pack(&self)
+    }
+}
+
+/// A "never miss" publisher built on top of [`Publisher`].
+///
+/// `Publisher::publish_confirmed` already rides through a transient owner failover
+/// (it refreshes topology and retries the transport up to `publish_timeout_ms`).
+/// But once that budget is spent it returns a retryable error and leaves the
+/// decision to you (see [`FibrilError::is_retryable`]). `ReliablePublisher`
+/// automates the rest of the loop: it re-publishes until the message is durably
+/// confirmed, a permanent ([`RetryAdvice::DoNotRetry`]) error occurs, or
+/// `max_attempts` is reached.
+///
+/// So today it is **at-least-once-no-miss**: every message is eventually confirmed,
+/// but a retry after a lost confirm can produce a DUPLICATE. It stamps every
+/// message with a stable **producer id** ([`HEADER_PRODUCER_ID`]) and a monotonic
+/// per-producer **sequence** ([`HEADER_PRODUCER_SEQ`]) under the broker's
+/// library-owned `fibril.client.*` header carve-out (user code cannot set those).
+/// The broker ignores them today; once it dedups on these keys the SAME helper
+/// becomes **effectively-once** with no API change. (A later hot-header
+/// optimization can promote them to typed fields, like `content_type` already is.)
+///
+/// Clone it freely: clones share the producer id and the sequence counter, so
+/// multiple tasks publishing through clones still emit one coherent id/seq stream.
+///
+/// ```no_run
+/// # async fn example(publisher: fibril_client::Publisher) -> fibril_client::FibrilResult<()> {
+/// // Opt in: re-publishes through arbitrarily long failovers until confirmed.
+/// let reliable = publisher.reliable();
+/// let offset = reliable.publish("order-42").await?; // durably confirmed
+/// # let _ = offset;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// If you would rather handle retries yourself, the classification is explicit:
+///
+/// ```no_run
+/// use fibril_client::RetryAdvice;
+/// # async fn example(publisher: fibril_client::Publisher) -> fibril_client::FibrilResult<()> {
+/// match publisher.publish_confirmed("order-42").await {
+///     Ok(_offset) => {}                       // durable + will be delivered
+///     Err(e) if e.is_retryable() => {
+///         // Unknown outcome - the write may have landed. Re-publishing is
+///         // at-least-once (may duplicate until idempotent dedup ships).
+///     }
+///     Err(_e) => { /* DoNotRetry: fix the request (bad topic/arg/payload). */ }
+/// }
+/// # let _ = RetryAdvice::Retry;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Clone)]
+pub struct ReliablePublisher {
+    publisher: Publisher,
+    producer_id: Uuid,
+    seq: Arc<std::sync::atomic::AtomicU64>,
+    /// 0 = retry until confirmed or a permanent error; otherwise cap the attempts.
+    max_attempts: u32,
+}
+
+impl ReliablePublisher {
+    /// Wrap a [`Publisher`]. Use [`Publisher::reliable`] for the idiomatic form.
+    pub fn new(publisher: Publisher) -> Self {
+        Self {
+            publisher,
+            producer_id: Uuid::new_v4(),
+            seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            max_attempts: 0,
+        }
+    }
+
+    /// Cap the number of publish attempts. `0` (default) retries until the message
+    /// is durably confirmed or hits a permanent error.
+    pub fn max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = max_attempts;
+        self
+    }
+
+    /// The stable producer id for this publisher (forward-compat scaffolding for
+    /// dedup; not yet transmitted - see the type docs).
+    pub fn producer_id(&self) -> Uuid {
+        self.producer_id
+    }
+
+    /// Publish and keep retrying until durably confirmed (or a permanent error /
+    /// `max_attempts`). Returns the broker-assigned offset. A retry after a lost
+    /// confirm may duplicate until owner-side dedup ships - see the type docs.
+    pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
+        // Stamp the producer id + monotonic sequence as library-owned system
+        // headers (the broker's `fibril.client.*` carve-out). The broker ignores
+        // them today, so this stays at-least-once; once it dedups on these keys the
+        // SAME helper is effectively-once. (A later hot-header optimization can
+        // promote them to typed fields, like content_type/not_before already are.)
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let message = payload
+            .into_message()?
+            .system_header(HEADER_PRODUCER_ID, self.producer_id.to_string())
+            .system_header(HEADER_PRODUCER_SEQ, seq.to_string());
+        let mut attempts: u32 = 0;
+        loop {
+            match self.publisher.publish_confirmed(message.clone()).await {
+                Ok(offset) => return Ok(offset),
+                // Retryable = unknown outcome (the inner call already exhausted its
+                // transport retry budget). Keep going unless the cap is reached.
+                Err(err) if err.is_retryable() => {
+                    attempts += 1;
+                    if self.max_attempts != 0 && attempts >= self.max_attempts {
+                        return Err(err);
+                    }
+                    tokio::time::sleep(publish_retry_nap(PUBLISH_RETRY_INITIAL_BACKOFF_MS)).await;
+                }
+                Err(err) => return Err(err), // permanent (DoNotRetry)
+            }
+        }
+    }
+}
+
+impl Publisher {
+    /// Wrap this publisher in a [`ReliablePublisher`] that retries until durably
+    /// confirmed and stamps producer-id/sequence headers (opt-in "never miss").
+    pub fn reliable(self) -> ReliablePublisher {
+        ReliablePublisher::new(self)
     }
 }
 
@@ -752,7 +949,9 @@ fn deserialize_by_content_type<T: DeserializeOwned>(
     }
 }
 
-fn decode_protocol<T: for<'de> serde::Deserialize<'de>>(frame: &Frame) -> FibrilResult<T> {
+fn decode_protocol<T: for<'de> serde::Deserialize<'de> + 'static>(
+    frame: &Frame,
+) -> FibrilResult<T> {
     try_decode(frame).map_err(|err| FibrilError::DeserializationFailure {
         msg: err.to_string(),
     })
@@ -775,6 +974,10 @@ fn reconcile_subscription_from_subscribe_ok(
         partition: ok.partition,
         auto_ack,
         prefetch: ok.prefetch,
+        // Carry exclusive membership so a reconnect rejoins the cohort.
+        consumer_group: ok.consumer_group.clone(),
+        consumer_target: ok.consumer_target,
+        member_id: ok.member_id,
     }
 }
 
@@ -783,6 +986,7 @@ enum Waiter {
     DeclareQueue(oneshot::Sender<FibrilResult<()>>),
     SubscribeManual(oneshot::Sender<FibrilResult<AckableSubChannel>>),
     SubscribeAuto(oneshot::Sender<FibrilResult<AutoAckedSubChannel>>),
+    Topology(oneshot::Sender<FibrilResult<TopologyOk>>),
 }
 
 #[derive(Debug, Clone)]
@@ -801,6 +1005,7 @@ pub struct QueueConfig {
     group: Option<GroupName>,
     dlq_policy: Option<DeadLetterPolicy>,
     dlq_max_retries: Option<u32>,
+    partition_count: Option<u32>,
 }
 
 impl QueueConfig {
@@ -811,6 +1016,7 @@ impl QueueConfig {
             group: None,
             dlq_policy: None,
             dlq_max_retries: None,
+            partition_count: None,
         })
     }
 
@@ -818,6 +1024,13 @@ impl QueueConfig {
     pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
         self.group = GroupName::parse_optional(group)?;
         Ok(self)
+    }
+
+    /// Request a specific partition count for this queue. When unset, the
+    /// cluster default applies.
+    pub fn partitions(mut self, partition_count: u32) -> Self {
+        self.partition_count = Some(partition_count);
+        self
     }
 
     /// Set the number of retries before the queue's dead-letter policy applies.
@@ -875,6 +1088,7 @@ impl QueueConfig {
             group: self.group.map(GroupName::into_string),
             dlq_policy,
             dlq_max_retries: self.dlq_max_retries,
+            partition_count: self.partition_count,
         }
     }
 }
@@ -905,6 +1119,8 @@ pub struct SubscriptionBuilder<'a> {
     topic: TopicName,
     group: Option<GroupName>,
     prefetch: u32,
+    consumer_group: Option<String>,
+    consumer_target: Option<u32>,
 }
 
 impl<'a> SubscriptionBuilder<'a> {
@@ -914,6 +1130,32 @@ impl<'a> SubscriptionBuilder<'a> {
     pub fn group(mut self, group: impl AsRef<str>) -> FibrilResult<Self> {
         self.group = GroupName::parse_optional(group)?;
         Ok(self)
+    }
+
+    /// Consume this queue as part of its **exclusive cohort**: each partition is
+    /// delivered to exactly one cohort member at a time, preserving per-key
+    /// ordering, with partitions balanced (and sticky) across members and
+    /// automatic failover when a member disconnects.
+    ///
+    /// Just run several instances that all call `.exclusive()` on the same queue
+    /// — they self-organize into the one cohort; there is nothing to name or
+    /// coordinate (a queue has a single exclusive cohort). Without this,
+    /// consumers compete for the queue (many per partition, unordered) — the
+    /// default, and the right choice when you don't need ordering. Fan-in is
+    /// transparent: the client subscribes to every partition and the broker gates
+    /// delivery to the assigned member.
+    pub fn exclusive(mut self) -> Self {
+        self.consumer_group = Some(DEFAULT_COHORT_ID.to_string());
+        self
+    }
+
+    /// Set this consumer's soft partition target within its exclusive cohort —
+    /// the max partitions it would prefer to own. Only meaningful together with
+    /// [`Self::exclusive`]; coverage always wins, so a member may still be
+    /// assigned more than its target when the cohort is under-provisioned.
+    pub fn consumer_target(mut self, max_partitions: u32) -> Self {
+        self.consumer_target = Some(max_partitions);
+        self
     }
 
     /// Set the maximum number of messages the broker may lease ahead.
@@ -930,20 +1172,66 @@ impl<'a> SubscriptionBuilder<'a> {
     /// Each received [`InflightMessage`] must be settled explicitly.
     #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
     pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
-        let req = Subscribe {
-            topic: self.topic.into_string(),
-            group: self.group.map(GroupName::into_string),
-            prefetch: self.prefetch,
+        let topic = self.topic.into_string();
+        let group = self.group.map(GroupName::into_string);
+        let prefetch = self.prefetch;
+        let consumer_group = self.consumer_group.clone();
+        let consumer_target = self.consumer_target;
+        let member_id = self
+            .consumer_group
+            .as_ref()
+            .and_then(|_| self.client.shared.cohort_member_id.get().copied());
+        let make_req = |partition| Subscribe {
+            topic: topic.clone(),
+            partition,
+            group: group.clone(),
+            prefetch,
             auto_ack: false,
+            consumer_group: consumer_group.clone(),
+            consumer_target,
+            member_id,
+        };
+        // Fan in across every partition the topology cache knows about
+        // (default: just partition 0 — see `partition_set`).
+        let partitions = partition_set(self.client, &topic, group.as_deref());
+        // Keep each partition's Subscribe request so the supervisor can re-subscribe
+        // it to a new owner after a failover.
+        let mut subs = Vec::with_capacity(partitions.len());
+        for partition in &partitions {
+            let req = make_req(*partition);
+            let part_rx = subscribe_partition_manual(self.client, req.clone()).await?;
+            subs.push((req, part_rx));
+        }
+
+        // Static fan-in when auto-resubscribe is disabled.
+        let Some(interval_ms) = self.client.shared.opts.partition_resubscribe_interval_ms else {
+            return Ok(Subscription::fan_in(
+                subs.into_iter().map(|(_, rx)| rx).collect(),
+                prefetch,
+            ));
         };
 
-        let rx = self
-            .client
-            .shared
-            .engine_for_operation()
-            .await?
-            .subscribe(req)
-            .await?;
+        // Dynamic fan-in: supervise each partition (re-subscribe on owner failover)
+        // and a manager task picks up partitions added by a live grow.
+        let cap = (prefetch as usize).max(1) * subs.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        let client = self.client.clone();
+        for (req, part_rx) in subs {
+            supervise_forward_manual(client.clone(), req, part_rx, tx.clone());
+        }
+        let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
+        tokio::spawn(partition_resubscribe_loop_manual(
+            client,
+            topic,
+            group,
+            prefetch,
+            consumer_group,
+            consumer_target,
+            member_id,
+            known,
+            tx,
+            interval_ms,
+        ));
         Ok(Subscription { rx })
     }
 
@@ -953,21 +1241,234 @@ impl<'a> SubscriptionBuilder<'a> {
     /// processing correctness matters.
     #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
     pub async fn sub_auto_ack(self) -> FibrilResult<AutoAckedSubscription> {
-        let req = Subscribe {
-            topic: self.topic.into_string(),
-            group: self.group.map(GroupName::into_string),
-            prefetch: self.prefetch,
+        let topic = self.topic.into_string();
+        let group = self.group.map(GroupName::into_string);
+        let prefetch = self.prefetch;
+        let consumer_group = self.consumer_group.clone();
+        let consumer_target = self.consumer_target;
+        let member_id = self
+            .consumer_group
+            .as_ref()
+            .and_then(|_| self.client.shared.cohort_member_id.get().copied());
+        let make_req = |partition| Subscribe {
+            topic: topic.clone(),
+            partition,
+            group: group.clone(),
+            prefetch,
             auto_ack: true,
+            consumer_group: consumer_group.clone(),
+            consumer_target,
+            member_id,
+        };
+        let partitions = partition_set(self.client, &topic, group.as_deref());
+        let mut subs = Vec::with_capacity(partitions.len());
+        for partition in &partitions {
+            let req = make_req(*partition);
+            let part_rx = subscribe_partition_auto(self.client, req.clone()).await?;
+            subs.push((req, part_rx));
+        }
+
+        let Some(interval_ms) = self.client.shared.opts.partition_resubscribe_interval_ms else {
+            return Ok(AutoAckedSubscription::fan_in(
+                subs.into_iter().map(|(_, rx)| rx).collect(),
+                prefetch,
+            ));
         };
 
-        let rx = self
-            .client
-            .shared
-            .engine_for_operation()
-            .await?
-            .subscribe_auto_ack(req)
-            .await?;
+        let cap = (prefetch as usize).max(1) * subs.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        let client = self.client.clone();
+        for (req, part_rx) in subs {
+            supervise_forward_auto(client.clone(), req, part_rx, tx.clone());
+        }
+        let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
+        tokio::spawn(partition_resubscribe_loop_auto(
+            client,
+            topic,
+            group,
+            prefetch,
+            consumer_group,
+            consumer_target,
+            member_id,
+            known,
+            tx,
+            interval_ms,
+        ));
         Ok(AutoAckedSubscription { rx })
+    }
+}
+
+/// The partitions a subscription should fan in over for `(topic, group)`.
+///
+/// Cache-only by design: the authoritative count comes from the topology cache
+/// (warmed by [`Client::fetch_topology`] or by redirects). An unknown count
+/// (cold cache, standalone, in-memory) yields just partition 0 — the
+/// single-partition path, unchanged. Subscribe never fetches topology on its
+/// own; that would add a round-trip (and could stall harnesses that don't
+/// answer `Op::Topology`). A subset selector for consumer-group assignment will
+/// narrow this set later.
+fn partition_set(client: &Client, topic: &str, group: Option<&str>) -> Vec<Partition> {
+    let count = client
+        .shared
+        .topology
+        .load()
+        .partitioning(topic, group)
+        .map(|p| p.count)
+        .unwrap_or(1)
+        .max(1);
+    (0..count).map(Partition::new).collect()
+}
+
+
+/// Background loop keeping a manual-ack subscription's fan-in current: on each
+/// tick it refreshes topology and subscribes to any partition added by a live
+/// grow, merging it into the same channel. Removed partitions (shrink) end
+/// naturally when the broker retires their stream. Stops when the subscription is
+/// dropped (the output sender closes).
+#[allow(clippy::too_many_arguments)]
+async fn partition_resubscribe_loop_manual(
+    client: Client,
+    topic: String,
+    group: Option<String>,
+    prefetch: u32,
+    consumer_group: Option<String>,
+    consumer_target: Option<u32>,
+    member_id: Option<uuid::Uuid>,
+    mut known: std::collections::HashSet<Partition>,
+    tx: mpsc::Sender<InflightMessage>,
+    interval_ms: u64,
+) {
+    let interval = std::time::Duration::from_millis(interval_ms.max(1));
+    loop {
+        tokio::select! {
+            _ = tx.closed() => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
+        let _ = client.fetch_topology().await;
+        for partition in partition_set(&client, &topic, group.as_deref()) {
+            if known.contains(&partition) {
+                continue;
+            }
+            let req = Subscribe {
+                topic: topic.clone(),
+                partition,
+                group: group.clone(),
+                prefetch,
+                auto_ack: false,
+                consumer_group: consumer_group.clone(),
+                consumer_target,
+                member_id,
+            };
+            if let Ok(part_rx) = subscribe_partition_manual(&client, req.clone()).await {
+                known.insert(partition);
+                supervise_forward_manual(client.clone(), req, part_rx, tx.clone());
+            }
+        }
+    }
+}
+
+/// Auto-ack counterpart of [`partition_resubscribe_loop_manual`].
+#[allow(clippy::too_many_arguments)]
+async fn partition_resubscribe_loop_auto(
+    client: Client,
+    topic: String,
+    group: Option<String>,
+    prefetch: u32,
+    consumer_group: Option<String>,
+    consumer_target: Option<u32>,
+    member_id: Option<uuid::Uuid>,
+    mut known: std::collections::HashSet<Partition>,
+    tx: mpsc::Sender<Message>,
+    interval_ms: u64,
+) {
+    let interval = std::time::Duration::from_millis(interval_ms.max(1));
+    loop {
+        tokio::select! {
+            _ = tx.closed() => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
+        let _ = client.fetch_topology().await;
+        for partition in partition_set(&client, &topic, group.as_deref()) {
+            if known.contains(&partition) {
+                continue;
+            }
+            let req = Subscribe {
+                topic: topic.clone(),
+                partition,
+                group: group.clone(),
+                prefetch,
+                auto_ack: true,
+                consumer_group: consumer_group.clone(),
+                consumer_target,
+                member_id,
+            };
+            if let Ok(part_rx) = subscribe_partition_auto(&client, req.clone()).await {
+                known.insert(partition);
+                supervise_forward_auto(client.clone(), req, part_rx, tx.clone());
+            }
+        }
+    }
+}
+
+/// Subscribe to a single partition (manual ack), following owner redirects.
+async fn subscribe_partition_manual(
+    client: &Client,
+    req: Subscribe,
+) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
+    let mut attempts = 0u32;
+    loop {
+        let engine = client
+            .shared
+            .engine_for(&req.topic, req.partition, req.group.as_deref())
+            .await?;
+        match engine.subscribe(req.clone()).await {
+            Ok(rx) => return Ok(rx),
+            Err(FibrilError::Redirect(redirect)) => {
+                if attempts >= client.shared.opts.max_redirects {
+                    return Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: format!(
+                            "exceeded max redirects ({}) subscribing {}/{}",
+                            client.shared.opts.max_redirects, req.topic, req.partition
+                        ),
+                    });
+                }
+                client.shared.apply_redirect(&redirect);
+                attempts += 1;
+            }
+            Err(other) => return Err(other),
+        }
+    }
+}
+
+/// Subscribe to a single partition (auto ack), following owner redirects.
+async fn subscribe_partition_auto(
+    client: &Client,
+    req: Subscribe,
+) -> FibrilResult<mpsc::Receiver<Message>> {
+    let mut attempts = 0u32;
+    loop {
+        let engine = client
+            .shared
+            .engine_for(&req.topic, req.partition, req.group.as_deref())
+            .await?;
+        match engine.subscribe_auto_ack(req.clone()).await {
+            Ok(rx) => return Ok(rx),
+            Err(FibrilError::Redirect(redirect)) => {
+                if attempts >= client.shared.opts.max_redirects {
+                    return Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: format!(
+                            "exceeded max redirects ({}) subscribing {}/{}",
+                            client.shared.opts.max_redirects, req.topic, req.partition
+                        ),
+                    });
+                }
+                client.shared.apply_redirect(&redirect);
+                attempts += 1;
+            }
+            Err(other) => return Err(other),
+        }
     }
 }
 
@@ -984,23 +1485,46 @@ impl Client {
         opts: ClientOptions,
     ) -> FibrilResult<Self> {
         let address = Self::convert_address(address)?;
-        let stream = TcpStream::connect(address)
-            .await
-            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
-        let framed = Framed::new(stream, ProtoCodec);
-
-        let subscriptions = Arc::new(RwLock::new(HashMap::new()));
-        let engine = start_engine(framed, opts.clone(), subscriptions.clone()).await?;
-        Ok(Client {
-            shared: Arc::new(ClientShared {
+        let user_shutdown = Arc::new(AtomicBool::new(false));
+        let (assignment_tx, _) = broadcast::channel(ASSIGNMENT_EVENT_CAPACITY);
+        let cohort_member_id = Arc::new(std::sync::OnceLock::new());
+        let slot = Arc::new(
+            EngineSlot::connect(
                 address,
+                opts.clone(),
+                user_shutdown.clone(),
+                assignment_tx.clone(),
+                cohort_member_id.clone(),
+            )
+            .await?,
+        );
+        let mut pool = HashMap::new();
+        pool.insert(address, slot);
+        let warm_timeout_ms = opts.topology_warm_timeout_ms;
+        let client = Client {
+            shared: Arc::new(ClientShared {
+                bootstrap: vec![address],
                 opts,
-                engine: Arc::new(EngineSlot::new(engine)),
-                reconnect_lock: Mutex::new(()),
-                user_shutdown: AtomicBool::new(false),
-                subscriptions,
+                user_shutdown,
+                pool: parking_lot::RwLock::new(pool),
+                topology: ArcSwap::from_pointee(TopologyCache::default()),
+                round_robin: std::sync::atomic::AtomicUsize::new(0),
+                assignment_tx,
+                cohort_member_id,
             }),
-        })
+        };
+        // Warm the topology cache once so the first publish spreads across
+        // partitions and the first subscription fans in over all of them.
+        // Best-effort and bounded: a server that does not answer must not stall
+        // connect, and a cold cache simply degrades to single-partition routing.
+        if let Some(timeout_ms) = warm_timeout_ms {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(timeout_ms),
+                client.fetch_topology(),
+            )
+            .await;
+        }
+        Ok(client)
     }
 
     /// Replace the internal engine with a new connection.
@@ -1014,10 +1538,9 @@ impl Client {
     /// resume identity. `ResumeOutcome::Resumed` means the server-side logical
     /// connection was reattached. Any other outcome means the broker treated the
     /// connection as fresh.
-    #[tracing::instrument(fields(address = ?self.shared.address, opts = ?self.shared.opts))]
+    #[tracing::instrument(fields(bootstrap = ?self.shared.bootstrap, opts = ?self.shared.opts))]
     pub async fn reconnect(&mut self) -> FibrilResult<ReconnectOutcome> {
-        let _guard = self.shared.reconnect_lock.lock().await;
-        self.shared.reconnect_once().await
+        self.shared.bootstrap_slot().await?.reconnect().await
     }
 
     /// Reconnect and restore existing handles.
@@ -1026,7 +1549,7 @@ impl Client {
     /// existing publishers can continue afterward, but active subscriptions
     /// should be recreated by the application.
     // TODO: try to handle inflight acks etc (resend?)
-    #[tracing::instrument(fields(address = ?self.shared.address, opts = ?self.shared.opts))]
+    #[tracing::instrument(fields(bootstrap = ?self.shared.bootstrap, opts = ?self.shared.opts))]
     pub async fn reconnect_restore(&mut self) -> FibrilResult<()> {
         todo!()
     }
@@ -1076,6 +1599,18 @@ impl Client {
         })
     }
 
+    /// Subscribe to exclusive consumer-group assignment changes for this client.
+    ///
+    /// Each [`AssignmentEvent`] reports a cohort the client belongs to (via
+    /// [`SubscriptionBuilder::consumer_group`]) whose partition set changed.
+    /// Purely informational — the broker enforces exclusivity regardless — but
+    /// useful for partition-affinity work, metrics, or app-level drain on
+    /// `revoked`. The stream survives reconnects; a slow consumer may miss events
+    /// (broadcast lag). Returns a fresh receiver each call.
+    pub fn assignment_events(&self) -> broadcast::Receiver<AssignmentEvent> {
+        self.shared.assignment_tx.subscribe()
+    }
+
     /// Start building a subscription to a topic.
     pub fn subscribe(
         &'_ self,
@@ -1086,6 +1621,8 @@ impl Client {
             topic: TopicName::parse(topic)?,
             group: None,
             prefetch: 1, // sensible default
+            consumer_group: None,
+            consumer_target: None,
         })
     }
 
@@ -1102,12 +1639,40 @@ impl Client {
             .await
     }
 
+    /// Fetch the cluster topology from the broker and refresh the routing
+    /// cache. Returns the topology snapshot. In standalone mode the broker
+    /// returns an empty topology and the client keeps using its direct
+    /// connection.
+    pub async fn fetch_topology(&self) -> FibrilResult<TopologyOk> {
+        let engine = self
+            .shared
+            .bootstrap_slot()
+            .await?
+            .engine_for_operation()
+            .await?;
+        let topology = engine.fetch_topology().await?;
+        let now = unix_millis();
+        let snapshot = topology.clone();
+        self.shared.topology.rcu(|old| {
+            let mut updated = (**old).clone();
+            updated.replace(snapshot.clone());
+            updated.last_refresh_ms = now;
+            updated
+        });
+        // Full refresh -> prune pooled connections to endpoints that are no
+        // longer owners (e.g. a demoted/dead owner after failover).
+        self.shared.prune_pool_to_topology();
+        Ok(topology)
+    }
+
     /// Gracefully shut down the client.
     ///
     /// This closes the connection engine and wakes subscription receivers.
     pub async fn shutdown(&self) {
         self.shared.user_shutdown.store(true, Ordering::Release);
-        self.shared.engine.current().shutdown.notify_waiters();
+        for slot in self.shared.pool.read().values() {
+            slot.current().shutdown.notify_waiters();
+        }
     }
 }
 
@@ -1122,12 +1687,22 @@ impl Publisher {
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish<T: Publishable>(&self, payload: T) -> FibrilResult<()> {
         let message = payload.into_message()?;
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
-            .engine_for_operation()
+            .engine_for(topic, partition, group)
             .await?
             .publish_unconfirmed(
-                self.topic.as_str().to_string(),
-                self.group.as_ref().map(|group| group.as_str().to_string()),
+                topic.to_string(),
+                group.map(str::to_string),
+                partition,
+                partitioning_version,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1136,15 +1711,111 @@ impl Publisher {
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
     }
 
+    /// Shared retry decision for confirmed-publish paths after one attempt fails.
+    /// Returns `Ok(())` to retry the loop, or `Err(e)` to give up with `e`.
+    ///
+    /// - Redirect: point-update routing to the named owner and retry (bounded by
+    ///   `max_redirects`).
+    /// - Transient transport failure (owner unreachable mid-failover): refresh
+    ///   topology from a reachable node so the next attempt re-resolves the new
+    ///   owner, then back off until the deadline. If a refresh lands against a
+    ///   populated cluster view and the topic is not declared, fail fast
+    ///   (`ERR_NOT_FOUND`) rather than burning the whole budget.
+    /// - Anything else: give up immediately.
+    async fn after_publish_failure(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        partition: Partition,
+        err: FibrilError,
+        state: &mut PublishRetryState,
+    ) -> FibrilResult<()> {
+        match err {
+            FibrilError::Redirect(redirect) => {
+                if state.redirects >= self.shared.opts.max_redirects {
+                    return Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: format!(
+                            "exceeded max redirects ({}) routing {topic}/{partition}",
+                            self.shared.opts.max_redirects
+                        ),
+                    });
+                }
+                self.shared.apply_redirect(&redirect);
+                state.redirects += 1;
+                Ok(())
+            }
+            err if err.is_transient() => {
+                let Some(deadline) = state.deadline else {
+                    return Err(err);
+                };
+                if Instant::now() >= deadline {
+                    return Err(err);
+                }
+                if self.shared.refresh_topology_throttled().await {
+                    let topo = self.shared.topology.load();
+                    if topo.is_populated() && !topo.knows_topic(topic, group) {
+                        return Err(FibrilError::Failure {
+                            code: ERR_NOT_FOUND,
+                            msg: format!("{topic}/{partition} is not declared in the cluster"),
+                        });
+                    }
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                tokio::time::sleep(publish_retry_nap(state.backoff_ms).min(remaining)).await;
+                state.backoff_ms = (state.backoff_ms * 2).min(PUBLISH_RETRY_MAX_BACKOFF_MS);
+                Ok(())
+            }
+            other => Err(other),
+        }
+    }
+
     /// Publish and wait for broker confirmation.
     ///
     /// Resolves with the broker-assigned topic offset.
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_confirmed<T: Publishable>(&self, payload: T) -> FibrilResult<u64> {
-        self.publish_with_confirmation(payload)
-            .await?
-            .confirmed()
-            .await
+        let message = payload.into_message()?;
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
+        // Bound transient (owner-failover) retries by the configured budget. 0
+        // disables retry: a transport failure fails fast, the pre-existing behavior.
+        let mut state = PublishRetryState::new(self.shared.opts.publish_timeout_ms);
+        loop {
+            // Resolve the owner, send, and await the confirm as one attempt so a
+            // transport failure at any step (dead owner during failover) is caught
+            // and retried together. Clone per attempt so a retry re-sends cleanly.
+            let attempt = async {
+                let engine = self.shared.engine_for(topic, partition, group).await?;
+                let confirmation = engine
+                    .publish_with_confirmation(
+                        topic.to_string(),
+                        group.map(str::to_string),
+                        partition,
+                        partitioning_version,
+                        message.content_type.clone(),
+                        message.headers.clone(),
+                        message.payload.clone(),
+                    )
+                    .await?;
+                confirmation.confirmed().await
+            }
+            .await;
+
+            match attempt {
+                Ok(offset) => return Ok(offset),
+                Err(err) => {
+                    self.after_publish_failure(topic, group, partition, err, &mut state)
+                        .await?
+                }
+            }
+        }
     }
 
     /// Publish and return a handle that can be awaited for broker confirmation.
@@ -1152,23 +1823,58 @@ impl Publisher {
     /// This sends a confirmed publish request but does not wait for the
     /// confirmation before returning. Keep the returned handle and await
     /// [`PublishConfirmation::confirmed`] later to pipeline multiple publishes.
+    ///
+    /// The SEND step retries across a transient owner failover (same policy as
+    /// [`publish_confirmed`](Self::publish_confirmation), bounded by
+    /// `publish_timeout_ms`): because callers await each send before issuing the
+    /// next, retrying the send before returning preserves per-partition send order.
+    /// A failure of the later confirm step (owner died after accepting the send) is
+    /// NOT retried here - re-sending an already-accepted message risks a duplicate
+    /// and a reorder under the confirm window, so that is left to the caller (a
+    /// future idempotent-producer feature).
     #[tracing::instrument(skip(payload), fields(topic = %self.topic))]
     pub async fn publish_with_confirmation<T: Publishable>(
         &self,
         payload: T,
     ) -> FibrilResult<PublishConfirmation> {
         let message = payload.into_message()?;
-        self.shared
-            .engine_for_operation()
-            .await?
-            .publish_with_confirmation(
-                self.topic.as_str().to_string(),
-                self.group.as_ref().map(|group| group.as_str().to_string()),
-                message.content_type,
-                message.headers,
-                message.payload,
-            )
-            .await
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
+        let mut state = PublishRetryState::new(self.shared.opts.publish_timeout_ms);
+        loop {
+            // Send-only attempt: resolve the owner and hand off the publish. Clone
+            // per attempt so a retry re-sends cleanly. The returned handle's confirm
+            // is awaited by the caller, not here.
+            let attempt = async {
+                let engine = self.shared.engine_for(topic, partition, group).await?;
+                engine
+                    .publish_with_confirmation(
+                        topic.to_string(),
+                        group.map(str::to_string),
+                        partition,
+                        partitioning_version,
+                        message.content_type.clone(),
+                        message.headers.clone(),
+                        message.payload.clone(),
+                    )
+                    .await
+            }
+            .await;
+
+            match attempt {
+                Ok(confirmation) => return Ok(confirmation),
+                Err(err) => {
+                    self.after_publish_failure(topic, group, partition, err, &mut state)
+                        .await?
+                }
+            }
+        }
     }
 
     /// Publish after a relative delay without waiting for broker confirmation.
@@ -1183,12 +1889,22 @@ impl Publisher {
     ) -> FibrilResult<()> {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
-            .engine_for_operation()
+            .engine_for(topic, partition, group)
             .await?
             .publish_unconfirmed_delayed(
-                self.topic.as_str().to_string(),
-                self.group.as_ref().map(|group| group.as_str().to_string()),
+                topic.to_string(),
+                group.map(str::to_string),
+                partition,
+                partitioning_version,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1225,12 +1941,22 @@ impl Publisher {
     ) -> FibrilResult<PublishConfirmation> {
         let deadline = delay.deadline();
         let message = payload.into_message()?;
+        let topic = self.topic.as_str();
+        let group = self.group.as_ref().map(|group| group.as_str());
+        let Route {
+            partition,
+            partitioning_version,
+        } = self
+            .shared
+            .route_partition(topic, group, message.partition_key.as_deref());
         self.shared
-            .engine_for_operation()
+            .engine_for(topic, partition, group)
             .await?
             .publish_delayed_with_confirmation(
-                self.topic.as_str().to_string(),
-                self.group.as_ref().map(|group| group.as_str().to_string()),
+                topic.to_string(),
+                group.map(str::to_string),
+                partition,
+                partitioning_version,
                 message.content_type,
                 message.headers,
                 message.payload,
@@ -1241,6 +1967,33 @@ impl Publisher {
 }
 
 impl Subscription {
+    /// Merge per-partition delivery streams into one subscription. A single
+    /// partition is returned as-is (no extra hop); multiple partitions are
+    /// forwarded into one merged channel by a task per partition. Each
+    /// `InflightMessage` carries its own settle channel, so acks route back to
+    /// the delivering partition's owner regardless of the merge. Ordering is
+    /// preserved within a partition, interleaved across partitions.
+    fn fan_in(mut receivers: Vec<mpsc::Receiver<InflightMessage>>, prefetch: u32) -> Self {
+        if receivers.len() == 1 {
+            if let Some(rx) = receivers.pop() {
+                return Subscription { rx };
+            }
+        }
+        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        for mut part_rx in receivers {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = part_rx.recv().await {
+                    if tx.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Subscription { rx }
+    }
+
     /// Receive the next manual-ack message.
     ///
     /// Returns `None` when the subscription channel closes.
@@ -1257,6 +2010,30 @@ impl Subscription {
 }
 
 impl AutoAckedSubscription {
+    /// Merge per-partition auto-ack streams into one subscription. See
+    /// [`Subscription::fan_in`]; auto-ack settles server-side, so there is no
+    /// ack to route — this is a plain stream merge.
+    fn fan_in(mut receivers: Vec<mpsc::Receiver<Message>>, prefetch: u32) -> Self {
+        if receivers.len() == 1 {
+            if let Some(rx) = receivers.pop() {
+                return AutoAckedSubscription { rx };
+            }
+        }
+        let cap = (prefetch as usize).max(1) * receivers.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        for mut part_rx in receivers {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                while let Some(msg) = part_rx.recv().await {
+                    if tx.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        AutoAckedSubscription { rx }
+    }
+
     /// Receive the next auto-ack message.
     ///
     /// Returns `None` when the subscription channel closes.
@@ -1274,40 +2051,480 @@ impl AutoAckedSubscription {
 
 // ===== Engine =================================================================
 
+/// Owner of one queue partition for client routing.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // fields consumed once routing is wired
+struct OwnerEntry {
+    endpoint: SocketAddr,
+    partitioning_version: u64,
+}
+
+/// Authoritative partitioning of one logical queue `(topic, group)`: how many
+/// partitions it has and the version that count was published under. The client
+/// stamps `version` on each publish so the owner can fence stale routing.
+#[derive(Debug, Clone, Copy)]
+struct PartitioningEntry {
+    count: u32,
+    version: u64,
+}
+
+/// The outcome of routing one publish: which partition to send to, and the
+/// partitioning version that choice was made under (stamped on the wire so the
+/// owner can fence a stale view).
+#[derive(Debug, Clone, Copy)]
+struct Route {
+    partition: Partition,
+    partitioning_version: u64,
+}
+
+/// Client-side cache of queue ownership learned from `Op::Topology` /
+/// `Op::Redirect`. Empty (e.g. standalone brokers) means "no routing info";
+/// callers fall back to the bootstrap connection.
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)] // some methods used as routing is wired
+struct TopologyCache {
+    generation: u64,
+    by_queue: HashMap<(String, Partition, Option<String>), OwnerEntry>,
+    /// Authoritative partitioning per logical queue `(topic, group)`.
+    counts: HashMap<(String, Option<String>), PartitioningEntry>,
+    last_refresh_ms: u64,
+}
+
+#[allow(dead_code)] // some methods used as routing is wired
+impl TopologyCache {
+    fn lookup(&self, topic: &str, partition: Partition, group: Option<&str>) -> Option<OwnerEntry> {
+        self.by_queue
+            .get(&(topic.to_string(), partition, group.map(str::to_string)))
+            .cloned()
+    }
+
+    /// Authoritative partitioning (count + version) for `(topic, group)`, if known.
+    fn partitioning(&self, topic: &str, group: Option<&str>) -> Option<PartitioningEntry> {
+        self.counts
+            .get(&(topic.to_string(), group.map(str::to_string)))
+            .copied()
+    }
+
+    /// Whether this `(topic, group)` is declared in the cluster. `counts` is
+    /// populated for every declared queue even while its owner is mid-failover
+    /// (unresolved), so this stays true through a transition and only goes false
+    /// when the topic is genuinely absent (never declared or deleted).
+    fn knows_topic(&self, topic: &str, group: Option<&str>) -> bool {
+        self.partitioning(topic, group).is_some()
+    }
+
+    /// Whether the cache holds a real cluster view (at least one declared queue).
+    /// Used to avoid reading an empty standalone/cold cache as "topic not found".
+    fn is_populated(&self) -> bool {
+        !self.counts.is_empty()
+    }
+
+    /// The set of endpoints that currently own at least one partition. Used to
+    /// prune pooled connections to endpoints that are no longer owners.
+    fn endpoints(&self) -> std::collections::HashSet<SocketAddr> {
+        self.by_queue.values().map(|entry| entry.endpoint).collect()
+    }
+
+    fn replace(&mut self, topology: TopologyOk) {
+        self.generation = topology.generation;
+        self.by_queue.clear();
+        self.counts.clear();
+        for queue in topology.queues {
+            self.counts.insert(
+                (queue.topic.clone(), queue.group.clone()),
+                PartitioningEntry {
+                    count: queue.partition_count.max(1),
+                    version: queue.partitioning_version,
+                },
+            );
+            let Some(endpoint) = queue
+                .owner_endpoint
+                .as_deref()
+                .and_then(|raw| raw.parse::<SocketAddr>().ok())
+            else {
+                continue;
+            };
+            self.by_queue.insert(
+                (queue.topic, queue.partition, queue.group),
+                OwnerEntry {
+                    endpoint,
+                    partitioning_version: queue.partitioning_version,
+                },
+            );
+        }
+    }
+
+    fn apply_redirect(&mut self, redirect: &Redirect) {
+        if let Ok(endpoint) = redirect.owner_endpoint.parse::<SocketAddr>() {
+            self.by_queue.insert(
+                (
+                    redirect.topic.clone(),
+                    redirect.partition,
+                    redirect.group.clone(),
+                ),
+                OwnerEntry {
+                    endpoint,
+                    partitioning_version: redirect.partitioning_version,
+                },
+            );
+        }
+    }
+
+    fn invalidate(&mut self, topic: &str, partition: Partition, group: Option<&str>) {
+        self.by_queue
+            .remove(&(topic.to_string(), partition, group.map(str::to_string)));
+    }
+}
+
 #[derive(Debug)]
 struct ClientShared {
-    address: SocketAddr,
+    bootstrap: Vec<SocketAddr>,
     opts: ClientOptions,
-    engine: Arc<EngineSlot>,
-    reconnect_lock: Mutex<()>,
-    user_shutdown: AtomicBool,
-    subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
+    user_shutdown: Arc<AtomicBool>,
+    // parking_lot: no poison, faster, and only ever held briefly (get + clone),
+    // never across an await — the connect happens outside the lock.
+    pool: parking_lot::RwLock<HashMap<SocketAddr, Arc<EngineSlot>>>,
+    // ArcSwap: lock-free read-mostly routing snapshot; readers can hold the
+    // snapshot across awaits, writers update via rcu. last_refresh_ms lives
+    // inside so it stays consistent with the swapped map.
+    topology: ArcSwap<TopologyCache>,
+    /// Round-robin cursor for keyless publishes (spread across partitions).
+    round_robin: std::sync::atomic::AtomicUsize,
+    /// Fan-out of exclusive consumer-group assignment changes to app subscribers.
+    /// Shared across reconnects so the stream survives a dropped connection.
+    assignment_tx: broadcast::Sender<AssignmentEvent>,
+    /// This consumer's cluster cohort member id, minted by the server on the first
+    /// exclusive subscribe and then carried on every other exclusive subscribe
+    /// (across brokers) and across reconnects, so the cohort sees one member.
+    cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+}
+
+/// Buffer of assignment events retained per [`Client::assignment_events`]
+/// receiver before a slow consumer starts lagging (older events dropped).
+const ASSIGNMENT_EVENT_CAPACITY: usize = 256;
+
+/// Wire cohort id sent for [`SubscriptionBuilder::exclusive`]. A queue has a
+/// single exclusive cohort, so the id is a fixed constant — membership is keyed
+/// by `(topic, group)` server-side; the string only needs to be stable and
+/// shared, never user-chosen.
+const DEFAULT_COHORT_ID: &str = "default";
+
+/// Stable FNV-1a hash for partition selection. Must be deterministic across all
+/// clients so a given key always maps to the same partition (per-key ordering).
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 impl ClientShared {
+    /// Select the partition for a publish to `(topic, group)`:
+    /// explicit override (none yet) -> `hash(key) % N` if a key is present ->
+    /// round-robin over N. N comes from the authoritative topology cache;
+    /// unknown N (cache cold / standalone) routes to partition 0. Returns the
+    /// chosen partition together with the partitioning version it was computed
+    /// under, so the publish can carry that version for the owner-side fence
+    /// (unknown => version 0, which matches a single-partition v0 queue).
+    fn route_partition(&self, topic: &str, group: Option<&str>, key: Option<&[u8]>) -> Route {
+        let partitioning = self.topology.load().partitioning(topic, group);
+        let version = partitioning.map(|p| p.version).unwrap_or(0);
+        let count = partitioning.map(|p| p.count).unwrap_or(1).max(1);
+        if count == 1 {
+            return Route {
+                partition: Partition::ZERO,
+                partitioning_version: version,
+            };
+        }
+        let index = match key {
+            Some(key) => (fnv1a(key) % count as u64) as u32,
+            None => {
+                let next = self
+                    .round_robin
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                (next % count as usize) as u32
+            }
+        };
+        Route {
+            partition: Partition::new(index),
+            partitioning_version: version,
+        }
+    }
+
+    /// Get-or-create the connection slot for an endpoint, connecting on miss.
+    async fn engine_slot(&self, addr: SocketAddr) -> FibrilResult<Arc<EngineSlot>> {
+        if let Some(slot) = self.pool.read().get(&addr).cloned() {
+            return Ok(slot);
+        }
+        let slot = Arc::new(
+            EngineSlot::connect(
+                addr,
+                self.opts.clone(),
+                self.user_shutdown.clone(),
+                self.assignment_tx.clone(),
+                self.cohort_member_id.clone(),
+            )
+            .await?,
+        );
+        let mut pool = self.pool.write();
+        // Another task may have connected the same endpoint concurrently.
+        if let Some(existing) = pool.get(&addr).cloned() {
+            return Ok(existing);
+        }
+        pool.insert(addr, slot.clone());
+        Ok(slot)
+    }
+
+    /// The bootstrap connection slot — the default route until queue-based
+    /// routing is enabled (A5.5).
+    async fn bootstrap_slot(&self) -> FibrilResult<Arc<EngineSlot>> {
+        self.engine_slot(self.bootstrap[0]).await
+    }
+
+    async fn engine_for_operation(&self) -> FibrilResult<Arc<EngineHandle>> {
+        self.bootstrap_slot().await?.engine_for_operation().await
+    }
+
+    /// Resolve the engine that should serve a queue partition. Routing is
+    /// REACTIVE: a cache hit routes to the owner's pooled connection; a miss
+    /// falls back to the bootstrap connection. The cache is populated by
+    /// redirects (the broker tells us the owner on a misroute) and by explicit
+    /// `Client::fetch_topology`. We deliberately do NOT fetch topology on the
+    /// hot path — that would add a round-trip to every first op (pointless in
+    /// standalone, where topology is empty) and the redirect path corrects a
+    /// misroute precisely.
+    async fn engine_for(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+    ) -> FibrilResult<Arc<EngineHandle>> {
+        if let Some(owner) = self.topology.load().lookup(topic, partition, group) {
+            return self
+                .engine_slot(owner.endpoint)
+                .await?
+                .engine_for_operation()
+                .await;
+        }
+        self.engine_for_operation().await
+    }
+
+    /// Refresh the whole topology cache from any reachable node, throttled by
+    /// `topology_refresh_cooldown_ms` so concurrent retriers do not storm the
+    /// cluster. The assignment table is raft-replicated, so any one live node
+    /// returns the authoritative current owners - we just need to reach one. Tries
+    /// the configured seeds first, then any already-pooled endpoint (a likely
+    /// survivor), and stops at the first that answers. Best-effort: on total
+    /// failure the cache is left as-is and the caller's retry will try again.
+    ///
+    /// Returns `true` if a live node answered and the cache was updated (so the
+    /// caller may trust the refreshed view, e.g. to fail fast on an unknown
+    /// topic), `false` if nothing answered or the refresh was throttled.
+    async fn refresh_topology_throttled(&self) -> bool {
+        let now = unix_millis();
+        let last = self.topology.load().last_refresh_ms;
+        if now.saturating_sub(last) < self.opts.topology_refresh_cooldown_ms {
+            return false;
+        }
+
+        let mut candidates: Vec<SocketAddr> = self.bootstrap.clone();
+        candidates.extend(self.pool.read().keys().copied());
+        let mut seen = std::collections::HashSet::new();
+        for addr in candidates {
+            if !seen.insert(addr) {
+                continue;
+            }
+            let Ok(slot) = self.engine_slot(addr).await else {
+                continue;
+            };
+            let Ok(engine) = slot.engine_for_operation().await else {
+                continue;
+            };
+            let Ok(topology) = engine.fetch_topology().await else {
+                continue;
+            };
+            let refreshed_at = unix_millis();
+            self.topology.rcu(|old| {
+                let mut updated = (**old).clone();
+                updated.replace(topology.clone());
+                updated.last_refresh_ms = refreshed_at;
+                updated
+            });
+            // A full refresh gives the complete current owner set, so prune
+            // pooled connections to endpoints that are no longer owners (e.g. a
+            // demoted/dead owner after failover).
+            self.prune_pool_to_topology();
+            return true;
+        }
+        false
+    }
+
+    /// Drop pooled connections to endpoints that no longer own any partition
+    /// (e.g. a demoted or dead owner after failover), so the pool does not
+    /// accumulate stale slots over a long-lived client's lifetime. Kept:
+    /// - bootstrap endpoints (the always-available fallback route), and
+    /// - any slot that still has active subscriptions (it may be mid-migration;
+    ///   it gets pruned on a later refresh once its subscriptions move).
+    /// A pruned endpoint that is needed again is simply reconnected on demand.
+    fn prune_pool_to_topology(&self) {
+        let live = self.topology.load().endpoints();
+        let bootstrap: std::collections::HashSet<SocketAddr> =
+            self.bootstrap.iter().copied().collect();
+        let mut pool = self.pool.write();
+        pool.retain(|addr, slot| {
+            let has_subscriptions = slot
+                .subscriptions
+                .read()
+                .map(|subs| !subs.is_empty())
+                .unwrap_or(true); // keep on a poisoned lock (conservative)
+            live.contains(addr) || bootstrap.contains(addr) || has_subscriptions
+        });
+    }
+
+    /// Update the routing cache from a broker redirect (point-update to the new
+    /// owner), so the retry — and subsequent ops — route correctly.
+    fn apply_redirect(&self, redirect: &Redirect) {
+        self.topology.rcu(|old| {
+            let mut updated = (**old).clone();
+            updated.apply_redirect(redirect);
+            updated
+        });
+    }
+}
+
+/// A single reconnectable connection to one broker endpoint. The connection
+/// pool holds one of these per endpoint.
+#[derive(Debug)]
+struct EngineSlot {
+    address: SocketAddr,
+    opts: ClientOptions,
+    user_shutdown: Arc<AtomicBool>,
+    subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
+    engine: RwLock<Arc<EngineHandle>>,
+    reconnect_lock: Mutex<()>,
+    /// Shared assignment-event fan-out (survives reconnects).
+    assignment_tx: broadcast::Sender<AssignmentEvent>,
+    /// Shared cohort member id cache (survives reconnects); the read loop fills it
+    /// from the first exclusive SubscribeOk.
+    cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+}
+
+impl EngineSlot {
+    /// Build a slot around an already-connected engine (after the initial
+    /// handshake, and for tests using an in-memory engine).
+    fn from_engine(
+        address: SocketAddr,
+        opts: ClientOptions,
+        user_shutdown: Arc<AtomicBool>,
+        subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
+        engine: Arc<EngineHandle>,
+        assignment_tx: broadcast::Sender<AssignmentEvent>,
+        cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+    ) -> Self {
+        Self {
+            address,
+            opts,
+            user_shutdown,
+            subscriptions,
+            engine: RwLock::new(engine),
+            reconnect_lock: Mutex::new(()),
+            assignment_tx,
+            cohort_member_id,
+        }
+    }
+
+    /// Connect a fresh slot to `address` (handshake included).
+    async fn connect(
+        address: SocketAddr,
+        opts: ClientOptions,
+        user_shutdown: Arc<AtomicBool>,
+        assignment_tx: broadcast::Sender<AssignmentEvent>,
+        cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+    ) -> FibrilResult<Self> {
+        let subscriptions = Arc::new(RwLock::new(HashMap::new()));
+        let stream = TcpStream::connect(address)
+            .await
+            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+        stream
+            .set_nodelay(true)
+            .map_err(|e| FibrilError::Disconnection {
+                msg: format!("failed to set TCP_NODELAY: {e}"),
+            })?;
+        let framed = Framed::new(stream, ProtoCodec);
+        let engine = start_engine(
+            framed,
+            opts.clone(),
+            subscriptions.clone(),
+            assignment_tx.clone(),
+            cohort_member_id.clone(),
+        )
+        .await?;
+        Ok(Self::from_engine(
+            address,
+            opts,
+            user_shutdown,
+            subscriptions,
+            engine,
+            assignment_tx,
+            cohort_member_id,
+        ))
+    }
+
+    fn current(&self) -> Arc<EngineHandle> {
+        self.engine
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn replace(&self, engine: Arc<EngineHandle>) {
+        *self.engine.write().unwrap_or_else(|e| e.into_inner()) = engine;
+    }
+
     async fn reconnect_once(&self) -> FibrilResult<ReconnectOutcome> {
-        let old_engine = self.engine.current();
+        let old_engine = self.current();
         let mut opts = self.opts.clone();
         opts.resume_identity = Some(old_engine.resume_identity.clone());
         let stream = TcpStream::connect(self.address)
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
 
+        stream
+            .set_nodelay(true)
+            .map_err(|e| FibrilError::Disconnection {
+                msg: format!("failed to set TCP_NODELAY: {e}"),
+            })?;
+
         let framed = Framed::new(stream, ProtoCodec);
-        let new_engine = start_engine(framed, opts, self.subscriptions.clone()).await?;
+        let new_engine = start_engine(
+            framed,
+            opts,
+            self.subscriptions.clone(),
+            self.assignment_tx.clone(),
+            self.cohort_member_id.clone(),
+        )
+        .await?;
         let outcome = ReconnectOutcome {
             resume_outcome: new_engine.resume_outcome,
         };
 
-        self.engine.replace(new_engine);
+        self.replace(new_engine);
         self.user_shutdown.store(false, Ordering::Release);
         old_engine.shutdown.notify_waiters();
 
         Ok(outcome)
     }
 
+    /// Explicit reconnect (lock-guarded) for `Client::reconnect`.
+    async fn reconnect(&self) -> FibrilResult<ReconnectOutcome> {
+        let _guard = self.reconnect_lock.lock().await;
+        self.reconnect_once().await
+    }
+
     async fn reconnect_if_closed(&self) -> FibrilResult<()> {
-        if !self.engine.current().is_closed() {
+        if !self.current().is_closed() {
             return Ok(());
         }
         if self.user_shutdown.load(Ordering::Acquire) {
@@ -1320,7 +2537,7 @@ impl ClientShared {
         }
 
         let _guard = self.reconnect_lock.lock().await;
-        if !self.engine.current().is_closed() {
+        if !self.current().is_closed() {
             return Ok(());
         }
 
@@ -1337,31 +2554,7 @@ impl ClientShared {
 
     async fn engine_for_operation(&self) -> FibrilResult<Arc<EngineHandle>> {
         self.reconnect_if_closed().await?;
-        Ok(self.engine.current())
-    }
-}
-
-#[derive(Debug)]
-struct EngineSlot {
-    engine: RwLock<Arc<EngineHandle>>,
-}
-
-impl EngineSlot {
-    fn new(engine: Arc<EngineHandle>) -> Self {
-        Self {
-            engine: RwLock::new(engine),
-        }
-    }
-
-    fn current(&self) -> Arc<EngineHandle> {
-        self.engine
-            .read()
-            .expect("client engine slot poisoned")
-            .clone()
-    }
-
-    fn replace(&self, engine: Arc<EngineHandle>) {
-        *self.engine.write().expect("client engine slot poisoned") = engine;
+        Ok(self.current())
     }
 }
 
@@ -1378,6 +2571,8 @@ enum Command {
     PublishUnconfirmed {
         topic: String,
         group: Option<String>,
+        partition: Partition,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1386,6 +2581,8 @@ enum Command {
     PublishConfirmed {
         topic: String,
         group: Option<String>,
+        partition: Partition,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1395,6 +2592,8 @@ enum Command {
     PublishDelayedUnconfirmed {
         topic: String,
         group: Option<String>,
+        partition: Partition,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1404,6 +2603,8 @@ enum Command {
     PublishDelayedConfirmed {
         topic: String,
         group: Option<String>,
+        partition: Partition,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -1422,6 +2623,9 @@ enum Command {
     DeclareQueue {
         req: DeclareQueue,
         reply: oneshot::Sender<FibrilResult<()>>,
+    },
+    Topology {
+        reply: oneshot::Sender<FibrilResult<TopologyOk>>,
     },
     Ack {
         sub_id: u64,
@@ -1457,7 +2661,7 @@ enum SubDelivery {
 struct SubState {
     topic: String,
     group: Option<String>,
-    partition: u32,
+    partition: Partition,
     delivery: SubDelivery,
 }
 
@@ -1507,7 +2711,67 @@ fn apply_reconcile_result(
     Ok(restored)
 }
 
-const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
+// DEFAULT_HEARTBEAT_INTERVAL is shared from the protocol crate (single source of
+// truth) so the client fallback and the server default cannot drift apart.
+const PUBLISH_FLUSH_MESSAGES: usize = 128;
+const PUBLISH_FLUSH_BYTES: usize = 1024 * 1024;
+const PUBLISH_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_micros(250);
+
+async fn feed_protocol_frame<S, T>(
+    framed: &mut Framed<S, ProtoCodec>,
+    op: Op,
+    request_id: u64,
+    msg: &T,
+) -> FibrilResult<usize>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    T: Serialize + 'static,
+{
+    let frame = try_encode(op, request_id, msg).map_err(|err| FibrilError::Unexpected {
+        msg: err.to_string(),
+    })?;
+    let size = size_of::<Frame>() + frame.payload.len();
+
+    framed
+        .feed(frame)
+        .await
+        .map_err(|err| FibrilError::Disconnection {
+            msg: err.to_string(),
+        })?;
+
+    Ok(size)
+}
+
+async fn feed_encoded_frame<S>(
+    framed: &mut Framed<S, ProtoCodec>,
+    frame: Frame,
+) -> FibrilResult<usize>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let size = size_of::<Frame>() + frame.payload.len();
+
+    framed
+        .feed(frame)
+        .await
+        .map_err(|err| FibrilError::Disconnection {
+            msg: err.to_string(),
+        })?;
+
+    Ok(size)
+}
+
+async fn flush_protocol_frames<S>(framed: &mut Framed<S, ProtoCodec>) -> FibrilResult<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    framed
+        .flush()
+        .await
+        .map_err(|err| FibrilError::Disconnection {
+            msg: err.to_string(),
+        })
+}
 
 async fn send_protocol_frame<S, T>(
     framed: &mut Framed<S, ProtoCodec>,
@@ -1517,26 +2781,20 @@ async fn send_protocol_frame<S, T>(
 ) -> FibrilResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    T: Serialize,
+    T: Serialize + 'static,
 {
-    let frame = try_encode(op, request_id, msg).map_err(|err| FibrilError::Unexpected {
-        msg: err.to_string(),
-    })?;
-
-    framed
-        .send(frame)
-        .await
-        .map_err(|err| FibrilError::Disconnection {
-            msg: err.to_string(),
-        })
+    feed_protocol_frame(framed, op, request_id, msg).await?;
+    flush_protocol_frames(framed).await
 }
 
 // TODO: Further reconnection attempts logic
-// TODO: Better handle `t _ = framed.send(...)` errors, which currently just get swallowed. These errors indicate a broken connection and should trigger cleanup and reconnection logic.
+// TODO: Better handle frame send errors, which currently just get swallowed. These errors indicate a broken connection and should trigger cleanup and reconnection logic.
 async fn start_engine<S>(
     mut framed: Framed<S, ProtoCodec>,
     opts: ClientOptions,
     subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
+    assignment_tx: broadcast::Sender<AssignmentEvent>,
+    cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
 ) -> FibrilResult<Arc<EngineHandle>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1694,6 +2952,11 @@ where
 
         let timeout = std::time::Duration::from_secs(heartbeat_secs * 3);
         let mut last_seen = tokio::time::Instant::now();
+        let mut flush_ticker = tokio::time::interval(PUBLISH_FLUSH_INTERVAL);
+        flush_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        flush_ticker.tick().await;
+        let mut queued_publish_frames = 0usize;
+        let mut queued_publish_bytes = 0usize;
 
         // In the engine task, before the select! loop:
         let mut fatal_error: Option<FibrilError> = None;
@@ -1704,6 +2967,75 @@ where
                 if let Err(e) = send_protocol_frame(&mut $framed, $op, $request_id, $msg).await {
                     $err_slot = Some(e);
                     break;
+                } else {
+                    queued_publish_frames = 0;
+                    queued_publish_bytes = 0;
+                }
+            };
+        }
+
+        macro_rules! flush_publishes_or_die {
+            ($framed:expr, $err_slot:expr) => {
+                if queued_publish_frames > 0 {
+                    if let Err(e) = flush_protocol_frames(&mut $framed).await {
+                        $err_slot = Some(e);
+                        break;
+                    }
+                    queued_publish_frames = 0;
+                    queued_publish_bytes = 0;
+                }
+            };
+        }
+
+        macro_rules! feed_encoded_publish_or_die {
+            ($framed:expr, $frame:expr, $err_slot:expr) => {
+                match $frame.map_err(|err| FibrilError::Unexpected {
+                    msg: err.to_string(),
+                }) {
+                    Ok(frame) => match feed_encoded_frame(&mut $framed, frame).await {
+                        Ok(size) => {
+                            queued_publish_frames += 1;
+                            queued_publish_bytes += size;
+                            if queued_publish_frames >= PUBLISH_FLUSH_MESSAGES
+                                || queued_publish_bytes >= PUBLISH_FLUSH_BYTES
+                            {
+                                flush_publishes_or_die!($framed, $err_slot);
+                            }
+                        }
+                        Err(e) => {
+                            $err_slot = Some(e);
+                            break;
+                        }
+                    },
+                    Err(e) => {
+                        $err_slot = Some(e);
+                        break;
+                    }
+                }
+            };
+        }
+
+        macro_rules! send_encoded_or_die {
+            ($framed:expr, $frame:expr, $err_slot:expr) => {
+                match $frame.map_err(|err| FibrilError::Unexpected {
+                    msg: err.to_string(),
+                }) {
+                    Ok(frame) => {
+                        if let Err(e) = feed_encoded_frame(&mut $framed, frame).await {
+                            $err_slot = Some(e);
+                            break;
+                        }
+                        if let Err(e) = flush_protocol_frames(&mut $framed).await {
+                            $err_slot = Some(e);
+                            break;
+                        }
+                        queued_publish_frames = 0;
+                        queued_publish_bytes = 0;
+                    }
+                    Err(e) => {
+                        $err_slot = Some(e);
+                        break;
+                    }
                 }
             };
         }
@@ -1720,71 +3052,88 @@ where
                     send_or_die!(framed, Op::Ping, req_id, &(), fatal_error)
                 }
 
+                _ = flush_ticker.tick(), if queued_publish_frames > 0 => {
+                    flush_publishes_or_die!(framed, fatal_error)
+                }
+
                 _ = shutdown.notified() => {
                     tracing::info!("Shutting down, exiting event loop.");
+                    if queued_publish_frames > 0 {
+                        if let Err(e) = flush_protocol_frames(&mut framed).await {
+                            fatal_error = Some(e);
+                        }
+                    }
                     break;
                 }
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    Command::PublishUnconfirmed { topic, group, content_type, headers, payload, published } => {
+                    Command::PublishUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = Publish {
                             topic,
                             group,
-                            partition: 0,
+                            partition,
                             require_confirm: false,
                             content_type,
                             headers,
                             payload,
                             published,
+                            partition_key: None,
+                            partitioning_version,
                         };
-                        send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
+                        feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }
-                    Command::PublishConfirmed { topic, group, content_type, headers, payload, published, reply } => {
+                    Command::PublishConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
                             topic,
                             group,
-                            partition: 0,
+                            partition,
                             require_confirm: true,
                             content_type,
                             headers,
                             payload,
                             published,
+                            partition_key: None,
+                            partitioning_version,
                         };
-                        send_or_die!(framed, Op::Publish, req_id, &p, fatal_error)
+                        feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }
-                    Command::PublishDelayedUnconfirmed { topic, group, content_type, headers, payload, published, not_before } => {
+                    Command::PublishDelayedUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = PublishDelayed {
                             topic,
                             group,
-                            partition: 0,
+                            partition,
                             require_confirm: false,
                             not_before,
                             content_type,
                             headers,
                             payload,
                             published,
+                            partition_key: None,
+                            partitioning_version,
                         };
-                        send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
+                        feed_encoded_publish_or_die!(framed, wire::encode_publish_delayed(req_id, &p), fatal_error)
                     }
-                    Command::PublishDelayedConfirmed { topic, group, content_type, headers, payload, published, not_before, reply } => {
+                    Command::PublishDelayedConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = PublishDelayed {
                             topic,
                             group,
-                            partition: 0,
+                            partition,
                             require_confirm: true,
                             not_before,
                             content_type,
                             headers,
                             payload,
                             published,
+                            partition_key: None,
+                            partitioning_version,
                         };
-                        send_or_die!(framed, Op::PublishDelayed, req_id, &p, fatal_error)
+                        feed_encoded_publish_or_die!(framed, wire::encode_publish_delayed(req_id, &p), fatal_error)
                     }
                     Command::Subscribe { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -1801,6 +3150,11 @@ where
                         waiters.insert(req_id, Waiter::DeclareQueue(reply));
                         send_or_die!(framed, Op::DeclareQueue, req_id, &req, fatal_error)
                     }
+                    Command::Topology { reply } => {
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
+                        waiters.insert(req_id, Waiter::Topology(reply));
+                        send_or_die!(framed, Op::Topology, req_id, &TopologyRequest::default(), fatal_error)
+                    }
                     Command::Ack { sub_id, delivery_tag, request_id } => {
                         if let Some(sub) = subs.get(&sub_id) {
                             let ack = Ack {
@@ -1809,7 +3163,7 @@ where
                                 partition: sub.partition,
                                 tags: vec![delivery_tag],
                             };
-                            send_or_die!(framed, Op::Ack, request_id, &ack, fatal_error)
+                            send_encoded_or_die!(framed, wire::encode_ack(request_id, &ack), fatal_error)
                         }
                     }
                     Command::Nack { sub_id, delivery_tag, requeue, not_before, request_id } => {
@@ -1822,7 +3176,7 @@ where
                                 requeue,
                                 not_before,
                             };
-                           send_or_die!(framed, Op::Nack, request_id, &nack, fatal_error)
+                            send_encoded_or_die!(framed, wire::encode_nack(request_id, &nack), fatal_error)
                         }
                     }
                 },
@@ -1839,10 +3193,12 @@ where
 
                     match frame.opcode {
                         x if x == Op::PublishOk as u16 => {
-                            let ok: PublishOk = match decode_protocol(&frame) {
+                            let ok: PublishOk = match wire::decode_publish_ok(&frame) {
                                 Ok(ok) => ok,
                                 Err(err) => {
-                                    fatal_error = Some(err);
+                                    fatal_error = Some(FibrilError::DeserializationFailure {
+                                        msg: err.to_string(),
+                                    });
                                     break;
                                 }
                             };
@@ -1868,10 +3224,12 @@ where
                             }
                         }
                         x if x == Op::Deliver as u16 => {
-                            let d: Deliver = match decode_protocol(&frame) {
+                            let d: Deliver = match wire::decode_deliver(&frame) {
                                 Ok(deliver) => deliver,
                                 Err(err) => {
-                                    fatal_error = Some(err);
+                                    fatal_error = Some(FibrilError::DeserializationFailure {
+                                        msg: err.to_string(),
+                                    });
                                     break;
                                 }
                             };
@@ -1965,6 +3323,26 @@ where
                                 }
                             }
                         }
+                        x if x == Op::AssignmentChanged as u16 => {
+                            let changed: AssignmentChanged = match decode_protocol(&frame) {
+                                Ok(changed) => changed,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+                            // Best-effort fan-out: no subscribers (or a lagging
+                            // one) just means the app isn't watching assignments.
+                            let _ = assignment_tx.send(AssignmentEvent {
+                                topic: changed.topic,
+                                group: changed.group,
+                                consumer_group: changed.consumer_group,
+                                generation: changed.generation,
+                                assigned: changed.assigned,
+                                added: changed.added,
+                                revoked: changed.revoked,
+                            });
+                        }
                         x if x == Op::SubscribeOk as u16 => {
                             let ok: SubscribeOk = match decode_protocol(&frame) {
                                 Ok(ok) => ok,
@@ -1973,6 +3351,13 @@ where
                                     break;
                                 }
                             };
+
+                            // Cache the server-minted cohort member id (write-once)
+                            // so subsequent exclusive subscribes — including to
+                            // other brokers — carry the same identity.
+                            if let Some(member_id) = ok.member_id {
+                                let _ = cohort_member_id.set(member_id);
+                            }
 
                             if let Some(waiter) = waiters.remove(&frame.request_id) {
                                 match waiter {
@@ -2079,6 +3464,51 @@ where
                                 }
                             }
                         }
+                        x if x == Op::TopologyOk as u16 => {
+                            let ok: TopologyOk = match decode_protocol(&frame) {
+                                Ok(ok) => ok,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+                            match waiters.remove(&frame.request_id) {
+                                Some(Waiter::Topology(tx)) => {
+                                    let _ = tx.send(Ok(ok));
+                                }
+                                Some(_other) => {
+                                    tracing::error!("Internal error: protocol violation: TopologyOk for non-topology request_id")
+                                }
+                                None => {
+                                    tracing::error!("Internal error: unexpected TopologyOk")
+                                }
+                            }
+                        }
+                        x if x == Op::Redirect as u16 => {
+                            let redirect: Redirect = match decode_protocol(&frame) {
+                                Ok(redirect) => redirect,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+                            // Surface the redirect on the waiting op so the
+                            // routing layer can update the cache and retry on
+                            // the new owner. Unconfirmed publishes have no
+                            // waiter — best-effort, the cache is corrected by a
+                            // confirmed op or fetch_topology.
+                            match waiters.remove(&frame.request_id) {
+                                Some(waiter) => {
+                                    fail_waiter(waiter, FibrilError::Redirect(Box::new(redirect)));
+                                }
+                                None => {
+                                    tracing::debug!(
+                                        "redirect for uncorrelated request {}; cache unchanged (best-effort path)",
+                                        frame.request_id
+                                    );
+                                }
+                            }
+                        }
                         x if x == Op::Ping as u16 => {
                             let res = send_protocol_frame(&mut framed, Op::Pong, frame.request_id, &()).await;
 
@@ -2124,6 +3554,13 @@ where
                                         }
                                     }
                                     Waiter::SubscribeAuto(tx) => {
+                                        let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
+
+                                        if res.is_err() {
+                                            tracing::warn!("Broken pipe");
+                                        }
+                                    }
+                                    Waiter::Topology(tx) => {
                                         let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
 
                                         if res.is_err() {
@@ -2201,6 +3638,9 @@ fn fail_waiter(waiter: Waiter, err: FibrilError) {
         Waiter::SubscribeAuto(tx) => {
             let _ = tx.send(Err(err));
         }
+        Waiter::Topology(tx) => {
+            let _ = tx.send(Err(err));
+        }
     }
 }
 
@@ -2213,6 +3653,8 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        partition: Partition,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2222,6 +3664,8 @@ impl EngineHandle {
             .send(Command::PublishUnconfirmed {
                 topic,
                 group,
+                partition,
+                partitioning_version,
                 content_type,
                 headers,
                 payload,
@@ -2236,6 +3680,8 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        partition: Partition,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2246,6 +3692,8 @@ impl EngineHandle {
             .send(Command::PublishConfirmed {
                 topic,
                 group,
+                partition,
+                partitioning_version,
                 content_type,
                 headers,
                 payload,
@@ -2261,6 +3709,8 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        partition: Partition,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2271,6 +3721,8 @@ impl EngineHandle {
             .send(Command::PublishDelayedUnconfirmed {
                 topic,
                 group,
+                partition,
+                partitioning_version,
                 content_type,
                 headers,
                 payload,
@@ -2286,6 +3738,8 @@ impl EngineHandle {
         &self,
         topic: String,
         group: Option<String>,
+        partition: Partition,
+        partitioning_version: u64,
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
@@ -2297,6 +3751,8 @@ impl EngineHandle {
             .send(Command::PublishDelayedConfirmed {
                 topic,
                 group,
+                partition,
+                partitioning_version,
                 content_type,
                 headers,
                 payload,
@@ -2313,6 +3769,15 @@ impl EngineHandle {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Command::DeclareQueue { req, reply: tx })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_e| FibrilError::BrokenPipe)?
+    }
+
+    async fn fetch_topology(&self) -> FibrilResult<TopologyOk> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::Topology { reply: tx })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
         rx.await.map_err(|_e| FibrilError::BrokenPipe)?
@@ -2407,6 +3872,32 @@ pub struct ClientOptions {
     pub auto_reconnect: AutoReconnect,
     /// How resumed connections reconcile subscriptions after reconnect.
     pub reconcile_policy: ReconcilePolicy,
+    /// Max times a single operation will follow `Op::Redirect` before failing.
+    pub max_redirects: u32,
+    /// Minimum interval between client topology refreshes (anti-storm).
+    pub topology_refresh_cooldown_ms: u64,
+    /// Warm the topology cache once at connect, bounded by this timeout (ms), so
+    /// the very first publish spreads across partitions and the first
+    /// subscription fans in over all of them. Without it a cold cache funnels
+    /// every publish to partition 0 and leaves other partitions unconsumed.
+    /// `None` disables warming (cache then warms lazily via redirects). Warming
+    /// is best-effort: on timeout or error the client proceeds with a cold
+    /// cache (single-partition behavior).
+    pub topology_warm_timeout_ms: Option<u64>,
+    /// How often a live subscription re-checks the topology to pick up partitions
+    /// added by a live grow (and shed ones removed by a shrink). A consumer-only
+    /// client has no other reason to refresh, so the subscription polls on this
+    /// interval. `None` disables auto-resubscribe (the fan-in is fixed at
+    /// subscribe time). Higher values reduce background traffic at the cost of
+    /// slower pickup of new partitions.
+    pub partition_resubscribe_interval_ms: Option<u64>,
+    /// How long a confirmed publish keeps retrying across a transient owner
+    /// failover (ms) before giving up. On a transport failure to the owner the
+    /// client refreshes topology from another node and retries with backoff until
+    /// this deadline, so a publish issued during a failover blocks for the
+    /// reassignment window and then succeeds against the new owner instead of
+    /// erroring. `0` disables the retry (fail fast on the first transport error).
+    pub publish_timeout_ms: u64,
 }
 
 impl ClientOptions {
@@ -2422,6 +3913,55 @@ impl ClientOptions {
             resume_identity: None,
             auto_reconnect: AutoReconnect::default(),
             reconcile_policy: ReconcilePolicy::Conservative,
+            max_redirects: 3,
+            topology_refresh_cooldown_ms: 1_000,
+            topology_warm_timeout_ms: Some(5_000),
+            partition_resubscribe_interval_ms: Some(5_000),
+            publish_timeout_ms: 30_000,
+        }
+    }
+
+    /// Return a copy with a custom confirmed-publish failover retry budget (ms).
+    /// `0` disables retry (fail fast on the first transient transport error).
+    pub fn publish_timeout_ms(self, timeout_ms: u64) -> Self {
+        Self {
+            publish_timeout_ms: timeout_ms,
+            ..self
+        }
+    }
+
+    /// Return a copy with a custom connect-time topology warm timeout (ms).
+    pub fn topology_warm_timeout_ms(self, timeout_ms: u64) -> Self {
+        Self {
+            topology_warm_timeout_ms: Some(timeout_ms),
+            ..self
+        }
+    }
+
+    /// Return a copy with connect-time topology warming disabled. The cache then
+    /// warms lazily via redirects; a cold cache routes/consumes partition 0 only.
+    pub fn disable_topology_warm(self) -> Self {
+        Self {
+            topology_warm_timeout_ms: None,
+            ..self
+        }
+    }
+
+    /// Return a copy with a custom auto-resubscribe interval (ms): how often a
+    /// live subscription re-checks topology to pick up partitions added by a grow.
+    pub fn partition_resubscribe_interval_ms(self, interval_ms: u64) -> Self {
+        Self {
+            partition_resubscribe_interval_ms: Some(interval_ms),
+            ..self
+        }
+    }
+
+    /// Return a copy with auto-resubscribe disabled: the subscription fan-in is
+    /// fixed at subscribe time and will not pick up partitions added later.
+    pub fn disable_partition_resubscribe(self) -> Self {
+        Self {
+            partition_resubscribe_interval_ms: None,
+            ..self
         }
     }
 
@@ -2492,6 +4032,71 @@ impl Default for ClientOptions {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
+    use std::time::Duration;
+
+    #[test]
+    fn topology_cache_distinguishes_declared_from_gone() {
+        // A declared topic with no resolved owner (mid-failover) stays "known"
+        // (counts present, by_queue absent) -> caller keeps retrying. An absent
+        // topic is "gone" -> caller fails fast. An empty cache is not populated.
+        let empty = TopologyCache {
+            generation: 0,
+            by_queue: HashMap::new(),
+            counts: HashMap::new(),
+            last_refresh_ms: 0,
+        };
+        assert!(!empty.is_populated());
+        assert!(!empty.knows_topic("orders", None));
+
+        let mut counts = HashMap::new();
+        counts.insert(
+            ("orders".to_string(), None),
+            PartitioningEntry {
+                count: 4,
+                version: 1,
+            },
+        );
+        let transitioning = TopologyCache {
+            generation: 1,
+            by_queue: HashMap::new(), // owner unresolved during failover
+            counts,
+            last_refresh_ms: 1,
+        };
+        assert!(transitioning.is_populated());
+        assert!(
+            transitioning.knows_topic("orders", None),
+            "declared topic stays known while its owner is transitioning"
+        );
+        assert!(
+            !transitioning.knows_topic("ghost", None),
+            "an undeclared topic is not known -> fail fast"
+        );
+    }
+
+    #[test]
+    fn publish_timeout_defaults_on_and_is_configurable() {
+        assert_eq!(ClientOptions::new().publish_timeout_ms, 30_000);
+        assert_eq!(ClientOptions::new().publish_timeout_ms(0).publish_timeout_ms, 0);
+        assert_eq!(
+            ClientOptions::new().publish_timeout_ms(5_000).publish_timeout_ms,
+            5_000
+        );
+    }
+
+    #[test]
+    fn fnv1a_is_deterministic_and_distributes() {
+        // Determinism: every client must map a key to the same partition.
+        assert_eq!(fnv1a(b"entity-123"), fnv1a(b"entity-123"));
+        assert_ne!(fnv1a(b"a"), fnv1a(b"b"));
+        // Distribution: distinct keys spread across N partitions (not all one).
+        let partitions: std::collections::HashSet<u64> = (0..32)
+            .map(|i| fnv1a(format!("k{i}").as_bytes()) % 4)
+            .collect();
+        assert!(
+            partitions.len() > 1,
+            "keys should distribute across partitions, got {partitions:?}"
+        );
+    }
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     struct TestPayload {
@@ -2562,15 +4167,32 @@ mod tests {
         opts: ClientOptions,
     ) -> (Client, mpsc::Receiver<Command>) {
         let (engine, rx) = engine_with_command_rx();
+        let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let user_shutdown = Arc::new(AtomicBool::new(false));
+        let (assignment_tx, _) = broadcast::channel(ASSIGNMENT_EVENT_CAPACITY);
+        let cohort_member_id = Arc::new(std::sync::OnceLock::new());
+        let slot = Arc::new(EngineSlot::from_engine(
+            address,
+            opts.clone(),
+            user_shutdown.clone(),
+            Arc::new(RwLock::new(HashMap::new())),
+            engine,
+            assignment_tx.clone(),
+            cohort_member_id.clone(),
+        ));
+        let mut pool = HashMap::new();
+        pool.insert(address, slot);
         (
             Client {
                 shared: Arc::new(ClientShared {
-                    address: "127.0.0.1:0".parse().unwrap(),
+                    bootstrap: vec![address],
                     opts,
-                    engine: Arc::new(EngineSlot::new(engine)),
-                    reconnect_lock: Mutex::new(()),
-                    user_shutdown: AtomicBool::new(false),
-                    subscriptions: Arc::new(RwLock::new(HashMap::new())),
+                    user_shutdown,
+                    pool: parking_lot::RwLock::new(pool),
+                    topology: ArcSwap::from_pointee(TopologyCache::default()),
+                    round_robin: std::sync::atomic::AtomicUsize::new(0),
+                    assignment_tx,
+                    cohort_member_id,
                 }),
             },
             rx,
@@ -2601,6 +4223,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prune_pool_drops_dead_owner_after_failover() {
+        let (client, _rx) = client_with_command_rx();
+        let bootstrap_addr = client.shared.bootstrap[0];
+
+        let make_slot = |addr: SocketAddr| -> Arc<EngineSlot> {
+            let (engine, _rx) = engine_with_command_rx();
+            Arc::new(EngineSlot::from_engine(
+                addr,
+                ClientOptions::new(),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(RwLock::new(HashMap::new())),
+                engine,
+                broadcast::channel(ASSIGNMENT_EVENT_CAPACITY).0,
+                Arc::new(std::sync::OnceLock::new()),
+            ))
+        };
+
+        let owner_addr: SocketAddr = "127.0.0.1:7001".parse().unwrap();
+        let dead_addr: SocketAddr = "127.0.0.1:7002".parse().unwrap();
+        {
+            let mut pool = client.shared.pool.write();
+            pool.insert(owner_addr, make_slot(owner_addr));
+            pool.insert(dead_addr, make_slot(dead_addr));
+        }
+
+        // New topology after failover: owner_addr owns a partition, dead_addr
+        // owns nothing.
+        let mut topo = TopologyCache::default();
+        topo.by_queue.insert(
+            ("jobs".to_string(), Partition::new(0), None),
+            OwnerEntry {
+                endpoint: owner_addr,
+                partitioning_version: 0,
+            },
+        );
+        client.shared.topology.store(Arc::new(topo));
+
+        client.shared.prune_pool_to_topology();
+
+        let pool = client.shared.pool.read();
+        assert!(pool.contains_key(&bootstrap_addr), "bootstrap kept");
+        assert!(pool.contains_key(&owner_addr), "current owner kept");
+        assert!(
+            !pool.contains_key(&dead_addr),
+            "dead owner pruned from the pool"
+        );
+    }
+
+    #[tokio::test]
     async fn publish_uses_unconfirmed_command() {
         let (client, mut rx) = client_with_command_rx();
         let publisher = client.publisher("jobs").unwrap();
@@ -2622,7 +4293,8 @@ mod tests {
         let publisher = client.publisher("jobs").unwrap();
         let (new_engine, mut new_rx) = engine_with_command_rx();
 
-        client.shared.engine.replace(new_engine);
+        let slot = client.shared.pool.read().values().next().unwrap().clone();
+        slot.replace(new_engine);
 
         publisher.publish("hello").await.unwrap();
 
@@ -2683,8 +4355,11 @@ mod tests {
                             sub_id: 77,
                             topic: req.topic,
                             group: req.group,
-                            partition: 0,
+                            partition: Partition::new(0),
                             prefetch: req.prefetch,
+                            consumer_group: None,
+                            consumer_target: None,
+                            member_id: None,
                         },
                     )
                     .unwrap(),
@@ -2724,9 +4399,12 @@ mod tests {
                 sub_id: 77,
                 topic: "jobs".into(),
                 group: None,
-                partition: 0,
+                partition: Partition::new(0),
                 auto_ack: false,
                 prefetch: 1,
+                consumer_group: None,
+                consumer_target: None,
+                member_id: None,
             };
             let restored = ReconcileSubscription {
                 sub_id: 88,
@@ -2752,14 +4430,13 @@ mod tests {
                 .unwrap();
             second
                 .send(
-                    try_encode(
-                        Op::Deliver,
+                    wire::encode_deliver(
                         88,
                         &Deliver {
                             sub_id: 88,
                             topic: "jobs".into(),
                             group: None,
-                            partition: 0,
+                            partition: Partition::new(0),
                             offset: 9,
                             delivery_tag: DeliveryTag { epoch: 123 },
                             published: 1,
@@ -2777,6 +4454,9 @@ mod tests {
 
         let mut client = ClientOptions::new()
             .reconnect_reconcile_policy(ReconcilePolicy::RestoreClientSubscriptions)
+            // This test's fake server scripts an exact frame sequence and does
+            // not answer a topology warm; keep connect to just the handshake.
+            .disable_topology_warm()
             .connect(addr)
             .await
             .unwrap();
@@ -2798,9 +4478,12 @@ mod tests {
                     sub_id: 77,
                     topic: "jobs".into(),
                     group: None,
-                    partition: 0,
+                    partition: Partition::new(0),
                     auto_ack: false,
                     prefetch: 1,
+                    consumer_group: None,
+                    consumer_target: None,
+                    member_id: None,
                 }],
             }
         );
@@ -2810,6 +4493,84 @@ mod tests {
 
         client.shutdown().await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn assignment_changed_push_reaches_assignment_events() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (go_tx, go_rx) = oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut conn = Framed::new(conn, ProtoCodec);
+            let hello = conn.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            conn.send(
+                try_encode(
+                    Op::HelloOk,
+                    hello.request_id,
+                    &HelloOk {
+                        protocol_version: PROTOCOL_V1,
+                        owner_id: uuid::Uuid::new_v4(),
+                        client_id: uuid::Uuid::new_v4(),
+                        resume_token: uuid::Uuid::new_v4(),
+                        resume_outcome: ResumeOutcome::New,
+                        server_name: "fake".into(),
+                        compliance: COMPLIANCE_STRING.into(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+            // Send the push only once the test is listening (broadcast delivers
+            // only to receivers that exist at send time).
+            go_rx.await.unwrap();
+            conn.send(
+                try_encode(
+                    Op::AssignmentChanged,
+                    0,
+                    &AssignmentChanged {
+                        topic: "jobs".into(),
+                        group: None,
+                        consumer_group: "g".into(),
+                        generation: 7,
+                        assigned: vec![Partition::new(0), Partition::new(2)],
+                        added: vec![Partition::new(2)],
+                        revoked: vec![Partition::new(1)],
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            // Keep the connection alive until the test finishes.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let client = ClientOptions::new()
+            .disable_topology_warm()
+            .connect(addr)
+            .await
+            .unwrap();
+        let mut events = client.assignment_events();
+        go_tx.send(()).unwrap();
+
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.topic, "jobs");
+        assert_eq!(event.consumer_group, "g");
+        assert_eq!(event.generation, 7);
+        assert_eq!(event.assigned, vec![Partition::new(0), Partition::new(2)]);
+        assert_eq!(event.added, vec![Partition::new(2)]);
+        assert_eq!(event.revoked, vec![Partition::new(1)]);
+
+        client.shutdown().await;
+        server.abort();
     }
 
     #[tokio::test]
@@ -2857,6 +4618,64 @@ mod tests {
         }
 
         assert_eq!(confirmation.confirmed().await.unwrap(), 43);
+    }
+
+    #[tokio::test]
+    async fn reliable_publisher_stamps_ids_and_retries_until_confirmed() {
+        let (client, mut rx) = client_with_command_rx();
+        let reliable = client.publisher("jobs").unwrap().reliable();
+        let pid = reliable.producer_id().to_string();
+        assert_eq!(
+            reliable.clone().producer_id().to_string(),
+            pid,
+            "clones share the producer id"
+        );
+
+        let task = tokio::spawn(async move { reliable.publish("hello").await });
+
+        // First attempt: producer id/seq stamped under the fibril.client.* carve-out;
+        // fail with a retryable (but not transport-transient) error so the outer
+        // ReliablePublisher loop re-publishes (inner publish_confirmed returns
+        // ERR_NOT_OWNER rather than auto-retrying it).
+        match rx.recv().await.unwrap() {
+            Command::PublishConfirmed { headers, reply, .. } => {
+                assert_eq!(headers.get(HEADER_PRODUCER_ID), Some(&pid));
+                assert_eq!(headers.get(HEADER_PRODUCER_SEQ), Some(&"0".to_string()));
+                reply
+                    .send(Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: "owner moved".into(),
+                    }))
+                    .unwrap();
+            }
+            other => panic!("expected confirmed publish, got {other:?}"),
+        }
+        // Re-publish keeps the SAME sequence, then confirms.
+        match rx.recv().await.unwrap() {
+            Command::PublishConfirmed { headers, reply, .. } => {
+                assert_eq!(
+                    headers.get(HEADER_PRODUCER_SEQ),
+                    Some(&"0".to_string()),
+                    "a retry re-sends the same seq"
+                );
+                reply.send(Ok(7)).unwrap();
+            }
+            other => panic!("expected re-publish, got {other:?}"),
+        }
+        assert_eq!(task.await.unwrap().unwrap(), 7);
+    }
+
+    #[test]
+    fn user_headers_cannot_set_reserved_namespaces() {
+        let msg = NewMessage::raw(vec![1])
+            .header("trace-id", "abc")
+            .header("fibril.client.producer_id", "spoofed")
+            .header("fibril.retries", "9")
+            .header("stroma.dlq.source_topic", "evil");
+        assert_eq!(msg.headers().get("trace-id"), Some(&"abc".to_string()));
+        assert!(msg.headers().get("fibril.client.producer_id").is_none());
+        assert!(msg.headers().get("fibril.retries").is_none());
+        assert!(msg.headers().get("stroma.dlq.source_topic").is_none());
     }
 
     #[tokio::test]
@@ -2936,6 +4755,10 @@ mod tests {
     #[tokio::test]
     async fn subscribe_flags_match_ack_mode() {
         let (client, mut rx) = client_with_command_rx();
+        // Hold the mock stream senders open so the per-partition streams stay live;
+        // otherwise the supervisor (correctly) sees the stream end and re-subscribes,
+        // which would interleave an extra Subscribe with the auto-subscribe below.
+        let mut keep_open: Vec<Box<dyn std::any::Any + Send>> = Vec::new();
         let manual_client = client.clone();
         let manual = tokio::spawn(async move {
             manual_client
@@ -2948,14 +4771,15 @@ mod tests {
         match rx.recv().await.unwrap() {
             Command::Subscribe { req, reply } => {
                 assert!(!req.auto_ack);
-                let (_tx, manual_rx) = mpsc::channel(1);
+                let (tx, manual_rx) = mpsc::channel(1);
+                keep_open.push(Box::new(tx));
                 reply
                     .send(Ok(AckableSubChannel { manual: manual_rx }))
                     .unwrap();
             }
             other => panic!("expected manual subscribe, got {other:?}"),
         }
-        manual.await.unwrap().unwrap();
+        let _manual_sub = manual.await.unwrap().unwrap();
 
         let auto_client = client.clone();
         let auto =
@@ -2966,14 +4790,16 @@ mod tests {
         match rx.recv().await.unwrap() {
             Command::SubscribeAutoAcked { req, reply } => {
                 assert!(req.auto_ack);
-                let (_tx, auto_rx) = mpsc::channel(1);
+                let (tx, auto_rx) = mpsc::channel(1);
+                keep_open.push(Box::new(tx));
                 reply
                     .send(Ok(AutoAckedSubChannel { auto: auto_rx }))
                     .unwrap();
             }
             other => panic!("expected auto subscribe, got {other:?}"),
         }
-        auto.await.unwrap().unwrap();
+        let _auto_sub = auto.await.unwrap().unwrap();
+        drop(keep_open);
     }
 
     #[tokio::test]

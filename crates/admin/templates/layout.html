@@ -12,6 +12,34 @@
       document.documentElement.dataset.theme = stored || (prefersLight ? "light" : "dark");
     })();
   </script>
+  <script>
+    // Boosted navigation swaps the page body without a full reload, which means
+    // a page's timers would otherwise keep running after we leave it. Track
+    // timers started by page scripts so navigation can clear them. Layout-owned
+    // timers (below) use the stashed native functions and are left running.
+    (() => {
+      window.__nativeSetInterval = window.setInterval.bind(window);
+      window.__nativeClearInterval = window.clearInterval.bind(window);
+      window.__nativeSetTimeout = window.setTimeout.bind(window);
+      window.__nativeClearTimeout = window.clearTimeout.bind(window);
+      window.__spaIntervals = new Set();
+      window.__spaTimeouts = new Set();
+      window.setInterval = (fn, ms, ...rest) => {
+        const id = window.__nativeSetInterval(fn, ms, ...rest);
+        window.__spaIntervals.add(id);
+        return id;
+      };
+      window.setTimeout = (fn, ms, ...rest) => {
+        const id = window.__nativeSetTimeout(fn, ms, ...rest);
+        window.__spaTimeouts.add(id);
+        return id;
+      };
+    })();
+  </script>
+  <style>
+    #page-root { transition: opacity 0.12s ease; }
+    #page-root.swapping { opacity: 0.35; }
+  </style>
   <link rel="stylesheet" href="/static/css/admin.css">
 </head>
 <body class="admin-body">
@@ -31,6 +59,7 @@
           <a class="nav-link {% if page == "subscriptions" %}active{% endif %}" href="/admin/subscriptions">Subscriptions</a>
           <a class="nav-link {% if page == "queues" %}active{% endif %}" href="/admin/queues">Queues</a>
           <a class="nav-link {% if page == "diagnostics" %}active{% endif %}" href="/admin/diagnostics">Diagnostics</a>
+          <a class="nav-link {% if page == "topology" %}active{% endif %}" href="/admin/topology">Topology</a>
           <a class="nav-link {% if page == "settings" %}active{% endif %}" href="/admin/settings">Settings</a>
         </div>
         <div class="nav-actions">
@@ -48,7 +77,10 @@
     </header>
     <div class="content-container">
       <div class="content-area">
-        {% block content %}{% endblock %}
+        <div id="quarantine-banner" class="quarantine-banner" hidden></div>
+        <main id="page-root">
+          {% block content %}{% endblock %}
+        </main>
       </div>
     </div>
     <footer class="footer">
@@ -89,6 +121,196 @@
         applyTheme(next);
         window.setTimeout(() => root.classList.remove("theme-transition"), 260);
       });
+    })();
+  </script>
+  <script>
+    // Quarantine banner: surfaces partitions parked by recovery (a dangling
+    // event->message reference). Shown on every page so the issue cannot be
+    // missed; offers an operator repair (truncate-to-valid).
+    (() => {
+      const el = document.getElementById("quarantine-banner");
+      if (!el) return;
+
+      function esc(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+        })[c]);
+      }
+
+      async function repair(topic, partition, group, btn) {
+        btn.disabled = true;
+        btn.textContent = "Repairing…";
+        const params = new URLSearchParams({ topic, partition: String(partition) });
+        if (group) params.set("group", group);
+        try {
+          const r = await fetch("/admin/api/quarantine/repair?" + params.toString(), {
+            method: "POST",
+          });
+          if (!r.ok) throw new Error(await r.text());
+          load();
+        } catch (e) {
+          btn.disabled = false;
+          btn.textContent = "Repair failed - retry";
+          console.error("quarantine repair failed", e);
+        }
+      }
+
+      async function load() {
+        let data;
+        try {
+          const r = await fetch("/admin/api/quarantine");
+          if (!r.ok) return;
+          data = await r.json();
+        } catch {
+          return;
+        }
+        const items = (data && data.quarantined) || [];
+        if (!items.length) {
+          el.hidden = true;
+          el.innerHTML = "";
+          return;
+        }
+        const rows = items.map((q) => {
+          const grp = q.group ? `/${esc(q.group)}` : "";
+          return `<li class="quarantine-item">
+            <div>
+              <strong>${esc(q.topic)}/${esc(q.partition)}${grp}</strong>
+              <span class="quarantine-reason">${esc(q.reason)}</span>
+            </div>
+            <button class="quarantine-repair" data-topic="${esc(q.topic)}"
+              data-partition="${esc(q.partition)}" data-group="${esc(q.group || "")}">
+              Repair (truncate-to-valid)
+            </button>
+          </li>`;
+        }).join("");
+        const policy = data.policy ? ` (policy: ${esc(data.policy)})` : "";
+        el.innerHTML = `
+          <div class="quarantine-title">⚠ ${items.length} queue(s) quarantined - must be resolved before they continue${policy}</div>
+          <ul class="quarantine-list">${rows}</ul>
+          <div class="quarantine-note">Repair drops the unrecoverable event-log suffix.
+            On a <strong>follower</strong> the owner re-replicates the dropped suffix
+            automatically (no data loss); on an <strong>owner / single node</strong> that
+            data is gone.</div>`;
+        el.hidden = false;
+        el.querySelectorAll(".quarantine-repair").forEach((btn) => {
+          btn.addEventListener("click", () =>
+            repair(btn.dataset.topic, btn.dataset.partition, btn.dataset.group || null, btn));
+        });
+      }
+
+      load();
+      // Layout-owned poller: native timer so boosted navigation does not clear it.
+      window.__nativeSetInterval(load, 15000);
+    })();
+  </script>
+  <script>
+    // Boosted navigation: intercept internal link clicks, fetch the target,
+    // and swap only the page body so the nav shell, theme, and quarantine
+    // banner persist (no full reload, no flash). Falls back to a normal
+    // navigation whenever anything looks off.
+    (() => {
+      if (!window.history || !window.history.pushState) return;
+
+      const loadedSrcs = new Set(
+        [...document.querySelectorAll("script[src]")].map((s) => s.src),
+      );
+
+      function clearPageTimers() {
+        for (const id of window.__spaIntervals) window.__nativeClearInterval(id);
+        window.__spaIntervals.clear();
+        for (const id of window.__spaTimeouts) window.__nativeClearTimeout(id);
+        window.__spaTimeouts.clear();
+      }
+
+      function setActiveNav(pathname) {
+        document.querySelectorAll(".nav-link").forEach((link) => {
+          link.classList.toggle("active", link.getAttribute("href") === pathname);
+        });
+      }
+
+      // innerHTML never runs <script> tags, so recreate them. External scripts
+      // are loaded once and awaited so their globals are ready; inline scripts
+      // run inside an IIFE so a page can be revisited without redeclaring its
+      // top-level bindings.
+      async function runScripts(container) {
+        for (const old of [...container.querySelectorAll("script")]) {
+          const fresh = document.createElement("script");
+          for (const attr of old.attributes) fresh.setAttribute(attr.name, attr.value);
+          if (old.src) {
+            if (loadedSrcs.has(fresh.src)) {
+              old.remove();
+              continue;
+            }
+            await new Promise((resolve) => {
+              fresh.onload = resolve;
+              fresh.onerror = resolve;
+              old.replaceWith(fresh);
+            });
+            loadedSrcs.add(fresh.src);
+          } else {
+            fresh.textContent = `(function(){\n${old.textContent}\n})();`;
+            old.replaceWith(fresh);
+          }
+        }
+      }
+
+      async function navigate(url, push) {
+        const current = document.getElementById("page-root");
+        if (!current) {
+          window.location.href = url;
+          return;
+        }
+        current.classList.add("swapping");
+        let res;
+        try {
+          res = await fetch(url, { headers: { "X-Requested-With": "fetch" } });
+        } catch {
+          window.location.href = url;
+          return;
+        }
+        const type = res.headers.get("content-type") || "";
+        if (!res.ok || res.redirected || !type.includes("text/html")) {
+          // Errors and auth redirects (for example to /login) need a full load.
+          window.location.href = res.redirected ? res.url : url;
+          return;
+        }
+        const doc = new DOMParser().parseFromString(await res.text(), "text/html");
+        const next = doc.getElementById("page-root");
+        if (!next) {
+          window.location.href = url;
+          return;
+        }
+        clearPageTimers();
+        const title = doc.querySelector("title");
+        if (title) document.title = title.textContent;
+        current.innerHTML = next.innerHTML;
+        await runScripts(current);
+        current.classList.remove("swapping");
+        setActiveNav(new URL(url, window.location.origin).pathname);
+        if (push) window.history.pushState({ spa: true }, "", url);
+        window.scrollTo(0, 0);
+      }
+
+      function boostable(anchor) {
+        if (!anchor) return false;
+        if (anchor.target && anchor.target !== "_self") return false;
+        if (anchor.hasAttribute("download") || anchor.dataset.noBoost !== undefined) return false;
+        const url = new URL(anchor.href, window.location.href);
+        if (url.origin !== window.location.origin) return false;
+        if (url.pathname === "/logout") return false;
+        return true;
+      }
+
+      document.addEventListener("click", (event) => {
+        if (event.defaultPrevented || event.button !== 0) return;
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        const anchor = event.target.closest("a[href]");
+        if (!boostable(anchor)) return;
+        event.preventDefault();
+        navigate(anchor.href, true);
+      });
+
+      window.addEventListener("popstate", () => navigate(window.location.href, false));
     })();
   </script>
 </body>

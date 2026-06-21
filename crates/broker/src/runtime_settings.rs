@@ -17,6 +17,39 @@ pub struct RuntimeSettings {
     pub idle_queue_cleanup: IdleQueueCleanupRuntimeSettings,
     #[serde(default)]
     pub connection: ConnectionRuntimeSettings,
+    #[serde(default)]
+    pub replication: ReplicationRuntimeSettings,
+    #[serde(default)]
+    pub partitioning: PartitioningRuntimeSettings,
+    #[serde(default)]
+    pub consumer_groups: ConsumerGroupRuntimeSettings,
+}
+
+/// Partitioning-related runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PartitioningRuntimeSettings {
+    /// Partition count for a queue declared without an explicit count
+    /// (Kafka `num.partitions` equivalent).
+    pub default_partition_count: u32,
+}
+
+impl Default for PartitioningRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            default_partition_count: 1,
+        }
+    }
+}
+
+/// Exclusive consumer-group runtime settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ConsumerGroupRuntimeSettings {
+    /// Soft target partitions-per-consumer for an exclusive cohort. Exceeding it
+    /// flags the cohort under-provisioned (an alert/autoscale signal); coverage
+    /// is never reduced. `None` disables the signal.
+    pub default_target_per_consumer: Option<usize>,
 }
 
 impl RuntimeSettings {
@@ -29,6 +62,38 @@ impl RuntimeSettings {
         if self.idle_queue_cleanup.sweep_interval_ms == 0 {
             return Err(RuntimeSettingsError::Invalid(
                 "idle_queue_cleanup.sweep_interval_ms must be at least 1".into(),
+            ));
+        }
+        if self.replication.caught_up_poll_ms == 0
+            || self.replication.retry_poll_ms == 0
+            || self.replication.checkpoint_retry_poll_ms == 0
+        {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication poll intervals must be at least 1ms".into(),
+            ));
+        }
+        if self.replication.max_messages_per_read == 0
+            || self.replication.max_events_per_read == 0
+            || self.replication.max_bytes_per_read == 0
+            || self.replication.max_iterations_per_tick == 0
+        {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication worker limits must be at least 1".into(),
+            ));
+        }
+        if self.replication.min_in_sync_replicas == 0 {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication.min_in_sync_replicas must be at least 1".into(),
+            ));
+        }
+        if self.replication.isr_timeout_ms == 0 {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication.isr_timeout_ms must be at least 1".into(),
+            ));
+        }
+        if self.partitioning.default_partition_count == 0 {
+            return Err(RuntimeSettingsError::Invalid(
+                "partitioning.default_partition_count must be at least 1".into(),
             ));
         }
         Ok(())
@@ -47,6 +112,9 @@ impl Default for RuntimeSettings {
             delivery: DeliveryRuntimeSettings::default(),
             idle_queue_cleanup: IdleQueueCleanupRuntimeSettings::default(),
             connection: ConnectionRuntimeSettings::default(),
+            replication: ReplicationRuntimeSettings::default(),
+            partitioning: PartitioningRuntimeSettings::default(),
+            consumer_groups: ConsumerGroupRuntimeSettings::default(),
         }
     }
 }
@@ -58,6 +126,72 @@ pub struct DeliveryRuntimeSettings {
     pub expiry_poll_min_ms: u64,
     pub expiry_batch_max: usize,
     pub delivery_poll_max_ms: u64,
+}
+
+/// Replication-related runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ReplicationRuntimeSettings {
+    /// How long a publish confirm may wait for the assignment's replication
+    /// durability policy (replica acks) before failing with a clear error.
+    pub confirm_timeout_ms: u64,
+    /// Follower pull interval while caught up with the owner. Bounds the
+    /// extra confirm latency of replica-durable publishes.
+    pub caught_up_poll_ms: u64,
+    /// Follower retry interval after a transient error or partial pull.
+    pub retry_poll_ms: u64,
+    /// Follower retry interval while a checkpoint install is required.
+    pub checkpoint_retry_poll_ms: u64,
+    /// Maximum message records read from the owner in one follower pull.
+    pub max_messages_per_read: usize,
+    /// Maximum event records read from the owner in one follower pull.
+    pub max_events_per_read: usize,
+    /// Approximate byte budget for records read from the owner in one follower
+    /// pull. One oversized message is still allowed so replication can
+    /// progress.
+    pub max_bytes_per_read: usize,
+    /// Maximum pull/apply iterations a follower performs before yielding.
+    pub max_iterations_per_tick: usize,
+    /// Minimum in-sync replicas required to accept a replica-durable publish.
+    /// 1 disables the floor.
+    pub min_in_sync_replicas: usize,
+    /// How recently a follower must have reported to count as in-sync.
+    pub isr_timeout_ms: u64,
+    /// Use credit-based streaming replication on the follower (default true after
+    /// fold + failover validation; pull is the automatic fallback).
+    pub stream_enabled: bool,
+    /// Linger (microseconds) the streaming follower spends gathering more
+    /// contiguous frames before applying them as one fsynced batch. Higher trades
+    /// apply latency for better fsync amortization (throughput); 0 = drain-only.
+    pub stream_apply_linger_us: u64,
+    /// Byte cap on a single coalesced streaming-apply (caps how large one folded
+    /// apply can grow: peak memory vs fsync amortization). Pairs with
+    /// `stream_apply_linger_us`.
+    pub stream_apply_max_merge_bytes: u64,
+    /// In-flight batch buffer depth (credit window) for the streaming follower.
+    /// Read at stream establish (setup-time): a change applies on the next stream.
+    pub stream_buffer_batches: usize,
+}
+
+impl Default for ReplicationRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            confirm_timeout_ms: 5_000,
+            caught_up_poll_ms: 1_000,
+            retry_poll_ms: 100,
+            checkpoint_retry_poll_ms: 5_000,
+            max_messages_per_read: 2048,
+            max_events_per_read: 2048,
+            max_bytes_per_read: 8 * 1024 * 1024,
+            max_iterations_per_tick: 8,
+            min_in_sync_replicas: 1,
+            isr_timeout_ms: 10_000,
+            stream_enabled: true,
+            stream_apply_linger_us: 2_000,
+            stream_apply_max_merge_bytes: 16 * 1024 * 1024,
+            stream_buffer_batches: 8,
+        }
+    }
 }
 
 impl Default for DeliveryRuntimeSettings {
@@ -264,6 +398,32 @@ impl RuntimeSettingsManager {
             )),
         }
     }
+
+    /// Apply a cluster-authoritative settings document to the local cache.
+    ///
+    /// Ganglion mode uses the cluster document as the authority, while the
+    /// Stroma global store remains this node's durable local cache. The local
+    /// store version may differ from the cluster document version, so this
+    /// helper retries normal optimistic local updates instead of requiring the
+    /// caller to know the current local version.
+    pub async fn apply_cluster_settings(
+        &self,
+        settings: RuntimeSettings,
+    ) -> Result<RuntimeSettingsSnapshot, RuntimeSettingsError> {
+        settings.validate()?;
+
+        for _ in 0..8 {
+            let current = self.current();
+            match self.update(current.version, settings.clone()).await? {
+                RuntimeSettingsUpdateOutcome::Stored(snapshot) => return Ok(snapshot),
+                RuntimeSettingsUpdateOutcome::Conflict(_) => continue,
+            }
+        }
+
+        Err(RuntimeSettingsError::StoreConflict(
+            "cluster runtime settings raced local cache updates repeatedly".into(),
+        ))
+    }
 }
 
 impl BrokerConfig {
@@ -275,6 +435,24 @@ impl BrokerConfig {
             delivery_poll_max_ms: settings.delivery.delivery_poll_max_ms,
             queue_idle_evict_after_ms: settings.idle_queue_cleanup.queue_idle_evict_after_ms(),
             queue_idle_sweep_interval_ms: settings.idle_queue_cleanup.sweep_interval_ms,
+            replication_confirm_timeout_ms: settings.replication.confirm_timeout_ms,
+            replication_caught_up_poll_ms: settings.replication.caught_up_poll_ms,
+            replication_retry_poll_ms: settings.replication.retry_poll_ms,
+            replication_checkpoint_retry_poll_ms: settings.replication.checkpoint_retry_poll_ms,
+            replication_max_messages_per_read: settings.replication.max_messages_per_read,
+            replication_max_events_per_read: settings.replication.max_events_per_read,
+            replication_max_bytes_per_read: settings.replication.max_bytes_per_read,
+            replication_max_iterations_per_tick: settings.replication.max_iterations_per_tick,
+            replication_min_in_sync_replicas: settings.replication.min_in_sync_replicas,
+            replication_isr_timeout_ms: settings.replication.isr_timeout_ms,
+            replication_stream_enabled: settings.replication.stream_enabled,
+            replication_stream_apply_linger_us: settings.replication.stream_apply_linger_us,
+            replication_stream_apply_max_merge_bytes: settings
+                .replication
+                .stream_apply_max_merge_bytes,
+            replication_stream_buffer_batches: settings.replication.stream_buffer_batches,
+            default_partition_count: settings.partitioning.default_partition_count,
+            default_consumer_target: settings.consumer_groups.default_target_per_consumer,
         }
     }
 }
@@ -461,6 +639,9 @@ mod tests {
             connection: ConnectionRuntimeSettings {
                 reconnect_grace_ms: Some(8),
             },
+            replication: ReplicationRuntimeSettings::default(),
+            partitioning: PartitioningRuntimeSettings::default(),
+            consumer_groups: ConsumerGroupRuntimeSettings::default(),
         };
 
         let decoded = decode_snapshot(GlobalValue {
@@ -496,6 +677,9 @@ mod tests {
             connection: ConnectionRuntimeSettings {
                 reconnect_grace_ms: Some(17),
             },
+            replication: ReplicationRuntimeSettings::default(),
+            partitioning: PartitioningRuntimeSettings::default(),
+            consumer_groups: ConsumerGroupRuntimeSettings::default(),
         };
 
         let config = BrokerConfig::from_runtime_settings(&settings);
@@ -506,6 +690,62 @@ mod tests {
         assert_eq!(config.delivery_poll_max_ms, 13);
         assert_eq!(config.queue_idle_evict_after_ms, Some(14));
         assert_eq!(config.queue_idle_sweep_interval_ms, 15);
+        assert_eq!(
+            config.replication_max_bytes_per_read,
+            ReplicationRuntimeSettings::default().max_bytes_per_read
+        );
+    }
+
+    #[test]
+    fn runtime_settings_validate_rejects_cluster_runtime_zeroes() {
+        let mut settings = RuntimeSettings::default();
+
+        settings.replication.caught_up_poll_ms = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("replication poll intervals")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.replication.max_messages_per_read = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("replication worker limits")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.replication.max_bytes_per_read = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("replication worker limits")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.replication.min_in_sync_replicas = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("min_in_sync_replicas")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.replication.isr_timeout_ms = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("isr_timeout_ms")
+        ));
+
+        settings = RuntimeSettings::default();
+        settings.partitioning.default_partition_count = 0;
+        assert!(matches!(
+            settings.validate(),
+            Err(RuntimeSettingsError::Invalid(message))
+                if message.contains("default_partition_count")
+        ));
     }
 
     #[tokio::test]
@@ -754,6 +994,41 @@ mod tests {
                 settings: first_update,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn apply_cluster_settings_retries_against_local_cache_version() {
+        let dir = test_dir!("runtime_settings_apply_cluster");
+        let stroma = Stroma::open(
+            &dir.root,
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+            SnapshotConfig::default(),
+        )
+        .await
+        .unwrap();
+        let store = stroma.global_store().await.unwrap();
+        let manager = RuntimeSettingsManager::load_from_store(
+            store,
+            RuntimeSettings::default(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+
+        let mut local = manager.current().settings;
+        local.delivery.inflight_ttl_ms = 111;
+        manager.update(1, local).await.unwrap();
+
+        let mut cluster = RuntimeSettings::default();
+        cluster.delivery.inflight_ttl_ms = 222;
+        let snapshot = manager
+            .apply_cluster_settings(cluster.clone())
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.version, 3);
+        assert_eq!(snapshot.settings, cluster);
+        assert_eq!(manager.current().settings.delivery.inflight_ttl_ms, 222);
     }
 
     #[tokio::test]

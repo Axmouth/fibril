@@ -6,9 +6,11 @@ use axum::{
     response::Response,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use fibril_broker::coordination::ReplicationDurabilityPolicy;
 use fibril_broker::queue_engine::{
     DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
-    InspectMode, MessageHeaders, MessageInspectionStatus, QueueInspectionState, StromaError,
+    InspectMode, MessageHeaders, MessageInspectionStatus, QueueInspectionState,
+    RecoveryMismatchPolicy, StromaError,
 };
 use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLoadIssue, RuntimeSettingsLocks,
@@ -19,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::auth::check_admin_auth;
-use crate::server::AdminServer;
+use crate::server::{AdminServer, RuntimeSettingsClusterUpdateOutcome};
 
 #[derive(Serialize)]
 pub struct OverviewResponse {
@@ -79,6 +81,25 @@ pub struct ReplayDeadLettersRequest {
     pub dlq_topic: String,
     pub dlq_group: Option<String>,
     pub offsets: Vec<u64>,
+}
+
+#[derive(Deserialize)]
+pub struct AddCoordinationVotingMemberRequest {
+    pub id: u64,
+    pub addr: String,
+}
+
+#[derive(Deserialize)]
+pub struct RemoveCoordinationVotingMemberRequest {
+    pub id: u64,
+}
+
+#[derive(Deserialize)]
+pub struct RepartitionQueueRequest {
+    pub topic: String,
+    #[serde(default)]
+    pub group: Option<String>,
+    pub partition_count: u32,
 }
 
 #[derive(Serialize)]
@@ -204,6 +225,23 @@ async fn check_auth(
     check_admin_auth(headers, &server.config.auth, &server.sessions).await
 }
 
+fn durability_policy_json(policy: ReplicationDurabilityPolicy) -> serde_json::Value {
+    match policy {
+        ReplicationDurabilityPolicy::LocalDurable => {
+            serde_json::json!({ "mode": "local_durable" })
+        }
+        ReplicationDurabilityPolicy::ReplicaAccepted { nodes } => {
+            serde_json::json!({ "mode": "replica_accepted", "nodes": nodes })
+        }
+        ReplicationDurabilityPolicy::ReplicaDurable { nodes } => {
+            serde_json::json!({ "mode": "replica_durable", "nodes": nodes })
+        }
+        ReplicationDurabilityPolicy::MajorityDurable => {
+            serde_json::json!({ "mode": "majority_durable" })
+        }
+    }
+}
+
 pub async fn overview(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
@@ -294,6 +332,27 @@ pub async fn queues_debug(
             }
             if let Some(summary) = observability.get("summary") {
                 object.insert("broker_activity_summary".into(), summary.clone());
+            }
+            if let Some(replication_followers) = observability.get("replication_followers") {
+                object.insert(
+                    "replication_followers".into(),
+                    replication_followers.clone(),
+                );
+            }
+            if let Some(replication_summary) = observability.get("replication_summary") {
+                object.insert("replication_summary".into(), replication_summary.clone());
+            }
+            if let Some(owned_replicas) = observability.get("owned_replicas") {
+                object.insert("owned_replicas".into(), owned_replicas.clone());
+            }
+            if let Some(owned_replica_summary) = observability.get("owned_replica_summary") {
+                object.insert(
+                    "owned_replica_summary".into(),
+                    owned_replica_summary.clone(),
+                );
+            }
+            if let Some(replication_timing) = observability.get("replication_timing") {
+                object.insert("replication_timing".into(), replication_timing.clone());
             }
             object.insert(
                 "broker_cleanup_metrics".into(),
@@ -396,21 +455,228 @@ pub async fn inspect_messages(
     }
 }
 
+/// Cluster topology: the committed coordination snapshot (nodes, assignments
+/// with owner/followers/epoch, generation) plus an optional consensus-internals
+/// block when an embedded provider is active. This JSON is the contract for
+/// `fibrilctl topology` and the admin diagram.
+pub async fn topology(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let coordination = match &server.coordination {
+        Some(coordination) => {
+            let snapshot = coordination.snapshot();
+            let mut nodes: Vec<serde_json::Value> = snapshot
+                .nodes
+                .values()
+                .map(|node| {
+                    serde_json::json!({
+                        "node_id": node.node_id,
+                        "broker_addr": node.broker_addr.to_string(),
+                        "admin_addr": node.admin_addr.map(|addr| addr.to_string()),
+                    })
+                })
+                .collect();
+            nodes.sort_by(|a, b| a["node_id"].as_str().cmp(&b["node_id"].as_str()));
+
+            let mut assignments: Vec<serde_json::Value> = snapshot
+                .assignments
+                .values()
+                .map(|assignment| {
+                    serde_json::json!({
+                        "topic": assignment.queue.topic,
+                        "partition": assignment.queue.partition,
+                        "group": assignment.queue.group,
+                        "owner": assignment.owner,
+                        "followers": assignment.followers,
+                        "epoch": assignment.epoch,
+                        "durability": durability_policy_json(assignment.durability),
+                    })
+                })
+                .collect();
+            assignments.sort_by(|a, b| {
+                (a["topic"].as_str(), a["partition"].as_u64())
+                    .cmp(&(b["topic"].as_str(), b["partition"].as_u64()))
+            });
+
+            serde_json::json!({
+                "node_id": coordination.node_id(),
+                "generation": snapshot.generation,
+                "nodes": nodes,
+                "assignments": assignments,
+            })
+        }
+        None => serde_json::Value::Null,
+    };
+
+    let consensus = match &server.consensus_topology {
+        Some(provider) => provider(),
+        None => serde_json::Value::Null,
+    };
+
+    Ok(Json(serde_json::json!({
+        "coordination": coordination,
+        "consensus": consensus,
+    })))
+}
+
+/// This broker's local exclusive-cohort view (per-cohort members and targets).
+/// Cohort assignment is broker-local runtime state, so this is node-scoped.
+pub async fn cohorts(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let cohorts = match &server.cohorts {
+        Some(provider) => provider(),
+        None => serde_json::Value::Null,
+    };
+    Ok(Json(serde_json::json!({ "cohorts": cohorts })))
+}
+
+pub async fn add_coordination_voting_member(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<AddCoordinationVotingMemberRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    if request.addr.parse::<std::net::SocketAddr>().is_err() {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_coordination_member_addr",
+            "addr must be a socket address",
+        ));
+    }
+
+    let Some(manager) = &server.coordination_membership else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "coordination_membership_unavailable",
+            "coordination membership management is not available",
+        ));
+    };
+
+    match manager.add_voting_member(request.id, request.addr).await {
+        Ok(coordination) => {
+            Ok(Json(serde_json::json!({ "coordination": coordination })).into_response())
+        }
+        Err(error) => Ok(admin_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "coordination_membership_update_failed",
+            error,
+        )),
+    }
+}
+
+pub async fn remove_coordination_voting_member(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<RemoveCoordinationVotingMemberRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let Some(manager) = &server.coordination_membership else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "coordination_membership_unavailable",
+            "coordination membership management is not available",
+        ));
+    };
+
+    match manager.remove_voting_member(request.id).await {
+        Ok(coordination) => {
+            Ok(Json(serde_json::json!({ "coordination": coordination })).into_response())
+        }
+        Err(error) => Ok(admin_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "coordination_membership_update_failed",
+            error,
+        )),
+    }
+}
+
+/// Trigger a live repartition (grow or shrink) of a queue to `partition_count`.
+pub async fn repartition_queue(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<RepartitionQueueRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    if request.partition_count == 0 {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_partition_count",
+            "partition_count must be at least 1",
+        ));
+    }
+
+    let Some(manager) = &server.queue_repartition else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "repartition_unavailable",
+            "live repartitioning is not available (requires ganglion coordination)",
+        ));
+    };
+
+    match manager
+        .repartition(
+            request.topic,
+            normalize_group(request.group),
+            request.partition_count,
+        )
+        .await
+    {
+        Ok(partitioning) => {
+            Ok(Json(serde_json::json!({ "partitioning": partitioning })).into_response())
+        }
+        Err(error) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "repartition_failed",
+            error,
+        )),
+    }
+}
+
 pub async fn runtime_settings(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<RuntimeSettingsResponse>, StatusCode> {
+) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
 
     let Some(runtime_settings) = &server.runtime_settings else {
         return Err(StatusCode::NOT_FOUND);
     };
 
+    let snapshot = match &server.runtime_settings_cluster {
+        Some(cluster) => match cluster.current_runtime_settings().await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => RuntimeSettingsSnapshot {
+                version: 0,
+                settings: runtime_settings.current().settings,
+            },
+            Err(error) => {
+                tracing::warn!(%error, "cluster runtime settings read failed");
+                return Ok(admin_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cluster_runtime_settings_unavailable",
+                    "cluster runtime settings are unavailable",
+                ));
+            }
+        },
+        None => runtime_settings.current(),
+    };
+
     Ok(Json(RuntimeSettingsResponse::new(
-        runtime_settings.current(),
+        snapshot,
         runtime_settings.locks().clone(),
         runtime_settings.load_issue(),
     )))
+    .map(IntoResponse::into_response)
 }
 
 pub async fn startup_config(
@@ -438,6 +704,70 @@ pub async fn update_runtime_settings(
     };
 
     let locks = runtime_settings.locks().clone();
+    if let Some(cluster) = &server.runtime_settings_cluster {
+        if let Err(err) = request.settings.validate() {
+            return Ok(match err {
+                RuntimeSettingsError::Invalid(message) => {
+                    admin_error(StatusCode::BAD_REQUEST, "invalid_runtime_settings", message)
+                }
+                other => {
+                    tracing::error!("runtime settings validation failed unexpectedly: {other}");
+                    admin_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "runtime_settings_update_failed",
+                        "runtime settings update failed",
+                    )
+                }
+            });
+        }
+
+        match cluster
+            .update_runtime_settings(request.expected_version, request.settings)
+            .await
+        {
+            Ok(RuntimeSettingsClusterUpdateOutcome::Stored(snapshot)) => {
+                if let Err(error) = runtime_settings
+                    .apply_cluster_settings(snapshot.settings.clone())
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        cluster_version = snapshot.version,
+                        "cluster runtime settings committed but local cache update failed"
+                    );
+                }
+                return Ok((
+                    StatusCode::OK,
+                    Json(RuntimeSettingsResponse::new(
+                        snapshot,
+                        locks,
+                        runtime_settings.load_issue(),
+                    )),
+                )
+                    .into_response());
+            }
+            Ok(RuntimeSettingsClusterUpdateOutcome::Conflict(snapshot)) => {
+                return Ok((
+                    StatusCode::CONFLICT,
+                    Json(RuntimeSettingsResponse::new(
+                        snapshot,
+                        locks,
+                        runtime_settings.load_issue(),
+                    )),
+                )
+                    .into_response());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cluster runtime settings update failed");
+                return Ok(admin_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "cluster_runtime_settings_update_failed",
+                    "cluster runtime settings update failed",
+                ));
+            }
+        }
+    }
+
     match runtime_settings
         .update(request.expected_version, request.settings)
         .await
@@ -650,4 +980,84 @@ pub async fn replay_dead_letters(
             ))
         }
     }
+}
+
+#[derive(Deserialize)]
+pub struct RepairPartitionQuery {
+    pub topic: String,
+    #[serde(default)]
+    pub partition: u32,
+    pub group: Option<String>,
+}
+
+/// List partitions quarantined by recovery (a dangling event->message reference)
+/// plus the active policy, so the admin UI can show "X must be resolved before
+/// this queue continues" and offer a repair.
+pub async fn quarantine(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let quarantined = server.storage.quarantined_partitions();
+    Ok(Json(serde_json::json!({
+        "policy": format!("{:?}", server.storage.recovery_mismatch_policy()),
+        "quarantined": quarantined,
+    })))
+}
+
+/// Repair a quarantined partition (truncate-to-valid) and clear it. The next
+/// access re-recovers the valid prefix. Operator-triggered.
+pub async fn repair_partition(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<RepairPartitionQuery>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let group = normalize_group(query.group);
+    match server
+        .storage
+        .repair_partition(&query.topic, query.partition, group.as_deref())
+        .await
+    {
+        Ok(()) => Ok(Json(serde_json::json!({
+            "repaired": true,
+            "topic": query.topic,
+            "partition": query.partition,
+        }))
+        .into_response()),
+        Err(err) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "repair_failed",
+            err.to_string(),
+        )),
+    }
+}
+
+/// Readiness probe. A quarantined partition means something needs an operator.
+/// Under the Quarantine policy the broker keeps serving the healthy partitions,
+/// so it stays ready (200) but reports `degraded`; under Refuse it fails
+/// readiness (503) so the problem cannot be missed.
+pub async fn readyz(State(server): State<Arc<AdminServer>>) -> Response {
+    let quarantined = server.storage.quarantined_partitions();
+    if quarantined.is_empty() {
+        return (StatusCode::OK, "ok").into_response();
+    }
+    let ready = !matches!(
+        server.storage.recovery_mismatch_policy(),
+        RecoveryMismatchPolicy::Refuse
+    );
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(serde_json::json!({
+            "ready": ready,
+            "degraded": true,
+            "quarantined": quarantined,
+        })),
+    )
+        .into_response()
 }

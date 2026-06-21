@@ -216,6 +216,67 @@ implementation can be slower than cloning small strings.
 
 Status: idea only.
 
+### Replica-durable confirm latency
+
+Hypothesis: replica-durable confirmed publish latency is currently bounded by
+the follower pull worker's caught-up poll interval. When a follower is already
+caught up, the default next poll delay is `1000ms`, so the first confirmed
+publish after an idle period may wait for the follower to poll again before the
+owner can observe durable follower progress.
+
+Why it might help: changing this path to owner notification, long-poll
+replication reads, or a lower adaptive delay could reduce cluster confirmed
+publish latency without changing standalone behavior.
+
+Benchmark needed: one owner and one follower with replica-durable confirms
+enabled. Run low offered loads to expose idle penalty, then a small knee sweep.
+Record confirmed publish p50, p95, p99, timeout/error count, follower lag, and
+server RSS.
+
+Risk: lowering the poll interval globally can add idle CPU and network wakeups.
+Notification or long-poll machinery can add complexity and must not hide owner
+failure.
+
+Status: audit finding, benchmark not yet written.
+
+### Multi-queue follower catch-up
+
+Hypothesis: the current protocol replication resolver keeps one serialized
+connection per owner. This is simple and conservative, but it may bottleneck a
+node that follows many queues from the same owner.
+
+Why it might help: per-queue peers, a small peer pool, or request multiplexing
+could increase catch-up throughput if the one-connection design becomes the
+limit.
+
+Benchmark needed: one follower catching up many queues from one owner, with both
+small and medium payloads. Compare catch-up wall time, owner CPU, follower CPU,
+connection count, and error behavior.
+
+Risk: more connections or multiplexing can make failure handling harder and can
+increase owner pressure. Keep the current design unless the benchmark proves it
+is the bottleneck.
+
+Status: audit finding, benchmark not yet written.
+
+### Cluster routing and fan-in
+
+Hypothesis: partitioned publish routing, not-owner redirects, and multi-partition
+subscription fan-in can regress independently of standalone publish/delivery
+benchmarks.
+
+Why it might help: cluster routing adds topology lookup, redirect retry, multiple
+client engines, and merged subscription streams. These costs should be visible
+before TypeScript parity or further routing polish.
+
+Benchmark needed: Rust client scenarios for keyed publish, keyless round-robin,
+redirected publish, and fan-in subscriptions across multiple partitions.
+
+Risk: optimizing routing too early can make the client API more complex. Measure
+first, then only change the pieces that show up.
+
+Status: audit finding, benchmark not yet written.
+
 ## Experiment record
 
 Add entries here when an optimization is actually tried.
@@ -228,6 +289,14 @@ Add entries here when an optimization is actually tried.
 | 2026-06-08 | local experiment | Reduce publish sink small-batch coalesce window from 1ms to 250µs | Keep useful batching while reducing artificial wait in normal and near-saturation runs | `baseline`, `confirmed`, and `throughput-1k`, 2s warmup, 5s steady | Low-rate 50k/150k was neutral. High-rate p95 improved from 471ms to 385ms at 350k/s, 1598ms to 1533ms at 400k/s, and 3304ms to 3267ms at 500k/s. RSS was also lower in high-rate runs | Keep 250µs. It improves the knee without increasing the window |
 | 2026-06-08 | local experiment | Remove publish sink small-batch wait entirely | Avoid any coalescing delay and rely only on immediate channel draining | `throughput-1k`, 2s warmup, 5s steady | Good at 250k/s, but worse than 250µs at 350k/s and 400k/s. Similar at 500k/s | Reverted. Some short coalescing still helps around the backlog knee |
 | 2026-06-08 | local experiment | Start the publish sink coalesce window at the previous flush instead of after the next message arrives | Avoid artificial sparse-message latency while keeping burst batching when traffic is already flowing | `baseline`, `confirmed`, and `throughput-1k`, 2s warmup, 5s steady | Low-rate 50k/150k stayed neutral. High-rate p95 improved from the 250µs always-wait run: 385ms to 337ms at 350k/s, 1533ms to 1418ms at 400k/s, and 3267ms to 3152ms at 500k/s | Keep. This gives the sparse case immediate flush behavior and improves the measured saturation knee |
+| 2026-06-15 | tooling | Let the steady benchmark target an external broker/admin pair and reuse `cluster-tryout.sh` for live cluster-routed runs | Make cluster-routed and later replica-durable confirm runs comparable without changing the benchmark client shape | `cargo check -p fibril-benches --bin steady_c --locked`, shell syntax checks, 3-node Ganglion tryout smoke at 500/s | The tryout-backed run delivered 500 measured messages with 0 missing and p99 publish-to-deliver latency of 15ms. A later audit showed the follower had not applied the measured range, so these are cluster-routed numbers, not replica-durable numbers. External targets report RSS as unavailable because the wrapper does not own the server process | Keep. Next step is an operator or test harness path that can require follower catch-up and replica-durable confirmation |
+| 2026-06-15 | tuning | Add replica-durable latency split and follower read-budget runtime settings | Distinguish client/confirm backlog from broker delivery time, then test whether follower batch limits were the replica-durable throughput ceiling | 3-node Ganglion tryout, `replica_durable:2`, 1 KiB payload, 50k/s target, 50k confirm window, heartbeat 1s, liveness TTL 30s, follower budgets 1024 messages/read, 1024 events/read, 16 iterations/tick | Measured about 45.6k/s with zero missing and zero errors. Follower tail reached benchmark writes and owner/follower cursors matched. publish-to-server-receive p99 was about 3.9s, while server-receive-to-deliver p99 was about 141ms | Keep the knobs. The first ceiling was partly follower-read-budget limited. The next question is confirm-window and client-side backpressure behavior |
+| 2026-06-15 | investigation | Add temporary protocol codec timing logs gated by `FIBRIL_PROTOCOL_CODEC_TIMING` | Check whether large-payload replicated runs are starving the server, the benchmark client, or both during encode/decode/frame-copy work | 3-node Ganglion tryout, `replica_durable:2`, 1 MiB payloads, explicit codec timing enabled | The probe showed large encode/decode costs on both sides, and especially expensive follower-side decode of large `ReplicationReadOk` frames. Moving large replication response decode to `spawn_blocking` protects Tokio workers but does not reduce deserialization time | Refactor or remove the logs before merge. If this signal remains useful, convert it to sampled or aggregated metrics rather than per-frame logs. Real speedup likely needs a different replication wire shape or dedicated decode/apply pipeline |
+| 2026-06-15 | fix | Add byte-aware owner replication read caps | Stop large-payload followers from requesting giant single `ReplicationReadOk` responses when record-count limits allow too much payload data | 256 KiB replica-durable run exposed responses growing into tens or hundreds of MiB, with follower decode taking seconds and publish confirms timing out | With `max_bytes_per_read = 8388608`, the same 256 KiB, 170/s, confirm-window 100 run completed with 0 publish errors, 0 confirm errors, 0 missing messages, p99 publish-to-deliver about 69ms, and matching owner/follower cursors | Keep. Longer-term transport may split payload and event streams so size limits are natural rather than envelope-level |
+| 2026-06-15 | investigation | Sweep confirm windows for high-rate 1 KiB replica-durable publishes | Separate sustainable low-latency throughput from throughput achieved by allowing a large confirmation backlog | 3-node Ganglion tryout, `replica_durable:2`, 1 KiB payload, 50k/s target, confirm windows 5k, 7.5k, 10k, 20k, 50k | 5k-7.5k windows stayed low latency at about 30k-32k/s with p99 publish-to-deliver 17ms. 10k reached about 34.8k/s but p99 rose to 841ms. 20k-50k reached about 38.5k-46.9k/s but p99 stayed around 2.8s. Raising event/message read limits at the 7.5k window did not improve throughput | Keep the split latency metrics. The next target is owner ingest/confirm scheduling, client confirm pacing, or storage isolation, not just larger follower read batches |
+| 2026-06-15 | investigation | Compare tmpfs-backed and disk-backed local cluster data dirs | Check whether the current replica-durable low-latency ceiling is mostly physical disk contention | Same 3-node tryout, 1 KiB payload, 50k/s target, 7.5k confirm window. Default `/tmp` is tmpfs. Disk comparison used `CLUSTER_TRYOUT_RUN_ROOT` under the repo filesystem | Tmpfs reached about 31.8k/s with p99 publish-to-deliver 17ms. Disk-backed reached about 28.2k/s with p99 28ms. Storage placement matters, but tmpfs still has the same broad ceiling shape | Keep the script run-root override. Prioritize scheduler, protocol, confirm pacing, and single-partition owner-path analysis before assuming this is only disk throughput |
+| 2026-06-15 | investigation | Split replica-durable publish-only and consume-drain paths, then inspect protocol codec logs | Find whether the current ceiling is publish replication, consume/ack, client windowing, roundtrips, or serialization | 3-node Ganglion tryout on tmpfs, `replica_durable:2`, 1 KiB payload, 50k/s publish-only target. Tuned follower budgets: 4096 messages/read, 4096 events/read, 16 MiB/read, 64 iterations/tick. Larger-batch variant used 16k records/read and 64 MiB/read | Consume-drain reached about 105k/s after preload, so consume/ack was not the bottleneck. Publish-only stayed around 27k/s. Lowering retry poll to 1ms did not help. Larger batches barely changed throughput but raised confirm latency from about 360ms p50 to about 1.36s p50. Codec logs showed owner `ReplicationReadOk` encode around 13-16ms for ~4.8 MiB frames, while follower decode took about 117-130ms. Larger ~19 MiB frames decoded in roughly 460-590ms | Current primary bottleneck is follower-side bulk `ReplicationReadOk` MessagePack decode, not physical disk or simple roundtrip count. Next useful work is a replication-specific wire shape or a bounded decode/apply pipeline |
+| 2026-06-16 | investigation | Add broker replication timing metrics to the cluster tryout output | Separate client-observed confirm latency from owner replica-gate wait, owner read cost, follower owner-read wait, follower apply cost, and whole follower tick time | 3-node Ganglion tryout, `replica_durable:2`, 1 KiB payload, 50k/s publish-only target, confirm window 1024, 4096 messages/events per read, 16 MiB/read | Actual rate was about 49k/s with confirm p50/p95/p99/max = 204/243/244/246ms. Owner `replica_confirm_wait` averaged about 0.033ms over 144k samples, while owner reads averaged about 1ms, follower owner-read await averaged about 6.3ms, follower apply averaged about 19.2ms, and whole follower ticks averaged about 552ms | Keep the metrics. This run says the visible latency is not mostly waiting after local append for follower progress. Next isolate local append completion latency and follower tick batching before changing durability semantics or poll cadence |
 
 ## Lessons so far
 
@@ -240,11 +309,49 @@ Add entries here when an optimization is actually tried.
   wake timing need more precise measurement before changing this path.
 - For 1KB publish frames, MessagePack encode/decode is measurable but not large
   enough by itself to explain the current backlog knee.
+- For internal replication reads, MessagePack was the wrong shape. The biggest
+  replicated-throughput win so far came from replacing the hot
+  `ReplicationReadOk` response with a raw, easy-to-parse binary frame carrying
+  fixed metadata, raw message header/payload bytes, raw event bytes, and explicit
+  offsets. That removed a large nested decode/re-encode cost from follower
+  catch-up.
+- Record-count limits are not enough for replication batches. Payload size can
+  dominate, so byte caps must be part of the protocol and must rewrite progress
+  metadata to the actual returned frontier.
 - The publish sink benefits from a much shorter coalescing window than the
   original 1ms. Removing the wait entirely lost useful batching around the
   350k-400k/s knee. Measuring the window from the previous flush gives sparse
   traffic immediate sends while preserving useful batching under load.
 - Large payload results are hardware-specific on the current SATA SSD machine.
   They are still useful for detecting memory and storage-regression direction.
+- For replica-durable runs, publish-to-deliver latency can be misleading by
+  itself. The current 50k/s tuned run shows most latency before server receive,
+  while server-receive-to-deliver remains much lower. Keep reporting both.
+- The first broker timing metrics show that replica-durable confirm latency is
+  not automatically the same thing as post-local-append follower wait. In the
+  50k/s window-1024 run, owner `replica_confirm_wait` averaged about 0.033ms
+  while client-observed confirmation p50 was about 204ms. The next useful split
+  is local append completion latency versus client/window backlog and follower
+  tick/apply work.
+- Replica-durable replication is now usable enough to benchmark seriously, but
+  it is not a finished performance story. Current runs prove correctness and
+  useful throughput, while the latency caveat is still real: higher throughput
+  currently depends on enough outstanding confirms, and that backlog becomes
+  visible client latency.
+- Compared with mature replicated queues and logs, the main open performance
+  questions are architectural rather than micro-optimizations: committed
+  visibility watermarking, long-poll or push-hinted follower replication,
+  cheaper watermark-based confirmation, better separation of payload transfer
+  from event/progress movement, whole-frame versus streaming decode, and raw
+  Keratin range replication that avoids decode/re-encode work where safe.
+- Local multi-node benchmarks are useful stress tests, but they are not a full
+  deployment model. They share CPU, page cache, and one drive, while also hiding
+  real network cost.
+- The next narrow measurement should split local append completion, confirm sink
+  backlog, replica-gate wait, and follower apply/tick time before making more
+  protocol or scheduling changes.
+- Temporary timing probes are acceptable during an audit, but they should not
+  remain as ad hoc logs. Promote useful signals to cheap aggregated metrics or
+  sampled diagnostics, then remove the raw per-frame logging.
 - Operator metrics should stay cheap and useful. Percentile-heavy measurement
   belongs in benchmark tools unless there is a clear production need.

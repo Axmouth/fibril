@@ -6,7 +6,7 @@ use fibril_protocol::v1::{
     frame::ProtoCodec,
     helper::{try_decode, try_encode},
 };
-use fibril_storage::DeliveryTag;
+use fibril_storage::{DeliveryTag, Partition};
 use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 use tokio::{net::TcpStream, sync::oneshot, time::Instant};
@@ -24,11 +24,13 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                 group: None,
                 topic: "Topic1".into(),
                 payload: payload.clone(),
-                partition: 1,
+                partition: Partition::new(1),
                 require_confirm: true,
                 content_type: None,
                 headers: HashMap::new(),
                 published: unix_millis(),
+                partition_key: None,
+                partitioning_version: 0,
             };
             let stream = TcpStream::connect(SocketAddr::V4(SocketAddrV4::new(
                 Ipv4Addr::from([127, 0, 0, 1]),
@@ -94,7 +96,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                         &Ack {
                             group: None,
                             topic: "Topic1".into(),
-                            partition: 1,
+                            partition: Partition::new(1),
                             tags: vec![tag],
                         },
                     )
@@ -144,7 +146,11 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                             auto_ack: false,
                             group: None,
                             topic: "Topic1".into(),
+                            partition: Partition::new(0),
                             prefetch: 1024,
+                            consumer_group: None,
+                            consumer_target: None,
+                            member_id: None,
                         },
                     )
                     .unwrap(),
@@ -156,7 +162,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                 }
             });
 
-            tokio::join!(reader, pubber, acker, sink_task);
+            let _ = tokio::join!(reader, pubber, acker, sink_task);
         }));
     }
 

@@ -26,6 +26,11 @@ tokio-util = { version = "0.7", features = ["codec"] }
 tracing = { version = "0.1", features = ["release_max_level_info"] }
 uuid = { version = "1.19", features = ["v7"] }
 
+[features]
+# Exposes coordination::contract_tests so other crates can run the shared
+# provider contract suite against their Coordination implementations.
+provider-contract-tests = []
+
 [build-dependencies]
 winres = "0.1"
 

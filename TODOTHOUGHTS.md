@@ -1,18 +1,34 @@
+fibril "jetstreams" (bit with bio theme still) with fanout etc built on top of fibril
 
-* **Replication**
+1. Split-Brain Mitigation via Epoch Comparison
 
-  * Queue data replicated across nodes so a single broker failure does not result in queue loss.
-  * Explicit durability and failover semantics rather than relying on backup/restore strategies.
+In DeterministicPartitionPlacement::plan, you determine whether an assignment's epoch changes:
+Rust
 
-* **Sharding / Partition Ownership**
+let epoch = existing
+    .filter(|assignment| assignment.owner == owner && assignment.followers == followers)
+    .map(|assignment| assignment.epoch)
+    .unwrap_or(input.generation);
 
-  * Queues distributed across a cluster instead of a single broker process.
-  * Ownership managed centrally, allowing the system to scale beyond one node while preserving queue semantics.
+    The Risk: If an owner falls out of the node map (e.g., a 10-second network hiccup causing its etcd lease to drop) and then suddenly reappears, it might still think it owns that partition.
 
-* **etcd-backed Cluster Coordination**
+    The Fix: When a node processes a LocalAssignmentTransition, it must ensure that any incoming write or replicate request includes the current epoch. If an incoming command's epoch is lower than the node's local partition state machine epoch, it must reject the command immediately to prevent stale data overwrites.
 
-  * Shared source of truth for cluster membership and ownership decisions.
-  * Makes failover, leader election, and shard reassignment predictable and observable.
+2. String Conversions in Inner Loops
+
+Inside plan_local_assignment_transitions, you sort keys using:
+Rust
+
+a.topic.to_string()
+
+Because this occurs inside your state-transition engine, doing .to_string() on a Topic performs a heap allocation. If you have tens of thousands of partitions, this will cause memory churn.
+
+    The Fix: If your Topic type implements AsRef<str> or allows direct borrowing, sort using references (&a.topic) to keep your execution completely zero-allocation.
+
+3. String Interning or Node Typing
+
+You are passing node identifiers as String everywhere. For maximum memory efficiency and to keep memory safely flat below your 1GB target, consider introducing an explicit type alias or light wrapper for NodeId (e.g., using Arc<str> or an internal CompactString crate) if you expect your cluster sizes to scale into dozens or hundreds of nodes.
+
 
 * **Broker Restart Reconciliation**
 
@@ -23,21 +39,30 @@
 
   * Messages can expire automatically after a configured period.
   * Prevents stale work from being processed long after it remains useful.
+  expiration map/registry in state, wire to expiry worker, do not expire while inflight, can do so while collecting expired too
+  consider if we need new event/frames or just add optional expiration to existing
 
 * **Time-based Retention**
 
   * Queues can automatically discard old messages according to retention policies.
   * Keeps storage growth bounded without manual intervention.
+  sparse worker, sparse offset to time mapping(though we have published.. so we can do a crude binary search instead too, and truncate before, also clear relevant state entries)
 
 * **Queue Purge**
 
   * Fast removal of all queued messages while preserving the queue itself.
   * Useful during incidents, testing, and recovery scenarios.
+  effectively done by reset
 
 * **Queue Deletion**
 
   * Complete lifecycle management of queues from creation to removal.
   * Eliminates operational cleanup gaps and orphaned resources.
+  freeze then filesystem cleanup?
+
+May as well add queue expiration as an option?
+
+Hide inactive queues option in dashboard(useful for when someone really has tons of sparse queues. plus basic search)
 
 * **Documented Failure Semantics**
 
@@ -49,6 +74,22 @@ And if I had to pick the three features that would most change how technically-m
 1. **Replication**
 2. **Sharding with cluster ownership**
 3. **Restart reconciliation built on top of the existing reconnect model**
+
+make client errors have an "embedded retry" (perhaps like retry method, to redo the ack or whatever it was? ideally in a way based on the type of error too. perhaps a retryable method returning an enum with basically yes and no? where yes gives you a retry handle. though ideally with fewer steps overall. maybe like .is_retryable() and some retry op kinda method on the error directly)
+
+How to Mitigate It Without Losing the Latency GainIf you want to keep the "express lane" speed but protect your system's transactional integrity, you can apply a few distributed systems patterns:
+
+1. The "Ghost Flag" (Speculative Delivery)When you push a message down the express lane before it is safely on disk, inject a metadata flag into the frame header sent to the consumer (e.g., X-Speculative: true).This tells the consumer: "I am giving you this message incredibly fast, but it is not durable yet. If I crash right now, you might see this again. Do not mark this as fully committed in your database until you are ready to handle a duplicate."
+
+2. Delayed Publisher Confirmation (The RabbitMQ Approach)RabbitMQ allows the fast-path delivery to the consumer to happen instantly, but it completely holds back the Publisher Confirmation frame. The broker will not tell the producer "OK" until that background 5ms fsync loop actually finishes writing the message to disk.This ensures that even if a crash causes a duplicate delivery later, the publisher and broker stay cryptographically aligned on what data was actually made durable.
+
+If you can successfully implement restart reconciliation (where a broker boots back up, scans its un-acked WAL logs, and immediately maps un-acked states back to reconnecting clients over a graceful grace period), you will have solved one of the most frustrating aspects of distributed systems. This completely saves developers from writing idempotent processing code for standard broker maintenance windows.
+
+building on top of restart reconciliation, update reconciliation. notify clients, drain pending, restart and continue like nothing happened.
+
+add client setting to opt out convenient features like reconnect grace etc
+
+opt in client enforced rate limints, one each way, separate total and per node
 
 Those are the features that make people stop seeing "single-node broker with nice ergonomics" and start seeing "distributed messaging system with an opinionated operational model."
 
@@ -147,3 +188,44 @@ replace epoch in delivery tag with gen and seq. Seq is simple monotonic counter,
 dls or embedded language to script transformations, routing, etc?
 
 in memory queues(no durability)? would need to make keratin pluggable or its write target able to take file or memory buffer(like a trait where flush etc becomes noop). Might be more worth doing it on Kerating level, though keeping the same semantics and only changing the storage is more reliably same behavior
+
+phrasing:
+Most applications need reliable queues, clear delivery semantics, reconnect behavior that does not surprise them, and admin operations that are obvious. Fibril optimizes for that path.
+What happens if the broker restarts?
+What happens if a consumer disconnects?
+What happens if a queue is idle?
+What happens if a message expires?
+What happens if I purge while consumers are attached?
+What happens during leader failover?
+What should I alert on?
+
+
+The relevant setting will show a random proverb each time. roadmap,locked in:
+Stability requires patience. But for those who may not wait:
+The surest path is seldom the swiftest. But for those in haste:
+What is built to endure is rarely built to hurry. But for those who must:
+Speed is easy to borrow from certainty. But for those willing to pay the price:
+The fastest message is often the least certain. But for those who accept the risk:
+Durability is purchased with time. But for those spending a different currency:
+A promise kept takes longer than a promise made. But for those in a hurry:
+Patience is the companion of certainty. But not all travelers keep the same company:
+The river reaches the sea by refusing shortcuts. But for those seeking them:
+What survives the storm is not always first to leave the harbor. But for those who must sail now:
+The surest path is seldom the swiftest.
+A bridge tested twice carries the heavier load.
+The lock that yields quickly opens for all.
+The swiftest promise is often the first forgotten
+What survives the storm seldom outruns it.
+The shortest road is not always the one that arrives.
+Certainty walks; haste runs.
+A message hurried is a message trusted less.
+The patient builder sleeps through the wind
+Time spent securing a door is rarely noticed after the theft.
+The oak and the reed both reach the sky, but only one expects the storm.
+Every shortcut borrows from tomorrow.
+
+The second mouse gets the cheese.
+A falling anvil reaches the ground first.
+Most parachutes work best when opened before landing.
+The tortoise won. The hare became a benchmark.
+"You are overriding the default safety assumptions. We trust you know why."

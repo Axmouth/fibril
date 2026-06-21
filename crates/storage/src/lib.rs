@@ -1,21 +1,25 @@
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub use stroma_core::{
     AppendCompletion, AppendResult, CompletionPair, IoError, MessageContentType,
 };
 
-pub type Topic = String;
-pub type LogId = u32;
+// Shared value types live in dependency-light crates: engine-layer concepts
+// (Partition, Topic, Group) in `stroma-common`, fibril-layer concepts
+// (DeliveryTag) in `fibril-common`. Re-exported here so existing
+// `fibril_storage::{Partition, ...}` paths keep working. `Offset` stays a `u64`
+// alias for now (its newtype adoption is the phase after Partition).
+pub use fibril_common::DeliveryTag;
+pub use stroma_common::{Group, Partition, Topic};
+
 pub type Offset = u64;
-pub type Group = String;
 
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
     pub topic: Topic,
     pub group: Option<Group>,
-    pub partition: LogId,
+    pub partition: Partition,
     pub offset: Offset,
     pub published: u64,
     pub publish_received: u64,
@@ -23,11 +27,6 @@ pub struct StoredMessage {
     pub content_type: Option<MessageContentType>,
     pub headers: HashMap<String, String>,
     pub payload: Vec<u8>,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct DeliveryTag {
-    pub epoch: u64,
 }
 
 /// Returned by poll operations: the message plus its metadata
@@ -51,9 +50,6 @@ pub enum StorageError {
 
     #[error("unexpected internal error: {0}")]
     Internal(String),
-
-    #[error("anyhow error: {0}")]
-    Anyhow(#[from] anyhow::Error),
 }
 
 #[async_trait]

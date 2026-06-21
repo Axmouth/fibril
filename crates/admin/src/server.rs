@@ -1,19 +1,28 @@
 use askama::Template;
+use async_trait::async_trait;
 use axum::{
     Form, Router,
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::get,
 };
+// Path is only used by the release-only embedded static handler.
+#[cfg(not(debug_assertions))]
+use axum::extract::Path;
 use fibril_broker::{
-    StromaMetrics, queue_engine::QueueEngine, runtime_settings::RuntimeSettingsManager,
+    StromaMetrics,
+    queue_engine::QueueEngine,
+    runtime_settings::{RuntimeSettings, RuntimeSettingsManager, RuntimeSettingsSnapshot},
 };
 use fibril_util::StaticAuthHandler;
+#[cfg(not(debug_assertions))]
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+// ServeDir backs the debug-only on-disk /static route.
+#[cfg(debug_assertions)]
 use tower_http::services::ServeDir;
 
 use crate::{
@@ -27,10 +36,63 @@ use fibril_metrics::Metrics;
 
 pub type BrokerQueueObservability = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
 
+/// Producer of the optional consensus-internals block in `GET /admin/api/topology`
+/// (the coordination backend's consensus state serialized to JSON). Opaque JSON
+/// callback so the admin crate stays independent of the coordination backend.
+pub type ConsensusTopologyProvider = dyn Fn() -> serde_json::Value + Send + Sync + 'static;
+
+#[async_trait]
+pub trait CoordinationMembershipManager: Send + Sync + 'static {
+    async fn add_voting_member(&self, id: u64, addr: String) -> Result<serde_json::Value, String>;
+
+    async fn remove_voting_member(&self, id: u64) -> Result<serde_json::Value, String>;
+}
+
+/// Operator-triggered live repartition (grow or shrink) of a queue's partition
+/// count. The implementation decides direction from the current count.
+#[async_trait]
+pub trait QueueRepartitionManager: Send + Sync + 'static {
+    async fn repartition(
+        &self,
+        topic: String,
+        group: Option<String>,
+        partition_count: u32,
+    ) -> Result<serde_json::Value, String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeSettingsClusterUpdateOutcome {
+    Stored(RuntimeSettingsSnapshot),
+    Conflict(RuntimeSettingsSnapshot),
+}
+
+#[async_trait]
+pub trait RuntimeSettingsClusterStore: Send + Sync + 'static {
+    async fn current_runtime_settings(&self) -> Result<Option<RuntimeSettingsSnapshot>, String>;
+
+    async fn update_runtime_settings(
+        &self,
+        expected_version: u64,
+        settings: RuntimeSettings,
+    ) -> Result<RuntimeSettingsClusterUpdateOutcome, String>;
+}
+
 pub struct AdminConfig {
     // TODO: better type, parse earlier
     pub bind: String,
     pub auth: Option<StaticAuthHandler>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AdminServerError {
+    #[error("failed to bind admin listener at {bind}: {source}")]
+    Bind {
+        bind: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("admin listener failed: {0}")]
+    Serve(#[source] std::io::Error),
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -42,6 +104,8 @@ pub struct StartupConfigSummary {
     pub keratin_fsync_interval_ms: u64,
     pub keratin_message_log_segment_max_bytes: u64,
     pub keratin_event_log_segment_max_bytes: u64,
+    pub coordination_heartbeat_interval_ms: u64,
+    pub coordination_liveness_ttl_ms: u64,
 }
 
 pub struct AdminServer {
@@ -53,6 +117,18 @@ pub struct AdminServer {
     pub broker_queue_observability: Option<Arc<BrokerQueueObservability>>,
     pub runtime_settings: Option<Arc<RuntimeSettingsManager>>,
     pub sessions: AdminSessions,
+    pub coordination: Option<Arc<dyn fibril_broker::Coordination>>,
+    pub consensus_topology: Option<Arc<ConsensusTopologyProvider>>,
+    /// Optional per-broker exclusive-cohort view (this node's local cohort
+    /// membership). Cohort assignment is broker-local runtime state, not in the
+    /// committed coordination snapshot, so this is a node-scoped view.
+    pub cohorts: Option<Arc<ConsensusTopologyProvider>>,
+    pub coordination_membership: Option<Arc<dyn CoordinationMembershipManager>>,
+    /// Optional live-repartition trigger (grow/shrink a queue's partition count).
+    pub queue_repartition: Option<Arc<dyn QueueRepartitionManager>>,
+    /// Optional cluster-authoritative runtime-settings store. When absent,
+    /// runtime settings are local-only and use the node's Stroma global store.
+    pub runtime_settings_cluster: Option<Arc<dyn RuntimeSettingsClusterStore>>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -84,18 +160,73 @@ impl AdminServer {
             broker_queue_observability,
             runtime_settings,
             sessions: AdminSessions::default(),
+            coordination: None,
+            consensus_topology: None,
+            cohorts: None,
+            coordination_membership: None,
+            queue_repartition: None,
+            runtime_settings_cluster: None,
         }
     }
 
-    pub async fn run(self) -> anyhow::Result<()> {
+    /// Attach the coordination provider serving `GET /admin/api/topology`.
+    pub fn with_coordination(mut self, coordination: Arc<dyn fibril_broker::Coordination>) -> Self {
+        self.coordination = Some(coordination);
+        self
+    }
+
+    /// Attach the optional consensus-internals block for the topology endpoint.
+    pub fn with_consensus_topology(mut self, provider: Arc<ConsensusTopologyProvider>) -> Self {
+        self.consensus_topology = Some(provider);
+        self
+    }
+
+    /// Attach the optional per-broker cohort view serving `GET /admin/api/cohorts`.
+    pub fn with_cohorts(mut self, provider: Arc<ConsensusTopologyProvider>) -> Self {
+        self.cohorts = Some(provider);
+        self
+    }
+
+    /// Attach the optional coordination membership manager.
+    pub fn with_coordination_membership(
+        mut self,
+        manager: Arc<dyn CoordinationMembershipManager>,
+    ) -> Self {
+        self.coordination_membership = Some(manager);
+        self
+    }
+
+    /// Attach the live-repartition trigger for `POST /admin/api/repartition`.
+    pub fn with_queue_repartition(mut self, manager: Arc<dyn QueueRepartitionManager>) -> Self {
+        self.queue_repartition = Some(manager);
+        self
+    }
+
+    /// Attach the cluster-authoritative runtime-settings store.
+    pub fn with_runtime_settings_cluster(
+        mut self,
+        store: Arc<dyn RuntimeSettingsClusterStore>,
+    ) -> Self {
+        self.runtime_settings_cluster = Some(store);
+        self
+    }
+
+    pub async fn run(self) -> Result<(), AdminServerError> {
         let state = Arc::new(self);
 
         let app = Self::router(state.clone());
 
-        let listener = TcpListener::bind(&state.config.bind).await?;
+        let listener = TcpListener::bind(&state.config.bind)
+            .await
+            .map_err(|source| AdminServerError::Bind {
+                bind: state.config.bind.clone(),
+                source,
+            })?;
         print_admin_banner(&state.config.bind, state.config.auth.is_some());
         tracing::info!("listening on {}", state.config.bind);
-        axum::serve(listener, app).await?;
+        axum::serve(listener, app)
+            .await
+            .map_err(AdminServerError::Serve)?;
         Ok(())
     }
 
@@ -123,6 +254,7 @@ impl AdminServer {
             .route("/admin/queues", get(queues_page))
             .route("/admin/messages", get(messages_page))
             .route("/admin/diagnostics", get(diagnostics_page))
+            .route("/admin/topology", get(topology_page))
             .route("/admin/settings", get(settings_page))
             .route("/admin/api/overview", get(routes::overview))
             .route("/admin/api/connections", get(routes::connections))
@@ -135,6 +267,20 @@ impl AdminServer {
                 get(routes::runtime_settings).put(routes::update_runtime_settings),
             )
             .route("/admin/api/startup-config", get(routes::startup_config))
+            .route("/admin/api/topology", get(routes::topology))
+            .route("/admin/api/cohorts", get(routes::cohorts))
+            .route(
+                "/admin/api/coordination/membership/add-voting-member",
+                axum::routing::post(routes::add_coordination_voting_member),
+            )
+            .route(
+                "/admin/api/coordination/membership/remove-voting-member",
+                axum::routing::post(routes::remove_coordination_voting_member),
+            )
+            .route(
+                "/admin/api/repartition",
+                axum::routing::post(routes::repartition_queue),
+            )
             .route(
                 "/admin/api/global-dlq",
                 get(routes::global_dlq).put(routes::update_global_dlq),
@@ -147,17 +293,27 @@ impl AdminServer {
                 "/admin/api/dlq/replay",
                 axum::routing::post(routes::replay_dead_letters),
             )
+            .route("/admin/api/quarantine", get(routes::quarantine))
+            .route(
+                "/admin/api/quarantine/repair",
+                axum::routing::post(routes::repair_partition),
+            )
             .route("/healthz", get(|| async { "ok" }))
+            .route("/readyz", get(routes::readyz))
             .fallback(not_found)
             .with_state(state);
         app
     }
 }
 
+// Release-only: in debug builds /static is served from disk via ServeDir (see
+// router), so the embedded copy and its handler are compiled only for release.
+#[cfg(not(debug_assertions))]
 #[derive(RustEmbed)]
 #[folder = "admin-ui"]
 struct AdminAssets;
 
+#[cfg(not(debug_assertions))]
 async fn admin_static(Path(path): Path<String>) -> impl IntoResponse {
     let path = path.trim_start_matches('/');
     if let Some(file) = AdminAssets::get(path) {
@@ -251,6 +407,18 @@ async fn diagnostics_page(
     Ok(render(Diagnostics {
         page: "diagnostics",
         title: "Diagnostics",
+        auth_enabled: server.config.auth.is_some(),
+    }))
+}
+
+async fn topology_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(TopologyPage {
+        page: "topology",
+        title: "Topology",
         auth_enabled: server.config.auth.is_some(),
     }))
 }
@@ -369,6 +537,14 @@ struct Diagnostics {
 }
 
 #[derive(Template)]
+#[template(path = "pages/topology.html")]
+struct TopologyPage {
+    page: &'static str,
+    title: &'static str,
+    auth_enabled: bool,
+}
+
+#[derive(Template)]
 #[template(path = "pages/settings.html")]
 struct Settings {
     page: &'static str,
@@ -414,6 +590,7 @@ pub fn print_admin_banner(bind: &str, auth: bool) {
 mod tests {
     use super::*;
 
+    use async_trait::async_trait;
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
@@ -433,15 +610,18 @@ mod tests {
     };
     use fibril_metrics::{ConnectionStats, Metrics, TcpStats};
     use fibril_protocol::v1::{
-        Deliver, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish, Subscribe,
+        Deliver, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Partition, Publish, Subscribe,
         frame::{Frame, ProtoCodec},
-        handler::{ConnectionSettings, handle_connection},
+        handler::{ConnectionSettings, ProtocolConnectionError, handle_connection},
         helper::{try_decode, try_encode},
     };
     use fibril_util::unix_millis;
     use futures::{SinkExt, StreamExt};
     use serde_json::json;
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::{Arc as StdArc, Mutex as StdMutex},
+        time::{Duration, Instant},
+    };
     use tokio::net::{TcpListener, TcpStream};
     use tokio_util::codec::Framed;
     use tower::ServiceExt;
@@ -486,6 +666,8 @@ mod tests {
                 keratin_fsync_interval_ms: 5,
                 keratin_message_log_segment_max_bytes: 16 * 1024 * 1024,
                 keratin_event_log_segment_max_bytes: 16 * 1024 * 1024,
+                coordination_heartbeat_interval_ms: 3000,
+                coordination_liveness_ttl_ms: 9000,
             }),
             Arc::new(engine),
             None,
@@ -498,11 +680,79 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
+    #[derive(Debug, Default)]
+    struct FakeRuntimeSettingsClusterStore {
+        current: StdMutex<Option<RuntimeSettingsSnapshot>>,
+    }
+
+    #[async_trait]
+    impl RuntimeSettingsClusterStore for FakeRuntimeSettingsClusterStore {
+        async fn current_runtime_settings(
+            &self,
+        ) -> Result<Option<RuntimeSettingsSnapshot>, String> {
+            Ok(self.current.lock().unwrap().clone())
+        }
+
+        async fn update_runtime_settings(
+            &self,
+            expected_version: u64,
+            settings: RuntimeSettings,
+        ) -> Result<RuntimeSettingsClusterUpdateOutcome, String> {
+            let mut current = self.current.lock().unwrap();
+            let current_version = current
+                .as_ref()
+                .map(|snapshot| snapshot.version)
+                .unwrap_or(0);
+            if current_version != expected_version {
+                return Ok(RuntimeSettingsClusterUpdateOutcome::Conflict(
+                    current.clone().unwrap_or(RuntimeSettingsSnapshot {
+                        version: 0,
+                        settings,
+                    }),
+                ));
+            }
+            let snapshot = RuntimeSettingsSnapshot {
+                version: current_version + 1,
+                settings,
+            };
+            *current = Some(snapshot.clone());
+            Ok(RuntimeSettingsClusterUpdateOutcome::Stored(snapshot))
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct FakeCoordinationMembershipManager {
+        calls: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CoordinationMembershipManager for FakeCoordinationMembershipManager {
+        async fn add_voting_member(
+            &self,
+            id: u64,
+            addr: String,
+        ) -> Result<serde_json::Value, String> {
+            self.calls.lock().unwrap().push(format!("add:{id}:{addr}"));
+            Ok(json!({
+                "voters": [1, id],
+                "added": id,
+            }))
+        }
+
+        async fn remove_voting_member(&self, id: u64) -> Result<serde_json::Value, String> {
+            self.calls.lock().unwrap().push(format!("remove:{id}"));
+            Ok(json!({
+                "voters": [1],
+                "removed": id,
+            }))
+        }
+    }
+
     async fn open_protocol_connection(
         broker: Arc<Broker<StromaEngine>>,
     ) -> (
         Framed<TcpStream, ProtoCodec>,
-        tokio::task::JoinHandle<anyhow::Result<()>>,
+        tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
     ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -521,6 +771,8 @@ mod tests {
             conn_id,
             None::<StaticAuthHandler>,
             ConnectionSettings::new(Some(60)),
+            None,
+            None,
         ));
 
         (Framed::new(client, ProtoCodec), server_task)
@@ -598,6 +850,327 @@ mod tests {
             .next()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn topology_endpoint_serves_coordination_and_raft_blocks() {
+        use fibril_broker::coordination::{
+            CoordinationSnapshot, NodeInfo, PartitionAssignment, QueueIdentity, StaticCoordination,
+        };
+
+        let base = test_server(RuntimeSettingsLocks::default()).await;
+        let server = Arc::try_unwrap(base).ok().expect("sole owner");
+
+        // Without a provider, both blocks are null.
+        let bare = AdminServer::router(Arc::new(AdminServer { ..server }));
+        let response = bare
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["coordination"].is_null());
+        assert!(body["consensus"].is_null());
+
+        // With a provider + consensus block attached, the endpoint reports both.
+        let queue = QueueIdentity::new("orders", Partition::ZERO, Some("workers"));
+        let mut nodes = std::collections::HashMap::new();
+        nodes.insert(
+            "broker-a".to_string(),
+            NodeInfo {
+                node_id: "broker-a".to_string(),
+                broker_addr: "127.0.0.1:9000".parse().unwrap(),
+                admin_addr: Some("127.0.0.1:9100".parse().unwrap()),
+            },
+        );
+        let mut assignments = std::collections::HashMap::new();
+        assignments.insert(
+            queue.clone(),
+            PartitionAssignment::new(queue, "broker-a", vec!["broker-b".to_string()], 3),
+        );
+        let coordination = StaticCoordination::new(
+            "broker-a",
+            CoordinationSnapshot {
+                nodes,
+                assignments,
+                generation: 7,
+            },
+        );
+
+        let wired = test_server(RuntimeSettingsLocks::default()).await;
+        let wired = Arc::try_unwrap(wired).ok().expect("sole owner");
+        let wired = wired
+            .with_coordination(Arc::new(coordination))
+            .with_consensus_topology(Arc::new(|| serde_json::json!({"local_id": 1, "leader": 1})));
+        let app = AdminServer::router(Arc::new(wired));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+
+        assert_eq!(body["coordination"]["node_id"], "broker-a");
+        assert_eq!(body["coordination"]["generation"], 7);
+        assert_eq!(body["coordination"]["nodes"][0]["node_id"], "broker-a");
+        let assignment = &body["coordination"]["assignments"][0];
+        assert_eq!(assignment["topic"], "orders");
+        assert_eq!(assignment["owner"], "broker-a");
+        assert_eq!(assignment["epoch"], 3);
+        assert_eq!(assignment["followers"][0], "broker-b");
+        assert_eq!(body["consensus"]["leader"], 1);
+    }
+
+    #[tokio::test]
+    async fn coordination_membership_routes_report_unavailable_without_manager() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/coordination/membership/add-voting-member")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": 2,
+                            "addr": "127.0.0.1:9202"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "coordination_membership_unavailable");
+    }
+
+    #[tokio::test]
+    async fn coordination_membership_add_rejects_invalid_addr() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/coordination/membership/add-voting-member")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": 2,
+                            "addr": "not a socket address"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_coordination_member_addr");
+    }
+
+    #[tokio::test]
+    async fn repartition_rejects_zero_partition_count() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/repartition")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "topic": "orders.created", "partition_count": 0 }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_partition_count");
+    }
+
+    #[tokio::test]
+    async fn repartition_reports_unavailable_without_manager() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/repartition")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "topic": "orders.created", "partition_count": 4 }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "repartition_unavailable");
+    }
+
+    #[tokio::test]
+    async fn cohorts_endpoint_returns_null_without_provider() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/cohorts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["cohorts"].is_null());
+    }
+
+    #[tokio::test]
+    async fn cohorts_endpoint_serves_provider_value() {
+        let server = Arc::try_unwrap(test_server(RuntimeSettingsLocks::default()).await)
+            .unwrap_or_else(|_| panic!("test server should have one strong reference"))
+            .with_cohorts(StdArc::new(|| {
+                json!([{ "topic": "orders", "consumer_group": "g1", "members": [{ "member": "c1" }] }])
+            }));
+        let app = AdminServer::router(Arc::new(server));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/cohorts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["cohorts"][0]["topic"], "orders");
+        assert_eq!(body["cohorts"][0]["members"][0]["member"], "c1");
+    }
+
+    #[tokio::test]
+    async fn readyz_ok_when_nothing_quarantined() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn quarantine_get_returns_policy_and_empty_list() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/api/quarantine")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(body["policy"].is_string());
+        assert!(body["quarantined"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn coordination_membership_routes_call_manager() {
+        let manager = StdArc::new(FakeCoordinationMembershipManager::default());
+        let server = Arc::try_unwrap(test_server(RuntimeSettingsLocks::default()).await)
+            .unwrap_or_else(|_| panic!("test server should have one strong reference"))
+            .with_coordination_membership(manager.clone());
+        let app = AdminServer::router(Arc::new(server));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/coordination/membership/add-voting-member")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": 2,
+                            "addr": "127.0.0.1:9202"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["coordination"]["added"], 2);
+        assert_eq!(body["coordination"]["voters"][1], 2);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/coordination/membership/remove-voting-member")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "id": 2
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["coordination"]["removed"], 2);
+        assert_eq!(
+            manager.calls.lock().unwrap().as_slice(),
+            ["add:2:127.0.0.1:9202", "remove:2"]
+        );
     }
 
     #[tokio::test]
@@ -697,6 +1270,30 @@ mod tests {
         assert!(body.contains("Command Lanes"));
         assert!(body.contains("Logs And Snapshots"));
         assert!(body.contains("/admin/api/overview"));
+    }
+
+    #[tokio::test]
+    async fn topology_page_escapes_operator_supplied_labels() {
+        let server = test_server_with_auth(RuntimeSettingsLocks::default(), None).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("function escapeHtml"));
+        assert!(body.contains("escapeHtml(assignment.topic)"));
+        assert!(body.contains("escapeHtml(assignment.group"));
+        assert!(body.contains("escapeHtml(coordination.node_id)"));
     }
 
     #[tokio::test]
@@ -890,8 +1487,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_settings_put_updates_settings() {
+    async fn runtime_settings_put_updates_local_settings_without_cluster_store() {
         let server = test_server(RuntimeSettingsLocks::default()).await;
+        assert!(server.runtime_settings_cluster.is_none());
+        let runtime_settings = server.runtime_settings.as_ref().unwrap().clone();
         let app = AdminServer::router(server);
 
         let response = app
@@ -933,6 +1532,95 @@ mod tests {
         assert_eq!(body["version"], 2);
         assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 12_000);
         assert_eq!(body["settings"]["connection"]["reconnect_grace_ms"], 30_000);
+        assert_eq!(
+            runtime_settings.current().settings.delivery.inflight_ttl_ms,
+            12_000
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_settings_put_uses_cluster_store_when_available() {
+        let cluster = StdArc::new(FakeRuntimeSettingsClusterStore::default());
+        let server = Arc::try_unwrap(test_server(RuntimeSettingsLocks::default()).await)
+            .unwrap_or_else(|_| panic!("test server should have one strong reference"))
+            .with_runtime_settings_cluster(cluster.clone());
+        let runtime_settings = server.runtime_settings.as_ref().unwrap().clone();
+        let app = AdminServer::router(Arc::new(server));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/admin/api/runtime-settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "expected_version": 0,
+                            "settings": {
+                                "delivery": {
+                                    "inflight_ttl_ms": 12_000,
+                                    "expiry_poll_min_ms": 15_000,
+                                    "expiry_batch_max": 8192,
+                                    "delivery_poll_max_ms": 5_000
+                                },
+                                "idle_queue_cleanup": {
+                                    "enabled": false,
+                                    "evict_after_ms": 600_000,
+                                    "sweep_interval_ms": 60_000,
+                                    "publisher_idle_timeout_ms": null
+                                },
+                                "connection": {
+                                    "reconnect_grace_ms": 30_000
+                                },
+                                "replication": {
+                                    "confirm_timeout_ms": 5000,
+                                    "caught_up_poll_ms": 1000,
+                                    "retry_poll_ms": 100,
+                                    "checkpoint_retry_poll_ms": 5000,
+                                    "max_messages_per_read": 256,
+                                    "max_events_per_read": 256,
+                                    "max_bytes_per_read": 8388608,
+                                    "max_iterations_per_tick": 8,
+                                    "min_in_sync_replicas": 1,
+                                    "isr_timeout_ms": 10000
+                                },
+                                "partitioning": {
+                                    "default_partition_count": 1
+                                },
+                                "consumer_groups": {
+                                    "default_target_per_consumer": null
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["version"], 1);
+        assert_eq!(body["settings"]["delivery"]["inflight_ttl_ms"], 12_000);
+        assert_eq!(
+            cluster
+                .current
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .settings
+                .delivery
+                .inflight_ttl_ms,
+            12_000
+        );
+
+        // The cluster write is applied back to the local manager as a cache.
+        assert_eq!(
+            runtime_settings.current().settings.delivery.inflight_ttl_ms,
+            12_000
+        );
     }
 
     #[tokio::test]
@@ -1437,6 +2125,27 @@ mod tests {
                             "kind": "storage",
                             "outcome": "evicted"
                         }
+                    }],
+                    "replication_summary": {
+                        "follower_worker_count": 1,
+                        "caught_up_count": 0,
+                        "pending_retry_count": 1,
+                        "checkpoint_required_count": 0
+                    },
+                    "replication_followers": [{
+                        "topic": "orders.created",
+                        "partition": 0,
+                        "group": null,
+                        "state": {
+                            "message_next_offset": 4,
+                            "event_next_offset": 6,
+                            "status": {
+                                "status": "pending_retry"
+                            },
+                            "last_progress": null,
+                            "next_delay_ms": 100
+                        },
+                        "busy": false
                     }]
                 })
             })),
@@ -1462,6 +2171,11 @@ mod tests {
             "evicted"
         );
         assert_eq!(body["broker_activity_summary"]["tracked_queue_count"], 1);
+        assert_eq!(
+            body["replication_summary"]["follower_worker_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(body["replication_followers"][0]["topic"], "orders.created");
         assert_eq!(body["broker_cleanup_metrics"]["attempts_total"], 0);
     }
 
@@ -1577,9 +2291,13 @@ mod tests {
                     2,
                     &Subscribe {
                         topic: "source".into(),
+                        partition: Partition::new(0),
                         group: None,
                         prefetch: 1,
                         auto_ack: false,
+                        consumer_group: None,
+                        consumer_target: None,
+                        member_id: None,
                     },
                 )
                 .unwrap(),
@@ -1595,9 +2313,13 @@ mod tests {
                     3,
                     &Subscribe {
                         topic: "_dlq.source".into(),
+                        partition: Partition::new(0),
                         group: None,
                         prefetch: 1,
                         auto_ack: false,
+                        consumer_group: None,
+                        consumer_target: None,
+                        member_id: None,
                     },
                 )
                 .unwrap(),
@@ -1613,7 +2335,7 @@ mod tests {
                     4,
                     &Publish {
                         topic: "source".into(),
-                        partition: 0,
+                        partition: Partition::new(0),
                         group: None,
                         require_confirm: true,
                         content_type: None,
@@ -1623,6 +2345,8 @@ mod tests {
                         )]),
                         payload: b"poison".to_vec(),
                         published: unix_millis(),
+                        partition_key: None,
+                        partitioning_version: 0,
                     },
                 )
                 .unwrap(),
@@ -1641,7 +2365,7 @@ mod tests {
                     &Nack {
                         topic: "source".into(),
                         group: None,
-                        partition: 0,
+                        partition: Partition::new(0),
                         tags: vec![source.delivery_tag],
                         requeue: true,
                         not_before: None,
@@ -1689,8 +2413,9 @@ mod tests {
         assert!(body.contains("Global Dead Letter Queue"));
         assert!(body.contains("Queue Dead Letter Policy"));
         assert!(body.contains("Optional queue group for the target queue."));
+        assert!(body.contains("Default partition count"));
+        assert!(body.contains("Target partitions per consumer"));
         assert!(!body.contains("Queue partition"));
-        assert!(!body.contains("Target partition"));
         assert!(!body.contains("consumer group"));
         assert!(body.contains("Save settings"));
         assert!(!body.contains("Log out"));

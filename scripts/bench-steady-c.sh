@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 writers="${WRITERS:-10}"
 readers="${READERS:-10}"
+mode="${BENCH_MODE:-mixed}"
 rate_per_sec="${RATE_PER_SEC:-100000}"
 warmup_secs="${WARMUP_SECS:-5}"
 duration_secs="${DURATION_SECS:-30}"
@@ -13,15 +14,31 @@ prefetch="${PREFETCH:-16384}"
 confirmed="${CONFIRMED:-0}"
 confirm_window="${CONFIRM_WINDOW:-1024}"
 build="${BUILD:-1}"
+start_server="${START_SERVER:-1}"
+broker_addr="${BROKER_ADDR:-127.0.0.1:9876}"
+admin_addr="${ADMIN_ADDR:-127.0.0.1:8081}"
+durability_label="${DURABILITY_LABEL:-local}"
+topic="${TOPIC:-topic1}"
+preload_messages="${PRELOAD_MESSAGES:-100000}"
+preload_confirmed="${PRELOAD_CONFIRMED:-1}"
 data_dir="$(mktemp -d)"
 log_file="${LOG_FILE:-$data_dir/steady.log}"
 results_file="${RESULTS_FILE:-$data_dir/steady-results.txt}"
 memory_file="$data_dir/server-rss-kib.txt"
 bench_args=()
 memory_sampler_pid=""
+server_pid=""
 
 if [ "$confirmed" != "0" ]; then
-  bench_args+=(--confirmed --confirm-window "$confirm_window")
+  bench_args+=(--confirmed)
+fi
+
+if [ "$confirmed" != "0" ] || [ "$preload_confirmed" != "0" ]; then
+  bench_args+=(--confirm-window "$confirm_window")
+fi
+
+if [ "$preload_confirmed" = "0" ]; then
+  bench_args+=(--preload-unconfirmed)
 fi
 
 mkdir -p "$(dirname "$log_file")" "$(dirname "$results_file")"
@@ -35,31 +52,35 @@ if [ "$build" != "0" ]; then
   cargo build --manifest-path "$repo_root/Cargo.toml" --release --bin fibril-server --bin steady_c >>"$log_file" 2>&1
 fi
 
-(
-  cd "$data_dir"
-  "$repo_root/target/release/fibril-server"
-) >>"$log_file" 2>&1 &
-server_pid="$!"
+if [ "$start_server" != "0" ]; then
+  (
+    cd "$data_dir"
+    "$repo_root/target/release/fibril-server"
+  ) >>"$log_file" 2>&1 &
+  server_pid="$!"
+fi
 
 cleanup() {
   if [ -n "$memory_sampler_pid" ]; then
     kill "$memory_sampler_pid" >/dev/null 2>&1 || true
     wait "$memory_sampler_pid" >/dev/null 2>&1 || true
   fi
-  kill "$server_pid" >/dev/null 2>&1 || true
-  wait "$server_pid" >/dev/null 2>&1 || true
+  if [ -n "$server_pid" ]; then
+    kill "$server_pid" >/dev/null 2>&1 || true
+    wait "$server_pid" >/dev/null 2>&1 || true
+  fi
   rm -rf "$data_dir"
 }
 trap cleanup EXIT
 
 ready=0
 for _ in $(seq 1 60); do
-  if ! kill -0 "$server_pid" >/dev/null 2>&1; then
+  if [ -n "$server_pid" ] && ! kill -0 "$server_pid" >/dev/null 2>&1; then
     echo "Benchmark server exited before becoming healthy. Log tail:" >&2
     tail -n 80 "$log_file" >&2 || true
     exit 1
   fi
-  if curl --silent --show-error --fail http://127.0.0.1:8081/healthz >/dev/null 2>&1; then
+  if curl --silent --show-error --fail "http://$admin_addr/healthz" >/dev/null 2>&1; then
     ready=1
     break
   fi
@@ -72,7 +93,7 @@ if [ "$ready" != "1" ]; then
   exit 1
 fi
 
-curl --silent --show-error --fail http://127.0.0.1:8081/healthz >>"$log_file" 2>&1
+curl --silent --show-error --fail "http://$admin_addr/healthz" >>"$log_file" 2>&1
 
 sample_memory() {
   while kill -0 "$server_pid" >/dev/null 2>&1; do
@@ -84,10 +105,16 @@ sample_memory() {
   done
 }
 
-sample_memory &
-memory_sampler_pid="$!"
+if [ -n "$server_pid" ]; then
+  sample_memory &
+  memory_sampler_pid="$!"
+fi
 
 "$repo_root/target/release/steady_c" \
+  --mode "$mode" \
+  --broker-addr "$broker_addr" \
+  --durability-label "$durability_label" \
+  --topic "$topic" \
   --writers "$writers" \
   --readers "$readers" \
   --rate-per-sec "$rate_per_sec" \
@@ -96,10 +123,13 @@ memory_sampler_pid="$!"
   --drain-timeout-secs "$drain_timeout_secs" \
   --size "$size" \
   --prefetch "$prefetch" \
+  --preload-messages "$preload_messages" \
   "${bench_args[@]}" >>"$results_file" 2>>"$log_file"
 
-kill "$memory_sampler_pid" >/dev/null 2>&1 || true
-wait "$memory_sampler_pid" >/dev/null 2>&1 || true
+if [ -n "$memory_sampler_pid" ]; then
+  kill "$memory_sampler_pid" >/dev/null 2>&1 || true
+  wait "$memory_sampler_pid" >/dev/null 2>&1 || true
+fi
 
 if [ -s "$memory_file" ]; then
   awk '
@@ -119,10 +149,10 @@ fi
 
 {
   echo "--- queue snapshot: after steady run ---"
-  curl --silent --show-error --fail http://127.0.0.1:8081/admin/api/queues \
+  curl --silent --show-error --fail "http://$admin_addr/admin/api/queues" \
     | jq --compact-output .
   echo "--- queue debug: after steady run ---"
-  curl --silent --show-error --fail http://127.0.0.1:8081/admin/api/queues_debug \
+  curl --silent --show-error --fail "http://$admin_addr/admin/api/queues_debug" \
     | jq --compact-output .
 } >>"$results_file"
 

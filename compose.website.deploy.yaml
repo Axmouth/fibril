@@ -9,11 +9,19 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=web"
-      - "traefik.http.routers.fibril-site.rule=Host(`${SITE_DOMAIN:?Set SITE_DOMAIN in .env}`) || Host(`www.${SITE_DOMAIN}`)"
+      - "traefik.http.routers.fibril-site.rule=Host(`${SITE_DOMAIN:?Set SITE_DOMAIN in .env}`)"
       - "traefik.http.routers.fibril-site.entrypoints=websecure"
       - "traefik.http.routers.fibril-site.tls.certresolver=letsencrypt"
       - "traefik.http.routers.fibril-site.middlewares=fibril-site-compress"
+      - "traefik.http.routers.fibril-site-www.rule=Host(`www.${SITE_DOMAIN}`)"
+      - "traefik.http.routers.fibril-site-www.entrypoints=websecure"
+      - "traefik.http.routers.fibril-site-www.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.fibril-site-www.middlewares=fibril-site-www-redirect"
+      - "traefik.http.routers.fibril-site-www.service=fibril-site"
       - "traefik.http.middlewares.fibril-site-compress.compress=true"
+      - "traefik.http.middlewares.fibril-site-www-redirect.redirectregex.regex=^https?://www\\.(.+)"
+      - "traefik.http.middlewares.fibril-site-www-redirect.redirectregex.replacement=https://$${1}"
+      - "traefik.http.middlewares.fibril-site-www-redirect.redirectregex.permanent=true"
       - "traefik.http.services.fibril-site.loadbalancer.server.port=8080"
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/healthz"]

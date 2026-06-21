@@ -80,6 +80,144 @@
       </label>
     </section>
 
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Replication</h5>
+        <p>Controls replica-durable publish confirms and follower catch-up work.</p>
+      </div>
+      <div class="settings-grid settings-grid-two">
+        <label class="settings-field">
+          <span class="settings-label">Confirm timeout</span>
+          <span class="settings-help">How long a replica-durable publish confirm can wait for enough durable follower progress.</span>
+          <span class="settings-duration">
+            <input id="replication.confirm_timeout_ms" type="number" min="1" step="1">
+            <select class="duration-unit" id="replication.confirm_timeout_ms.unit" data-for="replication.confirm_timeout_ms">
+              <option value="s">seconds</option>
+              <option value="ms">milliseconds</option>
+            </select>
+          </span>
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Caught-up poll</span>
+          <span class="settings-help">Follower pull interval while already caught up with the owner.</span>
+          <span class="settings-duration">
+            <input id="replication.caught_up_poll_ms" type="number" min="1" step="1">
+            <select class="duration-unit" id="replication.caught_up_poll_ms.unit" data-for="replication.caught_up_poll_ms">
+              <option value="s">seconds</option>
+              <option value="ms">milliseconds</option>
+            </select>
+          </span>
+        </label>
+      </div>
+      <div class="settings-grid settings-grid-two">
+        <label class="settings-field">
+          <span class="settings-label">Retry poll</span>
+          <span class="settings-help">Follower retry interval after a partial pull or transient replication error.</span>
+          <span class="settings-duration">
+            <input id="replication.retry_poll_ms" type="number" min="1" step="1">
+            <select class="duration-unit" id="replication.retry_poll_ms.unit" data-for="replication.retry_poll_ms">
+              <option value="s">seconds</option>
+              <option value="ms">milliseconds</option>
+            </select>
+          </span>
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Checkpoint retry poll</span>
+          <span class="settings-help">Follower retry interval while it needs a checkpoint before it can continue.</span>
+          <span class="settings-duration">
+            <input id="replication.checkpoint_retry_poll_ms" type="number" min="1" step="1">
+            <select class="duration-unit" id="replication.checkpoint_retry_poll_ms.unit" data-for="replication.checkpoint_retry_poll_ms">
+              <option value="s">seconds</option>
+              <option value="ms">milliseconds</option>
+            </select>
+          </span>
+        </label>
+      </div>
+      <div class="settings-grid settings-grid-two">
+        <label class="settings-field">
+          <span class="settings-label">Messages per read</span>
+          <span class="settings-help">Maximum message records a follower asks the owner for in one pull.</span>
+          <input id="replication.max_messages_per_read" type="number" min="1" step="1">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Events per read</span>
+          <span class="settings-help">Maximum event records a follower asks the owner for in one pull.</span>
+          <input id="replication.max_events_per_read" type="number" min="1" step="1">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Bytes per read</span>
+          <span class="settings-help">Approximate byte budget for one owner replication response.</span>
+          <input id="replication.max_bytes_per_read" type="number" min="1" step="1">
+        </label>
+      </div>
+      <div class="settings-grid settings-grid-two">
+        <label class="settings-field">
+          <span class="settings-label">Iterations per tick</span>
+          <span class="settings-help">Maximum pull/apply iterations before the follower yields.</span>
+          <input id="replication.max_iterations_per_tick" type="number" min="1" step="1">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Minimum in-sync replicas</span>
+          <span class="settings-help">Fail replica-durable publishes quickly when fewer replicas are recently in sync. Use 1 to disable the floor.</span>
+          <input id="replication.min_in_sync_replicas" type="number" min="1" step="1">
+        </label>
+      </div>
+      <label class="settings-field">
+        <span class="settings-label">ISR timeout</span>
+        <span class="settings-help">How recently a follower must report durable progress to count as in sync.</span>
+        <span class="settings-duration">
+          <input id="replication.isr_timeout_ms" type="number" min="1" step="1">
+          <select class="duration-unit" id="replication.isr_timeout_ms.unit" data-for="replication.isr_timeout_ms">
+            <option value="s">seconds</option>
+            <option value="ms">milliseconds</option>
+          </select>
+        </span>
+      </label>
+      <label class="checkbox-label">
+        <input id="replication.stream_enabled" type="checkbox">
+        <span>
+          <span class="settings-label">Streaming replication</span>
+          <span class="settings-help">Use credit-based streaming on followers. When disabled, followers fall back to polling pulls.</span>
+        </span>
+      </label>
+      <div class="settings-grid settings-grid-two">
+        <label class="settings-field">
+          <span class="settings-label">Stream apply linger</span>
+          <span class="settings-help">Microseconds a streaming follower spends gathering contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization; 0 = drain-only.</span>
+          <input id="replication.stream_apply_linger_us" type="number" min="0" step="1">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Stream apply max merge bytes</span>
+          <span class="settings-help">Byte cap on a single coalesced streaming apply (peak memory vs fsync amortization).</span>
+          <input id="replication.stream_apply_max_merge_bytes" type="number" min="1" step="1">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Stream buffer batches</span>
+          <span class="settings-help">In-flight batch buffer depth (credit window) for the streaming follower. Applied on the next stream.</span>
+          <input id="replication.stream_buffer_batches" type="number" min="1" step="1">
+        </label>
+      </div>
+    </section>
+
+    <section class="settings-section">
+      <div class="settings-section-heading">
+        <h5>Partitioning and Consumer Groups</h5>
+        <p>Defaults for new partitioned queues and exclusive consumer-group health signals.</p>
+      </div>
+      <div class="settings-grid settings-grid-two">
+        <label class="settings-field">
+          <span class="settings-label">Default partition count</span>
+          <span class="settings-help">Partition count used when a new queue is declared without an explicit count.</span>
+          <input id="partitioning.default_partition_count" type="number" min="1" step="1">
+        </label>
+        <label class="settings-field">
+          <span class="settings-label">Target partitions per consumer</span>
+          <span class="settings-help">Blank disables the exclusive-consumer-group under-provisioned signal.</span>
+          <input id="consumer_groups.default_target_per_consumer" type="number" min="1" step="1" placeholder="disabled">
+        </label>
+      </div>
+    </section>
+
     <section class="settings-section" id="idle-section">
       <div class="settings-section-heading">
         <h5>Idle Queue Cleanup <span id="idle-lock" class="settings-lock"></span></h5>
@@ -168,6 +306,14 @@
         <dt>Event log segment size</dt>
         <dd id="startup.keratin_event_log_segment_max_bytes"></dd>
       </div>
+      <div>
+        <dt>Coordination heartbeat</dt>
+        <dd id="startup.coordination_heartbeat_interval_ms"></dd>
+      </div>
+      <div>
+        <dt>Coordination liveness TTL</dt>
+        <dd id="startup.coordination_liveness_ttl_ms"></dd>
+      </div>
     </dl>
   </section>
 
@@ -237,6 +383,11 @@
         </label>
       </div>
 
+      <div class="settings-actions">
+        <button class="btn" type="button" id="queue-dlq-load">Load current</button>
+        <span id="queue-dlq-current" class="settings-help"></span>
+      </div>
+
       <div class="settings-grid settings-grid-two">
         <label class="settings-field">
           <span class="settings-label">Policy</span>
@@ -286,6 +437,11 @@ function field(id) {
 
 function numberValue(id) {
   return Number(field(id).value);
+}
+
+function optionalNumberValue(id) {
+  const value = field(id).value.trim();
+  return value === "" ? null : Number(value);
 }
 
 function optionalTextValue(id) {
@@ -386,6 +542,27 @@ function renderSettings(data) {
     data.settings.idle_queue_cleanup.publisher_idle_timeout_ms
   );
   renderDuration("connection.reconnect_grace_ms", data.settings.connection.reconnect_grace_ms);
+  renderDuration("replication.confirm_timeout_ms", data.settings.replication.confirm_timeout_ms);
+  renderDuration("replication.caught_up_poll_ms", data.settings.replication.caught_up_poll_ms);
+  renderDuration("replication.retry_poll_ms", data.settings.replication.retry_poll_ms);
+  renderDuration(
+    "replication.checkpoint_retry_poll_ms",
+    data.settings.replication.checkpoint_retry_poll_ms
+  );
+  field("replication.max_messages_per_read").value = data.settings.replication.max_messages_per_read;
+  field("replication.max_events_per_read").value = data.settings.replication.max_events_per_read;
+  field("replication.max_bytes_per_read").value = data.settings.replication.max_bytes_per_read;
+  field("replication.max_iterations_per_tick").value = data.settings.replication.max_iterations_per_tick;
+  field("replication.min_in_sync_replicas").value = data.settings.replication.min_in_sync_replicas;
+  renderDuration("replication.isr_timeout_ms", data.settings.replication.isr_timeout_ms);
+  field("replication.stream_enabled").checked = data.settings.replication.stream_enabled;
+  field("replication.stream_apply_linger_us").value = data.settings.replication.stream_apply_linger_us;
+  field("replication.stream_apply_max_merge_bytes").value =
+    data.settings.replication.stream_apply_max_merge_bytes;
+  field("replication.stream_buffer_batches").value = data.settings.replication.stream_buffer_batches;
+  field("partitioning.default_partition_count").value = data.settings.partitioning.default_partition_count;
+  field("consumer_groups.default_target_per_consumer").value =
+    data.settings.consumer_groups.default_target_per_consumer ?? "";
 
   currentLocks = data.locks || {};
   setDisabledForLockedGroups();
@@ -410,6 +587,8 @@ function renderStartupConfig(data) {
   field("startup.keratin_fsync_interval_ms").textContent = `${data.keratin_fsync_interval_ms} ms`;
   field("startup.keratin_message_log_segment_max_bytes").textContent = formatBytes(data.keratin_message_log_segment_max_bytes);
   field("startup.keratin_event_log_segment_max_bytes").textContent = formatBytes(data.keratin_event_log_segment_max_bytes);
+  field("startup.coordination_heartbeat_interval_ms").textContent = `${data.coordination_heartbeat_interval_ms} ms`;
+  field("startup.coordination_liveness_ttl_ms").textContent = `${data.coordination_liveness_ttl_ms} ms`;
 }
 
 function renderGlobalDlq(data) {
@@ -439,6 +618,28 @@ function collectSettings() {
     },
     connection: {
       reconnect_grace_ms: optionalDurationMsValue("connection.reconnect_grace_ms"),
+    },
+    replication: {
+      confirm_timeout_ms: durationMsValue("replication.confirm_timeout_ms"),
+      caught_up_poll_ms: durationMsValue("replication.caught_up_poll_ms"),
+      retry_poll_ms: durationMsValue("replication.retry_poll_ms"),
+      checkpoint_retry_poll_ms: durationMsValue("replication.checkpoint_retry_poll_ms"),
+      max_messages_per_read: numberValue("replication.max_messages_per_read"),
+      max_events_per_read: numberValue("replication.max_events_per_read"),
+      max_bytes_per_read: numberValue("replication.max_bytes_per_read"),
+      max_iterations_per_tick: numberValue("replication.max_iterations_per_tick"),
+      min_in_sync_replicas: numberValue("replication.min_in_sync_replicas"),
+      isr_timeout_ms: durationMsValue("replication.isr_timeout_ms"),
+      stream_enabled: field("replication.stream_enabled").checked,
+      stream_apply_linger_us: numberValue("replication.stream_apply_linger_us"),
+      stream_apply_max_merge_bytes: numberValue("replication.stream_apply_max_merge_bytes"),
+      stream_buffer_batches: numberValue("replication.stream_buffer_batches"),
+    },
+    partitioning: {
+      default_partition_count: numberValue("partitioning.default_partition_count"),
+    },
+    consumer_groups: {
+      default_target_per_consumer: optionalNumberValue("consumer_groups.default_target_per_consumer"),
     },
   };
 }
@@ -521,6 +722,34 @@ async function loadGlobalDlq(message = "Global DLQ loaded.") {
   setGlobalDlqMessage(`${message} Current version: ${data.version}.`, "info");
 }
 
+// See-before-declare: show a queue's current DLQ policy (from the live debug
+// view) so an operator is not declaring blind. Materialized queues only; an
+// on-disk-but-unloaded queue reports that its declared values apply on next load.
+async function loadCurrentQueueDlq() {
+  const tp = field("queue-dlq.tp").value.trim();
+  const group = field("queue-dlq.group").value.trim();
+  const el = field("queue-dlq-current");
+  if (!tp) {
+    el.textContent = "Enter a queue topic, then load its current DLQ policy.";
+    return;
+  }
+  const data = await api("/admin/api/queues_debug");
+  const match = (data.queues || []).find(
+    (q) => q.topic === tp && (q.group || "") === group
+  );
+  if (!match) {
+    el.textContent = `No indexed queue "${tp}"${group ? ` (group ${group})` : ""} found.`;
+    return;
+  }
+  if (!match.materialized) {
+    el.textContent = `Queue "${tp}" is on disk but not loaded; its declared DLQ values apply when it next loads.`;
+    return;
+  }
+  const policy = match.state?.dlq_policy ?? "unknown";
+  const maxRetries = match.state?.dlq_max_retries;
+  el.textContent = `Current: policy ${policy}, max retries ${maxRetries ?? "default"}.`;
+}
+
 async function saveSettings(event) {
   event.preventDefault();
   const response = await fetch("/admin/api/runtime-settings", {
@@ -594,6 +823,7 @@ field("settings-form").addEventListener("submit", saveSettings);
 field("reload-settings").addEventListener("click", () => loadSettings("Settings reloaded."));
 field("global-dlq-form").addEventListener("submit", saveGlobalDlq);
 field("reload-global-dlq").addEventListener("click", () => loadGlobalDlq("Global DLQ reloaded."));
+field("queue-dlq-load").addEventListener("click", loadCurrentQueueDlq);
 field("global-dlq.enabled").addEventListener("change", (event) => setGlobalDlqFieldsEnabled(event.target.checked));
 field("queue-dlq-form").addEventListener("submit", saveQueueDlq);
 field("queue-dlq.policy").addEventListener("change", (event) => setQueueDlqTargetFieldsEnabled(event.target.value === "custom"));
