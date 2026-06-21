@@ -242,6 +242,20 @@ more than MECHANISM, so do them one-by-one, not as one unified subsystem):
   for these must round-trip `encode_snapshot`/`load_snapshot` (FORMAT_VERSION bump)
   since snapshots compact away the events that would otherwise rebuild it.
 
+Nack semantics enrichment [USER, DESIGN] - plumb the richer nack vocabulary
+through. The `NackType` enum already exists in stroma `event.rs` (Discard,
+RetryNow, RetryLater, RequeueNow, RequeueLater) but is reserved/dead-code: the
+live wire + state path only carries the simpler `(requeue, not_before)` pair.
+Goal: let a CONSUMER choose the disposition explicitly - e.g. discard/trash
+immediately (straight to DLQ-or-drop, skip retries), requeue WITHOUT bumping the
+retry counter, retry-now vs retry-later. This likely changes the meaning of the
+current nack "verbs" on the wire and in the handler, so it needs a deliberate
+pass (wire op fields + handler mapping + state transitions + client API), not a
+bolt-on. Related: the TTL drop (#6) already reuses the terminal-nack ->
+DLQ/discard pipeline with `DeadLetterReason::Expired`, which is the first
+non-TerminalNack reason flowing through that path - a useful precedent for
+threading explicit dispositions.
+
 Usefulness read (value, anchored to Fibril being a work queue - consumed=gone):
 - Create + purge: HIGH value, low effort. Round out the admin board (we can
   repartition / set DLQ today but not create or empty a queue) and cover common
@@ -414,6 +428,13 @@ replication + stale-epoch-apply harness), so it lands after the admin-thin items
 - Manual failover runbook (partially covered by `FAILURE_MODES.md`). [PLAN]
 - Keep the implemented-surface inventory current. It is critical and easily falls
   out of date. [MEM]
+- PENDING REFRESH (do after the TTL bricks land): the surface inventory + docs
+  have not been recurated since 2026-06-21 (see "Done since the inventory was last
+  curated" at the top). Added since and not yet reflected: admin create-queue,
+  hide-inactive + search, single-node delete-queue, and message TTL
+  (per-message + per-queue-default, DLQ-on-expiry via DeadLetterReason::Expired).
+  Check the last curation date, diff what shipped, and update the inventory +
+  any user-facing docs (clients docs, coordination-surface doc) accordingly. [USER]
 
 ## Testing and hardening
 
