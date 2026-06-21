@@ -270,3 +270,46 @@ test("subscribe and subscribe_ok bodies round-trip", () => {
   };
   assert.deepEqual(decodeSubscribeOkBody(encodeSubscribeOkBody(ok)), ok);
 });
+
+import {
+  encodeReconcileClientBody,
+  decodeReconcileClientBody,
+  encodeReconcileServerBody,
+  decodeReconcileServerBody,
+  encodeReconcileResultBody,
+  decodeReconcileResultBody,
+  type ReconcileSubscription,
+} from "../src/wire.js";
+
+const reconcileSub = (subId: bigint): ReconcileSubscription => ({
+  subId,
+  topic: "jobs",
+  partition: 0,
+  group: null,
+  autoAck: false,
+  prefetch: 32,
+  consumerGroup: null,
+  consumerTarget: null,
+  memberId: null,
+});
+
+test("reconcile client/server bodies round-trip", () => {
+  const rc = {
+    policy: "restore_client_subscriptions" as const,
+    subscriptions: [reconcileSub(1n), reconcileSub(2n)],
+  };
+  assert.deepEqual(decodeReconcileClientBody(encodeReconcileClientBody(rc)), rc);
+
+  const rs = { subscriptions: [reconcileSub(7n)] };
+  assert.deepEqual(decodeReconcileServerBody(encodeReconcileServerBody(rs)), rs);
+});
+
+test("reconcile result body round-trips across actions", () => {
+  const rr = {
+    subscriptions: [
+      { client: reconcileSub(1n), server: reconcileSub(2n), action: "keep" as const, reason: "matched" },
+      { client: reconcileSub(3n), server: null, action: "close_client_side" as const, reason: "server_missing" },
+    ],
+  };
+  assert.deepEqual(decodeReconcileResultBody(encodeReconcileResultBody(rr)), rr);
+});

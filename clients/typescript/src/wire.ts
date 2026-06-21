@@ -39,6 +39,26 @@ const RESUME_OUTCOME_FROM_U8: ResumeOutcome[] = [
   "resume_rejected",
 ];
 
+export type ReconcilePolicy = "conservative" | "restore_client_subscriptions";
+export type ReconcileAction =
+  | "keep"
+  | "close_client_side"
+  | "close_server_side"
+  | "recreate_client_side";
+
+const RECONCILE_ACTION_TO_U8: Record<ReconcileAction, number> = {
+  keep: 0,
+  close_client_side: 1,
+  close_server_side: 2,
+  recreate_client_side: 3,
+};
+const RECONCILE_ACTION_FROM_U8: ReconcileAction[] = [
+  "keep",
+  "close_client_side",
+  "close_server_side",
+  "recreate_client_side",
+];
+
 /** Growable big-endian byte writer. */
 export class Writer {
   private buf: Uint8Array;
@@ -208,6 +228,35 @@ export class Writer {
       this.dlqPolicy(p);
     }
   }
+  reconcilePolicy(p: ReconcilePolicy): void {
+    this.u8(p === "restore_client_subscriptions" ? 1 : 0);
+  }
+  reconcileAction(a: ReconcileAction): void {
+    this.u8(RECONCILE_ACTION_TO_U8[a]);
+  }
+  reconcileSubscription(s: ReconcileSubscription): void {
+    this.u64(s.subId);
+    this.queueKey(s.topic, s.partition, s.group);
+    this.bool(s.autoAck);
+    this.u32(s.prefetch);
+    this.optionalStr(s.consumerGroup);
+    this.optionalU32(s.consumerTarget);
+    this.optionalUuid(s.memberId);
+  }
+  optionalReconcileSubscription(s: ReconcileSubscription | null | undefined): void {
+    if (s == null) {
+      this.u8(0);
+    } else {
+      this.u8(1);
+      this.reconcileSubscription(s);
+    }
+  }
+  reconcileSubscriptions(subs: ReconcileSubscription[]): void {
+    this.u32(subs.length);
+    for (const s of subs) {
+      this.reconcileSubscription(s);
+    }
+  }
   /** A 4-byte ASCII magic that opens every frame body. */
   magic(m: string): void {
     this.raw(textEncoder.encode(m));
@@ -353,6 +402,43 @@ export class Reader {
   }
   optionalDlqPolicy(): QueueDlqPolicy | null {
     return this.u8() === 1 ? this.dlqPolicy() : null;
+  }
+  reconcilePolicy(): ReconcilePolicy {
+    return this.u8() === 1 ? "restore_client_subscriptions" : "conservative";
+  }
+  reconcileAction(): ReconcileAction {
+    const tag = this.u8();
+    const a = RECONCILE_ACTION_FROM_U8[tag];
+    if (a === undefined) throw new Error(`wire: unknown reconcile action ${tag}`);
+    return a;
+  }
+  reconcileSubscription(): ReconcileSubscription {
+    const subId = this.u64();
+    const key = this.queueKey();
+    const autoAck = this.bool();
+    const prefetch = this.u32();
+    return {
+      subId,
+      topic: key.topic,
+      partition: key.partition,
+      group: key.group,
+      autoAck,
+      prefetch,
+      consumerGroup: this.optionalStr(),
+      consumerTarget: this.optionalU32(),
+      memberId: this.optionalUuid(),
+    };
+  }
+  optionalReconcileSubscription(): ReconcileSubscription | null {
+    return this.u8() === 1 ? this.reconcileSubscription() : null;
+  }
+  reconcileSubscriptions(): ReconcileSubscription[] {
+    const n = this.u32();
+    const subs: ReconcileSubscription[] = [];
+    for (let i = 0; i < n; i += 1) {
+      subs.push(this.reconcileSubscription());
+    }
+    return subs;
   }
   expectMagic(m: string): void {
     const got = this.raw(4);
@@ -886,4 +972,102 @@ export function decodeSubscribeOkBody(body: Uint8Array): SubscribeOk {
   };
   r.finish();
   return value;
+}
+
+// ---- reconcile ----
+
+export interface ReconcileSubscription {
+  subId: bigint;
+  topic: string;
+  partition: number;
+  group: string | null;
+  autoAck: boolean;
+  prefetch: number;
+  consumerGroup: string | null;
+  consumerTarget: number | null;
+  memberId: Uuid | null;
+}
+
+export interface ReconcileSubscriptionResult {
+  client: ReconcileSubscription | null;
+  server: ReconcileSubscription | null;
+  action: ReconcileAction;
+  reason: string;
+}
+
+export interface ReconcileClient {
+  policy: ReconcilePolicy;
+  subscriptions: ReconcileSubscription[];
+}
+
+export interface ReconcileServer {
+  subscriptions: ReconcileSubscription[];
+}
+
+export interface ReconcileResult {
+  subscriptions: ReconcileSubscriptionResult[];
+}
+
+export function encodeReconcileClientBody(rc: ReconcileClient): Uint8Array {
+  const w = new Writer();
+  w.magic("FRC1");
+  w.reconcilePolicy(rc.policy);
+  w.reconcileSubscriptions(rc.subscriptions);
+  return w.finish();
+}
+
+export function decodeReconcileClientBody(body: Uint8Array): ReconcileClient {
+  const r = new Reader(body);
+  r.expectMagic("FRC1");
+  const value: ReconcileClient = {
+    policy: r.reconcilePolicy(),
+    subscriptions: r.reconcileSubscriptions(),
+  };
+  r.finish();
+  return value;
+}
+
+export function encodeReconcileServerBody(rs: ReconcileServer): Uint8Array {
+  const w = new Writer();
+  w.magic("FRS1");
+  w.reconcileSubscriptions(rs.subscriptions);
+  return w.finish();
+}
+
+export function decodeReconcileServerBody(body: Uint8Array): ReconcileServer {
+  const r = new Reader(body);
+  r.expectMagic("FRS1");
+  const value: ReconcileServer = { subscriptions: r.reconcileSubscriptions() };
+  r.finish();
+  return value;
+}
+
+export function encodeReconcileResultBody(rr: ReconcileResult): Uint8Array {
+  const w = new Writer();
+  w.magic("FRR1");
+  w.u32(rr.subscriptions.length);
+  for (const s of rr.subscriptions) {
+    w.optionalReconcileSubscription(s.client);
+    w.optionalReconcileSubscription(s.server);
+    w.reconcileAction(s.action);
+    w.str(s.reason);
+  }
+  return w.finish();
+}
+
+export function decodeReconcileResultBody(body: Uint8Array): ReconcileResult {
+  const r = new Reader(body);
+  r.expectMagic("FRR1");
+  const n = r.u32();
+  const subscriptions: ReconcileSubscriptionResult[] = [];
+  for (let i = 0; i < n; i += 1) {
+    subscriptions.push({
+      client: r.optionalReconcileSubscription(),
+      server: r.optionalReconcileSubscription(),
+      action: r.reconcileAction(),
+      reason: r.str(),
+    });
+  }
+  r.finish();
+  return { subscriptions };
 }
