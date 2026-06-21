@@ -25,6 +25,18 @@ feature ideas live in their own track, summarized at the end.
 
 ## Correctness and durability
 
+- FIXED (found by the chaos soak): a consumer stopped receiving and never caught up
+  after the OWNER broker was killed and rejoined WITHOUT a failover (a bounce faster
+  than failure detection, so committed ownership stayed on the same broker). It was
+  never data loss (confirmed stayed durable, zero phantoms/dups) - the consumer's
+  subscription to that owner just did not re-establish after the owner's restart.
+  Two-part client fix: (1) `start_engine` now reconciles active subscriptions on
+  ANY reconnect, not only a `Resumed` session, so a fresh broker session restores
+  or closes them; (2) the subscription supervisor proactively re-dials the bound
+  owner's connection on its owner-check even when the owner endpoint is unchanged,
+  because nothing else reconnects a passive subscription's connection. Confirmed:
+  the 20-round chaos that lost ~70% now passes 4/4 with zero loss, plus a
+  deterministic unit regression (`reconnect_reconciles_subscriptions_when_resume_rejected`).
 - Idempotent producer dedup: broker reads `fibril.client.producer_id`/`seq` for
   effectively-once delivery (the headers are already on the wire). The one
   success criterion left genuinely not done. [WL/DN/PLAN phase 8]
@@ -100,6 +112,9 @@ feature ideas live in their own track, summarized at the end.
     pasted command. Offer the compose itself as the safe default. This is what
     would earn back a real "60 seconds from nothing" claim.
   - In-memory (non-durable) mode for an even lighter trial. [WL/USER]
+- Admin dashboard: a lost-connection banner. When the admin page can no longer
+  reach its broker (broker down, failover, network blip), show a clear banner
+  instead of silently stale data. [USER]
 
 ## Features (replication-related)
 
@@ -122,9 +137,12 @@ feature ideas live in their own track, summarized at the end.
 
 ## Code health and structure
 
-- Rework the `tui-example` (it has disabled instrumentation) and
-  `benches/bin/bench_e2e.rs` (half-disabled: dead channels, hardcoded params)
-  into clean, illustrative shape. [USER]
+- Rework the `tui-example` (`crates/tui-example`): a small TUI app that connects
+  to a broker and visualizes messages (packs) flowing in and out. It has disabled
+  instrumentation (latency tracking + compute_stats were dead, removed in the
+  dedup sweep). Bring it back to a clean, illustrative live-client demo. Also
+  `benches/bin/bench_e2e.rs` is half-disabled (dead channels, hardcoded
+  reporter/broker params) and wants the same treatment. [USER]
 - `stroma.rs` by-concern file split: a readability refactor independent of
   clustering. A full module sketch is preserved in the archived worklog. Do the
   low-risk type modules first, then the engine impl split incrementally. [WL]
@@ -158,6 +176,13 @@ feature ideas live in their own track, summarized at the end.
 
 ## Testing and hardening
 
+- Chaos soak harness: `scripts/cluster-tryout.sh --chaos` runs repeated mixed
+  faults (kill+rejoin and SIGSTOP/SIGCONT pause) under confirmed load and asserts
+  zero loss plus reconvergence. It found (and now passes after the fix for) the
+  owner-bounce consumer-resume bug. Each round deterministically faults the
+  topic's current owner with the consumer connected outside the replica set, so a
+  run reliably exercises the recovery path. Manual diagnostic, not in CI. A future
+  step would be wiring a trimmed version into CI as a nightly soak. [chaos]
 - Adversarial tests through all layers, plus a realistic chaotic benchmark
   (bursty, non-steady supply, consume, and bandwidth, not steady saturation). [WL]
 - Cluster benchmark profiles: replica-durable confirms, follower catch-up,

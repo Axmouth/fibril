@@ -14,6 +14,8 @@
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --replica-durable
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --replica-durable --failover-smoke
 #   scripts/cluster-tryout.sh --nodes 3 --failover-verify   # identity zero-loss check under owner kill
+#   scripts/cluster-tryout.sh --nodes 3 --chaos             # chaos soak: repeated mixed faults (kill+rejoin, pause) under load, zero-loss + reconverge
+#   scripts/cluster-tryout.sh --nodes 5 --chaos --chaos-rounds 12   # longer, wider chaos soak
 #   scripts/cluster-tryout.sh --nodes 3 --ganglion --steady-bench
 #   scripts/cluster-tryout.sh --nodes 100 --ganglion --summary --resource-summary --admin-wait-secs 5 --cluster-wait-secs 90
 #   scripts/cluster-tryout.sh --keep       # leave the cluster running to play with (detaches, prints a kill command)
@@ -45,6 +47,9 @@ FAILOVER_VERIFY=false
 FAILOVER_VERIFY_COUNT="${FAILOVER_VERIFY_COUNT:-30000}"
 FAILOVER_VERIFY_RATE="${FAILOVER_VERIFY_RATE:-5000}"
 REPARTITION_SMOKE=false
+CHAOS=false
+CHAOS_ROUNDS="${CHAOS_ROUNDS:-6}"
+CHAOS_LOAD_SECS="${CHAOS_LOAD_SECS:-70}"
 COORDINATION_HEARTBEAT_INTERVAL_MS="${COORDINATION_HEARTBEAT_INTERVAL_MS:-}"
 COORDINATION_LIVENESS_TTL_MS="${COORDINATION_LIVENESS_TTL_MS:-}"
 REPLICATION_CAUGHT_UP_POLL_MS="${REPLICATION_CAUGHT_UP_POLL_MS:-}"
@@ -86,6 +91,11 @@ while [[ $# -gt 0 ]]; do
       [[ -z "$ASSIGNMENT_DURABILITY" ]] && ASSIGNMENT_DURABILITY="replica_durable:2"
       shift ;;
     --repartition-smoke) GANGLION=true; REPARTITION_SMOKE=true; shift ;;
+    --chaos)
+      GANGLION=true; CHAOS=true
+      [[ -z "$ASSIGNMENT_DURABILITY" ]] && ASSIGNMENT_DURABILITY="replica_durable:2"
+      shift ;;
+    --chaos-rounds) CHAOS_ROUNDS="$2"; shift 2 ;;
     --admin-wait-secs) ADMIN_WAIT_SECS="$2"; shift 2 ;;
     --cluster-wait-secs) CLUSTER_WAIT_SECS="$2"; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -114,6 +124,14 @@ if [[ "$FAILOVER_SMOKE" == true && "$NODES" -lt 3 ]]; then
 fi
 if [[ "$FAILOVER_VERIFY" == true && "$NODES" -lt 3 ]]; then
   echo "FAIL: --failover-verify needs at least three nodes so raft keeps quorum after one death" >&2
+  exit 2
+fi
+if [[ "$CHAOS" == true && "$NODES" -lt 3 ]]; then
+  echo "FAIL: --chaos needs at least three nodes so the cluster keeps quorum while one is faulted" >&2
+  exit 2
+fi
+if ! [[ "$CHAOS_ROUNDS" =~ ^[0-9]+$ ]] || [[ "$CHAOS_ROUNDS" -lt 1 ]]; then
+  echo "FAIL: --chaos-rounds must be a positive integer" >&2
   exit 2
 fi
 if [[ "$REPARTITION_SMOKE" == true && "$NODES" -lt 2 ]]; then
@@ -382,6 +400,8 @@ cleanup() {
     return
   fi
   for pid in "${PIDS[@]:-}"; do
+    # Resume any chaos-paused (SIGSTOP) node so it can act on the term signal.
+    kill -CONT "$pid" 2>/dev/null || true
     kill "$pid" 2>/dev/null || true
   done
   for pid in "${PIDS[@]:-}"; do
@@ -403,11 +423,13 @@ for i in $(seq 1 "$EXPECTED_PROCESSES"); do
   done
 done
 
-if [[ "$STEADY_BENCH" == true || "$FAILOVER_VERIFY" == true ]]; then
+if [[ "$STEADY_BENCH" == true || "$FAILOVER_VERIFY" == true || "$CHAOS" == true ]]; then
   echo "building release fibril-server, fibrilctl, and bench bins..."
   cargo build --quiet --release -p fibril -p fibril-cli
   [[ "$STEADY_BENCH" == true ]] && cargo build --quiet --release -p fibril-benches --bin steady_c
-  [[ "$FAILOVER_VERIFY" == true ]] && cargo build --quiet --release -p fibril-benches --bin failover_verify
+  if [[ "$FAILOVER_VERIFY" == true || "$CHAOS" == true ]]; then
+    cargo build --quiet --release -p fibril-benches --bin failover_verify
+  fi
   SERVER=target/release/fibril-server
   CTL=target/release/fibrilctl
   VERIFY_BIN=target/release/failover_verify
@@ -427,6 +449,9 @@ fi
 
 start_node() {
   local i="$1"
+  # On a restart (chaos kill + rejoin) the node recovers from its data dir and
+  # rejoins the existing cluster, so it must NOT re-bootstrap. Pass skip_bootstrap.
+  local skip_bootstrap="${2:-false}"
   local broker_port=$((BASE_BROKER_PORT + i))
   local admin_port=$((BASE_ADMIN_PORT + i))
   # Per-node data-dir override (poor-man's separate-disk test): if
@@ -460,7 +485,7 @@ start_node() {
     if [[ -n "$COORDINATION_LIVENESS_TTL_MS" ]]; then
       env_vars+=("FIBRIL_COORDINATION_LIVENESS_TTL_MS=$COORDINATION_LIVENESS_TTL_MS")
     fi
-    if [[ "$i" -eq 1 ]]; then
+    if [[ "$i" -eq 1 && "$skip_bootstrap" != true ]]; then
       env_vars+=("FIBRIL_COORDINATION_BOOTSTRAP=true")
     fi
   fi
@@ -480,7 +505,9 @@ start_node() {
     exec env "${env_vars[@]}" "$SERVER"
   ) >"$RUN_DIR/node-$i.log" 2>&1 &
   local pid="$!"
-  PIDS+=("$pid")
+  # Assign by slot (not append) so a chaos restart of node i replaces its dead
+  # pid in place. For the initial sequential 1..N start this matches appending.
+  PIDS[$((i - 1))]="$pid"
   if [[ "$KEEP" == true ]]; then
     disown -h "$pid" 2>/dev/null || true
   fi
@@ -1015,6 +1042,121 @@ run_failover_verify() {
   echo "  failover-verify: every confirmed id survived the owner kill (zero loss, no phantoms)"
 }
 
+# Chaos soak: run a confirmed producer + consumer against a SURVIVOR while
+# injecting a SEQUENCE of varied faults (kill+rejoin and SIGSTOP/SIGCONT pause),
+# one at a time so the cluster always keeps quorum, then require zero loss + no
+# phantoms AND that the cluster reconverged. Stronger than --failover-verify
+# (one kill): this is repeated, mixed faults under sustained load.
+run_chaos() {
+  local topic="${BENCH_TOPIC}-chaos"
+  local assignment durability_mode owner follower owner_node follower_node connect_node
+  local verify_pid vexit round victim victim_pid count
+  local vdir="$RUN_DIR/chaos"
+  local vlog="$vdir/verify.log"
+  local expected_all
+  expected_all="$(seq -s, 1 "$NODES" | sed 's/^/[/' | sed 's/$/]/')"
+  mkdir -p "$vdir"
+
+  echo
+  echo "running CHAOS soak with topic '$topic' (nodes=$NODES, rounds=$CHAOS_ROUNDS, load=${CHAOS_LOAD_SECS}s)..."
+  if ! "$CTL" --broker "127.0.0.1:$((BASE_BROKER_PORT + 1))" queue declare "$topic" >/dev/null; then
+    echo "FAIL: chaos could not declare '$topic'" >&2
+    return 1
+  fi
+  assignment="$(wait_assignment_for_topic "$topic")" || return 1
+  durability_mode="$(echo "$assignment" | jq -r '.durability.mode // "local_durable"')"
+  if [[ "$durability_mode" != "replica_durable" && "$durability_mode" != "majority_durable" ]]; then
+    echo "FAIL: chaos needs a durable replica assignment, got $durability_mode" >&2
+    return 1
+  fi
+  owner="$(echo "$assignment" | jq -r '.owner')"
+  follower="$(echo "$assignment" | jq -r '.followers[0] // empty')"
+  owner_node="${owner#broker-}"
+  follower_node="${follower#broker-}"
+  # Connect the load to a node OUTSIDE this topic's replica set, so its bootstrap
+  # is never faulted AND every owner fault forces the consumer to migrate to a new
+  # owner - the path that exercises consumer ride-through and resume.
+  connect_node=""
+  for n in $(seq 1 "$NODES"); do
+    if [[ "$n" -ne "$owner_node" && "$n" -ne "$follower_node" ]]; then
+      connect_node="$n"
+      break
+    fi
+  done
+  if ! [[ "$connect_node" =~ ^[0-9]+$ ]]; then connect_node="$follower_node"; fi
+  if ! [[ "$connect_node" =~ ^[0-9]+$ ]]; then connect_node=1; fi
+
+  count=$((CHAOS_LOAD_SECS * FAILOVER_VERIFY_RATE))
+  echo "  launching load (count=$count rate=$FAILOVER_VERIFY_RATE/s) against survivor broker-$connect_node; faulting others mid-run"
+  "$VERIFY_BIN" \
+    --broker-addr "127.0.0.1:$((BASE_BROKER_PORT + connect_node))" \
+    --topic "$topic" \
+    --count "$count" \
+    --rate-per-sec "$FAILOVER_VERIFY_RATE" \
+    >"$vlog" 2>&1 &
+  verify_pid=$!
+
+  sleep 3   # let load ramp and replicate before the first fault
+
+  round=0
+  while kill -0 "$verify_pid" 2>/dev/null && [[ "$round" -lt "$CHAOS_ROUNDS" ]]; do
+    round=$((round + 1))
+    # Fault a node IN this topic's replica set (prefer the current owner) so the
+    # consumer is forced to migrate/recover every round. Query fresh since
+    # ownership moves. Never the connect node. Fall back to any other node.
+    cur="$(wait_assignment_for_topic "$topic" 2>/dev/null || echo "$assignment")"
+    victim=""
+    for cand in \
+      "$(echo "$cur" | jq -r '.owner // empty' | sed 's/^broker-//')" \
+      "$(echo "$cur" | jq -r '.followers[0] // empty' | sed 's/^broker-//')"; do
+      if [[ "$cand" =~ ^[0-9]+$ && "$cand" -ne "$connect_node" ]]; then
+        victim="$cand"
+        break
+      fi
+    done
+    if [[ -z "$victim" ]]; then
+      victim="$connect_node"
+      while [[ "$victim" -eq "$connect_node" ]]; do
+        victim=$(((RANDOM % NODES) + 1))
+      done
+    fi
+    victim_pid="${PIDS[$((victim - 1))]}"
+    if (( round % 2 == 0 )); then
+      echo "  [round $round/$CHAOS_ROUNDS] kill + rejoin broker-$victim (pid $victim_pid)"
+      kill "$victim_pid" 2>/dev/null || true
+      wait "$victim_pid" 2>/dev/null || true
+      sleep 2                     # let the cluster notice and fail over if it owned anything
+      start_node "$victim" true   # restart in place: recover + rejoin, no re-bootstrap
+      wait_admin "$victim"
+    else
+      echo "  [round $round/$CHAOS_ROUNDS] pause + resume broker-$victim (SIGSTOP/SIGCONT, pid $victim_pid)"
+      kill -STOP "$victim_pid" 2>/dev/null || true
+      sleep 3                     # appear unreachable past a liveness tick
+      kill -CONT "$victim_pid" 2>/dev/null || true
+    fi
+    # Restore a healthy single-fault baseline before the next round: wait for all
+    # voters to be visible again so we never fault two nodes at once.
+    wait_voters "$expected_all" "$NODES" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  echo "  injected $round fault round(s); waiting for the load to finish..."
+  if wait "$verify_pid"; then vexit=0; else vexit=$?; fi
+
+  echo "  --- verifier verdict ---"
+  grep -E "CONFIRMED|RECEIVED|LOSS|PHANTOM|DUPLICATE|unconfirmed|PASS|FAIL" "$vlog" | sed 's/^/  /' || true
+  echo "  ------------------------"
+  if [[ "$vexit" -ne 0 ]]; then
+    echo "FAIL: chaos soak reported loss/phantom (exit $vexit); full log: $vlog" >&2
+    return 1
+  fi
+
+  echo "  verifying the cluster reconverged (all $NODES voters, one leader)..."
+  wait_voters "$expected_all" "$NODES" || return 1
+  current_leader_id >/dev/null || return 1
+  echo "  chaos soak: zero confirmed-id loss across $round fault round(s), cluster reconverged"
+}
+
 run_repartition_smoke() {
   local topic="${BENCH_TOPIC}-repartition"
   local admin_node=1
@@ -1427,12 +1569,18 @@ if [[ "$FAILOVER_VERIFY" == true && "$FAILED" -eq 0 ]]; then
   run_failover_verify || FAILED=1
 fi
 
+if [[ "$CHAOS" == true && "$FAILED" -eq 0 ]]; then
+  run_chaos || FAILED=1
+fi
+
 if [[ "$FAILED" -ne 0 ]]; then
   echo "cluster-tryout: FAILED"
   exit 1
 fi
 
-if [[ "$FAILOVER_VERIFY" == true ]]; then
+if [[ "$CHAOS" == true ]]; then
+  echo "cluster-tryout: all checks passed, including a chaos soak (repeated mixed faults under load, zero loss, reconverged)"
+elif [[ "$FAILOVER_VERIFY" == true ]]; then
   echo "cluster-tryout: all checks passed, including identity-verified zero-loss failover under load"
 elif [[ "$FAILOVER_SMOKE" == true ]]; then
   echo "cluster-tryout: all checks passed, including intentional owner kill/failover"

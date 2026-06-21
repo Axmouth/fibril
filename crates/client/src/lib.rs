@@ -141,10 +141,8 @@ pub enum FibrilError {
     Unexpected { msg: String },
 }
 
-
 /// Result alias used by the Fibril Rust client.
 pub type FibrilResult<T> = Result<T, FibrilError>;
-
 
 // TODO: Explore From<..> impls for relevant error types
 // TODO: Add opt in event per message sent/received
@@ -1318,7 +1316,6 @@ fn partition_set(client: &Client, topic: &str, group: Option<&str>) -> Vec<Parti
         .max(1);
     (0..count).map(Partition::new).collect()
 }
-
 
 /// Background loop keeping a manual-ack subscription's fan-in current: on each
 /// tick it refreshes topology and subscribes to any partition added by a live
@@ -2887,15 +2884,25 @@ where
     }
 
     let mut restored_subs = HashMap::<u64, SubState>::new();
-    if resume_outcome == ResumeOutcome::Resumed {
+    // Re-declare active subscriptions on ANY reconnect that has them, not only a
+    // Resumed session. When the owner broker restarts in place (a bounce faster
+    // than failure detection, so ownership stays put and there is no failover)
+    // the client reconnects to a FRESH session (ResumeRejected/New) that has no
+    // memory of the subscriptions. Reconciling lets the broker either restore
+    // them (RestoreClientSubscriptions policy) or report them missing so the
+    // client drops the now-dead streams and the subscription supervisor
+    // re-subscribes. Without this, a bounced owner leaves the consumer's streams
+    // open but unfed and it silently stops receiving.
+    let reconcile_subs: Vec<_> = subscriptions
+        .read()
+        .map_err(|_| client_subscription_registry_poisoned())?
+        .values()
+        .map(|sub| sub.reconcile.clone())
+        .collect();
+    if !reconcile_subs.is_empty() {
         let reconcile = ReconcileClient {
             policy: opts.reconcile_policy,
-            subscriptions: subscriptions
-                .read()
-                .map_err(|_| client_subscription_registry_poisoned())?
-                .values()
-                .map(|sub| sub.reconcile.clone())
-                .collect(),
+            subscriptions: reconcile_subs,
         };
         send_protocol_frame(&mut framed, Op::ReconcileClient, 3, &reconcile).await?;
         let frame = framed
@@ -4076,9 +4083,16 @@ mod tests {
     #[test]
     fn publish_timeout_defaults_on_and_is_configurable() {
         assert_eq!(ClientOptions::new().publish_timeout_ms, 30_000);
-        assert_eq!(ClientOptions::new().publish_timeout_ms(0).publish_timeout_ms, 0);
         assert_eq!(
-            ClientOptions::new().publish_timeout_ms(5_000).publish_timeout_ms,
+            ClientOptions::new()
+                .publish_timeout_ms(0)
+                .publish_timeout_ms,
+            0
+        );
+        assert_eq!(
+            ClientOptions::new()
+                .publish_timeout_ms(5_000)
+                .publish_timeout_ms,
             5_000
         );
     }
@@ -4490,6 +4504,186 @@ mod tests {
         let msg = sub.recv().await.unwrap();
         assert_eq!(msg.payload, b"after-reconnect");
         assert_eq!(msg.delivery_tag, DeliveryTag { epoch: 123 });
+
+        client.shutdown().await;
+        server.await.unwrap();
+    }
+
+    // Regression: when the owner broker restarts in place (bounce faster than
+    // failover, so ownership stays put), the client reconnects to a FRESH session
+    // (resume REJECTED). It must still reconcile its active subscriptions so the
+    // broker re-establishes delivery - otherwise the consumer's stream stays open
+    // but unfed and it silently stops receiving (found by the chaos soak). Uses
+    // the DEFAULT (Conservative) policy to prove the common case.
+    #[tokio::test]
+    async fn reconnect_reconciles_subscriptions_when_resume_rejected() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let server = tokio::spawn(async move {
+            let owner_id = uuid::Uuid::new_v4();
+            let client_id = uuid::Uuid::new_v4();
+            let resume_token = uuid::Uuid::new_v4();
+
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = Framed::new(first, ProtoCodec);
+            let hello = first.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            first
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id,
+                            client_id,
+                            resume_token,
+                            resume_outcome: ResumeOutcome::New,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let subscribe = first.next().await.unwrap().unwrap();
+            assert_eq!(subscribe.opcode, Op::Subscribe as u16);
+            let req: Subscribe = try_decode(&subscribe).unwrap();
+            first
+                .send(
+                    try_encode(
+                        Op::SubscribeOk,
+                        subscribe.request_id,
+                        &SubscribeOk {
+                            sub_id: 77,
+                            topic: req.topic,
+                            group: req.group,
+                            partition: Partition::new(0),
+                            prefetch: req.prefetch,
+                            consumer_group: None,
+                            consumer_target: None,
+                            member_id: None,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // Reconnect: the broker came back FRESH, so resume is REJECTED.
+            let (second, _) = listener.accept().await.unwrap();
+            let mut second = Framed::new(second, ProtoCodec);
+            let hello = second.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            second
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id,
+                            client_id,
+                            resume_token,
+                            resume_outcome: ResumeOutcome::ResumeRejected,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // The fix: a reconcile arrives even though resume was rejected.
+            let reconcile = second.next().await.unwrap().unwrap();
+            assert_eq!(reconcile.opcode, Op::ReconcileClient as u16);
+            let msg: ReconcileClient = try_decode(&reconcile).unwrap();
+            tx.send(msg).await.unwrap();
+            let client_sub = ReconcileSubscription {
+                sub_id: 77,
+                topic: "jobs".into(),
+                group: None,
+                partition: Partition::new(0),
+                auto_ack: false,
+                prefetch: 1,
+                consumer_group: None,
+                consumer_target: None,
+                member_id: None,
+            };
+            let restored = ReconcileSubscription {
+                sub_id: 88,
+                ..client_sub.clone()
+            };
+            second
+                .send(
+                    try_encode(
+                        Op::ReconcileResult,
+                        reconcile.request_id,
+                        &ReconcileResult {
+                            subscriptions: vec![ReconcileSubscriptionResult {
+                                client: Some(client_sub),
+                                server: Some(restored.clone()),
+                                action: ReconcileAction::Keep,
+                                reason: "server_restored".into(),
+                            }],
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            second
+                .send(
+                    wire::encode_deliver(
+                        88,
+                        &Deliver {
+                            sub_id: 88,
+                            topic: "jobs".into(),
+                            group: None,
+                            partition: Partition::new(0),
+                            offset: 9,
+                            delivery_tag: DeliveryTag { epoch: 123 },
+                            published: 1,
+                            publish_received: 2,
+                            content_type: None,
+                            headers: HashMap::new(),
+                            payload: b"after-restart".to_vec(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let mut client = ClientOptions::new()
+            .disable_topology_warm()
+            .connect(addr)
+            .await
+            .unwrap();
+        let mut sub = client
+            .subscribe("jobs")
+            .unwrap()
+            .sub_manual_ack()
+            .await
+            .unwrap();
+        let outcome = client.reconnect().await.unwrap();
+
+        // Resume was rejected, yet the client still reconciled (the regression).
+        assert_eq!(outcome.resume_outcome, ResumeOutcome::ResumeRejected);
+        let reconcile = rx.recv().await.unwrap();
+        assert_eq!(reconcile.policy, ReconcilePolicy::Conservative);
+        assert_eq!(reconcile.subscriptions.len(), 1);
+        assert_eq!(reconcile.subscriptions[0].sub_id, 77);
+        assert_eq!(reconcile.subscriptions[0].topic, "jobs");
+        // And delivery resumes on the re-established subscription.
+        let msg = sub.recv().await.unwrap();
+        assert_eq!(msg.payload, b"after-restart");
 
         client.shutdown().await;
         server.await.unwrap();

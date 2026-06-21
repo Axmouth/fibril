@@ -205,7 +205,27 @@ fn supervise_forward<M, F>(
                         client.shared.refresh_topology_throttled().await;
                         let current = owner_of(&client, &req);
                         if current.is_some() && current != bound_owner {
+                            tracing::debug!(?bound_owner, ?current, "subscription owner moved, migrating");
                             break true;
+                        }
+                        // The owner endpoint is unchanged, but its connection may
+                        // have dropped (an owner restart-in-place: a bounce faster
+                        // than failover, so ownership stays put). Nothing else
+                        // reconnects a passive subscription's connection, so re-dial
+                        // it here. The reconnect reconciles active subscriptions,
+                        // re-establishing this stream (or closing it so we
+                        // re-subscribe). Cheap when the connection is healthy.
+                        if let Some(owner_addr) = current {
+                            match client.shared.engine_slot(owner_addr).await {
+                                Ok(slot) => {
+                                    if let Err(e) = slot.engine_for_operation().await {
+                                        tracing::debug!(%owner_addr, error = ?e, "subscription owner reconnect failed, will retry");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(%owner_addr, error = ?e, "subscription owner slot unavailable");
+                                }
+                            }
                         }
                     }
                 }
@@ -305,14 +325,30 @@ mod tests {
         // Retry: transport, redirect, topology conflict, server-transient.
         retry(FibrilError::BrokenPipe);
         retry(FibrilError::Eof);
-        retry(FibrilError::Disconnection { msg: "refused".into() });
-        retry(FibrilError::Failure { code: ERR_NOT_OWNER, msg: "moved".into() });
-        retry(FibrilError::Failure { code: 503, msg: "server busy".into() });
+        retry(FibrilError::Disconnection {
+            msg: "refused".into(),
+        });
+        retry(FibrilError::Failure {
+            code: ERR_NOT_OWNER,
+            msg: "moved".into(),
+        });
+        retry(FibrilError::Failure {
+            code: 503,
+            msg: "server busy".into(),
+        });
 
         // Do not retry: gone, invalid, and local request errors.
-        no(FibrilError::Failure { code: ERR_NOT_FOUND, msg: "no topic".into() });
-        no(FibrilError::Failure { code: ERR_INVALID, msg: "bad arg".into() });
-        no(FibrilError::SerializationFailure { msg: "bad payload".into() });
+        no(FibrilError::Failure {
+            code: ERR_NOT_FOUND,
+            msg: "no topic".into(),
+        });
+        no(FibrilError::Failure {
+            code: ERR_INVALID,
+            msg: "bad arg".into(),
+        });
+        no(FibrilError::SerializationFailure {
+            msg: "bad payload".into(),
+        });
         no(FibrilError::InvalidName {
             kind: "topic",
             name: "BAD".into(),
@@ -321,7 +357,13 @@ mod tests {
 
         // is_retryable mirrors retry_advice == Retry.
         assert!(FibrilError::BrokenPipe.is_retryable());
-        assert!(!FibrilError::Failure { code: ERR_NOT_FOUND, msg: "x".into() }.is_retryable());
+        assert!(
+            !FibrilError::Failure {
+                code: ERR_NOT_FOUND,
+                msg: "x".into()
+            }
+            .is_retryable()
+        );
     }
 
     #[test]
