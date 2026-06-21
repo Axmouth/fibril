@@ -84,7 +84,22 @@ feature ideas live in their own track, summarized at the end.
   the time and dirty triggers. The gate is commented out in
   `periodic_snapshot_step`, `last_snapshot_event_offset` is already tracked, so
   wiring is low-risk. Currently `#[allow(dead_code)]` with a FIXME. [USER]
-- Onboarding and easy trial: docker one-liner, in-memory mode, 60s quickstart. [WL]
+- Onboarding and easy trial (move on this soon): make "cluster from nothing"
+  genuinely fast and low-ceremony. The local tryout still needs a clone and a
+  build, so it is not really a 60-second path. Most of the pipeline is already
+  done: a `Dockerfile`, a CI job (`server-docker-image`) that publishes
+  `ghcr.io/<owner>/fibril-server` (`:main` and `:sha-...`) on every push to main,
+  and a single-server `compose.server.example.yaml`. Remaining to reach a
+  one-command trial:
+  - Make the GHCR package public so `docker run` and compose work anonymously
+    (a GitHub package-visibility toggle, not a repo change).
+  - Add a multi-node cluster compose (a few `fibril-server` services in ganglion
+    mode, shared network, service-DNS peers, bootstrap on one) plus the admin
+    dashboard, so a coordinated cluster comes up in one `docker compose up`.
+  - A curl-to-shell bootstrap that fetches and runs that compose for a single
+    pasted command. Offer the compose itself as the safe default. This is what
+    would earn back a real "60 seconds from nothing" claim.
+  - In-memory (non-durable) mode for an even lighter trial. [WL/USER]
 
 ## Features (replication-related)
 

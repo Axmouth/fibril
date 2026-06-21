@@ -26,10 +26,11 @@ hood. You do not configure Raft directly beyond its timings: Fibril's surface
 talks in terms of coordination, owners, followers, and a leader, and the
 consensus protocol is an implementation detail of the coordinator.
 
-## Try a cluster in 60 seconds
+## Try a cluster locally
 
 You can stand up a real multi-broker cluster on one machine, with no external
-services, using the tryout script. It starts several actual broker processes
+services, using the tryout script. You will need the repository checked out and
+a Rust toolchain, since the first run builds the broker from source. It starts several actual broker processes
 (each with its own ports and data directory), forms one coordination group,
 runs a few checks, and then holds the cluster open so you can explore it:
 
