@@ -25,13 +25,17 @@ import type {
   PublishMsg,
   PublishOkMsg,
   QueueDlqPolicy,
+  QueueTopologyEntryMsg,
   ReconcileClientMsg,
   ReconcileResultMsg,
   ReconcileServerMsg,
   ReconcileSubscription,
+  RedirectMsg,
   ResumeIdentity,
   SubscribeMsg,
   SubscribeOkMsg,
+  TopologyOkMsg,
+  TopologyRequestMsg,
 } from "./protocol.js";
 import * as wire from "./wire.js";
 
@@ -127,6 +131,28 @@ function publishToWire(v: PublishMsg): wire.Publish {
     published: v.published,
     partitionKey: v.partition_key ?? null,
     partitioningVersion: v.partitioning_version ?? 0n,
+  };
+}
+
+function entryToWire(e: QueueTopologyEntryMsg): wire.QueueTopologyEntry {
+  return {
+    topic: e.topic,
+    partition: e.partition,
+    group: e.group,
+    ownerEndpoint: e.owner_endpoint,
+    partitioningVersion: e.partitioning_version,
+    partitionCount: e.partition_count,
+  };
+}
+
+function entryFromWire(e: wire.QueueTopologyEntry): QueueTopologyEntryMsg {
+  return {
+    topic: e.topic,
+    partition: e.partition,
+    group: e.group,
+    owner_endpoint: e.ownerEndpoint,
+    partitioning_version: e.partitioningVersion,
+    partition_count: e.partitionCount,
   };
 }
 
@@ -281,6 +307,27 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
         })),
       });
     }
+    case Op.Topology: {
+      const v = value as TopologyRequestMsg;
+      return wire.encodeTopologyRequestBody({ topic: v.topic, group: v.group });
+    }
+    case Op.TopologyOk: {
+      const v = value as TopologyOkMsg;
+      return wire.encodeTopologyOkBody({
+        generation: v.generation,
+        queues: v.queues.map(entryToWire),
+      });
+    }
+    case Op.Redirect: {
+      const v = value as RedirectMsg;
+      return wire.encodeRedirectBody({
+        topic: v.topic,
+        partition: v.partition,
+        group: v.group,
+        ownerEndpoint: v.owner_endpoint,
+        partitioningVersion: v.partitioning_version,
+      });
+    }
     case Op.HelloErr:
     case Op.AuthErr:
     case Op.SubscribeErr:
@@ -429,6 +476,27 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
           reason: s.reason,
         })),
       } satisfies ReconcileResultMsg;
+    }
+    case Op.Topology: {
+      const w = wire.decodeTopologyRequestBody(payload);
+      return { topic: w.topic, group: w.group } satisfies TopologyRequestMsg;
+    }
+    case Op.TopologyOk: {
+      const w = wire.decodeTopologyOkBody(payload);
+      return {
+        generation: w.generation,
+        queues: w.queues.map(entryFromWire),
+      } satisfies TopologyOkMsg;
+    }
+    case Op.Redirect: {
+      const w = wire.decodeRedirectBody(payload);
+      return {
+        topic: w.topic,
+        partition: w.partition,
+        group: w.group,
+        owner_endpoint: w.ownerEndpoint,
+        partitioning_version: w.partitioningVersion,
+      } satisfies RedirectMsg;
     }
     case Op.HelloErr:
     case Op.AuthErr:

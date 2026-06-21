@@ -313,3 +313,59 @@ test("reconcile result body round-trips across actions", () => {
   };
   assert.deepEqual(decodeReconcileResultBody(encodeReconcileResultBody(rr)), rr);
 });
+
+import {
+  encodeTopologyRequestBody,
+  decodeTopologyRequestBody,
+  encodeTopologyOkBody,
+  decodeTopologyOkBody,
+  encodeRedirectBody,
+  decodeRedirectBody,
+} from "../src/wire.js";
+
+test("topology request body round-trips with and without filters", () => {
+  const full = { topic: "orders", group: "workers" };
+  assert.deepEqual(decodeTopologyRequestBody(encodeTopologyRequestBody(full)), full);
+
+  const empty = { topic: null, group: null };
+  assert.deepEqual(decodeTopologyRequestBody(encodeTopologyRequestBody(empty)), empty);
+});
+
+test("topology ok body round-trips across entries", () => {
+  const topology = {
+    generation: 12n,
+    queues: [
+      {
+        topic: "orders",
+        partition: 0,
+        group: "workers",
+        ownerEndpoint: "127.0.0.1:9001",
+        partitioningVersion: 3n,
+        partitionCount: 4,
+      },
+      {
+        topic: "orders",
+        partition: 1,
+        group: "workers",
+        ownerEndpoint: null,
+        partitioningVersion: 3n,
+        partitionCount: 4,
+      },
+    ],
+  };
+  assert.deepEqual(decodeTopologyOkBody(encodeTopologyOkBody(topology)), topology);
+
+  const emptyTopology = { generation: 0n, queues: [] };
+  assert.deepEqual(decodeTopologyOkBody(encodeTopologyOkBody(emptyTopology)), emptyTopology);
+});
+
+test("redirect body round-trips", () => {
+  const redirect = {
+    topic: "orders",
+    partition: 2,
+    group: null,
+    ownerEndpoint: "127.0.0.1:9002",
+    partitioningVersion: 5n,
+  };
+  assert.deepEqual(decodeRedirectBody(encodeRedirectBody(redirect)), redirect);
+});

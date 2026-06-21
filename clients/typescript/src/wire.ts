@@ -1071,3 +1071,114 @@ export function decodeReconcileResultBody(body: Uint8Array): ReconcileResult {
   r.finish();
   return { subscriptions };
 }
+
+// ---- topology + redirect (cluster routing) ----
+
+export interface TopologyRequest {
+  topic: string | null;
+  group: string | null;
+}
+
+/** One queue partition's ownership as seen by clients for routing. */
+export interface QueueTopologyEntry {
+  topic: string;
+  partition: number;
+  group: string | null;
+  // Owner broker endpoint, absent when the owner node is not in the registry.
+  ownerEndpoint: string | null;
+  partitioningVersion: bigint;
+  // Authoritative partition count for the queue, used for key routing.
+  partitionCount: number;
+}
+
+export interface TopologyOk {
+  generation: bigint;
+  queues: QueueTopologyEntry[];
+}
+
+/**
+ * Routing redirect: not an error but a target to retry against. It must be
+ * retried on a connection to ownerEndpoint, so the routing layer handles it.
+ */
+export interface Redirect {
+  topic: string;
+  partition: number;
+  group: string | null;
+  ownerEndpoint: string;
+  partitioningVersion: bigint;
+}
+
+export function encodeTopologyRequestBody(req: TopologyRequest): Uint8Array {
+  const w = new Writer();
+  w.magic("FTP1");
+  w.optionalStr(req.topic);
+  w.optionalStr(req.group);
+  return w.finish();
+}
+
+export function decodeTopologyRequestBody(body: Uint8Array): TopologyRequest {
+  const r = new Reader(body);
+  r.expectMagic("FTP1");
+  const req: TopologyRequest = { topic: r.optionalStr(), group: r.optionalStr() };
+  r.finish();
+  return req;
+}
+
+export function encodeTopologyOkBody(topology: TopologyOk): Uint8Array {
+  const w = new Writer();
+  w.magic("FTO1");
+  w.u64(topology.generation);
+  w.u32(topology.queues.length);
+  for (const e of topology.queues) {
+    w.queueKey(e.topic, e.partition, e.group);
+    w.optionalStr(e.ownerEndpoint);
+    w.u64(e.partitioningVersion);
+    w.u32(e.partitionCount);
+  }
+  return w.finish();
+}
+
+export function decodeTopologyOkBody(body: Uint8Array): TopologyOk {
+  const r = new Reader(body);
+  r.expectMagic("FTO1");
+  const generation = r.u64();
+  const n = r.u32();
+  const queues: QueueTopologyEntry[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const key = r.queueKey();
+    queues.push({
+      topic: key.topic,
+      partition: key.partition,
+      group: key.group,
+      ownerEndpoint: r.optionalStr(),
+      partitioningVersion: r.u64(),
+      partitionCount: r.u32(),
+    });
+  }
+  r.finish();
+  return { generation, queues };
+}
+
+export function encodeRedirectBody(redirect: Redirect): Uint8Array {
+  const w = new Writer();
+  w.magic("FRD1");
+  w.queueKey(redirect.topic, redirect.partition, redirect.group);
+  w.str(redirect.ownerEndpoint);
+  w.u64(redirect.partitioningVersion);
+  return w.finish();
+}
+
+export function decodeRedirectBody(body: Uint8Array): Redirect {
+  const r = new Reader(body);
+  r.expectMagic("FRD1");
+  const key = r.queueKey();
+  const redirect: Redirect = {
+    topic: key.topic,
+    partition: key.partition,
+    group: key.group,
+    ownerEndpoint: r.str(),
+    partitioningVersion: r.u64(),
+  };
+  r.finish();
+  return redirect;
+}

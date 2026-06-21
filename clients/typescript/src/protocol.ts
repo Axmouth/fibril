@@ -44,6 +44,10 @@ export enum Op {
   ReconcileServer = 71,
   ReconcileResult = 72,
 
+  Topology = 90,
+  TopologyOk = 91,
+  Redirect = 92,
+
   Error = 255,
 }
 
@@ -246,4 +250,43 @@ export interface NackMsg {
 export interface ErrorMsg {
   code: number;
   message: string;
+}
+
+// ===== Cluster topology + routing =====
+
+/** Topology query. A null topic asks for the full topology. */
+export interface TopologyRequestMsg {
+  topic: string | null;
+  group: string | null;
+}
+
+/** Ownership of one queue partition, as seen by clients for routing. */
+export interface QueueTopologyEntryMsg {
+  topic: string;
+  partition: number;
+  group: string | null;
+  // Owner broker endpoint, absent when the owner node is not in the registry.
+  owner_endpoint: string | null;
+  partitioning_version: bigint;
+  // Authoritative partition count for the queue, used for key routing.
+  partition_count: number;
+}
+
+/** Topology snapshot at a coordination generation. */
+export interface TopologyOkMsg {
+  generation: bigint;
+  queues: QueueTopologyEntryMsg[];
+}
+
+/**
+ * Routing redirect: not an error but a target to retry against. The retry must
+ * go to owner_endpoint on a separate connection, so the routing layer (not the
+ * per-connection engine) acts on it.
+ */
+export interface RedirectMsg {
+  topic: string;
+  partition: number;
+  group: string | null;
+  owner_endpoint: string;
+  partitioning_version: bigint;
 }
