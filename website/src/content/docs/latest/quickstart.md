@@ -88,4 +88,4 @@ For startup config, runtime settings, and idle queue cleanup options, see [confi
 
 ## Try a cluster
 
-To stand up a real multi-broker cluster locally and watch ownership, replication, and failover from the admin dashboard, see [try a cluster with Docker in about a minute](/latest/concepts/clustering/#try-a-cluster-with-docker). Clustering is experimental.
+To stand up a real multi-broker cluster locally and watch ownership, replication, and failover from the admin dashboard, see [try a cluster with Docker in under a minute](/latest/concepts/clustering/#try-a-cluster-with-docker). Clustering is experimental.

@@ -28,7 +28,7 @@ consensus protocol is an implementation detail of the coordinator.
 
 ## Try a cluster with Docker
 
-The fastest way to see a cluster, in about a minute, with no clone and no build.
+The fastest way to see a cluster, in under a minute, with no clone and no build.
 You need Docker with the Compose plugin:
 
 ```sh
