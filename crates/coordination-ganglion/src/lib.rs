@@ -5,7 +5,8 @@
 //! and bridges ganglion's committed-snapshot watch into the
 //! `watch::Receiver<CoordinationSnapshot>` fibril consumes. Reads are sync
 //! (trait-compatible); proposals are async and leader-only, matching the
-//! controller-loop model from `REPLICATION_PLANNING.md`.
+//! controller-loop model. See the coordination internals dev note:
+//! https://fibril.sh/latest/development/coordination-internals/
 
 use std::{collections::HashMap, time::Duration};
 
@@ -1201,8 +1202,7 @@ impl GanglionCoordination {
     /// v1 grows by an INTEGER MULTIPLE only (`new_count` must be a strictly larger
     /// multiple of the current count, typically doubling). With modulo hashing
     /// that keeps the per-key ordering barrier a pure partition-identity gate
-    /// (each new partition sources from exactly one old partition), see
-    /// DESIGN_NOTES.md.
+    /// (each new partition sources from exactly one old partition).
     ///
     /// - undeclared queue -> `NotDeclared`.
     /// - already at `new_count` -> idempotent success.
@@ -1334,8 +1334,8 @@ impl GanglionCoordination {
     /// draining (retirement/deregistration is deferred).
     ///
     /// NOTE: a stricter choreography would wait for owners to confirm survivors
-    /// are held before the version bump (see DESIGN_NOTES). v1 relies on the
-    /// watcher applying the hold within about one tick of the marker.
+    /// are held before the version bump. v1 relies on the watcher applying the
+    /// hold within about one tick of the marker.
     pub async fn shrink_queue(
         &self,
         topic: &str,
@@ -1864,7 +1864,8 @@ impl GanglionCoordination {
 
     /// One embedded-controller iteration, gated on raft leadership.
     ///
-    /// Implements the controller-loop shape from `REPLICATION_PLANNING.md`:
+    /// Implements the controller-loop shape (see the coordination internals dev
+    /// note, https://fibril.sh/latest/development/coordination-internals/):
     /// read committed state, run the pure placement planner over the given
     /// live-node set, stamp fencing epochs (owner change bumps, follower churn
     /// holds), and propose through a guarded CAS write — retrying when another

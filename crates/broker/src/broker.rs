@@ -1075,7 +1075,8 @@ impl ExclusiveGroupRouter {
     /// as a whole) also drops the whole member, briefly losing exclusivity on its
     /// other partitions until it re-subscribes. Acceptable for single-owner scope;
     /// revisit (per-partition leave) if/when client narrowing lands, where partial
-    /// unsubscribe becomes a normal operation. See REPLICATION_WORKLOG limitation (c).
+    /// unsubscribe becomes a normal operation. Tracked in FOLLOWUPS.md
+    /// (consumer assignment push and client fan-in narrowing).
     fn leave(
         &mut self,
         key: ConsumerGroupKey,

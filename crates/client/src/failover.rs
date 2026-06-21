@@ -91,8 +91,8 @@ impl FibrilError {
 
 // TODO(config-knobs, expert tier): the three failover-retry constants below are
 // hardcoded for now. Promote them to `ClientOptions` knobs in the later settings
-// pass (client-side tunables, expert tier per the settings-tiering design in
-// DESIGN_NOTES.md), alongside the existing `publish_timeout_ms`. Tracked:
+// pass (client-side tunables, expert tier per the settings-tiering follow-up in
+// FOLLOWUPS.md), alongside the existing `publish_timeout_ms`. Tracked:
 //   - PUBLISH_RETRY_INITIAL_BACKOFF_MS / PUBLISH_RETRY_MAX_BACKOFF_MS
 //   - SUBSCRIPTION_OWNER_CHECK_MS
 

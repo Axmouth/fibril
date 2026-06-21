@@ -60,6 +60,13 @@ feature ideas live in their own track, summarized at the end.
 
 - Programmatic scale up and down: join (learner to voter to rebalance) and
   drain-and-leave via fibrilctl plus the admin API, autoscaler-drivable. [PLAN]
+- Consumer assignment push and client fan-in narrowing: today a cohort client
+  fans in to all partitions of a queue and the per-partition delivery gate
+  enforces exclusivity. The deferred optimization is an assignment-change push
+  (`Op::AssignmentChanged`) so a client only pulls from partitions it is
+  assigned, with the gate staying as the correctness backstop. This also enables
+  per-partition leave (today `leave` drops the whole connection subscription).
+  [WL phase-2a limitation (c)] [MEM]
 - Unclean-leader-election toggle, off by default. Minor. [PLAN]
 - Settings tiering: basic, advanced, expert, with collapsible sections. [DN/WL]
 - Settings presets, orthogonal to tiers: opinionated bundles such as low-latency,
