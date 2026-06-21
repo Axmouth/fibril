@@ -2,7 +2,7 @@
 
 What each Fibril client supports, so parity gaps are visible at a glance and new
 clients have a checklist to work against. The Rust client (`crates/client`) is
-the reference implementation; other clients aim to match its behavior, not
+the reference implementation, and other clients aim to match its behavior, not
 necessarily its internal structure (e.g. the TS client mirrors the routing
 design with plain single-threaded constructs rather than locks and atomics).
 
@@ -41,7 +41,7 @@ Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 | Ack / Nack / retry-after | done | done |
 | Prefetch / backpressure | done | done |
 | Declare queue + DLQ policies | done | done |
-| Multi-partition subscribe fan-in | done | done (set fixed at subscribe; live grow pending) |
+| Multi-partition subscribe fan-in | done | done (set fixed at subscribe, live grow pending) |
 
 ## Reconnect and resume
 
@@ -73,10 +73,10 @@ Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 | Retry classification (is_retryable / retry_advice) | done | done |
 | Reserved-namespace header validation | done | done |
 | ReliablePublisher helper | done | done |
-| Producer-id dedup headers | done | done (sent; broker dedup pending both sides) |
+| Producer-id dedup headers | done | done (sent, broker dedup pending both sides) |
 | Exclusive consumer groups | done | done (cohort subscribe + member-id mint/carry) |
 | Cohort member id mint/carry | done | done |
-| Assignment events stream (AssignmentChanged) | done | no (broker gate enforces exclusivity; stream deferred) |
+| Assignment events stream (AssignmentChanged) | done | no (broker gate enforces exclusivity, stream not emitted server-side yet) |
 
 ## Tooling
 
@@ -84,7 +84,7 @@ Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 | --- | --- | --- |
 | Examples | done | done (hello/demo + self-validating *.example.ts) |
 | Examples-as-light-tests runner | done | done (run-all.sh, continuous/--check modes) |
-| Real-broker integration smoke | done | done (CI runs examples vs the published broker image; multi-node cluster smoke pending) |
+| Real-broker integration smoke | done | done (CI runs examples vs the published broker image, multi-node cluster smoke pending) |
 
 See `FOLLOWUPS.md` (repo root, "Clients" section) for the brick-by-brick plan
 behind the TypeScript "no"/"partial" rows.

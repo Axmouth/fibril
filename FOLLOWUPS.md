@@ -162,12 +162,12 @@ feature ideas live in their own track, summarized at the end.
     ganglion cluster smoke that exercises a real cross-owner redirect is still
     worth adding (fits the brick 8 examples-as-light-tests runner).
   - BRICK 4 reconnect + reconcile + resume: DONE. ResumeIdentity/Outcome on Hello
-    and the Reconcile* ops were already wired; the gap was the owner-restart case.
+    and the Reconcile* ops were already wired. The gap was the owner-restart case.
     Reconcile now fires on ANY reconnect that has active subscriptions (not only a
     resumed session) so a bounced owner's fresh session restores or closes the
-    streams instead of leaving them open-but-unfed. Regression-tested. Still TODO
-    (brick 5): nothing TRIGGERS a reconnect for a purely passive consumer whose
-    connection drops - that needs the subscription supervisor / proactive re-dial.
+    streams instead of leaving them open-but-unfed. Regression-tested. Done in
+    brick 5: the supervisor now triggers a reconnect for a passive consumer whose
+    connection drops.
   - BRICK 5 failover ride-through: DONE (single-partition). Publish side: transient
     owner-failover retry with throttled topology refresh, jittered backoff,
     deadline, not-found fast-fail (publishTimeoutMs), same loop as redirect-follow.
@@ -191,7 +191,7 @@ feature ideas live in their own track, summarized at the end.
   - BRICK 7 reliability: DONE. retryAdvice/isRetryable classification, the
     reserved-namespace header guard, and a ReliablePublisher that stamps producer
     id + monotonic seq (fibril.client.*) and retries until confirmed. At-least-once
-    today; effectively-once once the broker dedups on those keys (both sides TODO).
+    today. Effectively-once once the broker dedups on those keys (both sides TODO).
   - BRICK 8 examples-as-light-tests: DONE. Self-validating examples/*.example.ts
     (roundtrip, confirmed-delayed, manual-ack-retry, stream) + run-all.sh that
     starts a broker and runs them all. Continuous examples take --check for a
@@ -199,13 +199,14 @@ feature ideas live in their own track, summarized at the end.
     by reusing the published fibril-server image rather than building from source.
     STILL TODO: a multi-node cluster smoke for a real cross-owner redirect (needs
     a ganglion cluster, not just one container).
-  - Deferred client follow-ups, gated on server features that do not exist yet
-    (NOT client gaps): an assignment-events stream (the broker does not emit
-    AssignmentChanged today - both references in broker.rs are comments), live
-    partition-grow fan-in (pairs with live repartitioning, counts are fixed at
-    create), lease preservation across re-subscribe and effectively-once dedup
-    (need broker-side producer dedup). Build the client side when the server side
-    lands.
+  - Open client gaps, deferred because closing them needs server-side support
+    that does not exist yet (so building the client half now would be untestable
+    dead code, likely wrong when the server side lands): an assignment-events
+    stream (the broker does not emit AssignmentChanged today - both references in
+    broker.rs are comments), live partition-grow fan-in (pairs with live
+    repartitioning, counts are fixed at create), lease preservation across
+    re-subscribe, and effectively-once dedup (need broker-side producer dedup).
+    Build the client half when each server side lands.
   Pairs with AUDITS.md "Client API parity" and the client reliability docs item.
   [USER/AUDIT]
   See clients/ARCHITECTURE.md for the design reference and clients/FEATURE_MATRIX.md
