@@ -192,11 +192,20 @@ feature ideas live in their own track, summarized at the end.
     reserved-namespace header guard, and a ReliablePublisher that stamps producer
     id + monotonic seq (fibril.client.*) and retries until confirmed. At-least-once
     today; effectively-once once the broker dedups on those keys (both sides TODO).
-  - BRICK 8 examples-as-light-tests: DONE (pending a real-broker run). Self-
-    validating examples/*.example.ts (roundtrip, confirmed-delayed, manual-ack-
-    retry, stream) + run-all.sh that starts a broker and runs them all. Continuous
-    examples take --check for a bounded validated burst. STILL TODO: wire run-all.sh
-    into CI, and a multi-node cluster smoke (the sandbox could not spawn a broker).
+  - BRICK 8 examples-as-light-tests: DONE. Self-validating examples/*.example.ts
+    (roundtrip, confirmed-delayed, manual-ack-retry, stream) + run-all.sh that
+    starts a broker and runs them all. Continuous examples take --check for a
+    bounded validated burst. Wired into CI (typescript-client-ci "examples" job)
+    by reusing the published fibril-server image rather than building from source.
+    STILL TODO: a multi-node cluster smoke for a real cross-owner redirect (needs
+    a ganglion cluster, not just one container).
+  - Deferred client follow-ups, gated on server features that do not exist yet
+    (NOT client gaps): an assignment-events stream (the broker does not emit
+    AssignmentChanged today - both references in broker.rs are comments), live
+    partition-grow fan-in (pairs with live repartitioning, counts are fixed at
+    create), lease preservation across re-subscribe and effectively-once dedup
+    (need broker-side producer dedup). Build the client side when the server side
+    lands.
   Pairs with AUDITS.md "Client API parity" and the client reliability docs item.
   [USER/AUDIT]
   See clients/ARCHITECTURE.md for the design reference and clients/FEATURE_MATRIX.md

@@ -10,6 +10,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+CLIENT_DIR="$(cd "$HERE/.." && pwd)"
 REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 PORT="${FIBRIL_PORT:-9876}"
 ADDR="${FIBRIL_ADDR:-127.0.0.1:$PORT}"
@@ -38,8 +39,9 @@ failures=0
 for example in "$HERE"/*.example.ts; do
   echo "=== $(basename "$example") ==="
   # --check makes continuous examples run a bounded, self-validating burst and
-  # exit; bounded examples ignore it.
-  if ! FIBRIL_ADDR="$ADDR" npx tsx "$example" --check; then
+  # exit. Bounded examples ignore it. Run npx from the client dir so tsx resolves
+  # regardless of where this script was invoked from.
+  if ! (cd "$CLIENT_DIR" && FIBRIL_ADDR="$ADDR" npx tsx "$example" --check); then
     failures=$((failures + 1))
   fi
 done

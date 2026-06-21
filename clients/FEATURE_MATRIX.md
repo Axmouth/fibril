@@ -84,7 +84,7 @@ Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 | --- | --- | --- |
 | Examples | done | done (hello/demo + self-validating *.example.ts) |
 | Examples-as-light-tests runner | done | done (run-all.sh, continuous/--check modes) |
-| Real-broker integration smoke | done | partial (standalone validated; cluster smoke + CI wiring of run-all.sh pending) |
+| Real-broker integration smoke | done | done (CI runs examples vs the published broker image; multi-node cluster smoke pending) |
 
 See `FOLLOWUPS.md` (repo root, "Clients" section) for the brick-by-brick plan
 behind the TypeScript "no"/"partial" rows.
