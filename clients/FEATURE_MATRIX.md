@@ -69,6 +69,7 @@ Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 | Feature | Rust | TypeScript |
 | --- | --- | --- |
 | Retry classification (is_retryable / retry_advice) | done | partial (isTransientError only) |
+| Reserved-namespace header validation | done | no |
 | ReliablePublisher helper | done | no |
 | Producer-id dedup headers | done | no |
 | Exclusive consumer groups | done | no |
