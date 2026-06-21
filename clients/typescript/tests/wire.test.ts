@@ -106,3 +106,167 @@ test("magic mismatch is rejected", () => {
   const body = encodeAuthBody({ username: "a", password: "b" });
   assert.throws(() => decodeHelloBody(body), /magic/);
 });
+
+import {
+  encodePublishBody,
+  decodePublishBody,
+  encodePublishDelayedBody,
+  decodePublishDelayedBody,
+  encodePublishOkBody,
+  decodePublishOkBody,
+  encodeDeliverBody,
+  decodeDeliverBody,
+  encodeAckBody,
+  decodeAckBody,
+  encodeNackBody,
+  decodeNackBody,
+  encodeDeclareQueueBody,
+  decodeDeclareQueueBody,
+  encodeDeclareQueueOkBody,
+  decodeDeclareQueueOkBody,
+  encodeSubscribeBody,
+  decodeSubscribeBody,
+  encodeSubscribeOkBody,
+  decodeSubscribeOkBody,
+} from "../src/wire.js";
+
+test("publish body round-trips (with and without optionals)", () => {
+  const full = {
+    topic: "orders",
+    partition: 3,
+    group: "g",
+    requireConfirm: true,
+    contentType: "json" as const,
+    headers: { a: "1", b: "two" },
+    payload: new Uint8Array([1, 2, 3, 4]),
+    published: 123n,
+    partitionKey: new Uint8Array([9, 9]),
+    partitioningVersion: 7n,
+  };
+  assert.deepEqual(decodePublishBody(encodePublishBody(full)), full);
+
+  const minimal = {
+    topic: "t",
+    partition: 0,
+    group: null,
+    requireConfirm: false,
+    contentType: null,
+    headers: {},
+    payload: new Uint8Array(),
+    published: 0n,
+    partitionKey: null,
+    partitioningVersion: 0n,
+  };
+  assert.deepEqual(decodePublishBody(encodePublishBody(minimal)), minimal);
+});
+
+test("publish_delayed body round-trips with custom content type", () => {
+  const p = {
+    topic: "t",
+    partition: 1,
+    group: null,
+    requireConfirm: true,
+    notBefore: 999n,
+    contentType: { custom: "application/x-thing" },
+    headers: { k: "v" },
+    payload: new Uint8Array([5]),
+    published: 1n,
+    partitionKey: null,
+    partitioningVersion: 2n,
+  };
+  assert.deepEqual(decodePublishDelayedBody(encodePublishDelayedBody(p)), p);
+});
+
+test("publish_ok body round-trips", () => {
+  assert.deepEqual(decodePublishOkBody(encodePublishOkBody({ offset: 42n })), { offset: 42n });
+});
+
+test("deliver body round-trips", () => {
+  const d = {
+    subId: 77n,
+    topic: "jobs",
+    group: null,
+    partition: 0,
+    offset: 9n,
+    deliveryTag: { epoch: 123n },
+    published: 1n,
+    publishReceived: 2n,
+    contentType: "msgpack" as const,
+    headers: {},
+    payload: new Uint8Array([0xde, 0xad]),
+  };
+  assert.deepEqual(decodeDeliverBody(encodeDeliverBody(d)), d);
+});
+
+test("ack and nack bodies round-trip", () => {
+  const ack = { topic: "t", group: "g", partition: 2, tags: [{ epoch: 1n }, { epoch: 2n }] };
+  assert.deepEqual(decodeAckBody(encodeAckBody(ack)), ack);
+
+  const nackRequeue = {
+    topic: "t",
+    group: null,
+    partition: 0,
+    tags: [{ epoch: 5n }],
+    requeue: true,
+    notBefore: 1000n,
+  };
+  assert.deepEqual(decodeNackBody(encodeNackBody(nackRequeue)), nackRequeue);
+
+  const nackPlain = { topic: "t", group: null, partition: 0, tags: [], requeue: false, notBefore: null };
+  assert.deepEqual(decodeNackBody(encodeNackBody(nackPlain)), nackPlain);
+});
+
+test("declare_queue body round-trips across dlq policies", () => {
+  const discard = {
+    topic: "t",
+    group: null,
+    dlqPolicy: "discard" as const,
+    dlqMaxRetries: 3,
+    partitionCount: 4,
+  };
+  assert.deepEqual(decodeDeclareQueueBody(encodeDeclareQueueBody(discard)), discard);
+
+  const custom = {
+    topic: "t",
+    group: "g",
+    dlqPolicy: { custom: { topic: "_dlq.t", group: null } },
+    dlqMaxRetries: null,
+    partitionCount: null,
+  };
+  assert.deepEqual(decodeDeclareQueueBody(encodeDeclareQueueBody(custom)), custom);
+
+  const none = { topic: "t", group: null, dlqPolicy: null, dlqMaxRetries: null, partitionCount: null };
+  assert.deepEqual(decodeDeclareQueueBody(encodeDeclareQueueBody(none)), none);
+
+  assert.deepEqual(
+    decodeDeclareQueueOkBody(encodeDeclareQueueOkBody({ status: "created", partitionCount: 4 })),
+    { status: "created", partitionCount: 4 },
+  );
+});
+
+test("subscribe and subscribe_ok bodies round-trip", () => {
+  const member = new Uint8Array(16).fill(3);
+  const sub = {
+    topic: "jobs",
+    partition: 0,
+    group: null,
+    prefetch: 32,
+    autoAck: false,
+    consumerGroup: "workers",
+    consumerTarget: 2,
+    memberId: member,
+  };
+  assert.deepEqual(decodeSubscribeBody(encodeSubscribeBody(sub)), sub);
+
+  const ok = {
+    subId: 88n,
+    topic: "jobs",
+    partition: 0,
+    group: null,
+    prefetch: 32,
+    consumerGroup: null,
+    consumerTarget: null,
+    memberId: null,
+  };
+  assert.deepEqual(decodeSubscribeOkBody(encodeSubscribeOkBody(ok)), ok);
+});

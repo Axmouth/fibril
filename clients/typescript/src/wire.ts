@@ -132,6 +132,82 @@ export class Writer {
       this.resumeIdentity(id);
     }
   }
+  optionalBytes(b: Uint8Array | null | undefined): void {
+    if (b == null) {
+      this.u8(0);
+    } else {
+      this.u8(1);
+      this.bytes(b);
+    }
+  }
+  optionalU32(v: number | null | undefined): void {
+    if (v == null) {
+      this.u8(0);
+    } else {
+      this.u8(1);
+      this.u32(v);
+    }
+  }
+  optionalU64(v: bigint | null | undefined): void {
+    if (v == null) {
+      this.u8(0);
+    } else {
+      this.u8(1);
+      this.u64(v);
+    }
+  }
+  contentType(ct: ContentType): void {
+    if (ct == null) {
+      this.u8(0);
+    } else if (ct === "msgpack") {
+      this.u8(1);
+    } else if (ct === "json") {
+      this.u8(2);
+    } else if (ct === "text") {
+      this.u8(3);
+    } else {
+      this.u8(4);
+      this.str(ct.custom);
+    }
+  }
+  headers(h: Headers): void {
+    const entries = Object.entries(h);
+    this.u32(entries.length);
+    for (const [k, v] of entries) {
+      this.str(k);
+      this.str(v);
+    }
+  }
+  queueKey(topic: string, partition: number, group: string | null | undefined): void {
+    this.str(topic);
+    this.u32(partition);
+    this.optionalStr(group);
+  }
+  settleTags(tags: DeliveryTag[]): void {
+    this.u32(tags.length);
+    for (const t of tags) {
+      this.u64(t.epoch);
+    }
+  }
+  dlqPolicy(p: QueueDlqPolicy): void {
+    if (p === "discard") {
+      this.u8(0);
+    } else if (p === "global") {
+      this.u8(1);
+    } else {
+      this.u8(2);
+      this.str(p.custom.topic);
+      this.optionalStr(p.custom.group);
+    }
+  }
+  optionalDlqPolicy(p: QueueDlqPolicy | null | undefined): void {
+    if (p == null) {
+      this.u8(0);
+    } else {
+      this.u8(1);
+      this.dlqPolicy(p);
+    }
+  }
   /** A 4-byte ASCII magic that opens every frame body. */
   magic(m: string): void {
     this.raw(textEncoder.encode(m));
@@ -215,6 +291,68 @@ export class Reader {
   }
   optionalResumeIdentity(): ResumeIdentity | null {
     return this.u8() === 1 ? this.resumeIdentity() : null;
+  }
+  optionalBytes(): Uint8Array | null {
+    return this.u8() === 1 ? this.bytes() : null;
+  }
+  optionalU32(): number | null {
+    return this.u8() === 1 ? this.u32() : null;
+  }
+  optionalU64(): bigint | null {
+    return this.u8() === 1 ? this.u64() : null;
+  }
+  contentType(): ContentType {
+    const tag = this.u8();
+    switch (tag) {
+      case 0:
+        return null;
+      case 1:
+        return "msgpack";
+      case 2:
+        return "json";
+      case 3:
+        return "text";
+      case 4:
+        return { custom: this.str() };
+      default:
+        throw new Error(`wire: unknown content type ${tag}`);
+    }
+  }
+  headers(): Headers {
+    const n = this.u32();
+    const h: Headers = {};
+    for (let i = 0; i < n; i += 1) {
+      const k = this.str();
+      h[k] = this.str();
+    }
+    return h;
+  }
+  queueKey(): { topic: string; partition: number; group: string | null } {
+    return { topic: this.str(), partition: this.u32(), group: this.optionalStr() };
+  }
+  settleTags(): DeliveryTag[] {
+    const n = this.u32();
+    const tags: DeliveryTag[] = [];
+    for (let i = 0; i < n; i += 1) {
+      tags.push({ epoch: this.u64() });
+    }
+    return tags;
+  }
+  dlqPolicy(): QueueDlqPolicy {
+    const tag = this.u8();
+    switch (tag) {
+      case 0:
+        return "discard";
+      case 1:
+        return "global";
+      case 2:
+        return { custom: { topic: this.str(), group: this.optionalStr() } };
+      default:
+        throw new Error(`wire: unknown dlq policy ${tag}`);
+    }
+  }
+  optionalDlqPolicy(): QueueDlqPolicy | null {
+    return this.u8() === 1 ? this.dlqPolicy() : null;
   }
   expectMagic(m: string): void {
     const got = this.raw(4);
@@ -341,4 +479,411 @@ export function decodeErrorBody(body: Uint8Array): ErrorMsg {
   const error: ErrorMsg = { code: r.u16(), message: r.str() };
   r.finish();
   return error;
+}
+
+// ---- shared field types ----
+
+export type Headers = Record<string, string>;
+
+/** Frame content type. `null` = unspecified; `{ custom }` = an arbitrary MIME. */
+export type ContentType = null | "msgpack" | "json" | "text" | { custom: string };
+
+export interface DeliveryTag {
+  epoch: bigint;
+}
+
+/** Dead-letter policy on a queue declaration. */
+export type QueueDlqPolicy =
+  | "discard"
+  | "global"
+  | { custom: { topic: string; group: string | null } };
+
+// ---- publish ----
+
+export interface Publish {
+  topic: string;
+  partition: number;
+  group: string | null;
+  requireConfirm: boolean;
+  contentType: ContentType;
+  headers: Headers;
+  payload: Uint8Array;
+  published: bigint;
+  partitionKey: Uint8Array | null;
+  partitioningVersion: bigint;
+}
+
+function writePublishCommon(w: Writer, p: Publish): void {
+  w.str(p.topic);
+  w.optionalStr(p.group);
+  w.u32(p.partition);
+  w.bool(p.requireConfirm);
+  w.contentType(p.contentType);
+  w.headers(p.headers);
+  w.u64(p.published);
+  w.optionalBytes(p.partitionKey);
+  w.u64(p.partitioningVersion);
+  w.bytes(p.payload);
+}
+
+function readPublishCommon(r: Reader): Publish {
+  return {
+    topic: r.str(),
+    group: r.optionalStr(),
+    partition: r.u32(),
+    requireConfirm: r.bool(),
+    contentType: r.contentType(),
+    headers: r.headers(),
+    published: r.u64(),
+    partitionKey: r.optionalBytes(),
+    partitioningVersion: r.u64(),
+    payload: r.bytes(),
+  };
+}
+
+export function encodePublishBody(p: Publish): Uint8Array {
+  const w = new Writer();
+  w.magic("FPB1");
+  writePublishCommon(w, p);
+  return w.finish();
+}
+
+export function decodePublishBody(body: Uint8Array): Publish {
+  const r = new Reader(body);
+  r.expectMagic("FPB1");
+  const value = readPublishCommon(r);
+  r.finish();
+  return value;
+}
+
+export interface PublishDelayed {
+  topic: string;
+  partition: number;
+  group: string | null;
+  requireConfirm: boolean;
+  notBefore: bigint;
+  contentType: ContentType;
+  headers: Headers;
+  payload: Uint8Array;
+  published: bigint;
+  partitionKey: Uint8Array | null;
+  partitioningVersion: bigint;
+}
+
+export function encodePublishDelayedBody(p: PublishDelayed): Uint8Array {
+  const w = new Writer();
+  w.magic("FPD1");
+  w.str(p.topic);
+  w.optionalStr(p.group);
+  w.u32(p.partition);
+  w.bool(p.requireConfirm);
+  w.u64(p.notBefore);
+  w.contentType(p.contentType);
+  w.headers(p.headers);
+  w.u64(p.published);
+  w.optionalBytes(p.partitionKey);
+  w.u64(p.partitioningVersion);
+  w.bytes(p.payload);
+  return w.finish();
+}
+
+export function decodePublishDelayedBody(body: Uint8Array): PublishDelayed {
+  const r = new Reader(body);
+  r.expectMagic("FPD1");
+  const value: PublishDelayed = {
+    topic: r.str(),
+    group: r.optionalStr(),
+    partition: r.u32(),
+    requireConfirm: r.bool(),
+    notBefore: r.u64(),
+    contentType: r.contentType(),
+    headers: r.headers(),
+    published: r.u64(),
+    partitionKey: r.optionalBytes(),
+    partitioningVersion: r.u64(),
+    payload: r.bytes(),
+  };
+  r.finish();
+  return value;
+}
+
+export interface PublishOk {
+  offset: bigint;
+}
+
+export function encodePublishOkBody(ok: PublishOk): Uint8Array {
+  const w = new Writer();
+  w.magic("FPO1");
+  w.u64(ok.offset);
+  return w.finish();
+}
+
+export function decodePublishOkBody(body: Uint8Array): PublishOk {
+  const r = new Reader(body);
+  r.expectMagic("FPO1");
+  const offset = r.u64();
+  r.finish();
+  return { offset };
+}
+
+// ---- deliver ----
+
+export interface Deliver {
+  subId: bigint;
+  topic: string;
+  group: string | null;
+  partition: number;
+  offset: bigint;
+  deliveryTag: DeliveryTag;
+  published: bigint;
+  publishReceived: bigint;
+  contentType: ContentType;
+  headers: Headers;
+  payload: Uint8Array;
+}
+
+export function encodeDeliverBody(d: Deliver): Uint8Array {
+  const w = new Writer();
+  w.magic("FDL1");
+  w.u64(d.subId);
+  w.str(d.topic);
+  w.optionalStr(d.group);
+  w.u32(d.partition);
+  w.u64(d.offset);
+  w.u64(d.deliveryTag.epoch);
+  w.u64(d.published);
+  w.u64(d.publishReceived);
+  w.contentType(d.contentType);
+  w.headers(d.headers);
+  w.bytes(d.payload);
+  return w.finish();
+}
+
+export function decodeDeliverBody(body: Uint8Array): Deliver {
+  const r = new Reader(body);
+  r.expectMagic("FDL1");
+  const value: Deliver = {
+    subId: r.u64(),
+    topic: r.str(),
+    group: r.optionalStr(),
+    partition: r.u32(),
+    offset: r.u64(),
+    deliveryTag: { epoch: r.u64() },
+    published: r.u64(),
+    publishReceived: r.u64(),
+    contentType: r.contentType(),
+    headers: r.headers(),
+    payload: r.bytes(),
+  };
+  r.finish();
+  return value;
+}
+
+// ---- settle (ack / nack) ----
+
+export interface Ack {
+  topic: string;
+  group: string | null;
+  partition: number;
+  tags: DeliveryTag[];
+}
+
+export function encodeAckBody(ack: Ack): Uint8Array {
+  const w = new Writer();
+  w.magic("FAK1");
+  w.str(ack.topic);
+  w.optionalStr(ack.group);
+  w.u32(ack.partition);
+  w.settleTags(ack.tags);
+  return w.finish();
+}
+
+export function decodeAckBody(body: Uint8Array): Ack {
+  const r = new Reader(body);
+  r.expectMagic("FAK1");
+  const value: Ack = {
+    topic: r.str(),
+    group: r.optionalStr(),
+    partition: r.u32(),
+    tags: r.settleTags(),
+  };
+  r.finish();
+  return value;
+}
+
+export interface Nack {
+  topic: string;
+  group: string | null;
+  partition: number;
+  tags: DeliveryTag[];
+  requeue: boolean;
+  notBefore: bigint | null;
+}
+
+export function encodeNackBody(nack: Nack): Uint8Array {
+  const w = new Writer();
+  w.magic("FNK1");
+  w.str(nack.topic);
+  w.optionalStr(nack.group);
+  w.u32(nack.partition);
+  w.settleTags(nack.tags);
+  w.bool(nack.requeue);
+  w.optionalU64(nack.notBefore);
+  return w.finish();
+}
+
+export function decodeNackBody(body: Uint8Array): Nack {
+  const r = new Reader(body);
+  r.expectMagic("FNK1");
+  const value: Nack = {
+    topic: r.str(),
+    group: r.optionalStr(),
+    partition: r.u32(),
+    tags: r.settleTags(),
+    requeue: r.bool(),
+    notBefore: r.optionalU64(),
+  };
+  r.finish();
+  return value;
+}
+
+// ---- declare queue ----
+
+export interface DeclareQueue {
+  topic: string;
+  group: string | null;
+  dlqPolicy: QueueDlqPolicy | null;
+  dlqMaxRetries: number | null;
+  partitionCount: number | null;
+}
+
+export function encodeDeclareQueueBody(d: DeclareQueue): Uint8Array {
+  const w = new Writer();
+  w.magic("FDQ1");
+  w.str(d.topic);
+  w.optionalStr(d.group);
+  w.optionalDlqPolicy(d.dlqPolicy);
+  w.optionalU32(d.dlqMaxRetries);
+  w.optionalU32(d.partitionCount);
+  return w.finish();
+}
+
+export function decodeDeclareQueueBody(body: Uint8Array): DeclareQueue {
+  const r = new Reader(body);
+  r.expectMagic("FDQ1");
+  const value: DeclareQueue = {
+    topic: r.str(),
+    group: r.optionalStr(),
+    dlqPolicy: r.optionalDlqPolicy(),
+    dlqMaxRetries: r.optionalU32(),
+    partitionCount: r.optionalU32(),
+  };
+  r.finish();
+  return value;
+}
+
+export interface DeclareQueueOk {
+  status: string;
+  partitionCount: number;
+}
+
+export function encodeDeclareQueueOkBody(ok: DeclareQueueOk): Uint8Array {
+  const w = new Writer();
+  w.magic("FDK1");
+  w.str(ok.status);
+  w.u32(ok.partitionCount);
+  return w.finish();
+}
+
+export function decodeDeclareQueueOkBody(body: Uint8Array): DeclareQueueOk {
+  const r = new Reader(body);
+  r.expectMagic("FDK1");
+  const value: DeclareQueueOk = { status: r.str(), partitionCount: r.u32() };
+  r.finish();
+  return value;
+}
+
+// ---- subscribe ----
+
+export interface Subscribe {
+  topic: string;
+  partition: number;
+  group: string | null;
+  prefetch: number;
+  autoAck: boolean;
+  consumerGroup: string | null;
+  consumerTarget: number | null;
+  memberId: Uuid | null;
+}
+
+export function encodeSubscribeBody(s: Subscribe): Uint8Array {
+  const w = new Writer();
+  w.magic("FSB1");
+  w.queueKey(s.topic, s.partition, s.group);
+  w.u32(s.prefetch);
+  w.bool(s.autoAck);
+  w.optionalStr(s.consumerGroup);
+  w.optionalU32(s.consumerTarget);
+  w.optionalUuid(s.memberId);
+  return w.finish();
+}
+
+export function decodeSubscribeBody(body: Uint8Array): Subscribe {
+  const r = new Reader(body);
+  r.expectMagic("FSB1");
+  const key = r.queueKey();
+  const value: Subscribe = {
+    topic: key.topic,
+    partition: key.partition,
+    group: key.group,
+    prefetch: r.u32(),
+    autoAck: r.bool(),
+    consumerGroup: r.optionalStr(),
+    consumerTarget: r.optionalU32(),
+    memberId: r.optionalUuid(),
+  };
+  r.finish();
+  return value;
+}
+
+export interface SubscribeOk {
+  subId: bigint;
+  topic: string;
+  partition: number;
+  group: string | null;
+  prefetch: number;
+  consumerGroup: string | null;
+  consumerTarget: number | null;
+  memberId: Uuid | null;
+}
+
+export function encodeSubscribeOkBody(s: SubscribeOk): Uint8Array {
+  const w = new Writer();
+  w.magic("FSO1");
+  w.u64(s.subId);
+  w.queueKey(s.topic, s.partition, s.group);
+  w.u32(s.prefetch);
+  w.optionalStr(s.consumerGroup);
+  w.optionalU32(s.consumerTarget);
+  w.optionalUuid(s.memberId);
+  return w.finish();
+}
+
+export function decodeSubscribeOkBody(body: Uint8Array): SubscribeOk {
+  const r = new Reader(body);
+  r.expectMagic("FSO1");
+  const subId = r.u64();
+  const key = r.queueKey();
+  const value: SubscribeOk = {
+    subId,
+    topic: key.topic,
+    partition: key.partition,
+    group: key.group,
+    prefetch: r.u32(),
+    consumerGroup: r.optionalStr(),
+    consumerTarget: r.optionalU32(),
+    memberId: r.optionalUuid(),
+  };
+  r.finish();
+  return value;
 }
