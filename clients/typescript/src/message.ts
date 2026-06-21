@@ -67,15 +67,23 @@ export class NewMessage {
   readonly contentTypeValue: ContentType | null;
   /** Extra headers sent with the payload. */
   readonly headers: Record<string, string>;
+  /**
+   * Optional partition key. When set, the client routes the publish to
+   * `hash(key) % partitionCount` so all messages with the same key keep their
+   * relative order on one partition. Absent keys spread round-robin.
+   */
+  readonly partitionKeyValue: Uint8Array | null;
 
   private constructor(
     payload: Uint8Array,
     contentTypeValue: ContentType | null,
     headers: Record<string, string>,
+    partitionKeyValue: Uint8Array | null = null,
   ) {
     this.payload = payload;
     this.contentTypeValue = contentTypeValue;
     this.headers = { ...headers };
+    this.partitionKeyValue = partitionKeyValue;
   }
 
   /**
@@ -136,12 +144,24 @@ export class NewMessage {
         this.payload,
         contentTypeFromHeader(value),
         this.headers,
+        this.partitionKeyValue,
       );
     }
-    return new NewMessage(this.payload, this.contentTypeValue, {
-      ...this.headers,
-      [key]: value,
-    });
+    return new NewMessage(
+      this.payload,
+      this.contentTypeValue,
+      { ...this.headers, [key]: value },
+      this.partitionKeyValue,
+    );
+  }
+
+  /**
+   * Return a copy routed by the given partition key. A string key is encoded as
+   * UTF-8. All messages sharing a key route to the same partition.
+   */
+  partitionKey(key: string | Uint8Array): NewMessage {
+    const bytes = typeof key === "string" ? new TextEncoder().encode(key) : key;
+    return new NewMessage(this.payload, this.contentTypeValue, this.headers, bytes);
   }
 
   /**

@@ -4,12 +4,13 @@ import { BrokenPipeError, DisconnectionError, FibrilError } from "./errors.js";
 import { deferred } from "./internal/deferred.js";
 import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
-import { TopologyCache } from "./internal/topology.js";
+import { TopologyCache, routePartition, type Route, type RoundRobin } from "./internal/topology.js";
 import type {
   AuthMsg,
   DeclareQueueMsg,
   QueueDlqPolicy,
   ReconcilePolicy,
+  RedirectMsg,
   ResumeIdentity,
   ResumeOutcome,
   TopologyOkMsg,
@@ -46,6 +47,8 @@ export interface ClientOptionsInit {
   autoReconnectAttempts?: number;
   /** Subscription reconciliation policy used after a resumed reconnect. */
   reconnectReconcilePolicy?: ReconcilePolicy;
+  /** Maximum owner redirects to follow for a single confirmed publish. */
+  maxRedirects?: number;
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
@@ -64,6 +67,7 @@ export class ClientOptions {
   readonly resumeIdentity: ResumeIdentity | undefined;
   readonly autoReconnectAttempts: number;
   readonly reconnectReconcilePolicy: ReconcilePolicy;
+  readonly maxRedirects: number;
 
   constructor(init: ClientOptionsInit = {}) {
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
@@ -73,51 +77,43 @@ export class ClientOptions {
     this.resumeIdentity = init.resumeIdentity;
     this.autoReconnectAttempts = init.autoReconnectAttempts ?? 1;
     this.reconnectReconcilePolicy = init.reconnectReconcilePolicy ?? "conservative";
+    this.maxRedirects = init.maxRedirects ?? 3;
+  }
+
+  /** Return a copy with the given fields overridden. */
+  #copy(overrides: ClientOptionsInit): ClientOptions {
+    return new ClientOptions({
+      clientName: this.clientName,
+      clientVersion: this.clientVersion,
+      auth: this.auth,
+      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
+      resumeIdentity: this.resumeIdentity,
+      autoReconnectAttempts: this.autoReconnectAttempts,
+      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
+      maxRedirects: this.maxRedirects,
+      ...overrides,
+    });
   }
 
   /**
    * Return a copy with username/password authentication configured.
    */
   withAuth(username: string, password: string): ClientOptions {
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: { username, password },
-      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
-      resumeIdentity: this.resumeIdentity,
-      autoReconnectAttempts: this.autoReconnectAttempts,
-      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
-    });
+    return this.#copy({ auth: { username, password } });
   }
 
   /**
    * Return a copy with heartbeat interval configured in seconds.
    */
   withHeartbeatInterval(seconds: number): ClientOptions {
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: this.auth,
-      heartbeatIntervalSeconds: seconds,
-      resumeIdentity: this.resumeIdentity,
-      autoReconnectAttempts: this.autoReconnectAttempts,
-      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
-    });
+    return this.#copy({ heartbeatIntervalSeconds: seconds });
   }
 
   /**
    * Return a copy configured to attempt resuming a previous connection.
    */
   withResumeIdentity(resumeIdentity: ResumeIdentity): ClientOptions {
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: this.auth,
-      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
-      resumeIdentity,
-      autoReconnectAttempts: this.autoReconnectAttempts,
-      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
-    });
+    return this.#copy({ resumeIdentity });
   }
 
   /**
@@ -134,30 +130,24 @@ export class ClientOptions {
     if (!Number.isInteger(maxAttempts) || maxAttempts < 0) {
       throw new Error("maxAttempts must be a non-negative integer");
     }
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: this.auth,
-      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
-      resumeIdentity: this.resumeIdentity,
-      autoReconnectAttempts: maxAttempts,
-      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
-    });
+    return this.#copy({ autoReconnectAttempts: maxAttempts });
   }
 
   /**
    * Return a copy with a custom reconnect subscription reconciliation policy.
    */
   withReconnectReconcilePolicy(policy: ReconcilePolicy): ClientOptions {
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: this.auth,
-      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
-      resumeIdentity: this.resumeIdentity,
-      autoReconnectAttempts: this.autoReconnectAttempts,
-      reconnectReconcilePolicy: policy,
-    });
+    return this.#copy({ reconnectReconcilePolicy: policy });
+  }
+
+  /**
+   * Return a copy with a custom limit on owner redirects followed per publish.
+   */
+  withMaxRedirects(maxRedirects: number): ClientOptions {
+    if (!Number.isInteger(maxRedirects) || maxRedirects < 0) {
+      throw new Error("maxRedirects must be a non-negative integer");
+    }
+    return this.#copy({ maxRedirects });
   }
 
   /**
@@ -279,6 +269,12 @@ function parseAddress(
   return { host, port };
 }
 
+// Canonical pool key for a host/port. The broker reports owner endpoints as
+// strings, so this stays a plain string compare rather than parsing to an addr.
+function endpointKey(host: string, port: number): string {
+  return `${host}:${port}`;
+}
+
 function openSocket(host: string, port: number): Promise<Socket> {
   return new Promise<Socket>((resolve, reject) => {
     const socket = netConnect({ host, port });
@@ -322,6 +318,46 @@ class EngineSlot {
 }
 
 /**
+ * A lazily connected pooled connection to one non-bootstrap owner. Used for
+ * routed publishes. Each is its own session (no resume of the bootstrap
+ * identity) and reconnects on demand if the engine has closed.
+ */
+class PooledConnection {
+  #engine: Engine | null = null;
+  #connecting: Promise<Engine> | null = null;
+
+  constructor(
+    private readonly host: string,
+    private readonly port: number,
+    private readonly opts: ClientOptions,
+  ) {}
+
+  async engineForOperation(): Promise<Engine> {
+    if (this.#engine && !this.#engine.isClosed()) return this.#engine;
+    if (this.#connecting) return this.#connecting;
+    this.#connecting = (async () => {
+      const socket = await openSocket(this.host, this.port);
+      try {
+        const engine = await Engine.start(socket, this.opts, new Map());
+        this.#engine = engine;
+        return engine;
+      } catch (err) {
+        socket.destroy();
+        if (err instanceof FibrilError) throw err;
+        throw new DisconnectionError(`Engine failed to start: ${(err as Error).message}`);
+      } finally {
+        this.#connecting = null;
+      }
+    })();
+    return this.#connecting;
+  }
+
+  shutdown(): void {
+    this.#engine?.shutdown();
+  }
+}
+
+/**
  * Fibril broker client. Manages a single connection and dispatches
  * publish/subscribe operations through an internal engine.
  *
@@ -343,6 +379,12 @@ export class Client {
   // Routing cache, warmed by fetchTopology and point-updated by redirects. Empty
   // means "no routing info" (standalone broker or cold client).
   readonly #topology = new TopologyCache();
+  // Connections to non-bootstrap owners, keyed by "host:port". The bootstrap
+  // connection is the EngineSlot above and is never pooled here.
+  readonly #pool = new Map<string, PooledConnection>();
+  // Cursor for keyless round-robin partition spread.
+  readonly #roundRobin: RoundRobin = { next: 0 };
+  readonly #bootstrapEndpoint: string;
 
   private constructor(
     address: { host: string; port: number },
@@ -354,6 +396,7 @@ export class Client {
     this.#opts = opts;
     this.#engine = new EngineSlot(engine);
     this.#subscriptions = subscriptions;
+    this.#bootstrapEndpoint = endpointKey(address.host, address.port);
   }
 
   /**
@@ -489,12 +532,56 @@ export class Client {
   async fetchTopology(filter: { topic?: string | null; group?: string | null } = {}): Promise<TopologyOkMsg> {
     const topology = await (await this._engineForOperation()).fetchTopology(filter);
     this.#topology.replace(topology);
+    // A full refresh is authoritative: drop pooled connections to endpoints that
+    // no longer own anything so a failed-over owner's stale connection is gone.
+    const live = this.#topology.endpoints();
+    for (const [endpoint, conn] of this.#pool) {
+      if (!live.has(endpoint)) {
+        conn.shutdown();
+        this.#pool.delete(endpoint);
+      }
+    }
     return topology;
   }
 
   /** @internal The routing cache, exposed for the pool/router layer and tests. */
   _topology(): TopologyCache {
     return this.#topology;
+  }
+
+  /** @internal Choose the partition (and version) for a publish. */
+  _route(topic: string, group: string | null, key: Uint8Array | null): Route {
+    return routePartition(this.#topology, topic, group, key, this.#roundRobin);
+  }
+
+  /** @internal Maximum owner redirects to follow per confirmed publish. */
+  _maxRedirects(): number {
+    return this.#opts.maxRedirects;
+  }
+
+  /** @internal Point-update routing from a redirect (after a misroute). */
+  _applyRedirect(redirect: RedirectMsg): void {
+    this.#topology.applyRedirect(redirect);
+  }
+
+  /**
+   * @internal Resolve the engine that should serve a queue partition. Routing is
+   * reactive: a cache hit routes to the owner's pooled connection, a miss (cold
+   * cache or standalone) falls back to the bootstrap connection. The cache is
+   * filled by redirects and by fetchTopology, never on this hot path.
+   */
+  async _engineFor(topic: string, partition: number, group: string | null): Promise<Engine> {
+    const owner = this.#topology.lookup(topic, partition, group);
+    if (!owner || owner.endpoint === this.#bootstrapEndpoint) {
+      return this._engineForOperation();
+    }
+    let conn = this.#pool.get(owner.endpoint);
+    if (!conn) {
+      const addr = parseAddress(owner.endpoint);
+      conn = new PooledConnection(addr.host, addr.port, this.#opts);
+      this.#pool.set(owner.endpoint, conn);
+    }
+    return conn.engineForOperation();
   }
 
   /**
@@ -516,6 +603,8 @@ export class Client {
    */
   async shutdown(): Promise<void> {
     this.#userShutdown = true;
+    for (const conn of this.#pool.values()) conn.shutdown();
+    this.#pool.clear();
     const engine = this.#engine.current();
     engine.shutdown();
     await engine.whenComplete();

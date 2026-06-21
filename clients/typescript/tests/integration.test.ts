@@ -23,6 +23,7 @@ import {
 import { Client, ClientOptions, QueueConfig } from "../src/client.js";
 import { BrokenPipeError, DisconnectionError, RedirectError } from "../src/errors.js";
 import { NewMessage } from "../src/message.js";
+import { fnv1a } from "../src/internal/topology.js";
 
 // The wire format carries identity fields as raw 16-byte UUIDs, so the fake
 // broker uses byte arrays rather than the hyphenated string form.
@@ -964,10 +965,59 @@ test("fetchTopology returns the broker topology and warms the routing cache", as
   }
 });
 
-test("a redirected publish rejects with RedirectError carrying the owner", async () => {
+test("a confirmed publish follows an owner redirect to the new broker", async () => {
+  const owner = new FakeBroker();
+  await owner.start();
+  owner.onFrame = (f, s) => {
+    if (f.opcode === Op.Hello) {
+      owner.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+    } else if (f.opcode === Op.Publish) {
+      owner.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 42n }));
+    }
+  };
+
+  const bootstrap = new FakeBroker();
+  await bootstrap.start();
+  bootstrap.onFrame = (f, s) => {
+    if (f.opcode === Op.Hello) {
+      bootstrap.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+    } else if (f.opcode === Op.Publish) {
+      bootstrap.send(
+        s,
+        buildFrame(Op.Redirect, f.requestId, {
+          topic: "orders",
+          partition: 0,
+          group: null,
+          owner_endpoint: `127.0.0.1:${owner.port}`,
+          partitioning_version: 1n,
+        }),
+      );
+    }
+  };
+
+  try {
+    const client = await Client.connect(`127.0.0.1:${bootstrap.port}`, new ClientOptions());
+    const offset = await client.publisher("orders").publishConfirmed({ hello: "world" });
+    assert.equal(offset, 42n);
+    // The redirect point-updated routing to the owner connection.
+    assert.equal(
+      client._topology().lookup("orders", 0, null)?.endpoint,
+      `127.0.0.1:${owner.port}`,
+    );
+    assert.ok(owner.received.some((f) => f.opcode === Op.Publish));
+    await client.shutdown();
+  } finally {
+    await bootstrap.stop();
+    await owner.stop();
+  }
+});
+
+test("a confirmed publish gives up after maxRedirects with RedirectError", async () => {
   const broker = new FakeBroker();
   await broker.start();
   try {
+    // The broker always redirects to itself, so the client loops until the
+    // redirect budget is exhausted.
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
         broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
@@ -978,24 +1028,67 @@ test("a redirected publish rejects with RedirectError carrying the owner", async
             topic: "orders",
             partition: 0,
             group: null,
-            owner_endpoint: "127.0.0.1:9005",
+            owner_endpoint: `127.0.0.1:${broker.port}`,
             partitioning_version: 1n,
           }),
         );
       }
     };
 
-    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
-    const pub = client.publisher("orders");
-    await assert.rejects(
-      () => pub.publishConfirmed({ hello: "world" }),
-      (err) => {
-        assert.ok(err instanceof RedirectError);
-        assert.equal(err.redirect.owner_endpoint, "127.0.0.1:9005");
-        assert.equal(err.redirect.topic, "orders");
-        return true;
-      },
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions().withMaxRedirects(2),
     );
+    await assert.rejects(
+      () => client.publisher("orders").publishConfirmed({ hello: "world" }),
+      (err) => err instanceof RedirectError,
+    );
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("partition key routes the publish to the hashed partition on the wire", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let published: PublishMsg | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        broker.send(
+          s,
+          buildFrame(Op.TopologyOk, f.requestId, {
+            generation: 1n,
+            queues: [0, 1, 2, 3].map((partition) => ({
+              topic: "orders",
+              partition,
+              group: null,
+              owner_endpoint: `127.0.0.1:${broker.port}`,
+              partitioning_version: 5n,
+              partition_count: 4,
+            })),
+          }),
+        );
+      } else if (f.opcode === Op.Publish) {
+        published = decodeFrameBody<PublishMsg>(f);
+        broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 0n }));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    await client.fetchTopology();
+    await client.publisher("orders").publishConfirmed(
+      NewMessage.json({ id: 1 }).partitionKey("entity-1"),
+    );
+
+    assert.ok(published);
+    const expected = Number(fnv1a(new TextEncoder().encode("entity-1")) % 4n);
+    assert.equal(published.partition, expected);
+    assert.equal(published.partitioning_version, 5n);
+    assert.deepEqual(published.partition_key, new TextEncoder().encode("entity-1"));
     await client.shutdown();
   } finally {
     await broker.stop();

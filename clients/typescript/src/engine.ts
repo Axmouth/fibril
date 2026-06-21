@@ -87,10 +87,10 @@ type Waiter =
 
 // Commands the public API submits to the engine.
 export type Command =
-  | { type: "publishUnconfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint }
-  | { type: "publishConfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; reply: Deferred<bigint> }
-  | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
-  | { type: "publishDelayedConfirmed"; topic: string; group: string | null; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
+  | { type: "publishUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint }
+  | { type: "publishConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; reply: Deferred<bigint> }
+  | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
+  | { type: "publishDelayedConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
   | { type: "declareQueue"; req: DeclareQueueMsg; reply: Deferred<void> }
   | { type: "subscribe"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalInflight>> }
   | { type: "subscribeAutoAck"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalDelivered>> }
@@ -486,7 +486,9 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         const msg: PublishMsg = {
           topic: cmd.topic,
           group: cmd.group,
-          partition: 0,
+          partition: cmd.partition,
+          partition_key: cmd.partition_key,
+          partitioning_version: cmd.partitioning_version,
           require_confirm: false,
           content_type: cmd.content_type,
           headers: cmd.headers,
@@ -502,7 +504,9 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         const msg: PublishMsg = {
           topic: cmd.topic,
           group: cmd.group,
-          partition: 0,
+          partition: cmd.partition,
+          partition_key: cmd.partition_key,
+          partitioning_version: cmd.partitioning_version,
           require_confirm: true,
           content_type: cmd.content_type,
           headers: cmd.headers,
@@ -519,7 +523,9 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         const msg: PublishDelayedMsg = {
           topic: cmd.topic,
           group: cmd.group,
-          partition: 0,
+          partition: cmd.partition,
+          partition_key: cmd.partition_key,
+          partitioning_version: cmd.partitioning_version,
           require_confirm: false,
           not_before: cmd.not_before,
           content_type: cmd.content_type,
@@ -536,7 +542,9 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         const msg: PublishDelayedMsg = {
           topic: cmd.topic,
           group: cmd.group,
-          partition: 0,
+          partition: cmd.partition,
+          partition_key: cmd.partition_key,
+          partitioning_version: cmd.partitioning_version,
           require_confirm: true,
           not_before: cmd.not_before,
           content_type: cmd.content_type,
