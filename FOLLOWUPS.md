@@ -123,17 +123,30 @@ feature ideas live in their own track, summarized at the end.
 
 ## Clients
 
-- TypeScript client parity pass (BIG): bring `clients/typescript` up to the
-  current Rust client and protocol now that clustering landed. The TS client
-  exists (client, publisher, subscription, engine, codec, protocol over msgpack,
-  about 3100 lines) but lags the newer surface. Cover at least: partitioned-queue
-  publish with client-side key routing and transparent multi-partition fan-in,
-  exclusive consumer groups, owner redirect plus failover ride-through (refresh
-  topology and retry), and the reliability surface (is_retryable / retry_advice
-  outcome classification, the ReliablePublisher opt-in, producer-id dedup
-  headers). Audit against the Rust client surface first, then close the gaps.
-  Pairs with the AUDITS.md "Client API parity" pending item and the client
-  reliability docs item below. [USER/AUDIT]
+- TypeScript client parity pass (BIG, multi-brick): `clients/typescript` is
+  basically pre-replication-branch (~3100 lines). It has the single-broker basics
+  (publish/confirm/delayed, manual+auto ack, reconnect) but is behind on two big
+  fronts. Brick-by-brick, foundation first:
+  - BRICK 1 (prerequisite) WIRE FORMAT: the broker moved frame bodies from msgpack
+    to a custom simple binary format (`crates/protocol/src/v1/wire.rs`: magic +
+    field-by-field put_u16/put_u32/put_u64/put_uuid/put_str/put_bytes/put_headers,
+    ~20 client-facing ops) - much faster, fixed scheduler starvation. The TS client
+    still encodes msgpack bodies, so it cannot talk to the current broker at all.
+    Port the custom encode/decode for every client op, byte-exact to wire.rs, with
+    round-trip tests. The 20-byte frame header looks unchanged - only bodies moved.
+  - BRICK 2 topology + owner routing: FetchTopology op + cache + owner resolution
+    per (topic, partition) + follow not-owner redirects.
+  - BRICK 3 partitioning: client-side key routing on publish + transparent
+    multi-partition fan-in on subscribe.
+  - BRICK 4 reconnect + reconcile + resume: re-establish subscriptions on reconnect
+    including the owner-restart case (wire the already-declared Reconcile* ops, add
+    ResumeIdentity/Outcome on Hello).
+  - BRICK 5 failover ride-through (the supervisor equivalent).
+  - BRICK 6 exclusive consumer groups.
+  - BRICK 7 reliability: isRetryable/retryAdvice classification, a ReliablePublisher,
+    producer-id dedup headers.
+  Pairs with AUDITS.md "Client API parity" and the client reliability docs item.
+  [USER/AUDIT]
 
 ## Code health and structure
 
