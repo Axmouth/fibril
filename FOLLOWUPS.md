@@ -174,11 +174,11 @@ feature ideas live in their own track, summarized at the end.
     settles correctly. Continuity model: supervised subs own continuity via fresh
     re-subscribe and stay out of the reconcile registry (mutually exclusive with
     the brick-4 reconcile path, which is the supervision-off behavior).
-    STILL TODO: multi-partition fan-in on subscribe; graceful owner reassignment
-    detection (a periodic topology owner-check, since only stream-close triggers
-    re-subscribe today); lease preservation across re-subscribe (today an
-    unsettled InflightMessage from a dead owner fails its ack and is redelivered,
-    at-least-once safe).
+    Multi-partition fan-in and graceful-owner-move detection (periodic topology
+    owner-check) are now DONE too. STILL TODO: picking up partitions added by a
+    live grow (tied to live repartitioning, counts are fixed-at-create today);
+    lease preservation across re-subscribe (today an unsettled InflightMessage
+    from a dead owner fails its ack and is redelivered, at-least-once safe).
   - BRICK 6 exclusive consumer groups.
   - BRICK 7 reliability: isRetryable/retryAdvice classification, a ReliablePublisher,
     producer-id dedup headers.

@@ -39,7 +39,7 @@ Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 | Ack / Nack / retry-after | done | done |
 | Prefetch / backpressure | done | done |
 | Declare queue + DLQ policies | done | done |
-| Multi-partition subscribe fan-in | done | no (single-partition; subscribe routes to the partition-0 owner) |
+| Multi-partition subscribe fan-in | done | done (set fixed at subscribe; live grow pending) |
 
 ## Reconnect and resume
 
@@ -62,7 +62,7 @@ Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 | Follow owner redirects (bounded) | done | done |
 | Transient failover publish retry + backoff | done | done |
 | Topology refresh on transient failure (throttled) | done | done |
-| Subscription supervisor (re-subscribe on owner drop) | done | partial (single-partition; stream-close trigger, not graceful-move) |
+| Subscription supervisor (re-subscribe on owner drop + graceful move) | done | done |
 
 ## Reliability and groups
 
