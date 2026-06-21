@@ -251,10 +251,19 @@ export class Engine {
     }
 
     let restoredSubscriptions = new Map<bigint, SubState>();
-    if (hello.resume_outcome === "resumed") {
+    // Reconcile on ANY reconnect that has active subscriptions, not only a
+    // resumed session. When the owner broker restarts in place (a bounce faster
+    // than failure detection, so ownership stays and there is no failover) the
+    // client reconnects into a FRESH session (resume_rejected/new) that has no
+    // memory of the subscriptions. Reconciling lets the broker either restore
+    // them (restore_client_subscriptions) or report them missing so the dead
+    // streams close. Without this a bounced owner leaves the streams open but
+    // unfed and the consumer silently stops receiving.
+    const reconcileSubs = [...subscriptionRegistry.values()].map((sub) => sub.reconcile);
+    if (reconcileSubs.length > 0) {
       const reconcile: ReconcileClientMsg = {
         policy: opts.reconnectReconcilePolicy,
-        subscriptions: [...subscriptionRegistry.values()].map((sub) => sub.reconcile),
+        subscriptions: reconcileSubs,
       };
       await writeFrame(
         socket,

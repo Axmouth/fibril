@@ -1094,3 +1094,83 @@ test("partition key routes the publish to the hashed partition on the wire", asy
     await broker.stop();
   }
 });
+
+test("owner restart: reconnect into a fresh session still reconciles subscriptions", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let reconciled = false;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        // Always a fresh session ("new"), even when the client offers a resume
+        // identity: models an owner that bounced and lost its session state.
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 55n,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+      } else if (f.opcode === Op.ReconcileClient) {
+        reconciled = true;
+        const clientSub = {
+          sub_id: 55n,
+          topic: "jobs",
+          group: null,
+          partition: 0,
+          auto_ack: false,
+          prefetch: 1,
+        };
+        broker.send(
+          s,
+          buildFrame(Op.ReconcileResult, f.requestId, {
+            subscriptions: [
+              { client: clientSub, server: { ...clientSub, sub_id: 66n }, action: "keep", reason: "restored" },
+            ],
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 1n, {
+            sub_id: 66n,
+            topic: "jobs",
+            group: null,
+            partition: 0,
+            offset: 1n,
+            delivery_tag: { epoch: 7n },
+            published: 1n,
+            publish_received: 2n,
+            content_type: null,
+            headers: {},
+            payload: new Uint8Array([9]),
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions().withReconnectReconcilePolicy("restore_client_subscriptions"),
+    );
+    const sub = await client.subscribe("jobs").subManualAck();
+    const outcome = await client.reconnect();
+
+    // The session is fresh, yet reconcile still fired and the stream survived.
+    assert.equal(outcome.resumeOutcome, "new");
+    assert.ok(reconciled);
+    const delivered = await sub.recv();
+    assert.ok(delivered);
+    assert.deepEqual([...delivered.payload], [9]);
+
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
