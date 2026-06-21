@@ -108,11 +108,12 @@ Superscript numbers refer to the Notes under the tables.
    (its partition set is fixed at subscribe time). Actionable client work, not
    server-gated.
 3. The ReliablePublisher already works as a reliability helper: it retries until
-   durably confirmed (at-least-once), which is most of the value. It also stamps
-   `fibril.client.producer_id`/`_seq` so the broker can later make it
-   effectively-once by deduping on them. That broker-side dedup is not built yet,
-   so retries can still duplicate today. Only the effectively-once guarantee is
-   server-gated, not the helper.
+   durably confirmed (at-least-once), which is most of the value, and stamps
+   `fibril.client.producer_id`/`_seq` on every message. Those headers reach the
+   consumer, so effectively-once has a client-only path: a consumer-side dedup
+   helper that skips already-seen (producer_id, seq). That is actionable client
+   work needing no server change. Broker-side dedup (dropping dups at publish) is
+   the alternative and is the only server-gated part.
 4. The broker DOES push `AssignmentChanged` to exclusive-cohort members
    (`handler.rs` spawn_assignment_forwarder). The Rust client exposes them as an
    assignment-events stream. The TS client does not consume the op yet, so this

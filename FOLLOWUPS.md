@@ -214,10 +214,12 @@ feature ideas live in their own track, summarized at the end.
       decode + an `assignmentEvents()` stream (Rust has it). Observability and
       future client-side partition narrowing, not correctness (the per-partition
       gate already enforces exclusivity).
+  - Effectively-once: TWO paths. (a) CLIENT-ONLY and actionable - a consumer-side
+    dedup helper that skips already-seen (producer_id, seq); the headers already
+    reach the consumer, so no server change is needed. (b) SERVER-GATED - broker
+    dedup that drops dups at publish (only a "read by broker producer-dedup later"
+    comment exists). At-least-once today until one of these ships.
   - SERVER-GATED client items (build the client half when the server side lands):
-    - Effectively-once dedup. The client already sends fibril.client.producer_id/
-      _seq, and the broker dedup that would make it effectively-once is not built
-      (only a "read by broker producer-dedup later" comment). At-least-once today.
     - Lease preservation across re-subscribe (a shared at-least-once limitation).
   Pairs with AUDITS.md "Client API parity" and the client reliability docs item.
   [USER/AUDIT]
