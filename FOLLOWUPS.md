@@ -165,10 +165,16 @@ feature ideas live in their own track, summarized at the end.
     streams instead of leaving them open-but-unfed. Regression-tested. Still TODO
     (brick 5): nothing TRIGGERS a reconnect for a purely passive consumer whose
     connection drops - that needs the subscription supervisor / proactive re-dial.
-  - BRICK 5 failover ride-through (the supervisor equivalent): proactive reconnect
-    of a dropped passive subscription connection + re-subscribe after a Conservative
-    reconcile closes a stream + the transient owner-failover publish retry/backoff
-    deferred from bricks 2-3.
+  - BRICK 5 failover ride-through: PUBLISH SIDE DONE - transient owner-failover
+    retry with throttled topology refresh, jittered backoff, deadline, and
+    not-found fast-fail (publishTimeoutMs option), in the same bounded loop as
+    redirect-follow. STILL TODO (consume side, the supervisor equivalent):
+    proactive reconnect of a dropped passive subscription connection, owner-move
+    detection via topology, and re-subscribe after a Conservative reconcile closes
+    a stream. Design note: this decouples the public Subscription stream from a
+    single engine queue and must decide the semantics for unsettled
+    InflightMessages across a re-subscribe (their sub_id/deliver_request_id/engine
+    all change) - worth mirroring the Rust client's choice deliberately.
   - BRICK 6 exclusive consumer groups.
   - BRICK 7 reliability: isRetryable/retryAdvice classification, a ReliablePublisher,
     producer-id dedup headers.
