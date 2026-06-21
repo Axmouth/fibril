@@ -41,10 +41,13 @@ jobs:
           SITE_IMAGE: ghcr.io/axmouth/fibril/site:test
           SITE_DOMAIN: fibril.sh
 
-      - name: Check Traefik host rule
+      - name: Check Traefik host rules
         run: |
-          rule="$(docker compose -f compose.website.deploy.yaml config | sed -n 's/.*traefik.http.routers.fibril-site.rule: //p')"
-          test "$rule" = 'Host(`fibril.sh`) || Host(`www.fibril.sh`)'
+          config="$(docker compose -f compose.website.deploy.yaml config)"
+          apex="$(printf '%s\n' "$config" | sed -n 's/.*traefik.http.routers.fibril-site.rule: //p')"
+          www="$(printf '%s\n' "$config" | sed -n 's/.*traefik.http.routers.fibril-site-www.rule: //p')"
+          test "$apex" = 'Host(`fibril.sh`)'
+          test "$www" = 'Host(`www.fibril.sh`)'
         env:
           SITE_IMAGE: ghcr.io/axmouth/fibril/site:test
           SITE_DOMAIN: fibril.sh
