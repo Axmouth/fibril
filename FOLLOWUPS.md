@@ -141,9 +141,15 @@ first three are admin-thin (the primitive exists, just expose it).
    through `declare_partitioning` for an authoritative count + conflict detection
    (multi-partition cluster currently relies on the catalogue-sync loop to
    register the declared partitions).
-2. **Queue purge.** `reset()` exists in Stroma (`state.rs`). "Purge is
-   effectively reset" per TODOTHOUGHTS. Expose an admin endpoint + a button
-   (with confirm). Keeps the queue, drops its messages.
+2. **Queue purge.** RE-SCOPED to M after digging in: "purge is reset" was
+   optimistic. `QueueCommand::Reset` / `state.reset()` only re-inits the in-memory
+   consumption state (offsets/acks/inflight) - it does NOT drop log messages and
+   does NOT replicate (messages re-present after it). `StromaEvent::ResetQueue`
+   exists and is applied/decodable but is only EMITTED in tests (unwired
+   scaffolding). A real purge = truncate the message log to head (the
+   `message truncate ... before` primitive in `stroma.rs` exists) + reset state +
+   emit a replicated `ResetQueue` event, plumbed Stroma -> engine -> admin, with
+   replication correctness. Cross-crate, so do after the genuinely-thin items.
 3. **Hide-inactive-queues toggle + basic search** on the queues page. Frontend
    only - the activity/sparse data is already there. Useful with many sparse
    queues.
