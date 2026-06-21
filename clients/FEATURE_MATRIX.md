@@ -72,8 +72,9 @@ Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 | Reserved-namespace header validation | done | no |
 | ReliablePublisher helper | done | no |
 | Producer-id dedup headers | done | no |
-| Exclusive consumer groups | done | no |
-| Assignment events / cohort member id | done | no |
+| Exclusive consumer groups | done | done (cohort subscribe + member-id mint/carry) |
+| Cohort member id mint/carry | done | done |
+| Assignment events stream (AssignmentChanged) | done | no (broker gate enforces exclusivity; stream deferred) |
 
 ## Tooling
 
