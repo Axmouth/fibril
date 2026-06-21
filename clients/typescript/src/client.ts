@@ -4,6 +4,7 @@ import { BrokenPipeError, DisconnectionError, FibrilError } from "./errors.js";
 import { deferred } from "./internal/deferred.js";
 import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
+import { TopologyCache } from "./internal/topology.js";
 import type {
   AuthMsg,
   DeclareQueueMsg,
@@ -11,6 +12,7 @@ import type {
   ReconcilePolicy,
   ResumeIdentity,
   ResumeOutcome,
+  TopologyOkMsg,
 } from "./protocol.js";
 
 function normalizeGroup(group: string | null): string | null {
@@ -338,6 +340,9 @@ export class Client {
   #reconnectPromise: Promise<void> | null = null;
   #userShutdown = false;
   readonly #subscriptions: SubscriptionRegistry;
+  // Routing cache, warmed by fetchTopology and point-updated by redirects. Empty
+  // means "no routing info" (standalone broker or cold client).
+  readonly #topology = new TopologyCache();
 
   private constructor(
     address: { host: string; port: number },
@@ -474,6 +479,22 @@ export class Client {
    */
   subscribe(topic: string): SubscriptionBuilder {
     return new SubscriptionBuilder(this, topic);
+  }
+
+  /**
+   * Fetch the cluster topology and refresh the routing cache. Returns the
+   * snapshot. In standalone mode the broker returns an empty topology and the
+   * client keeps using its direct connection.
+   */
+  async fetchTopology(filter: { topic?: string | null; group?: string | null } = {}): Promise<TopologyOkMsg> {
+    const topology = await (await this._engineForOperation()).fetchTopology(filter);
+    this.#topology.replace(topology);
+    return topology;
+  }
+
+  /** @internal The routing cache, exposed for the pool/router layer and tests. */
+  _topology(): TopologyCache {
+    return this.#topology;
   }
 
   /**

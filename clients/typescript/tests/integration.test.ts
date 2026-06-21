@@ -21,7 +21,7 @@ import {
   type SubscribeMsg,
 } from "../src/protocol.js";
 import { Client, ClientOptions, QueueConfig } from "../src/client.js";
-import { BrokenPipeError, DisconnectionError } from "../src/errors.js";
+import { BrokenPipeError, DisconnectionError, RedirectError } from "../src/errors.js";
 import { NewMessage } from "../src/message.js";
 
 // The wire format carries identity fields as raw 16-byte UUIDs, so the fake
@@ -914,6 +914,88 @@ test("manual message retryAfter sends delayed nack", async () => {
     assert.equal(nack.not_before, BigInt(deadline.getTime()));
     assert.deepEqual(nack.tags, [{ epoch: 101n }]);
     sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("fetchTopology returns the broker topology and warms the routing cache", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        broker.send(
+          s,
+          buildFrame(Op.TopologyOk, f.requestId, {
+            generation: 9n,
+            queues: [
+              {
+                topic: "orders",
+                partition: 0,
+                group: "workers",
+                owner_endpoint: "127.0.0.1:9001",
+                partitioning_version: 2n,
+                partition_count: 3,
+              },
+            ],
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const topology = await client.fetchTopology();
+    assert.equal(topology.generation, 9n);
+    assert.equal(topology.queues.length, 1);
+
+    const cache = client._topology();
+    assert.deepEqual(cache.partitioning("orders", "workers"), { count: 3, version: 2n });
+    assert.deepEqual(cache.lookup("orders", 0, "workers"), {
+      endpoint: "127.0.0.1:9001",
+      partitioningVersion: 2n,
+    });
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("a redirected publish rejects with RedirectError carrying the owner", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Publish) {
+        broker.send(
+          s,
+          buildFrame(Op.Redirect, f.requestId, {
+            topic: "orders",
+            partition: 0,
+            group: null,
+            owner_endpoint: "127.0.0.1:9005",
+            partitioning_version: 1n,
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const pub = client.publisher("orders");
+    await assert.rejects(
+      () => pub.publishConfirmed({ hello: "world" }),
+      (err) => {
+        assert.ok(err instanceof RedirectError);
+        assert.equal(err.redirect.owner_endpoint, "127.0.0.1:9005");
+        assert.equal(err.redirect.topic, "orders");
+        return true;
+      },
+    );
     await client.shutdown();
   } finally {
     await broker.stop();

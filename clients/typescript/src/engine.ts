@@ -10,6 +10,7 @@ import {
   DisconnectionError,
   EofError,
   FibrilError,
+  RedirectError,
   ServerError,
   UnexpectedError,
 } from "./errors.js";
@@ -34,9 +35,12 @@ import {
   type ReconcileClientMsg,
   type ReconcileResultMsg,
   type ReconcileSubscription,
+  type RedirectMsg,
   type ResumeIdentity,
   type SubscribeMsg,
   type SubscribeOkMsg,
+  type TopologyOkMsg,
+  type TopologyRequestMsg,
 } from "./protocol.js";
 import { BoundedQueue } from "./internal/bounded-queue.js";
 import { deferred, type Deferred } from "./internal/deferred.js";
@@ -78,7 +82,8 @@ type Waiter =
   | { kind: "publish"; deferred: Deferred<bigint> }
   | { kind: "declareQueue"; deferred: Deferred<void> }
   | { kind: "subscribeManual"; deferred: Deferred<BoundedQueue<InternalInflight>> }
-  | { kind: "subscribeAuto"; deferred: Deferred<BoundedQueue<InternalDelivered>> };
+  | { kind: "subscribeAuto"; deferred: Deferred<BoundedQueue<InternalDelivered>> }
+  | { kind: "topology"; deferred: Deferred<TopologyOkMsg> };
 
 // Commands the public API submits to the engine.
 export type Command =
@@ -90,7 +95,8 @@ export type Command =
   | { type: "subscribe"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalInflight>> }
   | { type: "subscribeAutoAck"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalDelivered>> }
   | { type: "ack"; sub_id: bigint; tag: DeliveryTag; request_id: bigint; reply: Deferred<void> }
-  | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; not_before: bigint | null; request_id: bigint; reply: Deferred<void> };
+  | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; not_before: bigint | null; request_id: bigint; reply: Deferred<void> }
+  | { type: "topology"; topic: string | null; group: string | null; reply: Deferred<TopologyOkMsg> };
 
 // ===== Constants =====
 
@@ -302,6 +308,23 @@ export class Engine {
     } catch {
       throw new BrokenPipeError();
     }
+  }
+
+  /**
+   * Fetch the cluster topology from the broker. A null topic asks for the full
+   * topology. Standalone brokers return an empty topology.
+   */
+  async fetchTopology(
+    filter: { topic?: string | null; group?: string | null } = {},
+  ): Promise<TopologyOkMsg> {
+    const reply = deferred<TopologyOkMsg>();
+    await this.submit({
+      type: "topology",
+      topic: filter.topic ?? null,
+      group: filter.group ?? null,
+      reply,
+    });
+    return reply.promise;
   }
 
   /**
@@ -550,6 +573,15 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         }
         return;
       }
+      case "topology": {
+        const reqId = nextReqId();
+        waiters.set(reqId, { kind: "topology", deferred: cmd.reply });
+        const req: TopologyRequestMsg = { topic: cmd.topic, group: cmd.group };
+        if (!(await sendOrDie(buildFrame(Op.Topology, reqId, req)))) {
+          waiters.delete(reqId);
+        }
+        return;
+      }
       case "ack": {
         const sub = subs.get(cmd.sub_id);
         if (!sub) {
@@ -666,6 +698,30 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         if (w?.kind === "declareQueue") {
           waiters.delete(frame.requestId);
           w.deferred.resolve();
+        }
+        return;
+      }
+
+      case Op.TopologyOk: {
+        const topology = decodeFrameBody<TopologyOkMsg>(frame);
+        const w = waiters.get(frame.requestId);
+        if (w?.kind === "topology") {
+          waiters.delete(frame.requestId);
+          w.deferred.resolve(topology);
+        }
+        return;
+      }
+
+      case Op.Redirect: {
+        // Not a failure: the broker is naming the current owner for a misrouted
+        // op. Fail the matching waiter with a typed error so the routing layer
+        // can apply the redirect and retry on the owner's connection. Without a
+        // waiter there is nothing to retry, so drop it.
+        const redirect = decodeFrameBody<RedirectMsg>(frame);
+        const w = waiters.get(frame.requestId);
+        if (w) {
+          waiters.delete(frame.requestId);
+          failWaiter(w, new RedirectError(redirect));
         }
         return;
       }
@@ -799,6 +855,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         break;
       case "ack":
       case "nack":
+      case "topology":
         cmd.reply.reject(cleanupError);
         break;
       case "publishDelayedUnconfirmed":
@@ -826,6 +883,9 @@ function failWaiter(w: Waiter, err: FibrilError): void {
       return;
     case "subscribeManual":
     case "subscribeAuto":
+      w.deferred.reject(err);
+      return;
+    case "topology":
       w.deferred.reject(err);
       return;
   }

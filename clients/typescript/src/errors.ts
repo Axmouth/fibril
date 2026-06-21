@@ -66,6 +66,23 @@ export class ServerError extends FibrilError {
 }
 
 /**
+ * The broker told the client to retry this op against a different owner. Not a
+ * failure: it carries a routing target and must be retried on a connection to
+ * that owner. The routing layer (not the per-connection engine) acts on it, so
+ * the engine surfaces it as this typed error rather than a generic ServerError.
+ */
+export class RedirectError extends FibrilError {
+  override readonly name = "RedirectError";
+  readonly redirect: import("./protocol.js").RedirectMsg;
+  constructor(redirect: import("./protocol.js").RedirectMsg) {
+    super(
+      `redirected to owner ${redirect.owner_endpoint} for ${redirect.topic}/${redirect.partition}`,
+    );
+    this.redirect = redirect;
+  }
+}
+
+/**
  * Connection ended before completing a handshake or expected exchange.
  */
 export class EofError extends FibrilError {
