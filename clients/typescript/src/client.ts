@@ -74,6 +74,11 @@ export interface ClientOptionsInit {
    * the new owner. null disables supervision (a dropped stream just ends).
    */
   superviseSubscriptions?: boolean;
+  /**
+   * How often (ms) a supervised subscription re-checks the topology owner to
+   * detect a graceful owner move that did not drop the connection.
+   */
+  subscriptionSuperviseIntervalMs?: number;
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
@@ -96,6 +101,7 @@ export class ClientOptions {
   readonly publishTimeoutMs: number;
   readonly topologyRefreshCooldownMs: number;
   readonly superviseSubscriptions: boolean;
+  readonly subscriptionSuperviseIntervalMs: number;
 
   constructor(init: ClientOptionsInit = {}) {
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
@@ -109,6 +115,7 @@ export class ClientOptions {
     this.publishTimeoutMs = init.publishTimeoutMs ?? 30_000;
     this.topologyRefreshCooldownMs = init.topologyRefreshCooldownMs ?? 1_000;
     this.superviseSubscriptions = init.superviseSubscriptions ?? true;
+    this.subscriptionSuperviseIntervalMs = init.subscriptionSuperviseIntervalMs ?? 1_000;
   }
 
   /** Return a copy with the given fields overridden. */
@@ -125,6 +132,7 @@ export class ClientOptions {
       publishTimeoutMs: this.publishTimeoutMs,
       topologyRefreshCooldownMs: this.topologyRefreshCooldownMs,
       superviseSubscriptions: this.superviseSubscriptions,
+      subscriptionSuperviseIntervalMs: this.subscriptionSuperviseIntervalMs,
       ...overrides,
     });
   }
@@ -670,6 +678,28 @@ export class Client {
   /** @internal Whether subscriptions should ride through a failover. */
   _superviseSubscriptions(): boolean {
     return this.#opts.superviseSubscriptions;
+  }
+
+  /** @internal How often a supervised subscription re-checks its owner. */
+  _superviseIntervalMs(): number {
+    return this.#opts.subscriptionSuperviseIntervalMs;
+  }
+
+  /**
+   * @internal Partitions a subscription fans in over for (topic, group). The
+   * count comes from the topology cache; an unknown count (cold cache or
+   * standalone) yields just partition 0, the single-partition path. Cache-only
+   * by design: subscribe never fetches topology on its own.
+   */
+  _partitionSet(topic: string, group: string | null): number[] {
+    const partitioning = this.#topology.partitioning(topic, group);
+    const count = Math.max(partitioning?.count ?? 1, 1);
+    return Array.from({ length: count }, (_, i) => i);
+  }
+
+  /** @internal Current owner endpoint for a partition, or null if unresolved. */
+  _ownerEndpoint(topic: string, partition: number, group: string | null): string | null {
+    return this.#topology.lookup(topic, partition, group)?.endpoint ?? null;
   }
 
   /**

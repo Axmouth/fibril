@@ -325,53 +325,87 @@ type Tagged<R> = { engine: Engine; raw: R };
 interface SupervisorClient {
   _isShuttingDown(): boolean;
   _superviseSubscriptions(): boolean;
+  _superviseIntervalMs(): number;
   _refreshTopologyThrottled(): Promise<boolean>;
   _isTopicMissing(topic: string, group: string | null): boolean;
+  _ownerEndpoint(topic: string, partition: number, group: string | null): string | null;
 }
 
 /**
- * Keeps a subscription's stream alive across an owner failover or restart. The
- * public subscription reads from a merged queue that this fills from the current
- * owner's per-connection delivery queue. When that stream ends and the consumer
- * has not closed, it re-subscribes to the current owner (re-resolved from a
- * refreshed topology) with backoff, then resumes - the read-side mirror of the
- * publish failover retry. Each delivery carries the engine it arrived on so a
- * manual ack settles against the right connection.
- *
- * Scope: single-partition (partition 0). Owner moves are detected when the
- * stream closes (owner death / restart). A graceful owner reassignment that
- * leaves the old connection up, and multi-partition fan-in, are follow-ups.
+ * Supervises one partition's stream. Forwards it into the shared merged queue,
+ * re-subscribes to the current owner when the stream closes (owner death or
+ * restart), and watches the topology for a graceful owner move that did not drop
+ * the connection. Each delivery carries the engine it arrived on so a manual ack
+ * settles against the right connection.
  */
-class SubscriptionSupervisor<R> {
-  readonly merged: BoundedQueue<Tagged<R>>;
+class PartitionSupervisor<R> {
   #engine: Engine;
   #partQueue: BoundedQueue<R>;
-  #userClosed = false;
+  #stopped = false;
+  #boundOwner: string | null;
+  #timer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly client: SupervisorClient,
     private readonly req: SubscribeMsg,
+    private readonly merged: BoundedQueue<Tagged<R>>,
     private readonly resubscribe: (req: SubscribeMsg) => Promise<SubscribeHandle<R>>,
     first: SubscribeHandle<R>,
-    prefetch: number,
+    onStopped: () => void,
   ) {
     this.#engine = first.engine;
     this.#partQueue = first.queue;
-    this.merged = new BoundedQueue<Tagged<R>>(Math.max(prefetch, 1));
-    void this.#run();
+    this.#boundOwner = this.#ownerNow();
+    // The merged queue is shared; this partition closing must not end the others.
+    // Notify the fan-in so it can close the merged queue once all have stopped.
+    void this.#run().finally(onStopped);
+    if (this.client._superviseSubscriptions()) this.#startOwnerCheck();
   }
 
-  async recv(): Promise<Tagged<R> | null> {
-    return this.merged.recv();
-  }
-
-  close(): void {
-    if (this.#userClosed) return;
-    this.#userClosed = true;
-    // Close the current owner stream to unblock the forwarder, and the merged
-    // queue to end the consumer.
+  stop(): void {
+    if (this.#stopped) return;
+    this.#stopped = true;
+    this.#clearTimer();
     this.#partQueue.close();
-    this.merged.close();
+  }
+
+  #ownerNow(): string | null {
+    return this.client._ownerEndpoint(this.req.topic, this.req.partition ?? 0, this.req.group);
+  }
+
+  // Periodically detect a graceful owner move (ownership changed but the old
+  // connection stayed up, so the stream did not close). Closing the stream forces
+  // a re-subscribe to the new owner. Unref'd so it never keeps the process alive.
+  #startOwnerCheck(): void {
+    let checking = false;
+    this.#timer = setInterval(() => {
+      if (this.#stopped || this.client._isShuttingDown()) {
+        this.#clearTimer();
+        return;
+      }
+      if (checking) return;
+      checking = true;
+      void (async () => {
+        try {
+          await this.client._refreshTopologyThrottled();
+          const current = this.#ownerNow();
+          if (current !== null && current !== this.#boundOwner) {
+            this.#boundOwner = current;
+            this.#partQueue.close();
+          }
+        } finally {
+          checking = false;
+        }
+      })();
+    }, Math.max(this.client._superviseIntervalMs(), 1));
+    this.#timer.unref?.();
+  }
+
+  #clearTimer(): void {
+    if (this.#timer) {
+      clearInterval(this.#timer);
+      this.#timer = null;
+    }
   }
 
   async #run(): Promise<void> {
@@ -383,23 +417,20 @@ class SubscriptionSupervisor<R> {
         try {
           await this.merged.send({ engine: this.#engine, raw });
         } catch {
-          // merged closed by close(): the consumer is gone.
-          this.#userClosed = true;
+          this.#stopped = true; // merged closed: the consumer is gone
           break;
         }
       }
-      // The owner stream ended. Stop on user close, client shutdown, or when
-      // supervision is disabled; otherwise re-subscribe to the current owner.
       if (
-        this.#userClosed ||
+        this.#stopped ||
         this.client._isShuttingDown() ||
         !this.client._superviseSubscriptions()
       ) {
-        this.merged.close();
+        this.#clearTimer();
         return;
       }
       if (!(await this.#resubscribeWithBackoff())) {
-        this.merged.close();
+        this.#clearTimer();
         return;
       }
     }
@@ -408,7 +439,7 @@ class SubscriptionSupervisor<R> {
   async #resubscribeWithBackoff(): Promise<boolean> {
     let backoffMs = PUBLISH_RETRY_INITIAL_BACKOFF_MS;
     for (;;) {
-      if (this.#userClosed || this.client._isShuttingDown()) return false;
+      if (this.#stopped || this.client._isShuttingDown()) return false;
       // Re-resolve the owner from a refreshed topology. If a populated view no
       // longer knows the topic, stop re-subscribing (it was deleted).
       if (await this.client._refreshTopologyThrottled()) {
@@ -416,12 +447,13 @@ class SubscriptionSupervisor<R> {
       }
       try {
         const next = await this.resubscribe(this.req);
-        if (this.#userClosed || this.client._isShuttingDown()) {
+        if (this.#stopped || this.client._isShuttingDown()) {
           next.queue.close();
           return false;
         }
         this.#engine = next.engine;
         this.#partQueue = next.queue;
+        this.#boundOwner = this.#ownerNow();
         return true;
       } catch (err) {
         if (isTransientError(err)) {
@@ -431,6 +463,66 @@ class SubscriptionSupervisor<R> {
         }
         return false; // permanent: subscribe rejected, max redirects, etc.
       }
+    }
+  }
+}
+
+/**
+ * Fans one logical subscription in over its partitions. Each partition has its
+ * own supervisor feeding a single merged queue that the public subscription
+ * reads, so per-partition ordering is preserved and the partitions interleave.
+ * The partition set is fixed at subscribe time (partition counts are fixed at
+ * queue creation today); picking up partitions added by a live grow is a
+ * follow-up tied to live repartitioning.
+ */
+class FanIn<R> {
+  readonly #merged: BoundedQueue<Tagged<R>>;
+  readonly #partitions: PartitionSupervisor<R>[] = [];
+  #active: number;
+  #closed = false;
+
+  constructor(
+    client: SupervisorClient,
+    baseReq: SubscribeMsg,
+    resubscribe: (req: SubscribeMsg) => Promise<SubscribeHandle<R>>,
+    initial: Array<{ partition: number; handle: SubscribeHandle<R> }>,
+    prefetch: number,
+  ) {
+    const cap = Math.max(prefetch, 1) * Math.max(initial.length, 1);
+    this.#merged = new BoundedQueue<Tagged<R>>(cap);
+    this.#active = initial.length;
+    for (const { partition, handle } of initial) {
+      this.#partitions.push(
+        new PartitionSupervisor(
+          client,
+          { ...baseReq, partition },
+          this.#merged,
+          resubscribe,
+          handle,
+          () => this.#onPartitionStopped(),
+        ),
+      );
+    }
+  }
+
+  async recv(): Promise<Tagged<R> | null> {
+    return this.#merged.recv();
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    for (const sup of this.#partitions) sup.stop();
+    this.#merged.close();
+  }
+
+  // When the last partition permanently stops, end the merged stream so the
+  // consumer's iteration completes rather than blocking forever.
+  #onPartitionStopped(): void {
+    this.#active -= 1;
+    if (this.#active <= 0 && !this.#closed) {
+      this.#closed = true;
+      this.#merged.close();
     }
   }
 }
@@ -464,23 +556,23 @@ class SubscriptionSupervisor<R> {
  * ```
  */
 export class Subscription implements AsyncIterable<InflightMessage> {
-  readonly #sup: SubscriptionSupervisor<InternalInflight>;
+  readonly #fanIn: FanIn<InternalInflight>;
 
   /** @internal */
-  constructor(sup: SubscriptionSupervisor<InternalInflight>) {
-    this.#sup = sup;
+  constructor(fanIn: FanIn<InternalInflight>) {
+    this.#fanIn = fanIn;
   }
 
   /** Receive the next message, or `null` if the subscription is closed cleanly. */
   async recv(): Promise<InflightMessage | null> {
-    const item = await this.#sup.recv();
+    const item = await this.#fanIn.recv();
     if (item === null) return null;
     return new InflightMessage(item.engine, item.raw);
   }
 
   /** Close this subscription. The client engine continues running. */
   close(): void {
-    this.#sup.close();
+    this.#fanIn.close();
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<InflightMessage> {
@@ -499,23 +591,23 @@ export class Subscription implements AsyncIterable<InflightMessage> {
  * Prefer manual acknowledgements when processing correctness matters.
  */
 export class AutoAckedSubscription implements AsyncIterable<Message> {
-  readonly #sup: SubscriptionSupervisor<InternalDelivered>;
+  readonly #fanIn: FanIn<InternalDelivered>;
 
   /** @internal */
-  constructor(sup: SubscriptionSupervisor<InternalDelivered>) {
-    this.#sup = sup;
+  constructor(fanIn: FanIn<InternalDelivered>) {
+    this.#fanIn = fanIn;
   }
 
   /** Receive the next message, or `null` if the subscription is closed cleanly. */
   async recv(): Promise<Message | null> {
-    const item = await this.#sup.recv();
+    const item = await this.#fanIn.recv();
     if (item === null) return null;
     return new Message(item.raw);
   }
 
   /** Close this subscription. The client engine continues running. */
   close(): void {
-    this.#sup.close();
+    this.#fanIn.close();
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<Message> {
@@ -575,55 +667,66 @@ export class SubscriptionBuilder {
    * Each received `InflightMessage` must be settled by the user.
    */
   async subManualAck(): Promise<Subscription> {
-    const req: SubscribeMsg = {
+    const baseReq: SubscribeMsg = {
       topic: this.#topic,
       group: this.#group,
       prefetch: this.#prefetch,
       auto_ack: false,
-      partition: 0,
     };
-    let first: SubscribeHandle<InternalInflight>;
-    try {
-      first = await this.#client._subscribeManualOnce(req);
-    } catch (err) {
-      if (err instanceof FibrilError) throw err;
-      throw new BrokenPipeError();
-    }
-    const sup = new SubscriptionSupervisor<InternalInflight>(
+    const initial = await this.#fanInInitial(baseReq, (r) =>
+      this.#client._subscribeManualOnce(r),
+    );
+    const fanIn = new FanIn<InternalInflight>(
       this.#client,
-      req,
+      baseReq,
       (r) => this.#client._subscribeManualOnce(r),
-      first,
+      initial,
       this.#prefetch,
     );
-    return new Subscription(sup);
+    return new Subscription(fanIn);
   }
 
   /**
    * Subscribe with client-side automatic acknowledgement.
    */
   async subAutoAck(): Promise<AutoAckedSubscription> {
-    const req: SubscribeMsg = {
+    const baseReq: SubscribeMsg = {
       topic: this.#topic,
       group: this.#group,
       prefetch: this.#prefetch,
       auto_ack: false, // matches Rust client: auto-ack is client-side
-      partition: 0,
     };
-    let first: SubscribeHandle<InternalDelivered>;
+    const initial = await this.#fanInInitial(baseReq, (r) =>
+      this.#client._subscribeAutoOnce(r),
+    );
+    const fanIn = new FanIn<InternalDelivered>(
+      this.#client,
+      baseReq,
+      (r) => this.#client._subscribeAutoOnce(r),
+      initial,
+      this.#prefetch,
+    );
+    return new AutoAckedSubscription(fanIn);
+  }
+
+  // Subscribe to each partition in the topic's partition set. On a partial
+  // failure, close the handles already acquired so we leak no connections.
+  async #fanInInitial<R>(
+    baseReq: SubscribeMsg,
+    subscribeOne: (req: SubscribeMsg) => Promise<SubscribeHandle<R>>,
+  ): Promise<Array<{ partition: number; handle: SubscribeHandle<R> }>> {
+    const partitions = this.#client._partitionSet(this.#topic, this.#group);
+    const initial: Array<{ partition: number; handle: SubscribeHandle<R> }> = [];
     try {
-      first = await this.#client._subscribeAutoOnce(req);
+      for (const partition of partitions) {
+        const handle = await subscribeOne({ ...baseReq, partition });
+        initial.push({ partition, handle });
+      }
     } catch (err) {
+      for (const { handle } of initial) handle.queue.close();
       if (err instanceof FibrilError) throw err;
       throw new BrokenPipeError();
     }
-    const sup = new SubscriptionSupervisor<InternalDelivered>(
-      this.#client,
-      req,
-      (r) => this.#client._subscribeAutoOnce(r),
-      first,
-      this.#prefetch,
-    );
-    return new AutoAckedSubscription(sup);
+    return initial;
   }
 }

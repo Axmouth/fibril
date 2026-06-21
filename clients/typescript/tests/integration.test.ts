@@ -1349,3 +1349,77 @@ test("a full topology refresh prunes pooled connections to dropped owners", asyn
     await owner.stop();
   }
 });
+
+test("subscribe fans in over all partitions the topology knows", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        broker.send(
+          s,
+          buildFrame(Op.TopologyOk, f.requestId, {
+            generation: 1n,
+            queues: [0, 1, 2].map((partition) => ({
+              topic: "orders",
+              partition,
+              group: null,
+              owner_endpoint: `127.0.0.1:${broker.port}`,
+              partitioning_version: 1n,
+              partition_count: 3,
+            })),
+          }),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        const partition = sub.partition ?? 0;
+        const subId = BigInt(partition + 1);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: subId,
+            topic: "orders",
+            group: null,
+            partition,
+            prefetch: sub.prefetch,
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: subId,
+            topic: "orders",
+            group: null,
+            partition,
+            offset: 0n,
+            delivery_tag: { epoch: subId },
+            published: 1n,
+            publish_received: 2n,
+            content_type: null,
+            headers: {},
+            payload: new Uint8Array([partition]),
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    await client.fetchTopology(); // warm the cache so the fan-in covers 3 partitions
+    const sub = await client.subscribe("orders").subAutoAck();
+
+    const seen = new Set<number>();
+    for (let i = 0; i < 3; i += 1) {
+      const msg = await sub.recv();
+      assert.ok(msg);
+      seen.add(msg.payload[0]!);
+    }
+    assert.deepEqual([...seen].sort(), [0, 1, 2]);
+
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
