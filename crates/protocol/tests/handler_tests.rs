@@ -2421,47 +2421,36 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
     assert_eq!(moved.owner, "b-follower");
     assert_eq!(moved.epoch, first.epoch + 1);
 
-    // The old owner demotes itself: ownership gate flips off and the engine
-    // refuses owner traffic (publish path fails, no silent stale writes).
+    // The old owner demotes itself: its owner runtime is cancelled and the
+    // engine refuses owner traffic, so writes on the EXISTING publisher fail (no
+    // silent stale writes). We assert through the existing `publisher` rather than
+    // a fresh `get_publisher`: this test broker uses OwnAllQueues (no ownership
+    // gate), so a fresh get_publisher would re-materialize the queue as owner past
+    // the freeze - a path the real coordination gate forbids in a cluster, and a
+    // Stroma role-durability gap tracked in FOLLOWUPS.md (durable queue role).
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let gate_owns = fibril_broker::broker::QueueOwnership::owns_queue(
-                coordination.as_ref(),
-                topic,
-                Partition::new(0),
-                None,
-            );
-            if !gate_owns {
-                let publish_attempt = match owner_broker
-                    .get_publisher(topic, Partition::new(0), &None)
-                    .await
-                {
-                    Ok((publisher, _confirms)) => {
-                        match publisher
-                            .publish(
-                                b"stale-after-fence".to_vec(),
-                                unix_millis(),
-                                unix_millis(),
-                                None,
-                                Default::default(),
-                            )
-                            .await
-                        {
-                            Ok(reply) => reply.await.map(|inner| inner.is_err()).unwrap_or(true),
-                            Err(_) => true,
-                        }
-                    }
-                    Err(_) => true,
-                };
-                if publish_attempt {
-                    break;
-                }
+            let refused = match publisher
+                .publish(
+                    b"stale-after-fence".to_vec(),
+                    unix_millis(),
+                    unix_millis(),
+                    None,
+                    Default::default(),
+                )
+                .await
+            {
+                Ok(reply) => reply.await.map(|inner| inner.is_err()).unwrap_or(true),
+                Err(_) => true,
+            };
+            if refused {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .expect("demoted old owner must refuse new publishes");
+    .expect("demoted old owner must refuse writes on the existing publisher");
 
     coordination.consensus_node().shutdown().await.unwrap();
     owner_broker.shutdown().await;

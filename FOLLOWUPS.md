@@ -43,6 +43,21 @@ feature ideas live in their own track, summarized at the end.
 - Split-brain: believed addressed by epoch fencing in Keratin plus the Stroma
   freeze. Verify, and add adversarial tests for the reappearing-stale-owner case
   (reject any write or replicate whose epoch is below the local partition epoch). [PLAN]
+- Durable queue role (Stroma hardening, defense-in-depth for the ownership gate):
+  a Stroma queue defaults to `QueueRole::Owner` on create/recovery and the role
+  is in-memory only (`stroma/core/src/state.rs`). So a Frozen/Follower queue
+  loses that role on eviction or restart and re-materializes as Owner, which can
+  resurface a stale owner accepting writes if the broker gate is bypassed or
+  diverges. Two layers found while fixing
+  `ganglion_returning_old_owner_is_demoted_and_refuses_publishes`:
+  (A) the broker gate/watcher divergence - FIXED (broker `locally_owned` reconcile,
+  commit aea4d50, demotes a de-facto owner even with no observed BecomeOwner);
+  (B) this engine-role durability gap - OPEN. Lighter increment: pin a
+  frozen-for-transition queue against eviction (survives eviction, not restart).
+  Robust fix: persist the role (or "not owner") so recovery restores a non-owner
+  state and ownership is always coordination's decision, never a default (covers
+  eviction AND restart). The gate masks this in normal operation, so it is
+  defense-in-depth. [USER]
 - Ex-owner rejoins the cluster after losing privileges while its replicas were
   not fully caught up and its data was not shared: define and handle the
   mechanics (ties to epoch fencing plus recovery verification). [WL]
