@@ -162,7 +162,7 @@ test("client reconnect offers previous resume identity", async () => {
 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
-      new ClientOptions().withReconnectReconcilePolicy("restore_client_subscriptions"),
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore_client_subscriptions"),
     );
     const outcome = await client.reconnect();
 
@@ -316,7 +316,7 @@ test("client sends active subscriptions during reconnect reconciliation", async 
 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
-      new ClientOptions().withReconnectReconcilePolicy("restore_client_subscriptions"),
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore_client_subscriptions"),
     );
     const sub = await client.subscribe("jobs").group("workers").subManualAck();
     const outcome = await client.reconnect();
@@ -688,16 +688,13 @@ test("delivery accepts array-encoded byte payloads from Rust", async () => {
   }
 });
 
-test("subscription throws on engine disconnection", async () => {
+test("subscription ends when the engine disconnects with supervision off", async () => {
   const broker = new FakeBroker();
   await broker.start();
   try {
     broker.onFrame = (f, s) => {
       if (f.opcode === Op.Hello) {
-        broker.send(
-          s,
-          buildFrame(Op.HelloOk, f.requestId, helloOk()),
-        );
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
       } else if (f.opcode === Op.Subscribe) {
         broker.send(
           s,
@@ -712,28 +709,87 @@ test("subscription throws on engine disconnection", async () => {
       }
     };
 
-    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions({ superviseSubscriptions: false }).disableAutoReconnect(),
+    );
     const sub = await client.subscribe("t").subManualAck();
 
-    // Stop the broker; client engine should eventually surface the error.
+    // Stop the broker; with supervision off the stream ends rather than riding
+    // through. The iteration must terminate (not hang).
     setTimeout(() => broker.stop(), 10);
-
-    // The iterator should throw on next() because the queue closes with a fatal error.
-    let threw = false;
-    try {
-      for await (const _msg of sub) {
-        // no-op
-      }
-    } catch {
-      threw = true;
+    for await (const _msg of sub) {
+      // no-op
     }
-    // It's also acceptable for it to terminate cleanly if the close path didn't
-    // capture a fatal error in time. We accept either outcome but assert the
-    // iteration ended (didn't hang).
-    assert.ok(threw || true);
     await client.shutdown();
   } finally {
-    // already stopped
+    // broker already stopped
+  }
+});
+
+test("subscription rides through an owner drop by re-subscribing", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let subscribes = 0;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        broker.send(s, buildFrame(Op.TopologyOk, f.requestId, { generation: 0n, queues: [] }));
+      } else if (f.opcode === Op.Subscribe) {
+        subscribes += 1;
+        const subId = BigInt(subscribes);
+        const payload = new Uint8Array([subscribes]); // 1 before the drop, 2 after
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: subId,
+            topic: "t",
+            group: null,
+            partition: 0,
+            prefetch: 10,
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: subId,
+            topic: "t",
+            group: null,
+            partition: 0,
+            offset: subId,
+            delivery_tag: { epoch: subId },
+            published: 1n,
+            publish_received: 2n,
+            content_type: null,
+            headers: {},
+            payload,
+          }),
+        );
+        // Drop the owner after the first delivery: the supervisor must reconnect
+        // and re-subscribe to keep the stream alive.
+        if (subscribes === 1) setTimeout(() => s.destroy(), 20);
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const sub = await client.subscribe("t").subAutoAck();
+
+    const first = await sub.recv();
+    assert.ok(first);
+    assert.deepEqual([...first.payload], [1]);
+
+    // Second message arrives only after a transparent re-subscribe.
+    const second = await sub.recv();
+    assert.ok(second);
+    assert.deepEqual([...second.payload], [2]);
+    assert.ok(subscribes >= 2);
+
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
   }
 });
 
@@ -1156,7 +1212,7 @@ test("owner restart: reconnect into a fresh session still reconciles subscriptio
 
     const client = await Client.connect(
       `127.0.0.1:${broker.port}`,
-      new ClientOptions().withReconnectReconcilePolicy("restore_client_subscriptions"),
+      new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore_client_subscriptions"),
     );
     const sub = await client.subscribe("jobs").subManualAck();
     const outcome = await client.reconnect();

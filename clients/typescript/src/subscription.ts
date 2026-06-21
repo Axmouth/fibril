@@ -2,17 +2,24 @@ import {
   BrokenPipeError,
   DeserializationError,
   FibrilError,
+  isTransientError,
 } from "./errors.js";
 import { contentTypeHeader, deserializeByContentType } from "./message.js";
-import type { DeliveryTag } from "./protocol.js";
+import type { DeliveryTag, SubscribeMsg } from "./protocol.js";
 import type {
   Engine,
   InternalDelivered,
   InternalInflight,
 } from "./engine.js";
 import { deferred } from "./internal/deferred.js";
-import type { BoundedQueue } from "./internal/bounded-queue.js";
-import type { Client } from "./client.js";
+import { BoundedQueue } from "./internal/bounded-queue.js";
+import {
+  PUBLISH_RETRY_INITIAL_BACKOFF_MS,
+  PUBLISH_RETRY_MAX_BACKOFF_MS,
+  publishRetryNap,
+  sleep,
+} from "./internal/retry.js";
+import type { Client, SubscribeHandle } from "./client.js";
 import { deadlineFromDelay, type DelayInput } from "./publisher.js";
 
 function normalizeGroup(group: string | null): string | null {
@@ -311,15 +318,132 @@ export class InflightMessage {
   }
 }
 
+/** A delivery tagged with the engine it arrived on, so settle routes correctly. */
+type Tagged<R> = { engine: Engine; raw: R };
+
+/** The routing surface a supervised subscription needs from the Client. */
+interface SupervisorClient {
+  _isShuttingDown(): boolean;
+  _superviseSubscriptions(): boolean;
+  _refreshTopologyThrottled(): Promise<boolean>;
+  _isTopicMissing(topic: string, group: string | null): boolean;
+}
+
+/**
+ * Keeps a subscription's stream alive across an owner failover or restart. The
+ * public subscription reads from a merged queue that this fills from the current
+ * owner's per-connection delivery queue. When that stream ends and the consumer
+ * has not closed, it re-subscribes to the current owner (re-resolved from a
+ * refreshed topology) with backoff, then resumes - the read-side mirror of the
+ * publish failover retry. Each delivery carries the engine it arrived on so a
+ * manual ack settles against the right connection.
+ *
+ * Scope: single-partition (partition 0). Owner moves are detected when the
+ * stream closes (owner death / restart). A graceful owner reassignment that
+ * leaves the old connection up, and multi-partition fan-in, are follow-ups.
+ */
+class SubscriptionSupervisor<R> {
+  readonly merged: BoundedQueue<Tagged<R>>;
+  #engine: Engine;
+  #partQueue: BoundedQueue<R>;
+  #userClosed = false;
+
+  constructor(
+    private readonly client: SupervisorClient,
+    private readonly req: SubscribeMsg,
+    private readonly resubscribe: (req: SubscribeMsg) => Promise<SubscribeHandle<R>>,
+    first: SubscribeHandle<R>,
+    prefetch: number,
+  ) {
+    this.#engine = first.engine;
+    this.#partQueue = first.queue;
+    this.merged = new BoundedQueue<Tagged<R>>(Math.max(prefetch, 1));
+    void this.#run();
+  }
+
+  async recv(): Promise<Tagged<R> | null> {
+    return this.merged.recv();
+  }
+
+  close(): void {
+    if (this.#userClosed) return;
+    this.#userClosed = true;
+    // Close the current owner stream to unblock the forwarder, and the merged
+    // queue to end the consumer.
+    this.#partQueue.close();
+    this.merged.close();
+  }
+
+  async #run(): Promise<void> {
+    for (;;) {
+      // Forward the current owner's stream into the merged queue.
+      for (;;) {
+        const raw = await this.#partQueue.recv();
+        if (raw === null) break;
+        try {
+          await this.merged.send({ engine: this.#engine, raw });
+        } catch {
+          // merged closed by close(): the consumer is gone.
+          this.#userClosed = true;
+          break;
+        }
+      }
+      // The owner stream ended. Stop on user close, client shutdown, or when
+      // supervision is disabled; otherwise re-subscribe to the current owner.
+      if (
+        this.#userClosed ||
+        this.client._isShuttingDown() ||
+        !this.client._superviseSubscriptions()
+      ) {
+        this.merged.close();
+        return;
+      }
+      if (!(await this.#resubscribeWithBackoff())) {
+        this.merged.close();
+        return;
+      }
+    }
+  }
+
+  async #resubscribeWithBackoff(): Promise<boolean> {
+    let backoffMs = PUBLISH_RETRY_INITIAL_BACKOFF_MS;
+    for (;;) {
+      if (this.#userClosed || this.client._isShuttingDown()) return false;
+      // Re-resolve the owner from a refreshed topology. If a populated view no
+      // longer knows the topic, stop re-subscribing (it was deleted).
+      if (await this.client._refreshTopologyThrottled()) {
+        if (this.client._isTopicMissing(this.req.topic, this.req.group)) return false;
+      }
+      try {
+        const next = await this.resubscribe(this.req);
+        if (this.#userClosed || this.client._isShuttingDown()) {
+          next.queue.close();
+          return false;
+        }
+        this.#engine = next.engine;
+        this.#partQueue = next.queue;
+        return true;
+      } catch (err) {
+        if (isTransientError(err)) {
+          await sleep(publishRetryNap(backoffMs));
+          backoffMs = Math.min(backoffMs * 2, PUBLISH_RETRY_MAX_BACKOFF_MS);
+          continue;
+        }
+        return false; // permanent: subscribe rejected, max redirects, etc.
+      }
+    }
+  }
+}
+
 /**
  * Subscription with manual acknowledgement. Iterate with `for await`.
  * Each delivered message must be settled by the user via
  * `complete()` / `fail()` / `retry()` / `retryAfter()` on the
  * `InflightMessage`.
  *
- * Iteration ends cleanly when the subscription is closed by the user
- * (via `close()`); it throws `DisconnectionError` (or other `FibrilError`)
- * if the engine dies.
+ * Iteration ends cleanly when the subscription is closed by the user (via
+ * `close()`) or the client shuts down. With supervision enabled (the default)
+ * it rides through an owner failover by re-subscribing rather than ending.
  *
  * @example
  * ```ts
@@ -340,28 +464,23 @@ export class InflightMessage {
  * ```
  */
 export class Subscription implements AsyncIterable<InflightMessage> {
-  readonly #engine: Engine;
-  readonly #queue: BoundedQueue<InternalInflight>;
-  #closed = false;
+  readonly #sup: SubscriptionSupervisor<InternalInflight>;
 
   /** @internal */
-  constructor(engine: Engine, queue: BoundedQueue<InternalInflight>) {
-    this.#engine = engine;
-    this.#queue = queue;
+  constructor(sup: SubscriptionSupervisor<InternalInflight>) {
+    this.#sup = sup;
   }
 
   /** Receive the next message, or `null` if the subscription is closed cleanly. */
   async recv(): Promise<InflightMessage | null> {
-    const v = await this.#queue.recv();
-    if (v === null) return null;
-    return new InflightMessage(this.#engine, v);
+    const item = await this.#sup.recv();
+    if (item === null) return null;
+    return new InflightMessage(item.engine, item.raw);
   }
 
   /** Close this subscription. The client engine continues running. */
   close(): void {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.#queue.close();
+    this.#sup.close();
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<InflightMessage> {
@@ -380,26 +499,23 @@ export class Subscription implements AsyncIterable<InflightMessage> {
  * Prefer manual acknowledgements when processing correctness matters.
  */
 export class AutoAckedSubscription implements AsyncIterable<Message> {
-  readonly #queue: BoundedQueue<InternalDelivered>;
-  #closed = false;
+  readonly #sup: SubscriptionSupervisor<InternalDelivered>;
 
   /** @internal */
-  constructor(queue: BoundedQueue<InternalDelivered>) {
-    this.#queue = queue;
+  constructor(sup: SubscriptionSupervisor<InternalDelivered>) {
+    this.#sup = sup;
   }
 
   /** Receive the next message, or `null` if the subscription is closed cleanly. */
   async recv(): Promise<Message | null> {
-    const v = await this.#queue.recv();
-    if (v === null) return null;
-    return new Message(v);
+    const item = await this.#sup.recv();
+    if (item === null) return null;
+    return new Message(item.raw);
   }
 
   /** Close this subscription. The client engine continues running. */
   close(): void {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.#queue.close();
+    this.#sup.close();
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<Message> {
@@ -459,51 +575,55 @@ export class SubscriptionBuilder {
    * Each received `InflightMessage` must be settled by the user.
    */
   async subManualAck(): Promise<Subscription> {
-    const reply = deferred<BoundedQueue<InternalInflight>>();
-    const engine = await this.#client._engineForOperation();
-    await engine.submit({
-      type: "subscribe",
-      req: {
-        topic: this.#topic,
-        group: this.#group,
-        prefetch: this.#prefetch,
-        auto_ack: false,
-      },
-      reply,
-    });
-    let queue: BoundedQueue<InternalInflight>;
+    const req: SubscribeMsg = {
+      topic: this.#topic,
+      group: this.#group,
+      prefetch: this.#prefetch,
+      auto_ack: false,
+      partition: 0,
+    };
+    let first: SubscribeHandle<InternalInflight>;
     try {
-      queue = await reply.promise;
+      first = await this.#client._subscribeManualOnce(req);
     } catch (err) {
       if (err instanceof FibrilError) throw err;
       throw new BrokenPipeError();
     }
-    return new Subscription(engine, queue);
+    const sup = new SubscriptionSupervisor<InternalInflight>(
+      this.#client,
+      req,
+      (r) => this.#client._subscribeManualOnce(r),
+      first,
+      this.#prefetch,
+    );
+    return new Subscription(sup);
   }
 
   /**
    * Subscribe with client-side automatic acknowledgement.
    */
   async subAutoAck(): Promise<AutoAckedSubscription> {
-    const reply = deferred<BoundedQueue<InternalDelivered>>();
-    const engine = await this.#client._engineForOperation();
-    await engine.submit({
-      type: "subscribeAutoAck",
-      req: {
-        topic: this.#topic,
-        group: this.#group,
-        prefetch: this.#prefetch,
-        auto_ack: false, // matches Rust client: auto-ack is client-side
-      },
-      reply,
-    });
-    let queue: BoundedQueue<InternalDelivered>;
+    const req: SubscribeMsg = {
+      topic: this.#topic,
+      group: this.#group,
+      prefetch: this.#prefetch,
+      auto_ack: false, // matches Rust client: auto-ack is client-side
+      partition: 0,
+    };
+    let first: SubscribeHandle<InternalDelivered>;
     try {
-      queue = await reply.promise;
+      first = await this.#client._subscribeAutoOnce(req);
     } catch (err) {
       if (err instanceof FibrilError) throw err;
       throw new BrokenPipeError();
     }
-    return new AutoAckedSubscription(queue);
+    const sup = new SubscriptionSupervisor<InternalDelivered>(
+      this.#client,
+      req,
+      (r) => this.#client._subscribeAutoOnce(r),
+      first,
+      this.#prefetch,
+    );
+    return new AutoAckedSubscription(sup);
   }
 }

@@ -81,8 +81,8 @@ export interface InternalInflight extends InternalDelivered {
 type Waiter =
   | { kind: "publish"; deferred: Deferred<bigint> }
   | { kind: "declareQueue"; deferred: Deferred<void> }
-  | { kind: "subscribeManual"; deferred: Deferred<BoundedQueue<InternalInflight>> }
-  | { kind: "subscribeAuto"; deferred: Deferred<BoundedQueue<InternalDelivered>> }
+  | { kind: "subscribeManual"; deferred: Deferred<BoundedQueue<InternalInflight>>; supervised: boolean }
+  | { kind: "subscribeAuto"; deferred: Deferred<BoundedQueue<InternalDelivered>>; supervised: boolean }
   | { kind: "topology"; deferred: Deferred<TopologyOkMsg> };
 
 // Commands the public API submits to the engine.
@@ -92,8 +92,8 @@ export type Command =
   | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
   | { type: "publishDelayedConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
   | { type: "declareQueue"; req: DeclareQueueMsg; reply: Deferred<void> }
-  | { type: "subscribe"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalInflight>> }
-  | { type: "subscribeAutoAck"; req: SubscribeMsg; reply: Deferred<BoundedQueue<InternalDelivered>> }
+  | { type: "subscribe"; req: SubscribeMsg; supervised: boolean; reply: Deferred<BoundedQueue<InternalInflight>> }
+  | { type: "subscribeAutoAck"; req: SubscribeMsg; supervised: boolean; reply: Deferred<BoundedQueue<InternalDelivered>> }
   | { type: "ack"; sub_id: bigint; tag: DeliveryTag; request_id: bigint; reply: Deferred<void> }
   | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; not_before: bigint | null; request_id: bigint; reply: Deferred<void> }
   | { type: "topology"; topic: string | null; group: string | null; reply: Deferred<TopologyOkMsg> };
@@ -568,7 +568,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       }
       case "subscribe": {
         const reqId = nextReqId();
-        waiters.set(reqId, { kind: "subscribeManual", deferred: cmd.reply });
+        waiters.set(reqId, { kind: "subscribeManual", deferred: cmd.reply, supervised: cmd.supervised });
         if (!(await sendOrDie(buildFrame(Op.Subscribe, reqId, cmd.req)))) {
           waiters.delete(reqId);
         }
@@ -576,7 +576,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       }
       case "subscribeAutoAck": {
         const reqId = nextReqId();
-        waiters.set(reqId, { kind: "subscribeAuto", deferred: cmd.reply });
+        waiters.set(reqId, { kind: "subscribeAuto", deferred: cmd.reply, supervised: cmd.supervised });
         if (!(await sendOrDie(buildFrame(Op.Subscribe, reqId, cmd.req)))) {
           waiters.delete(reqId);
         }
@@ -670,17 +670,22 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
             partition: ok.partition,
             delivery,
           });
-          subscriptionRegistry.set(ok.sub_id, {
-            reconcile: {
-              sub_id: ok.sub_id,
-              topic: ok.topic,
-              group: ok.group,
-              partition: ok.partition,
-              auto_ack: false,
-              prefetch: ok.prefetch,
-            },
-            delivery,
-          });
+          // Supervised subscriptions own their own continuity (the client
+          // re-subscribes on failover), so they stay out of the reconcile
+          // registry: they are not preserved or reconciled on reconnect.
+          if (!w.supervised) {
+            subscriptionRegistry.set(ok.sub_id, {
+              reconcile: {
+                sub_id: ok.sub_id,
+                topic: ok.topic,
+                group: ok.group,
+                partition: ok.partition,
+                auto_ack: false,
+                prefetch: ok.prefetch,
+              },
+              delivery,
+            });
+          }
           w.deferred.resolve(queue);
         } else if (w.kind === "subscribeAuto") {
           const queue = new BoundedQueue<InternalDelivered>(prefetch);
@@ -691,17 +696,19 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
             partition: ok.partition,
             delivery,
           });
-          subscriptionRegistry.set(ok.sub_id, {
-            reconcile: {
-              sub_id: ok.sub_id,
-              topic: ok.topic,
-              group: ok.group,
-              partition: ok.partition,
-              auto_ack: true,
-              prefetch: ok.prefetch,
-            },
-            delivery,
-          });
+          if (!w.supervised) {
+            subscriptionRegistry.set(ok.sub_id, {
+              reconcile: {
+                sub_id: ok.sub_id,
+                topic: ok.topic,
+                group: ok.group,
+                partition: ok.partition,
+                auto_ack: true,
+                prefetch: ok.prefetch,
+              },
+              delivery,
+            });
+          }
           w.deferred.resolve(queue);
         } else {
           // wrong kind; nothing to do

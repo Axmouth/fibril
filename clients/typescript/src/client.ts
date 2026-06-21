@@ -1,7 +1,13 @@
 import { connect as netConnect, type Socket } from "node:net";
-import { Engine, type SubscriptionRegistry } from "./engine.js";
+import {
+  Engine,
+  type InternalDelivered,
+  type InternalInflight,
+  type SubscriptionRegistry,
+} from "./engine.js";
 import { BrokenPipeError, DisconnectionError, FibrilError } from "./errors.js";
 import { deferred } from "./internal/deferred.js";
+import type { BoundedQueue } from "./internal/bounded-queue.js";
 import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
 import { TopologyCache, routePartition, type Route, type RoundRobin } from "./internal/topology.js";
@@ -13,8 +19,15 @@ import type {
   RedirectMsg,
   ResumeIdentity,
   ResumeOutcome,
+  SubscribeMsg,
   TopologyOkMsg,
 } from "./protocol.js";
+
+/** A routed subscription connection: the engine plus its delivery queue. */
+export interface SubscribeHandle<R> {
+  engine: Engine;
+  queue: BoundedQueue<R>;
+}
 
 function normalizeGroup(group: string | null): string | null {
   const trimmed = group?.trim();
@@ -56,6 +69,11 @@ export interface ClientOptionsInit {
   publishTimeoutMs?: number;
   /** Minimum gap between throttled topology refreshes during retries. */
   topologyRefreshCooldownMs?: number;
+  /**
+   * Whether subscriptions ride through an owner failover by re-subscribing to
+   * the new owner. null disables supervision (a dropped stream just ends).
+   */
+  superviseSubscriptions?: boolean;
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
@@ -77,6 +95,7 @@ export class ClientOptions {
   readonly maxRedirects: number;
   readonly publishTimeoutMs: number;
   readonly topologyRefreshCooldownMs: number;
+  readonly superviseSubscriptions: boolean;
 
   constructor(init: ClientOptionsInit = {}) {
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
@@ -89,6 +108,7 @@ export class ClientOptions {
     this.maxRedirects = init.maxRedirects ?? 3;
     this.publishTimeoutMs = init.publishTimeoutMs ?? 30_000;
     this.topologyRefreshCooldownMs = init.topologyRefreshCooldownMs ?? 1_000;
+    this.superviseSubscriptions = init.superviseSubscriptions ?? true;
   }
 
   /** Return a copy with the given fields overridden. */
@@ -104,6 +124,7 @@ export class ClientOptions {
       maxRedirects: this.maxRedirects,
       publishTimeoutMs: this.publishTimeoutMs,
       topologyRefreshCooldownMs: this.topologyRefreshCooldownMs,
+      superviseSubscriptions: this.superviseSubscriptions,
       ...overrides,
     });
   }
@@ -639,6 +660,37 @@ export class Client {
       this.#pool.set(owner.endpoint, conn);
     }
     return conn.engineForOperation();
+  }
+
+  /** @internal Whether the user has asked the client to shut down. */
+  _isShuttingDown(): boolean {
+    return this.#userShutdown;
+  }
+
+  /** @internal Whether subscriptions should ride through a failover. */
+  _superviseSubscriptions(): boolean {
+    return this.#opts.superviseSubscriptions;
+  }
+
+  /**
+   * @internal Subscribe once to a partition owner with manual ack, returning the
+   * engine and its delivery queue. Routes via the topology cache (owner's pooled
+   * connection, or bootstrap on a miss). The supervisor calls this to (re)attach
+   * a subscription to its current owner.
+   */
+  async _subscribeManualOnce(req: SubscribeMsg): Promise<SubscribeHandle<InternalInflight>> {
+    const reply = deferred<BoundedQueue<InternalInflight>>();
+    const engine = await this._engineFor(req.topic, req.partition ?? 0, req.group);
+    await engine.submit({ type: "subscribe", req, supervised: this.#opts.superviseSubscriptions, reply });
+    return { engine, queue: await reply.promise };
+  }
+
+  /** @internal Auto-ack counterpart of _subscribeManualOnce. */
+  async _subscribeAutoOnce(req: SubscribeMsg): Promise<SubscribeHandle<InternalDelivered>> {
+    const reply = deferred<BoundedQueue<InternalDelivered>>();
+    const engine = await this._engineFor(req.topic, req.partition ?? 0, req.group);
+    await engine.submit({ type: "subscribeAutoAck", req, supervised: this.#opts.superviseSubscriptions, reply });
+    return { engine, queue: await reply.promise };
   }
 
   /**
