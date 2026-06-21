@@ -182,16 +182,25 @@ feature ideas live in their own track, summarized at the end.
     live grow (tied to live repartitioning, counts are fixed-at-create today);
     lease preservation across re-subscribe (today an unsettled InflightMessage
     from a dead owner fails its ack and is redelivered, at-least-once safe).
-  - BRICK 6 exclusive consumer groups.
-  - BRICK 7 reliability: isRetryable/retryAdvice classification, a ReliablePublisher,
-    producer-id dedup headers.
-  - BRICK 8 examples-as-light-tests: detailed TS examples that connect to a REAL
-    broker, each with example code plus a basic self-validation that it worked,
-    and a top-level runner that executes them all. Doubles as user docs and an
-    end-to-end smoke we (and CI) can run. The current demo.ts is not in this
-    shape; build new ones that are. [USER]
+  - BRICK 6 exclusive consumer groups: DONE. SubscriptionBuilder.consumerGroup/
+    consumerTarget, plus cluster-scoped member-id mint-and-carry (server mints on
+    the first exclusive subscribe, client latches and stamps every later one).
+    Exclusivity is enforced by the broker per-partition gate. STILL TODO: an
+    assignment-events stream (AssignmentChanged op), deferred per the server-side
+    design note.
+  - BRICK 7 reliability: DONE. retryAdvice/isRetryable classification, the
+    reserved-namespace header guard, and a ReliablePublisher that stamps producer
+    id + monotonic seq (fibril.client.*) and retries until confirmed. At-least-once
+    today; effectively-once once the broker dedups on those keys (both sides TODO).
+  - BRICK 8 examples-as-light-tests: DONE (pending a real-broker run). Self-
+    validating examples/*.example.ts (roundtrip, confirmed-delayed, manual-ack-
+    retry, stream) + run-all.sh that starts a broker and runs them all. Continuous
+    examples take --check for a bounded validated burst. STILL TODO: wire run-all.sh
+    into CI, and a multi-node cluster smoke (the sandbox could not spawn a broker).
   Pairs with AUDITS.md "Client API parity" and the client reliability docs item.
   [USER/AUDIT]
+  See clients/ARCHITECTURE.md for the design reference and clients/FEATURE_MATRIX.md
+  for status. Next client: Python.
 
 ## Code health and structure
 
