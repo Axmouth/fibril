@@ -25,6 +25,19 @@ feature ideas live in their own track, summarized at the end.
 
 ## Correctness and durability
 
+- HIGH (found by the chaos soak): a consumer stops receiving and never catches up
+  after the OWNER broker is killed and rejoins WITHOUT a failover (a bounce faster
+  than failure detection, so committed ownership stays on the same broker). This
+  is NOT data loss: confirmed messages stay durable, with zero phantoms and zero
+  duplicates. The consumer's subscription to that owner simply does not recover the
+  backlog produced during the outage. Evidence from a 20-round run: `orders-chaos`
+  owner committed-stable on broker-2 throughout, broker-2 killed (followers logged
+  connection-refused to it), consumer received as little as 31% of confirmed ids.
+  The subscription supervisor correctly does NOT migrate (the committed owner is
+  unchanged), so the gap is subscription resume/catch-up after the owner's
+  reconnect, not failover detection (the `resume_rejected` metric is the prime
+  suspect). Repro: `scripts/cluster-tryout.sh --chaos`. Fix the consumer resume
+  path so a bounced owner redelivers from the consumer's last position. [chaos]
 - Idempotent producer dedup: broker reads `fibril.client.producer_id`/`seq` for
   effectively-once delivery (the headers are already on the wire). The one
   success criterion left genuinely not done. [WL/DN/PLAN phase 8]
@@ -100,6 +113,9 @@ feature ideas live in their own track, summarized at the end.
     pasted command. Offer the compose itself as the safe default. This is what
     would earn back a real "60 seconds from nothing" claim.
   - In-memory (non-durable) mode for an even lighter trial. [WL/USER]
+- Admin dashboard: a lost-connection banner. When the admin page can no longer
+  reach its broker (broker down, failover, network blip), show a clear banner
+  instead of silently stale data. [USER]
 
 ## Features (replication-related)
 
@@ -158,6 +174,13 @@ feature ideas live in their own track, summarized at the end.
 
 ## Testing and hardening
 
+- Chaos soak harness exists: `scripts/cluster-tryout.sh --chaos` runs repeated
+  mixed faults (kill+rejoin and SIGSTOP/SIGCONT pause) under confirmed load and
+  asserts zero loss plus reconvergence. It already found the owner-bounce
+  consumer-resume bug (see Correctness), so it currently fails by design until
+  that is fixed. It is a manual diagnostic, not wired into CI. Improve: target
+  the topic's replica set deterministically (random victims only hit it about one
+  run in two), and spread faults across nodes rather than hammering one. [chaos]
 - Adversarial tests through all layers, plus a realistic chaotic benchmark
   (bursty, non-steady supply, consume, and bandwidth, not steady saturation). [WL]
 - Cluster benchmark profiles: replica-durable confirms, follower catch-up,
