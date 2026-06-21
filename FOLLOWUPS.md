@@ -150,9 +150,9 @@ first three are admin-thin (the primitive exists, just expose it).
    `message truncate ... before` primitive in `stroma.rs` exists) + reset state +
    emit a replicated `ResetQueue` event, plumbed Stroma -> engine -> admin, with
    replication correctness. Cross-crate, so do after the genuinely-thin items.
-3. **Hide-inactive-queues toggle + basic search** on the queues page. Frontend
-   only - the activity/sparse data is already there. Useful with many sparse
-   queues.
+3. **Hide-inactive-queues toggle + basic search** on the queues page - DONE.
+   Frontend-only filter bar (search by topic/group, hide queues with no active
+   publishers/subscribers); summary cards stay full counts.
 4. **Admin delete-queue** (deferred per user: "no delete yet"). Stroma primitive
    `destroy_partition` exists (freeze-then-fs-cleanup, already refuses on
    inflight). Expose carefully: confirm dialog + drain/inflight guard.

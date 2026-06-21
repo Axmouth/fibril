@@ -24,6 +24,11 @@
   </div>
 </details>
 
+<div class="queue-controls">
+  <input id="queue-search" type="search" placeholder="filter by topic or group" />
+  <label><input id="queue-hide-inactive" type="checkbox" /> hide inactive</label>
+</div>
+
 <div id="queues"></div>
 
 <script src="/static/js/api.js"></script>
@@ -138,8 +143,24 @@ async function refresh() {
   const tracked = activitySummary.tracked_queue_count ?? data.broker_activity?.length ?? 0;
 
   const num = (v) => (typeof v === "number" ? v : 0);
+
+  // Queue-table filters (summary cards above stay full counts).
+  const search = (document.getElementById("queue-search")?.value || "").trim().toLowerCase();
+  const hideInactive = document.getElementById("queue-hide-inactive")?.checked ?? false;
+  const isActive = (item) => {
+    const a = activityByQueue.get(queueKey(item));
+    return (a?.active_publishers ?? 0) > 0 || (a?.active_subscribers ?? 0) > 0;
+  };
+  const visibleQueues = queues.filter((item) => {
+    if (hideInactive && !isActive(item)) return false;
+    if (search && !`${item.topic || ""} ${item.group || ""}`.toLowerCase().includes(search)) {
+      return false;
+    }
+    return true;
+  });
+
   const byGroup = {};
-  for (const item of queues) {
+  for (const item of visibleQueues) {
     const group = item.group || "default";
     (byGroup[group] ||= {});
     (byGroup[group][item.topic] ||= []).push(item);
@@ -375,6 +396,10 @@ async function submitCreateQueue() {
 }
 
 document.getElementById("create.submit").addEventListener("click", submitCreateQueue);
+
+// Re-render immediately when the filters change (the 2s poll also re-applies them).
+document.getElementById("queue-search").addEventListener("input", refresh);
+document.getElementById("queue-hide-inactive").addEventListener("change", refresh);
 
 setInterval(refresh, 2000);
 refresh();
