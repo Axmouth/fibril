@@ -6,6 +6,8 @@ the reference implementation; other clients aim to match its behavior, not
 necessarily its internal structure (e.g. the TS client mirrors the routing
 design with plain single-threaded constructs rather than locks and atomics).
 
+`ARCHITECTURE.md` covers the shared layering, invariants, and porting lessons.
+
 Legend: done, partial (scope noted), no (planned), n/a (not applicable).
 
 ## Core protocol

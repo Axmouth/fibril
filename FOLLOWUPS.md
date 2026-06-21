@@ -126,6 +126,9 @@ feature ideas live in their own track, summarized at the end.
 - Per-client feature matrix lives at `clients/FEATURE_MATRIX.md` (Rust reference
   vs each client). Keep it updated as bricks land - it is the at-a-glance parity
   view and the checklist for any new client.
+- `clients/ARCHITECTURE.md` is the language-agnostic design reference (layering,
+  invariants, continuity/routing/reliability models, porting lessons). Read it
+  before starting a new client (the Python client is next).
 - TypeScript client parity pass (BIG, multi-brick): `clients/typescript` is
   basically pre-replication-branch (~3100 lines). It has the single-broker basics
   (publish/confirm/delayed, manual+auto ack, reconnect) but is behind on two big
