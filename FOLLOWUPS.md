@@ -137,9 +137,12 @@ feature ideas live in their own track, summarized at the end.
 
 ## Code health and structure
 
-- Rework the `tui-example` (it has disabled instrumentation) and
-  `benches/bin/bench_e2e.rs` (half-disabled: dead channels, hardcoded params)
-  into clean, illustrative shape. [USER]
+- Rework the `tui-example` (`crates/tui-example`): a small TUI app that connects
+  to a broker and visualizes messages (packs) flowing in and out. It has disabled
+  instrumentation (latency tracking + compute_stats were dead, removed in the
+  dedup sweep). Bring it back to a clean, illustrative live-client demo. Also
+  `benches/bin/bench_e2e.rs` is half-disabled (dead channels, hardcoded
+  reporter/broker params) and wants the same treatment. [USER]
 - `stroma.rs` by-concern file split: a readability refactor independent of
   clustering. A full module sketch is preserved in the archived worklog. Do the
   low-risk type modules first, then the engine impl split incrementally. [WL]
@@ -173,14 +176,13 @@ feature ideas live in their own track, summarized at the end.
 
 ## Testing and hardening
 
-- Chaos soak harness exists: `scripts/cluster-tryout.sh --chaos` runs repeated
-  mixed faults (kill+rejoin and SIGSTOP/SIGCONT pause) under confirmed load and
-  asserts zero loss plus reconvergence. It found (and now passes after the fix
-  for) the owner-bounce consumer-resume bug. It is a manual diagnostic, not wired
-  into CI. Improve: target the topic's replica set deterministically (random
-  victims only hit it about one run in two so a single run can pass without
-  exercising the path), and spread faults across nodes rather than hammering one.
-  [chaos]
+- Chaos soak harness: `scripts/cluster-tryout.sh --chaos` runs repeated mixed
+  faults (kill+rejoin and SIGSTOP/SIGCONT pause) under confirmed load and asserts
+  zero loss plus reconvergence. It found (and now passes after the fix for) the
+  owner-bounce consumer-resume bug. Each round deterministically faults the
+  topic's current owner with the consumer connected outside the replica set, so a
+  run reliably exercises the recovery path. Manual diagnostic, not in CI. A future
+  step would be wiring a trimmed version into CI as a nightly soak. [chaos]
 - Adversarial tests through all layers, plus a realistic chaotic benchmark
   (bursty, non-steady supply, consume, and bandwidth, not steady saturation). [WL]
 - Cluster benchmark profiles: replica-durable confirms, follower catch-up,

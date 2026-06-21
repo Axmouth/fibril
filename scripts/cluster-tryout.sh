@@ -1073,9 +1073,17 @@ run_chaos() {
   follower="$(echo "$assignment" | jq -r '.followers[0] // empty')"
   owner_node="${owner#broker-}"
   follower_node="${follower#broker-}"
-  # Connect the load to a node we will NOT fault, so the client always has a live
-  # bootstrap to refresh topology from across the chaos.
-  connect_node="$follower_node"
+  # Connect the load to a node OUTSIDE this topic's replica set, so its bootstrap
+  # is never faulted AND every owner fault forces the consumer to migrate to a new
+  # owner - the path that exercises consumer ride-through and resume.
+  connect_node=""
+  for n in $(seq 1 "$NODES"); do
+    if [[ "$n" -ne "$owner_node" && "$n" -ne "$follower_node" ]]; then
+      connect_node="$n"
+      break
+    fi
+  done
+  if ! [[ "$connect_node" =~ ^[0-9]+$ ]]; then connect_node="$follower_node"; fi
   if ! [[ "$connect_node" =~ ^[0-9]+$ ]]; then connect_node=1; fi
 
   count=$((CHAOS_LOAD_SECS * FAILOVER_VERIFY_RATE))
@@ -1093,11 +1101,25 @@ run_chaos() {
   round=0
   while kill -0 "$verify_pid" 2>/dev/null && [[ "$round" -lt "$CHAOS_ROUNDS" ]]; do
     round=$((round + 1))
-    # Pick a victim that is not the client's bootstrap node.
-    victim="$connect_node"
-    while [[ "$victim" -eq "$connect_node" ]]; do
-      victim=$(((RANDOM % NODES) + 1))
+    # Fault a node IN this topic's replica set (prefer the current owner) so the
+    # consumer is forced to migrate/recover every round. Query fresh since
+    # ownership moves. Never the connect node. Fall back to any other node.
+    cur="$(wait_assignment_for_topic "$topic" 2>/dev/null || echo "$assignment")"
+    victim=""
+    for cand in \
+      "$(echo "$cur" | jq -r '.owner // empty' | sed 's/^broker-//')" \
+      "$(echo "$cur" | jq -r '.followers[0] // empty' | sed 's/^broker-//')"; do
+      if [[ "$cand" =~ ^[0-9]+$ && "$cand" -ne "$connect_node" ]]; then
+        victim="$cand"
+        break
+      fi
     done
+    if [[ -z "$victim" ]]; then
+      victim="$connect_node"
+      while [[ "$victim" -eq "$connect_node" ]]; do
+        victim=$(((RANDOM % NODES) + 1))
+      done
+    fi
     victim_pid="${PIDS[$((victim - 1))]}"
     if (( round % 2 == 0 )); then
       echo "  [round $round/$CHAOS_ROUNDS] kill + rejoin broker-$victim (pid $victim_pid)"
