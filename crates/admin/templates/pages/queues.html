@@ -272,7 +272,7 @@ async function refresh() {
           : "-";
         const dataAttrs = `data-group="${escapeHtml(group)}" data-topic="${escapeHtml(topic)}"`;
         const agg = `
-          <tr class="queue-row queue-agg-row" ${dataAttrs} style="cursor:pointer">
+          <tr class="queue-row queue-agg-row" ${dataAttrs} data-partitions="${parts.length}" style="cursor:pointer">
             <td class="queue-topic-cell" title="${escapeHtml(topic)}"><span class="queue-caret">${open ? "▼" : "▶"}</span> ${escapeHtml(topic)}</td>
             <td>${loaded}/${parts.length} loaded</td>
             <td class="text-right">${sumAct("active_publishers")}</td>
@@ -285,6 +285,7 @@ async function refresh() {
             <td class="text-right">-</td>
             <td>${escapeHtml(dlq)}</td>
             <td>-</td>
+            <td><button type="button" class="queue-delete-btn" ${dataAttrs} data-partitions="${parts.length}">Delete</button></td>
           </tr>`;
         const childRows = parts.map(item => {
           const activity = activityByQueue.get(queueKey(item));
@@ -302,6 +303,7 @@ async function refresh() {
             <td class="text-right">${formatQueueStateValue(item, item.state.settled_until)}</td>
             <td>${item.materialized ? escapeHtml(`${item.state.dlq_policy}${item.state.dlq_max_retries != null ? ` (max ${item.state.dlq_max_retries})` : ""}`) : "-"}</td>
             <td><a class="queue-messages-link" href="${inspectHref(item)}" title="Inspect messages">Inspect</a></td>
+            <td>-</td>
           </tr>`;
         }).join("");
         return agg + childRows;
@@ -326,6 +328,7 @@ async function refresh() {
               <th class="text-right">Settled until</th>
               <th>DLQ policy</th>
               <th>Messages</th>
+              <th>Actions</th>
             </tr>
             ${topicRows}
           </table>
@@ -337,6 +340,14 @@ async function refresh() {
 }
 
 document.getElementById("queues").addEventListener("click", (event) => {
+  // The Delete button lives inside the aggregate row - handle it separately so a
+  // click does not also toggle the partition expansion.
+  const deleteBtn = event.target.closest(".queue-delete-btn");
+  if (deleteBtn) {
+    event.stopPropagation();
+    deleteQueue(deleteBtn);
+    return;
+  }
   const row = event.target.closest(".queue-agg-row");
   if (!row) return;
   const g = row.dataset.group;
@@ -396,6 +407,29 @@ async function submitCreateQueue() {
 }
 
 document.getElementById("create.submit").addEventListener("click", submitCreateQueue);
+
+// ---- delete queue ----
+async function deleteQueue(btn) {
+  const topic = btn.dataset.topic;
+  const group = btn.dataset.group;
+  const partitions = Number(btn.dataset.partitions) || 1;
+  const label = group && group !== "default" ? `${topic} (group ${group})` : topic;
+  if (!confirm(`Delete queue "${label}" and all ${partitions} partition(s)? This drops the messages and on-disk storage and cannot be undone.`)) {
+    return;
+  }
+  const body = {
+    tp: topic,
+    group: group && group !== "default" ? group : null,
+    partition_count: partitions,
+  };
+  const { ok, data } = await apiPost("/admin/api/queues/delete", body);
+  if (ok) {
+    setCreateMessage(`Deleted "${topic}" (${data?.partition_count ?? partitions} partition(s)).`, "info");
+    refresh();
+  } else {
+    setCreateMessage(`Delete failed: ${data?.message || data?.error || "request failed"}`, "warning");
+  }
+}
 
 // Re-render immediately when the filters change (the 2s poll also re-applies them).
 document.getElementById("queue-search").addEventListener("input", refresh);

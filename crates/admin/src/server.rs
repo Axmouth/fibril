@@ -263,6 +263,10 @@ impl AdminServer {
                 "/admin/api/queues",
                 get(routes::queues).post(routes::create_queue),
             )
+            .route(
+                "/admin/api/queues/delete",
+                axum::routing::post(routes::delete_queue),
+            )
             .route("/admin/api/queues_debug", get(routes::queues_debug))
             .route("/admin/api/messages", get(routes::inspect_messages))
             .route(
@@ -603,8 +607,8 @@ mod tests {
         CompletionPair,
         broker::{Broker, BrokerConfig},
         queue_engine::{
-            KeratinAppendCompletion, KeratinConfig, MessageContentType, MessageHeaders,
-            QueueEngine, SnapshotConfig, StromaEngine, StromaKeratinConfig,
+            DeclareMeta, KeratinAppendCompletion, KeratinConfig, MessageContentType,
+            MessageHeaders, QueueEngine, SnapshotConfig, StromaEngine, StromaKeratinConfig,
         },
         runtime_settings::{
             RuntimeSettings, RuntimeSettingsLocks, RuntimeSettingsManager,
@@ -1059,6 +1063,66 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await;
         assert_eq!(body["code"], "invalid_topic");
+    }
+
+    #[tokio::test]
+    async fn delete_queue_rejects_empty_topic() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/queues/delete")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(json!({ "tp": "  " }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["code"], "invalid_topic");
+    }
+
+    #[tokio::test]
+    async fn delete_queue_destroys_declared_partitions() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        server
+            .storage
+            .declare_queue("orders", 0, None, DeclareMeta::default())
+            .await
+            .unwrap();
+        server
+            .storage
+            .declare_queue("orders", 1, None, DeclareMeta::default())
+            .await
+            .unwrap();
+        assert!(server.storage.is_materialized("orders", 0, None));
+        let app = AdminServer::router(server.clone());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/api/queues/delete")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "tp": "orders", "partition_count": 2 }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["status"], "deleted");
+        assert_eq!(body["partition_count"], 2);
+        assert!(!server.storage.is_materialized("orders", 0, None));
+        assert!(!server.storage.is_materialized("orders", 1, None));
     }
 
     #[tokio::test]

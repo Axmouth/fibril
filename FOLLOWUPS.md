@@ -155,20 +155,14 @@ first three are admin-thin (the primitive exists, just expose it).
    publishers/subscribers); summary cards stay full counts.
 4. **Admin delete-queue** - WE WANT IT (the earlier "no delete yet" meant "we do
    not have it", not "skip it"). Split into two:
-   - SINGLE-NODE (DO THIS NEXT, standalone-correct). `destroy_partition(tp, part,
-     group)` is ALREADY on the `QueueEngine` trait
-     (`crates/broker/src/queue_engine.rs:239`), returning
-     `DestroyOutcome::{Destroyed, HasInflight}` (refuses when leased work
-     remains). Add `POST /admin/api/queues/delete` (a `delete_queue` handler in
-     `routes.rs` + `DeleteQueueRequest{ tp, group, partition_count }`), then loop
-     destroy_partition over 0..count, mapping HasInflight -> 409 ("settle or
-     wait") and other errors -> 500. GATE OFF in cluster: if
-     `server.coordination.is_some()`
-     return 501 with code "cluster_delete_unsupported" (single-node only for now).
-     UI: a per-row delete button on the queue agg row in `queues.html` (carry
-     data-group/data-topic/data-count, default-group maps to null group), a
-     confirm dialog, `apiPost` to the delete route, then refresh. Add a
-     validation test (empty topic -> 400) mirroring create_queue.
+   - SINGLE-NODE - DONE. `POST /admin/api/queues/delete` (`delete_queue` handler +
+     `DeleteQueueRequest{ tp, group, partition_count }` in `routes.rs`) loops
+     `destroy_partition` over 0..count, mapping HasInflight -> 409 and other
+     errors -> 500, gated off in cluster (`server.coordination.is_some()` ->
+     501 "cluster_delete_unsupported"). UI: per-row Delete button on the queue
+     agg row in `queues.html` (carries data-group/topic/partitions, confirm
+     dialog, `apiPost` then refresh). Tests cover empty-topic -> 400 and a
+     destroy-declared-partitions happy path.
    - MULTI-NODE (planned, M): a coordinated teardown - deregister from the
      coordination catalogue (so the controller stops placing it and the
      catalogue-sync loop stops re-registering it), destroy on ALL replicas (not

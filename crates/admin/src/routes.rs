@@ -8,9 +8,9 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use fibril_broker::coordination::ReplicationDurabilityPolicy;
 use fibril_broker::queue_engine::{
-    DLQDiscardPolicyWire, DeclareMeta, GlobalDLQ, GlobalDlqSnapshot, GlobalDlqUpdateOutcome,
-    InspectMode, MessageHeaders, MessageInspectionStatus, QueueInspectionState,
-    RecoveryMismatchPolicy, StromaError,
+    DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, GlobalDLQ, GlobalDlqSnapshot,
+    GlobalDlqUpdateOutcome, InspectMode, MessageHeaders, MessageInspectionStatus,
+    QueueInspectionState, RecoveryMismatchPolicy, StromaError,
 };
 use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLoadIssue, RuntimeSettingsLocks,
@@ -86,6 +86,15 @@ pub struct CreateQueueRequest {
     pub policy: Option<QueueDlqPolicyRequest>,
     pub target: Option<QueueDlqTargetRequest>,
     pub max_retries: Option<u32>,
+}
+
+#[derive(Deserialize)]
+pub struct DeleteQueueRequest {
+    pub tp: String,
+    pub group: Option<String>,
+    /// Partition count to tear down (defaults to 1). Partitions 0..count are
+    /// destroyed.
+    pub partition_count: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -1040,6 +1049,87 @@ pub async fn create_queue(
         StatusCode::CREATED,
         Json(serde_json::json!({
             "status": "created",
+            "partition_count": partition_count,
+        })),
+    )
+        .into_response())
+}
+
+/// Delete a queue from the admin UI. Destroys partitions 0..partition_count
+/// locally (drops each from the registry AND deletes its on-disk storage).
+/// partition_count defaults to 1.
+///
+/// Single-node only. In cluster mode this is refused (501) because a real
+/// teardown has to deregister the queue from coordination and destroy every
+/// replica, otherwise the catalogue-sync loop re-materializes it. That
+/// coordinated path is the multi-node follow-up in FOLLOWUPS.md.
+///
+/// A partition with inflight (leased, un-acked) work is not destroyed - the
+/// whole request returns 409 so callers drain or wait for lease expiry first.
+pub async fn delete_queue(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<DeleteQueueRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    if request.tp.trim().is_empty() {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_topic",
+            "topic must not be empty",
+        ));
+    }
+
+    if server.coordination.is_some() {
+        return Ok(admin_error(
+            StatusCode::NOT_IMPLEMENTED,
+            "cluster_delete_unsupported",
+            "deleting a queue in cluster mode is not supported yet (coordinated teardown is pending)",
+        ));
+    }
+
+    let partition_count = request.partition_count.unwrap_or(1).max(1);
+    let group = normalize_group(request.group.clone());
+
+    for partition in 0..partition_count {
+        match server
+            .storage
+            .destroy_partition(&request.tp, partition, group.as_deref())
+            .await
+        {
+            Ok(DestroyOutcome::Destroyed) => {}
+            Ok(DestroyOutcome::HasInflight) => {
+                return Ok(admin_error(
+                    StatusCode::CONFLICT,
+                    "queue_has_inflight",
+                    format!(
+                        "partition {partition} still has inflight work - drain or wait for lease expiry before deleting"
+                    ),
+                ));
+            }
+            Err(err @ StromaError::InvalidArgument(_)) => {
+                return Ok(admin_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_queue",
+                    err.to_string(),
+                ));
+            }
+            Err(err) => {
+                tracing::error!("delete queue failed: {err}");
+                return Ok(admin_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "delete_queue_failed",
+                    "delete queue failed",
+                ));
+            }
+        }
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "deleted",
             "partition_count": partition_count,
         })),
     )
