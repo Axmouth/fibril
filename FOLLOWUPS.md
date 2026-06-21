@@ -135,11 +135,12 @@ feature ideas live in their own track, summarized at the end.
 Small user-facing features, ordered cheapest-and-highest-visibility first. The
 first three are admin-thin (the primitive exists, just expose it).
 
-1. **Admin create-queue** (IN PROGRESS first). Storage primitive
-   `declare_queue(tp, part, group, meta)` exists and is already used as a side
-   effect of `update_queue_dlq` (`crates/admin/src/routes.rs`). Add a first-class
-   admin endpoint (topic, optional group, partition count, DLQ policy + max
-   retries) plus a create form on the queues page.
+1. **Admin create-queue** - DONE first cut (commit f2d91b7). POST
+   /admin/api/queues declares partitions 0..count locally with an optional DLQ
+   policy + max retries, plus a create form on the queues page. PARITY TODO: go
+   through `declare_partitioning` for an authoritative count + conflict detection
+   (multi-partition cluster currently relies on the catalogue-sync loop to
+   register the declared partitions).
 2. **Queue purge.** `reset()` exists in Stroma (`state.rs`). "Purge is
    effectively reset" per TODOTHOUGHTS. Expose an admin endpoint + a button
    (with confirm). Keeps the queue, drops its messages.
