@@ -1290,6 +1290,7 @@ mod replication_byte_limit_tests {
                         StromaEvent::Enqueue {
                             off: 10,
                             retries: 0,
+                            expire_at: None,
                         },
                     ),
                     (
@@ -1297,6 +1298,7 @@ mod replication_byte_limit_tests {
                         StromaEvent::Enqueue {
                             off: 11,
                             retries: 0,
+                            expire_at: None,
                         },
                     ),
                     (23, StromaEvent::Ack { off: 10 }),

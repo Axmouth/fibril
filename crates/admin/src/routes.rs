@@ -933,6 +933,7 @@ pub async fn update_queue_dlq(
     let meta = DeclareMeta {
         dlq_policy: Some(policy),
         dlq_max_retries: request.max_retries,
+        default_ttl_ms: None,
     };
 
     let group = normalize_group(request.group);
@@ -1017,6 +1018,7 @@ pub async fn create_queue(
     let meta = DeclareMeta {
         dlq_policy,
         dlq_max_retries: request.max_retries,
+        default_ttl_ms: None,
     };
 
     let group = normalize_group(request.group.clone());

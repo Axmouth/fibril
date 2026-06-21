@@ -1225,7 +1225,7 @@ async fn replication_apply_writes_follower_log_records() {
         open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
     handshake(&mut framed).await;
 
-    let event_payload = StromaEvent::Enqueue { off: 0, retries: 0 }
+    let event_payload = StromaEvent::Enqueue { off: 0, retries: 0, expire_at: None }
         .encode()
         .unwrap();
     framed
