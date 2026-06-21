@@ -165,16 +165,20 @@ feature ideas live in their own track, summarized at the end.
     streams instead of leaving them open-but-unfed. Regression-tested. Still TODO
     (brick 5): nothing TRIGGERS a reconnect for a purely passive consumer whose
     connection drops - that needs the subscription supervisor / proactive re-dial.
-  - BRICK 5 failover ride-through: PUBLISH SIDE DONE - transient owner-failover
-    retry with throttled topology refresh, jittered backoff, deadline, and
-    not-found fast-fail (publishTimeoutMs option), in the same bounded loop as
-    redirect-follow. STILL TODO (consume side, the supervisor equivalent):
-    proactive reconnect of a dropped passive subscription connection, owner-move
-    detection via topology, and re-subscribe after a Conservative reconcile closes
-    a stream. Design note: this decouples the public Subscription stream from a
-    single engine queue and must decide the semantics for unsettled
-    InflightMessages across a re-subscribe (their sub_id/deliver_request_id/engine
-    all change) - worth mirroring the Rust client's choice deliberately.
+  - BRICK 5 failover ride-through: DONE (single-partition). Publish side: transient
+    owner-failover retry with throttled topology refresh, jittered backoff,
+    deadline, not-found fast-fail (publishTimeoutMs), same loop as redirect-follow.
+    Consume side: a subscription supervisor reads from a merged queue and
+    re-subscribes to the current owner when the per-connection stream closes
+    (owner death/restart), tagging each delivery with its engine so manual ack
+    settles correctly. Continuity model: supervised subs own continuity via fresh
+    re-subscribe and stay out of the reconcile registry (mutually exclusive with
+    the brick-4 reconcile path, which is the supervision-off behavior).
+    STILL TODO: multi-partition fan-in on subscribe; graceful owner reassignment
+    detection (a periodic topology owner-check, since only stream-close triggers
+    re-subscribe today); lease preservation across re-subscribe (today an
+    unsettled InflightMessage from a dead owner fails its ack and is redelivered,
+    at-least-once safe).
   - BRICK 6 exclusive consumer groups.
   - BRICK 7 reliability: isRetryable/retryAdvice classification, a ReliablePublisher,
     producer-id dedup headers.
