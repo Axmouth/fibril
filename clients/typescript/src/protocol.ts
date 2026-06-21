@@ -44,6 +44,10 @@ export enum Op {
   ReconcileServer = 71,
   ReconcileResult = 72,
 
+  Topology = 90,
+  TopologyOk = 91,
+  Redirect = 92,
+
   Error = 255,
 }
 
@@ -117,6 +121,9 @@ export interface PublishMsg {
   headers: Record<string, string>;
   payload: Uint8Array;
   published: bigint;
+  // Wire fields; default to null / 0 until partitioning lands (brick 3).
+  partition_key?: Uint8Array | null;
+  partitioning_version?: bigint;
 }
 
 /** Delayed publish frame body. */
@@ -139,6 +146,8 @@ export interface DeclareQueueMsg {
   group: string | null;
   dlq_policy: QueueDlqPolicy | null;
   dlq_max_retries: number | null;
+  // Wire field; default null until repartition declares lands.
+  partition_count?: number | null;
 }
 
 export interface DeclareQueueOkMsg {
@@ -151,6 +160,11 @@ export interface SubscribeMsg {
   group: string | null;
   prefetch: number;
   auto_ack: boolean;
+  // Wire fields; default 0 / null until topology routing + groups land.
+  partition?: number;
+  consumer_group?: string | null;
+  consumer_target?: number | null;
+  member_id?: Uint8Array | null;
 }
 
 /** Successful subscribe response body. */
@@ -160,6 +174,12 @@ export interface SubscribeOkMsg {
   group: string | null;
   partition: number;
   prefetch: number;
+  // Exclusive cohort fields the server echoes. member_id is server-minted on the
+  // first exclusive subscribe and carried on later ones so the cohort sees one
+  // member. Absent for non-exclusive subscriptions.
+  consumer_group?: string | null;
+  consumer_target?: number | null;
+  member_id?: Uint8Array | null;
 }
 
 export interface ReconcileSubscription {
@@ -236,4 +256,43 @@ export interface NackMsg {
 export interface ErrorMsg {
   code: number;
   message: string;
+}
+
+// ===== Cluster topology + routing =====
+
+/** Topology query. A null topic asks for the full topology. */
+export interface TopologyRequestMsg {
+  topic: string | null;
+  group: string | null;
+}
+
+/** Ownership of one queue partition, as seen by clients for routing. */
+export interface QueueTopologyEntryMsg {
+  topic: string;
+  partition: number;
+  group: string | null;
+  // Owner broker endpoint, absent when the owner node is not in the registry.
+  owner_endpoint: string | null;
+  partitioning_version: bigint;
+  // Authoritative partition count for the queue, used for key routing.
+  partition_count: number;
+}
+
+/** Topology snapshot at a coordination generation. */
+export interface TopologyOkMsg {
+  generation: bigint;
+  queues: QueueTopologyEntryMsg[];
+}
+
+/**
+ * Routing redirect: not an error but a target to retry against. The retry must
+ * go to owner_endpoint on a separate connection, so the routing layer (not the
+ * per-connection engine) acts on it.
+ */
+export interface RedirectMsg {
+  topic: string;
+  partition: number;
+  group: string | null;
+  owner_endpoint: string;
+  partitioning_version: bigint;
 }

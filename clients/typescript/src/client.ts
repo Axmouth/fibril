@@ -1,17 +1,34 @@
 import { connect as netConnect, type Socket } from "node:net";
-import { Engine, type SubscriptionRegistry } from "./engine.js";
+import {
+  Engine,
+  type InternalDelivered,
+  type InternalInflight,
+  type SubscribeResult,
+  type SubscriptionRegistry,
+} from "./engine.js";
 import { BrokenPipeError, DisconnectionError, FibrilError } from "./errors.js";
 import { deferred } from "./internal/deferred.js";
+import type { BoundedQueue } from "./internal/bounded-queue.js";
 import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
+import { TopologyCache, routePartition, type Route, type RoundRobin } from "./internal/topology.js";
 import type {
   AuthMsg,
   DeclareQueueMsg,
   QueueDlqPolicy,
   ReconcilePolicy,
+  RedirectMsg,
   ResumeIdentity,
   ResumeOutcome,
+  SubscribeMsg,
+  TopologyOkMsg,
 } from "./protocol.js";
+
+/** A routed subscription connection: the engine plus its delivery queue. */
+export interface SubscribeHandle<R> {
+  engine: Engine;
+  queue: BoundedQueue<R>;
+}
 
 function normalizeGroup(group: string | null): string | null {
   const trimmed = group?.trim();
@@ -44,6 +61,25 @@ export interface ClientOptionsInit {
   autoReconnectAttempts?: number;
   /** Subscription reconciliation policy used after a resumed reconnect. */
   reconnectReconcilePolicy?: ReconcilePolicy;
+  /** Maximum owner redirects to follow for a single confirmed publish. */
+  maxRedirects?: number;
+  /**
+   * Budget in milliseconds for retrying a confirmed publish across a transient
+   * owner failover. 0 disables retry so the first transport failure fails fast.
+   */
+  publishTimeoutMs?: number;
+  /** Minimum gap between throttled topology refreshes during retries. */
+  topologyRefreshCooldownMs?: number;
+  /**
+   * Whether subscriptions ride through an owner failover by re-subscribing to
+   * the new owner. null disables supervision (a dropped stream just ends).
+   */
+  superviseSubscriptions?: boolean;
+  /**
+   * How often (ms) a supervised subscription re-checks the topology owner to
+   * detect a graceful owner move that did not drop the connection.
+   */
+  subscriptionSuperviseIntervalMs?: number;
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
@@ -62,6 +98,11 @@ export class ClientOptions {
   readonly resumeIdentity: ResumeIdentity | undefined;
   readonly autoReconnectAttempts: number;
   readonly reconnectReconcilePolicy: ReconcilePolicy;
+  readonly maxRedirects: number;
+  readonly publishTimeoutMs: number;
+  readonly topologyRefreshCooldownMs: number;
+  readonly superviseSubscriptions: boolean;
+  readonly subscriptionSuperviseIntervalMs: number;
 
   constructor(init: ClientOptionsInit = {}) {
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
@@ -71,51 +112,51 @@ export class ClientOptions {
     this.resumeIdentity = init.resumeIdentity;
     this.autoReconnectAttempts = init.autoReconnectAttempts ?? 1;
     this.reconnectReconcilePolicy = init.reconnectReconcilePolicy ?? "conservative";
+    this.maxRedirects = init.maxRedirects ?? 3;
+    this.publishTimeoutMs = init.publishTimeoutMs ?? 30_000;
+    this.topologyRefreshCooldownMs = init.topologyRefreshCooldownMs ?? 1_000;
+    this.superviseSubscriptions = init.superviseSubscriptions ?? true;
+    this.subscriptionSuperviseIntervalMs = init.subscriptionSuperviseIntervalMs ?? 1_000;
+  }
+
+  /** Return a copy with the given fields overridden. */
+  #copy(overrides: ClientOptionsInit): ClientOptions {
+    return new ClientOptions({
+      clientName: this.clientName,
+      clientVersion: this.clientVersion,
+      auth: this.auth,
+      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
+      resumeIdentity: this.resumeIdentity,
+      autoReconnectAttempts: this.autoReconnectAttempts,
+      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
+      maxRedirects: this.maxRedirects,
+      publishTimeoutMs: this.publishTimeoutMs,
+      topologyRefreshCooldownMs: this.topologyRefreshCooldownMs,
+      superviseSubscriptions: this.superviseSubscriptions,
+      subscriptionSuperviseIntervalMs: this.subscriptionSuperviseIntervalMs,
+      ...overrides,
+    });
   }
 
   /**
    * Return a copy with username/password authentication configured.
    */
   withAuth(username: string, password: string): ClientOptions {
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: { username, password },
-      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
-      resumeIdentity: this.resumeIdentity,
-      autoReconnectAttempts: this.autoReconnectAttempts,
-      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
-    });
+    return this.#copy({ auth: { username, password } });
   }
 
   /**
    * Return a copy with heartbeat interval configured in seconds.
    */
   withHeartbeatInterval(seconds: number): ClientOptions {
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: this.auth,
-      heartbeatIntervalSeconds: seconds,
-      resumeIdentity: this.resumeIdentity,
-      autoReconnectAttempts: this.autoReconnectAttempts,
-      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
-    });
+    return this.#copy({ heartbeatIntervalSeconds: seconds });
   }
 
   /**
    * Return a copy configured to attempt resuming a previous connection.
    */
   withResumeIdentity(resumeIdentity: ResumeIdentity): ClientOptions {
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: this.auth,
-      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
-      resumeIdentity,
-      autoReconnectAttempts: this.autoReconnectAttempts,
-      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
-    });
+    return this.#copy({ resumeIdentity });
   }
 
   /**
@@ -132,30 +173,35 @@ export class ClientOptions {
     if (!Number.isInteger(maxAttempts) || maxAttempts < 0) {
       throw new Error("maxAttempts must be a non-negative integer");
     }
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: this.auth,
-      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
-      resumeIdentity: this.resumeIdentity,
-      autoReconnectAttempts: maxAttempts,
-      reconnectReconcilePolicy: this.reconnectReconcilePolicy,
-    });
+    return this.#copy({ autoReconnectAttempts: maxAttempts });
   }
 
   /**
    * Return a copy with a custom reconnect subscription reconciliation policy.
    */
   withReconnectReconcilePolicy(policy: ReconcilePolicy): ClientOptions {
-    return new ClientOptions({
-      clientName: this.clientName,
-      clientVersion: this.clientVersion,
-      auth: this.auth,
-      heartbeatIntervalSeconds: this.heartbeatIntervalSeconds,
-      resumeIdentity: this.resumeIdentity,
-      autoReconnectAttempts: this.autoReconnectAttempts,
-      reconnectReconcilePolicy: policy,
-    });
+    return this.#copy({ reconnectReconcilePolicy: policy });
+  }
+
+  /**
+   * Return a copy with a custom limit on owner redirects followed per publish.
+   */
+  withMaxRedirects(maxRedirects: number): ClientOptions {
+    if (!Number.isInteger(maxRedirects) || maxRedirects < 0) {
+      throw new Error("maxRedirects must be a non-negative integer");
+    }
+    return this.#copy({ maxRedirects });
+  }
+
+  /**
+   * Return a copy with a custom confirmed-publish failover retry budget in
+   * milliseconds. 0 disables retry (the first transport failure fails fast).
+   */
+  withPublishTimeout(timeoutMs: number): ClientOptions {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 0) {
+      throw new Error("timeoutMs must be a non-negative integer");
+    }
+    return this.#copy({ publishTimeoutMs: timeoutMs });
   }
 
   /**
@@ -277,6 +323,12 @@ function parseAddress(
   return { host, port };
 }
 
+// Canonical pool key for a host/port. The broker reports owner endpoints as
+// strings, so this stays a plain string compare rather than parsing to an addr.
+function endpointKey(host: string, port: number): string {
+  return `${host}:${port}`;
+}
+
 function openSocket(host: string, port: number): Promise<Socket> {
   return new Promise<Socket>((resolve, reject) => {
     const socket = netConnect({ host, port });
@@ -320,6 +372,46 @@ class EngineSlot {
 }
 
 /**
+ * A lazily connected pooled connection to one non-bootstrap owner. Used for
+ * routed publishes. Each is its own session (no resume of the bootstrap
+ * identity) and reconnects on demand if the engine has closed.
+ */
+class PooledConnection {
+  #engine: Engine | null = null;
+  #connecting: Promise<Engine> | null = null;
+
+  constructor(
+    private readonly host: string,
+    private readonly port: number,
+    private readonly opts: ClientOptions,
+  ) {}
+
+  async engineForOperation(): Promise<Engine> {
+    if (this.#engine && !this.#engine.isClosed()) return this.#engine;
+    if (this.#connecting) return this.#connecting;
+    this.#connecting = (async () => {
+      const socket = await openSocket(this.host, this.port);
+      try {
+        const engine = await Engine.start(socket, this.opts, new Map());
+        this.#engine = engine;
+        return engine;
+      } catch (err) {
+        socket.destroy();
+        if (err instanceof FibrilError) throw err;
+        throw new DisconnectionError(`Engine failed to start: ${(err as Error).message}`);
+      } finally {
+        this.#connecting = null;
+      }
+    })();
+    return this.#connecting;
+  }
+
+  shutdown(): void {
+    this.#engine?.shutdown();
+  }
+}
+
+/**
  * Fibril broker client. Manages a single connection and dispatches
  * publish/subscribe operations through an internal engine.
  *
@@ -338,6 +430,19 @@ export class Client {
   #reconnectPromise: Promise<void> | null = null;
   #userShutdown = false;
   readonly #subscriptions: SubscriptionRegistry;
+  // Routing cache, warmed by fetchTopology and point-updated by redirects. Empty
+  // means "no routing info" (standalone broker or cold client).
+  readonly #topology = new TopologyCache();
+  // Connections to non-bootstrap owners, keyed by "host:port". The bootstrap
+  // connection is the EngineSlot above and is never pooled here.
+  readonly #pool = new Map<string, PooledConnection>();
+  // Cursor for keyless round-robin partition spread.
+  readonly #roundRobin: RoundRobin = { next: 0 };
+  readonly #bootstrapEndpoint: string;
+  // Cluster-scoped cohort member id, minted by the server on the first exclusive
+  // subscribe and carried on every later one (across partitions, reconnects, and
+  // brokers) so the cohort recognizes this client as one member.
+  #cohortMemberId: Uint8Array | null = null;
 
   private constructor(
     address: { host: string; port: number },
@@ -349,6 +454,7 @@ export class Client {
     this.#opts = opts;
     this.#engine = new EngineSlot(engine);
     this.#subscriptions = subscriptions;
+    this.#bootstrapEndpoint = endpointKey(address.host, address.port);
   }
 
   /**
@@ -477,6 +583,172 @@ export class Client {
   }
 
   /**
+   * Fetch the cluster topology and refresh the routing cache. Returns the
+   * snapshot. In standalone mode the broker returns an empty topology and the
+   * client keeps using its direct connection.
+   */
+  async fetchTopology(filter: { topic?: string | null; group?: string | null } = {}): Promise<TopologyOkMsg> {
+    const topology = await (await this._engineForOperation()).fetchTopology(filter);
+    this.#topology.replace(topology);
+    this.#topology.lastRefreshMs = Date.now();
+    // A full refresh is authoritative: drop pooled connections to endpoints that
+    // no longer own anything so a failed-over owner's stale connection is gone.
+    const live = this.#topology.endpoints();
+    for (const [endpoint, conn] of this.#pool) {
+      if (!live.has(endpoint)) {
+        conn.shutdown();
+        this.#pool.delete(endpoint);
+      }
+    }
+    return topology;
+  }
+
+  /** @internal The routing cache, exposed for the pool/router layer and tests. */
+  _topology(): TopologyCache {
+    return this.#topology;
+  }
+
+  /** @internal Choose the partition (and version) for a publish. */
+  _route(topic: string, group: string | null, key: Uint8Array | null): Route {
+    return routePartition(this.#topology, topic, group, key, this.#roundRobin);
+  }
+
+  /** @internal Maximum owner redirects to follow per confirmed publish. */
+  _maxRedirects(): number {
+    return this.#opts.maxRedirects;
+  }
+
+  /** @internal Failover retry budget for a confirmed publish, in milliseconds. */
+  _publishTimeoutMs(): number {
+    return this.#opts.publishTimeoutMs;
+  }
+
+  /**
+   * @internal Refresh topology from a reachable node, throttled by the refresh
+   * cooldown. Returns true if a refresh actually happened. Used by the publish
+   * failover retry to re-resolve the new owner after a transient failure.
+   */
+  async _refreshTopologyThrottled(): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.#topology.lastRefreshMs < this.#opts.topologyRefreshCooldownMs) {
+      return false;
+    }
+    try {
+      await this.fetchTopology();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** @internal Point-update routing from a redirect (after a misroute). */
+  _applyRedirect(redirect: RedirectMsg): void {
+    this.#topology.applyRedirect(redirect);
+  }
+
+  /**
+   * @internal True when the cache holds a real cluster view that does not
+   * include this queue, so a publish should fail fast as not-found rather than
+   * burning the failover retry budget on a topic that was never declared.
+   */
+  _isTopicMissing(topic: string, group: string | null): boolean {
+    return this.#topology.isPopulated() && !this.#topology.knowsTopic(topic, group);
+  }
+
+  /**
+   * @internal Resolve the engine that should serve a queue partition. Routing is
+   * reactive: a cache hit routes to the owner's pooled connection, a miss (cold
+   * cache or standalone) falls back to the bootstrap connection. The cache is
+   * filled by redirects and by fetchTopology, never on this hot path.
+   */
+  async _engineFor(topic: string, partition: number, group: string | null): Promise<Engine> {
+    const owner = this.#topology.lookup(topic, partition, group);
+    if (!owner || owner.endpoint === this.#bootstrapEndpoint) {
+      return this._engineForOperation();
+    }
+    let conn = this.#pool.get(owner.endpoint);
+    if (!conn) {
+      const addr = parseAddress(owner.endpoint);
+      conn = new PooledConnection(addr.host, addr.port, this.#opts);
+      this.#pool.set(owner.endpoint, conn);
+    }
+    return conn.engineForOperation();
+  }
+
+  /** @internal Whether the user has asked the client to shut down. */
+  _isShuttingDown(): boolean {
+    return this.#userShutdown;
+  }
+
+  /** @internal Whether subscriptions should ride through a failover. */
+  _superviseSubscriptions(): boolean {
+    return this.#opts.superviseSubscriptions;
+  }
+
+  /** @internal How often a supervised subscription re-checks its owner. */
+  _superviseIntervalMs(): number {
+    return this.#opts.subscriptionSuperviseIntervalMs;
+  }
+
+  /**
+   * @internal Partitions a subscription fans in over for (topic, group). The
+   * count comes from the topology cache. An unknown count (cold cache or
+   * standalone) yields just partition 0, the single-partition path. Cache-only
+   * by design: subscribe never fetches topology on its own.
+   */
+  _partitionSet(topic: string, group: string | null): number[] {
+    const partitioning = this.#topology.partitioning(topic, group);
+    const count = Math.max(partitioning?.count ?? 1, 1);
+    return Array.from({ length: count }, (_, i) => i);
+  }
+
+  /** @internal Current owner endpoint for a partition, or null if unresolved. */
+  _ownerEndpoint(topic: string, partition: number, group: string | null): string | null {
+    return this.#topology.lookup(topic, partition, group)?.endpoint ?? null;
+  }
+
+  /**
+   * @internal Subscribe once to a partition owner with manual ack, returning the
+   * engine and its delivery queue. Routes via the topology cache (owner's pooled
+   * connection, or bootstrap on a miss). The supervisor calls this to (re)attach
+   * a subscription to its current owner.
+   */
+  async _subscribeManualOnce(req: SubscribeMsg): Promise<SubscribeHandle<InternalInflight>> {
+    const reply = deferred<SubscribeResult<InternalInflight>>();
+    const fullReq = this.#withCohortMember(req);
+    const engine = await this._engineFor(fullReq.topic, fullReq.partition ?? 0, fullReq.group);
+    await engine.submit({ type: "subscribe", req: fullReq, supervised: this.#opts.superviseSubscriptions, reply });
+    const result = await reply.promise;
+    this.#captureCohortMember(fullReq, result.memberId);
+    return { engine, queue: result.queue };
+  }
+
+  /** @internal Auto-ack counterpart of _subscribeManualOnce. */
+  async _subscribeAutoOnce(req: SubscribeMsg): Promise<SubscribeHandle<InternalDelivered>> {
+    const reply = deferred<SubscribeResult<InternalDelivered>>();
+    const fullReq = this.#withCohortMember(req);
+    const engine = await this._engineFor(fullReq.topic, fullReq.partition ?? 0, fullReq.group);
+    await engine.submit({ type: "subscribeAutoAck", req: fullReq, supervised: this.#opts.superviseSubscriptions, reply });
+    const result = await reply.promise;
+    this.#captureCohortMember(fullReq, result.memberId);
+    return { engine, queue: result.queue };
+  }
+
+  // Stamp the current cohort member id onto an exclusive subscribe so every
+  // subscribe from this client joins the cohort as the same member.
+  #withCohortMember(req: SubscribeMsg): SubscribeMsg {
+    if (req.consumer_group == null) return req;
+    return { ...req, member_id: req.member_id ?? this.#cohortMemberId };
+  }
+
+  // Latch the server-minted member id from the first exclusive subscribe.
+  #captureCohortMember(req: SubscribeMsg, memberId: Uint8Array | null): void {
+    if (req.consumer_group != null && memberId != null && this.#cohortMemberId == null) {
+      this.#cohortMemberId = memberId;
+    }
+  }
+
+  /**
    * Declare queue retry and dead-letter behavior.
    */
   async declareQueue(config: QueueConfig): Promise<void> {
@@ -495,6 +767,8 @@ export class Client {
    */
   async shutdown(): Promise<void> {
     this.#userShutdown = true;
+    for (const conn of this.#pool.values()) conn.shutdown();
+    this.#pool.clear();
     const engine = this.#engine.current();
     engine.shutdown();
     await engine.whenComplete();

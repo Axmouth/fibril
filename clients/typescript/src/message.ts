@@ -1,6 +1,7 @@
 import { decodeMsgpack, encodeMsgpack } from "./codec.js";
 import {
   DeserializationError,
+  FibrilError,
   SerializationError,
 } from "./errors.js";
 import type { ContentType } from "./protocol.js";
@@ -16,6 +17,22 @@ export type HeadersInit = Record<string, string>;
 const MSGPACK_CONTENT_TYPE = "application/msgpack";
 const JSON_CONTENT_TYPE = "application/json";
 const TEXT_CONTENT_TYPE = "text/plain; charset=utf-8";
+
+// Header key prefixes reserved for system metadata. A publish that sets a
+// reserved key is rejected by the broker, so the client guards user code from
+// setting them. The library-owned carve-out below is the one exception.
+export const RESERVED_HEADER_PREFIXES = ["fibril.", "stroma."] as const;
+/** Library-owned carve-out within the reserved namespace (e.g. dedup ids). */
+export const CLIENT_HEADER_PREFIX = "fibril.client.";
+/** Producer id header set by ReliablePublisher, read by broker dedup later. */
+export const HEADER_PRODUCER_ID = "fibril.client.producer_id";
+/** Per-producer monotonic sequence header (under the client carve-out). */
+export const HEADER_PRODUCER_SEQ = "fibril.client.producer_seq";
+
+/** Whether a header key is in a reserved system namespace. */
+export function isReservedHeaderKey(key: string): boolean {
+  return RESERVED_HEADER_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
 
 export function contentTypeFromHeader(value: string): ContentType {
   const normalized = value.split(";")[0]?.trim();
@@ -67,15 +84,23 @@ export class NewMessage {
   readonly contentTypeValue: ContentType | null;
   /** Extra headers sent with the payload. */
   readonly headers: Record<string, string>;
+  /**
+   * Optional partition key. When set, the client routes the publish to
+   * `hash(key) % partitionCount` so all messages with the same key keep their
+   * relative order on one partition. Absent keys spread round-robin.
+   */
+  readonly partitionKeyValue: Uint8Array | null;
 
   private constructor(
     payload: Uint8Array,
     contentTypeValue: ContentType | null,
     headers: Record<string, string>,
+    partitionKeyValue: Uint8Array | null = null,
   ) {
     this.payload = payload;
     this.contentTypeValue = contentTypeValue;
     this.headers = { ...headers };
+    this.partitionKeyValue = partitionKeyValue;
   }
 
   /**
@@ -136,12 +161,43 @@ export class NewMessage {
         this.payload,
         contentTypeFromHeader(value),
         this.headers,
+        this.partitionKeyValue,
       );
     }
-    return new NewMessage(this.payload, this.contentTypeValue, {
-      ...this.headers,
-      [key]: value,
-    });
+    if (isReservedHeaderKey(key)) {
+      throw new FibrilError(
+        `header key "${key}" is in a reserved namespace (fibril.* / stroma.*)`,
+      );
+    }
+    return new NewMessage(
+      this.payload,
+      this.contentTypeValue,
+      { ...this.headers, [key]: value },
+      this.partitionKeyValue,
+    );
+  }
+
+  /**
+   * @internal Set a library-owned system header (the `fibril.client.*`
+   * carve-out). Bypasses the reserved-key guard, so only the client library
+   * itself calls this (e.g. ReliablePublisher dedup ids).
+   */
+  systemHeader(key: string, value: string): NewMessage {
+    return new NewMessage(
+      this.payload,
+      this.contentTypeValue,
+      { ...this.headers, [key]: value },
+      this.partitionKeyValue,
+    );
+  }
+
+  /**
+   * Return a copy routed by the given partition key. A string key is encoded as
+   * UTF-8. All messages sharing a key route to the same partition.
+   */
+  partitionKey(key: string | Uint8Array): NewMessage {
+    const bytes = typeof key === "string" ? new TextEncoder().encode(key) : key;
+    return new NewMessage(this.payload, this.contentTypeValue, this.headers, bytes);
   }
 
   /**

@@ -123,17 +123,94 @@ feature ideas live in their own track, summarized at the end.
 
 ## Clients
 
-- TypeScript client parity pass (BIG): bring `clients/typescript` up to the
-  current Rust client and protocol now that clustering landed. The TS client
-  exists (client, publisher, subscription, engine, codec, protocol over msgpack,
-  about 3100 lines) but lags the newer surface. Cover at least: partitioned-queue
-  publish with client-side key routing and transparent multi-partition fan-in,
-  exclusive consumer groups, owner redirect plus failover ride-through (refresh
-  topology and retry), and the reliability surface (is_retryable / retry_advice
-  outcome classification, the ReliablePublisher opt-in, producer-id dedup
-  headers). Audit against the Rust client surface first, then close the gaps.
-  Pairs with the AUDITS.md "Client API parity" pending item and the client
-  reliability docs item below. [USER/AUDIT]
+- Per-client feature matrix lives at `clients/FEATURE_MATRIX.md` (Rust reference
+  vs each client). Keep it updated as bricks land - it is the at-a-glance parity
+  view and the checklist for any new client.
+- `clients/ARCHITECTURE.md` is the language-agnostic design reference (layering,
+  invariants, continuity/routing/reliability models, porting lessons). Read it
+  before starting a new client (the Python client is next).
+- TypeScript client parity pass (BIG, multi-brick): `clients/typescript` is
+  basically pre-replication-branch (~3100 lines). It has the single-broker basics
+  (publish/confirm/delayed, manual+auto ack, reconnect) but is behind on two big
+  fronts. Brick-by-brick, foundation first:
+  - BRICK 1 (prerequisite) WIRE FORMAT: DONE. The broker moved frame bodies from
+    msgpack to a custom simple binary format (`crates/protocol/src/v1/wire.rs`:
+    magic + field-by-field put_u16/put_u32/put_u64/put_uuid/put_str/put_bytes/
+    put_headers, ~20 client-facing ops) - much faster, fixed scheduler starvation.
+    Ported to TS as `clients/typescript/src/wire.ts` (byte-exact codec with
+    round-trip + byte-layout tests) and a symmetric `frames.ts` adapter that maps
+    protocol.ts structs to the wire bodies. codec.ts now delegates body encode/
+    decode to the adapter while user payloads keep msgpack. The 20-byte frame
+    header is unchanged - only bodies moved. Remaining wire fields the protocol
+    structs do not carry yet (partition_key, consumer routing) default null/0 and
+    get populated by bricks 2-6.
+  - BRICK 2 topology + owner routing: DONE (publish path). FetchTopology op +
+    TopologyCache + owner resolution per (topic, partition) + a connection pool
+    keyed by endpoint + follow-redirect retry on confirmed publishes (bounded by
+    maxRedirects). Mirrors the Rust pool/cache shape in idiomatic single-threaded
+    TS (plain Map/object/counter, no locks/atomics). NOTE: subscribe still uses
+    the bootstrap connection - routing subscribes to partition owners is folded
+    into bricks 4-6.
+  - BRICK 3 partitioning: DONE (publish path). routePartition (FNV-1a key routing
+    + keyless round-robin) stamps partition/partition_key/partitioning_version on
+    the wire, byte-exact hashing vs the broker. Still TODO: transparent
+    multi-partition fan-in on subscribe (pairs with the subscribe-routing work in
+    bricks 4-6).
+  - FOLLOWUP (bricks 2-3): a multi-node real-broker smoke for routing/redirects.
+    The unit + integration tests cover routing against the real wire codec, and
+    brick 1 validated the publish path against a live standalone broker, but a
+    ganglion cluster smoke that exercises a real cross-owner redirect is still
+    worth adding (fits the brick 8 examples-as-light-tests runner).
+  - BRICK 4 reconnect + reconcile + resume: DONE. ResumeIdentity/Outcome on Hello
+    and the Reconcile* ops were already wired. The gap was the owner-restart case.
+    Reconcile now fires on ANY reconnect that has active subscriptions (not only a
+    resumed session) so a bounced owner's fresh session restores or closes the
+    streams instead of leaving them open-but-unfed. Regression-tested. Done in
+    brick 5: the supervisor now triggers a reconnect for a passive consumer whose
+    connection drops.
+  - BRICK 5 failover ride-through: DONE (single-partition). Publish side: transient
+    owner-failover retry with throttled topology refresh, jittered backoff,
+    deadline, not-found fast-fail (publishTimeoutMs), same loop as redirect-follow.
+    Consume side: a subscription supervisor reads from a merged queue and
+    re-subscribes to the current owner when the per-connection stream closes
+    (owner death/restart), tagging each delivery with its engine so manual ack
+    settles correctly. Continuity model: supervised subs own continuity via fresh
+    re-subscribe and stay out of the reconcile registry (mutually exclusive with
+    the brick-4 reconcile path, which is the supervision-off behavior).
+    Multi-partition fan-in and graceful-owner-move detection (periodic topology
+    owner-check) are now DONE too. STILL TODO: picking up partitions added by a
+    live grow (tied to live repartitioning, counts are fixed-at-create today);
+    lease preservation across re-subscribe (today an unsettled InflightMessage
+    from a dead owner fails its ack and is redelivered, at-least-once safe).
+  - BRICK 6 exclusive consumer groups: DONE. SubscriptionBuilder.consumerGroup/
+    consumerTarget, plus cluster-scoped member-id mint-and-carry (server mints on
+    the first exclusive subscribe, client latches and stamps every later one).
+    Exclusivity is enforced by the broker per-partition gate. STILL TODO: an
+    assignment-events stream (AssignmentChanged op), deferred per the server-side
+    design note.
+  - BRICK 7 reliability: DONE. retryAdvice/isRetryable classification, the
+    reserved-namespace header guard, and a ReliablePublisher that stamps producer
+    id + monotonic seq (fibril.client.*) and retries until confirmed. At-least-once
+    today. Effectively-once once the broker dedups on those keys (both sides TODO).
+  - BRICK 8 examples-as-light-tests: DONE. Self-validating examples/*.example.ts
+    (roundtrip, confirmed-delayed, manual-ack-retry, stream) + run-all.sh that
+    starts a broker and runs them all. Continuous examples take --check for a
+    bounded validated burst. Wired into CI (typescript-client-ci "examples" job)
+    by reusing the published fibril-server image rather than building from source.
+    STILL TODO: a multi-node cluster smoke for a real cross-owner redirect (needs
+    a ganglion cluster, not just one container).
+  - Open client gaps, deferred because closing them needs server-side support
+    that does not exist yet (so building the client half now would be untestable
+    dead code, likely wrong when the server side lands): an assignment-events
+    stream (the broker does not emit AssignmentChanged today - both references in
+    broker.rs are comments), live partition-grow fan-in (pairs with live
+    repartitioning, counts are fixed at create), lease preservation across
+    re-subscribe, and effectively-once dedup (need broker-side producer dedup).
+    Build the client half when each server side lands.
+  Pairs with AUDITS.md "Client API parity" and the client reliability docs item.
+  [USER/AUDIT]
+  See clients/ARCHITECTURE.md for the design reference and clients/FEATURE_MATRIX.md
+  for status. Next client: Python.
 
 ## Code health and structure
 

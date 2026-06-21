@@ -1,0 +1,90 @@
+# Client feature matrix
+
+What each Fibril client supports, so parity gaps are visible at a glance and new
+clients have a checklist to work against. The Rust client (`crates/client`) is
+the reference implementation, and other clients aim to match its behavior, not
+necessarily its internal structure (e.g. the TS client mirrors the routing
+design with plain single-threaded constructs rather than locks and atomics).
+
+`ARCHITECTURE.md` covers the shared layering, invariants, and porting lessons.
+
+Legend: done, partial (scope noted), no (planned), n/a (not applicable).
+
+## Core protocol
+
+| Feature | Rust | TypeScript |
+| --- | --- | --- |
+| Custom binary wire format (v1) | done | done |
+| Handshake + compliance marker | done | done |
+| Username/password auth | done | done |
+| Heartbeat ping/pong + timeout | done | done |
+| Typed wire parse errors | done | partial (decode throws, not yet a typed error taxonomy) |
+
+## Publish
+
+| Feature | Rust | TypeScript |
+| --- | --- | --- |
+| Unconfirmed publish | done | done |
+| Confirmed publish (awaits offset) | done | done |
+| Pipelined confirmation handle | done | done |
+| Delayed publish | done | done |
+| Raw bytes publish | done | done |
+| Content types (msgpack/json/text/raw/custom) | done | done |
+| Custom headers | done | done |
+
+## Consume
+
+| Feature | Rust | TypeScript |
+| --- | --- | --- |
+| Subscribe manual ack | done | done |
+| Subscribe auto ack | done | done |
+| Ack / Nack / retry-after | done | done |
+| Prefetch / backpressure | done | done |
+| Declare queue + DLQ policies | done | done |
+| Multi-partition subscribe fan-in | done | done (set fixed at subscribe, live grow pending) |
+
+## Reconnect and resume
+
+| Feature | Rust | TypeScript |
+| --- | --- | --- |
+| Resume identity on Hello | done | done |
+| Auto-reconnect before an operation | done | done |
+| Reconcile subscriptions on reconnect | done | done |
+| Owner-restart (reconcile on any reconnect, not just resumed) | done | done |
+
+## Cluster routing
+
+| Feature | Rust | TypeScript |
+| --- | --- | --- |
+| Topology fetch + cache | done | done |
+| Per-endpoint connection pool | done | done |
+| Owner routing per (topic, partition) | done | done (publish path) |
+| Partition-key routing (FNV-1a, broker-exact) | done | done |
+| Keyless round-robin spread | done | done |
+| Follow owner redirects (bounded) | done | done |
+| Transient failover publish retry + backoff | done | done |
+| Topology refresh on transient failure (throttled) | done | done |
+| Subscription supervisor (re-subscribe on owner drop + graceful move) | done | done |
+
+## Reliability and groups
+
+| Feature | Rust | TypeScript |
+| --- | --- | --- |
+| Retry classification (is_retryable / retry_advice) | done | done |
+| Reserved-namespace header validation | done | done |
+| ReliablePublisher helper | done | done |
+| Producer-id dedup headers | done | done (sent, broker dedup pending both sides) |
+| Exclusive consumer groups | done | done (cohort subscribe + member-id mint/carry) |
+| Cohort member id mint/carry | done | done |
+| Assignment events stream (AssignmentChanged) | done | no (broker gate enforces exclusivity, stream not emitted server-side yet) |
+
+## Tooling
+
+| Feature | Rust | TypeScript |
+| --- | --- | --- |
+| Examples | done | done (hello/demo + self-validating *.example.ts) |
+| Examples-as-light-tests runner | done | done (run-all.sh, continuous/--check modes) |
+| Real-broker integration smoke | done | done (CI runs examples vs the published broker image, multi-node cluster smoke pending) |
+
+See `FOLLOWUPS.md` (repo root, "Clients" section) for the brick-by-brick plan
+behind the TypeScript "no"/"partial" rows.

@@ -1,6 +1,7 @@
 import { encode as msgpackEncode, decode as msgpackDecode } from "@msgpack/msgpack";
 import type { Op } from "./protocol.js";
 import { PROTOCOL_V1 } from "./protocol.js";
+import { encodeBody, decodeBody } from "./frames.js";
 
 // Wire frame layout (big-endian):
 //   u32 payload_len
@@ -47,19 +48,15 @@ export function decodeMsgpack<T>(bytes: Uint8Array): T {
 
 /**
  * Build a frame for a given opcode and payload value. The payload is
- * msgpack-encoded with map/named-field encoding.
+ * encoded with the broker's custom binary format (see frames.ts / wire.ts).
  */
 export function buildFrame(op: Op, requestId: bigint, payload: unknown): Frame {
-  const bytes =
-    payload === null || payload === undefined
-      ? new Uint8Array(0)
-      : encodeMsgpack(payload);
   return {
     version: PROTOCOL_V1,
     opcode: op,
     flags: 0,
     requestId,
-    payload: bytes,
+    payload: encodeBody(op, payload),
   };
 }
 
@@ -111,8 +108,8 @@ export function tryDecodeFrame(
 }
 
 /**
- * Decode the typed body of a frame.
+ * Decode the typed body of a frame using the broker's custom binary format.
  */
 export function decodeFrameBody<T>(frame: Frame): T {
-  return decodeMsgpack<T>(frame.payload);
+  return decodeBody(frame.opcode as Op, frame.payload) as T;
 }

@@ -7,14 +7,21 @@ import {
   HEADER_SIZE,
   tryDecodeFrame,
 } from "../src/codec.js";
-import { Op, PROTOCOL_V1 } from "../src/protocol.js";
+import { Op, PROTOCOL_V1, type Hello } from "../src/protocol.js";
 
-test("frame round-trip with object payload", () => {
-  const original = buildFrame(Op.Hello, 42n, {
-    client_name: "test",
-    client_version: "0.0.1",
-    protocol_version: PROTOCOL_V1,
-  });
+// These tests cover the 20-byte frame header and stream framing. Body encoding
+// is exercised against real protocol structs (the only thing the wire codec
+// accepts) rather than ad-hoc objects.
+
+const hello = (name = "test"): Hello => ({
+  client_name: name,
+  client_version: "0.0.1",
+  protocol_version: PROTOCOL_V1,
+  resume: null,
+});
+
+test("frame round-trip carries header fields and body", () => {
+  const original = buildFrame(Op.Hello, 42n, hello());
 
   const bytes = encodeFrame(original);
   assert.equal(bytes.byteLength, HEADER_SIZE + original.payload.byteLength);
@@ -27,11 +34,7 @@ test("frame round-trip with object payload", () => {
   assert.equal(decoded.frame.version, PROTOCOL_V1);
   assert.equal(decoded.frame.flags, 0);
 
-  const body = decodeFrameBody<{
-    client_name: string;
-    client_version: string;
-    protocol_version: number;
-  }>(decoded.frame);
+  const body = decodeFrameBody<Hello>(decoded.frame);
   assert.equal(body.client_name, "test");
   assert.equal(body.client_version, "0.0.1");
   assert.equal(body.protocol_version, PROTOCOL_V1);
@@ -51,14 +54,14 @@ test("frame with empty payload", () => {
 });
 
 test("partial decode returns null", () => {
-  const frame = buildFrame(Op.Hello, 1n, { x: 1, y: 2 });
+  const frame = buildFrame(Op.Hello, 1n, hello());
   const bytes = encodeFrame(frame);
 
   // Less than header
   assert.equal(tryDecodeFrame(bytes.subarray(0, 5)), null);
   // Header but partial payload
   assert.equal(tryDecodeFrame(bytes.subarray(0, HEADER_SIZE + 1)), null);
-  // Exactly header + 0 bytes (and there's payload due) -> null
+  // Exactly header but payload still due
   assert.equal(tryDecodeFrame(bytes.subarray(0, HEADER_SIZE)), null);
 });
 
@@ -78,7 +81,7 @@ test("decode handles two frames concatenated", () => {
   assert.equal(second.frame.opcode, Op.Pong);
 });
 
-test("bigint round-trip via msgpack", () => {
+test("u64 body field round-trips near the max value", () => {
   const big = 0xfffffffffffffffen; // u64 near max
   const frame = buildFrame(Op.PublishOk, 99n, { offset: big });
   const bytes = encodeFrame(frame);
@@ -104,9 +107,9 @@ test("request id big-endian encoding", () => {
 });
 
 test("payload length big-endian", () => {
-  const frame = buildFrame(Op.Hello, 1n, { a: "x".repeat(300) });
+  // A 300-char client_name forces a payload over 256 bytes.
+  const frame = buildFrame(Op.Hello, 1n, hello("x".repeat(300)));
   const bytes = encodeFrame(frame);
-  // First 4 bytes are payload length, BE. msgpack encoding will be > 256 bytes.
   const len = (bytes[0]! << 24) | (bytes[1]! << 16) | (bytes[2]! << 8) | bytes[3]!;
   assert.equal(len, frame.payload.byteLength);
   assert.ok(len > 256);

@@ -58,6 +58,25 @@ await client.shutdown();
   The subscribe request is marked auto-ack and the client exposes delivered
   messages without a settlement handle.
 
+## Examples
+
+Runnable examples live in `examples/`. The `*.example.ts` files double as light
+end-to-end tests: each connects to a real broker, exercises one feature, and
+self-validates, exiting non-zero on failure.
+
+```sh
+# Start a broker, run every example, tear it down (exits non-zero if any fail):
+examples/run-all.sh
+
+# Or run one against an already-running broker:
+FIBRIL_ADDR=127.0.0.1:9876 npx tsx examples/roundtrip.example.ts
+```
+
+Continuous examples (e.g. `stream.example.ts`) run forever by default so you can
+watch packets flow, and take `--check` (or `FIBRIL_CHECK=1`) for a bounded,
+self-validating burst that exits. `run-all.sh` passes `--check`. `hello.ts` and
+`demo.ts` are illustrative walkthroughs rather than tests.
+
 ## Error handling
 
 All errors are subclasses of `FibrilError`:
