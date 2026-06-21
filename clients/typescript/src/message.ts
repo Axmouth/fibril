@@ -1,6 +1,7 @@
 import { decodeMsgpack, encodeMsgpack } from "./codec.js";
 import {
   DeserializationError,
+  FibrilError,
   SerializationError,
 } from "./errors.js";
 import type { ContentType } from "./protocol.js";
@@ -16,6 +17,22 @@ export type HeadersInit = Record<string, string>;
 const MSGPACK_CONTENT_TYPE = "application/msgpack";
 const JSON_CONTENT_TYPE = "application/json";
 const TEXT_CONTENT_TYPE = "text/plain; charset=utf-8";
+
+// Header key prefixes reserved for system metadata. A publish that sets a
+// reserved key is rejected by the broker, so the client guards user code from
+// setting them. The library-owned carve-out below is the one exception.
+export const RESERVED_HEADER_PREFIXES = ["fibril.", "stroma."] as const;
+/** Library-owned carve-out within the reserved namespace (e.g. dedup ids). */
+export const CLIENT_HEADER_PREFIX = "fibril.client.";
+/** Producer id header set by ReliablePublisher, read by broker dedup later. */
+export const HEADER_PRODUCER_ID = "fibril.client.producer_id";
+/** Per-producer monotonic sequence header (under the client carve-out). */
+export const HEADER_PRODUCER_SEQ = "fibril.client.producer_seq";
+
+/** Whether a header key is in a reserved system namespace. */
+export function isReservedHeaderKey(key: string): boolean {
+  return RESERVED_HEADER_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
 
 export function contentTypeFromHeader(value: string): ContentType {
   const normalized = value.split(";")[0]?.trim();
@@ -147,6 +164,25 @@ export class NewMessage {
         this.partitionKeyValue,
       );
     }
+    if (isReservedHeaderKey(key)) {
+      throw new FibrilError(
+        `header key "${key}" is in a reserved namespace (fibril.* / stroma.*)`,
+      );
+    }
+    return new NewMessage(
+      this.payload,
+      this.contentTypeValue,
+      { ...this.headers, [key]: value },
+      this.partitionKeyValue,
+    );
+  }
+
+  /**
+   * @internal Set a library-owned system header (the `fibril.client.*`
+   * carve-out). Bypasses the reserved-key guard, so only the client library
+   * itself calls this (e.g. ReliablePublisher dedup ids).
+   */
+  systemHeader(key: string, value: string): NewMessage {
     return new NewMessage(
       this.payload,
       this.contentTypeValue,

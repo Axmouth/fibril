@@ -1,15 +1,28 @@
-import { BrokenPipeError, RedirectError, ServerError, isTransientError } from "./errors.js";
+import {
+  BrokenPipeError,
+  RedirectError,
+  ServerError,
+  isRetryable,
+  isTransientError,
+} from "./errors.js";
 import type { Command, Engine } from "./engine.js";
 import { deferred, type Deferred } from "./internal/deferred.js";
 import type { Route } from "./internal/topology.js";
 import {
+  PUBLISH_RETRY_INITIAL_BACKOFF_MS,
   bumpBackoff,
   newPublishRetryState,
   publishRetryNap,
   sleep,
   type PublishRetryState,
 } from "./internal/retry.js";
-import { intoMessage, NewMessage, type Publishable } from "./message.js";
+import {
+  HEADER_PRODUCER_ID,
+  HEADER_PRODUCER_SEQ,
+  intoMessage,
+  NewMessage,
+  type Publishable,
+} from "./message.js";
 import type { ContentType, RedirectMsg } from "./protocol.js";
 
 // Broker error code for a queue that is not declared in the cluster. Matches the
@@ -316,6 +329,83 @@ export class Publisher {
     return reply
       ? { type: "publishDelayedConfirmed", ...common, not_before: spec.notBefore, reply }
       : { type: "publishDelayedUnconfirmed", ...common, not_before: spec.notBefore };
+  }
+
+  /**
+   * Wrap this publisher in a {@link ReliablePublisher} that stamps producer
+   * dedup ids and retries until the message is durably confirmed.
+   */
+  reliable(): ReliablePublisher {
+    return new ReliablePublisher(this);
+  }
+}
+
+/**
+ * A publisher that keeps retrying a confirmed publish until it is durably
+ * confirmed (or hits a permanent error or the attempt cap), stamping each
+ * message with a stable producer id and a monotonic per-producer sequence under
+ * the library-owned `fibril.client.*` header carve-out.
+ *
+ * The broker ignores those headers today, so this stays at-least-once: a retry
+ * after a lost confirmation may duplicate. Once the broker dedups on these keys
+ * the same helper becomes effectively-once with no API change.
+ */
+export class ReliablePublisher {
+  readonly #publisher: Publisher;
+  readonly #producerId: string;
+  #seq = 0n;
+  #maxAttempts = 0;
+
+  /** @internal Use {@link Publisher.reliable}. */
+  constructor(publisher: Publisher, producerId: string = crypto.randomUUID()) {
+    this.#publisher = publisher;
+    this.#producerId = producerId;
+  }
+
+  /** The stable producer id stamped on every message from this publisher. */
+  get producerId(): string {
+    return this.#producerId;
+  }
+
+  /**
+   * Cap the number of publish attempts. 0 (the default) retries until the
+   * message is durably confirmed or a permanent error.
+   */
+  maxAttempts(maxAttempts: number): this {
+    if (maxAttempts < 0 || !Number.isInteger(maxAttempts)) {
+      throw new Error("maxAttempts must be a non-negative integer");
+    }
+    this.#maxAttempts = maxAttempts;
+    return this;
+  }
+
+  /**
+   * Publish and keep retrying until durably confirmed. Resolves with the
+   * broker-assigned offset. A retry re-sends the SAME sequence number.
+   */
+  async publish<T>(payload: Publishable<T>): Promise<bigint> {
+    const seq = this.#seq;
+    this.#seq += 1n;
+    const message = intoMessage(payload)
+      .systemHeader(HEADER_PRODUCER_ID, this.#producerId)
+      .systemHeader(HEADER_PRODUCER_SEQ, seq.toString());
+
+    let attempts = 0;
+    for (;;) {
+      try {
+        return await this.#publisher.publishConfirmed(message);
+      } catch (err) {
+        // Retryable means the outcome is unknown (the inner publish already
+        // spent its transport retry budget). Keep going unless the cap is hit.
+        if (isRetryable(err)) {
+          attempts += 1;
+          if (this.#maxAttempts !== 0 && attempts >= this.#maxAttempts) throw err;
+          await sleep(publishRetryNap(PUBLISH_RETRY_INITIAL_BACKOFF_MS));
+          continue;
+        }
+        throw err; // permanent
+      }
+    }
   }
 }
 

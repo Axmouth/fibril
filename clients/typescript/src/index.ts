@@ -5,8 +5,18 @@ export {
   type ClientOptionsInit,
   type ReconnectOutcome,
 } from "./client.js";
-export { NewMessage, type HeadersInit, type Publishable } from "./message.js";
-export { Publisher, PublishConfirmation, type DelayInput } from "./publisher.js";
+export {
+  NewMessage,
+  isReservedHeaderKey,
+  type HeadersInit,
+  type Publishable,
+} from "./message.js";
+export {
+  Publisher,
+  ReliablePublisher,
+  PublishConfirmation,
+  type DelayInput,
+} from "./publisher.js";
 export {
   Subscription,
   AutoAckedSubscription,
@@ -20,9 +30,13 @@ export {
   DeserializationError,
   SerializationError,
   BrokenPipeError,
+  RedirectError,
   ServerError,
   EofError,
   UnexpectedError,
+  isRetryable,
+  retryAdvice,
+  type RetryAdvice,
 } from "./errors.js";
 export {
   Op,

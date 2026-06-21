@@ -1485,3 +1485,43 @@ test("exclusive subscribe mints a cohort member id and carries it across partiti
     await broker.stop();
   }
 });
+
+test("reliable publisher stamps producer ids and retries until confirmed", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    const publishes: PublishMsg[] = [];
+    let attempts = 0;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Publish) {
+        publishes.push(decodeFrameBody<PublishMsg>(f));
+        attempts += 1;
+        if (attempts === 1) {
+          // Retryable but not transport-transient, so the inner confirmed publish
+          // surfaces it and the reliable loop re-publishes.
+          broker.send(s, buildFrame(Op.Error, f.requestId, { code: 409, message: "owner moved" }));
+        } else {
+          broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 7n }));
+        }
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const reliable = client.publisher("jobs").reliable();
+    const pid = reliable.producerId;
+    const offset = await reliable.publish("hello");
+
+    assert.equal(offset, 7n);
+    assert.equal(publishes.length, 2);
+    assert.equal(publishes[0]!.headers["fibril.client.producer_id"], pid);
+    assert.equal(publishes[0]!.headers["fibril.client.producer_seq"], "0");
+    // A retry re-sends the same sequence.
+    assert.equal(publishes[1]!.headers["fibril.client.producer_seq"], "0");
+
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
