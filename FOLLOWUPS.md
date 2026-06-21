@@ -130,18 +130,71 @@ feature ideas live in their own track, summarized at the end.
 - Admin dashboard: a lost-connection banner. When the admin page can no longer
   reach its broker (broker down, failover, network blip), show a clear banner
   instead of silently stale data. [USER]
-- Admin queues page: create a queue from the UI (and later delete). CREATE is
-  mostly plumbing - the storage primitive `declare_queue(tp, part, group, meta)`
-  already exists and is used today as a side effect of `update_queue_dlq`
-  (`crates/admin/src/routes.rs`). Needs a first-class admin endpoint (topic,
-  optional group, partition count, DLQ policy + max retries) plus a create form
-  on the queues page. DELETE deferred (user: "no delete yet"): the Stroma
-  primitive exists (`destroy_partition` / freeze-then-fs-cleanup, see archived
-  TODOTHOUGHTS.md "Queue Deletion"), but expose it carefully (confirm, inflight/
-  drain guard - destroy_partition already refuses on inflight). Pairs with the
-  dashboard niceties from TODOTHOUGHTS: hide-inactive-queues toggle + basic
-  search, and optional queue expiration. One of the small user-facing features.
-  [USER]
+### Queue lifecycle, retention, expiry (ordered plan) [USER]
+
+Small user-facing features, ordered cheapest-and-highest-visibility first. The
+first three are admin-thin (the primitive exists, just expose it).
+
+1. **Admin create-queue** (IN PROGRESS first). Storage primitive
+   `declare_queue(tp, part, group, meta)` exists and is already used as a side
+   effect of `update_queue_dlq` (`crates/admin/src/routes.rs`). Add a first-class
+   admin endpoint (topic, optional group, partition count, DLQ policy + max
+   retries) plus a create form on the queues page.
+2. **Queue purge.** `reset()` exists in Stroma (`state.rs`). "Purge is
+   effectively reset" per TODOTHOUGHTS. Expose an admin endpoint + a button
+   (with confirm). Keeps the queue, drops its messages.
+3. **Hide-inactive-queues toggle + basic search** on the queues page. Frontend
+   only - the activity/sparse data is already there. Useful with many sparse
+   queues.
+4. **Admin delete-queue** (deferred per user: "no delete yet"). Stroma primitive
+   `destroy_partition` exists (freeze-then-fs-cleanup, already refuses on
+   inflight). Expose carefully: confirm dialog + drain/inflight guard.
+5. **Time-based retention.** Primitive `safe_message_truncate_before` exists.
+   Add a sparse worker: map time -> offset (crude binary search on the stored
+   `published` is fine, no new index needed), truncate before the cutoff, and
+   clear the relevant state entries. Per-queue retention config.
+6. **Message TTL (drop by age).** GENUINELY NEW - do not conflate with the
+   existing `expiry_heap` / `collect_expired`, which is the lease-timeout
+   REDELIVERY path (inflight -> requeue, never ack), not age-drop. Approach
+   (user): a map in queue state like the lease heap - a RangeMap if expiry ranges
+   are commonly contiguous (a span of offsets sharing a deadline) - wired to the
+   expiry worker. Never expire an inflight message, and dropping can happen
+   during the same `collect_expired` tick. Decide: optional per-message
+   expires-at on the wire vs a per-queue default TTL (likely both - prefer adding
+   an optional field to the existing publish over new ops/frames). Client
+   convenience: a publisher SETTING, e.g. a `publisher.expiring(ttl)` builder
+   (not necessarily a separate type), that stamps a default expiry on every
+   publish. Composable with the other publish modes. The ttl arg follows the
+   client's existing Delayable-style trait - accept either a bare number (seconds)
+   or a Duration, same as the delayed-publish API.
+7. **Queue expiration (auto-delete idle queues).** A DECLARE-TIME queue setting
+   (the queue carries its own idle-TTL, e.g. expire-after-idle), not an external
+   config. A sparse worker destroys queues idle beyond their declared TTL. Builds
+   on delete (#4) + idle tracking.
+
+Usefulness read (value, anchored to Fibril being a work queue - consumed=gone):
+- Create + purge: HIGH value, low effort. Round out the admin board (we can
+  repartition / set DLQ today but not create or empty a queue) and cover common
+  ops needs. Do first.
+- Message TTL (+ the expiring publisher): HIGH product value - "do not process
+  stale work" is core work-queue semantics (a RabbitMQ flagship). Higher value
+  than its cheapest-first slot implies, so consider pulling it forward right after
+  the admin-thin wins.
+- Time retention: MEDIUM. A backlog safety valve for slow/dead consumers, DLQs,
+  and delayed messages. Less central than in a log system since acked messages
+  are already gone.
+- Hide-inactive + search: MEDIUM, scales with queue count. Low-effort QoL win.
+- Delete: MEDIUM-HIGH. Closes the lifecycle / orphan-cleanup gap, but
+  safety-sensitive, so deferred for now.
+- Queue expiration (declare-time idle-TTL): MEDIUM / niche. Great for ephemeral
+  per-session queues (RPC reply, per-client), and needs delete first.
+
+Also queued (correctness): the split-brain adversarial test (see "Split-brain"
+under Correctness and durability) - assert a returning stale owner's write AND
+replicate at an epoch below the local partition epoch are both rejected. The
+mechanism is in place (epoch bump in placement + persisted per-log epoch fence +
+the demotion fix aea4d50). This is the missing proof. Non-trivial (needs a
+replication + stale-epoch-apply harness), so it lands after the admin-thin items.
 
 ## Features (replication-related)
 
