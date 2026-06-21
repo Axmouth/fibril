@@ -174,22 +174,73 @@ first three are admin-thin (the primitive exists, just expose it).
    clear the relevant state entries. Per-queue retention config.
 6. **Message TTL (drop by age).** GENUINELY NEW - do not conflate with the
    existing `expiry_heap` / `collect_expired`, which is the lease-timeout
-   REDELIVERY path (inflight -> requeue, never ack), not age-drop. Approach
-   (user): a map in queue state like the lease heap - a RangeMap if expiry ranges
-   are commonly contiguous (a span of offsets sharing a deadline) - wired to the
-   expiry worker. Never expire an inflight message, and dropping can happen
-   during the same `collect_expired` tick. Decide: optional per-message
-   expires-at on the wire vs a per-queue default TTL (likely both - prefer adding
-   an optional field to the existing publish over new ops/frames). Client
-   convenience: a publisher SETTING, e.g. a `publisher.expiring(ttl)` builder
-   (not necessarily a separate type), that stamps a default expiry on every
-   publish. Composable with the other publish modes. The ttl arg follows the
-   client's existing Delayable-style trait - accept either a bare number (seconds)
-   or a Duration, same as the delayed-publish API.
+   REDELIVERY path (inflight -> requeue, never ack), not age-drop. DESIGN (locked,
+   traced against current code):
+   - Fork resolved - do BOTH per-message and per-queue-default, collapsed to one
+     absolute deadline at publish on the owner (broker = clock authority):
+     `expire_at = per_message_ttl ?? queue_default_ttl ?? none`. Per-message =
+     optional `ttl_ms` on the existing `Publish` op (no new op/frame). Per-queue
+     default = `default_ttl_ms: Option<u64>` on `DeclareMeta` (declare-time).
+   - State (stroma `state.rs`): a single `ttl_deadlines: RangeMap<Offset,
+     Deadline>` keyed by OFFSET (quantized deadline). NOT a deadline-ordered heap.
+     Keying by offset is the win: the mapping persists across
+     ready->inflight->ready and is removed only on terminal settle, so there is no
+     "bucket fired while inflight then requeued and never re-checked" bug, and no
+     re-insert logic. RangeMap (not heap) because a TTL structure is bounded by
+     the READY BACKLOG (every msg can carry a deadline), largest exactly when TTL
+     matters (lagging consumers); RangeMap collapses contiguous same-deadline
+     spans -> near-O(1) per burst for uniform/queue-default TTL. `ready` is already
+     a RangeSet, so this is idiomatic. (Plain offset-keyed structure also answers
+     reactive lookups; a deadline-keyed map/heap would need a reverse index.)
+   - Two-tier check: (a) REACTIVE / correctness - `next_deliverable` + mark-inflight
+     drop any offset with deadline <= now, so stale work is never delivered
+     regardless of worker timing; (b) PROACTIVE / cleanup - the EXISTING
+     expiry_worker (broker.rs `spawn_expiry_worker`) scans the front of
+     ttl_deadlines each tick, dropping expired READY offsets bounded by
+     `expiry_batch_max`. Hint piggybacks the front entry (exact for uniform TTL,
+     else falls back to poll cadence). NEVER drop inflight.
+   - Drop = a DURABLE settle (Ack-path event) - unlike lease-requeue and
+     delayed-enqueue, which are derived/non-durable. v1 = discard; DLQ-on-expiry
+     is a cheap fast-follow (`DeadLetterReason::Expired` + existing DLQ path).
+   - Durability/replication/recovery: `expire_at` rides the `Enqueue` event
+     (bump `STROMA_VER` 2->3) so followers + recovery rebuild ttl_deadlines.
+     Snapshots (`encode_snapshot`/`load_snapshot`, bump `FORMAT_VERSION` 2->3)
+     append the ttl_deadlines ranges, since snapshots compact away the Enqueue
+     events. Quantization granularity = a delivery runtime setting (ceil to bucket
+     so we never drop early); guarantee mirrors delayed-publish ("dropped within
+     granularity + worker period after expiry").
+   - Client: a `publisher.expiring(ttl)` builder (a SETTING, not a new type) that
+     stamps a default per-publish ttl; ttl via the Delayable-style trait (bare
+     number = seconds, or a Duration). Composable with delayed/reliable modes.
+   - Brick order (each its own green commit): (1) `DeclareMeta.default_ttl_ms` +
+     `Enqueue` `expire_at` + STROMA_VER bump (stroma codec/event); (2)
+     ttl_deadlines + reactive drop in next_deliverable/mark_inflight + proactive
+     drop in collect_expired + snapshot FORMAT_VERSION bump (stroma state); (3)
+     broker publish-path wiring (resolve effective ttl) + worker durable-drop
+     emit; (4) wire `ttl_ms` on `Publish` (protocol); (5) client `expiring()`.
 7. **Queue expiration (auto-delete idle queues).** A DECLARE-TIME queue setting
    (the queue carries its own idle-TTL, e.g. expire-after-idle), not an external
    config. A sparse worker destroys queues idle beyond their declared TTL. Builds
    on delete (#4) + idle tracking.
+
+Shared time-based internals (map for #5/#6/#7 - they are "close" but share CONFIG
+more than MECHANISM, so do them one-by-one, not as one unified subsystem):
+- Granularity differs: TTL (#6) is per-OFFSET (RangeMap + collect_expired +
+  expiry_worker + durable settle); retention (#5) is per-SEGMENT by age
+  (`safe_message_truncate_before` + message `published` ts + a coarse truncate
+  worker); queue-expiration (#7) is per-QUEUE idle (`destroy_partition` (done) +
+  idle tracking, which broker observability already exposes as `idle_for_ms`).
+  Different core data structures - do NOT try to unify the mechanisms.
+- GENUINELY shared surface = `DeclareMeta` (all three are declare-time per-queue
+  settings: `default_ttl_ms`, retention window, idle-TTL). Worth shaping ONCE: a
+  consistent `Option<u64>`-ms field convention + declare->replicate->recover
+  plumbing (the `Declare` event already carries DeclareMeta). TTL's
+  `default_ttl_ms` lands in the shape #5/#7 reuse.
+- Also shared: the worker + runtime-settings cadence pattern
+  (`expiry_poll_min_ms`/`expiry_batch_max` is the template; #5/#7 each want their
+  own cadence knob), and SNAPSHOTS - any per-offset/per-queue durable state added
+  for these must round-trip `encode_snapshot`/`load_snapshot` (FORMAT_VERSION bump)
+  since snapshots compact away the events that would otherwise rebuild it.
 
 Usefulness read (value, anchored to Fibril being a work queue - consumed=gone):
 - Create + purge: HIGH value, low effort. Round out the admin board (we can
