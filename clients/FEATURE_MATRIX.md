@@ -51,7 +51,8 @@ Superscript numbers refer to the Notes under the tables.
 | Ack / Nack / retry-after | done | done |
 | Prefetch / backpressure | done | done |
 | Declare queue + DLQ policies | done | done |
-| Multi-partition subscribe fan-in | done | done <sup>2</sup> |
+| Multi-partition subscribe fan-in | done | done |
+| Live-repartition partition pickup (consumer) | done | no <sup>2</sup> |
 
 ## Reconnect and resume
 
@@ -86,7 +87,7 @@ Superscript numbers refer to the Notes under the tables.
 | Producer-id dedup headers | done | client-ready <sup>3</sup> |
 | Exclusive consumer groups | done | done |
 | Cohort member id mint/carry | done | done |
-| Assignment events stream (AssignmentChanged) | done | deferred <sup>4</sup> |
+| Assignment events stream (AssignmentChanged) | done | no <sup>4</sup> |
 
 ## Tooling
 
@@ -100,16 +101,24 @@ Superscript numbers refer to the Notes under the tables.
 
 1. Decode throws on malformed frames, but a typed parse-error taxonomy (matching
    the Rust typed wire errors) is not ported yet.
-2. The partition set is fixed at subscribe time. Picking up partitions added by a
-   live grow is deferred, and pairs with live repartitioning (counts are fixed at
-   queue creation today).
-3. The client sends `fibril.client.producer_id`/`_seq` on every reliable publish.
-   End-to-end dedup needs the broker to key on them, which is not implemented yet,
-   so this stays at-least-once for now. Unblocks when broker-side dedup lands.
-4. The Rust client carries dormant assignment-events plumbing. The TS client does
-   not port it because the broker does not emit `AssignmentChanged` today (both
-   references in `broker.rs` are comments). Exclusivity is enforced by the broker
-   per-partition gate regardless. Unblocks when the broker emits the op.
+2. The broker supports live repartition (grow/shrink) in cluster mode
+   (`fibrilctl repartition`, `/admin/api/repartition`, broker transition
+   machinery). A consumer must re-fan-in to pick up partitions added by a grow.
+   The Rust client does this via a resubscribe loop. The TS client does not yet
+   (its partition set is fixed at subscribe time). Actionable client work, not
+   server-gated.
+3. The ReliablePublisher already works as a reliability helper: it retries until
+   durably confirmed (at-least-once), which is most of the value. It also stamps
+   `fibril.client.producer_id`/`_seq` so the broker can later make it
+   effectively-once by deduping on them. That broker-side dedup is not built yet,
+   so retries can still duplicate today. Only the effectively-once guarantee is
+   server-gated, not the helper.
+4. The broker DOES push `AssignmentChanged` to exclusive-cohort members
+   (`handler.rs` spawn_assignment_forwarder). The Rust client exposes them as an
+   assignment-events stream. The TS client does not consume the op yet, so this
+   is actionable client work. Exclusivity is enforced by the per-partition gate
+   regardless, so an assignment stream is observability/narrowing, not
+   correctness.
 5. CI runs the examples against the published single-node broker image. A
    multi-node ganglion cluster smoke for a real cross-owner redirect is still
    pending.

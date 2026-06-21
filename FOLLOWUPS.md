@@ -178,16 +178,16 @@ feature ideas live in their own track, summarized at the end.
     re-subscribe and stay out of the reconcile registry (mutually exclusive with
     the brick-4 reconcile path, which is the supervision-off behavior).
     Multi-partition fan-in and graceful-owner-move detection (periodic topology
-    owner-check) are now DONE too. STILL TODO: picking up partitions added by a
-    live grow (tied to live repartitioning, counts are fixed-at-create today);
-    lease preservation across re-subscribe (today an unsettled InflightMessage
-    from a dead owner fails its ack and is redelivered, at-least-once safe).
+    owner-check) are now DONE too. STILL TODO (actionable, see below): picking up
+    partitions added by a live grow, and lease preservation across re-subscribe
+    (today an unsettled InflightMessage from a dead owner fails its ack and is
+    redelivered, at-least-once safe).
   - BRICK 6 exclusive consumer groups: DONE. SubscriptionBuilder.consumerGroup/
     consumerTarget, plus cluster-scoped member-id mint-and-carry (server mints on
     the first exclusive subscribe, client latches and stamps every later one).
-    Exclusivity is enforced by the broker per-partition gate. STILL TODO: an
-    assignment-events stream (AssignmentChanged op), deferred per the server-side
-    design note.
+    Exclusivity is enforced by the broker per-partition gate. STILL TODO
+    (actionable, see below): consume the AssignmentChanged push as an
+    assignment-events stream.
   - BRICK 7 reliability: DONE. retryAdvice/isRetryable classification, the
     reserved-namespace header guard, and a ReliablePublisher that stamps producer
     id + monotonic seq (fibril.client.*) and retries until confirmed. At-least-once
@@ -199,14 +199,26 @@ feature ideas live in their own track, summarized at the end.
     by reusing the published fibril-server image rather than building from source.
     STILL TODO: a multi-node cluster smoke for a real cross-owner redirect (needs
     a ganglion cluster, not just one container).
-  - Open client gaps, deferred because closing them needs server-side support
-    that does not exist yet (so building the client half now would be untestable
-    dead code, likely wrong when the server side lands): an assignment-events
-    stream (the broker does not emit AssignmentChanged today - both references in
-    broker.rs are comments), live partition-grow fan-in (pairs with live
-    repartitioning, counts are fixed at create), lease preservation across
-    re-subscribe, and effectively-once dedup (need broker-side producer dedup).
-    Build the client half when each server side lands.
+  - ACTIONABLE client gaps (server support EXISTS - verified in code 2026-06-21,
+    correcting an earlier wrong "server-gated" call):
+    - Live-grow partition pickup. The broker ships live repartition (grow by a
+      multiple, shrink by a factor) in cluster mode: `fibrilctl repartition`,
+      `/admin/api/repartition` (gated on ganglion), and broker transition
+      machinery (`repartition_transitions`, hold/release delivery during the
+      drain) in `crates/broker/src/broker.rs`. After a grow the TS consumer does
+      NOT pick up the new partitions (its fan-in set is fixed at subscribe). The
+      Rust client does, via `partition_resubscribe_loop_*`. Port that loop.
+    - Assignment-events stream. The broker DOES push `AssignmentChanged` to
+      exclusive-cohort members (`crates/protocol/src/v1/handler.rs`
+      spawn_assignment_forwarder). The TS client ignores the op. Port the Op
+      decode + an `assignmentEvents()` stream (Rust has it). Observability and
+      future client-side partition narrowing, not correctness (the per-partition
+      gate already enforces exclusivity).
+  - SERVER-GATED client items (build the client half when the server side lands):
+    - Effectively-once dedup. The client already sends fibril.client.producer_id/
+      _seq, and the broker dedup that would make it effectively-once is not built
+      (only a "read by broker producer-dedup later" comment). At-least-once today.
+    - Lease preservation across re-subscribe (a shared at-least-once limitation).
   Pairs with AUDITS.md "Client API parity" and the client reliability docs item.
   [USER/AUDIT]
   See clients/ARCHITECTURE.md for the design reference and clients/FEATURE_MATRIX.md
