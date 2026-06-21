@@ -1,7 +1,10 @@
 # Fibril Audit Index
 
 This is the root checklist for focused audits. Detailed findings should live in
-their own audit documents so this file stays useful as a status board.
+their own audit documents so this file stays useful as a status board. The
+detailed audit documents from the replication effort now live under
+`archive/replication-sharding-plan/` (linked below). Open `Next:` items are still
+worth a fresh pass.
 
 ## Status Meanings
 
@@ -17,7 +20,7 @@ their own audit documents so this file stays useful as a status board.
 
 - [x] Runtime settings through Ganglion
   - Status: Addressed
-  - Detail: [RUNTIME_SETTINGS_GANGLION_AUDIT.md](RUNTIME_SETTINGS_GANGLION_AUDIT.md)
+  - Detail: [RUNTIME_SETTINGS_GANGLION_AUDIT.md](archive/replication-sharding-plan/RUNTIME_SETTINGS_GANGLION_AUDIT.md)
   - Next: keep follow-up policy questions in the deferred immutable runtime
     policy item.
 - [ ] Cluster-wide immutable runtime policy
@@ -27,20 +30,20 @@ their own audit documents so this file stays useful as a status board.
     cluster runtime settings. Keep hardware-shaped startup settings local.
 - [x] Single-node behavior
   - Status: Addressed
-  - Detail: [SINGLE_NODE_GUARDRAIL_AUDIT.md](SINGLE_NODE_GUARDRAIL_AUDIT.md)
+  - Detail: [SINGLE_NODE_GUARDRAIL_AUDIT.md](archive/replication-sharding-plan/SINGLE_NODE_GUARDRAIL_AUDIT.md)
   - Next: add a broader single-node scenario runner with the end-to-end harness.
 - [ ] Replication and sharding transition safety
   - Status: Audited
-  - Detail: [REPLICATION_TRANSITION_SAFETY_AUDIT.md](REPLICATION_TRANSITION_SAFETY_AUDIT.md)
+  - Detail: [REPLICATION_TRANSITION_SAFETY_AUDIT.md](archive/replication-sharding-plan/REPLICATION_TRANSITION_SAFETY_AUDIT.md)
   - Next: extract cluster bootstrap for multi-node integration tests, then cover
     cohort coordination and failover adversarial scenarios.
 - [ ] Ganglion integration boundary
   - Status: Audited
-  - Detail: [GANGLION_INTEGRATION_BOUNDARY_AUDIT.md](GANGLION_INTEGRATION_BOUNDARY_AUDIT.md)
+  - Detail: [GANGLION_INTEGRATION_BOUNDARY_AUDIT.md](archive/replication-sharding-plan/GANGLION_INTEGRATION_BOUNDARY_AUDIT.md)
   - Next: defer dedupe until a helper is clearly domain-neutral and reused.
 - [ ] Admin operations surface
   - Status: Audited
-  - Detail: [ADMIN_OPERATIONS_SURFACE_AUDIT.md](ADMIN_OPERATIONS_SURFACE_AUDIT.md)
+  - Detail: [ADMIN_OPERATIONS_SURFACE_AUDIT.md](archive/replication-sharding-plan/ADMIN_OPERATIONS_SURFACE_AUDIT.md)
   - Next: make message inspection status filtering explicit, either with a
     bounded admin-side scan-fill loop or a response/UI note that filtering
     happens after a bounded page read.
@@ -50,17 +53,17 @@ their own audit documents so this file stays useful as a status board.
   - Next: audit Rust and TypeScript clients against the current protocol and docs.
 - [ ] Performance-sensitive paths
   - Status: Audited
-  - Detail: [PERFORMANCE_SENSITIVE_PATHS_AUDIT.md](PERFORMANCE_SENSITIVE_PATHS_AUDIT.md)
+  - Detail: [PERFORMANCE_SENSITIVE_PATHS_AUDIT.md](archive/replication-sharding-plan/PERFORMANCE_SENSITIVE_PATHS_AUDIT.md)
   - Next: add cluster benchmark profiles for replica-durable confirms,
     follower catch-up, partitioned fan-in, and redirects.
 - [ ] Lock usage and synchronization
   - Status: Audited
-  - Detail: [LOCK_USAGE_AUDIT.md](LOCK_USAGE_AUDIT.md)
+  - Detail: [LOCK_USAGE_AUDIT.md](archive/replication-sharding-plan/LOCK_USAGE_AUDIT.md)
   - Next: replace replica-durable per-offset follower-map checks with committed
     watermark progress, then add the concurrent duplicate-subscribe regression.
 - [ ] User-facing documentation shape
   - Status: Audited
-  - Detail: [USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md](USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md)
+  - Detail: [USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md](archive/replication-sharding-plan/USER_FACING_DOCUMENTATION_SHAPE_AUDIT.md)
   - Next: add a clustered queues and replication explainer, then keep TypeScript
     examples scoped to the single-owner API until the parity pass lands.
 

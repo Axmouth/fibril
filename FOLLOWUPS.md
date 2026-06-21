@@ -1,0 +1,163 @@
+# Follow-ups and pending work
+
+Consolidated open items, extracted before the replication-effort working docs
+were archived so nothing is lost. Full detail and rationale live in
+`archive/replication-sharding-plan/` (the worklog, replication planning, and
+design notes). Audit follow-ups live in [AUDITS.md](AUDITS.md), the audit status
+board, and are not duplicated here.
+
+Source tags: `[WL]` worklog, `[PLAN]` replication planning, `[DN]` design notes,
+`[MEM]` memory, `[RACE]` race-windows, `[AUDIT]` audit board, `[USER]` author note.
+Tiers are grouped by concern, not strictly ordered.
+
+This file tracks the replication and clustering roadmap leftovers. Non-replication
+feature ideas live in their own track, summarized at the end.
+
+## Done since the inventory was last curated (2026-06-21)
+
+- Topology page glowup: adaptive ellipse/staggered-grid layout, click-to-inspect
+  broker panel, and a Diagram/List view toggle.
+- Admin SPA-feel: boosted navigation, vanilla, no framework.
+- Admin node management from the topology page: repartition plus add/remove
+  coordination voting member controls.
+- CI guard: inline template-JS syntax check (`scripts/check-template-js.sh`,
+  wired into `scripts/check.sh`).
+
+## Correctness and durability
+
+- Idempotent producer dedup: broker reads `fibril.client.producer_id`/`seq` for
+  effectively-once delivery (the headers are already on the wire). The one
+  success criterion left genuinely not done. [WL/DN/PLAN phase 8]
+- Split-brain: believed addressed by epoch fencing in Keratin plus the Stroma
+  freeze. Verify, and add adversarial tests for the reappearing-stale-owner case
+  (reject any write or replicate whose epoch is below the local partition epoch). [PLAN]
+- Ex-owner rejoins the cluster after losing privileges while its replicas were
+  not fully caught up and its data was not shared: define and handle the
+  mechanics (ties to epoch fencing plus recovery verification). [WL]
+- Ensure follower queues are materialized in memory on demand. [WL]
+- Low priority: verify snapshot replay strictly begins at the offset after the
+  snapshot (believed done via `recovery_replays_only_events_after_snapshot_offset`). [WL]
+- `[RACE]` STALE, needs re-verification against current code: ack versus
+  redelivery-worker idempotency (a snapshot `list_expired` can race an ack). The
+  delivery-tag epoch work may already cover this. Confirm or add a generation or
+  is-acked guard before requeue. [RACE Race 2]
+
+## Performance and scale
+
+- Owner-side read and encode fan-out (shared tail, private catch-up) for RF >= 3. [WL]
+- Parallel-fsync, now unblocked since the recovery event-to-message verification
+  landed. [WL]
+- Replication-lag backpressure hook in the append path (slow accept when
+  followers lag). [PLAN]
+- Replication streamed decode (decode while fetching and applying), separate
+  payload and event replication streams, and a more push-focused replication
+  architecture. [WL]
+- Low priority: make `BLOCKING_DECODE_BYTES` adaptive instead of a CPU-tuned
+  const (piecewise decode-time model, startup calibration first). Details in the
+  code comment. [WL]
+
+## Operability and quality of life
+
+- Programmatic scale up and down: join (learner to voter to rebalance) and
+  drain-and-leave via fibrilctl plus the admin API, autoscaler-drivable. [PLAN]
+- Unclean-leader-election toggle, off by default. Minor. [PLAN]
+- Settings tiering: basic, advanced, expert, with collapsible sections. [DN/WL]
+- Settings presets, orthogonal to tiers: opinionated bundles such as low-latency,
+  hands-off, and power-user. Tiers are how much you see, presets are what the
+  defaults do. [USER]
+- Relational settings nudges (soft warn, not reject): for example warn when a
+  failover-sensitive timeout is set below the failure-detection cadence. Needs
+  cross-setting advisories at config load and runtime PUT, plus an inline admin
+  hint. Pairs with settings tiering. [USER]
+- Eager opt-in startup recovery: `recover_all` exists but is unused (recovery is
+  lazy via `queue_handle`). A config to eagerly recover all on-disk partitions at
+  boot makes `recovery.on_mismatch = refuse` a literal refuse-to-start. Lazy
+  stays the default. [USER]
+- Snapshot cadence: wire `snap_cfg.every_events` as an additional knob alongside
+  the time and dirty triggers. The gate is commented out in
+  `periodic_snapshot_step`, `last_snapshot_event_offset` is already tracked, so
+  wiring is low-risk. Currently `#[allow(dead_code)]` with a FIXME. [USER]
+- Onboarding and easy trial: docker one-liner, in-memory mode, 60s quickstart. [WL]
+
+## Features (replication-related)
+
+- Plexus: a fan-out or stream channel type built on its own arc, enabled by the
+  substrate-versus-engine split below. [DN]
+
+## Code health and structure
+
+- Rework the `tui-example` (it has disabled instrumentation) and
+  `benches/bin/bench_e2e.rs` (half-disabled: dead channels, hardcoded params)
+  into clean, illustrative shape. [USER]
+- `stroma.rs` by-concern file split: a readability refactor independent of
+  clustering. A full module sketch is preserved in the archived worklog. Do the
+  low-risk type modules first, then the engine impl split incrementally. [WL]
+- substrate-versus-engine split (WorkQueueEngine plus StreamEngine over a shared
+  substrate), which enables Plexus. [DN]
+- Optional de-raft finish: fibril-side de-raft is complete. Remaining is optional,
+  routing the protocol dev-dep and coordination-ganglion through the `ganglion`
+  umbrella crate, or the bigger approach-B of moving raft-node construction up out
+  of fibril entirely. [WL]
+- Ganglion domain hygiene: keep all coordination-domain code in ganglion so fibril
+  depends on a stable surface, not internals. Ongoing. [DN/MEM]
+- Clustering-module separation: done for broker, stroma-core, and client (protocol
+  was already done). Kept here only as a reference point. [MEM/DN]
+- Replace `::MAX` config branches with `Option`s for clearer semantics, and a
+  mutex-refactor pass (concurrency-primitive discipline). [WL]
+- Assess persisting the queue catalogue (which queues plus path) in the stroma
+  store instead of filesystem discovery. Filesystem discovery is likely good
+  enough. [WL]
+- Low priority: `lifecycle_locks` map pruning plus a bench (rare optimization, no
+  latency or throughput impact). [WL]
+
+## Docs
+
+- Client reliability example or tutorial on the docs site (`clients.mdx`):
+  confirmed publish with the `is_retryable`/`retry_advice` match pattern, the
+  ReliablePublisher opt-in, producer ids and the dedup path, and a short
+  failover-behavior note. Keep it copy-paste-able. [WL]
+- Manual failover runbook (partially covered by `FAILURE_MODES.md`). [PLAN]
+- Keep the implemented-surface inventory current. It is critical and easily falls
+  out of date. [MEM]
+
+## Testing and hardening
+
+- Adversarial tests through all layers, plus a realistic chaotic benchmark
+  (bursty, non-steady supply, consume, and bandwidth, not steady saturation). [WL]
+- Cluster benchmark profiles: replica-durable confirms, follower catch-up,
+  partitioned fan-in, and redirects. [AUDIT]
+- A test pass to ensure tests pin correct behavior, not current bugs. [WL]
+- Revisit the audits in [AUDITS.md](AUDITS.md) and harvest anything still
+  actionable (several are Audited with open Next items). [USER]
+
+## Far horizon (v2+)
+
+- Multi-region and geo placement: region and zone labels feeding the planner,
+  per-queue placement hints, region-aware placement strategy. [PLAN]
+- Load-aware placement and routing: node and partition load scores (advisory,
+  off the coordination log, hysteresis, power-of-two-choices), plus a consumer
+  scheduling policy and a per-consumer override of the global partition target. [DN/MEM]
+- Live repartitioning beyond fixed-at-create: partition_count is already
+  versioned and routing is version-parameterized. The hard deferred semantic is
+  per-key ordering across a resize. [PLAN/MEM]
+- Transactional or cross-partition writes. [PLAN]
+- Self-hosted metadata to replace external coordination. Explicitly deferred. [PLAN]
+- Follower reads: rejected for the work-queue model (no analog). [PLAN]
+
+## Non-replication track (own roadmap)
+
+These elevate Fibril feature-wise but are tracked separately, not on the
+replication roadmap. Raw notes are preserved in
+`archive/replication-sharding-plan/TODOTHOUGHTS.md`.
+
+- TTL and message expiration, time-based retention, queue purge, and queue
+  deletion lifecycle (the author's first post-wrap nice-to-haves).
+- Broker restart reconciliation and update reconciliation: persistent session
+  continuity built on the existing reconnect model. Noted as the most distinctive
+  of the bunch.
+- In-memory (non-durable) queues via a pluggable Keratin write target.
+- Express-lane and speculative delivery with deferred publisher confirmation.
+- Client opt-out of convenience features and client-enforced rate limits.
+- Settings proverbs (a delight touch on the durability override), more Keratin
+  writer pipelining, topic and node id interning, dashboard QoL such as hiding
+  inactive queues plus search, and a RabbitMQ-compatibility easter egg.
