@@ -23,8 +23,8 @@ use uuid::Uuid;
 use crate::coordination::{
     CohortMemberInfo, ConsumerGroupKey, Coordination, CoordinationSnapshot,
     ExclusiveConsumerGroups, LocalAssignmentIntent, LocalAssignmentTransition,
-    LocalCohortMembership, PartitionAssignment, QueueIdentity, StaticCoordination,
-    StickyConsumerGroupAssignor, plan_local_assignment_transitions,
+    LocalCohortMembership, PartitionAssignment, QueueIdentity, ReplicationDurabilityPolicy,
+    StaticCoordination, StickyConsumerGroupAssignor, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
     DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StromaEngine,
@@ -1330,6 +1330,14 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     /// replica set source for confirms). Maintained by the assignment watcher;
     /// empty for standalone brokers (local-durable confirms only).
     pub(crate) assignment_cache: Arc<DashMap<QueueKey, PartitionAssignment>>,
+    /// Queues this broker is actually serving owner writes for (set when the gate
+    /// admits a publisher, cleared when the owner runtime stops). Broker-level so
+    /// it survives QueueLoopState recreation. The assignment watcher reconciles
+    /// against it, so a demotion is computed even when a BecomeOwner was never
+    /// observed - the gate (which admits writes) and the watcher cache can
+    /// otherwise diverge and leave a stale owner accepting writes after a fast
+    /// failover.
+    locally_owned: Arc<DashMap<QueueKey, ()>>,
     /// Opt-in exclusive consumer-group routing: maps cohort membership to the
     /// per-partition delivery gate. Absent cohorts leave delivery competing.
     exclusive_groups: Mutex<ExclusiveGroupRouter>,
@@ -1428,6 +1436,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             replication_progress: Arc::new(DashMap::new()),
             replication_timing: Arc::new(ReplicationTimingMetrics::default()),
             assignment_cache: Arc::new(DashMap::new()),
+            locally_owned: Arc::new(DashMap::new()),
             exclusive_groups: Mutex::new(ExclusiveGroupRouter::new(default_consumer_target)),
             repartition_transitions: Mutex::new(HashMap::new()),
             pending_settles: Arc::new(AtomicUsize::new(0)),
@@ -1673,6 +1682,19 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             })
             .await;
 
+        // The gate admitted this publisher, so the broker is now serving owner
+        // writes for the queue. Record it so the assignment watcher can demote on
+        // a later loss of ownership even if no BecomeOwner transition was observed
+        // (the gate and the watcher's view can otherwise diverge briefly).
+        self.locally_owned.insert(
+            QueueKey {
+                tp: tp.clone(),
+                part,
+                group: group.clone(),
+            },
+            (),
+        );
+
         // TODO: make async by maybe making two tasks: one to receive publish requests and one to wait for completions and send confirms? Or use a bounded channel and backpressure?
         let (confirm_sink_tx, mut confirm_sink_rx) = mpsc::channel::<(
             oneshot::Receiver<Result<AppendResult, IoError>>,
@@ -1878,6 +1900,8 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 
     fn stop_owner_queue_runtime(&self, key: &QueueKey) -> Option<Vec<Offset>> {
+        // No longer serving owner writes for this queue (frozen or demoted).
+        self.locally_owned.remove(key);
         let Some((_, qs)) = self.queues.remove(key) else {
             return None;
         };
@@ -3721,6 +3745,25 @@ impl Broker<StromaEngine> {
                 QueueIdentity::new(key.tp.clone(), key.part, key.group.as_deref()),
                 assignment.clone(),
             );
+        }
+        // Reconcile against real local state: any queue this broker is actually
+        // serving as owner must appear owned in `previous`, even if no
+        // BecomeOwner was ever observed (so the cache missed it). Otherwise a
+        // failover that the watcher sees as (None -> not-owned) computes Noop and
+        // leaves a stale owner accepting writes. With the queue present as owned,
+        // the planner derives the correct freeze/demote.
+        for entry in self.locally_owned.iter() {
+            let key = entry.key();
+            let queue = QueueIdentity::new(key.tp.clone(), key.part, key.group.as_deref());
+            previous.assignments.entry(queue.clone()).or_insert_with(|| {
+                PartitionAssignment {
+                    queue,
+                    owner: node_id.to_string(),
+                    followers: Vec::new(),
+                    epoch: 0,
+                    durability: ReplicationDurabilityPolicy::LocalDurable,
+                }
+            });
         }
         previous
     }
