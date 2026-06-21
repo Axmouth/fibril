@@ -130,6 +130,18 @@ feature ideas live in their own track, summarized at the end.
 - Admin dashboard: a lost-connection banner. When the admin page can no longer
   reach its broker (broker down, failover, network blip), show a clear banner
   instead of silently stale data. [USER]
+- Admin queues page: create a queue from the UI (and later delete). CREATE is
+  mostly plumbing - the storage primitive `declare_queue(tp, part, group, meta)`
+  already exists and is used today as a side effect of `update_queue_dlq`
+  (`crates/admin/src/routes.rs`). Needs a first-class admin endpoint (topic,
+  optional group, partition count, DLQ policy + max retries) plus a create form
+  on the queues page. DELETE deferred (user: "no delete yet"): the Stroma
+  primitive exists (`destroy_partition` / freeze-then-fs-cleanup, see archived
+  TODOTHOUGHTS.md "Queue Deletion"), but expose it carefully (confirm, inflight/
+  drain guard - destroy_partition already refuses on inflight). Pairs with the
+  dashboard niceties from TODOTHOUGHTS: hide-inactive-queues toggle + basic
+  search, and optional queue expiration. One of the small user-facing features.
+  [USER]
 
 ## Features (replication-related)
 
