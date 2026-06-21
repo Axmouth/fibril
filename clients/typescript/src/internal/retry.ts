@@ -15,7 +15,7 @@ export function publishRetryNap(baseMs: number): number {
 
 /** Per-call state for the confirmed-publish failover retry loop. */
 export interface PublishRetryState {
-  // Give-up time (epoch ms) for transient retries; null disables retry so the
+  // Give-up time (epoch ms) for transient retries. Null disables retry so the
   // first transient error fails fast.
   deadline: number | null;
   redirects: number;

@@ -356,7 +356,7 @@ class PartitionSupervisor<R> {
     this.#engine = first.engine;
     this.#partQueue = first.queue;
     this.#boundOwner = this.#ownerNow();
-    // The merged queue is shared; this partition closing must not end the others.
+    // The merged queue is shared, so this partition closing must not end the others.
     // Notify the fan-in so it can close the merged queue once all have stopped.
     void this.#run().finally(onStopped);
     if (this.client._superviseSubscriptions()) this.#startOwnerCheck();
@@ -472,7 +472,7 @@ class PartitionSupervisor<R> {
  * own supervisor feeding a single merged queue that the public subscription
  * reads, so per-partition ordering is preserved and the partitions interleave.
  * The partition set is fixed at subscribe time (partition counts are fixed at
- * queue creation today); picking up partitions added by a live grow is a
+ * queue creation today). Picking up partitions added by a live grow is a
  * follow-up tied to live repartitioning.
  */
 class FanIn<R> {
@@ -630,6 +630,8 @@ export class SubscriptionBuilder {
   #topic: string;
   #group: string | null = null;
   #prefetch = 1;
+  #consumerGroup: string | null = null;
+  #consumerTarget: number | null = null;
 
   /** @internal */
   constructor(client: Client, topic: string) {
@@ -644,6 +646,29 @@ export class SubscriptionBuilder {
    */
   group(group: string): this {
     this.#group = normalizeGroup(group);
+    return this;
+  }
+
+  /**
+   * Join an exclusive consumer cohort. Members of the same cohort share the
+   * topic's partitions: the broker assigns each partition to one member, so the
+   * cohort consumes the partitioned topic in order with free failover. Without
+   * this, the subscription is a plain competing consumer.
+   */
+  consumerGroup(consumerGroup: string): this {
+    this.#consumerGroup = consumerGroup;
+    return this;
+  }
+
+  /**
+   * Hint how many members the cohort should spread partitions across. This is a
+   * capacity signal, not a coverage cap. Only meaningful with a consumer group.
+   */
+  consumerTarget(target: number): this {
+    if (target < 1 || !Number.isInteger(target)) {
+      throw new Error("consumerTarget must be a positive integer");
+    }
+    this.#consumerTarget = target;
     return this;
   }
 
@@ -672,6 +697,8 @@ export class SubscriptionBuilder {
       group: this.#group,
       prefetch: this.#prefetch,
       auto_ack: false,
+      consumer_group: this.#consumerGroup,
+      consumer_target: this.#consumerTarget,
     };
     const initial = await this.#fanInInitial(baseReq, (r) =>
       this.#client._subscribeManualOnce(r),
@@ -695,6 +722,8 @@ export class SubscriptionBuilder {
       group: this.#group,
       prefetch: this.#prefetch,
       auto_ack: false, // matches Rust client: auto-ack is client-side
+      consumer_group: this.#consumerGroup,
+      consumer_target: this.#consumerTarget,
     };
     const initial = await this.#fanInInitial(baseReq, (r) =>
       this.#client._subscribeAutoOnce(r),

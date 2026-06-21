@@ -18,7 +18,7 @@ const ERR_NOT_FOUND = 404;
 
 /**
  * Routing surface the Publisher needs from the Client. The Client owns the
- * topology cache and connection pool; the Publisher only asks it where each
+ * topology cache and connection pool. The Publisher only asks it where each
  * publish should go and how to react to a redirect or transient failover.
  */
 interface RoutingClient {
@@ -178,7 +178,7 @@ export class Publisher {
 
   /**
    * Publish after a delay without waiting for server confirmation.
-   * Numeric delays are milliseconds; `Date` is treated as an absolute deadline.
+   * Numeric delays are milliseconds. A `Date` is treated as an absolute deadline.
    *
    * @example
    * ```ts
@@ -194,7 +194,7 @@ export class Publisher {
 
   /**
    * Publish after a delay and wait for broker confirmation.
-   * Numeric delays are milliseconds; `Date` is treated as an absolute deadline.
+   * Numeric delays are milliseconds. A `Date` is treated as an absolute deadline.
    *
    * @example
    * ```ts
@@ -213,7 +213,7 @@ export class Publisher {
 
   /**
    * Publish after a delay and return a broker-confirmation handle.
-   * Numeric delays are milliseconds; `Date` is treated as an absolute deadline.
+   * Numeric delays are milliseconds. A `Date` is treated as an absolute deadline.
    */
   async publishDelayedWithConfirmation<T>(
     payload: Publishable<T>,

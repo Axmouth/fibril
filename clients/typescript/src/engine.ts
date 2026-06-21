@@ -81,8 +81,8 @@ export interface InternalInflight extends InternalDelivered {
 type Waiter =
   | { kind: "publish"; deferred: Deferred<bigint> }
   | { kind: "declareQueue"; deferred: Deferred<void> }
-  | { kind: "subscribeManual"; deferred: Deferred<BoundedQueue<InternalInflight>>; supervised: boolean }
-  | { kind: "subscribeAuto"; deferred: Deferred<BoundedQueue<InternalDelivered>>; supervised: boolean }
+  | { kind: "subscribeManual"; deferred: Deferred<SubscribeResult<InternalInflight>>; supervised: boolean }
+  | { kind: "subscribeAuto"; deferred: Deferred<SubscribeResult<InternalDelivered>>; supervised: boolean }
   | { kind: "topology"; deferred: Deferred<TopologyOkMsg> };
 
 // Commands the public API submits to the engine.
@@ -92,8 +92,8 @@ export type Command =
   | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
   | { type: "publishDelayedConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
   | { type: "declareQueue"; req: DeclareQueueMsg; reply: Deferred<void> }
-  | { type: "subscribe"; req: SubscribeMsg; supervised: boolean; reply: Deferred<BoundedQueue<InternalInflight>> }
-  | { type: "subscribeAutoAck"; req: SubscribeMsg; supervised: boolean; reply: Deferred<BoundedQueue<InternalDelivered>> }
+  | { type: "subscribe"; req: SubscribeMsg; supervised: boolean; reply: Deferred<SubscribeResult<InternalInflight>> }
+  | { type: "subscribeAutoAck"; req: SubscribeMsg; supervised: boolean; reply: Deferred<SubscribeResult<InternalDelivered>> }
   | { type: "ack"; sub_id: bigint; tag: DeliveryTag; request_id: bigint; reply: Deferred<void> }
   | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; not_before: bigint | null; request_id: bigint; reply: Deferred<void> }
   | { type: "topology"; topic: string | null; group: string | null; reply: Deferred<TopologyOkMsg> };
@@ -109,6 +109,12 @@ const RECONCILE_REQUEST_ID = 3n;
 export interface RegisteredSubscription {
   reconcile: ReconcileSubscription;
   delivery: SubDelivery;
+}
+
+/** Result of a subscribe: the delivery queue plus the server-echoed member id. */
+export interface SubscribeResult<R> {
+  queue: BoundedQueue<R>;
+  memberId: Uint8Array | null;
 }
 
 export type SubscriptionRegistry = Map<bigint, RegisteredSubscription>;
@@ -686,7 +692,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
               delivery,
             });
           }
-          w.deferred.resolve(queue);
+          w.deferred.resolve({ queue, memberId: ok.member_id ?? null });
         } else if (w.kind === "subscribeAuto") {
           const queue = new BoundedQueue<InternalDelivered>(prefetch);
           const delivery: SubDelivery = { kind: "auto", queue };
@@ -709,7 +715,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
               delivery,
             });
           }
-          w.deferred.resolve(queue);
+          w.deferred.resolve({ queue, memberId: ok.member_id ?? null });
         } else {
           // wrong kind; nothing to do
         }

@@ -174,6 +174,12 @@ export interface SubscribeOkMsg {
   group: string | null;
   partition: number;
   prefetch: number;
+  // Exclusive cohort fields the server echoes. member_id is server-minted on the
+  // first exclusive subscribe and carried on later ones so the cohort sees one
+  // member. Absent for non-exclusive subscriptions.
+  consumer_group?: string | null;
+  consumer_target?: number | null;
+  member_id?: Uint8Array | null;
 }
 
 export interface ReconcileSubscription {

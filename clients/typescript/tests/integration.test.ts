@@ -1423,3 +1423,65 @@ test("subscribe fans in over all partitions the topology knows", async () => {
     await broker.stop();
   }
 });
+
+test("exclusive subscribe mints a cohort member id and carries it across partitions", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    const minted = new Uint8Array(16).fill(0x7);
+    const subscribeReqs: SubscribeMsg[] = [];
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        broker.send(
+          s,
+          buildFrame(Op.TopologyOk, f.requestId, {
+            generation: 1n,
+            queues: [0, 1].map((partition) => ({
+              topic: "orders",
+              partition,
+              group: null,
+              owner_endpoint: `127.0.0.1:${broker.port}`,
+              partitioning_version: 1n,
+              partition_count: 2,
+            })),
+          }),
+        );
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        subscribeReqs.push(sub);
+        const partition = sub.partition ?? 0;
+        // The broker mints a member id when the client offers none.
+        const memberId = sub.member_id ?? minted;
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: BigInt(partition + 1),
+            topic: "orders",
+            group: null,
+            partition,
+            prefetch: sub.prefetch,
+            consumer_group: sub.consumer_group,
+            consumer_target: sub.consumer_target,
+            member_id: memberId,
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    await client.fetchTopology();
+    const sub = await client.subscribe("orders").consumerGroup("workers").subAutoAck();
+
+    assert.equal(subscribeReqs.length, 2);
+    assert.equal(subscribeReqs[0]!.consumer_group, "workers");
+    assert.equal(subscribeReqs[0]!.member_id, null); // first offers none
+    assert.deepEqual(subscribeReqs[1]!.member_id, minted); // later carry the minted id
+
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});

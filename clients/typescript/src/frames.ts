@@ -228,9 +228,9 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
         partition: v.partition,
         group: v.group,
         prefetch: v.prefetch,
-        consumerGroup: null,
-        consumerTarget: null,
-        memberId: null,
+        consumerGroup: v.consumer_group ?? null,
+        consumerTarget: v.consumer_target ?? null,
+        memberId: v.member_id ?? null,
       });
     }
     case Op.Deliver: {
@@ -403,6 +403,9 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
         group: w.group,
         partition: w.partition,
         prefetch: w.prefetch,
+        consumer_group: w.consumerGroup,
+        consumer_target: w.consumerTarget,
+        member_id: w.memberId,
       } satisfies SubscribeOkMsg;
     }
     case Op.Deliver: {

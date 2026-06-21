@@ -3,6 +3,7 @@ import {
   Engine,
   type InternalDelivered,
   type InternalInflight,
+  type SubscribeResult,
   type SubscriptionRegistry,
 } from "./engine.js";
 import { BrokenPipeError, DisconnectionError, FibrilError } from "./errors.js";
@@ -438,6 +439,10 @@ export class Client {
   // Cursor for keyless round-robin partition spread.
   readonly #roundRobin: RoundRobin = { next: 0 };
   readonly #bootstrapEndpoint: string;
+  // Cluster-scoped cohort member id, minted by the server on the first exclusive
+  // subscribe and carried on every later one (across partitions, reconnects, and
+  // brokers) so the cohort recognizes this client as one member.
+  #cohortMemberId: Uint8Array | null = null;
 
   private constructor(
     address: { host: string; port: number },
@@ -687,7 +692,7 @@ export class Client {
 
   /**
    * @internal Partitions a subscription fans in over for (topic, group). The
-   * count comes from the topology cache; an unknown count (cold cache or
+   * count comes from the topology cache. An unknown count (cold cache or
    * standalone) yields just partition 0, the single-partition path. Cache-only
    * by design: subscribe never fetches topology on its own.
    */
@@ -709,18 +714,38 @@ export class Client {
    * a subscription to its current owner.
    */
   async _subscribeManualOnce(req: SubscribeMsg): Promise<SubscribeHandle<InternalInflight>> {
-    const reply = deferred<BoundedQueue<InternalInflight>>();
-    const engine = await this._engineFor(req.topic, req.partition ?? 0, req.group);
-    await engine.submit({ type: "subscribe", req, supervised: this.#opts.superviseSubscriptions, reply });
-    return { engine, queue: await reply.promise };
+    const reply = deferred<SubscribeResult<InternalInflight>>();
+    const fullReq = this.#withCohortMember(req);
+    const engine = await this._engineFor(fullReq.topic, fullReq.partition ?? 0, fullReq.group);
+    await engine.submit({ type: "subscribe", req: fullReq, supervised: this.#opts.superviseSubscriptions, reply });
+    const result = await reply.promise;
+    this.#captureCohortMember(fullReq, result.memberId);
+    return { engine, queue: result.queue };
   }
 
   /** @internal Auto-ack counterpart of _subscribeManualOnce. */
   async _subscribeAutoOnce(req: SubscribeMsg): Promise<SubscribeHandle<InternalDelivered>> {
-    const reply = deferred<BoundedQueue<InternalDelivered>>();
-    const engine = await this._engineFor(req.topic, req.partition ?? 0, req.group);
-    await engine.submit({ type: "subscribeAutoAck", req, supervised: this.#opts.superviseSubscriptions, reply });
-    return { engine, queue: await reply.promise };
+    const reply = deferred<SubscribeResult<InternalDelivered>>();
+    const fullReq = this.#withCohortMember(req);
+    const engine = await this._engineFor(fullReq.topic, fullReq.partition ?? 0, fullReq.group);
+    await engine.submit({ type: "subscribeAutoAck", req: fullReq, supervised: this.#opts.superviseSubscriptions, reply });
+    const result = await reply.promise;
+    this.#captureCohortMember(fullReq, result.memberId);
+    return { engine, queue: result.queue };
+  }
+
+  // Stamp the current cohort member id onto an exclusive subscribe so every
+  // subscribe from this client joins the cohort as the same member.
+  #withCohortMember(req: SubscribeMsg): SubscribeMsg {
+    if (req.consumer_group == null) return req;
+    return { ...req, member_id: req.member_id ?? this.#cohortMemberId };
+  }
+
+  // Latch the server-minted member id from the first exclusive subscribe.
+  #captureCohortMember(req: SubscribeMsg, memberId: Uint8Array | null): void {
+    if (req.consumer_group != null && memberId != null && this.#cohortMemberId == null) {
+      this.#cohortMemberId = memberId;
+    }
   }
 
   /**
