@@ -16,7 +16,7 @@ rust_test_flags="${RUSTFLAGS:-}"
 if [[ " $rust_test_flags " != *" -Awarnings "* ]]; then
   rust_test_flags="${rust_test_flags:+$rust_test_flags }-Awarnings"
 fi
-run env RUSTFLAGS="$rust_test_flags" cargo test --quiet --workspace --locked
+run env RUSTFLAGS="$rust_test_flags" cargo test --quiet --workspace
 
 if [ -d "$repo_root/clients/typescript" ]; then
   (
