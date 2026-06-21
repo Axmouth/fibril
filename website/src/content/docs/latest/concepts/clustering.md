@@ -26,10 +26,37 @@ hood. You do not configure Raft directly beyond its timings: Fibril's surface
 talks in terms of coordination, owners, followers, and a leader, and the
 consensus protocol is an implementation detail of the coordinator.
 
+## Try a cluster with Docker
+
+The fastest way to see a cluster, with no clone and no build. You need Docker
+with the Compose plugin:
+
+```sh
+curl -fsSL fibril.sh/tryout.sh | sh
+```
+
+This fetches a small Compose file and starts a three-broker coordinated cluster,
+then prints an admin dashboard URL for each broker. Open one and visit the
+topology page to watch ownership, followers, and fencing epochs.
+
+If you would rather not pipe a script into your shell, fetch the Compose file and
+run it yourself:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Axmouth/fibril/main/compose.cluster.example.yaml -o fibril-cluster.yaml
+docker compose -f fibril-cluster.yaml up
+```
+
+Stop and remove everything, including the data volumes:
+
+```sh
+docker compose -f fibril-cluster.yaml down -v
+```
+
 ## Try a cluster locally
 
-You can stand up a real multi-broker cluster on one machine, with no external
-services, using the tryout script. You will need the repository checked out and
+You can also stand up the cluster from source instead of the published image, with
+the tryout script. You will need the repository checked out and
 a Rust toolchain, since the first run builds the broker from source. It starts several actual broker processes
 (each with its own ports and data directory), forms one coordination group,
 runs a few checks, and then holds the cluster open so you can explore it:
