@@ -123,6 +123,9 @@ feature ideas live in their own track, summarized at the end.
 
 ## Clients
 
+- Per-client feature matrix lives at `clients/FEATURE_MATRIX.md` (Rust reference
+  vs each client). Keep it updated as bricks land - it is the at-a-glance parity
+  view and the checklist for any new client.
 - TypeScript client parity pass (BIG, multi-brick): `clients/typescript` is
   basically pre-replication-branch (~3100 lines). It has the single-broker basics
   (publish/confirm/delayed, manual+auto ack, reconnect) but is behind on two big
