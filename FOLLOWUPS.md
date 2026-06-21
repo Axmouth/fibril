@@ -127,13 +127,17 @@ feature ideas live in their own track, summarized at the end.
   basically pre-replication-branch (~3100 lines). It has the single-broker basics
   (publish/confirm/delayed, manual+auto ack, reconnect) but is behind on two big
   fronts. Brick-by-brick, foundation first:
-  - BRICK 1 (prerequisite) WIRE FORMAT: the broker moved frame bodies from msgpack
-    to a custom simple binary format (`crates/protocol/src/v1/wire.rs`: magic +
-    field-by-field put_u16/put_u32/put_u64/put_uuid/put_str/put_bytes/put_headers,
-    ~20 client-facing ops) - much faster, fixed scheduler starvation. The TS client
-    still encodes msgpack bodies, so it cannot talk to the current broker at all.
-    Port the custom encode/decode for every client op, byte-exact to wire.rs, with
-    round-trip tests. The 20-byte frame header looks unchanged - only bodies moved.
+  - BRICK 1 (prerequisite) WIRE FORMAT: DONE. The broker moved frame bodies from
+    msgpack to a custom simple binary format (`crates/protocol/src/v1/wire.rs`:
+    magic + field-by-field put_u16/put_u32/put_u64/put_uuid/put_str/put_bytes/
+    put_headers, ~20 client-facing ops) - much faster, fixed scheduler starvation.
+    Ported to TS as `clients/typescript/src/wire.ts` (byte-exact codec with
+    round-trip + byte-layout tests) and a symmetric `frames.ts` adapter that maps
+    protocol.ts structs to the wire bodies. codec.ts now delegates body encode/
+    decode to the adapter while user payloads keep msgpack. The 20-byte frame
+    header is unchanged - only bodies moved. Remaining wire fields the protocol
+    structs do not carry yet (partition_key, consumer routing) default null/0 and
+    get populated by bricks 2-6.
   - BRICK 2 topology + owner routing: FetchTopology op + cache + owner resolution
     per (topic, partition) + follow not-owner redirects.
   - BRICK 3 partitioning: client-side key routing on publish + transparent
@@ -145,6 +149,11 @@ feature ideas live in their own track, summarized at the end.
   - BRICK 6 exclusive consumer groups.
   - BRICK 7 reliability: isRetryable/retryAdvice classification, a ReliablePublisher,
     producer-id dedup headers.
+  - BRICK 8 examples-as-light-tests: detailed TS examples that connect to a REAL
+    broker, each with example code plus a basic self-validation that it worked,
+    and a top-level runner that executes them all. Doubles as user docs and an
+    end-to-end smoke we (and CI) can run. The current demo.ts is not in this
+    shape; build new ones that are. [USER]
   Pairs with AUDITS.md "Client API parity" and the client reliability docs item.
   [USER/AUDIT]
 

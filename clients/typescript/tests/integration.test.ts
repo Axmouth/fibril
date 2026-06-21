@@ -24,12 +24,19 @@ import { Client, ClientOptions, QueueConfig } from "../src/client.js";
 import { BrokenPipeError, DisconnectionError } from "../src/errors.js";
 import { NewMessage } from "../src/message.js";
 
+// The wire format carries identity fields as raw 16-byte UUIDs, so the fake
+// broker uses byte arrays rather than the hyphenated string form.
+const uuid = (fill: number): Uint8Array => new Uint8Array(16).fill(fill);
+const OWNER_ID = uuid(0x10);
+const CLIENT_ID = uuid(0x00);
+const RESUME_TOKEN = uuid(0x20);
+
 function helloOk(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     protocol_version: PROTOCOL_V1,
-    owner_id: "00000000-0000-0000-0000-000000000100",
-    client_id: "00000000-0000-0000-0000-000000000000",
-    resume_token: "00000000-0000-0000-0000-000000000200",
+    owner_id: OWNER_ID,
+    client_id: CLIENT_ID,
+    resume_token: RESUME_TOKEN,
     resume_outcome: "new",
     server_name: "fake",
     compliance: COMPLIANCE_STRING,
@@ -162,9 +169,9 @@ test("client reconnect offers previous resume identity", async () => {
     assert.equal(outcome.resumeOutcome, "resumed");
     assert.equal(hellos[0]!.resume, null);
     assert.deepEqual(hellos[1]!.resume, {
-      owner_id: "00000000-0000-0000-0000-000000000100",
-      client_id: "00000000-0000-0000-0000-000000000000",
-      resume_token: "00000000-0000-0000-0000-000000000200",
+      owner_id: OWNER_ID,
+      client_id: CLIENT_ID,
+      resume_token: RESUME_TOKEN,
     });
 
     await client.shutdown();
@@ -488,6 +495,7 @@ test("client declares queue policy", async () => {
       group: "workers",
       dlq_policy: { kind: "custom", topic: "_dlq.jobs", group: null },
       dlq_max_retries: 3,
+      partition_count: null,
     });
     await client.shutdown();
   } finally {
@@ -528,6 +536,7 @@ test("default and blank groups normalize to ungrouped declarations and subscript
             topic: "jobs",
             group: null,
             partition: 0,
+            prefetch: 1,
           }),
         );
       }
@@ -541,6 +550,10 @@ test("default and blank groups normalize to ungrouped declarations and subscript
       group: null,
       prefetch: 1,
       auto_ack: false,
+      partition: 0,
+      consumer_group: null,
+      consumer_target: null,
+      member_id: null,
     });
     sub.close();
     await client.shutdown();

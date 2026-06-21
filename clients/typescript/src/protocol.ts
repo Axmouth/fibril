@@ -117,6 +117,9 @@ export interface PublishMsg {
   headers: Record<string, string>;
   payload: Uint8Array;
   published: bigint;
+  // Wire fields; default to null / 0 until partitioning lands (brick 3).
+  partition_key?: Uint8Array | null;
+  partitioning_version?: bigint;
 }
 
 /** Delayed publish frame body. */
@@ -139,6 +142,8 @@ export interface DeclareQueueMsg {
   group: string | null;
   dlq_policy: QueueDlqPolicy | null;
   dlq_max_retries: number | null;
+  // Wire field; default null until repartition declares lands.
+  partition_count?: number | null;
 }
 
 export interface DeclareQueueOkMsg {
@@ -151,6 +156,11 @@ export interface SubscribeMsg {
   group: string | null;
   prefetch: number;
   auto_ack: boolean;
+  // Wire fields; default 0 / null until topology routing + groups land.
+  partition?: number;
+  consumer_group?: string | null;
+  consumer_target?: number | null;
+  member_id?: Uint8Array | null;
 }
 
 /** Successful subscribe response body. */
