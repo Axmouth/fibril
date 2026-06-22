@@ -66,7 +66,11 @@ Conditions and limits:
 - Durable messages and queue state live on disk.
 - A queue can exist on disk without being loaded into memory.
 - Loading a cold queue has a first-use cost.
-- Queue deletion and message retention by age are not implemented as user-facing features.
+- Single-node queue deletion is exposed through the admin API/dashboard. A
+  coordinated multi-node delete is still pending.
+- Message TTL (dropping individual messages by age) is implemented. Log
+  retention by age (truncating old durable messages on a schedule) is not yet a
+  user-facing feature.
 
 ## Recovery Quarantine
 
@@ -105,6 +109,7 @@ See also: [client usage](/latest/clients/) and
 | Reserved metadata headers | Implemented | Broker protocol handler rejects `fibril.*` and `stroma.*` user headers |
 | Partition key routing | Implemented | Rust client `NewMessage::partition_key`, protocol publish metadata, server per-partition publish routing |
 | Partitioning-version fence | Implemented | Client stamps routed version, and server redirects stale publishes before appending |
+| Message TTL (drop by age) | Implemented | `Publish.ttl_ms` + per-queue `default_message_ttl_ms` on declare, owner resolves an absolute deadline, expiry worker drops via the DLQ/discard pipeline. Rust `Publisher::expiring` + `QueueConfig::default_message_ttl`, TypeScript `Publisher.expiring` + `QueueConfig.defaultMessageTtl` |
 
 Conditions and limits:
 
@@ -118,6 +123,14 @@ Conditions and limits:
   routing key and is not part of the durable payload.
 - Stale partitioning topology is handled by redirecting the client to refresh
   and retry.
+- Message TTL drops a message that is not consumed before its deadline. A
+  per-message `ttl_ms` wins over the queue's `default_message_ttl_ms`; with
+  neither set a message never expires. The owner resolves the deadline against
+  its own clock at publish, so it survives recovery and replication. An expired
+  message is never dropped while it is in flight, and the drop honors the queue's
+  dead-letter policy (discard when no DLQ is configured, otherwise dead-lettered
+  with reason `expired`). This is per-message age-drop, not queue expiration
+  (auto-deleting an idle queue), which is a separate, not-yet-implemented idea.
 
 ## Subscribe and Delivery
 
@@ -132,7 +145,7 @@ See also: [backpressure](/latest/concepts/backpressure/) and
 | Backpressure | Implemented | Pull-based delivery bounded by prefetch |
 | Unsubscribe redistribution | Implemented | Broker tests cover prefetched unacked messages returning to active subscribers |
 | Competing consumers (default) | Implemented | Many consumers per queue, fair dispatch, unordered |
-| Exclusive consumer groups | Partial | `.exclusive()` Rust client + TCP protocol, per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
+| Exclusive consumer groups | Partial | `.exclusive()`/`consumer_target` (Rust) and `consumerGroup()`/`consumerTarget()` (TypeScript) + TCP protocol, per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
 | Cross-broker cohort coordination | Partial | Member identity + controller (aggregate→plan→publish) + owner apply all wired in cluster bootstrap, coordination-level multi-node rebalance test exists, fuller broker/client scenarios are still growing |
 | Partition fan-in | Implemented | Rust client subscribes to all known partitions and merges deliveries while keeping per-partition settlement routing |
 
@@ -145,7 +158,7 @@ Conditions and limits:
 - Prefetch limits how many messages a subscription can hold at once.
 - If a subscription ends with prefetched but unsettled messages, those messages are returned for redelivery.
 - A message can be delivered more than once under failure, retry, or lease expiry conditions.
-- Exclusive consumer groups are opt-in. Without `.exclusive()`, consumers compete (no ordering). A queue has a single exclusive cohort. The TypeScript client does not yet expose `.exclusive()`.
+- Exclusive consumer groups are opt-in (Rust `.exclusive()`, TypeScript `.consumerGroup()`). Without them, consumers compete (no ordering). A queue has a single exclusive cohort. The TypeScript client does not yet expose the assignment-events stream.
 - Cross-broker cohort balance is advisory/eventually-consistent. The per-partition delivery gate is always the correctness backstop. Single-node is fully covered by tests.
 - Plain subscriptions fan in over known partitions. A topology warm step at
   connect prevents pure consumers from staying on partition `0` when topology is
@@ -212,6 +225,7 @@ See also: [dead lettering](/latest/reliability/dead-lettering/) and
 | Per-queue DLQ policy | Implemented | Rust client, TypeScript client, `fibrilctl`, admin API |
 | Global DLQ target | Implemented | Stroma-owned runtime state, admin UI/API, `fibrilctl` |
 | Max retry routing | Implemented | Broker/storage path and tests |
+| Dead-letter reasons | Implemented | `retries_exhausted`, `terminal_nack`, `pending_recovery`, `expired` (message TTL) |
 | DLQ metadata | Implemented | Reserved `stroma.dlq.*` headers on dead-lettered messages |
 | DLQ replay by selected offsets | Implemented | Broker/storage path, admin API, admin dashboard, `fibrilctl` |
 | Bulk replay filters | Planned | Not yet implemented |
@@ -353,7 +367,9 @@ See also: [admin dashboard](/latest/admin-dashboard/).
 | --- | --- | --- |
 | Overview metrics | Implemented | Dashboard and API |
 | Connections and subscriptions | Implemented | Dashboard and API |
-| Queues page | Implemented | Dashboard and API, per-partition expand, follower-replication view, DLQ-policy column |
+| Queues page | Implemented | Dashboard and API, per-partition expand, follower-replication view, DLQ-policy column, hide-inactive toggle + search filter |
+| Create queue | Implemented | `POST /admin/api/queues` + dashboard form (partition count, optional DLQ policy, optional default message TTL) |
+| Delete queue (single-node) | Implemented | `POST /admin/api/queues/delete` + per-row dashboard button; refuses while messages are inflight (409) and in cluster mode (501) pending coordinated teardown |
 | Settings page | Implemented | Dashboard and API, incl. replication and streaming-replication settings |
 | Message inspection page | Implemented | Dashboard and API |
 | DLQ replay controls | Implemented | Dashboard and API |
@@ -415,9 +431,10 @@ does not currently have.
 | Publish confirmed | Implemented | Implemented |
 | Pipelined confirmation handle | Implemented | Implemented |
 | Delayed publish | Implemented | Implemented |
+| Message TTL (`expiring` publisher + queue `default_message_ttl`) | Implemented | Implemented |
 | Manual ack subscription | Implemented | Implemented |
 | Auto ack subscription | Implemented | Implemented |
-| Exclusive consumer group (`.exclusive()`, `.consumer_target()`) | Implemented | Planned |
+| Exclusive consumer group | Implemented | Implemented |
 | Assignment-change events (`assignment_events()`) | Implemented | Planned |
 | Resume identity handshake | Implemented | Implemented |
 | Explicit reconnect outcome | Implemented | Implemented |
@@ -530,8 +547,12 @@ Conditions and limits:
 | --- | --- | --- |
 | Transactions | Out of scope | Not planned |
 | Production-ready clustered HA | Planned | Experimental coordination, replication, and failover are wired, but hardening and runbooks remain |
-| Queue deletion | Planned or undecided | Not currently exposed as a user feature |
-| Message retention by age | Planned or undecided | Not currently exposed as a user feature |
+| Single-node queue deletion | Implemented | Admin API/dashboard; see Admin Surface |
+| Multi-node queue deletion | Planned | Coordinated teardown across replicas is pending |
+| Message TTL (drop by age) | Implemented | Per-message + per-queue default; see Publish |
+| Queue expiration (auto-delete idle queue) | Planned | Distinct from message TTL; needs global/coordinated idle tracking |
+| Log retention by age (truncate old messages) | Planned or undecided | Not currently exposed as a user feature |
+| Message purge (empty a queue) | Planned | Re-scoped: needs a replicated reset, not in-memory only |
 | Python client | Planned | Future client priority, including a blocking client |
 | C# client | Planned | Future client priority after Python |
 | Go client | Planned | Future client priority after C# |

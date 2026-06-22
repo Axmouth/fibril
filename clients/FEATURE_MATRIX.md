@@ -41,6 +41,8 @@ Superscript numbers refer to the Notes under the tables.
 | Raw bytes publish | done | done |
 | Content types (msgpack/json/text/raw/custom) | done | done |
 | Custom headers | done | done |
+| Message TTL: `expiring` publisher | done | done |
+| Message TTL: queue `default_message_ttl` on declare | done | done |
 
 ## Consume
 

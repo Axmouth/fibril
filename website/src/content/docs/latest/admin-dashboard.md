@@ -39,6 +39,12 @@ The queues page lists known queues with ready, inflight, and settled offset
 information. Use **Inspect messages** from a queue row when you want to inspect
 that specific queue.
 
+You can **create a queue** from the page (partition count, an optional
+dead-letter policy, and an optional default message TTL) and **delete a queue**
+from its row. Delete is single-node: it is refused while a partition still has
+inflight work, and refused in cluster mode pending coordinated teardown. A
+**hide-inactive** toggle and a **search** filter help when the list is long.
+
 For sparse workloads, the page also shows whether each queue is currently loaded
 in memory, only indexed on disk, or recently unloaded after being idle. It shows
 active publisher/subscriber counts, idle time when known, last used time for the

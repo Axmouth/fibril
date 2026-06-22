@@ -66,3 +66,49 @@ TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute 
 await msg.retryAfter(30_000);
 await msg.retryAfter(new Date(Date.now() + 30_000));
 ```
+
+## Message TTL (drop by age)
+
+A message can be dropped if it is not consumed before a deadline. This is the
+work-queue "do not process stale work" behavior, and it is distinct from queue
+expiration (auto-deleting an idle queue), which is not implemented.
+
+Set a TTL per message, or a per-queue default that applies when a message
+carries no TTL of its own. A per-message TTL wins over the queue default; with
+neither set a message never expires. The owner resolves the deadline against its
+own clock at publish, so it survives recovery and replication.
+
+An expired message is **never** dropped while it is in flight. When it does
+drop, it follows the queue's dead-letter policy: discarded when no DLQ is
+configured, otherwise dead-lettered with reason `expired`.
+
+Per-message TTL via an "expiring" publisher (Rust numeric = seconds, or a
+`Duration`; TypeScript = milliseconds):
+
+```rust
+let publisher = client.publisher("rpc.reply")?.expiring(30);
+publisher.publish(reply).await?;
+```
+
+```ts
+const publisher = client.publisher("rpc.reply").expiring(30_000);
+await publisher.publish(reply);
+```
+
+Per-queue default TTL at declare time:
+
+```rust
+client
+    .declare_queue(QueueConfig::new("rpc.reply")?.default_message_ttl(30))
+    .await?;
+```
+
+```ts
+await client.declareQueue(
+  new QueueConfig("rpc.reply").defaultMessageTtl(30_000),
+);
+```
+
+The broker resolves the deadline from `Publish.ttl_ms` (or the queue's
+`default_message_ttl_ms`) and the expiry worker drops expired ready messages on
+its normal tick.

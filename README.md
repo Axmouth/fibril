@@ -158,8 +158,12 @@ The current implementation provides a minimal but working set of broker semantic
 
 * **Publish (pub)** over a custom TCP protocol
 * **Delayed publish** using a distinct delayed-publish protocol frame
+* **Message TTL** (per-message `ttl_ms` or a per-queue `default_message_ttl`); an
+  unconsumed message past its deadline is dropped, or dead-lettered when the
+  queue has a DLQ policy
 * **Subscribe (sub)** to topics and receive messages
 * **Topic plus optional group addressing** (partition selection is internal)
+* **Admin queue management** (create, delete single-node, hide-inactive + search)
 * **Basic Rust and TypeScript clients** for publishing and consuming
 
 ### Delivery model

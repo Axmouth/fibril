@@ -16,6 +16,7 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Leasing | Available | Expired leases can return to ready |
 | Backpressure | Available | Pull-based delivery and bounded prefetch |
 | Delayed publish | Available | Broker path and Rust/TypeScript client methods are wired |
+| Message TTL | Available | Per-message or per-queue default; expired messages drop or dead-letter. Not queue expiration |
 | Dead lettering | Available | Global and per-queue policy are configurable, replay tooling is still early |
 | Sparse queues | Available | Lazy loading and idle cleanup are wired, observability is still growing |
 | Message inspection | Available | Browse active queue messages from admin tooling, with optional settled offsets and payload previews |
@@ -24,7 +25,7 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Replication | Experimental | Follower pull replication, failover promotion, in-sync checks, and replica-durable confirms are wired on this branch |
 | Live repartitioning | Experimental | Grow or shrink a queue's partition count in coordinated mode, from the admin topology page |
 | Recovery quarantine | Available | A damaged queue log is detected on recovery and isolated per the `recovery.on_mismatch` policy, with operator repair |
-| Exclusive consumer groups | Partial | Rust client opt-in for one active consumer per partition, with sticky assignment and cross-broker coordinator wiring |
+| Exclusive consumer groups | Partial | Rust and TypeScript client opt-in for one active consumer per partition, with sticky assignment and cross-broker coordinator wiring |
 | Transactions | Out of scope | Not planned. Transactional publish/consume workflows are intentionally excluded |
 
 ## Early performance observations

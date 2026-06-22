@@ -13,8 +13,17 @@ Tiers are grouped by concern, not strictly ordered.
 This file tracks the replication and clustering roadmap leftovers. Non-replication
 feature ideas live in their own track, summarized at the end.
 
-## Done since the inventory was last curated (2026-06-21)
+## Done since the inventory was last curated (2026-06-22)
 
+The `implemented-surface.md` inventory was recurated on 2026-06-22 and now
+reflects everything below. Keep this list empty-ish: fold new surface into the
+inventory as it lands (see the docs-currency directive in the Docs section).
+
+- (curated into the inventory 2026-06-22) Admin create-queue, delete-queue
+  (single-node), hide-inactive toggle + search on the queues page.
+- (curated 2026-06-22) Message TTL: per-message `ttl_ms` + per-queue
+  `default_message_ttl_ms`, DLQ-routed expired drop (`DeadLetterReason::Expired`),
+  client `expiring` publisher + `default_message_ttl`. Rust + TypeScript.
 - Topology page glowup: adaptive ellipse/staggered-grid layout, click-to-inspect
   broker panel, and a Diagram/List view toggle.
 - Admin SPA-feel: boosted navigation, vanilla, no framework.
@@ -436,15 +445,15 @@ replication + stale-epoch-apply harness), so it lands after the admin-thin items
   ReliablePublisher opt-in, producer ids and the dedup path, and a short
   failover-behavior note. Keep it copy-paste-able. [WL]
 - Manual failover runbook (partially covered by `FAILURE_MODES.md`). [PLAN]
-- Keep the implemented-surface inventory current. It is critical and easily falls
-  out of date. [MEM]
-- PENDING REFRESH (do after the TTL bricks land): the surface inventory + docs
-  have not been recurated since 2026-06-21 (see "Done since the inventory was last
-  curated" at the top). Added since and not yet reflected: admin create-queue,
-  hide-inactive + search, single-node delete-queue, and message TTL
-  (per-message + per-queue-default, DLQ-on-expiry via DeadLetterReason::Expired).
-  Check the last curation date, diff what shipped, and update the inventory +
-  any user-facing docs (clients docs, coordination-surface doc) accordingly. [USER]
+- DIRECTIVE [USER, standing]: keep the docs current with every surface-changing
+  change, in the SAME change - do not let them drift. When a commit adds, changes,
+  or removes user-visible surface (protocol op/field, client API, admin
+  endpoint/page, CLI command, config/runtime setting, behavior/limit), update in
+  the same pass: `website/.../implemented-surface.md` (canonical inventory),
+  `clients/FEATURE_MATRIX.md` (any client-facing change), the relevant
+  `website/.../` user guide (reliability/concepts/admin-dashboard/configuration/
+  clients), `README.md` if it lists the feature, and FOLLOWUPS "Done since the
+  inventory was last curated". Last full recuration: 2026-06-22.
 
 ## Testing and hardening
 
