@@ -169,6 +169,14 @@ impl QueueEngine for FailingPublishEngine {
         Ok(StdHashSet::new())
     }
 
+    async fn drop_ttl_expired(
+        &self,
+        _now: u64,
+        _max: usize,
+    ) -> Result<StdHashSet<(String, u32, Option<String>, u64)>, StromaError> {
+        Ok(StdHashSet::new())
+    }
+
     async fn shutdown(&self) -> Result<(), StromaError> {
         Ok(())
     }

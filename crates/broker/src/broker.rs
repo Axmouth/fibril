@@ -197,6 +197,8 @@ pub struct PublishRequest {
     pub payload: Vec<u8>,
     pub reply: oneshot::Sender<Result<Offset, BrokerError>>,
     pub not_before: Option<UnixMillis>,
+    /// Absolute drop deadline (message TTL) resolved by the caller. `None` = none.
+    pub expire_at: Option<UnixMillis>,
     pub require_confirm: bool,
     pub published: u64,
     pub publish_received: u64,
@@ -231,6 +233,7 @@ impl PublisherHandle {
                 reply: tx,
                 require_confirm: true,
                 not_before: None,
+                expire_at: None,
                 published,
                 publish_received,
                 content_type,
@@ -265,6 +268,7 @@ impl PublisherHandle {
                 reply: tx,
                 require_confirm: false,
                 not_before: None,
+                expire_at: None,
                 publish_received,
                 published,
                 content_type,
@@ -300,6 +304,7 @@ impl PublisherHandle {
                 reply: tx,
                 require_confirm: true,
                 not_before: Some(not_before),
+                expire_at: None,
                 published,
                 publish_received,
                 content_type,
@@ -327,6 +332,7 @@ impl PublisherHandle {
                 reply: tx,
                 require_confirm: false,
                 not_before: Some(not_before),
+                expire_at: None,
                 published,
                 publish_received,
                 content_type,
@@ -1777,6 +1783,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     payload,
                     reply,
                     not_before,
+                    expire_at,
                     require_confirm: _,
                     published,
                     publish_received,
@@ -1797,6 +1804,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                         headers,
                         payload,
                         not_before,
+                        expire_at,
                         completion,
                     });
                 }
@@ -3515,6 +3523,21 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
                     "Expiry worker woke up, requeued {} expired messages",
                     expired.len()
                 );
+
+                // Drop messages past their TTL (age-drop). Routed through the
+                // DLQ/discard pipeline inside Stroma, so this honors each queue's
+                // dlq_policy. Separate from the lease-timeout requeue above.
+                match broker
+                    .engine
+                    .drop_ttl_expired(unix_millis(), broker.config_snapshot().expiry_batch_max)
+                    .await
+                {
+                    Ok(dropped) if !dropped.is_empty() => {
+                        tracing::info!("Expiry worker dropped {} expired-TTL messages", dropped.len());
+                    }
+                    Ok(_) => {}
+                    Err(err) => tracing::error!("Expiry worker TTL-drop error: {err}"),
+                }
 
                 if ran_for_deadline {
                     for qs in broker.queues.iter().map(|entry| entry.value().clone()) {

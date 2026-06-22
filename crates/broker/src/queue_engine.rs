@@ -166,6 +166,15 @@ pub trait QueueEngine {
         max: usize,
     ) -> Result<HashSet<(String, u32, Option<String>, u64)>, StromaError>;
 
+    /// Drop ready messages past their TTL (message age-drop), routing them through
+    /// the DLQ/discard pipeline. Distinct from `requeue_expired`, which re-readies
+    /// lease-timed-out work.
+    async fn drop_ttl_expired(
+        &self,
+        now: UnixMillis,
+        max: usize,
+    ) -> Result<HashSet<(String, u32, Option<String>, u64)>, StromaError>;
+
     async fn shutdown(&self) -> Result<(), StromaError>;
 
     async fn estimate_disk_used(&self) -> Result<u64, StromaError>;
@@ -801,6 +810,14 @@ impl QueueEngine for StromaEngine {
         max: usize,
     ) -> Result<HashSet<(String, u32, Option<String>, u64)>, StromaError> {
         self.inner.requeue_expired(now, max).await
+    }
+
+    async fn drop_ttl_expired(
+        &self,
+        now: UnixMillis,
+        max: usize,
+    ) -> Result<HashSet<(String, u32, Option<String>, u64)>, StromaError> {
+        self.inner.drop_ttl_expired(now, max).await
     }
 
     async fn shutdown(&self) -> Result<(), StromaError> {
