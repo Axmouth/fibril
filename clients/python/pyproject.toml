@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fibril"
+version = "0.1.0"
+description = "Python client for the Fibril message broker"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Fibril" }]
+keywords = ["fibril", "message-queue", "broker", "asyncio"]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: AsyncIO",
+    "License :: OSI Approved :: MIT License",
+    "Typing :: Typed",
+]
+dependencies = ["msgpack>=1.0"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "mypy>=1.10"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fibril"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/fibril"]
