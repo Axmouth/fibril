@@ -3,6 +3,8 @@ title: Quickstart
 description: Run the current Fibril broker from source.
 ---
 
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
 The current distribution is a source checkout. Published binaries and production configuration are not ready yet.
 
 ## Prerequisites
@@ -27,9 +29,16 @@ The development server currently:
 
 Do not expose this development server directly to the public internet.
 
-## Rust client shape
+## Client shape
 
-The Rust client lives in `crates/client`. It supports publishers, delayed publish, and manual-ack subscriptions:
+Fibril has Rust, TypeScript, and Python clients over the same broker surface:
+publishers, delayed publish, and manual-ack subscriptions. The examples are for
+the current pre-alpha source tree, not a stable package contract.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+The Rust client lives in `crates/client`.
 
 ```rust
 let client = ClientOptions::new()
@@ -53,9 +62,10 @@ while let Some(msg) = sub.recv().await {
 }
 ```
 
-## TypeScript client shape
+  </TabItem>
+  <TabItem label="TypeScript">
 
-The TypeScript client lives in `clients/typescript`. It mirrors the current Rust client shape where practical:
+The TypeScript client lives in `clients/typescript`. Delays are in milliseconds.
 
 ```ts
 import { ClientOptions, NewMessage } from "@fibril/client";
@@ -79,6 +89,31 @@ for await (const msg of sub) {
   await msg.complete();
 }
 ```
+
+  </TabItem>
+  <TabItem label="Python">
+
+The Python client lives in `clients/python`. Delays are seconds (a float or a
+`timedelta`). A synchronous `fibril.blocking.BlockingClient` mirrors the same API
+without `async`.
+
+```python
+from fibril import ClientOptions, NewMessage
+
+client = await ClientOptions().with_auth("fibril", "fibril").connect("127.0.0.1:9876")
+
+publisher = client.publisher("email.send")
+await publisher.publish(NewMessage.json({"body": "hello"}))
+await publisher.publish_delayed(NewMessage.json({"body": "hello later"}), 30)
+
+sub = await client.subscribe("email.send").prefetch(32).sub_manual_ack()
+async for msg in sub:
+    await process(msg.deserialize())
+    await msg.complete()
+```
+
+  </TabItem>
+</Tabs>
 
 The API is evolving. Treat examples as a guide to the current source tree rather than a stable package contract.
 

@@ -1,25 +1,26 @@
 ---
 title: Client usage
-description: Use the Rust and TypeScript clients to publish, consume, and settle messages.
+description: Use the Rust, TypeScript, and Python clients to publish, consume, and settle messages.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Fibril currently has Rust and TypeScript clients for the same core broker surface:
+Fibril has Rust, TypeScript, and Python clients for the same core broker surface:
 
 - connect with optional auth
 - publish with or without confirmation
 - delayed publish
 - manual acknowledgements
-- client-side auto-ack convenience
+- auto-ack convenience
 - message helpers for msgpack, JSON, raw bytes, and text payloads
 
 The examples below are source-tree examples for the current pre-alpha API. They are useful for building against this repository, but not yet a stable package contract.
 
-Current parity note: the Rust client has the branch's partition topology,
-owner-redirect, partition-key routing, and exclusive consumer-group surface.
-The TypeScript client covers the core single-owner queue API and needs a
-cohesive parity pass before it should be treated as cluster/cohort ready.
+Parity note: all three clients cover the branch's partition topology,
+owner-redirect, partition-key routing, exclusive consumer-group surface, and
+message TTL. The Rust client is the reference implementation; the TypeScript and
+Python clients mirror its behavior. The Python client also ships a synchronous
+facade (`fibril.blocking.BlockingClient`) over the same async core.
 
 For reconnect behavior and current limits, see [reconnects](/latest/reliability/reconnects/).
 
@@ -49,14 +50,23 @@ const client = await new ClientOptions()
 ```
 
   </TabItem>
+  <TabItem label="Python">
+
+```python
+from fibril import ClientOptions
+
+client = await ClientOptions().with_auth("fibril", "fibril").connect("127.0.0.1:9876")
+```
+
+  </TabItem>
 </Tabs>
 
-By default, both clients make one automatic reconnect attempt before a new
+By default, the clients make one automatic reconnect attempt before a new
 operation if the previous engine is already closed. Disable that with
-`disable_auto_reconnect()` in Rust or `disableAutoReconnect()` in TypeScript.
-After a successful resume, both clients send their known subscription metadata
-to the broker and read the reconciliation result. Subscriptions that the broker
-confirms with `keep` continue on the existing stream. This does not replay
+`disable_auto_reconnect()` in Rust and Python, or `disableAutoReconnect()` in
+TypeScript. After a successful resume, the clients send their known subscription
+metadata to the broker and read the reconciliation result. Subscriptions that the
+broker confirms with `keep` continue on the existing stream. This does not replay
 in-flight publish operations. See [reconnects](/latest/reliability/reconnects/)
 for the current limits.
 
@@ -64,7 +74,8 @@ The default reconciliation policy is conservative. Rust can opt into restoring
 missing server-side subscriptions with
 `reconnect_reconcile_policy(ReconcilePolicy::RestoreClientSubscriptions)`.
 TypeScript can do the same with
-`withReconnectReconcilePolicy("restore_client_subscriptions")`.
+`withReconnectReconcilePolicy("restore_client_subscriptions")`, and Python with
+`ClientOptions(reconnect_reconcile_policy="restore_client_subscriptions")`.
 
 ## Reconnect Policy
 
@@ -74,7 +85,7 @@ and drops server-side subscriptions the client no longer reports.
 
 Use restore mode only when you want the client to ask the broker to recreate
 client-owned subscriptions that are missing after a successful resume.
-Restored subscriptions may receive a new server subscription id, which both
+Restored subscriptions may receive a new server subscription id, which the
 clients remap internally.
 
 <Tabs syncKey="client-language">
@@ -99,6 +110,17 @@ const policy: ReconcilePolicy = "restore_client_subscriptions"
 const client = await new ClientOptions()
   .withReconnectReconcilePolicy(policy)
   .connect("127.0.0.1:9876")
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+from fibril import ClientOptions
+
+client = await ClientOptions(
+    reconnect_reconcile_policy="restore_client_subscriptions"
+).connect("127.0.0.1:9876")
 ```
 
   </TabItem>
@@ -143,6 +165,20 @@ const pipelinedOffset = await confirmation.confirmed();
 ```
 
   </TabItem>
+  <TabItem label="Python">
+
+```python
+publisher = client.publisher("email.send")
+
+await publisher.publish("hello")
+
+offset = await publisher.publish_confirmed("needs an offset")
+
+confirmation = await publisher.publish_with_confirmation("pipeline me")
+pipelined_offset = await confirmation.confirmed()
+```
+
+  </TabItem>
 </Tabs>
 
 ## Delayed Publish
@@ -181,6 +217,19 @@ const offset = await publisher.publishDelayedConfirmed(
 TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute deadline.
 
   </TabItem>
+  <TabItem label="Python">
+
+```python
+await publisher.publish_delayed("send later", 30)
+
+offset = await publisher.publish_delayed_confirmed(
+    "send later and return offset", 30
+)
+```
+
+Python delays are seconds (a float or a `datetime.timedelta`).
+
+  </TabItem>
 </Tabs>
 
 ## Delayed Retry
@@ -208,6 +257,16 @@ await msg.retryAfter(30_000);
 ```
 
 TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute retry deadline.
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+msg = await sub.recv()
+await msg.retry_after(30)
+```
+
+Python delays are seconds (a float or a `datetime.timedelta`).
 
   </TabItem>
 </Tabs>
@@ -260,6 +319,21 @@ await publisher.publish(
 );
 
 await publisher.publish(NewMessage.raw(new Uint8Array([1, 2, 3])));
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+from fibril import NewMessage
+
+await publisher.publish(NewMessage.json({"id": 42, "kind": "welcome"}))
+
+await publisher.publish(
+    NewMessage.content("plain text").header("x-trace-id", "abc123")
+)
+
+await publisher.publish(NewMessage.raw(bytes([1, 2, 3])))
 ```
 
   </TabItem>
@@ -319,9 +393,25 @@ for await (const msg of sub) {
 ```
 
   </TabItem>
+  <TabItem label="Python">
+
+```python
+sub = await client.subscribe("email.send").group("workers").prefetch(32).sub_manual_ack()
+
+async for msg in sub:
+    body = msg.text()
+
+    try:
+        await send_email(body)
+        await msg.complete()
+    except Exception:
+        await msg.retry()
+```
+
+  </TabItem>
 </Tabs>
 
-`retry()` requeues immediately. Use `retry_after(..)` in Rust or `retryAfter(..)` in TypeScript for delayed retry.
+`retry()` requeues immediately. Use `retry_after(..)` in Rust and Python or `retryAfter(..)` in TypeScript for delayed retry.
 
 ## Dead Letter Workflow
 
@@ -379,6 +469,20 @@ await client.declareQueue(
 ```
 
   </TabItem>
+  <TabItem label="Python">
+
+```python
+from fibril import QueueConfig
+
+await client.declare_queue(
+    QueueConfig("email.send")
+    .group("workers")
+    .use_global_dead_letter_queue()
+    .max_retries(3)
+)
+```
+
+  </TabItem>
 </Tabs>
 
 Application clients keep using normal publish/consume code:
@@ -429,6 +533,22 @@ for await (const msg of sub) {
 ```
 
   </TabItem>
+  <TabItem label="Python">
+
+```python
+publisher = client.publisher_grouped("email.send", "workers")
+await publisher.publish_confirmed(NewMessage.json(job))
+
+sub = await client.subscribe("email.send").group("workers").prefetch(32).sub_manual_ack()
+
+async for msg in sub:
+    if await process(msg.deserialize()):
+        await msg.complete()
+    else:
+        await msg.retry()
+```
+
+  </TabItem>
 </Tabs>
 
 Once the configured retry limit is exhausted, the broker routes the failed message to `_dlq.email`. Subscribe to that queue like any other queue when you want inspection or replay tooling.
@@ -465,11 +585,22 @@ const text = msg.content();
 ```
 
   </TabItem>
+  <TabItem label="Python">
+
+```python
+job = msg.deserialize()
+raw = msg.raw()
+text = msg.text()
+```
+
+  </TabItem>
 </Tabs>
 
 ## Auto Ack
 
-Auto-ack subscriptions are a convenience mode. The current client behavior tracks acknowledgement client-side. Use manual ack when processing correctness matters.
+Auto-ack subscriptions are a convenience mode that settles each delivery
+server-side as the broker sends it, so the consumer just reads messages. Use
+manual ack when processing correctness matters.
 
 <Tabs syncKey="client-language">
   <TabItem label="Rust">
@@ -501,6 +632,16 @@ for await (const msg of sub) {
 ```
 
   </TabItem>
+  <TabItem label="Python">
+
+```python
+sub = await client.subscribe("metrics").prefetch(128).sub_auto_ack()
+
+async for msg in sub:
+    observe(msg.deserialize())
+```
+
+  </TabItem>
 </Tabs>
 
 ## Shutdown
@@ -517,6 +658,13 @@ client.shutdown().await;
 
 ```ts
 await client.shutdown();
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+await client.shutdown()
 ```
 
   </TabItem>

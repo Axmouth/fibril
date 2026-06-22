@@ -29,8 +29,8 @@ See also: [core model](/latest/concepts/core-model/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Topic plus optional group | Implemented | Broker, protocol, Rust client, TypeScript client, admin API, CLI |
-| Default group normalization | Implemented | Empty group and `default` normalize to ungrouped on admin and CLI paths, and in Rust and TypeScript clients |
+| Topic plus optional group | Implemented | Broker, protocol, Rust client, TypeScript client, Python client, admin API, CLI |
+| Default group normalization | Implemented | Empty group and `default` normalize to ungrouped on admin and CLI paths, and in Rust, TypeScript, and Python clients |
 | Partitioned queue declaration | Implemented | `DeclareQueue.partition_count`, Rust client declare builder, config default, coordination catalogue |
 | Producer partition routing | Implemented | Rust client topology cache, round-robin keyless routing, `partition_key` stable routing, version-fenced publish frames |
 | Subscription fan-in | Implemented | Rust client opens per-partition subscriptions from topology and merges deliveries into one logical stream |
@@ -101,15 +101,15 @@ See also: [client usage](/latest/clients/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Unconfirmed publish | Implemented | TCP protocol, Rust client, TypeScript client |
-| Confirmed publish | Implemented | TCP protocol, Rust client, TypeScript client |
-| Pipelined confirmation handles | Implemented | Rust `publish_with_confirmation`, TypeScript `publishWithConfirmation` |
-| Delayed publish | Implemented | TCP protocol, broker, Rust client, TypeScript client |
-| Content type metadata | Implemented | Protocol metadata, Rust client, TypeScript client, delivery path |
+| Unconfirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
+| Confirmed publish | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
+| Pipelined confirmation handles | Implemented | Rust `publish_with_confirmation`, TypeScript `publishWithConfirmation`, Python `publish_with_confirmation` |
+| Delayed publish | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client |
+| Content type metadata | Implemented | Protocol metadata, Rust client, TypeScript client, Python client, delivery path |
 | Reserved metadata headers | Implemented | Broker protocol handler rejects `fibril.*` and `stroma.*` user headers |
 | Partition key routing | Implemented | Rust client `NewMessage::partition_key`, protocol publish metadata, server per-partition publish routing |
 | Partitioning-version fence | Implemented | Client stamps routed version, and server redirects stale publishes before appending |
-| Message TTL (drop by age) | Implemented | `Publish.ttl_ms` + per-queue `default_message_ttl_ms` on declare, owner resolves an absolute deadline, expiry worker drops via the DLQ/discard pipeline. Rust `Publisher::expiring` + `QueueConfig::default_message_ttl`, TypeScript `Publisher.expiring` + `QueueConfig.defaultMessageTtl` |
+| Message TTL (drop by age) | Implemented | `Publish.ttl_ms` + per-queue `default_message_ttl_ms` on declare, owner resolves an absolute deadline, expiry worker drops via the DLQ/discard pipeline. Rust `Publisher::expiring` + `QueueConfig::default_message_ttl`, TypeScript `Publisher.expiring` + `QueueConfig.defaultMessageTtl`, Python `Publisher.expiring` + `QueueConfig.default_message_ttl` (seconds-native) |
 
 Conditions and limits:
 
@@ -139,13 +139,13 @@ See also: [backpressure](/latest/concepts/backpressure/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Manual ack subscriptions | Implemented | TCP protocol, Rust client, TypeScript client |
-| Auto ack subscriptions | Implemented | TCP protocol, Rust client, TypeScript client |
+| Manual ack subscriptions | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
+| Auto ack subscriptions | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
 | Bounded prefetch | Implemented | Broker delivery path and clients |
 | Backpressure | Implemented | Pull-based delivery bounded by prefetch |
 | Unsubscribe redistribution | Implemented | Broker tests cover prefetched unacked messages returning to active subscribers |
 | Competing consumers (default) | Implemented | Many consumers per queue, fair dispatch, unordered |
-| Exclusive consumer groups | Partial | `.exclusive()`/`consumer_target` (Rust) and `consumerGroup()`/`consumerTarget()` (TypeScript) + TCP protocol, per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
+| Exclusive consumer groups | Partial | `.exclusive()`/`consumer_target` (Rust), `consumerGroup()`/`consumerTarget()` (TypeScript), and `consumer_group()`/`consumer_target()` (Python) + TCP protocol, per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
 | Cross-broker cohort coordination | Partial | Member identity + controller (aggregate→plan→publish) + owner apply all wired in cluster bootstrap, coordination-level multi-node rebalance test exists, fuller broker/client scenarios are still growing |
 | Partition fan-in | Implemented | Both clients subscribe to all known partitions, merge deliveries while keeping per-partition settlement routing, and pick up partitions added by a live grow |
 
@@ -158,7 +158,7 @@ Conditions and limits:
 - Prefetch limits how many messages a subscription can hold at once.
 - If a subscription ends with prefetched but unsettled messages, those messages are returned for redelivery.
 - A message can be delivered more than once under failure, retry, or lease expiry conditions.
-- Exclusive consumer groups are opt-in (Rust `.exclusive()`, TypeScript `.consumerGroup()`). Without them, consumers compete (no ordering). A queue has a single exclusive cohort. Both clients expose the assignment-events stream (Rust `assignment_events()`, TypeScript `onAssignmentChange`).
+- Exclusive consumer groups are opt-in (Rust `.exclusive()`, TypeScript `.consumerGroup()`, Python `.consumer_group()`). Without them, consumers compete (no ordering). A queue has a single exclusive cohort. The clients expose the assignment-events stream (Rust `assignment_events()`, TypeScript `onAssignmentChange`, Python `on_assignment_change`).
 - Cross-broker cohort balance is advisory/eventually-consistent. The per-partition delivery gate is always the correctness backstop. Single-node is fully covered by tests.
 - Plain subscriptions fan in over known partitions and pick up partitions added by a live grow. A topology warm step at
   connect prevents pure consumers from staying on partition `0` when topology is
@@ -171,10 +171,10 @@ See also: [reconnects](/latest/reliability/reconnects/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Resume identity handshake | Implemented | TCP protocol, Rust client, TypeScript client |
+| Resume identity handshake | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
 | Reconnect grace window | Implemented | Runtime settings and TCP handler |
-| Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client |
-| Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client |
+| Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client, Python client |
+| Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client |
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
 | Durable broker restart reconciliation | Planned | Design notes only |
 | In-flight publish replay | Out of scope | Clients do not replay old in-flight protocol requests |
@@ -188,7 +188,7 @@ Conditions and limits:
   still valid.
 - Restore mode can recreate missing server-side subscriptions reported by the
   client after a successful resume.
-- Current Rust and TypeScript subscription receive APIs surface
+- Current Rust, TypeScript, and Python subscription receive APIs surface
   reconciliation-closed streams as end-of-stream rather than a typed close
   reason.
 
@@ -200,10 +200,10 @@ See also: [core model](/latest/concepts/core-model/),
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Ack | Implemented | TCP protocol, Rust client, TypeScript client |
-| Nack without requeue | Implemented | TCP protocol, Rust client, TypeScript client |
-| Immediate retry | Implemented | TCP protocol, Rust client, TypeScript client |
-| Delayed retry | Implemented | TCP protocol, broker, Rust client, TypeScript client |
+| Ack | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
+| Nack without requeue | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
+| Immediate retry | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
+| Delayed retry | Implemented | TCP protocol, broker, Rust client, TypeScript client, Python client |
 | Lease expiry | Implemented | Runtime delivery settings and broker/storage path |
 
 Conditions and limits:
@@ -222,7 +222,7 @@ See also: [dead lettering](/latest/reliability/dead-lettering/) and
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
-| Per-queue DLQ policy | Implemented | Rust client, TypeScript client, `fibrilctl`, admin API |
+| Per-queue DLQ policy | Implemented | Rust client, TypeScript client, Python client, `fibrilctl`, admin API |
 | Global DLQ target | Implemented | Stroma-owned runtime state, admin UI/API, `fibrilctl` |
 | Max retry routing | Implemented | Broker/storage path and tests |
 | Dead-letter reasons | Implemented | `retries_exhausted`, `terminal_nack`, `pending_recovery`, `expired` (message TTL) |
