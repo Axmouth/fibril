@@ -10,7 +10,7 @@ const features = [
   {
     feature: "Publish and subscribe",
     status: { kind: "ready", label: "available" },
-    notes: "Custom TCP protocol with Rust and TypeScript clients.",
+    notes: "Custom TCP protocol with Rust, TypeScript, and Python clients.",
   },
   {
     feature: "Explicit settlement",
@@ -20,12 +20,12 @@ const features = [
   {
     feature: "Delayed publish",
     status: { kind: "ready", label: "available" },
-    notes: "Broker path and Rust/TypeScript client methods are wired.",
+    notes: "Broker path and Rust, TypeScript, and Python client methods are wired.",
   },
   {
     feature: "Dead lettering",
     status: { kind: "ready", label: "available" },
-    notes: "Global and per-queue policy are configurable; replay tooling is still early.",
+    notes: "Global and per-queue policy are configurable. Replay tooling is still early.",
   },
   {
     feature: "Backpressure",
@@ -35,7 +35,7 @@ const features = [
   {
     feature: "Sparse queues",
     status: { kind: "ready", label: "available" },
-    notes: "Lazy loading and idle eviction are wired; observability is still growing.",
+    notes: "Lazy loading and idle eviction are wired. Observability is still growing.",
   },
   {
     feature: "Message inspection",
@@ -44,18 +44,18 @@ const features = [
   },
   {
     feature: "Partition ownership",
-    status: { kind: "planned", label: "planned" },
-    notes: "Future nodes can split active queue traffic by owning different partitions.",
+    status: { kind: "partial", label: "experimental" },
+    notes: "Cluster nodes split a queue's active traffic by owning different partitions. Experimental.",
   },
   {
     feature: "Replication",
-    status: { kind: "planned", label: "planned" },
-    notes: "Future followers can keep partition copies for failover and recovery.",
+    status: { kind: "partial", label: "experimental" },
+    notes: "Followers keep partition copies for failover and recovery. Experimental.",
   },
   {
     feature: "Transactions",
     status: { kind: "no", label: "out of scope" },
-    notes: "Not planned; transactional workflows are intentionally excluded.",
+    notes: "Not planned. Transactional workflows are intentionally excluded.",
   },
 ] as const;
 ---

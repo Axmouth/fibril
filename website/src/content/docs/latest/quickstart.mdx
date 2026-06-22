@@ -9,10 +9,25 @@ The current distribution is a source checkout. Published binaries and production
 
 ## Prerequisites
 
-- A current Rust toolchain
-- Git
+Docker (recommended), or a current Rust toolchain and Git to build from source.
 
 ## Run the broker
+
+The quickest path is the published `main` image from GitHub Container Registry:
+
+```sh
+docker pull ghcr.io/axmouth/fibril-server:main
+docker run --rm \
+  -p 9876:9876 \
+  -p 8081:8081 \
+  -v fibril-server-data:/app/server_data \
+  ghcr.io/axmouth/fibril-server:main
+```
+
+The `main` tag is a moving pre-release image. CI also publishes immutable
+`sha-<commit>` tags for exact builds.
+
+As a backup, run from a source checkout instead:
 
 ```sh
 git clone https://github.com/Axmouth/fibril.git
@@ -20,11 +35,11 @@ cd fibril
 cargo run --release --bin fibril-server
 ```
 
-The development server currently:
+Either way, the development server currently:
 
-- listens for broker TCP traffic on `0.0.0.0:9876`
-- serves the early admin interface on `0.0.0.0:8081`
-- stores durable state under `server_data/`
+- listens for broker TCP traffic on `9876`
+- serves the early admin interface on `8081`
+- stores durable state under `server_data/` (the `fibril-server-data` volume with Docker)
 - uses development authentication defaults in the server binary
 
 Do not expose this development server directly to the public internet.

@@ -18,9 +18,16 @@ The examples below are source-tree examples for the current pre-alpha API. They 
 
 Parity note: all three clients cover the branch's partition topology,
 owner-redirect, partition-key routing, exclusive consumer-group surface, and
-message TTL. The Rust client is the reference implementation; the TypeScript and
+message TTL. The Rust client is the reference implementation. The TypeScript and
 Python clients mirror its behavior. The Python client also ships a synchronous
 facade (`fibril.blocking.BlockingClient`) over the same async core.
+
+## Requirements
+
+- **Rust**: the workspace toolchain (current stable Rust).
+- **TypeScript**: Node.js 18 or newer, ESM.
+- **Python**: Python 3.11 or newer. The only runtime dependency is the PyPI
+  `msgpack` package, installed automatically with the client.
 
 For reconnect behavior and current limits, see [reconnects](/latest/reliability/reconnects/).
 
@@ -669,3 +676,23 @@ await client.shutdown()
 
   </TabItem>
 </Tabs>
+
+## Blocking Python client
+
+For code not built on asyncio, the Python package ships a synchronous facade. It
+runs the async client on a background event-loop thread and bridges each call, so
+it is the same client behind one source of truth rather than a second
+implementation. Subscriptions become ordinary iterators.
+
+```python
+from fibril.blocking import BlockingClient
+
+with BlockingClient.connect("127.0.0.1:9876") as client:
+    client.publisher("email.send").publish_confirmed({"body": "hello"})
+
+    sub = client.subscribe("email.send").group("workers").sub_manual_ack()
+    for msg in sub:
+        process(msg.deserialize())
+        msg.complete()
+    sub.close()
+```
