@@ -312,6 +312,14 @@ replication + stale-epoch-apply harness), so it lands after the admin-thin items
 - `clients/ARCHITECTURE.md` is the language-agnostic design reference (layering,
   invariants, continuity/routing/reliability models, porting lessons). Read it
   before starting a new client (the Python client is next).
+- TS<->Rust feature parity: CLOSED (2026-06-23). All FEATURE_MATRIX rows are
+  done for both: assignment-events stream (`onAssignmentChange`), live-grow
+  partition pickup, typed `WireError` taxonomy, message TTL, producer-id dedup.
+- Per-client throughput expectation: define a target each client should sustain
+  (msgs/s ingress+egress at a stated payload size, confirmed vs unconfirmed),
+  measure it with a small client-side bench, and record it next to the matrix so
+  a new client has a perf bar to hit, not just a feature checklist. The server
+  bench (`benches/`) measures the broker; this is the client-overhead view.
 - TypeScript client parity pass (BIG, multi-brick): `clients/typescript` is
   basically pre-replication-branch (~3100 lines). It has the single-broker basics
   (publish/confirm/delayed, manual+auto ack, reconnect) but is behind on two big
