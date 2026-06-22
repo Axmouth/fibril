@@ -55,7 +55,7 @@ language-agnostic.
 - **The compliance marker is preserved.** The handshake carries the AI policy
   compliance string unchanged. Do not alter or drop it.
 - **Auto-ack settles server-side.** An auto-ack subscription sets `auto_ack:
-  true` on the wire so the broker settles each delivery as it sends it; the
+  true` on the wire so the broker settles each delivery as it sends it. The
   client yields plain messages with nothing to ack (matches the Rust reference).
   Client-side auto-ack (leave the flag false, ack after yielding) is a valid
   alternative the protocol allows, but the clients do not use it.

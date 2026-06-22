@@ -2,7 +2,7 @@
 
 Byte-exact with the Rust ``crates/protocol/src/v1/wire.rs`` and the TypeScript
 ``clients/typescript/src/wire.ts``. The broker encodes frame bodies in this
-format (the 20-byte frame header lives in ``codec.py``); this module is the only
+format (the 20-byte frame header lives in ``codec.py``). This module is the only
 one that touches bytes and the only one that must match the broker exactly.
 
 Layout rules (all big-endian):
@@ -10,7 +10,7 @@ Layout rules (all big-endian):
   - len-prefixed bytes: u32 length, then the raw bytes
   - strings: len-prefixed UTF-8
   - bool: u8 (0 or 1)
-  - uuid: 16 raw bytes (opaque here; the client only echoes them)
+  - uuid: 16 raw bytes (opaque here, the client only echoes them)
   - option[T]: u8 tag (0 = none, 1 = some), then T when some
   - each body starts with a 4-byte ASCII magic
 """
@@ -58,7 +58,7 @@ class CustomContentType:
     value: str
 
 
-#: Frame content type. ``None`` = unspecified; ``CustomContentType`` = arbitrary.
+#: Frame content type. ``None`` = unspecified, ``CustomContentType`` = arbitrary.
 ContentType = Union[None, Literal["msgpack", "json", "text"], CustomContentType]
 
 

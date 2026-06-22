@@ -31,7 +31,7 @@ class WireError(FibrilError):
     """A frame body could not be decoded.
 
     ``kind`` is a stable discriminant (truncation, bad magic, trailing bytes, an
-    unknown tag); the message is human-readable.
+    unknown tag). The message is human-readable.
     """
 
     def __init__(self, kind: WireErrorKind, message: str) -> None:
@@ -58,7 +58,7 @@ class BrokenPipeError(FibrilError):
     is advised.
     """
 
-    def __init__(self, message: str = "Broken pipe; engine has shut down") -> None:
+    def __init__(self, message: str = "Broken pipe, engine has shut down") -> None:
         super().__init__(message)
 
 

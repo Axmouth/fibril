@@ -124,28 +124,28 @@ Superscript numbers refer to the Notes under the tables.
    the consumer, so effectively-once has a client-only path (consumer-side dedup
    on (producer_id, seq)). Broker-side dedup is the only server-gated part.
 4. The broker pushes `AssignmentChanged` to exclusive-cohort members. The Rust
-   client exposes them via `assignment_events()`; the TS client via
-   `client.onAssignmentChange(handler)`; the Python client via
+   client exposes them via `assignment_events()`, the TS client via
+   `client.onAssignmentChange(handler)`, and the Python client via
    `client.on_assignment_change(handler)`. Exclusivity is enforced by the
    per-partition gate regardless, so this is observability/narrowing, not
    correctness.
 5. CI runs the examples against the published single-node broker image for Rust
    and TS. A multi-node ganglion cluster smoke for a real cross-owner redirect is
    still pending. The Python client's wire correctness is pinned by the shared
-   cross-client vectors (note 6); wiring its examples into CI against a live broker
+   cross-client vectors (note 6). Wiring its examples into CI against a live broker
    is still pending.
 6. The Python wire codec is cross-checked byte-for-byte against the shared
    `clients/wire_vectors.json`, the same fixture the Rust protocol crate pins its
    encoders to (`crates/protocol/tests/wire_vectors.rs`), so all three
    implementations agree on the bytes.
 7. Message TTL and the queue default TTL are seconds-native in Python (`expiring`
-   takes a float of seconds or a `timedelta`); the wire field stays milliseconds.
+   takes a float of seconds or a `timedelta`). The wire field stays milliseconds.
 8. Auto-ack settles server-side (`auto_ack: true` on the wire), matching the Rust
-   client; the subscription yields plain messages with nothing to ack.
+   client. The subscription yields plain messages with nothing to ack.
 9. The Python blocking client (`fibril.blocking.BlockingClient`) is a thin facade
    over the async core on a background event-loop thread, not a second
    implementation.
-10. The Python client has unit and fake-broker integration tests; a runnable
+10. The Python client has unit and fake-broker integration tests. A runnable
     examples-as-tests job like the TS client's is not wired up yet.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan

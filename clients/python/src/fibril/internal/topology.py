@@ -1,7 +1,7 @@
 """Client-side routing: a cache of queue ownership plus partition selection.
 
 Mirrors the Rust client (``crates/client`` TopologyCache + route_partition). The
-cache is connection-free so routing decisions are testable in isolation; the
+cache is connection-free so routing decisions are testable in isolation. The
 connection pool that acts on them lives in ``client.py``. Routing is cache-only
 and reactive: a cold or standalone cache routes to partition 0, and a misroute is
 corrected by a broker redirect rather than a pre-flight lookup.
@@ -118,7 +118,7 @@ def route_partition(
     """Select the partition for a publish to (topic, group).
 
     A key routes by ``hash(key) % N``, otherwise round-robin over N. N is the
-    authoritative count from the cache; an unknown N (cold cache or standalone)
+    authoritative count from the cache. An unknown N (cold cache or standalone)
     routes to partition 0 under version 0, matching a single-partition queue.
     """
     partitioning = cache.partitioning(topic, group)

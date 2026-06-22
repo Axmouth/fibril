@@ -5,7 +5,7 @@ supervisor feeding a single merged queue the public subscription reads, so
 per-partition ordering holds and partitions interleave. A supervised subscription
 owns its continuity by re-subscribing to the current owner on a drop or a
 graceful owner move, and picks up partitions added by a live grow. This mirrors
-the Rust client; the supervisor stays out of the engine reconcile registry.
+the Rust client. The supervisor stays out of the engine reconcile registry.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ class Message:
 
 
 class InflightMessage:
-    """A delivered message in manual-ack mode; settle exactly once.
+    """A delivered message in manual-ack mode. Settle exactly once.
 
     Must be settled with ``complete()``, ``fail()``, ``retry()``, or
     ``retry_after()``. Dropping it without settling does not acknowledge it.
@@ -349,7 +349,7 @@ class _FanIn:
                 self._active += 1
                 self._partitions.append(self._supervise(partition, handle))
             except Exception:
-                pass  # owner not ready yet; retry on the next poll
+                pass  # owner not ready yet, retry on the next poll
 
     def _on_partition_stopped(self) -> None:
         self._active -= 1
@@ -361,7 +361,7 @@ class _FanIn:
 
 
 class Subscription:
-    """Manual-ack subscription. Async-iterate; settle each ``InflightMessage``."""
+    """Manual-ack subscription. Async-iterate, settling each ``InflightMessage``."""
 
     def __init__(self, fan_in: _FanIn) -> None:
         self._fan_in = fan_in

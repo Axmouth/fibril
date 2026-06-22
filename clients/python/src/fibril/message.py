@@ -1,8 +1,8 @@
 """Message construction and payload (de)serialization.
 
-Plain values published through a Publisher are msgpack-encoded by default; use
+Plain values published through a Publisher are msgpack-encoded by default. Use
 ``NewMessage`` for JSON, text, raw bytes, custom headers, or a partition key.
-Wire bodies are hand-rolled (see ``wire.py``); msgpack here is only the payload
+Wire bodies are hand-rolled (see ``wire.py``). msgpack here is only the payload
 content type.
 """
 
@@ -20,7 +20,7 @@ _JSON = "application/json"
 _TEXT = "text/plain; charset=utf-8"
 
 # Header key prefixes reserved for system metadata. A publish that sets a
-# reserved key is rejected by the broker, so the client guards user code; the
+# reserved key is rejected by the broker, so the client guards user code. The
 # library-owned carve-out below is the one exception.
 RESERVED_HEADER_PREFIXES = ("fibril.", "stroma.")
 CLIENT_HEADER_PREFIX = "fibril.client."

@@ -1,7 +1,7 @@
 """Fibril Python client.
 
 Async-first client for the Fibril message broker with a thin blocking facade.
-The async surface is re-exported here; the blocking facade lives in
+The async surface is re-exported here. The blocking facade lives in
 ``fibril.blocking``.
 """
 

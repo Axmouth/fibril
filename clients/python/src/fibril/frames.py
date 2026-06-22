@@ -1,6 +1,6 @@
 """Opcode dispatch between frame bodies and the wire codec.
 
-``codec.py`` carries frame headers; this maps each opcode to the matching
+``codec.py`` carries frame headers. This maps each opcode to the matching
 ``wire.py`` encode/decode function, in both directions, so the in-process fake
 broker used by the tests speaks the same bytes as the real broker. The wire
 dataclasses double as the engine's message structs, so there is no field
@@ -14,7 +14,7 @@ from typing import Callable
 from . import wire
 from .protocol import Op
 
-# Encoders take a concrete wire dataclass; the dispatch table erases that to a
+# Encoders take a concrete wire dataclass. The dispatch table erases that to a
 # common signature, so callers are responsible for passing the right body type.
 _Encoder = Callable[..., bytes]
 _Decoder = Callable[[bytes], object]

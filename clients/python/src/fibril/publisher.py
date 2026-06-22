@@ -4,7 +4,7 @@ Confirmed publishes follow owner redirects (bounded) and retry across a transien
 owner failover (refresh topology, jittered backoff, deadline), mirroring the Rust
 client. Delays and TTLs are seconds-native (a float of seconds or a
 ``datetime.timedelta``), matching Python convention and the Rust client's
-seconds-or-Duration; the TS client uses milliseconds.
+seconds-or-Duration. The TS client uses milliseconds.
 """
 
 from __future__ import annotations
@@ -69,7 +69,7 @@ class _SendSpec:
 
 
 class PublishConfirmation:
-    """A handle for a pipelined confirmed publish; await ``confirmed()`` for the offset."""
+    """A handle for a pipelined confirmed publish. Await ``confirmed()`` for the offset."""
 
     def __init__(self, future: "object") -> None:
         self._future = future
@@ -136,7 +136,7 @@ class Publisher:
     def expiring(self, ttl: Delay) -> "Publisher":
         """A publisher that stamps a default TTL (seconds or timedelta) on each
         immediate publish, so the broker drops the message if not consumed in
-        time. Applies to immediate publishes; delayed publishes carry no TTL."""
+        time. Applies to immediate publishes. Delayed publishes carry no TTL."""
         return Publisher(self._client, self._topic, self._group, _to_ms(ttl))
 
     def reliable(self) -> "ReliablePublisher":
@@ -232,7 +232,7 @@ class ReliablePublisher:
     """Retries a confirmed publish until durably confirmed, stamping a stable
     producer id and a monotonic per-producer sequence under ``fibril.client.*``.
 
-    At-least-once today (a retry after a lost confirmation may duplicate); becomes
+    At-least-once today (a retry after a lost confirmation may duplicate). Becomes
     effectively-once with no API change once the broker dedups on those keys.
     """
 

@@ -85,7 +85,7 @@ class BoundedQueue(Generic[T]):
             fut.set_result(None)
 
     def close(self, error: Optional[BaseException] = None) -> None:
-        """Close the queue. Idempotent. Pending sends raise; a waiting receiver ends."""
+        """Close the queue. Idempotent. Pending sends raise, and a waiting receiver ends."""
         if self._closed:
             return
         self._closed = True

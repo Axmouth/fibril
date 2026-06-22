@@ -72,7 +72,7 @@ async def test_read_frame_streams_then_clean_eof() -> None:
 async def test_read_frame_handles_split_chunks() -> None:
     reader = asyncio.StreamReader()
     raw = _publish_frame(5)
-    # Deliver the frame in two arbitrary chunks; readexactly stitches them.
+    # Deliver the frame in two arbitrary chunks, and readexactly stitches them.
     reader.feed_data(raw[:9])
     reader.feed_data(raw[9:])
     reader.feed_eof()

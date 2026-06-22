@@ -11,7 +11,7 @@ grid, and `clients/PYTHON_CLIENT_PLAN.md` for the Python-specific decisions.
 ## Status
 
 Feature-complete against the `FEATURE_MATRIX` (async core plus the blocking
-facade). Pre-alpha and not yet published; the API tracks the source tree.
+facade). Pre-alpha and not yet published. The API tracks the source tree.
 
 ## Development
 

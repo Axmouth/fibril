@@ -317,7 +317,7 @@ class Client:
             raise last or BrokenPipeError()
 
     async def shutdown(self) -> None:
-        """Gracefully shut down. Pending ops fail; subscription iterators end."""
+        """Gracefully shut down. Pending ops fail and subscription iterators end."""
         self._user_shutdown = True
         for conn in self._pool.values():
             conn.shutdown()

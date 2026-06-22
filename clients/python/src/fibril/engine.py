@@ -3,13 +3,13 @@
 Models the per-connection actor from the Rust client (``crates/client``), which
 owns the handshake, optional auth, reconnect reconcile, heartbeats, the
 request-id-to-waiter map, and per-subscription delivery queues. The Rust client
-funnels everything through a command channel because it spans threads; on a
+funnels everything through a command channel because it spans threads. On a
 single asyncio loop that serialization is unnecessary, so the engine exposes
 async request methods directly (allocate id, register the waiter, write, await
 the reply) with a single read-loop task fanning responses back. There are no
 locks: all state lives on one event loop.
 
-Routing and topology are not the engine's concern; the client layer drives it.
+Routing and topology are not the engine's concern. The client layer drives it.
 """
 
 from __future__ import annotations
@@ -496,7 +496,7 @@ class Engine:
             return
         prefetch = max(1, ok.prefetch)
         queue: BoundedQueue[object] = BoundedQueue(prefetch)
-        # auto-ack is decided by the request; the broker settles server-side, so
+        # auto-ack is decided by the request. The broker settles server-side, so
         # the engine carries it only to tag the sub state.
         auto_ack = w.auto_ack
         self._subs[ok.sub_id] = _SubState(
@@ -529,7 +529,7 @@ class Engine:
         if sub is None:
             return
         # Auto-ack can be done two ways: server-side, by setting auto_ack on the
-        # wire so the broker settles each delivery as it sends it; or client-side,
+        # wire so the broker settles each delivery as it sends it, or client-side,
         # by leaving it false and acking after the consumer yields. This client
         # uses the server-side path (matches the Rust client), so an auto-ack sub
         # yields settled Delivered items with nothing to ack, while a manual sub
