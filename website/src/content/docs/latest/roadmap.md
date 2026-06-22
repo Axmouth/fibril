@@ -13,6 +13,18 @@ check what is already wired and under what conditions.
 
 ## Recently landed
 
+- A Python client landed at full feature parity with the Rust and TypeScript
+  clients, with both an async API and a thin blocking facade over the same core.
+  See [client usage](/latest/clients/).
+- The TypeScript client reached parity with the Rust reference, including
+  exclusive consumer groups, the assignment-events stream, live-grow partition
+  pickup, typed wire errors, and producer-id dedup headers.
+- Message TTL: messages can expire by age, set per message with an `expiring`
+  publisher or per queue with a default TTL on declare. Expired messages drop
+  through the dead-letter or discard path rather than being silently consumed.
+  Wired in the broker and all three clients.
+- Single-node queue creation and deletion are available from the admin API and
+  dashboard, and the queues page can hide inactive queues and filter by name.
 - Partitioned queues: declare can create multiple partitions, producers can use
   `partition_key` for stable key routing or rely on round-robin spread, and
   subscriptions transparently fan in across known partitions.
@@ -77,7 +89,8 @@ check what is already wired and under what conditions.
   cluster-wide runtime locks need a replicated policy rather than node-local
   boot config.
 - Improve TCP protocol ergonomics and error behavior.
-- Keep Rust and TypeScript client APIs aligned as public-path behavior changes.
+- Keep the Rust, TypeScript, and Python client APIs aligned as public-path
+  behavior changes.
 
 ## Medium term
 
@@ -107,8 +120,8 @@ check what is already wired and under what conditions.
   persisted session and inflight ownership after a broker process restart,
   using a startup grace window before normal redelivery resumes. Current
   reconnect grace is live-process only.
-- More complete client ecosystem. Priority order: Python, including a blocking
-  client, then C#, Go, and Java.
+- More complete client ecosystem. The Python client (async plus a blocking
+  facade) has landed. The next targets are C#, Go, and Java.
 
 ## Out of scope
 
