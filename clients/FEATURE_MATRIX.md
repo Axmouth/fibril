@@ -54,7 +54,7 @@ Superscript numbers refer to the Notes under the tables.
 | Prefetch / backpressure | done | done |
 | Declare queue + DLQ policies | done | done |
 | Multi-partition subscribe fan-in | done | done |
-| Live-repartition partition pickup (consumer) | done | no <sup>2</sup> |
+| Live-repartition partition pickup (consumer grow) | done | done <sup>2</sup> |
 
 ## Reconnect and resume
 
@@ -106,9 +106,9 @@ Superscript numbers refer to the Notes under the tables.
 2. The broker supports live repartition (grow/shrink) in cluster mode
    (`fibrilctl repartition`, `/admin/api/repartition`, broker transition
    machinery). A consumer must re-fan-in to pick up partitions added by a grow.
-   The Rust client does this via a resubscribe loop. The TS client does not yet
-   (its partition set is fixed at subscribe time). Actionable client work, not
-   server-gated.
+   Both clients now do this via a supervised poll that refreshes topology and
+   subscribes new partitions. Shrink (retiring a partition) is handled by the
+   per-partition supervisor, not an explicit drop, in both clients.
 3. The ReliablePublisher already works as a reliability helper: it retries until
    durably confirmed (at-least-once), which is most of the value, and stamps
    `fibril.client.producer_id`/`_seq` on every message. Those headers reach the

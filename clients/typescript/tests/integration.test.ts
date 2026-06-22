@@ -20,6 +20,7 @@ import {
   type PublishMsg,
   type ReconcileClientMsg,
   type SubscribeMsg,
+  type TopologyOkMsg,
 } from "../src/protocol.js";
 import { Client, ClientOptions, QueueConfig } from "../src/client.js";
 import { BrokenPipeError, DisconnectionError, RedirectError } from "../src/errors.js";
@@ -804,6 +805,74 @@ test("subscription rides through an owner drop by re-subscribing", async () => {
     assert.ok(second);
     assert.deepEqual([...second.payload], [2]);
     assert.ok(subscribes >= 2);
+
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("subscription picks up a partition added by a live grow", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    const addr = `127.0.0.1:${broker.port}`;
+    let grown = false;
+    const subscribedPartitions = new Set<number>();
+
+    const topologyFor = (count: number): TopologyOkMsg => ({
+      generation: 1n,
+      queues: Array.from({ length: count }, (_, p) => ({
+        topic: "t",
+        partition: p,
+        group: null,
+        owner_endpoint: addr,
+        partitioning_version: 1n,
+        partition_count: count,
+      })),
+    });
+
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        // First refresh (connect warm) reports 1 partition; later refreshes
+        // report 2, simulating a live grow.
+        broker.send(s, buildFrame(Op.TopologyOk, f.requestId, topologyFor(grown ? 2 : 1)));
+        grown = true;
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        subscribedPartitions.add(sub.partition);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: BigInt(subscribedPartitions.size),
+            topic: "t",
+            group: null,
+            partition: sub.partition,
+            prefetch: 10,
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions({
+        subscriptionSuperviseIntervalMs: 25,
+        topologyRefreshCooldownMs: 1,
+      }),
+    );
+    const sub = await client.subscribe("t").subAutoAck();
+
+    // Initially one partition; the growth poll should pick up partition 1.
+    const deadline = Date.now() + 2000;
+    while (subscribedPartitions.size < 2 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    assert.ok(subscribedPartitions.has(0), "subscribed partition 0");
+    assert.ok(subscribedPartitions.has(1), "picked up grown partition 1");
 
     sub.close();
     await client.shutdown();

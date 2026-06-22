@@ -329,6 +329,7 @@ interface SupervisorClient {
   _refreshTopologyThrottled(): Promise<boolean>;
   _isTopicMissing(topic: string, group: string | null): boolean;
   _ownerEndpoint(topic: string, partition: number, group: string | null): string | null;
+  _partitionSet(topic: string, group: string | null): number[];
 }
 
 /**
@@ -471,20 +472,23 @@ class PartitionSupervisor<R> {
  * Fans one logical subscription in over its partitions. Each partition has its
  * own supervisor feeding a single merged queue that the public subscription
  * reads, so per-partition ordering is preserved and the partitions interleave.
- * The partition set is fixed at subscribe time (partition counts are fixed at
- * queue creation today). Picking up partitions added by a live grow is a
- * follow-up tied to live repartitioning.
+ *
+ * Partitions added by a live grow are picked up by a supervised poll that
+ * refreshes topology and subscribes the new partitions, matching the Rust
+ * client. Shrink (retiring a partition) is left to the per-partition supervisor.
  */
 class FanIn<R> {
   readonly #merged: BoundedQueue<Tagged<R>>;
   readonly #partitions: PartitionSupervisor<R>[] = [];
+  readonly #covered = new Set<number>();
   #active: number;
   #closed = false;
+  #growthTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
-    client: SupervisorClient,
-    baseReq: SubscribeMsg,
-    resubscribe: (req: SubscribeMsg) => Promise<SubscribeHandle<R>>,
+    private readonly client: SupervisorClient,
+    private readonly baseReq: SubscribeMsg,
+    private readonly resubscribe: (req: SubscribeMsg) => Promise<SubscribeHandle<R>>,
     initial: Array<{ partition: number; handle: SubscribeHandle<R> }>,
     prefetch: number,
   ) {
@@ -492,17 +496,21 @@ class FanIn<R> {
     this.#merged = new BoundedQueue<Tagged<R>>(cap);
     this.#active = initial.length;
     for (const { partition, handle } of initial) {
-      this.#partitions.push(
-        new PartitionSupervisor(
-          client,
-          { ...baseReq, partition },
-          this.#merged,
-          resubscribe,
-          handle,
-          () => this.#onPartitionStopped(),
-        ),
-      );
+      this.#covered.add(partition);
+      this.#partitions.push(this.#supervise(partition, handle));
     }
+    if (this.client._superviseSubscriptions()) this.#startGrowthPoll();
+  }
+
+  #supervise(partition: number, handle: SubscribeHandle<R>): PartitionSupervisor<R> {
+    return new PartitionSupervisor(
+      this.client,
+      { ...this.baseReq, partition },
+      this.#merged,
+      this.resubscribe,
+      handle,
+      () => this.#onPartitionStopped(),
+    );
   }
 
   async recv(): Promise<Tagged<R> | null> {
@@ -512,8 +520,56 @@ class FanIn<R> {
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
+    this.#clearGrowthTimer();
     for (const sup of this.#partitions) sup.stop();
     this.#merged.close();
+  }
+
+  // Periodically pick up partitions added by a live grow. Unref'd so it never
+  // keeps the process alive. Refreshes topology, then subscribes any partition in
+  // the current set we are not already covering.
+  #startGrowthPoll(): void {
+    let polling = false;
+    this.#growthTimer = setInterval(() => {
+      if (this.#closed || this.client._isShuttingDown()) {
+        this.#clearGrowthTimer();
+        return;
+      }
+      if (polling) return;
+      polling = true;
+      void this.#pickUpNewPartitions().finally(() => {
+        polling = false;
+      });
+    }, this.client._superviseIntervalMs());
+    this.#growthTimer.unref?.();
+  }
+
+  async #pickUpNewPartitions(): Promise<void> {
+    await this.client._refreshTopologyThrottled();
+    if (this.#closed) return;
+    const set = this.client._partitionSet(this.baseReq.topic, this.baseReq.group);
+    for (const partition of set) {
+      if (this.#covered.has(partition)) continue;
+      try {
+        const handle = await this.resubscribe({ ...this.baseReq, partition });
+        if (this.#closed) {
+          handle.queue.close();
+          return;
+        }
+        this.#covered.add(partition);
+        this.#active += 1;
+        this.#partitions.push(this.#supervise(partition, handle));
+      } catch {
+        // Owner not ready yet; retry on the next poll. Do not mark covered.
+      }
+    }
+  }
+
+  #clearGrowthTimer(): void {
+    if (this.#growthTimer) {
+      clearInterval(this.#growthTimer);
+      this.#growthTimer = null;
+    }
   }
 
   // When the last partition permanently stops, end the merged stream so the
@@ -522,6 +578,7 @@ class FanIn<R> {
     this.#active -= 1;
     if (this.#active <= 0 && !this.#closed) {
       this.#closed = true;
+      this.#clearGrowthTimer();
       this.#merged.close();
     }
   }
