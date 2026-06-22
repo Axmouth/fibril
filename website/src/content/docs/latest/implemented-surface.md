@@ -158,7 +158,7 @@ Conditions and limits:
 - Prefetch limits how many messages a subscription can hold at once.
 - If a subscription ends with prefetched but unsettled messages, those messages are returned for redelivery.
 - A message can be delivered more than once under failure, retry, or lease expiry conditions.
-- Exclusive consumer groups are opt-in (Rust `.exclusive()`, TypeScript `.consumerGroup()`). Without them, consumers compete (no ordering). A queue has a single exclusive cohort. The TypeScript client does not yet expose the assignment-events stream.
+- Exclusive consumer groups are opt-in (Rust `.exclusive()`, TypeScript `.consumerGroup()`). Without them, consumers compete (no ordering). A queue has a single exclusive cohort. Both clients expose the assignment-events stream (Rust `assignment_events()`, TypeScript `onAssignmentChange`).
 - Cross-broker cohort balance is advisory/eventually-consistent. The per-partition delivery gate is always the correctness backstop. Single-node is fully covered by tests.
 - Plain subscriptions fan in over known partitions. A topology warm step at
   connect prevents pure consumers from staying on partition `0` when topology is
@@ -435,7 +435,7 @@ does not currently have.
 | Manual ack subscription | Implemented | Implemented |
 | Auto ack subscription | Implemented | Implemented |
 | Exclusive consumer group | Implemented | Implemented |
-| Assignment-change events (`assignment_events()`) | Implemented | Planned |
+| Assignment-change events | Implemented | Implemented (`onAssignmentChange`) |
 | Resume identity handshake | Implemented | Implemented |
 | Explicit reconnect outcome | Implemented | Implemented |
 | Existing publishers after explicit reconnect | Implemented | Implemented |

@@ -45,4 +45,5 @@ export {
   type DeliveryTag,
   type ReconcilePolicy,
   type ResumeOutcome,
+  type AssignmentChangedMsg,
 } from "./protocol.js";

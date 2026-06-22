@@ -89,7 +89,7 @@ Superscript numbers refer to the Notes under the tables.
 | Producer-id dedup headers | done | client-ready <sup>3</sup> |
 | Exclusive consumer groups | done | done |
 | Cohort member id mint/carry | done | done |
-| Assignment events stream (AssignmentChanged) | done | no <sup>4</sup> |
+| Assignment events stream (AssignmentChanged) | done | done |
 
 ## Tooling
 
@@ -116,11 +116,11 @@ Superscript numbers refer to the Notes under the tables.
    helper that skips already-seen (producer_id, seq). That is actionable client
    work needing no server change. Broker-side dedup (dropping dups at publish) is
    the alternative and is the only server-gated part.
-4. The broker DOES push `AssignmentChanged` to exclusive-cohort members
-   (`handler.rs` spawn_assignment_forwarder). The Rust client exposes them as an
-   assignment-events stream. The TS client does not consume the op yet, so this
-   is actionable client work. Exclusivity is enforced by the per-partition gate
-   regardless, so an assignment stream is observability/narrowing, not
+4. The broker pushes `AssignmentChanged` to exclusive-cohort members
+   (`handler.rs` spawn_assignment_forwarder). The Rust client exposes them via
+   `assignment_events()`; the TS client exposes them via
+   `client.onAssignmentChange(handler)`. Exclusivity is enforced by the
+   per-partition gate regardless, so this is observability/narrowing, not
    correctness.
 5. CI runs the examples against the published single-node broker image. A
    multi-node ganglion cluster smoke for a real cross-owner redirect is still

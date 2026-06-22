@@ -903,6 +903,59 @@ export function decodeDeclareQueueOkBody(body: Uint8Array): DeclareQueueOk {
   return value;
 }
 
+// ---- assignment changed (server push to cohort members) ----
+
+export interface AssignmentChanged {
+  topic: string;
+  group: string | null;
+  consumerGroup: string;
+  generation: bigint;
+  assigned: number[];
+  added: number[];
+  revoked: number[];
+}
+
+function writePartitions(w: Writer, parts: number[]): void {
+  w.u32(parts.length);
+  for (const p of parts) w.u32(p);
+}
+
+function readPartitions(r: Reader): number[] {
+  const count = r.u32();
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) out.push(r.u32());
+  return out;
+}
+
+export function encodeAssignmentChangedBody(a: AssignmentChanged): Uint8Array {
+  const w = new Writer();
+  w.magic("FAC1");
+  w.str(a.topic);
+  w.optionalStr(a.group);
+  w.str(a.consumerGroup);
+  w.u64(a.generation);
+  writePartitions(w, a.assigned);
+  writePartitions(w, a.added);
+  writePartitions(w, a.revoked);
+  return w.finish();
+}
+
+export function decodeAssignmentChangedBody(body: Uint8Array): AssignmentChanged {
+  const r = new Reader(body);
+  r.expectMagic("FAC1");
+  const value: AssignmentChanged = {
+    topic: r.str(),
+    group: r.optionalStr(),
+    consumerGroup: r.str(),
+    generation: r.u64(),
+    assigned: readPartitions(r),
+    added: readPartitions(r),
+    revoked: readPartitions(r),
+  };
+  r.finish();
+  return value;
+}
+
 // ---- subscribe ----
 
 export interface Subscribe {

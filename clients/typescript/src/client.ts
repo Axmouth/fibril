@@ -13,6 +13,7 @@ import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder } from "./subscription.js";
 import { TopologyCache, routePartition, type Route, type RoundRobin } from "./internal/topology.js";
 import type {
+  AssignmentChangedMsg,
   AuthMsg,
   DeclareQueueMsg,
   QueueDlqPolicy,
@@ -411,6 +412,7 @@ class PooledConnection {
     private readonly host: string,
     private readonly port: number,
     private readonly opts: ClientOptions,
+    private readonly onAssignmentChanged?: (event: AssignmentChangedMsg) => void,
   ) {}
 
   async engineForOperation(): Promise<Engine> {
@@ -419,7 +421,12 @@ class PooledConnection {
     this.#connecting = (async () => {
       const socket = await openSocket(this.host, this.port);
       try {
-        const engine = await Engine.start(socket, this.opts, new Map());
+        const engine = await Engine.start(
+          socket,
+          this.opts,
+          new Map(),
+          this.onAssignmentChanged,
+        );
         this.#engine = engine;
         return engine;
       } catch (err) {
@@ -470,18 +477,49 @@ export class Client {
   // subscribe and carried on every later one (across partitions, reconnects, and
   // brokers) so the cohort recognizes this client as one member.
   #cohortMemberId: Uint8Array | null = null;
+  // Client-level fan-out of exclusive-cohort assignment changes. Shared across
+  // every engine (bootstrap, reconnect, pool) so the stream survives reconnects
+  // and owner moves. Lossy broadcast, like the Rust client.
+  readonly #assignmentListeners: Set<(event: AssignmentChangedMsg) => void>;
+
+  // Bound so it can be handed to every Engine.start as the assignment callback.
+  readonly #emitAssignment = (event: AssignmentChangedMsg): void => {
+    for (const listener of [...this.#assignmentListeners]) {
+      try {
+        listener(event);
+      } catch {
+        // A listener throwing must not break frame processing.
+      }
+    }
+  };
 
   private constructor(
     address: { host: string; port: number },
     opts: ClientOptions,
     engine: Engine,
     subscriptions: SubscriptionRegistry,
+    assignmentListeners: Set<(event: AssignmentChangedMsg) => void>,
   ) {
     this.#address = address;
     this.#opts = opts;
     this.#engine = new EngineSlot(engine);
     this.#subscriptions = subscriptions;
+    this.#assignmentListeners = assignmentListeners;
     this.#bootstrapEndpoint = endpointKey(address.host, address.port);
+  }
+
+  /**
+   * Observe exclusive-cohort assignment changes for this client's subscriptions.
+   * The handler fires when the broker reports this client's partition set
+   * changed for a cohort it joined via `SubscriptionBuilder.consumerGroup`.
+   * Purely informational - the broker's per-partition gate enforces exclusivity
+   * regardless. Returns an unsubscribe function. The stream survives reconnects.
+   */
+  onAssignmentChange(handler: (event: AssignmentChangedMsg) => void): () => void {
+    this.#assignmentListeners.add(handler);
+    return () => {
+      this.#assignmentListeners.delete(handler);
+    };
   }
 
   /**
@@ -497,9 +535,21 @@ export class Client {
     const addr = parseAddress(address);
     const socket = await openSocket(addr.host, addr.port);
     const subscriptions: SubscriptionRegistry = new Map();
+    // The listener set is shared with the Client instance (and so with every
+    // engine it later creates), so the bootstrap engine routes into the same set.
+    const assignmentListeners = new Set<(event: AssignmentChangedMsg) => void>();
+    const emitAssignment = (event: AssignmentChangedMsg): void => {
+      for (const listener of [...assignmentListeners]) {
+        try {
+          listener(event);
+        } catch {
+          // ignore listener errors
+        }
+      }
+    };
     let engine: Engine;
     try {
-      engine = await Engine.start(socket, opts, subscriptions);
+      engine = await Engine.start(socket, opts, subscriptions, emitAssignment);
     } catch (err) {
       socket.destroy();
       if (err instanceof FibrilError) throw err;
@@ -507,7 +557,7 @@ export class Client {
         `Engine failed to start: ${(err as Error).message}`,
       );
     }
-    return new Client(addr, opts, engine, subscriptions);
+    return new Client(addr, opts, engine, subscriptions, assignmentListeners);
   }
 
   /**
@@ -533,6 +583,7 @@ export class Client {
         socket,
         this.#opts.withResumeIdentity(oldEngine.resumeIdentity),
         this.#subscriptions,
+        this.#emitAssignment,
       );
     } catch (err) {
       socket.destroy();
@@ -696,7 +747,7 @@ export class Client {
     let conn = this.#pool.get(owner.endpoint);
     if (!conn) {
       const addr = parseAddress(owner.endpoint);
-      conn = new PooledConnection(addr.host, addr.port, this.#opts);
+      conn = new PooledConnection(addr.host, addr.port, this.#opts, this.#emitAssignment);
       this.#pool.set(owner.endpoint, conn);
     }
     return conn.engineForOperation();

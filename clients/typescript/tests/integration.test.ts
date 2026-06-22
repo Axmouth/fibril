@@ -12,6 +12,7 @@ import {
   COMPLIANCE_STRING,
   Op,
   PROTOCOL_V1,
+  type AssignmentChangedMsg,
   type DeclareQueueMsg,
   type Hello,
   type NackMsg,
@@ -897,6 +898,49 @@ test("expiring publisher stamps ttl_ms on published frames", async () => {
     assert.ok(published);
     assert.equal(published.topic, "t-ttl");
     assert.equal(published.ttl_ms, 30_000n);
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("client receives assignment-change events (server push)", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let session: Socket | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        session = s;
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const got = new Promise<AssignmentChangedMsg>((resolve) => {
+      client.onAssignmentChange(resolve);
+    });
+
+    assert.ok(session);
+    broker.send(
+      session,
+      buildFrame(Op.AssignmentChanged, 0n, {
+        topic: "orders",
+        group: "workers",
+        consumer_group: "g1",
+        generation: 3n,
+        assigned: [0, 1],
+        added: [1],
+        revoked: [],
+      } satisfies AssignmentChangedMsg),
+    );
+
+    const event = await got;
+    assert.equal(event.topic, "orders");
+    assert.equal(event.consumer_group, "g1");
+    assert.equal(event.generation, 3n);
+    assert.deepEqual(event.assigned, [0, 1]);
+    assert.deepEqual(event.added, [1]);
     await client.shutdown();
   } finally {
     await broker.stop();

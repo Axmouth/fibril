@@ -33,6 +33,7 @@ export enum Op {
   Deliver = 40,
   Ack = 41,
   Nack = 42,
+  AssignmentChanged = 43,
 
   Ping = 50,
   Pong = 51,
@@ -254,6 +255,21 @@ export interface NackMsg {
   tags: DeliveryTag[];
   requeue: boolean;
   not_before: bigint | null;
+}
+
+/**
+ * Server push to an exclusive-cohort member when its partition assignment
+ * changes. Observability only: the broker's per-partition gate enforces
+ * exclusivity regardless.
+ */
+export interface AssignmentChangedMsg {
+  topic: string;
+  group: string | null;
+  consumer_group: string;
+  generation: bigint;
+  assigned: number[];
+  added: number[];
+  revoked: number[];
 }
 
 /** Structured broker error frame body. */

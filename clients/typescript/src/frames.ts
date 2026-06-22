@@ -15,6 +15,7 @@ import type {
   AuthMsg,
   ContentType,
   DeclareQueueMsg,
+  AssignmentChangedMsg,
   DeclareQueueOkMsg,
   DeliverMsg,
   ErrorMsg,
@@ -286,6 +287,18 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
       const v = value as DeclareQueueOkMsg;
       return wire.encodeDeclareQueueOkBody({ status: v.status, partitionCount: 0 });
     }
+    case Op.AssignmentChanged: {
+      const v = value as AssignmentChangedMsg;
+      return wire.encodeAssignmentChangedBody({
+        topic: v.topic,
+        group: v.group,
+        consumerGroup: v.consumer_group,
+        generation: v.generation,
+        assigned: v.assigned,
+        added: v.added,
+        revoked: v.revoked,
+      });
+    }
     case Op.ReconcileClient: {
       const v = value as ReconcileClientMsg;
       return wire.encodeReconcileClientBody({
@@ -464,6 +477,18 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
     case Op.DeclareQueueOk: {
       const w = wire.decodeDeclareQueueOkBody(payload);
       return { status: w.status } satisfies DeclareQueueOkMsg;
+    }
+    case Op.AssignmentChanged: {
+      const w = wire.decodeAssignmentChangedBody(payload);
+      return {
+        topic: w.topic,
+        group: w.group,
+        consumer_group: w.consumerGroup,
+        generation: w.generation,
+        assigned: w.assigned,
+        added: w.added,
+        revoked: w.revoked,
+      } satisfies AssignmentChangedMsg;
     }
     case Op.ReconcileClient: {
       const w = wire.decodeReconcileClientBody(payload);

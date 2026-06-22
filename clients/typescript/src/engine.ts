@@ -23,6 +23,7 @@ import {
   type AuthMsg,
   type DeclareQueueMsg,
   type DeclareQueueOkMsg,
+  type AssignmentChangedMsg,
   type DeliverMsg,
   type DeliveryTag,
   type ErrorMsg,
@@ -200,6 +201,7 @@ export class Engine {
     socket: Socket,
     opts: ClientOptions,
     subscriptionRegistry: SubscriptionRegistry = new Map(),
+    onAssignmentChanged?: (msg: AssignmentChangedMsg) => void,
   ): Promise<Engine> {
     const reader = new FrameReader(socket);
     const iter = reader[Symbol.asyncIterator]();
@@ -305,6 +307,7 @@ export class Engine {
       subscriptionRegistry,
       initialSubscriptions: restoredSubscriptions,
       shutdownMode,
+      onAssignmentChanged,
     });
 
     return new Engine(commandQueue, socket, completed, shutdownMode, resumeIdentity, hello.resume_outcome);
@@ -384,6 +387,7 @@ interface EngineLoopArgs {
   subscriptionRegistry: SubscriptionRegistry;
   initialSubscriptions: Map<bigint, SubState>;
   shutdownMode: ShutdownMode;
+  onAssignmentChanged?: (msg: AssignmentChangedMsg) => void;
 }
 
 async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
@@ -395,6 +399,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     subscriptionRegistry,
     initialSubscriptions,
     shutdownMode,
+    onAssignmentChanged,
   } = args;
 
   const subs = new Map<bigint, SubState>(initialSubscriptions);
@@ -794,6 +799,15 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
             subs.delete(d.sub_id);
             subscriptionRegistry.delete(d.sub_id);
           }
+        }
+        return;
+      }
+
+      case Op.AssignmentChanged: {
+        // Server push (no request id). Observability for exclusive cohorts;
+        // exclusivity is enforced by the broker gate regardless.
+        if (onAssignmentChanged) {
+          onAssignmentChanged(decodeFrameBody<AssignmentChangedMsg>(frame));
         }
         return;
       }
