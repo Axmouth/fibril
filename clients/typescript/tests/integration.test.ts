@@ -860,6 +860,36 @@ test("client publishes delayed frame with headers and deadline", async () => {
   }
 });
 
+test("expiring publisher stamps ttl_ms on published frames", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let published: PublishMsg | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Publish) {
+        published = decodeFrameBody<PublishMsg>(f);
+        broker.send(s, buildFrame(Op.PublishOk, f.requestId, { offset: 7n }));
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    const offset = await client
+      .publisher("t-ttl")
+      .expiring(30_000)
+      .publishConfirmed(NewMessage.json({ hello: "ephemeral" }));
+
+    assert.equal(offset, 7n);
+    assert.ok(published);
+    assert.equal(published.topic, "t-ttl");
+    assert.equal(published.ttl_ms, 30_000n);
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("delivery deserializes json by content-type", async () => {
   const broker = new FakeBroker();
   await broker.start();

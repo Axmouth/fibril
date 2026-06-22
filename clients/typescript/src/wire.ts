@@ -447,6 +447,9 @@ export class Reader {
       if (got[i] !== want[i]) throw new Error(`wire: bad magic, expected ${m}`);
     }
   }
+  remaining(): number {
+    return this.input.length - this.cursor;
+  }
   finish(): void {
     if (this.cursor !== this.input.length) {
       throw new Error(`wire: ${this.input.length - this.cursor} trailing byte(s)`);
@@ -597,6 +600,8 @@ export interface Publish {
   published: bigint;
   partitionKey: Uint8Array | null;
   partitioningVersion: bigint;
+  /** Optional message TTL in milliseconds (relative to publish time). */
+  ttlMs: bigint | null;
 }
 
 function writePublishCommon(w: Writer, p: Publish): void {
@@ -610,6 +615,8 @@ function writePublishCommon(w: Writer, p: Publish): void {
   w.optionalBytes(p.partitionKey);
   w.u64(p.partitioningVersion);
   w.bytes(p.payload);
+  // Trailing so a peer that omits it still decodes (read as null).
+  w.optionalU64(p.ttlMs);
 }
 
 function readPublishCommon(r: Reader): Publish {
@@ -624,6 +631,8 @@ function readPublishCommon(r: Reader): Publish {
     partitionKey: r.optionalBytes(),
     partitioningVersion: r.u64(),
     payload: r.bytes(),
+    // Trailing optional: absent when the peer has not been updated to send it.
+    ttlMs: r.remaining() > 0 ? r.optionalU64() : null,
   };
 }
 

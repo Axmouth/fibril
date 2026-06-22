@@ -131,6 +131,7 @@ function publishToWire(v: PublishMsg): wire.Publish {
     published: v.published,
     partitionKey: v.partition_key ?? null,
     partitioningVersion: v.partitioning_version ?? 0n,
+    ttlMs: v.ttl_ms ?? null,
   };
 }
 
@@ -168,6 +169,7 @@ function publishFromWire(w: wire.Publish): PublishMsg {
     published: w.published,
     partition_key: w.partitionKey,
     partitioning_version: w.partitioningVersion,
+    ttl_ms: w.ttlMs,
   };
 }
 
@@ -376,7 +378,10 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
       return publishFromWire(wire.decodePublishBody(payload));
     case Op.PublishDelayed: {
       const w = wire.decodePublishDelayedBody(payload);
-      return { ...publishFromWire(w), not_before: w.notBefore } satisfies PublishDelayedMsg;
+      return {
+        ...publishFromWire({ ...w, ttlMs: null }),
+        not_before: w.notBefore,
+      } satisfies PublishDelayedMsg;
     }
     case Op.PublishOk: {
       const w = wire.decodePublishOkBody(payload);

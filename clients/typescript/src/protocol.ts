@@ -124,6 +124,8 @@ export interface PublishMsg {
   // Wire fields; default to null / 0 until partitioning lands (brick 3).
   partition_key?: Uint8Array | null;
   partitioning_version?: bigint;
+  /** Optional message TTL in milliseconds (relative to publish time). */
+  ttl_ms?: bigint | null;
 }
 
 /** Delayed publish frame body. */

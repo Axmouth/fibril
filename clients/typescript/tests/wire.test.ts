@@ -142,6 +142,7 @@ test("publish body round-trips (with and without optionals)", () => {
     published: 123n,
     partitionKey: new Uint8Array([9, 9]),
     partitioningVersion: 7n,
+    ttlMs: 30000n,
   };
   assert.deepEqual(decodePublishBody(encodePublishBody(full)), full);
 
@@ -156,6 +157,7 @@ test("publish body round-trips (with and without optionals)", () => {
     published: 0n,
     partitionKey: null,
     partitioningVersion: 0n,
+    ttlMs: null,
   };
   assert.deepEqual(decodePublishBody(encodePublishBody(minimal)), minimal);
 });

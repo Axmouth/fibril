@@ -113,12 +113,19 @@ export class Publisher {
   readonly #client: RoutingClient;
   readonly #topic: string;
   readonly #group: string | null;
+  readonly #defaultTtlMs: bigint | null;
 
   /** @internal */
-  constructor(client: RoutingClient, topic: string, group: string | null) {
+  constructor(
+    client: RoutingClient,
+    topic: string,
+    group: string | null,
+    defaultTtlMs: bigint | null = null,
+  ) {
     this.#client = client;
     this.#topic = topic;
     this.#group = group;
+    this.#defaultTtlMs = defaultTtlMs;
   }
 
   /**
@@ -320,6 +327,7 @@ export class Publisher {
       headers: spec.headers,
       payload: spec.payload,
       published: BigInt(Date.now()),
+      ttl_ms: this.#defaultTtlMs,
     };
     if (spec.notBefore === null) {
       return reply
@@ -329,6 +337,26 @@ export class Publisher {
     return reply
       ? { type: "publishDelayedConfirmed", ...common, not_before: spec.notBefore, reply }
       : { type: "publishDelayedUnconfirmed", ...common, not_before: spec.notBefore };
+  }
+
+  /**
+   * Return a publisher that stamps a default message TTL (in milliseconds) on
+   * every immediate publish: the broker drops the message if it is not consumed
+   * within the interval. Milliseconds, matching this client's delayed-publish
+   * convention. Applies to the immediate publish paths (delayed publishes do not
+   * carry a TTL yet).
+   *
+   * @example
+   * ```ts
+   * const ephemeral = client.publisher("rpc.reply").expiring(30_000);
+   * await ephemeral.publish(result);
+   * ```
+   */
+  expiring(ttlMs: number): Publisher {
+    if (!Number.isFinite(ttlMs) || ttlMs < 0) {
+      throw new Error("ttl must be a non-negative millisecond value");
+    }
+    return new Publisher(this.#client, this.#topic, this.#group, BigInt(Math.trunc(ttlMs)));
   }
 
   /**

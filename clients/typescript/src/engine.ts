@@ -87,8 +87,8 @@ type Waiter =
 
 // Commands the public API submits to the engine.
 export type Command =
-  | { type: "publishUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint }
-  | { type: "publishConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; reply: Deferred<bigint> }
+  | { type: "publishUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; ttl_ms: bigint | null }
+  | { type: "publishConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; ttl_ms: bigint | null; reply: Deferred<bigint> }
   | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
   | { type: "publishDelayedConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
   | { type: "declareQueue"; req: DeclareQueueMsg; reply: Deferred<void> }
@@ -509,6 +509,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           headers: cmd.headers,
           payload: cmd.payload,
           published: cmd.published,
+          ttl_ms: cmd.ttl_ms,
         };
         await sendOrDie(buildFrame(Op.Publish, reqId, msg));
         return;
@@ -527,6 +528,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
           headers: cmd.headers,
           payload: cmd.payload,
           published: cmd.published,
+          ttl_ms: cmd.ttl_ms,
         };
         if (!(await sendOrDie(buildFrame(Op.Publish, reqId, msg)))) {
           waiters.delete(reqId);
