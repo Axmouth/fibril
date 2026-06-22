@@ -312,6 +312,13 @@ replication + stale-epoch-apply harness), so it lands after the admin-thin items
 - `clients/ARCHITECTURE.md` is the language-agnostic design reference (layering,
   invariants, continuity/routing/reliability models, porting lessons). Read it
   before starting a new client (the Python client is next).
+- Python client: spec LOCKED in `clients/PYTHON_CLIENT_PLAN.md` (async core +
+  blocking facade, Python 3.11, build straight to full parity). Implementation is
+  a deliberate fresh-context big push - not started yet.
+- Future: Python 3.10 backport. 3.11 is the floor; keep the few 3.11-only bits
+  (mainly `asyncio.TaskGroup`) isolated behind helpers so dropping to 3.10 is a
+  localized change. 3.9 is not a target (forces future-annotations everywhere +
+  older-asyncio quirks). Driven by real-world clinging to old runtimes.
 - TS<->Rust feature parity: CLOSED (2026-06-23). All FEATURE_MATRIX rows are
   done for both: assignment-events stream (`onAssignmentChange`), live-grow
   partition pickup, typed `WireError` taxonomy, message TTL, producer-id dedup.
