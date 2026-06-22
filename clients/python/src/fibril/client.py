@@ -1,0 +1,470 @@
+"""Cluster-aware client: connection pool, topology cache, and routing.
+
+Mirrors the Rust client (``crates/client``): one bootstrap connection plus a
+pool of lazily opened connections to non-bootstrap owners, a routing cache warmed
+by topology fetches and point-updated by redirects, bounded redirect-follow, and
+auto-reconnect. The engine exposes async request methods directly, so this layer
+calls them without an intermediate command channel.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import socket as _socket
+from dataclasses import dataclass, replace
+from datetime import timedelta
+from typing import Callable, Optional, Union
+
+from . import wire
+from .engine import Engine, EngineOptions, SubscribeResult, SubscriptionRegistry
+from .errors import BrokenPipeError, DisconnectionError, FibrilError
+from .internal.bounded_queue import BoundedQueue
+from .internal.topology import Route, RoundRobin, TopologyCache, route_partition
+
+Address = Union[str, tuple[str, int]]
+AssignmentHandler = Callable[[wire.AssignmentChanged], None]
+
+DEFAULT_CLIENT_NAME = "Fibril Python Client"
+DEFAULT_CLIENT_VERSION = "0.1.0"
+
+
+def normalize_group(group: Optional[str]) -> Optional[str]:
+    trimmed = group.strip() if group else ""
+    if not trimmed or trimmed == "default":
+        return None
+    return trimmed
+
+
+@dataclass
+class ClientOptions:
+    """Connection and routing settings. Use ``with_*`` for copies with overrides."""
+
+    client_name: str = DEFAULT_CLIENT_NAME
+    client_version: str = DEFAULT_CLIENT_VERSION
+    auth: Optional[wire.Auth] = None
+    heartbeat_interval_seconds: float = 5.0
+    resume_identity: Optional[wire.ResumeIdentity] = None
+    auto_reconnect_attempts: int = 1
+    reconnect_reconcile_policy: wire.ReconcilePolicy = "conservative"
+    max_redirects: int = 3
+    publish_timeout_ms: int = 30_000
+    topology_refresh_cooldown_ms: int = 1_000
+    supervise_subscriptions: bool = True
+    subscription_supervise_interval_ms: int = 1_000
+
+    def with_auth(self, username: str, password: str) -> "ClientOptions":
+        return replace(self, auth=wire.Auth(username=username, password=password))
+
+    def with_heartbeat_interval(self, seconds: float) -> "ClientOptions":
+        return replace(self, heartbeat_interval_seconds=seconds)
+
+    def with_resume_identity(self, resume_identity: wire.ResumeIdentity) -> "ClientOptions":
+        return replace(self, resume_identity=resume_identity)
+
+    def disable_auto_reconnect(self) -> "ClientOptions":
+        return replace(self, auto_reconnect_attempts=0)
+
+    def engine_options(
+        self, resume_identity: Optional[wire.ResumeIdentity] = None
+    ) -> EngineOptions:
+        return EngineOptions(
+            client_name=self.client_name,
+            client_version=self.client_version,
+            auth=self.auth,
+            resume_identity=resume_identity if resume_identity is not None else self.resume_identity,
+            reconnect_reconcile_policy=self.reconnect_reconcile_policy,
+            heartbeat_interval_seconds=self.heartbeat_interval_seconds,
+        )
+
+    async def connect(self, address: Address) -> "Client":
+        return await Client.connect(address, self)
+
+
+@dataclass
+class QueueConfig:
+    """Queue declaration for retry and dead-letter behavior. Immutable builder."""
+
+    topic: str
+    group_name: Optional[str] = None
+    dlq_policy: Optional[wire.QueueDlqPolicy] = None
+    dlq_max_retries: Optional[int] = None
+    default_message_ttl_ms: Optional[int] = None
+
+    def group(self, group: str) -> "QueueConfig":
+        return replace(self, group_name=normalize_group(group))
+
+    def max_retries(self, n: int) -> "QueueConfig":
+        return replace(self, dlq_max_retries=n)
+
+    def default_message_ttl(self, ttl: Union[float, timedelta]) -> "QueueConfig":
+        """Default per-message TTL (seconds or timedelta): messages without their
+        own TTL drop after this age. Per-message expiry, not queue expiration."""
+        seconds = ttl.total_seconds() if isinstance(ttl, timedelta) else float(ttl)
+        if seconds < 0:
+            raise ValueError("ttl must be non-negative")
+        return replace(self, default_message_ttl_ms=int(seconds * 1000))
+
+    def discard_dead_letters(self) -> "QueueConfig":
+        return replace(self, dlq_policy="discard")
+
+    def use_global_dead_letter_queue(self) -> "QueueConfig":
+        return replace(self, dlq_policy="global")
+
+    def custom_dead_letter_queue(
+        self, topic: str, group: Optional[str] = None
+    ) -> "QueueConfig":
+        return replace(
+            self, dlq_policy=wire.CustomDlqPolicy(topic=topic, group=normalize_group(group))
+        )
+
+    def to_wire(self) -> wire.DeclareQueue:
+        return wire.DeclareQueue(
+            topic=self.topic,
+            group=self.group_name,
+            dlq_policy=self.dlq_policy,
+            dlq_max_retries=self.dlq_max_retries,
+            default_message_ttl_ms=self.default_message_ttl_ms,
+        )
+
+
+@dataclass
+class SubscribeHandle:
+    """A routed subscription connection: the engine plus its delivery queue."""
+
+    engine: Engine
+    queue: BoundedQueue[object]
+
+
+@dataclass
+class ReconnectOutcome:
+    resume_outcome: wire.ResumeOutcome
+
+
+def parse_address(address: Address) -> tuple[str, int]:
+    if isinstance(address, tuple):
+        return address
+    if address.startswith("[") and "]:" in address:  # [ipv6]:port
+        host, _, port = address[1:].partition("]:")
+        return host, int(port)
+    idx = address.rfind(":")
+    if idx == -1:
+        raise DisconnectionError(f"invalid address (no port): {address}")
+    return address[:idx], int(address[idx + 1 :])
+
+
+def _endpoint_key(host: str, port: int) -> str:
+    return f"{host}:{port}"
+
+
+async def _open_connection(
+    host: str, port: int
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    try:
+        reader, writer = await asyncio.open_connection(host, port)
+    except (ConnectionError, OSError) as err:
+        raise DisconnectionError(f"failed to connect to {host}:{port}: {err}") from err
+    sock = writer.get_extra_info("socket")
+    if sock is not None:
+        # Disable Nagle for low latency on small frames, like the reference clients.
+        sock.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
+    return reader, writer
+
+
+class _PooledConnection:
+    """A lazily opened connection to one non-bootstrap owner, its own session."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        opts: ClientOptions,
+        on_assignment: Optional[AssignmentHandler],
+    ) -> None:
+        self._host = host
+        self._port = port
+        self._opts = opts
+        self._on_assignment = on_assignment
+        self._engine: Optional[Engine] = None
+        self._lock = asyncio.Lock()
+
+    async def engine_for_operation(self) -> Engine:
+        if self._engine is not None and not self._engine.is_closed():
+            return self._engine
+        async with self._lock:
+            if self._engine is not None and not self._engine.is_closed():
+                return self._engine
+            reader, writer = await _open_connection(self._host, self._port)
+            try:
+                engine = await Engine.start(
+                    reader, writer, self._opts.engine_options(), {}, self._on_assignment
+                )
+            except BaseException:
+                writer.close()
+                raise
+            self._engine = engine
+            return engine
+
+    def shutdown(self) -> None:
+        if self._engine is not None:
+            self._engine.shutdown()
+
+
+class Client:
+    """Fibril broker client: one bootstrap connection plus routed pooled owners."""
+
+    def __init__(
+        self,
+        address: tuple[str, int],
+        opts: ClientOptions,
+        engine: Engine,
+        registry: SubscriptionRegistry,
+        assignment_listeners: set[AssignmentHandler],
+    ) -> None:
+        self._address = address
+        self._opts = opts
+        self._engine = engine
+        self._registry = registry
+        self._assignment_listeners = assignment_listeners
+        self._bootstrap_endpoint = _endpoint_key(*address)
+        self._topology = TopologyCache()
+        self._pool: dict[str, _PooledConnection] = {}
+        self._round_robin = RoundRobin()
+        self._cohort_member_id: Optional[wire.Uuid] = None
+        self._user_shutdown = False
+        self._reconnect_lock = asyncio.Lock()
+
+    # ---- connect / lifecycle ------------------------------------------
+
+    @classmethod
+    async def connect(
+        cls, address: Address, opts: Optional[ClientOptions] = None
+    ) -> "Client":
+        opts = opts or ClientOptions()
+        addr = parse_address(address)
+        registry: SubscriptionRegistry = {}
+        listeners: set[AssignmentHandler] = set()
+
+        def emit(event: wire.AssignmentChanged) -> None:
+            for listener in list(listeners):
+                try:
+                    listener(event)
+                except Exception:
+                    pass
+
+        reader, writer = await _open_connection(*addr)
+        try:
+            engine = await Engine.start(reader, writer, opts.engine_options(), registry, emit)
+        except BaseException:
+            writer.close()
+            raise
+        client = cls(addr, opts, engine, registry, listeners)
+        return client
+
+    def _emit_assignment(self, event: wire.AssignmentChanged) -> None:
+        for listener in list(self._assignment_listeners):
+            try:
+                listener(event)
+            except Exception:
+                pass
+
+    def on_assignment_change(self, handler: AssignmentHandler) -> Callable[[], None]:
+        """Observe exclusive-cohort assignment changes. Returns an unsubscribe."""
+        self._assignment_listeners.add(handler)
+
+        def unsubscribe() -> None:
+            self._assignment_listeners.discard(handler)
+
+        return unsubscribe
+
+    async def reconnect(self) -> ReconnectOutcome:
+        async with self._reconnect_lock:
+            return await self._reconnect_once()
+
+    async def _reconnect_once(self) -> ReconnectOutcome:
+        old = self._engine
+        reader, writer = await _open_connection(*self._address)
+        try:
+            engine = await Engine.start(
+                reader,
+                writer,
+                self._opts.engine_options(old.resume_identity),
+                self._registry,
+                self._emit_assignment,
+            )
+        except BaseException:
+            writer.close()
+            raise
+        self._engine = engine
+        self._user_shutdown = False
+        old.shutdown_for_reconnect()
+        return ReconnectOutcome(resume_outcome=engine.resume_outcome)
+
+    async def _reconnect_if_closed(self) -> None:
+        if not self._engine.is_closed():
+            return
+        if self._user_shutdown or self._opts.auto_reconnect_attempts == 0:
+            raise BrokenPipeError()
+        async with self._reconnect_lock:
+            if not self._engine.is_closed():
+                return
+            last: Optional[BaseException] = None
+            for _ in range(self._opts.auto_reconnect_attempts):
+                try:
+                    await self._reconnect_once()
+                    return
+                except Exception as err:
+                    last = err
+            raise last or BrokenPipeError()
+
+    async def shutdown(self) -> None:
+        """Gracefully shut down. Pending ops fail; subscription iterators end."""
+        self._user_shutdown = True
+        for conn in self._pool.values():
+            conn.shutdown()
+        self._pool.clear()
+        engine = self._engine
+        engine.shutdown()
+        await engine.wait_closed()
+
+    async def __aenter__(self) -> "Client":
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.shutdown()
+
+    # ---- handles -------------------------------------------------------
+
+    def publisher(self, topic: str) -> "Publisher":
+        from .publisher import Publisher
+
+        return Publisher(self, topic, None)
+
+    def publisher_grouped(self, topic: str, group: str) -> "Publisher":
+        from .publisher import Publisher
+
+        return Publisher(self, topic, normalize_group(group))
+
+    def subscribe(self, topic: str) -> "SubscriptionBuilder":
+        from .subscription import SubscriptionBuilder
+
+        return SubscriptionBuilder(self, topic)
+
+    async def declare_queue(self, config: QueueConfig) -> None:
+        engine = await self._engine_for_operation()
+        await engine.declare_queue(config.to_wire())
+
+    # ---- topology / routing -------------------------------------------
+
+    async def fetch_topology(
+        self, topic: Optional[str] = None, group: Optional[str] = None
+    ) -> wire.TopologyOk:
+        engine = await self._engine_for_operation()
+        topology = await engine.fetch_topology(topic, group)
+        self._topology.replace(topology)
+        self._topology.last_refresh_ms = asyncio.get_running_loop().time() * 1000
+        live = self._topology.endpoints()
+        for endpoint in list(self._pool):
+            if endpoint not in live:
+                self._pool.pop(endpoint).shutdown()
+        return topology
+
+    def route(self, topic: str, group: Optional[str], key: Optional[bytes]) -> Route:
+        return route_partition(self._topology, topic, group, key, self._round_robin)
+
+    @property
+    def max_redirects(self) -> int:
+        return self._opts.max_redirects
+
+    @property
+    def publish_timeout_ms(self) -> int:
+        return self._opts.publish_timeout_ms
+
+    def apply_redirect(self, redirect: wire.Redirect) -> None:
+        self._topology.apply_redirect(redirect)
+
+    def is_topic_missing(self, topic: str, group: Optional[str]) -> bool:
+        return self._topology.is_populated() and not self._topology.knows_topic(topic, group)
+
+    def is_shutting_down(self) -> bool:
+        return self._user_shutdown
+
+    def supervise_subscriptions(self) -> bool:
+        return self._opts.supervise_subscriptions
+
+    def supervise_interval_ms(self) -> int:
+        return self._opts.subscription_supervise_interval_ms
+
+    def partition_set(self, topic: str, group: Optional[str]) -> list[int]:
+        partitioning = self._topology.partitioning(topic, group)
+        count = max(partitioning.count if partitioning is not None else 1, 1)
+        return list(range(count))
+
+    def owner_endpoint(
+        self, topic: str, partition: int, group: Optional[str]
+    ) -> Optional[str]:
+        entry = self._topology.lookup(topic, partition, group)
+        return entry.endpoint if entry is not None else None
+
+    async def refresh_topology_throttled(self) -> bool:
+        now = asyncio.get_running_loop().time() * 1000
+        if now - self._topology.last_refresh_ms < self._opts.topology_refresh_cooldown_ms:
+            return False
+        try:
+            await self.fetch_topology()
+            return True
+        except Exception:
+            return False
+
+    # ---- engine resolution --------------------------------------------
+
+    async def _engine_for_operation(self) -> Engine:
+        await self._reconnect_if_closed()
+        return self._engine
+
+    async def engine_for(
+        self, topic: str, partition: int, group: Optional[str]
+    ) -> Engine:
+        owner = self._topology.lookup(topic, partition, group)
+        if owner is None or owner.endpoint == self._bootstrap_endpoint:
+            return await self._engine_for_operation()
+        conn = self._pool.get(owner.endpoint)
+        if conn is None:
+            host, port = parse_address(owner.endpoint)
+            conn = _PooledConnection(host, port, self._opts, self._emit_assignment)
+            self._pool[owner.endpoint] = conn
+        return await conn.engine_for_operation()
+
+    async def subscribe_once(self, req: wire.Subscribe) -> SubscribeHandle:
+        """Subscribe one partition to its current owner (routed). Used by the fan-in
+        supervisor to (re)attach a subscription."""
+        full = self._with_cohort_member(req)
+        engine = await self.engine_for(full.topic, full.partition, full.group)
+        result: SubscribeResult = await engine.subscribe(
+            full, supervised=self._opts.supervise_subscriptions
+        )
+        self._capture_cohort_member(full, result.member_id)
+        return SubscribeHandle(engine=engine, queue=result.queue)
+
+    def _with_cohort_member(self, req: wire.Subscribe) -> wire.Subscribe:
+        if req.consumer_group is None:
+            return req
+        if req.member_id is not None:
+            return req
+        return replace(req, member_id=self._cohort_member_id)
+
+    def _capture_cohort_member(
+        self, req: wire.Subscribe, member_id: Optional[wire.Uuid]
+    ) -> None:
+        if (
+            req.consumer_group is not None
+            and member_id is not None
+            and self._cohort_member_id is None
+        ):
+            self._cohort_member_id = member_id
+
+
+# Imported lazily in the handle factory methods to avoid an import cycle, but
+# referenced in type comments above.
+if False:  # pragma: no cover - typing only
+    from .publisher import Publisher
+    from .subscription import SubscriptionBuilder

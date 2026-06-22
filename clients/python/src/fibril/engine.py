@@ -273,6 +273,23 @@ class Engine:
         assert isinstance(offset, int)
         return offset
 
+    async def publish_pipelined(self, msg: wire.Publish) -> "asyncio.Future[object]":
+        """Send a confirmed publish and return its reply future without awaiting it.
+
+        Lets a caller pipeline several confirmed publishes and collect each offset
+        later. The frame is written before this returns, so send order is kept.
+        """
+        msg.require_confirm = True
+        if self._closed:
+            raise self._fatal or BrokenPipeError()
+        rid = self._alloc_id()
+        fut: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+        self._waiters[rid] = _Waiter(kind="publish", future=fut)
+        if not await self._send_or_die(build_frame(Op.PUBLISH, rid, encode_body(Op.PUBLISH, msg))):
+            self._waiters.pop(rid, None)
+            raise self._fatal or BrokenPipeError()
+        return fut
+
     async def publish_delayed(self, msg: wire.PublishDelayed, confirm: bool) -> Optional[int]:
         msg.require_confirm = confirm
         if not confirm:

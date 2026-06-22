@@ -35,3 +35,7 @@ asyncio_mode = "auto"
 python_version = "3.11"
 strict = true
 files = ["src/fibril"]
+
+[[tool.mypy.overrides]]
+module = "msgpack"
+ignore_missing_imports = true
