@@ -850,6 +850,8 @@ export interface DeclareQueue {
   dlqPolicy: QueueDlqPolicy | null;
   dlqMaxRetries: number | null;
   partitionCount: number | null;
+  /** Default message TTL (ms) for the queue. Not queue expiration. */
+  defaultMessageTtlMs: bigint | null;
 }
 
 export function encodeDeclareQueueBody(d: DeclareQueue): Uint8Array {
@@ -860,6 +862,8 @@ export function encodeDeclareQueueBody(d: DeclareQueue): Uint8Array {
   w.optionalDlqPolicy(d.dlqPolicy);
   w.optionalU32(d.dlqMaxRetries);
   w.optionalU32(d.partitionCount);
+  // Trailing so a peer that omits it still decodes (read as null).
+  w.optionalU64(d.defaultMessageTtlMs);
   return w.finish();
 }
 
@@ -872,6 +876,7 @@ export function decodeDeclareQueueBody(body: Uint8Array): DeclareQueue {
     dlqPolicy: r.optionalDlqPolicy(),
     dlqMaxRetries: r.optionalU32(),
     partitionCount: r.optionalU32(),
+    defaultMessageTtlMs: r.remaining() > 0 ? r.optionalU64() : null,
   };
   r.finish();
   return value;

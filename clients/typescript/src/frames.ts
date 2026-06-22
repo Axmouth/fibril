@@ -279,6 +279,7 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
         dlqPolicy: dlqToWire(v.dlq_policy),
         dlqMaxRetries: v.dlq_max_retries,
         partitionCount: v.partition_count ?? null,
+        defaultMessageTtlMs: v.default_message_ttl_ms ?? null,
       });
     }
     case Op.DeclareQueueOk: {
@@ -457,6 +458,7 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
         dlq_policy: dlqFromWire(w.dlqPolicy),
         dlq_max_retries: w.dlqMaxRetries,
         partition_count: w.partitionCount,
+        default_message_ttl_ms: w.defaultMessageTtlMs,
       } satisfies DeclareQueueMsg;
     }
     case Op.DeclareQueueOk: {

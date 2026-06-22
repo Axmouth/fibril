@@ -502,11 +502,22 @@ test("client declares queue policy", async () => {
       dlq_policy: { kind: "custom", topic: "_dlq.jobs", group: null },
       dlq_max_retries: 3,
       partition_count: null,
+      default_message_ttl_ms: null,
     });
     await client.shutdown();
   } finally {
     await broker.stop();
   }
+});
+
+test("queue config carries a default message ttl", () => {
+  assert.deepEqual(new QueueConfig("ephemeral").defaultMessageTtl(30_000).toWire(), {
+    topic: "ephemeral",
+    group: null,
+    dlq_policy: null,
+    dlq_max_retries: null,
+    default_message_ttl_ms: 30_000n,
+  });
 });
 
 test("default and blank groups normalize to ungrouped declarations and subscriptions", async () => {
@@ -515,12 +526,14 @@ test("default and blank groups normalize to ungrouped declarations and subscript
     group: null,
     dlq_policy: null,
     dlq_max_retries: null,
+    default_message_ttl_ms: null,
   });
   assert.deepEqual(new QueueConfig("jobs").group("   ").toWire(), {
     topic: "jobs",
     group: null,
     dlq_policy: null,
     dlq_max_retries: null,
+    default_message_ttl_ms: null,
   });
 
   const broker = new FakeBroker();

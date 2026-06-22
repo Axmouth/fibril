@@ -150,6 +150,8 @@ export interface DeclareQueueMsg {
   dlq_max_retries: number | null;
   // Wire field; default null until repartition declares lands.
   partition_count?: number | null;
+  /** Default message TTL (ms) for the queue. Not queue expiration. */
+  default_message_ttl_ms?: bigint | null;
 }
 
 export interface DeclareQueueOkMsg {

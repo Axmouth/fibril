@@ -230,17 +230,20 @@ export class QueueConfig {
   readonly groupName: string | null;
   readonly dlqPolicy: QueueDlqPolicy | null;
   readonly dlqMaxRetries: number | null;
+  readonly defaultMessageTtlMs: bigint | null;
 
   constructor(
     topic: string,
     groupName: string | null = null,
     dlqPolicy: QueueDlqPolicy | null = null,
     dlqMaxRetries: number | null = null,
+    defaultMessageTtlMs: bigint | null = null,
   ) {
     this.topic = topic;
     this.groupName = normalizeGroup(groupName);
     this.dlqPolicy = dlqPolicy;
     this.dlqMaxRetries = dlqMaxRetries;
+    this.defaultMessageTtlMs = defaultMessageTtlMs;
   }
 
   group(group: string): QueueConfig {
@@ -249,6 +252,7 @@ export class QueueConfig {
       normalizeGroup(group),
       this.dlqPolicy,
       this.dlqMaxRetries,
+      this.defaultMessageTtlMs,
     );
   }
 
@@ -258,6 +262,25 @@ export class QueueConfig {
       this.groupName,
       this.dlqPolicy,
       maxRetries,
+      this.defaultMessageTtlMs,
+    );
+  }
+
+  /**
+   * Set a default message TTL (milliseconds) for this queue: messages published
+   * without their own TTL drop after this age. Per-message expiry, not queue
+   * expiration (auto-deleting an idle queue).
+   */
+  defaultMessageTtl(ttlMs: number): QueueConfig {
+    if (!Number.isFinite(ttlMs) || ttlMs < 0) {
+      throw new Error("ttl must be a non-negative millisecond value");
+    }
+    return new QueueConfig(
+      this.topic,
+      this.groupName,
+      this.dlqPolicy,
+      this.dlqMaxRetries,
+      BigInt(Math.trunc(ttlMs)),
     );
   }
 
@@ -267,6 +290,7 @@ export class QueueConfig {
       this.groupName,
       { kind: "discard" },
       this.dlqMaxRetries,
+      this.defaultMessageTtlMs,
     );
   }
 
@@ -276,6 +300,7 @@ export class QueueConfig {
       this.groupName,
       { kind: "global" },
       this.dlqMaxRetries,
+      this.defaultMessageTtlMs,
     );
   }
 
@@ -285,6 +310,7 @@ export class QueueConfig {
       this.groupName,
       { kind: "custom", topic, group: normalizeGroup(group) },
       this.dlqMaxRetries,
+      this.defaultMessageTtlMs,
     );
   }
 
@@ -294,6 +320,7 @@ export class QueueConfig {
       group: this.groupName,
       dlq_policy: this.dlqPolicy,
       dlq_max_retries: this.dlqMaxRetries,
+      default_message_ttl_ms: this.defaultMessageTtlMs,
     };
   }
 }

@@ -225,6 +225,7 @@ test("declare_queue body round-trips across dlq policies", () => {
     dlqPolicy: "discard" as const,
     dlqMaxRetries: 3,
     partitionCount: 4,
+    defaultMessageTtlMs: 30000n,
   };
   assert.deepEqual(decodeDeclareQueueBody(encodeDeclareQueueBody(discard)), discard);
 
@@ -234,10 +235,18 @@ test("declare_queue body round-trips across dlq policies", () => {
     dlqPolicy: { custom: { topic: "_dlq.t", group: null } },
     dlqMaxRetries: null,
     partitionCount: null,
+    defaultMessageTtlMs: null,
   };
   assert.deepEqual(decodeDeclareQueueBody(encodeDeclareQueueBody(custom)), custom);
 
-  const none = { topic: "t", group: null, dlqPolicy: null, dlqMaxRetries: null, partitionCount: null };
+  const none = {
+    topic: "t",
+    group: null,
+    dlqPolicy: null,
+    dlqMaxRetries: null,
+    partitionCount: null,
+    defaultMessageTtlMs: null,
+  };
   assert.deepEqual(decodeDeclareQueueBody(encodeDeclareQueueBody(none)), none);
 
   assert.deepEqual(
