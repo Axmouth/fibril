@@ -139,7 +139,7 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 - Admin dashboard: a lost-connection banner. When the admin page can no longer
   reach its broker (broker down, failover, network blip), show a clear banner
   instead of silently stale data. [USER]
-### Queue lifecycle, retention, expiry (ordered plan) [USER]
+### Queue lifecycle, retention, expiry (ordered plan)
 
 Small user-facing features, ordered cheapest-and-highest-visibility first. The
 first three are admin-thin (the primitive exists, just expose it).
@@ -235,7 +235,7 @@ first three are admin-thin (the primitive exists, just expose it).
      (per-partition, no coordination); #7 deletes the whole QUEUE after idle. Use
      a clearly separate DeclareMeta field (e.g. `expire_after_idle_ms`), never
      reuse the message-TTL default.
-   - DESIGN NOTE [USER]: queue expiration is ideally GLOBAL (per queue), not
+   - DESIGN NOTE: queue expiration is ideally GLOBAL (per queue), not
      per-partition. "Is the queue idle?" must aggregate activity across ALL the
      queue's partitions and replica nodes, so a per-partition timer is wrong - the
      decision + the destroy need to be coordinated (controller-side aggregation of
@@ -261,7 +261,7 @@ more than MECHANISM, so do them one-by-one, not as one unified subsystem):
   for these must round-trip `encode_snapshot`/`load_snapshot` (FORMAT_VERSION bump)
   since snapshots compact away the events that would otherwise rebuild it.
 
-Nack semantics enrichment [USER, DESIGN] - plumb the richer nack vocabulary
+Nack semantics enrichment - plumb the richer nack vocabulary
 through. The `NackType` enum already exists in stroma `event.rs` (Discard,
 RetryNow, RetryLater, RequeueNow, RequeueLater) but is reserved/dead-code: the
 live wire + state path only carries the simpler `(requeue, not_before)` pair.
@@ -445,15 +445,12 @@ replication + stale-epoch-apply harness), so it lands after the admin-thin items
   ReliablePublisher opt-in, producer ids and the dedup path, and a short
   failover-behavior note. Keep it copy-paste-able. [WL]
 - Manual failover runbook (partially covered by `FAILURE_MODES.md`). [PLAN]
-- DIRECTIVE [USER, standing]: keep the docs current with every surface-changing
-  change, in the SAME change - do not let them drift. When a commit adds, changes,
-  or removes user-visible surface (protocol op/field, client API, admin
-  endpoint/page, CLI command, config/runtime setting, behavior/limit), update in
-  the same pass: `website/.../implemented-surface.md` (canonical inventory),
-  `clients/FEATURE_MATRIX.md` (any client-facing change), the relevant
-  `website/.../` user guide (reliability/concepts/admin-dashboard/configuration/
-  clients), `README.md` if it lists the feature, and FOLLOWUPS "Done since the
-  inventory was last curated". Last full recuration: 2026-06-22.
+- Keep the docs current in the SAME change as any user-visible surface change
+  (protocol/client API, admin endpoint/page, CLI, config/runtime setting,
+  behavior/limit): update `website/.../implemented-surface.md`,
+  `clients/FEATURE_MATRIX.md`, the relevant `website/.../` guide, `README.md` if
+  it lists the feature, and the "Done since the inventory was last curated"
+  section. Last full recuration: 2026-06-22.
 
 ## Testing and hardening
 
