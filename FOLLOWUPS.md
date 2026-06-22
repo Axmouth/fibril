@@ -222,6 +222,16 @@ first three are admin-thin (the primitive exists, just expose it).
    (the queue carries its own idle-TTL, e.g. expire-after-idle), not an external
    config. A sparse worker destroys queues idle beyond their declared TTL. Builds
    on delete (#4) + idle tracking.
+   - DISTINCT from message-TTL default (#6): #6 drops individual MESSAGES by age
+     (per-partition, no coordination); #7 deletes the whole QUEUE after idle. Use
+     a clearly separate DeclareMeta field (e.g. `expire_after_idle_ms`), never
+     reuse the message-TTL default.
+   - DESIGN NOTE [USER]: queue expiration is ideally GLOBAL (per queue), not
+     per-partition. "Is the queue idle?" must aggregate activity across ALL the
+     queue's partitions and replica nodes, so a per-partition timer is wrong - the
+     decision + the destroy need to be coordinated (controller-side aggregation of
+     last-activity, then a coordinated teardown like multi-node delete in #4).
+     Needs brainstorming; deferred. Per-partition idle is only a building block.
 
 Shared time-based internals (map for #5/#6/#7 - they are "close" but share CONFIG
 more than MECHANISM, so do them one-by-one, not as one unified subsystem):

@@ -332,7 +332,7 @@ pub struct Publisher {
     group: Option<GroupName>,
     /// Default message TTL (ms) stamped on every immediate publish from this
     /// publisher. Set via [`Publisher::expiring`]. `None` = no default.
-    default_ttl_ms: Option<u64>,
+    default_message_ttl_ms: Option<u64>,
 }
 
 /// Broker confirmation for a publish request.
@@ -700,7 +700,7 @@ impl Publisher {
     /// number is seconds, or pass a [`std::time::Duration`]. Applies to the
     /// immediate publish paths (delayed publishes do not carry a TTL yet).
     pub fn expiring(mut self, ttl: impl Delayable) -> Self {
-        self.default_ttl_ms = Some(ttl.with_delay().as_millis() as u64);
+        self.default_message_ttl_ms = Some(ttl.with_delay().as_millis() as u64);
         self
     }
 }
@@ -1017,6 +1017,7 @@ pub struct QueueConfig {
     dlq_policy: Option<DeadLetterPolicy>,
     dlq_max_retries: Option<u32>,
     partition_count: Option<u32>,
+    default_message_ttl_ms: Option<u64>,
 }
 
 impl QueueConfig {
@@ -1028,6 +1029,7 @@ impl QueueConfig {
             dlq_policy: None,
             dlq_max_retries: None,
             partition_count: None,
+            default_message_ttl_ms: None,
         })
     }
 
@@ -1047,6 +1049,15 @@ impl QueueConfig {
     /// Set the number of retries before the queue's dead-letter policy applies.
     pub fn max_retries(mut self, max_retries: u32) -> Self {
         self.dlq_max_retries = Some(max_retries);
+        self
+    }
+
+    /// Set a default message TTL for this queue: messages published without their
+    /// own TTL drop after this interval. Follows the [`Delayable`] convention
+    /// (bare number = seconds, or a Duration). This is per-message expiry, not
+    /// queue expiration (auto-deleting an idle queue).
+    pub fn default_message_ttl(mut self, ttl: impl Delayable) -> Self {
+        self.default_message_ttl_ms = Some(ttl.with_delay().as_millis() as u64);
         self
     }
 
@@ -1100,6 +1111,7 @@ impl QueueConfig {
             dlq_policy,
             dlq_max_retries: self.dlq_max_retries,
             partition_count: self.partition_count,
+            default_message_ttl_ms: self.default_message_ttl_ms,
         }
     }
 }
@@ -1590,7 +1602,7 @@ impl Client {
             shared: self.shared.clone(),
             topic: TopicName::parse(topic)?,
             group: None,
-            default_ttl_ms: None,
+            default_message_ttl_ms: None,
         })
     }
 
@@ -1607,7 +1619,7 @@ impl Client {
             shared: self.shared.clone(),
             topic: TopicName::parse(topic)?,
             group: GroupName::parse_optional(group)?,
-            default_ttl_ms: None,
+            default_message_ttl_ms: None,
         })
     }
 
@@ -1718,7 +1730,7 @@ impl Publisher {
                 message.content_type,
                 message.headers,
                 message.payload,
-                self.default_ttl_ms,
+                self.default_message_ttl_ms,
             )
             .await
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
@@ -1815,7 +1827,7 @@ impl Publisher {
                         message.content_type.clone(),
                         message.headers.clone(),
                         message.payload.clone(),
-                        self.default_ttl_ms,
+                        self.default_message_ttl_ms,
                     )
                     .await?;
                 confirmation.confirmed().await
@@ -1876,7 +1888,7 @@ impl Publisher {
                         message.content_type.clone(),
                         message.headers.clone(),
                         message.payload.clone(),
-                        self.default_ttl_ms,
+                        self.default_message_ttl_ms,
                     )
                     .await
             }
@@ -4937,6 +4949,27 @@ mod tests {
                     }
                     other => panic!("expected custom dlq policy, got {other:?}"),
                 }
+                reply.send(Ok(())).unwrap();
+            }
+            other => panic!("expected declare queue, got {other:?}"),
+        }
+
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn declare_carries_default_message_ttl() {
+        let (client, mut rx) = client_with_command_rx();
+        let task = tokio::spawn(async move {
+            client
+                .declare_queue(QueueConfig::new("ephemeral").unwrap().default_message_ttl(30u64))
+                .await
+        });
+
+        match rx.recv().await.unwrap() {
+            Command::DeclareQueue { req, reply } => {
+                // 30 seconds via the Delayable convention -> 30_000 ms.
+                assert_eq!(req.default_message_ttl_ms, Some(30_000));
                 reply.send(Ok(())).unwrap();
             }
             other => panic!("expected declare queue, got {other:?}"),

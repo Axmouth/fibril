@@ -464,6 +464,7 @@ mod tests {
             }),
             dlq_max_retries: Some(7),
             partition_count: Some(3),
+            default_message_ttl_ms: None,
         };
         let frame = try_encode(Op::DeclareQueue, 5, &declare).unwrap();
         let got = try_decode::<DeclareQueue>(&frame).unwrap();

@@ -3868,6 +3868,7 @@ async fn declare_fans_out_partitions_standalone() {
                     dlq_policy: None,
                     dlq_max_retries: None,
                     partition_count: Some(3),
+                    default_message_ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -3891,6 +3892,7 @@ async fn declare_fans_out_partitions_standalone() {
                     dlq_policy: None,
                     dlq_max_retries: None,
                     partition_count: None,
+                    default_message_ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -3959,6 +3961,7 @@ async fn declare_uses_coordinator_effective_count() {
                     dlq_policy: None,
                     dlq_max_retries: None,
                     partition_count: Some(3),
+                    default_message_ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -4536,6 +4539,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     dlq_policy: Some(QueueDlqPolicy::Global),
                     dlq_max_retries: Some(0),
                     partition_count: None,
+                    default_message_ttl_ms: None,
                 },
             )
             .unwrap(),

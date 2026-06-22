@@ -86,6 +86,9 @@ pub struct CreateQueueRequest {
     pub policy: Option<QueueDlqPolicyRequest>,
     pub target: Option<QueueDlqTargetRequest>,
     pub max_retries: Option<u32>,
+    /// Optional per-queue default message TTL (ms): messages without their own
+    /// TTL drop after this age. Not queue expiration.
+    pub default_message_ttl_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -933,7 +936,7 @@ pub async fn update_queue_dlq(
     let meta = DeclareMeta {
         dlq_policy: Some(policy),
         dlq_max_retries: request.max_retries,
-        default_ttl_ms: None,
+        default_message_ttl_ms: None,
     };
 
     let group = normalize_group(request.group);
@@ -1018,7 +1021,7 @@ pub async fn create_queue(
     let meta = DeclareMeta {
         dlq_policy,
         dlq_max_retries: request.max_retries,
-        default_ttl_ms: None,
+        default_message_ttl_ms: request.default_message_ttl_ms,
     };
 
     let group = normalize_group(request.group.clone());

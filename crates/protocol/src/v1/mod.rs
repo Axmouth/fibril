@@ -249,6 +249,11 @@ pub struct DeclareQueue {
     /// clients wire-compatible.
     #[serde(default)]
     pub partition_count: Option<u32>,
+    /// Default message TTL in milliseconds for this queue: messages published
+    /// without their own TTL drop after this age. `None` = no default. NOT queue
+    /// expiration (that is a separate idle-delete setting).
+    #[serde(default)]
+    pub default_message_ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

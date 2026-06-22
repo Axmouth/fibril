@@ -180,7 +180,7 @@ async fn to_declare_meta(declare: &DeclareQueue) -> Result<DeclareMeta, String> 
     Ok(DeclareMeta {
         dlq_policy,
         dlq_max_retries: declare.dlq_max_retries,
-        default_ttl_ms: None,
+        default_message_ttl_ms: declare.default_message_ttl_ms,
     })
 }
 

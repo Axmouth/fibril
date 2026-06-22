@@ -368,6 +368,8 @@ pub fn encode_declare_queue(request_id: u64, declare: &DeclareQueue) -> WireResu
     put_optional_dlq_policy(&mut out, declare.dlq_policy.as_ref())?;
     put_optional_u32(&mut out, declare.dlq_max_retries);
     put_optional_u32(&mut out, declare.partition_count);
+    // Trailing so a peer that omits it still decodes (read as None).
+    put_optional_u64(&mut out, declare.default_message_ttl_ms);
     Ok(frame(Op::DeclareQueue, request_id, out.freeze()))
 }
 
@@ -381,6 +383,11 @@ pub fn decode_declare_queue(frame: &Frame) -> WireResult<DeclareQueue> {
         dlq_policy: reader.optional_dlq_policy()?,
         dlq_max_retries: reader.optional_u32()?,
         partition_count: reader.optional_u32()?,
+        default_message_ttl_ms: if reader.remaining() > 0 {
+            reader.optional_u64()?
+        } else {
+            None
+        },
     };
     reader.finish()?;
     Ok(declare)

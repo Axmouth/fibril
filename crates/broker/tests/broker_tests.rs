@@ -6282,7 +6282,7 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
             DeclareMeta {
                 dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
                 dlq_max_retries: Some(0),
-                default_ttl_ms: None,
+                default_message_ttl_ms: None,
             },
         )
         .await?;
@@ -6364,7 +6364,7 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
             DeclareMeta {
                 dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
                 dlq_max_retries: Some(0),
-                default_ttl_ms: None,
+                default_message_ttl_ms: None,
             },
         )
         .await?;
@@ -6512,7 +6512,7 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
             DeclareMeta {
                 dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
                 dlq_max_retries: Some(2),
-                default_ttl_ms: None,
+                default_message_ttl_ms: None,
             },
         )
         .await?;
@@ -6594,7 +6594,7 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
             DeclareMeta {
                 dlq_policy: Some(DLQDiscardPolicyWire::GlobalDQL),
                 dlq_max_retries: Some(0),
-                default_ttl_ms: None,
+                default_message_ttl_ms: None,
             },
         )
         .await?;
