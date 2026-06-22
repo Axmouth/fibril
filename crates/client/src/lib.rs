@@ -330,6 +330,9 @@ pub struct Publisher {
     shared: Arc<ClientShared>,
     topic: TopicName,
     group: Option<GroupName>,
+    /// Default message TTL (ms) stamped on every immediate publish from this
+    /// publisher. Set via [`Publisher::expiring`]. `None` = no default.
+    default_ttl_ms: Option<u64>,
 }
 
 /// Broker confirmation for a publish request.
@@ -689,6 +692,16 @@ impl Publisher {
     /// confirmed and stamps producer-id/sequence headers (opt-in "never miss").
     pub fn reliable(self) -> ReliablePublisher {
         ReliablePublisher::new(self)
+    }
+
+    /// Stamp a default message TTL on every immediate publish from this
+    /// publisher: the broker drops the message if it is not consumed within the
+    /// interval. The interval follows the [`Delayable`] convention - a bare
+    /// number is seconds, or pass a [`std::time::Duration`]. Applies to the
+    /// immediate publish paths (delayed publishes do not carry a TTL yet).
+    pub fn expiring(mut self, ttl: impl Delayable) -> Self {
+        self.default_ttl_ms = Some(ttl.with_delay().as_millis() as u64);
+        self
     }
 }
 
@@ -1577,6 +1590,7 @@ impl Client {
             shared: self.shared.clone(),
             topic: TopicName::parse(topic)?,
             group: None,
+            default_ttl_ms: None,
         })
     }
 
@@ -1593,6 +1607,7 @@ impl Client {
             shared: self.shared.clone(),
             topic: TopicName::parse(topic)?,
             group: GroupName::parse_optional(group)?,
+            default_ttl_ms: None,
         })
     }
 
@@ -1703,6 +1718,7 @@ impl Publisher {
                 message.content_type,
                 message.headers,
                 message.payload,
+                self.default_ttl_ms,
             )
             .await
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
@@ -1799,6 +1815,7 @@ impl Publisher {
                         message.content_type.clone(),
                         message.headers.clone(),
                         message.payload.clone(),
+                        self.default_ttl_ms,
                     )
                     .await?;
                 confirmation.confirmed().await
@@ -1859,6 +1876,7 @@ impl Publisher {
                         message.content_type.clone(),
                         message.headers.clone(),
                         message.payload.clone(),
+                        self.default_ttl_ms,
                     )
                     .await
             }
@@ -2574,6 +2592,7 @@ enum Command {
         headers: HashMap<String, String>,
         payload: Vec<u8>,
         published: u64,
+        ttl_ms: Option<u64>,
     },
     PublishConfirmed {
         topic: String,
@@ -2584,6 +2603,7 @@ enum Command {
         headers: HashMap<String, String>,
         payload: Vec<u8>,
         published: u64,
+        ttl_ms: Option<u64>,
         reply: oneshot::Sender<FibrilResult<u64>>,
     },
     PublishDelayedUnconfirmed {
@@ -3074,7 +3094,7 @@ where
                 }
 
                 Some(cmd) = cmd_rx.recv() => match cmd {
-                    Command::PublishUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published } => {
+                    Command::PublishUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, ttl_ms } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = Publish {
                             topic,
@@ -3087,11 +3107,11 @@ where
                             published,
                             partition_key: None,
                             partitioning_version,
-                            ttl_ms: None,
+                            ttl_ms,
                         };
                         feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }
-                    Command::PublishConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, reply } => {
+                    Command::PublishConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, ttl_ms, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
@@ -3105,7 +3125,7 @@ where
                             published,
                             partition_key: None,
                             partitioning_version,
-                            ttl_ms: None,
+                            ttl_ms,
                         };
                         feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }
@@ -3667,6 +3687,7 @@ impl EngineHandle {
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
+        ttl_ms: Option<u64>,
     ) -> FibrilResult<()> {
         let published = unix_millis();
         self.tx
@@ -3679,6 +3700,7 @@ impl EngineHandle {
                 headers,
                 payload,
                 published,
+                ttl_ms,
             })
             .await
             .map_err(|_e| FibrilError::BrokenPipe)?;
@@ -3694,6 +3716,7 @@ impl EngineHandle {
         content_type: Option<ContentType>,
         headers: HashMap<String, String>,
         payload: Vec<u8>,
+        ttl_ms: Option<u64>,
     ) -> FibrilResult<PublishConfirmation> {
         let (tx, rx) = oneshot::channel();
         let published = unix_millis();
@@ -3707,6 +3730,7 @@ impl EngineHandle {
                 headers,
                 payload,
                 published,
+                ttl_ms,
                 reply: tx,
             })
             .await
@@ -4042,6 +4066,16 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::time::Duration;
+
+    #[test]
+    fn expiring_ttl_follows_delayable_convention() {
+        // expiring() stamps `ttl.with_delay().as_millis()`. A bare number is
+        // seconds; a Duration is taken as-is. This mirrors the delayed-publish API.
+        let from_secs = 60u64.with_delay().as_millis() as u64;
+        assert_eq!(from_secs, 60_000);
+        let from_duration = Duration::from_millis(1500).with_delay().as_millis() as u64;
+        assert_eq!(from_duration, 1500);
+    }
 
     #[test]
     fn topology_cache_distinguishes_declared_from_gone() {
