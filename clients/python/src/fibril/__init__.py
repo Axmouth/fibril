@@ -2,8 +2,7 @@
 
 Async-first client for the Fibril message broker with a thin blocking facade.
 The public surface (``Client``, ``Publisher``, ``Subscription``, ``Message``) is
-re-exported here as the higher layers land; for now this exposes the protocol
-constants so the package imports cleanly.
+re-exported from this package root.
 """
 
 from __future__ import annotations
