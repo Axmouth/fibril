@@ -59,11 +59,29 @@ const client = await new ClientOptions()
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 from fibril import ClientOptions
 
 client = await ClientOptions().with_auth("fibril", "fibril").connect("127.0.0.1:9876")
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+from fibril import ClientOptions
+from fibril.blocking import BlockingClient
+
+client = BlockingClient.connect(
+    "127.0.0.1:9876", ClientOptions().with_auth("fibril", "fibril")
+)
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
@@ -122,6 +140,9 @@ const client = await new ClientOptions()
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 from fibril import ClientOptions
 
@@ -129,6 +150,22 @@ client = await ClientOptions(
     reconnect_reconcile_policy="restore_client_subscriptions"
 ).connect("127.0.0.1:9876")
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+from fibril import ClientOptions
+from fibril.blocking import BlockingClient
+
+client = BlockingClient.connect(
+    "127.0.0.1:9876",
+    ClientOptions(reconnect_reconcile_policy="restore_client_subscriptions"),
+)
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
@@ -174,6 +211,9 @@ const pipelinedOffset = await confirmation.confirmed();
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 publisher = client.publisher("email.send")
 
@@ -184,6 +224,23 @@ offset = await publisher.publish_confirmed("needs an offset")
 confirmation = await publisher.publish_with_confirmation("pipeline me")
 pipelined_offset = await confirmation.confirmed()
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+publisher = client.publisher("email.send")
+
+publisher.publish("hello")
+
+offset = publisher.publish_confirmed("needs an offset")
+
+confirmation = publisher.publish_with_confirmation("pipeline me")
+pipelined_offset = confirmation.confirmed()
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
@@ -226,6 +283,9 @@ TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute 
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 await publisher.publish_delayed("send later", 30)
 
@@ -233,6 +293,18 @@ offset = await publisher.publish_delayed_confirmed(
     "send later and return offset", 30
 )
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+publisher.publish_delayed("send later", 30)
+
+offset = publisher.publish_delayed_confirmed("send later and return offset", 30)
+```
+
+  </TabItem>
+</Tabs>
 
 Python delays are seconds (a float or a `datetime.timedelta`).
 
@@ -268,10 +340,24 @@ TypeScript numeric delays are milliseconds. Passing a `Date` uses that absolute 
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 msg = await sub.recv()
 await msg.retry_after(30)
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+msg = sub.recv()
+msg.retry_after(30)
+```
+
+  </TabItem>
+</Tabs>
 
 Python delays are seconds (a float or a `datetime.timedelta`).
 
@@ -331,6 +417,9 @@ await publisher.publish(NewMessage.raw(new Uint8Array([1, 2, 3])));
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 from fibril import NewMessage
 
@@ -342,6 +431,24 @@ await publisher.publish(
 
 await publisher.publish(NewMessage.raw(bytes([1, 2, 3])))
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+from fibril import NewMessage
+
+publisher.publish(NewMessage.json({"id": 42, "kind": "welcome"}))
+
+publisher.publish(
+    NewMessage.content("plain text").header("x-trace-id", "abc123")
+)
+
+publisher.publish(NewMessage.raw(bytes([1, 2, 3])))
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
@@ -402,6 +509,9 @@ for await (const msg of sub) {
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 sub = await client.subscribe("email.send").group("workers").prefetch(32).sub_manual_ack()
 
@@ -414,6 +524,25 @@ async for msg in sub:
     except Exception:
         await msg.retry()
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+sub = client.subscribe("email.send").group("workers").prefetch(32).sub_manual_ack()
+
+for msg in sub:
+    body = msg.text()
+
+    try:
+        send_email(body)
+        msg.complete()
+    except Exception:
+        msg.retry()
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
@@ -478,6 +607,9 @@ await client.declareQueue(
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 from fibril import QueueConfig
 
@@ -488,6 +620,23 @@ await client.declare_queue(
     .max_retries(3)
 )
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+from fibril import QueueConfig
+
+client.declare_queue(
+    QueueConfig("email.send")
+    .group("workers")
+    .use_global_dead_letter_queue()
+    .max_retries(3)
+)
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
@@ -542,6 +691,9 @@ for await (const msg of sub) {
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 publisher = client.publisher_grouped("email.send", "workers")
 await publisher.publish_confirmed(NewMessage.json(job))
@@ -554,6 +706,25 @@ async for msg in sub:
     else:
         await msg.retry()
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+publisher = client.publisher_grouped("email.send", "workers")
+publisher.publish_confirmed(NewMessage.json(job))
+
+sub = client.subscribe("email.send").group("workers").prefetch(32).sub_manual_ack()
+
+for msg in sub:
+    if process(msg.deserialize()):
+        msg.complete()
+    else:
+        msg.retry()
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
@@ -641,12 +812,28 @@ for await (const msg of sub) {
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 sub = await client.subscribe("metrics").prefetch(128).sub_auto_ack()
 
 async for msg in sub:
     observe(msg.deserialize())
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+sub = client.subscribe("metrics").prefetch(128).sub_auto_ack()
+
+for msg in sub:
+    observe(msg.deserialize())
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
@@ -670,9 +857,22 @@ await client.shutdown();
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 await client.shutdown()
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+client.shutdown()
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
@@ -682,7 +882,9 @@ await client.shutdown()
 For code not built on asyncio, the Python package ships a synchronous facade. It
 runs the async client on a background event-loop thread and bridges each call, so
 it is the same client behind one source of truth rather than a second
-implementation. Subscriptions become ordinary iterators.
+implementation. Subscriptions become ordinary iterators. The Async/Blocking
+toggle on the examples above shows the synchronous form of each call, and the
+full shape is:
 
 ```python
 from fibril.blocking import BlockingClient

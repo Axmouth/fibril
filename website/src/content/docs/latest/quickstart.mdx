@@ -112,6 +112,9 @@ The Python client lives in `clients/python`. Delays are seconds (a float or a
 `timedelta`). A synchronous `fibril.blocking.BlockingClient` mirrors the same API
 without `async`.
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 from fibril import ClientOptions, NewMessage
 
@@ -126,6 +129,30 @@ async for msg in sub:
     await process(msg.deserialize())
     await msg.complete()
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+from fibril import ClientOptions, NewMessage
+from fibril.blocking import BlockingClient
+
+client = BlockingClient.connect(
+    "127.0.0.1:9876", ClientOptions().with_auth("fibril", "fibril")
+)
+
+publisher = client.publisher("email.send")
+publisher.publish(NewMessage.json({"body": "hello"}))
+publisher.publish_delayed(NewMessage.json({"body": "hello later"}), 30)
+
+sub = client.subscribe("email.send").prefetch(32).sub_manual_ack()
+for msg in sub:
+    process(msg.deserialize())
+    msg.complete()
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>
