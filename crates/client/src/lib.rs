@@ -3087,6 +3087,7 @@ where
                             published,
                             partition_key: None,
                             partitioning_version,
+                            ttl_ms: None,
                         };
                         feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }
@@ -3104,6 +3105,7 @@ where
                             published,
                             partition_key: None,
                             partitioning_version,
+                            ttl_ms: None,
                         };
                         feed_encoded_publish_or_die!(framed, wire::encode_publish(req_id, &p), fatal_error)
                     }

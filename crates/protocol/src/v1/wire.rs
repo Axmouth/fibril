@@ -996,6 +996,8 @@ fn put_publish_common(out: &mut BytesMut, publish: &Publish) -> WireResult<()> {
     put_optional_bytes(out, publish.partition_key.as_deref())?;
     out.put_u64(publish.partitioning_version);
     put_bytes(out, &publish.payload)?;
+    // Trailing so a peer that does not send it still decodes (read as None).
+    put_optional_u64(out, publish.ttl_ms);
     Ok(())
 }
 
@@ -1010,6 +1012,12 @@ fn read_publish_common(reader: &mut Reader<'_>) -> WireResult<Publish> {
     let partition_key = reader.optional_bytes()?.map(ToOwned::to_owned);
     let partitioning_version = reader.u64()?;
     let payload = reader.bytes()?.to_vec();
+    // Trailing optional: absent when a peer has not been updated to send it.
+    let ttl_ms = if reader.remaining() > 0 {
+        reader.optional_u64()?
+    } else {
+        None
+    };
 
     Ok(Publish {
         topic,
@@ -1022,6 +1030,7 @@ fn read_publish_common(reader: &mut Reader<'_>) -> WireResult<Publish> {
         published,
         partition_key,
         partitioning_version,
+        ttl_ms,
     })
 }
 
@@ -1486,6 +1495,10 @@ impl<'a> Reader<'a> {
         } else {
             Err(WireError::InvalidMagic { context })
         }
+    }
+
+    fn remaining(&self) -> usize {
+        self.input.len().saturating_sub(self.cursor)
     }
 
     fn finish(&self) -> WireResult<()> {
@@ -2032,6 +2045,7 @@ mod tests {
         assert_eq!(got.published, expected.published);
         assert_eq!(got.partition_key, expected.partition_key);
         assert_eq!(got.partitioning_version, expected.partitioning_version);
+        assert_eq!(got.ttl_ms, expected.ttl_ms);
     }
 
     #[test]
@@ -2047,12 +2061,35 @@ mod tests {
             published: 99,
             partition_key: Some(b"customer-7".to_vec()),
             partitioning_version: 12,
+            ttl_ms: None,
         };
 
         let frame = encode_publish(42, &publish).unwrap();
         assert_eq!(frame.opcode, Op::Publish as u16);
         assert_eq!(frame.request_id, 42);
         assert_publish_eq(&decode_publish(&frame).unwrap(), &publish);
+    }
+
+    #[test]
+    fn publish_roundtrips_with_ttl() {
+        let publish = Publish {
+            topic: "orders".into(),
+            partition: Partition::new(0),
+            group: None,
+            require_confirm: false,
+            content_type: None,
+            headers: headers(),
+            payload: vec![9, 8, 7],
+            published: 1,
+            partition_key: None,
+            partitioning_version: 0,
+            ttl_ms: Some(30_000),
+        };
+
+        let frame = encode_publish(1, &publish).unwrap();
+        let got = decode_publish(&frame).unwrap();
+        assert_eq!(got.ttl_ms, Some(30_000));
+        assert_publish_eq(&got, &publish);
     }
 
     #[test]

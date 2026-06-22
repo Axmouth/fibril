@@ -502,6 +502,7 @@ async fn static_ownership_allows_owned_queue() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -544,6 +545,7 @@ async fn partition_lowest_unacked_offset_reaches_boundary_when_drained() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap()
@@ -641,6 +643,7 @@ async fn repartition_delivery_hold_blocks_until_released() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap()
@@ -693,6 +696,7 @@ async fn repartition_transition_holds_new_partition_until_source_drains() {
         unix_millis(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -725,6 +729,7 @@ async fn repartition_transition_holds_new_partition_until_source_drains() {
         unix_millis(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -791,6 +796,7 @@ async fn repartition_drain_detection_lifts_new_partition_after_old_acks() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap()
@@ -809,6 +815,7 @@ async fn repartition_drain_detection_lifts_new_partition_after_old_acks() {
         unix_millis(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -885,6 +892,7 @@ async fn shrink_survivor_holds_moved_key_until_removed_source_drains() {
         unix_millis(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -929,6 +937,7 @@ async fn shrink_survivor_holds_moved_key_until_removed_source_drains() {
         unix_millis(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -1010,6 +1019,7 @@ async fn shrink_hold_delivers_below_boundary_and_holds_above() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap()
@@ -1097,6 +1107,7 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1327,6 +1338,7 @@ async fn refresh_follower_keeps_replication_worker_progress() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1427,6 +1439,7 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1461,6 +1474,7 @@ async fn publish_confirm_waits_for_follower_durable_progress() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1513,6 +1527,7 @@ async fn publish_refused_when_min_in_sync_exceeds_replica_set() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1567,6 +1582,7 @@ async fn publish_refused_when_in_sync_replicas_below_floor() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1621,6 +1637,7 @@ async fn stale_follower_excluded_from_in_sync_set() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1675,6 +1692,7 @@ async fn publish_admitted_once_in_sync_floor_met() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1770,6 +1788,7 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1851,6 +1870,7 @@ async fn catch_up_rejects_stale_append_without_recording_ready_state() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1976,6 +1996,7 @@ async fn assignment_transitions_use_cached_local_role_when_watch_skips_previous_
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2083,6 +2104,7 @@ async fn demote_owner_to_follower_stops_broker_owner_runtime() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2128,6 +2150,7 @@ async fn demote_owner_to_follower_stops_broker_owner_runtime() {
                     unix_millis(),
                     None,
                     Default::default(),
+                    None,
                 )
                 .await
             {
@@ -2162,6 +2185,7 @@ async fn demote_owner_to_follower_requeues_broker_tracked_deliveries() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2283,6 +2307,7 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2328,6 +2353,7 @@ async fn freeze_owner_requeues_broker_tracked_deliveries() {
                     unix_millis(),
                     None,
                     Default::default(),
+                    None,
                 )
                 .await
             {
@@ -2405,6 +2431,7 @@ async fn owner_replication_read_returns_published_records() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2500,6 +2527,7 @@ async fn owner_replication_long_poll_wakes_after_publish() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2589,6 +2617,7 @@ async fn owner_replication_long_poll_ignores_local_only_wake() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2618,6 +2647,7 @@ async fn owner_replication_long_poll_wakes_after_ack_event() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2719,6 +2749,7 @@ async fn cold_owner_materializes_at_cached_assignment_epoch() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2763,6 +2794,7 @@ async fn publishes_route_to_independent_partition_logs() {
         unix_millis(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -2781,6 +2813,7 @@ async fn publishes_route_to_independent_partition_logs() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap()
@@ -2873,6 +2906,7 @@ async fn exclusive_assignee_gate_delivers_only_to_assignee() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap()
@@ -2899,6 +2933,7 @@ async fn exclusive_assignee_gate_delivers_only_to_assignee() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap()
@@ -2968,6 +3003,7 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -3066,6 +3102,7 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -3286,6 +3323,7 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -3385,6 +3423,7 @@ async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -3439,6 +3478,7 @@ async fn checkpoint_aware_catch_up_repairs_overlapping_local_prefix() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -3466,6 +3506,7 @@ async fn checkpoint_aware_catch_up_repairs_overlapping_local_prefix() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -3762,6 +3803,7 @@ async fn follower_worker_tick_records_catch_up_progress() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -4769,6 +4811,7 @@ async fn queue_eviction_skips_broker_delivery_tags() {
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -4835,6 +4878,7 @@ async fn queue_eviction_unmaterializes_idle_materialized_queue() {
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -4876,6 +4920,7 @@ async fn queue_eviction_reports_not_materialized_after_previous_unmaterialize() 
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -4916,6 +4961,7 @@ async fn queue_eviction_sweep_reports_skips_and_storage_outcomes() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap()
@@ -4977,6 +5023,7 @@ async fn queue_eviction_sweep_unmaterializes_idle_materialized_queue() {
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -5014,6 +5061,7 @@ async fn queue_eviction_sweep_does_not_repeat_already_unloaded_queue() {
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -5055,6 +5103,7 @@ async fn queue_eviction_sweep_rechecks_queue_materialized_after_previous_unload(
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -5125,6 +5174,7 @@ async fn queue_eviction_worker_is_disabled_by_default() {
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -5157,6 +5207,7 @@ async fn queue_eviction_worker_can_be_enabled_after_startup() {
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -5209,6 +5260,7 @@ async fn queue_eviction_worker_leaves_active_publisher_materialized() {
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -5251,6 +5303,7 @@ async fn active_publisher_does_not_race_idle_cleanup_into_double_open() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -5283,6 +5336,7 @@ async fn broker_delivers_messages_in_order() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -5383,6 +5437,7 @@ async fn delayed_retry_waits_until_deadline() {
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap()
@@ -5438,6 +5493,7 @@ async fn broker_respects_prefetch() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -5488,6 +5544,7 @@ async fn ack_releases_prefetch_slot() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -5575,6 +5632,7 @@ async fn ack_releases_prefetch_slot2() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -5656,6 +5714,7 @@ async fn broker_redelivers_after_expiry() {
         Default::default(),
         None,
         Default::default(),
+        None,
     )
     .await
     .unwrap();
@@ -5705,6 +5764,7 @@ async fn broker_distributes_across_consumers() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -5753,6 +5813,7 @@ async fn slow_consumer_does_not_starve_fast_one() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -5812,6 +5873,7 @@ async fn unsubscribe_requeues_prefetched_unacked_messages() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -5883,6 +5945,7 @@ async fn unsubscribe_redistributes_prefetched_messages_to_active_subscriber() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -5965,6 +6028,7 @@ async fn unsubscribe_redelivery_survives_if_active_replacement_has_no_capacity_t
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -6072,6 +6136,7 @@ async fn unsubscribe_does_not_requeue_acked_messages_after_settles_drain() {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -6179,6 +6244,7 @@ async fn publish_engine_open_conflict_is_returned_to_publisher() -> anyhow::Resu
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await?;
     let err = tokio::time::timeout(Duration::from_secs(2), reply)
@@ -6232,6 +6298,7 @@ async fn global_dlq_policy_routes_exhausted_message_to_global_target()
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await?
         .await??;
@@ -6313,6 +6380,7 @@ async fn dlq_replay_copies_message_back_to_source_without_system_headers()
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await?
         .await??;
@@ -6460,6 +6528,7 @@ async fn global_dlq_metadata_reports_retry_count_after_requeues()
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await?
         .await??;
@@ -6541,6 +6610,7 @@ async fn clearing_global_dlq_makes_global_policy_discard_exhausted_messages()
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await?
         .await??;
@@ -7032,6 +7102,7 @@ async fn stress_single_consumer(total: usize) {
             Default::default(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();

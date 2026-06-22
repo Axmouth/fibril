@@ -2436,6 +2436,7 @@ mod tests {
                         published: unix_millis(),
                         partition_key: None,
                         partitioning_version: 0,
+                        ttl_ms: None,
                     },
                 )
                 .unwrap(),

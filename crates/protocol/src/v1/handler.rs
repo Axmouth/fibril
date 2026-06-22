@@ -2746,6 +2746,12 @@ pub async fn handle_connection(
                     continue;
                 };
                 cached_publisher.last_used_ms = now_ms;
+                // Resolve the per-message TTL to an absolute drop deadline using
+                // the broker clock (the owner is the clock authority). A per-queue
+                // default TTL fallback is applied lower down in Stroma.
+                let expire_at = pubreq
+                    .ttl_ms
+                    .map(|ttl| publish_received.saturating_add(ttl));
                 let pub_tx = pub_tx.clone();
                 let frame_tx_pub = frame_tx_low_prio.clone();
                 // tokio::spawn(async move {
@@ -2761,6 +2767,7 @@ pub async fn handle_connection(
                             publish_received,
                             to_storage_content_type(content_type),
                             headers,
+                            expire_at,
                         )
                         .await
                 } else {
@@ -2772,6 +2779,7 @@ pub async fn handle_connection(
                             publish_received,
                             to_storage_content_type(content_type),
                             headers,
+                            expire_at,
                         )
                         .await
                 };

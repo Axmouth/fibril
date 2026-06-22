@@ -192,6 +192,11 @@ pub struct Publish {
     /// matches a single-partition v0 queue (standalone / non-cluster path).
     #[serde(default)]
     pub partitioning_version: u64,
+    /// Optional message TTL in milliseconds (relative to publish time). The owner
+    /// resolves it to an absolute drop deadline. Absent => the queue's default TTL
+    /// (if any) applies; if neither is set the message never expires.
+    #[serde(default)]
+    pub ttl_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

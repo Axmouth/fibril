@@ -117,8 +117,6 @@ Figure keratin head offset discrepancy.
 
 Maybe find way to better linearly read from Keratin, faster
 
-More pipelining in Keratin writer: Batch -> encode and stage buffer -> write file -> fsync -> notify awaiters (estimated possible 40%-60% gain in throughput from not waiting encoding and fsync for large payloads)
-
 explore a cache trying to keep in memory x mb of next deliverable messages(we always know which messages are next with ready set)
 
 opportunistic batching (do not wait if the socket is writable now, but if you would block, accumulate)

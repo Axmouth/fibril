@@ -224,6 +224,7 @@ impl PublisherHandle {
         publish_received: u64,
         content_type: Option<MessageContentType>,
         extra: HashMap<String, String>,
+        expire_at: Option<UnixMillis>,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();
 
@@ -233,7 +234,7 @@ impl PublisherHandle {
                 reply: tx,
                 require_confirm: true,
                 not_before: None,
-                expire_at: None,
+                expire_at,
                 published,
                 publish_received,
                 content_type,
@@ -259,6 +260,7 @@ impl PublisherHandle {
         publish_received: u64,
         content_type: Option<MessageContentType>,
         extra: HashMap<String, String>,
+        expire_at: Option<UnixMillis>,
     ) -> Result<oneshot::Receiver<Result<u64, BrokerError>>, BrokerError> {
         let (tx, rx) = oneshot::channel();
 
@@ -268,7 +270,7 @@ impl PublisherHandle {
                 reply: tx,
                 require_confirm: false,
                 not_before: None,
-                expire_at: None,
+                expire_at,
                 publish_received,
                 published,
                 content_type,

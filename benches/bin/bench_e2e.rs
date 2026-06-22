@@ -177,7 +177,7 @@ async fn producer_task(
 
         let published = unix_millis();
         let recv = publisher
-            .publish(payload, published, published, None, HashMap::new())
+            .publish(payload, published, published, None, HashMap::new(), None)
             .await
             .unwrap();
         recvs.push(recv);

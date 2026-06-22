@@ -31,6 +31,7 @@ async fn run_load_test(num_clients: usize, msgs_per_client: usize, txb: oneshot:
                 published: unix_millis(),
                 partition_key: None,
                 partitioning_version: 0,
+                ttl_ms: None,
             };
             let stream = TcpStream::connect(SocketAddr::V4(SocketAddrV4::new(
                 Ipv4Addr::from([127, 0, 0, 1]),

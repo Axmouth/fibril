@@ -500,6 +500,7 @@ async fn framed_publish(
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -1557,6 +1558,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1849,6 +1851,7 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -1933,6 +1936,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -2112,6 +2116,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -2252,6 +2257,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
                             unix_millis(),
                             None,
                             Default::default(),
+                            None,
                         )
                         .await;
                     if let Ok(reply) = reply {
@@ -2324,6 +2330,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
             unix_millis(),
             None,
             Default::default(),
+            None,
         )
         .await
         .unwrap();
@@ -2437,6 +2444,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
                     unix_millis(),
                     None,
                     Default::default(),
+                    None,
                 )
                 .await
             {
@@ -2473,6 +2481,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -2592,6 +2601,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -2824,6 +2834,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
                 unix_millis(),
                 None,
                 Default::default(),
+                None,
             )
             .await
             .unwrap();
@@ -3035,6 +3046,7 @@ async fn unowned_publish_redirects_to_current_owner() {
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -3114,6 +3126,7 @@ async fn stale_partitioning_version_publish_is_fenced() {
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 2,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -3170,6 +3183,7 @@ async fn multi_partition_publish_subscribe_is_isolated_e2e() {
                         published: unix_millis(),
                         partition_key: None,
                         partitioning_version: 0,
+                        ttl_ms: None,
                     },
                 )
                 .unwrap(),
@@ -3344,6 +3358,7 @@ async fn publish_to_partition(
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -4114,6 +4129,7 @@ async fn unowned_publish_returns_not_owner_error_and_keeps_connection_open() {
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -4242,6 +4258,7 @@ async fn publish_content_type_header_is_delivered_as_metadata() {
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -4282,6 +4299,7 @@ async fn publish_with_reserved_header_returns_error_and_keeps_connection_open() 
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -4448,6 +4466,7 @@ async fn delayed_retry_over_tcp_waits_until_not_before() {
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -4588,6 +4607,7 @@ async fn exhausted_message_routes_to_global_dlq_over_tcp() {
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -4677,6 +4697,7 @@ async fn publisher_cache_idle_timeout_allows_queue_eviction_while_connection_sta
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -4741,6 +4762,7 @@ async fn publisher_cache_idle_timeout_expires_on_next_frame_without_waiting_for_
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),
@@ -4838,6 +4860,7 @@ async fn demo_like_grouped_auto_ack_publish_survives_idle_cleanup() {
                         published: unix_millis(),
                         partition_key: None,
                         partitioning_version: 0,
+                        ttl_ms: None,
                     },
                 )
                 .unwrap(),
@@ -4929,6 +4952,7 @@ async fn publisher_cache_idle_timeout_updates_existing_connection() {
                     published: unix_millis(),
                     partition_key: None,
                     partitioning_version: 0,
+                    ttl_ms: None,
                 },
             )
             .unwrap(),

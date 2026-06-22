@@ -26,6 +26,7 @@ fn publish_frame(
         partition_key: None,
         partitioning_version: 0,
     }
+    ttl_ms: None,
 }
 
 fn bench_case(c: &mut Criterion, name: &str, publish: Publish) {
