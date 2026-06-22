@@ -10,7 +10,8 @@ grid, and `clients/PYTHON_CLIENT_PLAN.md` for the Python-specific decisions.
 
 ## Status
 
-Under construction, built bottom-up (wire codec first). Not yet published.
+Feature-complete against the `FEATURE_MATRIX` (async core plus the blocking
+facade). Pre-alpha and not yet published; the API tracks the source tree.
 
 ## Development
 
