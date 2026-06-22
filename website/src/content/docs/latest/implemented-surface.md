@@ -147,7 +147,7 @@ See also: [backpressure](/latest/concepts/backpressure/) and
 | Competing consumers (default) | Implemented | Many consumers per queue, fair dispatch, unordered |
 | Exclusive consumer groups | Partial | `.exclusive()`/`consumer_target` (Rust) and `consumerGroup()`/`consumerTarget()` (TypeScript) + TCP protocol, per-partition gate, balanced+sticky assignment, soft `consumer_target`, assignment push, reconnect restore, one-cohort-per-queue guard |
 | Cross-broker cohort coordination | Partial | Member identity + controller (aggregate→plan→publish) + owner apply all wired in cluster bootstrap, coordination-level multi-node rebalance test exists, fuller broker/client scenarios are still growing |
-| Partition fan-in | Implemented | Rust client subscribes to all known partitions and merges deliveries while keeping per-partition settlement routing |
+| Partition fan-in | Implemented | Both clients subscribe to all known partitions, merge deliveries while keeping per-partition settlement routing, and pick up partitions added by a live grow |
 
 See [consumer groups](/latest/concepts/consumer-groups/) for the user-facing model.
 
@@ -160,7 +160,7 @@ Conditions and limits:
 - A message can be delivered more than once under failure, retry, or lease expiry conditions.
 - Exclusive consumer groups are opt-in (Rust `.exclusive()`, TypeScript `.consumerGroup()`). Without them, consumers compete (no ordering). A queue has a single exclusive cohort. Both clients expose the assignment-events stream (Rust `assignment_events()`, TypeScript `onAssignmentChange`).
 - Cross-broker cohort balance is advisory/eventually-consistent. The per-partition delivery gate is always the correctness backstop. Single-node is fully covered by tests.
-- Plain subscriptions fan in over known partitions. A topology warm step at
+- Plain subscriptions fan in over known partitions and pick up partitions added by a live grow. A topology warm step at
   connect prevents pure consumers from staying on partition `0` when topology is
   available.
 

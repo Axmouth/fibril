@@ -86,7 +86,7 @@ Superscript numbers refer to the Notes under the tables.
 | Retry classification (is_retryable / retry_advice) | done | done |
 | Reserved-namespace header validation | done | done |
 | ReliablePublisher helper | done | done |
-| Producer-id dedup headers | done | client-ready <sup>3</sup> |
+| Producer-id dedup headers | done | done <sup>3</sup> |
 | Exclusive consumer groups | done | done |
 | Cohort member id mint/carry | done | done |
 | Assignment events stream (AssignmentChanged) | done | done |
