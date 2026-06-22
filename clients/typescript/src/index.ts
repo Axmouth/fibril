@@ -34,9 +34,11 @@ export {
   ServerError,
   EofError,
   UnexpectedError,
+  WireError,
   isRetryable,
   retryAdvice,
   type RetryAdvice,
+  type WireErrorKind,
 } from "./errors.js";
 export {
   Op,

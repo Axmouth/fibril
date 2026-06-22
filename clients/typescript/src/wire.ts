@@ -12,6 +12,8 @@
 //   - option<T>: u8 tag (0 = none, 1 = some), then T when some
 //   - each body starts with a 4-byte ASCII magic
 
+import { WireError } from "./errors.js";
+
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -117,7 +119,7 @@ export class Writer {
     this.u8(b ? 1 : 0);
   }
   uuid(u: Uuid): void {
-    if (u.length !== 16) throw new Error(`wire: uuid must be 16 bytes, got ${u.length}`);
+    if (u.length !== 16) throw new WireError("invalid_uuid", `wire: uuid must be 16 bytes, got ${u.length}`);
     this.raw(u);
   }
   optionalStr(s: string | null | undefined): void {
@@ -277,7 +279,7 @@ export class Reader {
 
   private need(n: number): void {
     if (this.cursor + n > this.input.length) {
-      throw new Error("wire: unexpected end of input");
+      throw new WireError("unexpected_eof", "wire: unexpected end of input");
     }
   }
 
@@ -332,7 +334,7 @@ export class Reader {
   resumeOutcome(): ResumeOutcome {
     const tag = this.u8();
     const outcome = RESUME_OUTCOME_FROM_U8[tag];
-    if (outcome === undefined) throw new Error(`wire: unknown resume outcome ${tag}`);
+    if (outcome === undefined) throw new WireError("unknown_tag", `wire: unknown resume outcome ${tag}`);
     return outcome;
   }
   resumeIdentity(): ResumeIdentity {
@@ -364,7 +366,7 @@ export class Reader {
       case 4:
         return { custom: this.str() };
       default:
-        throw new Error(`wire: unknown content type ${tag}`);
+        throw new WireError("unknown_content_type", `wire: unknown content type ${tag}`);
     }
   }
   headers(): Headers {
@@ -397,7 +399,7 @@ export class Reader {
       case 2:
         return { custom: { topic: this.str(), group: this.optionalStr() } };
       default:
-        throw new Error(`wire: unknown dlq policy ${tag}`);
+        throw new WireError("unknown_tag", `wire: unknown dlq policy ${tag}`);
     }
   }
   optionalDlqPolicy(): QueueDlqPolicy | null {
@@ -409,7 +411,7 @@ export class Reader {
   reconcileAction(): ReconcileAction {
     const tag = this.u8();
     const a = RECONCILE_ACTION_FROM_U8[tag];
-    if (a === undefined) throw new Error(`wire: unknown reconcile action ${tag}`);
+    if (a === undefined) throw new WireError("unknown_tag", `wire: unknown reconcile action ${tag}`);
     return a;
   }
   reconcileSubscription(): ReconcileSubscription {
@@ -444,7 +446,7 @@ export class Reader {
     const got = this.raw(4);
     const want = textEncoder.encode(m);
     for (let i = 0; i < 4; i += 1) {
-      if (got[i] !== want[i]) throw new Error(`wire: bad magic, expected ${m}`);
+      if (got[i] !== want[i]) throw new WireError("invalid_magic", `wire: bad magic, expected ${m}`);
     }
   }
   remaining(): number {
@@ -452,7 +454,7 @@ export class Reader {
   }
   finish(): void {
     if (this.cursor !== this.input.length) {
-      throw new Error(`wire: ${this.input.length - this.cursor} trailing byte(s)`);
+      throw new WireError("trailing_bytes", `wire: ${this.input.length - this.cursor} trailing byte(s)`);
     }
   }
 }

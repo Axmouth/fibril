@@ -28,7 +28,7 @@ Superscript numbers refer to the Notes under the tables.
 | Handshake + compliance marker | done | done |
 | Username/password auth | done | done |
 | Heartbeat ping/pong + timeout | done | done |
-| Typed wire parse errors | done | deferred <sup>1</sup> |
+| Typed wire parse errors | done | done <sup>1</sup> |
 
 ## Publish
 
@@ -101,8 +101,10 @@ Superscript numbers refer to the Notes under the tables.
 
 ## Notes
 
-1. Decode throws on malformed frames, but a typed parse-error taxonomy (matching
-   the Rust typed wire errors) is not ported yet.
+1. Decode throws a typed `WireError` (with a `kind` discriminant:
+   `unexpected_eof`, `invalid_magic`, `trailing_bytes`, `invalid_uuid`,
+   `unknown_content_type`, `unknown_tag`), mirroring the Rust typed wire errors so
+   callers branch on kind rather than parse messages.
 2. The broker supports live repartition (grow/shrink) in cluster mode
    (`fibrilctl repartition`, `/admin/api/repartition`, broker transition
    machinery). A consumer must re-fan-in to pick up partitions added by a grow.

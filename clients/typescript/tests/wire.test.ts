@@ -1,6 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { WireError } from "../src/errors.js";
+
 import {
   Reader,
   Writer,
@@ -379,4 +381,41 @@ test("redirect body round-trips", () => {
     partitioningVersion: 5n,
   };
   assert.deepEqual(decodeRedirectBody(encodeRedirectBody(redirect)), redirect);
+});
+
+test("decode failures throw typed WireError with a kind", () => {
+  // Bad magic on a publish body.
+  const good = encodePublishBody({
+    topic: "t",
+    partition: 0,
+    group: null,
+    requireConfirm: false,
+    contentType: null,
+    headers: {},
+    payload: new Uint8Array(),
+    published: 0n,
+    partitionKey: null,
+    partitioningVersion: 0n,
+    ttlMs: null,
+  });
+  const badMagic = good.slice();
+  badMagic[0] ^= 0xff;
+  assert.throws(
+    () => decodePublishBody(badMagic),
+    (err: unknown) => err instanceof WireError && err.kind === "invalid_magic",
+  );
+
+  // Truncated body (header only) -> unexpected_eof.
+  assert.throws(
+    () => decodePublishBody(good.slice(0, 4)),
+    (err: unknown) => err instanceof WireError && err.kind === "unexpected_eof",
+  );
+
+  // Trailing bytes after a valid body.
+  const trailing = new Uint8Array(good.length + 1);
+  trailing.set(good);
+  assert.throws(
+    () => decodePublishBody(trailing),
+    (err: unknown) => err instanceof WireError && err.kind === "trailing_bytes",
+  );
 });

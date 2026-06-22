@@ -20,6 +20,32 @@ export class FibrilError extends Error {
 }
 
 /**
+ * Discriminants for {@link WireError}, mirroring the Rust client's typed wire
+ * errors so callers can branch on the failure kind rather than parse messages.
+ */
+export type WireErrorKind =
+  | "unexpected_eof"
+  | "invalid_magic"
+  | "trailing_bytes"
+  | "invalid_uuid"
+  | "unknown_content_type"
+  | "unknown_tag";
+
+/**
+ * A frame body could not be decoded: truncated, wrong magic, trailing bytes, or
+ * an unknown tag. `kind` is a stable discriminant; `message` is human-readable.
+ */
+export class WireError extends FibrilError {
+  override readonly name = "WireError";
+  constructor(
+    readonly kind: WireErrorKind,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * The client could not establish or maintain a connection to the server.
  */
 export class DisconnectionError extends FibrilError {
