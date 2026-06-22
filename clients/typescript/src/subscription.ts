@@ -771,14 +771,19 @@ export class SubscriptionBuilder {
   }
 
   /**
-   * Subscribe with client-side automatic acknowledgement.
+   * Subscribe with automatic acknowledgement.
    */
   async subAutoAck(): Promise<AutoAckedSubscription> {
     const baseReq: SubscribeMsg = {
       topic: this.#topic,
       group: this.#group,
       prefetch: this.#prefetch,
-      auto_ack: false, // matches Rust client: auto-ack is client-side
+      // Auto-ack can be done two ways: server-side, by setting auto_ack on the
+      // wire so the broker settles each delivery as it sends it; or client-side,
+      // by leaving it false and having the client ack after yielding. We use the
+      // server-side path (matches the Rust client), so deliveries arrive already
+      // settled and the subscription yields plain Messages with nothing to ack.
+      auto_ack: true,
       consumer_group: this.#consumerGroup,
       consumer_target: this.#consumerTarget,
     };

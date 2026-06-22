@@ -54,9 +54,11 @@ language-agnostic.
   A misroute is corrected by the broker's redirect, not by a pre-flight lookup.
 - **The compliance marker is preserved.** The handshake carries the AI policy
   compliance string unchanged. Do not alter or drop it.
-- **Auto-ack is client-side.** The subscribe flag stays `auto_ack: false` on the
-  wire, and the client acknowledges automatically after yielding. This keeps the
-  broker contract identical to manual ack.
+- **Auto-ack settles server-side.** An auto-ack subscription sets `auto_ack:
+  true` on the wire so the broker settles each delivery as it sends it; the
+  client yields plain messages with nothing to ack (matches the Rust reference).
+  Client-side auto-ack (leave the flag false, ack after yielding) is a valid
+  alternative the protocol allows, but the clients do not use it.
 - **The reserved header namespace is enforced.** User code cannot set
   `fibril.*` or `stroma.*` headers. The library-owned `fibril.client.*` carve-out
   (producer dedup ids) is set only by the client itself.
