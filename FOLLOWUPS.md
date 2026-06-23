@@ -76,11 +76,27 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   a server limit (1ms delivery). Also: light-load confirm/deliver latency is the
   keratin fsync interval, config-tunable, separate from this.
 
+- Ephemeral has a fat delivery TAIL on real disk, despite the best p50. Measured
+  (SSD ext4, 1KB, 150k/s, confirmed): deliver p50=1ms but p95~530ms, p99~600ms,
+  while speculative at the same rate is p95=17ms and durable p95=84ms. Confirmed it
+  is dirty-page writeback throttling, not a Fibril-internal stall: the SAME run on
+  tmpfs (RAM) collapses the tail to p95=10ms AND lifts throughput from ~115k to the
+  full 150k. Mechanism: ephemeral writes with KDurability::AfterWrite (never fsyncs),
+  so dirty pages accumulate until the kernel stalls the writer thread mid-write;
+  durable/speculative fsync steadily so writeback never hits the cliff. So ephemeral
+  only wins outright on RAM-backed or writeback-tuned storage; on a plain disk
+  speculative is the better low-latency choice. FIX LEVER (not done): give ephemeral
+  a periodic background flush (sync_file_range / lazy fsync on an interval, NOT
+  gating delivery) to drain dirty pages steadily - keeps the 1ms p50 and tames the
+  tail. Make the interval a runtime setting.
+
 - Possible future channel mode: a true memory-only stream (no log at all, lost on
   restart, no durable cursors/replay/retention, lowest possible latency). Distinct
   from the `ephemeral` durability tier, which is defined as log-backed (persist
   async, no fsync, do not gate). Would be a separate channel flag or a 4th mode,
-  not a redefinition of `ephemeral`. Examine when there is a real need.
+  not a redefinition of `ephemeral`. The writeback finding above strengthens the
+  case: a memory-only mode sidesteps writeback entirely. Examine when there is a
+  real need.
 
 - Offsets are an unstable internal storage detail, not a stable consumer-facing
   identity (Fibril follows work-queue semantics, not a replayable-log model). The
