@@ -17,8 +17,8 @@ pub use stroma_core::{
     MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead,
     OwnerStateCheckpoint, PartitionKind, QuarantineInfo, QueueInspectionState, QueuePromotionOutcome,
     RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
-    ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, StagedStreamAppend, Stroma,
-    StromaError, StromaEvent, StromaKeratinConfig,
+    EnqueuedStreamAppend, ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig,
+    StagedStreamAppend, Stroma, StromaError, StromaEvent, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -349,16 +349,18 @@ pub trait StreamStore: Send + Sync {
         durability: Option<KDurability>,
     ) -> Result<StagedStreamAppend, StromaError>;
 
-    /// Batched express-path append: one keratin append (one fsync) for the whole
-    /// batch. Records occupy `base..base+records.len()`. For the durable-tier
-    /// pipeline.
-    async fn append_stream_records_batch(
+    /// Pipelined durable append: enqueue the batch as one keratin append and return
+    /// immediately, without waiting for stage or durability. `offset` resolves at
+    /// stage (the base offset; records occupy `base..base+records.len()`), `durable`
+    /// when the batch is fsynced. Lets the caller enqueue the next batch right away
+    /// so keratin coalesces fsyncs across appends. For the durable-tier pipeline.
+    async fn append_stream_records_enqueue(
         &self,
         tp: &str,
         part: u32,
         records: Vec<(MessageHeaders, Vec<u8>)>,
         durability: Option<KDurability>,
-    ) -> Result<StagedStreamAppend, StromaError>;
+    ) -> Result<EnqueuedStreamAppend, StromaError>;
 
     async fn read_stream_records(
         &self,
@@ -439,15 +441,15 @@ impl StreamStore for StromaEngine {
             .await
     }
 
-    async fn append_stream_records_batch(
+    async fn append_stream_records_enqueue(
         &self,
         tp: &str,
         part: u32,
         records: Vec<(MessageHeaders, Vec<u8>)>,
         durability: Option<KDurability>,
-    ) -> Result<StagedStreamAppend, StromaError> {
+    ) -> Result<EnqueuedStreamAppend, StromaError> {
         self.inner
-            .append_stream_records_batch(tp, part, records, durability)
+            .append_stream_records_enqueue(tp, part, records, durability)
             .await
     }
 
