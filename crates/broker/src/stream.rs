@@ -29,7 +29,8 @@ use stroma_core::{MessageHeaders, RetentionConfig, StromaError};
 /// Per-channel durability tier (a channel-level knob, not a separate channel
 /// type). Governs how a publish is persisted and when the producer is confirmed;
 /// the fan-out core is the same for all tiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StreamDurability {
     /// Persist to the log asynchronously, do not gate delivery or confirm. Lowest
     /// latency, weakest guarantee.
@@ -391,6 +392,11 @@ pub struct StreamChannel {
     engine: Arc<dyn StreamStore>,
     live_channel_capacity: usize,
     cmd_tx: mpsc::Sender<FanoutCmd>,
+    /// Declared durability tier, kept for observability (the broker is
+    /// durable-first for all tiers today).
+    durability: StreamDurability,
+    /// Declared retention bound, kept for observability.
+    retention: Option<RetentionConfig>,
 }
 
 impl StreamChannel {
@@ -401,11 +407,12 @@ impl StreamChannel {
         engine: Arc<dyn StreamStore>,
         tp: &str,
         part: u32,
+        durability: StreamDurability,
         retention: Option<RetentionConfig>,
         ring_capacity: usize,
         live_channel_capacity: usize,
     ) -> Result<Self, StromaError> {
-        engine.create_stream(tp, part, retention).await?;
+        engine.create_stream(tp, part, retention.clone()).await?;
         let (_head, tail) = engine.stream_head_tail(tp, part).await?;
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel(256);
@@ -437,7 +444,34 @@ impl StreamChannel {
             engine,
             live_channel_capacity,
             cmd_tx,
+            durability,
+            retention,
         })
+    }
+
+    /// The channel topic.
+    pub fn topic(&self) -> &str {
+        &self.tp
+    }
+
+    /// The partition this channel hosts.
+    pub fn partition(&self) -> u32 {
+        self.part
+    }
+
+    /// The declared durability tier.
+    pub fn durability(&self) -> StreamDurability {
+        self.durability
+    }
+
+    /// The declared retention bound.
+    pub fn retention(&self) -> Option<&RetentionConfig> {
+        self.retention.as_ref()
+    }
+
+    /// Current head and tail offsets from the durable log.
+    pub async fn head_tail(&self) -> Result<(Offset, Offset), StromaError> {
+        self.engine.stream_head_tail(&self.tp, self.part).await
     }
 
     /// Publish a record: persist it durably (which assigns the offset), then fan
@@ -800,7 +834,7 @@ mod channel_tests {
     #[tokio::test]
     async fn backfill_from_ring_then_live() {
         let dir = temp_dir("stream_ring");
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, None, 64, 64)
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64)
             .await
             .unwrap();
         for i in 0..5u32 {
@@ -828,7 +862,7 @@ mod channel_tests {
     async fn backfill_reads_evicted_records_from_the_log() {
         let dir = temp_dir("stream_log");
         // ring holds only the newest 2, so older records must come from stroma
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, None, 2, 64)
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 2, 64)
             .await
             .unwrap();
         for i in 0..6u32 {
@@ -847,7 +881,7 @@ mod channel_tests {
     #[tokio::test]
     async fn durable_resume_starts_after_the_committed_cursor() {
         let dir = temp_dir("stream_durable");
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, None, 64, 64)
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64)
             .await
             .unwrap();
         for i in 0..5u32 {
@@ -877,7 +911,7 @@ mod channel_tests {
     #[tokio::test]
     async fn filter_applies_to_backfill_and_live() {
         let dir = temp_dir("stream_filter");
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, None, 64, 64)
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64)
             .await
             .unwrap();
         ch.publish(hdr(&[("kind", "cow")]), b"a".to_vec())

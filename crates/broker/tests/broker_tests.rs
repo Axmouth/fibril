@@ -7243,8 +7243,8 @@ async fn stream_registry_opens_caches_routes_and_closes() {
     let (broker, _dir) = open_test_broker().await;
 
     // open is idempotent: the second call returns the same hosted channel
-    let ch1 = broker.get_or_open_stream("sensors", 0, None).await.unwrap();
-    let ch2 = broker.get_or_open_stream("sensors", 0, None).await.unwrap();
+    let ch1 = broker.get_or_open_stream("sensors", 0, fibril_broker::stream::StreamDurability::Durable, None).await.unwrap();
+    let ch2 = broker.get_or_open_stream("sensors", 0, fibril_broker::stream::StreamDurability::Durable, None).await.unwrap();
     assert!(Arc::ptr_eq(&ch1, &ch2));
 
     // routing predicate distinguishes hosted streams

@@ -10,8 +10,9 @@ use fibril_broker::coordination::ReplicationDurabilityPolicy;
 use fibril_broker::queue_engine::{
     DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, GlobalDLQ, GlobalDlqSnapshot,
     GlobalDlqUpdateOutcome, InspectMode, MessageHeaders, MessageInspectionStatus,
-    QueueInspectionState, RecoveryMismatchPolicy, StromaError,
+    QueueInspectionState, RecoveryMismatchPolicy, RetentionConfig, StromaError,
 };
+use fibril_broker::stream::StreamDurability;
 use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLoadIssue, RuntimeSettingsLocks,
     RuntimeSettingsSnapshot, RuntimeSettingsUpdateOutcome,
@@ -223,6 +224,103 @@ impl RuntimeSettingsResponse {
             settings: snapshot.settings,
             locks,
             load_issue,
+        }
+    }
+}
+
+/// Request body for declaring a Plexus stream from the admin UI.
+#[derive(Deserialize)]
+pub struct CreateStreamRequest {
+    pub tp: String,
+    pub partition_count: Option<u32>,
+    /// "ephemeral" | "speculative" | "durable" (defaults to durable).
+    pub durability: Option<String>,
+    pub max_age_ms: Option<u64>,
+    pub max_bytes: Option<u64>,
+    pub max_records: Option<u64>,
+}
+
+/// GET /admin/api/streams: stream channels this broker hosts, with per-partition
+/// position plus declared durability and retention.
+pub async fn streams(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let Some(streams) = &server.streams else {
+        return Ok(Json(serde_json::json!({ "streams": [] })));
+    };
+    let stats = streams.stream_stats().await;
+    Ok(Json(
+        serde_json::json!({ "streams": serde_json::to_value(stats).unwrap_or_default() }),
+    ))
+}
+
+/// POST /admin/api/streams: declare a Plexus stream.
+pub async fn create_stream(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<CreateStreamRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    if request.tp.trim().is_empty() {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_topic",
+            "topic must not be empty",
+        ));
+    }
+    let Some(streams) = &server.streams else {
+        return Ok(admin_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "streams_unavailable",
+            "this broker does not host streams",
+        ));
+    };
+
+    let durability = match request.durability.as_deref() {
+        None | Some("durable") => StreamDurability::Durable,
+        Some("speculative") => StreamDurability::Speculative,
+        Some("ephemeral") => StreamDurability::Ephemeral,
+        Some(other) => {
+            return Ok(admin_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_durability",
+                format!("unknown durability tier `{other}`"),
+            ));
+        }
+    };
+
+    let retention = if request.max_age_ms.is_some()
+        || request.max_bytes.is_some()
+        || request.max_records.is_some()
+    {
+        Some(RetentionConfig {
+            max_age_ms: request.max_age_ms,
+            max_bytes: request.max_bytes,
+            max_records: request.max_records,
+        })
+    } else {
+        None
+    };
+
+    let partition_count = request.partition_count.unwrap_or(1).max(1);
+    match streams
+        .declare_stream(&request.tp, partition_count, durability, retention)
+        .await
+    {
+        Ok(()) => Ok(Json(serde_json::json!({ "status": "created" })).into_response()),
+        Err(StromaError::InvalidArgument(message)) => {
+            Ok(admin_error(StatusCode::BAD_REQUEST, "invalid_argument", message))
+        }
+        Err(err) => {
+            tracing::error!("create stream failed: {err}");
+            Ok(admin_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "create_stream_failed",
+                "create stream failed",
+            ))
         }
     }
 }

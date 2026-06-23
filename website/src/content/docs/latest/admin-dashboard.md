@@ -63,6 +63,18 @@ has pulled, and when it last made progress. See
 The message inspection link starts near the queue's settled offset by default so
 you do not begin at offset `0` on large queues unless you choose to.
 
+## Streams
+
+The streams page lists the [Plexus](/latest/concepts/plexus-streams/) stream
+channels this broker is currently hosting, grouped by topic. Each partition row
+shows its head and tail offsets and how many records are retained, and the topic
+heading shows the declared durability tier and retention bound.
+
+You can **create a stream** from the page: a topic, a partition count, a
+durability tier, and optional retention bounds (records, bytes, or age). A topic
+is one channel kind for its lifetime, so declaring a stream over an existing
+queue (or the reverse) is refused.
+
 ## Message Inspection
 
 Message inspection reads queue state and persisted message data on demand. Use

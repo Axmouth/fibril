@@ -381,7 +381,7 @@ fn start_readers(
                 .subscribe(&topic)
                 .unwrap()
                 .prefetch(prefetch)
-                .sub_manual_ack()
+                .sub()
                 .await
                 .unwrap();
             let (tx_acker, mut rx_acker) = mpsc::unbounded_channel::<InflightMessage>();

@@ -29,7 +29,7 @@ use crate::coordination::{
 use crate::queue_engine::{
     DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StreamStore, StromaEngine,
 };
-use crate::stream::StreamChannel;
+use crate::stream::{StreamChannel, StreamDurability};
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
     MessageContentType, MessageHeaders, NackEventMeta, RetentionConfig, StromaDebugSnapshot,
@@ -1406,6 +1406,65 @@ fn shrink_sources(r: u32, n_new: u32, n_old: u32) -> impl Iterator<Item = u32> {
     (r..n_old).step_by(step)
 }
 
+/// One stream partition's stats for the admin surface: position and the declared
+/// durability and retention.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StreamStatsEntry {
+    pub topic: String,
+    pub partition: u32,
+    pub head: u64,
+    pub tail: u64,
+    pub durability: StreamDurability,
+    pub max_age_ms: Option<u64>,
+    pub max_bytes: Option<u64>,
+    pub max_records: Option<u64>,
+}
+
+/// The stream observability and declare surface the admin server needs, kept as a
+/// trait object so the admin holds it without depending on the concrete broker
+/// generic.
+#[async_trait::async_trait]
+pub trait StreamAdmin: Send + Sync {
+    async fn stream_stats(&self) -> Vec<StreamStatsEntry>;
+    async fn declare_stream(
+        &self,
+        topic: &str,
+        partition_count: u32,
+        durability: StreamDurability,
+        retention: Option<RetentionConfig>,
+    ) -> Result<(), StromaError>;
+}
+
+#[async_trait::async_trait]
+impl<
+    E: QueueEngine
+        + crate::queue_engine::StreamStore
+        + std::fmt::Debug
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+> StreamAdmin for Broker<E>
+{
+    async fn stream_stats(&self) -> Vec<StreamStatsEntry> {
+        Broker::stream_stats(self).await
+    }
+
+    async fn declare_stream(
+        &self,
+        topic: &str,
+        partition_count: u32,
+        durability: StreamDurability,
+        retention: Option<RetentionConfig>,
+    ) -> Result<(), StromaError> {
+        for partition in 0..partition_count.max(1) {
+            self.get_or_open_stream(topic, partition, durability, retention.clone())
+                .await?;
+        }
+        Ok(())
+    }
+}
+
 impl<
     E: QueueEngine
         + crate::queue_engine::StreamStore
@@ -1516,6 +1575,7 @@ impl<
         &self,
         tp: &str,
         part: u32,
+        durability: StreamDurability,
         retention: Option<RetentionConfig>,
     ) -> Result<Arc<StreamChannel>, StromaError> {
         let key = QueueKey {
@@ -1532,6 +1592,7 @@ impl<
                 engine,
                 tp,
                 part,
+                durability,
                 retention,
                 STREAM_RING_CAPACITY,
                 STREAM_LIVE_CHANNEL_CAPACITY,
@@ -1539,6 +1600,32 @@ impl<
             .await?,
         );
         Ok(self.streams.entry(key).or_insert(opened).value().clone())
+    }
+
+    /// Snapshot of the stream channels this broker is currently hosting, with
+    /// per-partition head/tail offsets and the declared durability and retention.
+    /// Open channels only (what the broker is serving), mirroring how queue stats
+    /// reflect materialized queues.
+    pub async fn stream_stats(&self) -> Vec<StreamStatsEntry> {
+        let channels: Vec<Arc<StreamChannel>> =
+            self.streams.iter().map(|e| e.value().clone()).collect();
+        let mut out = Vec::with_capacity(channels.len());
+        for ch in channels {
+            let (head, tail) = ch.head_tail().await.unwrap_or((0, 0));
+            let retention = ch.retention();
+            out.push(StreamStatsEntry {
+                topic: ch.topic().to_string(),
+                partition: ch.partition(),
+                head,
+                tail,
+                durability: ch.durability(),
+                max_age_ms: retention.and_then(|r| r.max_age_ms),
+                max_bytes: retention.and_then(|r| r.max_bytes),
+                max_records: retention.and_then(|r| r.max_records),
+            });
+        }
+        out.sort_by(|a, b| a.topic.cmp(&b.topic).then(a.partition.cmp(&b.partition)));
+        out
     }
 
     /// Resolve `(tp, part)` to its stream channel for routing a request, opening
@@ -1555,7 +1642,10 @@ impl<
             return Some(ch.value().clone());
         }
         if self.engine.durable_is_stream(tp, part) {
-            return self.get_or_open_stream(tp, part, None).await.ok();
+            return self
+                .get_or_open_stream(tp, part, StreamDurability::default(), None)
+                .await
+                .ok();
         }
         None
     }

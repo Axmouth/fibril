@@ -1,0 +1,148 @@
+{% extends "layout.html" %}
+{% block content %}
+<h4 class="metrics-header">Streams (Plexus)</h4>
+
+<p class="queue-group-note">
+  Fan-out channels: every consumer sees every record. This lists the stream
+  partitions this broker is currently hosting, with their position and declared
+  durability and retention.
+</p>
+
+<details class="queue-create-panel">
+  <summary>Create a stream</summary>
+  <div class="queue-create-fields">
+    <input id="create.topic" placeholder="topic" />
+    <label>partitions
+      <input id="create.partitions" type="number" min="1" value="1" />
+    </label>
+    <select id="create.durability">
+      <option value="durable">Durable</option>
+      <option value="speculative">Speculative</option>
+      <option value="ephemeral">Ephemeral</option>
+    </select>
+    <input id="create.max_records" type="number" min="0" placeholder="retain records (optional)" />
+    <input id="create.max_bytes" type="number" min="0" placeholder="retain bytes (optional)" />
+    <input id="create.max_age_ms" type="number" min="0" placeholder="retain age ms (optional)" />
+    <button id="create.submit" type="button">Create</button>
+    <span id="create-message" class="op-message"></span>
+  </div>
+</details>
+
+<div class="queue-controls">
+  <input id="stream-search" type="search" placeholder="filter by topic" />
+</div>
+
+<div id="streams"></div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/admin.js"></script>
+<script>
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function retentionLabel(entry) {
+  const parts = [];
+  if (entry.max_records != null) parts.push(`${entry.max_records} records`);
+  if (entry.max_bytes != null) parts.push(`${entry.max_bytes} bytes`);
+  if (entry.max_age_ms != null) parts.push(`${entry.max_age_ms}ms`);
+  return parts.length ? parts.join(", ") : "unbounded";
+}
+
+async function refresh() {
+  const data = await api('/admin/api/streams');
+  const container = document.getElementById("streams");
+  const streams = data.streams || [];
+  const search = (document.getElementById("stream-search")?.value || "").trim().toLowerCase();
+
+  const visible = streams.filter(s => !search || String(s.topic).toLowerCase().includes(search));
+
+  if (visible.length === 0) {
+    container.innerHTML = `<p class="queue-group-note">No stream partitions hosted on this broker.</p>`;
+    return;
+  }
+
+  const byTopic = {};
+  for (const entry of visible) {
+    (byTopic[entry.topic] ||= []).push(entry);
+  }
+
+  const html = Object.entries(byTopic)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([topic, parts]) => {
+      parts.sort((a, b) => a.partition - b.partition);
+      const durability = parts[0]?.durability ?? "durable";
+      const retention = retentionLabel(parts[0] || {});
+      const rows = parts.map(entry => {
+        const depth = Math.max(0, Number(entry.tail) - Number(entry.head));
+        return `
+          <tr class="queue-row">
+            <td class="queue-part-cell">partition ${entry.partition}</td>
+            <td class="text-right">${entry.head}</td>
+            <td class="text-right">${entry.tail}</td>
+            <td class="text-right">${depth}</td>
+          </tr>`;
+      }).join("");
+      return `
+        <h5 class="metrics-header queue-group-heading">${escapeHtml(topic)}</h5>
+        <p class="queue-group-note">${parts.length} partition(s) - durability: ${escapeHtml(durability)} - retention: ${escapeHtml(retention)}</p>
+        <div class="queue-table-wrap">
+          <table class="table table-compact narrow metric-table queue-table">
+            <tr>
+              <th>Partition</th>
+              <th class="text-right">Head</th>
+              <th class="text-right">Tail</th>
+              <th class="text-right">Retained</th>
+            </tr>
+            ${rows}
+          </table>
+        </div>`;
+    }).join("");
+
+  container.innerHTML = html;
+}
+
+// ---- create stream ----
+function setCreateMessage(text, kind) {
+  const node = document.getElementById("create-message");
+  node.textContent = text;
+  node.dataset.kind = kind || "info";
+}
+
+async function submitCreateStream() {
+  const topic = document.getElementById("create.topic").value.trim();
+  const count = Number(document.getElementById("create.partitions").value) || 1;
+  const durability = document.getElementById("create.durability").value;
+  if (!topic) return setCreateMessage("Enter a topic.", "warning");
+  if (!(count >= 1)) return setCreateMessage("Partition count must be at least 1.", "warning");
+
+  const body = { tp: topic, partition_count: count, durability };
+  const records = document.getElementById("create.max_records").value.trim();
+  const bytes = document.getElementById("create.max_bytes").value.trim();
+  const age = document.getElementById("create.max_age_ms").value.trim();
+  if (records !== "") body.max_records = Number(records);
+  if (bytes !== "") body.max_bytes = Number(bytes);
+  if (age !== "") body.max_age_ms = Number(age);
+
+  const { ok, data } = await apiPost("/admin/api/streams", body);
+  if (ok) {
+    setCreateMessage(`Created stream "${topic}" with ${count} partition(s).`, "info");
+    document.getElementById("create.topic").value = "";
+    refresh();
+  } else {
+    setCreateMessage(`Failed: ${data?.message || data?.error || "request failed"}`, "warning");
+  }
+}
+
+document.getElementById("create.submit").addEventListener("click", submitCreateStream);
+document.getElementById("stream-search").addEventListener("input", refresh);
+
+setInterval(refresh, 2000);
+refresh();
+</script>
+{% endblock %}
