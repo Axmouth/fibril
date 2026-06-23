@@ -122,7 +122,7 @@ async def test_manual_ack_subscription_completes(broker: FakeBroker) -> None:
     broker.deliver_on_subscribe = [b"task"]
     client = await _connect(broker)
     try:
-        sub = await client.subscribe("jobs").sub_manual_ack()
+        sub = await client.subscribe("jobs").sub()
         msg = await asyncio.wait_for(sub.recv(), timeout=1)
         assert msg is not None and msg.text() == "task"
         await msg.complete()

@@ -18,7 +18,7 @@ const client = await new ClientOptions({ clientName: "hello-example" })
   .connect(addr);
 
 // Subscribe first.
-const sub = await client.subscribe("hello").prefetch(1).subManualAck();
+const sub = await client.subscribe("hello").prefetch(1).sub();
 
 // Publish in the background.
 const pub = client.publisher("hello");

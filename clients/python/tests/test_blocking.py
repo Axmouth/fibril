@@ -62,7 +62,7 @@ def test_blocking_auto_ack_iteration(broker: FakeBroker) -> None:
 def test_blocking_manual_ack_complete(broker: FakeBroker) -> None:
     broker.deliver_on_subscribe = [b"task"]
     with BlockingClient.connect((broker.host, broker.port), _opts()) as client:
-        sub = client.subscribe("jobs").sub_manual_ack()
+        sub = client.subscribe("jobs").sub()
         msg = sub.recv()
         assert msg is not None and msg.text() == "task"
         msg.complete()

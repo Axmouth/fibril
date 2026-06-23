@@ -24,7 +24,8 @@ use fibril_broker::{
     queue_engine::{
         DLQDiscardPolicyWire, DeclareMeta, FollowerStateCheckpointInstall, GlobalDLQ, Message,
         MessageContentType, MessageHeaders, OwnerReplicationBatch, OwnerReplicationRead,
-        OwnerStateCheckpoint, QueueEngine, RetentionConfig, StromaEngine, StromaError, StromaEvent,
+        OwnerStateCheckpoint, QueueEngine, RetentionConfig, StreamStore, StromaEngine, StromaError,
+        StromaEvent,
     },
     stream::{StreamChannel, StreamFilter, StreamRecord, SubscribeStart},
 };
@@ -2603,6 +2604,29 @@ pub async fn handle_connection(
             x if x == Op::Subscribe as u16 => {
                 let sub: Subscribe = decode_or_400!(frame, frame_tx_high_prio, metrics, Subscribe);
 
+                // A queue subscribe to a stream partition has no queue consumer to
+                // attach. Reject it at the routing boundary (use SubscribeStream)
+                // rather than installing a consumer that would never be fed.
+                if broker.is_stream(&sub.topic, sub.partition.id())
+                    || broker.engine().durable_is_stream(&sub.topic, sub.partition.id())
+                {
+                    frame_tx_high_prio
+                        .send(try_encode(
+                            Op::SubscribeErr,
+                            frame.request_id,
+                            &ErrorMsg {
+                                code: ERR_INVALID,
+                                message: format!(
+                                    "{} is a plexus stream, use a stream subscribe",
+                                    sub.topic
+                                ),
+                            },
+                        )?)
+                        .await?;
+                    metrics.error();
+                    continue;
+                }
+
                 // Captured for a possible redirect (the identity is moved into
                 // the install args below).
                 let sub_topic = sub.topic.clone();
@@ -2832,13 +2856,22 @@ pub async fn handle_connection(
                 // ephemeral/speculative is a later refinement).
                 let mut failure: Option<(u16, String)> = None;
                 for partition in 0..partition_count {
-                    if let Err(err) = broker
+                    match broker
                         .get_or_open_stream(&declare.topic, partition, retention.clone())
                         .await
                     {
-                        tracing::error!("Declare plexus failed: {err}");
-                        failure = Some((500, "declare plexus failed".into()));
-                        break;
+                        Ok(_) => {}
+                        // A kind conflict (the topic is already a queue) is a client
+                        // error to fix, not a transient server fault.
+                        Err(err @ StromaError::InvalidArgument(_)) => {
+                            failure = Some((400, err.to_string()));
+                            break;
+                        }
+                        Err(err) => {
+                            tracing::error!("Declare plexus failed: {err}");
+                            failure = Some((500, "declare plexus failed".into()));
+                            break;
+                        }
                     }
                 }
                 if let Some((code, message)) = failure {

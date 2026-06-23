@@ -460,7 +460,7 @@ async fn consume_messages(
     if let Some(group) = normalize_group_arg(args.group.as_deref()) {
         builder = builder.group(group)?;
     }
-    let mut subscription = builder.sub_manual_ack().await?;
+    let mut subscription = builder.sub().await?;
 
     for index in 0..args.count {
         let message = tokio::time::timeout(

@@ -467,7 +467,7 @@ let mut sub = client
     .subscribe("email.send")?
     .group("workers")?
     .prefetch(32)
-    .sub_manual_ack()
+    .sub()
     .await?;
 
 while let Some(msg) = sub.recv().await {
@@ -492,7 +492,7 @@ const sub = await client
   .subscribe("email.send")
   .group("workers")
   .prefetch(32)
-  .subManualAck();
+  .sub();
 
 for await (const msg of sub) {
   const body = msg.content();
@@ -513,7 +513,7 @@ for await (const msg of sub) {
   <TabItem label="Async">
 
 ```python
-sub = await client.subscribe("email.send").group("workers").prefetch(32).sub_manual_ack()
+sub = await client.subscribe("email.send").group("workers").prefetch(32).sub()
 
 async for msg in sub:
     body = msg.text()
@@ -529,7 +529,7 @@ async for msg in sub:
   <TabItem label="Blocking">
 
 ```python
-sub = client.subscribe("email.send").group("workers").prefetch(32).sub_manual_ack()
+sub = client.subscribe("email.send").group("workers").prefetch(32).sub()
 
 for msg in sub:
     body = msg.text()
@@ -654,7 +654,7 @@ let mut sub = client
     .subscribe("email.send")?
     .group("workers")?
     .prefetch(32)
-    .sub_manual_ack()
+    .sub()
     .await?;
 
 while let Some(msg) = sub.recv().await {
@@ -677,7 +677,7 @@ const sub = await client
   .subscribe("email.send")
   .group("workers")
   .prefetch(32)
-  .subManualAck();
+  .sub();
 
 for await (const msg of sub) {
   if (await process(msg.deserialize())) {
@@ -698,7 +698,7 @@ for await (const msg of sub) {
 publisher = client.publisher_grouped("email.send", "workers")
 await publisher.publish_confirmed(NewMessage.json(job))
 
-sub = await client.subscribe("email.send").group("workers").prefetch(32).sub_manual_ack()
+sub = await client.subscribe("email.send").group("workers").prefetch(32).sub()
 
 async for msg in sub:
     if await process(msg.deserialize()):
@@ -714,7 +714,7 @@ async for msg in sub:
 publisher = client.publisher_grouped("email.send", "workers")
 publisher.publish_confirmed(NewMessage.json(job))
 
-sub = client.subscribe("email.send").group("workers").prefetch(32).sub_manual_ack()
+sub = client.subscribe("email.send").group("workers").prefetch(32).sub()
 
 for msg in sub:
     if process(msg.deserialize()):
@@ -844,7 +844,7 @@ A [Plexus stream](/latest/concepts/plexus-streams/) delivers every record to
 every consumer. Declare it with `declare_plexus`, publish with the ordinary
 publisher (the broker routes by channel kind), and consume with `stream(...)`.
 Name the subscription to get a durable cursor that resumes after a restart and
-advances on ack; a stream subscription reads all partitions and fans them in.
+advances on ack. A stream subscription reads all partitions and fans them in.
 
 <Tabs syncKey="client-language">
   <TabItem label="Rust">
@@ -863,7 +863,7 @@ let mut sub = client
     .stream("events")?
     .durable("analytics")
     .filter("region", "eu-*")
-    .sub_manual_ack()
+    .sub()
     .await?;
 
 while let Some(msg) = sub.recv().await {
@@ -888,7 +888,7 @@ const sub = await client
   .stream("events")
   .durable("analytics")
   .filter("region", "eu-*")
-  .subManualAck();
+  .sub();
 
 for await (const msg of sub) {
   handle(msg.content());
@@ -909,7 +909,7 @@ await client.declare_plexus(StreamConfig("events").partitions(4).retain_records(
 
 await client.publisher("events").publish("hello")
 
-sub = await client.stream("events").durable("analytics").filter("region", "eu-*").sub_manual_ack()
+sub = await client.stream("events").durable("analytics").filter("region", "eu-*").sub()
 
 async for msg in sub:
     handle(msg.text())
@@ -926,7 +926,7 @@ client.declare_plexus(StreamConfig("events").partitions(4).retain_records(1_000_
 
 client.publisher("events").publish("hello")
 
-sub = client.stream("events").durable("analytics").filter("region", "eu-*").sub_manual_ack()
+sub = client.stream("events").durable("analytics").filter("region", "eu-*").sub()
 
 for msg in sub:
     handle(msg.text())
@@ -998,7 +998,7 @@ from fibril.blocking import BlockingClient
 with BlockingClient.connect("127.0.0.1:9876") as client:
     client.publisher("email.send").publish_confirmed({"body": "hello"})
 
-    sub = client.subscribe("email.send").group("workers").sub_manual_ack()
+    sub = client.subscribe("email.send").group("workers").sub()
     for msg in sub:
         process(msg.deserialize())
         msg.complete()

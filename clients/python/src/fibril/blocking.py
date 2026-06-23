@@ -210,8 +210,8 @@ class BlockingSubscriptionBuilder:
         self._builder.prefetch(prefetch)
         return self
 
-    def sub_manual_ack(self) -> "BlockingSubscription":
-        sub = self._owner._run(self._builder.sub_manual_ack())
+    def sub(self) -> "BlockingSubscription":
+        sub = self._owner._run(self._builder.sub())
         return BlockingSubscription(self._owner, sub)
 
     def sub_auto_ack(self) -> "BlockingAutoAckedSubscription":
@@ -262,8 +262,8 @@ class BlockingStreamSubscriptionBuilder:
         self._builder.prefetch(prefetch)
         return self
 
-    def sub_manual_ack(self) -> "BlockingSubscription":
-        sub = self._owner._run(self._builder.sub_manual_ack())
+    def sub(self) -> "BlockingSubscription":
+        sub = self._owner._run(self._builder.sub())
         return BlockingSubscription(self._owner, sub)
 
     def sub_auto_ack(self) -> "BlockingAutoAckedSubscription":

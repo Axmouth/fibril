@@ -13,7 +13,7 @@ Prefetch bounds the number of messages a consumer may have inflight at once.
 let mut sub = client
     .subscribe("email.send")?
     .prefetch(32)
-    .sub_manual_ack()
+    .sub()
     .await?;
 ```
 

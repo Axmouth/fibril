@@ -1224,7 +1224,7 @@ impl StreamConfig {
 ///     .subscribe("email.send")?
 ///     .group("workers")?
 ///     .prefetch(32)
-///     .sub_manual_ack()
+///     .sub()
 ///     .await?;
 ///
 /// while let Some(msg) = sub.recv().await {
@@ -1290,7 +1290,7 @@ impl<'a> SubscriptionBuilder<'a> {
     ///
     /// Each received [`InflightMessage`] must be settled explicitly.
     #[tracing::instrument(fields(topic = %self.topic, group = ?self.group, prefetch = %self.prefetch))]
-    pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
+    pub async fn sub(self) -> FibrilResult<Subscription> {
         let topic = self.topic.into_string();
         let group = self.group.map(GroupName::into_string);
         let prefetch = self.prefetch;
@@ -1430,7 +1430,7 @@ impl<'a> SubscriptionBuilder<'a> {
 ///     .stream("events")?
 ///     .durable("analytics")
 ///     .filter("region", "eu-*")
-///     .sub_manual_ack()
+///     .sub()
 ///     .await?;
 /// while let Some(msg) = sub.recv().await {
 ///     msg.complete().await?;
@@ -1535,7 +1535,7 @@ impl<'a> StreamSubscriptionBuilder<'a> {
     /// Subscribe with manual acknowledgements. Each [`InflightMessage`] must be
     /// settled; completing one advances the durable cursor past its offset.
     #[tracing::instrument(fields(topic = %self.topic, prefetch = %self.prefetch))]
-    pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
+    pub async fn sub(self) -> FibrilResult<Subscription> {
         let partitions = self.partition_list();
         let mut subs = Vec::with_capacity(partitions.len());
         for partition in &partitions {
@@ -5131,7 +5131,7 @@ mod tests {
         let mut sub = client
             .subscribe("jobs")
             .unwrap()
-            .sub_manual_ack()
+            .sub()
             .await
             .unwrap();
         let outcome = client.reconnect().await.unwrap();
@@ -5323,7 +5323,7 @@ mod tests {
         let mut sub = client
             .subscribe("jobs")
             .unwrap()
-            .sub_manual_ack()
+            .sub()
             .await
             .unwrap();
         let outcome = client.reconnect().await.unwrap();
@@ -5557,7 +5557,7 @@ mod tests {
                 .filter("region", "eu-*")
                 .filter("kind", "order")
                 .prefetch(8)
-                .sub_manual_ack()
+                .sub()
                 .await
         });
 
@@ -5738,7 +5738,7 @@ mod tests {
             manual_client
                 .subscribe("jobs")
                 .unwrap()
-                .sub_manual_ack()
+                .sub()
                 .await
         });
 

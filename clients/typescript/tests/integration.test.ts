@@ -325,7 +325,7 @@ test("client sends active subscriptions during reconnect reconciliation", async 
       `127.0.0.1:${broker.port}`,
       new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore_client_subscriptions"),
     );
-    const sub = await client.subscribe("jobs").group("workers").subManualAck();
+    const sub = await client.subscribe("jobs").group("workers").sub();
     const outcome = await client.reconnect();
 
     assert.equal(outcome.resumeOutcome, "resumed");
@@ -564,7 +564,7 @@ test("default and blank groups normalize to ungrouped declarations and subscript
     };
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
-    const sub = await client.subscribe("jobs").group(" default ").subManualAck();
+    const sub = await client.subscribe("jobs").group(" default ").sub();
 
     assert.deepEqual(subscribe, {
       topic: "jobs",
@@ -630,7 +630,7 @@ test("client subscribes and receives a delivery", async () => {
     };
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
-    const sub = await client.subscribe("t1").subManualAck();
+    const sub = await client.subscribe("t1").sub();
     const iter = sub[Symbol.asyncIterator]();
     const result = await iter.next();
     assert.equal(result.done, false);
@@ -733,7 +733,7 @@ test("subscription ends when the engine disconnects with supervision off", async
       `127.0.0.1:${broker.port}`,
       new ClientOptions({ superviseSubscriptions: false }).disableAutoReconnect(),
     );
-    const sub = await client.subscribe("t").subManualAck();
+    const sub = await client.subscribe("t").sub();
 
     // Stop the broker; with supervision off the stream ends rather than riding
     // through. The iteration must terminate (not hang).
@@ -1115,7 +1115,7 @@ test("manual message retryAfter sends delayed nack", async () => {
     };
 
     const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
-    const sub = await client.subscribe("manual-delay").subManualAck();
+    const sub = await client.subscribe("manual-delay").sub();
     const msg = await sub.recv();
     assert.ok(msg);
     const deadline = new Date(Date.now() + 10_000);
@@ -1375,7 +1375,7 @@ test("owner restart: reconnect into a fresh session still reconciles subscriptio
       `127.0.0.1:${broker.port}`,
       new ClientOptions({ superviseSubscriptions: false }).withReconnectReconcilePolicy("restore_client_subscriptions"),
     );
-    const sub = await client.subscribe("jobs").subManualAck();
+    const sub = await client.subscribe("jobs").sub();
     const outcome = await client.reconnect();
 
     // The session is fresh, yet reconcile still fired and the stream survived.
