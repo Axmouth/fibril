@@ -44,15 +44,13 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   for owned stream partitions. Until then, declaring the stream against the new
   owner re-materializes it. Low risk in single-node / declare-before-publish flows.
 
-- Plexus stream subscriptions in the clients use STATIC fan-in: they subscribe to
-  the partitions known at subscribe time and do not yet run the dynamic
-  resubscribe / live-grow supervisor or the reconnect-reconcile restore that queue
-  subscriptions have. So a stream sub does not auto-pick-up partitions added by a
-  live grow, and does not auto-restore after a reconnect (the durable cursor still
-  makes a fresh manual subscribe resume correctly). Wire it onto the same
-  supervisor the queue path uses (`partition_resubscribe_loop_*`, reconcile
-  registry) when streams need failover/elastic parity. Rust client first, then TS
-  and Python.
+- Plexus stream subscriptions in the TS and Python clients still need the dynamic
+  fan-in the Rust client now has: the failover-resubscribe supervisor plus the
+  live-grow partition pickup loop (Rust shares the queue supervisor via the
+  `SupervisedReq` trait + `stream_partition_resubscribe_loop_*`). Port both when
+  doing the TS/Python stream clients. Note streams deliberately stay OUT of the
+  reconnect-reconcile registry (they own re-subscribe and resume via the durable
+  cursor) - mirror that in the other clients.
 
 - FIXED (found by the chaos soak): a consumer stopped receiving and never caught up
   after the OWNER broker was killed and rejoined WITHOUT a failover (a bounce faster
