@@ -216,6 +216,7 @@ async fn main() {
         address,
         args.topic.clone(),
         args.writers,
+        args.partitions,
         args.rate_per_sec,
         args.size.max(1),
         args.confirmed,
@@ -371,6 +372,7 @@ async fn run_rate_limited_writers(
     address: SocketAddr,
     topic: String,
     writers: usize,
+    partitions: u32,
     rate_per_sec: u64,
     payload_size: usize,
     confirmed: bool,
@@ -393,7 +395,7 @@ async fn run_rate_limited_writers(
                 .connect(address)
                 .await
                 .unwrap();
-            let publisher = client.publisher(&topic).unwrap();
+            let publisher = client.publisher(&topic).unwrap().partitions(partitions);
             let mut stats = WriterStats::default();
 
             let period = Duration::from_secs_f64(1.0 / writer_rate as f64);

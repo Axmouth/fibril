@@ -333,6 +333,15 @@ pub struct Publisher {
     /// Default message TTL (ms) stamped on every immediate publish from this
     /// publisher. Set via [`Publisher::expiring`]. `None` = no default.
     default_message_ttl_ms: Option<u64>,
+    /// Explicit partition count for spreading publishes, set via
+    /// [`Publisher::partitions`]. When `None` the topology cache supplies the count
+    /// (just partition 0 in standalone / cold-cache). Set this for a multi-partition
+    /// Plexus stream, whose partitioning the topology cache does not carry yet -
+    /// mirrors [`StreamSubscriptionBuilder::partitions`] on the read side.
+    partition_count: Option<u32>,
+    /// Round-robin cursor for keyless publishes when `partition_count` is set.
+    /// `Arc` so a cloned publisher shares one cursor.
+    round_robin: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Broker confirmation for a publish request.
@@ -2045,6 +2054,8 @@ impl Client {
             topic: TopicName::parse(topic)?,
             group: None,
             default_message_ttl_ms: None,
+            partition_count: None,
+            round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -2062,6 +2073,8 @@ impl Client {
             topic: TopicName::parse(topic)?,
             group: GroupName::parse_optional(group)?,
             default_message_ttl_ms: None,
+            partition_count: None,
+            round_robin: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -2178,6 +2191,42 @@ impl Client {
 // TODO: Replace serializeable with NewMessage struct, so the user can easily choose form of serialization
 // TODO: perhaps use generics so that it defaults to message pack and can be used transparently
 impl Publisher {
+    /// Spread this publisher's writes across `count` partitions (`0..count`):
+    /// round-robin for keyless messages, `hash(key) % count` when a partition key
+    /// is set. Mirrors [`StreamSubscriptionBuilder::partitions`] on the read side.
+    /// Use it for a multi-partition Plexus stream, whose partitioning the topology
+    /// cache does not carry; without it the publisher routes via the topology cache,
+    /// which is just partition 0 in standalone or a cold cache.
+    pub fn partitions(mut self, count: u32) -> Self {
+        self.partition_count = Some(count.max(1));
+        self
+    }
+
+    /// Resolve the partition for one publish: an explicit local count (set via
+    /// [`partitions`](Self::partitions)) wins, otherwise the shared topology cache
+    /// routes. The local path stamps partitioning version 0, which the broker does
+    /// not fence in standalone (no topology source).
+    fn route(&self, key: Option<&[u8]>) -> Route {
+        let Some(count) = self.partition_count else {
+            let group = self.group.as_ref().map(|group| group.as_str());
+            return self.shared.route_partition(self.topic.as_str(), group, key);
+        };
+        let count = count.max(1);
+        let index = match key {
+            Some(key) => (fnv1a(key) % count as u64) as u32,
+            None => {
+                let next = self
+                    .round_robin
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                (next % count as usize) as u32
+            }
+        };
+        Route {
+            partition: Partition::new(index),
+            partitioning_version: 0,
+        }
+    }
+
     /// Publish without waiting for broker confirmation.
     ///
     /// This is the common path. It only waits for the command to be accepted by
@@ -2191,9 +2240,7 @@ impl Publisher {
         let Route {
             partition,
             partitioning_version,
-        } = self
-            .shared
-            .route_partition(topic, group, message.partition_key.as_deref());
+        } = self.route(message.partition_key.as_deref());
         self.shared
             .engine_for(topic, partition, group)
             .await?
@@ -2344,9 +2391,7 @@ impl Publisher {
         let Route {
             partition,
             partitioning_version,
-        } = self
-            .shared
-            .route_partition(topic, group, message.partition_key.as_deref());
+        } = self.route(message.partition_key.as_deref());
         let mut state = PublishRetryState::new(self.shared.opts.publish_timeout_ms);
         loop {
             // Send-only attempt: resolve the owner and hand off the publish. Clone
