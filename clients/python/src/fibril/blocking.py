@@ -242,10 +242,6 @@ class BlockingStreamSubscriptionBuilder:
         self._builder.from_earliest()
         return self
 
-    def from_offset(self, offset: int) -> "BlockingStreamSubscriptionBuilder":
-        self._builder.from_offset(offset)
-        return self
-
     def from_last(self, count: int) -> "BlockingStreamSubscriptionBuilder":
         self._builder.from_last(count)
         return self

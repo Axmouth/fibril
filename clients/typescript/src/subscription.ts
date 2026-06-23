@@ -891,12 +891,6 @@ export class StreamSubscriptionBuilder {
     return this;
   }
 
-  /** Begin at a specific offset (clamped into the retained window). */
-  fromOffset(offset: bigint): this {
-    this.#start = { kind: "offset", value: offset };
-    return this;
-  }
-
   /** Begin `count` records back from the tail. */
   fromLast(count: bigint): this {
     this.#start = { kind: "nback", value: count };

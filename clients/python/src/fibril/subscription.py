@@ -528,10 +528,6 @@ class StreamSubscriptionBuilder:
         self._start = wire.StreamStart(kind="earliest")
         return self
 
-    def from_offset(self, offset: int) -> "StreamSubscriptionBuilder":
-        self._start = wire.StreamStart(kind="offset", value=offset)
-        return self
-
     def from_last(self, count: int) -> "StreamSubscriptionBuilder":
         self._start = wire.StreamStart(kind="nback", value=count)
         return self
