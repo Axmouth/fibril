@@ -9,10 +9,12 @@ use std::path::PathBuf;
 
 use fibril_protocol::v1::wire;
 use fibril_protocol::v1::{
-    Ack, AssignmentChanged, Auth, ContentType, DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag,
-    ErrorMsg, Hello, HelloOk, Nack, Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy,
-    QueueTopologyEntry, ReconcileClient, ReconcilePolicy, ReconcileSubscription, Redirect,
-    ResumeIdentity, ResumeOutcome, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
+    Ack, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
+    DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, Hello, HelloOk, Nack, Partition, Publish,
+    PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry, ReconcileClient, ReconcilePolicy,
+    ReconcileSubscription, Redirect, ResumeIdentity, ResumeOutcome, StreamDurability,
+    StreamRetention, StreamStart, Subscribe, SubscribeOk, SubscribeStream, TopologyOk,
+    TopologyRequest,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -509,6 +511,97 @@ fn wire_encoders_match_shared_vectors() {
                 group: Some("g".into()),
                 owner_endpoint: "h:1".into(),
                 partitioning_version: 3,
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    check(
+        &v,
+        "declare_plexus",
+        wire::encode_declare_plexus(
+            rid,
+            &DeclarePlexus {
+                topic: "t".into(),
+                partition_count: Some(4),
+                durability: StreamDurability::Speculative,
+                retention: StreamRetention {
+                    max_age_ms: Some(60000),
+                    max_bytes: None,
+                    max_records: Some(1_000_000),
+                },
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    check(
+        &v,
+        "declare_plexus_min",
+        wire::encode_declare_plexus(
+            rid,
+            &DeclarePlexus {
+                topic: "t".into(),
+                partition_count: None,
+                durability: StreamDurability::Durable,
+                retention: StreamRetention::default(),
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    check(
+        &v,
+        "declare_plexus_ok",
+        wire::encode_declare_plexus_ok(
+            rid,
+            &DeclarePlexusOk {
+                status: "created".into(),
+                partition_count: 4,
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    check(
+        &v,
+        "subscribe_stream",
+        wire::encode_subscribe_stream(
+            rid,
+            &SubscribeStream {
+                topic: "t".into(),
+                partition: Partition::new(1),
+                durable_name: Some("c1".into()),
+                start: StreamStart::ByTime { time_ms: 1234 },
+                filter: vec![
+                    ("region".into(), "eu-*".into()),
+                    ("kind".into(), "order".into()),
+                ],
+                prefetch: 16,
+                auto_ack: false,
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    check(
+        &v,
+        "subscribe_stream_min",
+        wire::encode_subscribe_stream(
+            rid,
+            &SubscribeStream {
+                topic: "t".into(),
+                partition: Partition::new(0),
+                durable_name: None,
+                start: StreamStart::Latest,
+                filter: vec![],
+                prefetch: 0,
+                auto_ack: true,
             },
         )
         .unwrap()

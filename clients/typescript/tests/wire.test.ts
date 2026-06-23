@@ -419,3 +419,81 @@ test("decode failures throw typed WireError with a kind", () => {
     (err: unknown) => err instanceof WireError && err.kind === "trailing_bytes",
   );
 });
+
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+import {
+  encodeDeclarePlexusBody,
+  decodeDeclarePlexusBody,
+  encodeDeclarePlexusOkBody,
+  decodeDeclarePlexusOkBody,
+  encodeSubscribeStreamBody,
+  decodeSubscribeStreamBody,
+  type DeclarePlexus,
+  type SubscribeStream,
+} from "../src/wire.js";
+
+const toHex = (b: Uint8Array): string =>
+  Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+
+// The shared cross-client fixture lives at clients/wire_vectors.json (two levels
+// up from this tests directory).
+const VECTORS: Record<string, string> = JSON.parse(
+  readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "..", "wire_vectors.json"),
+    "utf-8",
+  ),
+);
+
+test("plexus stream bodies match shared vectors and round-trip", () => {
+  const declare: DeclarePlexus = {
+    topic: "t",
+    partitionCount: 4,
+    durability: "speculative",
+    retention: { maxAgeMs: 60000n, maxBytes: null, maxRecords: 1000000n },
+  };
+  assert.equal(toHex(encodeDeclarePlexusBody(declare)), VECTORS.declare_plexus);
+  assert.deepEqual(decodeDeclarePlexusBody(encodeDeclarePlexusBody(declare)), declare);
+
+  const declareMin: DeclarePlexus = {
+    topic: "t",
+    partitionCount: null,
+    durability: "durable",
+    retention: { maxAgeMs: null, maxBytes: null, maxRecords: null },
+  };
+  assert.equal(toHex(encodeDeclarePlexusBody(declareMin)), VECTORS.declare_plexus_min);
+  assert.deepEqual(decodeDeclarePlexusBody(encodeDeclarePlexusBody(declareMin)), declareMin);
+
+  const ok = { status: "created", partitionCount: 4 };
+  assert.equal(toHex(encodeDeclarePlexusOkBody(ok)), VECTORS.declare_plexus_ok);
+  assert.deepEqual(decodeDeclarePlexusOkBody(encodeDeclarePlexusOkBody(ok)), ok);
+
+  const sub: SubscribeStream = {
+    topic: "t",
+    partition: 1,
+    durableName: "c1",
+    start: { kind: "bytime", value: 1234n },
+    filter: [
+      ["region", "eu-*"],
+      ["kind", "order"],
+    ],
+    prefetch: 16,
+    autoAck: false,
+  };
+  assert.equal(toHex(encodeSubscribeStreamBody(sub)), VECTORS.subscribe_stream);
+  assert.deepEqual(decodeSubscribeStreamBody(encodeSubscribeStreamBody(sub)), sub);
+
+  const subMin: SubscribeStream = {
+    topic: "t",
+    partition: 0,
+    durableName: null,
+    start: { kind: "latest" },
+    filter: [],
+    prefetch: 0,
+    autoAck: true,
+  };
+  assert.equal(toHex(encodeSubscribeStreamBody(subMin)), VECTORS.subscribe_stream_min);
+  assert.deepEqual(decodeSubscribeStreamBody(encodeSubscribeStreamBody(subMin)), subMin);
+});

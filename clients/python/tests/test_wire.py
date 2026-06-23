@@ -280,6 +280,57 @@ def _cases() -> dict[str, tuple[bytes, object]]:
             ),
             wire.decode_reconcile_client_body,
         ),
+        "declare_plexus": (
+            wire.encode_declare_plexus_body(
+                wire.DeclarePlexus(
+                    topic="t",
+                    partition_count=4,
+                    durability="speculative",
+                    retention=wire.StreamRetention(
+                        max_age_ms=60000, max_bytes=None, max_records=1_000_000
+                    ),
+                )
+            ),
+            wire.decode_declare_plexus_body,
+        ),
+        "declare_plexus_min": (
+            wire.encode_declare_plexus_body(wire.DeclarePlexus(topic="t")),
+            wire.decode_declare_plexus_body,
+        ),
+        "declare_plexus_ok": (
+            wire.encode_declare_plexus_ok_body(
+                wire.DeclarePlexusOk(status="created", partition_count=4)
+            ),
+            wire.decode_declare_plexus_ok_body,
+        ),
+        "subscribe_stream": (
+            wire.encode_subscribe_stream_body(
+                wire.SubscribeStream(
+                    topic="t",
+                    partition=1,
+                    durable_name="c1",
+                    start=wire.StreamStart(kind="bytime", value=1234),
+                    filter=[("region", "eu-*"), ("kind", "order")],
+                    prefetch=16,
+                    auto_ack=False,
+                )
+            ),
+            wire.decode_subscribe_stream_body,
+        ),
+        "subscribe_stream_min": (
+            wire.encode_subscribe_stream_body(
+                wire.SubscribeStream(
+                    topic="t",
+                    partition=0,
+                    durable_name=None,
+                    start=wire.StreamStart(kind="latest"),
+                    filter=[],
+                    prefetch=0,
+                    auto_ack=True,
+                )
+            ),
+            wire.decode_subscribe_stream_body,
+        ),
     }
 
 
@@ -324,6 +375,11 @@ _ENCODERS = {
     "topology_ok": wire.encode_topology_ok_body,
     "redirect": wire.encode_redirect_body,
     "reconcile_client": wire.encode_reconcile_client_body,
+    "declare_plexus": wire.encode_declare_plexus_body,
+    "declare_plexus_min": wire.encode_declare_plexus_body,
+    "declare_plexus_ok": wire.encode_declare_plexus_ok_body,
+    "subscribe_stream": wire.encode_subscribe_stream_body,
+    "subscribe_stream_min": wire.encode_subscribe_stream_body,
 }
 
 
