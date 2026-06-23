@@ -1090,6 +1090,175 @@ def decode_subscribe_ok_body(body: bytes) -> SubscribeOk:
     return value
 
 
+# ---- plexus (fan-out stream) --------------------------------------------
+
+#: Per-channel durability tier: ``"ephemeral"`` | ``"speculative"`` | ``"durable"``.
+StreamDurability = str
+
+_DURABILITY_TO_U8 = {"ephemeral": 0, "speculative": 1, "durable": 2}
+_U8_TO_DURABILITY = {v: k for k, v in _DURABILITY_TO_U8.items()}
+
+
+@dataclass
+class StreamRetention:
+    #: Drop records older than this age in milliseconds.
+    max_age_ms: Optional[int] = None
+    #: Keep at most this many bytes of retained records.
+    max_bytes: Optional[int] = None
+    #: Keep at most this many records.
+    max_records: Optional[int] = None
+
+
+@dataclass
+class StreamStart:
+    """Where a stream subscription begins when it has no durable cursor to resume.
+
+    ``kind`` is one of ``"latest"``, ``"earliest"``, ``"offset"``, ``"nback"``,
+    ``"bytime"``. ``value`` carries the offset / count / time for the last three.
+    """
+
+    kind: str = "latest"
+    value: int = 0
+
+
+_START_TO_U8 = {"latest": 0, "earliest": 1, "offset": 2, "nback": 3, "bytime": 4}
+_U8_TO_START = {v: k for k, v in _START_TO_U8.items()}
+
+
+def _put_stream_start(w: "Writer", s: StreamStart) -> None:
+    tag = _START_TO_U8.get(s.kind)
+    if tag is None:  # pragma: no cover - guards an invalid value
+        raise WireError("unknown_tag", f"wire: bad stream start {s.kind!r}")
+    w.u8(tag)
+    if tag >= 2:
+        w.u64(s.value)
+
+
+def _read_stream_start(r: "Reader") -> StreamStart:
+    tag = r.u8()
+    kind = _U8_TO_START.get(tag)
+    if kind is None:
+        raise WireError("unknown_tag", f"wire: bad stream start tag {tag}")
+    value = r.u64() if tag >= 2 else 0
+    return StreamStart(kind=kind, value=value)
+
+
+@dataclass
+class DeclarePlexus:
+    topic: str
+    partition_count: Optional[int] = None
+    durability: StreamDurability = "durable"
+    retention: StreamRetention = field(default_factory=StreamRetention)
+
+
+def encode_declare_plexus_body(d: DeclarePlexus) -> bytes:
+    w = Writer()
+    w.magic("FDP1")
+    w.write_str(d.topic)
+    w.optional_u32(d.partition_count)
+    tag = _DURABILITY_TO_U8.get(d.durability)
+    if tag is None:  # pragma: no cover - guards an invalid value
+        raise WireError("unknown_tag", f"wire: bad durability {d.durability!r}")
+    w.u8(tag)
+    w.optional_u64(d.retention.max_age_ms)
+    w.optional_u64(d.retention.max_bytes)
+    w.optional_u64(d.retention.max_records)
+    return w.finish()
+
+
+def decode_declare_plexus_body(body: bytes) -> DeclarePlexus:
+    r = Reader(body)
+    r.expect_magic("FDP1")
+    topic = r.read_str()
+    partition_count = r.optional_u32()
+    tag = r.u8()
+    durability = _U8_TO_DURABILITY.get(tag)
+    if durability is None:
+        raise WireError("unknown_tag", f"wire: bad durability tag {tag}")
+    retention = StreamRetention(
+        max_age_ms=r.optional_u64(),
+        max_bytes=r.optional_u64(),
+        max_records=r.optional_u64(),
+    )
+    r.finish()
+    return DeclarePlexus(topic, partition_count, durability, retention)
+
+
+@dataclass
+class DeclarePlexusOk:
+    status: str
+    partition_count: int
+
+
+def encode_declare_plexus_ok_body(ok: DeclarePlexusOk) -> bytes:
+    w = Writer()
+    w.magic("FPK1")
+    w.write_str(ok.status)
+    w.u32(ok.partition_count)
+    return w.finish()
+
+
+def decode_declare_plexus_ok_body(body: bytes) -> DeclarePlexusOk:
+    r = Reader(body)
+    r.expect_magic("FPK1")
+    value = DeclarePlexusOk(status=r.read_str(), partition_count=r.u32())
+    r.finish()
+    return value
+
+
+@dataclass
+class SubscribeStream:
+    topic: str
+    partition: int
+    durable_name: Optional[str]
+    start: StreamStart
+    filter: list[tuple[str, str]]
+    prefetch: int
+    auto_ack: bool
+
+
+def encode_subscribe_stream_body(s: SubscribeStream) -> bytes:
+    w = Writer()
+    w.magic("FSP1")
+    w.write_str(s.topic)
+    w.u32(s.partition)
+    w.optional_str(s.durable_name)
+    _put_stream_start(w, s.start)
+    w.u32(len(s.filter))
+    for key, pattern in s.filter:
+        w.write_str(key)
+        w.write_str(pattern)
+    w.u32(s.prefetch)
+    w.write_bool(s.auto_ack)
+    return w.finish()
+
+
+def decode_subscribe_stream_body(body: bytes) -> SubscribeStream:
+    r = Reader(body)
+    r.expect_magic("FSP1")
+    topic = r.read_str()
+    partition = r.u32()
+    durable_name = r.optional_str()
+    start = _read_stream_start(r)
+    clause_count = r.u32()
+    flt: list[tuple[str, str]] = []
+    for _ in range(clause_count):
+        key = r.read_str()
+        pattern = r.read_str()
+        flt.append((key, pattern))
+    value = SubscribeStream(
+        topic=topic,
+        partition=partition,
+        durable_name=durable_name,
+        start=start,
+        filter=flt,
+        prefetch=r.u32(),
+        auto_ack=r.read_bool(),
+    )
+    r.finish()
+    return value
+
+
 # ---- reconcile ----------------------------------------------------------
 
 

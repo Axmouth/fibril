@@ -41,6 +41,10 @@ export enum Op {
   DeclareQueue = 60,
   DeclareQueueOk = 61,
 
+  DeclarePlexus = 62,
+  DeclarePlexusOk = 63,
+  SubscribeStream = 64,
+
   ReconcileClient = 70,
   ReconcileServer = 71,
   ReconcileResult = 72,

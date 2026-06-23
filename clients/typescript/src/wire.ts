@@ -1043,6 +1043,188 @@ export function decodeSubscribeOkBody(body: Uint8Array): SubscribeOk {
   return value;
 }
 
+// ---- plexus (fan-out stream) ----
+
+/** Per-channel durability tier. */
+export type StreamDurability = "ephemeral" | "speculative" | "durable";
+
+const DURABILITY_TO_U8: Record<StreamDurability, number> = {
+  ephemeral: 0,
+  speculative: 1,
+  durable: 2,
+};
+const U8_TO_DURABILITY: Record<number, StreamDurability> = {
+  0: "ephemeral",
+  1: "speculative",
+  2: "durable",
+};
+
+export interface StreamRetention {
+  /** Drop records older than this age in milliseconds. */
+  maxAgeMs: bigint | null;
+  /** Keep at most this many bytes of retained records. */
+  maxBytes: bigint | null;
+  /** Keep at most this many records. */
+  maxRecords: bigint | null;
+}
+
+/**
+ * Where a stream subscription begins when it has no durable cursor to resume.
+ * `value` carries the offset / count / time for the offset/nback/bytime kinds.
+ */
+export type StreamStart =
+  | { kind: "latest" }
+  | { kind: "earliest" }
+  | { kind: "offset"; value: bigint }
+  | { kind: "nback"; value: bigint }
+  | { kind: "bytime"; value: bigint };
+
+const START_TO_U8: Record<StreamStart["kind"], number> = {
+  latest: 0,
+  earliest: 1,
+  offset: 2,
+  nback: 3,
+  bytime: 4,
+};
+
+function writeStreamStart(w: Writer, s: StreamStart): void {
+  w.u8(START_TO_U8[s.kind]);
+  if (s.kind === "offset" || s.kind === "nback" || s.kind === "bytime") {
+    w.u64(s.value);
+  }
+}
+
+function readStreamStart(r: Reader): StreamStart {
+  const tag = r.u8();
+  switch (tag) {
+    case 0:
+      return { kind: "latest" };
+    case 1:
+      return { kind: "earliest" };
+    case 2:
+      return { kind: "offset", value: r.u64() };
+    case 3:
+      return { kind: "nback", value: r.u64() };
+    case 4:
+      return { kind: "bytime", value: r.u64() };
+    default:
+      throw new WireError("unknown_tag", `wire: bad stream start tag ${tag}`);
+  }
+}
+
+export interface DeclarePlexus {
+  topic: string;
+  partitionCount: number | null;
+  durability: StreamDurability;
+  retention: StreamRetention;
+}
+
+export function encodeDeclarePlexusBody(d: DeclarePlexus): Uint8Array {
+  const w = new Writer();
+  w.magic("FDP1");
+  w.str(d.topic);
+  w.optionalU32(d.partitionCount);
+  w.u8(DURABILITY_TO_U8[d.durability]);
+  w.optionalU64(d.retention.maxAgeMs);
+  w.optionalU64(d.retention.maxBytes);
+  w.optionalU64(d.retention.maxRecords);
+  return w.finish();
+}
+
+export function decodeDeclarePlexusBody(body: Uint8Array): DeclarePlexus {
+  const r = new Reader(body);
+  r.expectMagic("FDP1");
+  const topic = r.str();
+  const partitionCount = r.optionalU32();
+  const tag = r.u8();
+  const durability = U8_TO_DURABILITY[tag];
+  if (durability === undefined) {
+    throw new WireError("unknown_tag", `wire: bad durability tag ${tag}`);
+  }
+  const retention: StreamRetention = {
+    maxAgeMs: r.optionalU64(),
+    maxBytes: r.optionalU64(),
+    maxRecords: r.optionalU64(),
+  };
+  r.finish();
+  return { topic, partitionCount, durability, retention };
+}
+
+export interface DeclarePlexusOk {
+  status: string;
+  partitionCount: number;
+}
+
+export function encodeDeclarePlexusOkBody(ok: DeclarePlexusOk): Uint8Array {
+  const w = new Writer();
+  w.magic("FPK1");
+  w.str(ok.status);
+  w.u32(ok.partitionCount);
+  return w.finish();
+}
+
+export function decodeDeclarePlexusOkBody(body: Uint8Array): DeclarePlexusOk {
+  const r = new Reader(body);
+  r.expectMagic("FPK1");
+  const value: DeclarePlexusOk = { status: r.str(), partitionCount: r.u32() };
+  r.finish();
+  return value;
+}
+
+export interface SubscribeStream {
+  topic: string;
+  partition: number;
+  durableName: string | null;
+  start: StreamStart;
+  filter: [string, string][];
+  prefetch: number;
+  autoAck: boolean;
+}
+
+export function encodeSubscribeStreamBody(s: SubscribeStream): Uint8Array {
+  const w = new Writer();
+  w.magic("FSP1");
+  w.str(s.topic);
+  w.u32(s.partition);
+  w.optionalStr(s.durableName);
+  writeStreamStart(w, s.start);
+  w.u32(s.filter.length);
+  for (const [key, pattern] of s.filter) {
+    w.str(key);
+    w.str(pattern);
+  }
+  w.u32(s.prefetch);
+  w.bool(s.autoAck);
+  return w.finish();
+}
+
+export function decodeSubscribeStreamBody(body: Uint8Array): SubscribeStream {
+  const r = new Reader(body);
+  r.expectMagic("FSP1");
+  const topic = r.str();
+  const partition = r.u32();
+  const durableName = r.optionalStr();
+  const start = readStreamStart(r);
+  const clauseCount = r.u32();
+  const filter: [string, string][] = [];
+  for (let i = 0; i < clauseCount; i++) {
+    const key = r.str();
+    const pattern = r.str();
+    filter.push([key, pattern]);
+  }
+  const value: SubscribeStream = {
+    topic,
+    partition,
+    durableName,
+    start,
+    filter,
+    prefetch: r.u32(),
+    autoAck: r.bool(),
+  };
+  r.finish();
+  return value;
+}
+
 // ---- reconcile ----
 
 export interface ReconcileSubscription {
