@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import socket as _socket
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Callable, Optional, Union
 
@@ -124,6 +124,55 @@ class QueueConfig:
             dlq_policy=self.dlq_policy,
             dlq_max_retries=self.dlq_max_retries,
             default_message_ttl_ms=self.default_message_ttl_ms,
+        )
+
+
+@dataclass
+class StreamConfig:
+    """Plexus (fan-out stream) declaration. Immutable builder.
+
+    A stream delivers every record to every consumer (unlike a queue). Partitions
+    buy write throughput and per-key ordering, not consumer work-sharing.
+    """
+
+    topic: str
+    partition_count: Optional[int] = None
+    durability: wire.StreamDurability = "durable"
+    retention: wire.StreamRetention = field(default_factory=wire.StreamRetention)
+
+    def partitions(self, count: int) -> "StreamConfig":
+        if count < 1:
+            raise ValueError("partitions must be a positive integer")
+        return replace(self, partition_count=count)
+
+    def ephemeral(self) -> "StreamConfig":
+        return replace(self, durability="ephemeral")
+
+    def speculative(self) -> "StreamConfig":
+        return replace(self, durability="speculative")
+
+    def durable(self) -> "StreamConfig":
+        return replace(self, durability="durable")
+
+    def retain_for(self, age: Union[float, timedelta]) -> "StreamConfig":
+        """Drop records older than this age (seconds or timedelta)."""
+        seconds = age.total_seconds() if isinstance(age, timedelta) else float(age)
+        if seconds < 0:
+            raise ValueError("age must be non-negative")
+        return replace(self, retention=replace(self.retention, max_age_ms=int(seconds * 1000)))
+
+    def retain_bytes(self, max_bytes: int) -> "StreamConfig":
+        return replace(self, retention=replace(self.retention, max_bytes=max_bytes))
+
+    def retain_records(self, max_records: int) -> "StreamConfig":
+        return replace(self, retention=replace(self.retention, max_records=max_records))
+
+    def to_wire(self) -> wire.DeclarePlexus:
+        return wire.DeclarePlexus(
+            topic=self.topic,
+            partition_count=self.partition_count,
+            durability=self.durability,
+            retention=self.retention,
         )
 
 
@@ -349,9 +398,21 @@ class Client:
 
         return SubscriptionBuilder(self, topic)
 
+    def stream(self, topic: str) -> "StreamSubscriptionBuilder":
+        """Begin a Plexus (fan-out stream) subscription. Every consumer sees every
+        record; the subscription reads all partitions and fans them in."""
+        from .subscription import StreamSubscriptionBuilder
+
+        return StreamSubscriptionBuilder(self, topic)
+
     async def declare_queue(self, config: QueueConfig) -> None:
         engine = await self._engine_for_operation()
         await engine.declare_queue(config.to_wire())
+
+    async def declare_plexus(self, config: StreamConfig) -> None:
+        """Declare a Plexus (fan-out stream) channel."""
+        engine = await self._engine_for_operation()
+        await engine.declare_plexus(config.to_wire())
 
     # ---- topology / routing -------------------------------------------
 
@@ -445,6 +506,13 @@ class Client:
         self._capture_cohort_member(full, result.member_id)
         return SubscribeHandle(engine=engine, queue=result.queue)
 
+    async def subscribe_stream_once(self, req: wire.SubscribeStream) -> SubscribeHandle:
+        """Subscribe one stream partition to its current owner (routed). Used by the
+        stream fan-in supervisor to (re)attach a subscription."""
+        engine = await self.engine_for(req.topic, req.partition, None)
+        result = await engine.subscribe_stream(req)
+        return SubscribeHandle(engine=engine, queue=result.queue)
+
     def _with_cohort_member(self, req: wire.Subscribe) -> wire.Subscribe:
         if req.consumer_group is None:
             return req
@@ -467,4 +535,4 @@ class Client:
 # referenced in type comments above.
 if False:  # pragma: no cover - typing only
     from .publisher import Publisher
-    from .subscription import SubscriptionBuilder
+    from .subscription import StreamSubscriptionBuilder, SubscriptionBuilder

@@ -485,3 +485,136 @@ class SubscriptionBuilder:
                 raise
             raise BrokenPipeError() from err
         return initial
+
+
+class StreamSubscriptionBuilder:
+    """Builder for a Plexus (fan-out stream) subscription.
+
+    Chain ``durable``/``from_*``/``filter``/``prefetch``/``partitions``, then call
+    ``sub_manual_ack`` or ``sub_auto_ack``. The subscription reads every partition
+    and fans them in; the SAME durable name tracks an independent cursor per
+    partition.
+    """
+
+    def __init__(self, client: "Client", topic: str) -> None:
+        self._client = client
+        self._topic = topic
+        self._partition_count: Optional[int] = None
+        self._durable_name: Optional[str] = None
+        self._start: wire.StreamStart = wire.StreamStart(kind="latest")
+        self._filter: list[tuple[str, str]] = []
+        self._prefetch = 16
+
+    def partitions(self, count: int) -> "StreamSubscriptionBuilder":
+        """Fan in over exactly this many partitions. When unset, the topology cache
+        supplies the count (just partition 0 in standalone / cold cache)."""
+        if count < 1:
+            raise ValueError("partitions must be a positive integer")
+        self._partition_count = count
+        return self
+
+    def durable(self, name: str) -> "StreamSubscriptionBuilder":
+        """Use a durable broker-side cursor: resume from the committed position
+        (earliest on a fresh name) and advance it on ack. Without a durable name the
+        subscription is ephemeral and the start position governs."""
+        self._durable_name = name
+        return self
+
+    def from_latest(self) -> "StreamSubscriptionBuilder":
+        self._start = wire.StreamStart(kind="latest")
+        return self
+
+    def from_earliest(self) -> "StreamSubscriptionBuilder":
+        self._start = wire.StreamStart(kind="earliest")
+        return self
+
+    def from_offset(self, offset: int) -> "StreamSubscriptionBuilder":
+        self._start = wire.StreamStart(kind="offset", value=offset)
+        return self
+
+    def from_last(self, count: int) -> "StreamSubscriptionBuilder":
+        self._start = wire.StreamStart(kind="nback", value=count)
+        return self
+
+    def from_time(self, time_ms: int) -> "StreamSubscriptionBuilder":
+        self._start = wire.StreamStart(kind="bytime", value=time_ms)
+        return self
+
+    def filter(self, header: str, pattern: str) -> "StreamSubscriptionBuilder":
+        """Add a header-match clause: deliver only records whose ``header`` value
+        matches ``pattern`` (a literal that may contain ``*`` wildcards). Repeatable;
+        clauses are AND-ed."""
+        self._filter.append((header, pattern))
+        return self
+
+    def prefetch(self, prefetch: int) -> "StreamSubscriptionBuilder":
+        if prefetch < 1:
+            raise ValueError("prefetch must be a positive integer")
+        self._prefetch = prefetch
+        return self
+
+    async def sub_manual_ack(self) -> Subscription:
+        base = self._base_req(auto_ack=False)
+        initial = await self._fan_in_initial(base)
+        fan_in = _FanIn(self._client, base, self._resubscribe(False), initial, self._prefetch)
+        return Subscription(fan_in)
+
+    async def sub_auto_ack(self) -> AutoAckedSubscription:
+        base = self._base_req(auto_ack=True)
+        initial = await self._fan_in_initial(base)
+        fan_in = _FanIn(self._client, base, self._resubscribe(True), initial, self._prefetch)
+        return AutoAckedSubscription(fan_in)
+
+    # Stream routing reuses the queue fan-in (_FanIn / _PartitionSupervisor), which
+    # work off a wire.Subscribe routing request; the resubscribe closure translates
+    # it to a wire.SubscribeStream carrying this builder's stream options.
+    def _base_req(self, auto_ack: bool) -> wire.Subscribe:
+        return wire.Subscribe(
+            topic=self._topic,
+            partition=0,
+            group=None,
+            prefetch=self._prefetch,
+            auto_ack=auto_ack,
+            consumer_group=None,
+            consumer_target=None,
+        )
+
+    def _to_stream(self, req: wire.Subscribe) -> wire.SubscribeStream:
+        return wire.SubscribeStream(
+            topic=req.topic,
+            partition=req.partition,
+            durable_name=self._durable_name,
+            start=self._start,
+            filter=list(self._filter),
+            prefetch=self._prefetch,
+            auto_ack=req.auto_ack,
+        )
+
+    def _resubscribe(self, auto_ack: bool) -> "_Resubscribe":
+        async def resubscribe(req: wire.Subscribe) -> "SubscribeHandle":
+            return await self._client.subscribe_stream_once(self._to_stream(req))
+
+        return resubscribe
+
+    def _partition_list(self) -> list[int]:
+        if self._partition_count is not None:
+            return list(range(self._partition_count))
+        return self._client.partition_set(self._topic, None)
+
+    async def _fan_in_initial(
+        self, base: wire.Subscribe
+    ) -> list[tuple[int, "SubscribeHandle"]]:
+        initial: list[tuple[int, "SubscribeHandle"]] = []
+        try:
+            for partition in self._partition_list():
+                handle = await self._client.subscribe_stream_once(
+                    self._to_stream(replace(base, partition=partition))
+                )
+                initial.append((partition, handle))
+        except Exception as err:
+            for _partition, handle in initial:
+                handle.queue.close()
+            if isinstance(err, FibrilError):
+                raise
+            raise BrokenPipeError() from err
+        return initial

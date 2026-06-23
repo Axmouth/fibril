@@ -304,6 +304,9 @@ class Engine:
     async def declare_queue(self, req: wire.DeclareQueue) -> None:
         await self._request("declare_queue", Op.DECLARE_QUEUE, req)
 
+    async def declare_plexus(self, req: wire.DeclarePlexus) -> None:
+        await self._request("declare_queue", Op.DECLARE_PLEXUS, req)
+
     async def fetch_topology(
         self, topic: Optional[str] = None, group: Optional[str] = None
     ) -> wire.TopologyOk:
@@ -318,6 +321,19 @@ class Engine:
     ) -> SubscribeResult:
         result = await self._request(
             "subscribe", Op.SUBSCRIBE, req, supervised=supervised, auto_ack=req.auto_ack
+        )
+        assert isinstance(result, SubscribeResult)
+        return result
+
+    async def subscribe_stream(self, req: wire.SubscribeStream) -> SubscribeResult:
+        # Streams are always supervised by their own fan-in, so they stay out of
+        # the reconcile registry and resume via the durable cursor instead.
+        result = await self._request(
+            "subscribe",
+            Op.SUBSCRIBE_STREAM,
+            req,
+            supervised=True,
+            auto_ack=req.auto_ack,
         )
         assert isinstance(result, SubscribeResult)
         return result
@@ -439,6 +455,10 @@ class Engine:
             return
 
         if op == Op.DECLARE_QUEUE_OK:
+            self._resolve(frame.request_id, "declare_queue", None)
+            return
+
+        if op == Op.DECLARE_PLEXUS_OK:
             self._resolve(frame.request_id, "declare_queue", None)
             return
 
