@@ -24,7 +24,7 @@ use fibril_storage::Offset;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::queue_engine::StreamStore;
-use stroma_core::{MessageHeaders, RetentionConfig, StromaError};
+use stroma_core::{KDurability, MessageHeaders, RetentionConfig, StagedStreamAppend, StromaError};
 
 /// Per-channel durability tier (a channel-level knob, not a separate channel
 /// type). Governs how a publish is persisted and when the producer is confirmed;
@@ -475,12 +475,8 @@ impl StreamChannel {
     }
 
     /// Publish a record: persist it durably (which assigns the offset), then fan
-    /// it out to live subscribers. Returns the assigned offset.
-    //
-    // Durable-tier behavior (persist before fan-out/confirm). The express lane for
-    // the ephemeral and speculative tiers (deliver before fsync, defer the confirm)
-    // is a refinement on top of this and needs a non-blocking append that returns
-    // the offset early.
+    /// it out to live subscribers. Returns the assigned offset. Durable-tier
+    /// behavior: persist before fan-out and confirm.
     pub async fn publish(
         &self,
         headers: MessageHeaders,
@@ -498,6 +494,36 @@ impl StreamChannel {
             .map_err(|_| StromaError::QueueActorGone)?;
         let _ = rx.await;
         Ok(offset)
+    }
+
+    /// Express-lane publish for the speculative and ephemeral tiers: stage the
+    /// record (assigning its offset), fan it out to live subscribers immediately,
+    /// and return the offset plus a durability handle WITHOUT waiting for the
+    /// flush. The caller decides confirm timing by tier (ephemeral confirms now,
+    /// speculative defers the confirm until the handle resolves).
+    pub async fn publish_staged(
+        &self,
+        headers: MessageHeaders,
+        payload: Vec<u8>,
+    ) -> Result<StagedStreamAppend, StromaError> {
+        // Ephemeral never fsyncs (hand to the OS, weakest guarantee); speculative
+        // persists durably in the background.
+        let durability = match self.durability {
+            StreamDurability::Ephemeral => Some(KDurability::AfterWrite),
+            _ => Some(KDurability::AfterFsync),
+        };
+        let staged = self
+            .engine
+            .append_stream_record_staged(&self.tp, self.part, &headers, payload.clone(), durability)
+            .await?;
+        let record = StreamRecord::from_stored(staged.offset, payload, headers);
+        let (resp, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(FanoutCmd::Publish { record, resp })
+            .await
+            .map_err(|_| StromaError::QueueActorGone)?;
+        let _ = rx.await;
+        Ok(staged)
     }
 
     /// Resolve a start position and register a subscriber. The returned

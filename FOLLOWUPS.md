@@ -74,6 +74,12 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   identity is broken. Order: ephemeral first (no deferred confirm), then
   speculative. See note 11 in clients/FEATURE_MATRIX.md.
 
+- Possible future channel mode: a true memory-only stream (no log at all, lost on
+  restart, no durable cursors/replay/retention, lowest possible latency). Distinct
+  from the `ephemeral` durability tier, which is defined as log-backed (persist
+  async, no fsync, do not gate). Would be a separate channel flag or a 4th mode,
+  not a redefinition of `ephemeral`. Examine when there is a real need.
+
 - Offsets are an unstable internal storage detail, not a stable consumer-facing
   identity (Fibril follows work-queue semantics, not a replayable-log model). The
   clients deliberately do NOT expose starting a stream subscription at a raw offset

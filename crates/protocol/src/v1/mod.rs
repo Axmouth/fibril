@@ -801,6 +801,10 @@ pub const CLIENT_HEADER_PREFIX: &str = "fibril.client.";
 pub const HEADER_PRODUCER_ID: &str = "fibril.client.producer_id";
 /// Library-owned per-producer monotonic sequence header (under `fibril.client.*`).
 pub const HEADER_PRODUCER_SEQ: &str = "fibril.client.producer_seq";
+/// Server-owned marker the broker stamps on records published to a speculative
+/// stream: delivery may run ahead of durability. Reserved (`fibril.`) but NOT
+/// under the client carve-out, so only the broker sets it.
+pub const HEADER_SPECULATIVE: &str = "fibril.speculative";
 
 /// Whether `key` is in a reserved system namespace at all (the client guard).
 pub fn is_reserved_header_key(key: &str) -> bool {
