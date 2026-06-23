@@ -838,7 +838,11 @@ fn stroma_event_available_for_replicated_messages(
         StromaEvent::NackMany { reqs } => reqs.iter().all(|req| req.off < message_frontier),
         StromaEvent::DeadLetter { reqs } => reqs.iter().all(|req| req.off < message_frontier),
         StromaEvent::DeadLetterCommit { offs } => offs.iter().all(|off| *off < message_frontier),
-        StromaEvent::Declare(_) | StromaEvent::ResetQueue { .. } => true,
+        // A cursor commit carries no message reference (it is a soft consumer
+        // bookmark), so it never has to wait on the message frontier.
+        StromaEvent::Declare(_)
+        | StromaEvent::ResetQueue { .. }
+        | StromaEvent::CursorCommit { .. } => true,
         StromaEvent::Snapshot { .. } => message_tail_fully_returned,
     }
 }
