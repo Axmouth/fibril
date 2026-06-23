@@ -5412,3 +5412,78 @@ async fn queue_subscribe_to_a_plexus_topic_is_rejected() {
     drop(framed);
     server_task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn multi_partition_queue_blocks_plexus_no_mixed_partitions() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+
+    // A 3-partition queue.
+    framed
+        .send(
+            try_encode(
+                Op::DeclareQueue,
+                2,
+                &DeclareQueue {
+                    topic: "mix.guard".into(),
+                    group: None,
+                    dlq_policy: None,
+                    dlq_max_retries: None,
+                    partition_count: Some(3),
+                    default_message_ttl_ms: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(&mut framed).await.opcode, Op::DeclareQueueOk as u16);
+
+    // Declaring it as a plexus must fail (partition 0 collides before any stream
+    // partition is materialized).
+    framed
+        .send(
+            try_encode(
+                Op::DeclarePlexus,
+                3,
+                &DeclarePlexus {
+                    topic: "mix.guard".into(),
+                    partition_count: Some(3),
+                    durability: Default::default(),
+                    retention: StreamRetention::default(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(&mut framed).await.opcode, Op::Error as u16);
+
+    // No partition became a stream: a stream subscribe to any partition is
+    // rejected (the topic is a queue end to end).
+    for partition in 0..3u32 {
+        framed
+            .send(
+                try_encode(
+                    Op::SubscribeStream,
+                    10 + partition as u64,
+                    &SubscribeStream {
+                        topic: "mix.guard".into(),
+                        partition: Partition::new(partition),
+                        durable_name: None,
+                        start: StreamStart::Latest,
+                        filter: Vec::new(),
+                        prefetch: 1,
+                        auto_ack: true,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recv_frame(&mut framed).await.opcode, Op::SubscribeErr as u16);
+    }
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
