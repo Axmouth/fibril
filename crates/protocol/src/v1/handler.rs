@@ -1300,10 +1300,9 @@ async fn handle_stream_publish(
     mut headers: HashMap<String, String>,
     publish_received: u64,
 ) -> Result<(), ProtocolConnectionError> {
-    let durability = channel.durability();
     // A speculative stream may deliver ahead of durability, so the broker marks
     // its records with a server-owned header.
-    if durability == BrokerStreamDurability::Speculative {
+    if channel.durability() == BrokerStreamDurability::Speculative {
         headers.insert(HEADER_SPECULATIVE.to_string(), "1".to_string());
     }
     let msg_headers = MessageHeaders {
@@ -1313,108 +1312,38 @@ async fn handle_stream_publish(
         extra: headers,
     };
 
-    match durability {
-        // Durable: persist before fan-out and confirm. Pipelined - the frame loop
-        // only enqueues to the channel's durable ingest, the confirm resolves when
-        // the record is durable and fanned out.
-        BrokerStreamDurability::Durable => match channel.publish_durable(msg_headers, payload).await
-        {
-            Ok(confirm_rx) => {
-                if require_confirm {
-                    let tx = tx.clone();
-                    tokio::spawn(async move {
-                        match confirm_rx.await {
-                            Ok(Ok(offset)) => {
-                                if let Ok(frame) =
-                                    try_encode(Op::PublishOk, request_id, &PublishOk { offset })
-                                {
-                                    let _ = tx.send(frame).await;
-                                }
-                            }
-                            _ => {
-                                let _ = send_error_response(
-                                    &tx,
-                                    request_id,
-                                    500,
-                                    "durable stream record failed to persist",
-                                )
-                                .await;
+    // The frame loop only enqueues; the channel drain handles fan-out and confirm
+    // timing per tier (durable and speculative confirm on durability, ephemeral at
+    // stage). The confirm handle resolves accordingly, so the publish path here is
+    // the same regardless of tier.
+    match channel.publish_pipelined(msg_headers, payload).await {
+        Ok(confirm_rx) => {
+            if require_confirm {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    match confirm_rx.await {
+                        Ok(Ok(offset)) => {
+                            if let Ok(frame) =
+                                try_encode(Op::PublishOk, request_id, &PublishOk { offset })
+                            {
+                                let _ = tx.send(frame).await;
                             }
                         }
-                    });
-                }
-            }
-            Err(err) => {
-                send_error_response(tx, request_id, 500, format!("stream publish failed: {err}"))
-                    .await?;
-            }
-        },
-        // Express lane: fan out off the staged offset, do not wait for the flush.
-        BrokerStreamDurability::Ephemeral | BrokerStreamDurability::Speculative => {
-            match channel.publish_staged(msg_headers, payload).await {
-                Ok(staged) => {
-                    if durability == BrokerStreamDurability::Ephemeral {
-                        // Confirm now (weakest guarantee); drain durability in the
-                        // background so a failed write is logged, not awaited.
-                        if require_confirm {
-                            tx.send(try_encode(
-                                Op::PublishOk,
+                        _ => {
+                            let _ = send_error_response(
+                                &tx,
                                 request_id,
-                                &PublishOk {
-                                    offset: staged.offset,
-                                },
-                            )?)
-                            .await?;
+                                500,
+                                "stream record failed to persist",
+                            )
+                            .await;
                         }
-                        tokio::spawn(async move {
-                            if let Ok(Err(err)) = staged.durable.await {
-                                tracing::warn!("ephemeral stream record failed to persist: {err}");
-                            }
-                        });
-                    } else if require_confirm {
-                        // Speculative: delivery already happened, defer the confirm
-                        // until the record is durable.
-                        let tx = tx.clone();
-                        let offset = staged.offset;
-                        tokio::spawn(async move {
-                            match staged.durable.await {
-                                Ok(Ok(())) => {
-                                    if let Ok(frame) =
-                                        try_encode(Op::PublishOk, request_id, &PublishOk { offset })
-                                    {
-                                        let _ = tx.send(frame).await;
-                                    }
-                                }
-                                _ => {
-                                    let _ = send_error_response(
-                                        &tx,
-                                        request_id,
-                                        500,
-                                        "speculative stream record failed to persist",
-                                    )
-                                    .await;
-                                }
-                            }
-                        });
-                    } else {
-                        // No confirm wanted: still drain durability to log failures.
-                        tokio::spawn(async move {
-                            if let Ok(Err(err)) = staged.durable.await {
-                                tracing::warn!("speculative stream record failed to persist: {err}");
-                            }
-                        });
                     }
-                }
-                Err(err) => {
-                    send_error_response(
-                        tx,
-                        request_id,
-                        500,
-                        format!("stream publish failed: {err}"),
-                    )
-                    .await?;
-                }
+                });
             }
+        }
+        Err(err) => {
+            send_error_response(tx, request_id, 500, format!("stream publish failed: {err}")).await?;
         }
     }
     Ok(())
