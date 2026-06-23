@@ -1486,12 +1486,6 @@ impl<'a> StreamSubscriptionBuilder<'a> {
         self
     }
 
-    /// Begin at a specific offset (clamped into the retained window).
-    pub fn from_offset(mut self, offset: u64) -> Self {
-        self.start = StreamStart::Offset { offset };
-        self
-    }
-
     /// Begin `count` records back from the tail.
     pub fn from_last(mut self, count: u64) -> Self {
         self.start = StreamStart::NBack { count };

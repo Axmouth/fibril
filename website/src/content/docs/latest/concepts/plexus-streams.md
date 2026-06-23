@@ -19,15 +19,20 @@ A stream subscription tracks position with a **cursor**. There are two modes:
   the cursor for that name, advances it as you ack, and resumes it after a
   restart or reconnect, anywhere in the cluster. No offset bookkeeping on your
   side. A fresh name starts at the earliest retained record so it cannot silently
-  miss data. Different names are independent fan-out consumers (JetStream-style).
-  The same name is single-active (last commit wins).
+  miss data. Different names are independent fan-out consumers, each tracking its
+  own position. The same name is single-active (last commit wins).
 - **Ephemeral.** No name. You choose a start position and the broker keeps no
   state for you, so you are at the mercy of retention. Good for a live tail or an
   ad-hoc replay.
 
 Start positions for an ephemeral subscription: latest (only new records),
-earliest (oldest retained), a specific offset, N records back from the tail, or
-the first record at or after a wall-clock time.
+earliest (oldest retained), N records back from the tail, or the first record at
+or after a wall-clock time.
+
+Note that a record's offset is an internal storage detail, not a stable identity
+to build application logic on. Resume with a durable cursor name rather than by
+remembering offsets. The client deliberately does not let you start a
+subscription at a raw offset.
 
 ## Filtering
 
@@ -51,8 +56,8 @@ work queue — that is its job.
 ## Retention
 
 A stream keeps records until a retention bound is crossed, then drops whole
-sealed log segments (Kafka-style). Bound it by age, total bytes, or record count
-(any combination). Retention wins over a slow cursor: a consumer that lags past
+sealed log segments. Bound it by age, total bytes, or record count (any
+combination). Retention wins over a slow cursor: a consumer that lags past
 the retained window is clamped forward and flagged rather than holding storage
 forever.
 
