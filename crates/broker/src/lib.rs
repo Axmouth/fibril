@@ -3,6 +3,7 @@ pub mod coordination;
 pub mod queue_engine;
 pub mod replication;
 pub mod runtime_settings;
+pub mod stream;
 pub mod test_util;
 
 pub use fibril_storage::{BrokerCompletionPair, CompletionPair};
