@@ -164,6 +164,35 @@ Conditions and limits:
   connect prevents pure consumers from staying on partition `0` when topology is
   available.
 
+## Plexus Streams
+
+See also: [Plexus streams](/latest/concepts/plexus-streams/) and
+[client usage](/latest/clients/).
+
+| Item | Status | Implemented surface |
+| --- | --- | --- |
+| Stream channel type (fan-out) | Implemented | Stroma StreamEngine (cursors/retention), broker fan-out actor, TCP protocol (`DeclarePlexus`/`SubscribeStream`, reuses Publish/Deliver/Ack), Rust + TypeScript + Python clients |
+| Declare plexus (partitions, durability, retention) | Implemented | `declare_plexus`/`declarePlexus` + `StreamConfig` in all three clients |
+| Durable named cursor | Implemented | Broker-side cursor per (channel, partition, name); resume on restart, advance on ack |
+| Ephemeral start position | Implemented | latest / earliest / offset / n-back / by-time |
+| Header filter | Implemented | AND of `header == pattern` with `*` glob, stream-only |
+| Client-side fan-in across partitions | Implemented | Reuses the queue fan-in supervisor (failover resubscribe + live-grow pickup); streams stay out of the reconnect-reconcile registry and resume via the cursor |
+| Durability tiers (ephemeral/speculative/durable) | Partial | Selected on declare and accepted by the broker; broker persists durable-first for all tiers (the express lane is a later refinement) |
+| Cross-client wire vectors | Implemented | `DeclarePlexus`/`DeclarePlexusOk`/`SubscribeStream` pinned in `clients/wire_vectors.json`, asserted by Rust/Python/TS |
+
+Conditions and limits:
+
+- Every consumer of a stream sees every record. Partitioning a stream is for write
+  throughput and per-key ordering, not consumer work-sharing.
+- A durable name is single-active (last commit wins); distinct names are
+  independent fan-out consumers, each with its own per-partition cursor.
+- A fresh durable name starts at the earliest retained record so it cannot
+  silently miss data.
+- Retention drops whole sealed segments (by age/bytes/records) and clamps a cursor
+  that lags past the retained window.
+- The durability-tier knob is plumbed end to end but does not yet change broker
+  delivery timing.
+
 ## Reconnects
 
 See also: [reconnects](/latest/reliability/reconnects/) and
@@ -434,6 +463,7 @@ does not currently have.
 | Message TTL (`expiring` publisher + queue `default_message_ttl`) | Implemented | Implemented |
 | Manual ack subscription | Implemented | Implemented |
 | Auto ack subscription | Implemented | Implemented |
+| Plexus stream declare + subscribe (durable cursor, filter, fan-in) | Implemented | Implemented |
 | Exclusive consumer group | Implemented | Implemented |
 | Assignment-change events | Implemented | Implemented (`onAssignmentChange`) |
 | Resume identity handshake | Implemented | Implemented |

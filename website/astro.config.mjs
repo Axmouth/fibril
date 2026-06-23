@@ -32,6 +32,7 @@ export default defineConfig({
           label: "Concepts",
           items: [
             { label: "Core model", slug: "latest/concepts/core-model" },
+            { label: "Plexus streams", slug: "latest/concepts/plexus-streams" },
             { label: "Consumer groups", slug: "latest/concepts/consumer-groups" },
             { label: "Clustering and coordination", slug: "latest/concepts/clustering" },
             { label: "Reliability semantics", slug: "latest/reliability/semantics" },

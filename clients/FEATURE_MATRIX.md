@@ -56,6 +56,25 @@ Superscript numbers refer to the Notes under the tables.
 | Multi-partition subscribe fan-in | done | done | done |
 | Live-repartition partition pickup (consumer grow) | done | done <sup>2</sup> | done <sup>2</sup> |
 
+## Plexus (fan-out streams)
+
+Every consumer of a stream sees every record (vs a queue, where a message is
+consumed once). A stream subscription reads ALL partitions and fans them in; the
+same durable name tracks an independent cursor per partition.
+
+| Feature | Rust | TypeScript | Python |
+| --- | --- | --- | --- |
+| Declare plexus (partitions, durability, retention) | done | done | done |
+| Publish to a stream (reuses Publish, routed by kind) | done | done | done |
+| Stream subscribe manual ack (cursor advance) | done | done | done |
+| Stream subscribe auto ack (server-settled cursor) | done | done | done |
+| Durable named cursor (resume/advance) | done | done | done |
+| Ephemeral start position (latest/earliest/offset/n-back/by-time) | done | done | done |
+| Header filter (AND of `header == pattern`, `*` glob) | done | done | done |
+| Client-side fan-in across all partitions | done | done | done |
+| Failover resubscribe + live-grow pickup | done | done | done |
+| Durability tiers honored end to end (express lane) | client-ready <sup>11</sup> | client-ready <sup>11</sup> | client-ready <sup>11</sup> |
+
 ## Reconnect and resume
 
 | Feature | Rust | TypeScript | Python |
@@ -147,6 +166,11 @@ Superscript numbers refer to the Notes under the tables.
    implementation.
 10. The Python client has unit and fake-broker integration tests. A runnable
     examples-as-tests job like the TS client's is not wired up yet.
+11. All three clients select the durability tier on declare and the broker accepts
+    it, but the broker currently persists durable-first for every tier. The
+    express lane for the ephemeral/speculative tiers (deliver before fsync, defer
+    the producer confirm) is a broker-side refinement, so the client knob is
+    plumbed end to end but does not yet change broker timing.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.
