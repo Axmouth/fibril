@@ -10,6 +10,21 @@ Source tags: `[WL]` worklog, `[PLAN]` replication planning, `[DN]` design notes,
 `[MEM]` memory, `[RACE]` race-windows, `[AUDIT]` audit board, `[USER]` author note.
 Tiers are grouped by concern, not strictly ordered.
 
+- Stream/staging perf levers from the staging-efficiency audit. DONE: removed the
+  per-publish replication-cache clone (cache removed entirely, keratin 27940f8) and
+  the per-record fan-out round-trip in the stream drain (fibril 115b370, +~23%
+  ephemeral single-partition). OPEN: (a) keratin encode_record builds the fixed
+  32-byte record header via 8 extend_from_slice calls - pack into a stack [u8;32] +
+  one extend (micro-opt). (b) BIG: the payload is memcpied into write_buf before the
+  single write(); a vectored write (writev of [header, headers, payload, crc] with
+  CRC fed incrementally) would avoid the copy - real lever for large payloads, but a
+  substantial write-path rewrite (partial writes, segment rolls). (c) durable
+  single-partition throughput is noisy run-to-run (~196k-245k at 300k offered, 1KB);
+  worth tracing what causes the variance (fsync batching cadence? scheduling?).
+  Client-side: a single reader's multi-partition fan-in tops out ~260k records/s -
+  its own bottleneck, separate from the broker. See tasks #61/#62/#65 for the topic
+  routing + Arc<str> interning follow-ups.
+
 This file tracks the replication and clustering roadmap leftovers. Non-replication
 feature ideas live in their own track, summarized at the end.
 
