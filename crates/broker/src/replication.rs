@@ -2283,7 +2283,16 @@ where
     }
 }
 
-impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
+impl<
+    E: QueueEngine
+        + crate::queue_engine::StreamStore
+        + std::fmt::Debug
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+> Broker<E>
+{
     pub fn has_follower_replication_worker(
         &self,
         topic: &str,
@@ -2371,7 +2380,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 }
 
-impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
+impl<
+    E: QueueEngine
+        + crate::queue_engine::StreamStore
+        + std::fmt::Debug
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+> Broker<E>
+{
     /// Shareable confirm gate for spawned per-queue confirm loops.
     pub fn replication_confirm_gate(&self) -> ReplicationConfirmGate {
         ReplicationConfirmGate {
@@ -2383,7 +2401,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 }
 
-impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
+impl<
+    E: QueueEngine
+        + crate::queue_engine::StreamStore
+        + std::fmt::Debug
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+> Broker<E>
+{
     /// Record a follower's durable replication progress (from a stamped
     /// replication read: followers apply durably, so their pull offsets are
     /// durable watermarks). Wakes any publish confirms waiting on policy.

@@ -546,6 +546,14 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
 
 ## Code health and structure
 
+- Convert wide config structs (starting with `BrokerConfig`, and `StromaOptions`)
+  to a builder pattern. They are currently constructed with exhaustive struct
+  literals across many call sites (tests, replication, main), so adding a field
+  churns all of them and discourages putting new tunables in config (e.g. the
+  stream ring/live-channel sizes are module consts in broker.rs as a result). A
+  builder with defaults lets new fields land without touching existing call sites,
+  and is the clean home for those stream tunables. [USER]
+
 - Rework the `tui-example` (`crates/tui-example`): a small TUI app that connects
   to a broker and visualizes messages (packs) flowing in and out. It has disabled
   instrumentation (latency tracking + compute_stats were dead, removed in the
