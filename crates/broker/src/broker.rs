@@ -3780,15 +3780,16 @@ impl Broker<StromaEngine> {
         for entry in self.locally_owned.iter() {
             let key = entry.key();
             let queue = QueueIdentity::new(key.tp.clone(), key.part, key.group.as_deref());
-            previous.assignments.entry(queue.clone()).or_insert_with(|| {
-                PartitionAssignment {
+            previous
+                .assignments
+                .entry(queue.clone())
+                .or_insert_with(|| PartitionAssignment {
                     queue,
                     owner: node_id.to_string(),
                     followers: Vec::new(),
                     epoch: 0,
                     durability: ReplicationDurabilityPolicy::LocalDurable,
-                }
-            });
+                });
         }
         previous
     }
