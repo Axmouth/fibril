@@ -2002,6 +2002,8 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
         .control_iteration(
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
+            &fibril_broker::coordination::DeterministicStreamPlacement,
+            &coordination.registered_streams(),
             1,
             ReplicationDurabilityPolicy::LocalDurable,
             &live,
@@ -2178,6 +2180,8 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         .control_iteration(
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
+            &fibril_broker::coordination::DeterministicStreamPlacement,
+            &coordination.registered_streams(),
             1,
             ReplicationDurabilityPolicy::LocalDurable,
             &live,
@@ -2226,6 +2230,8 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
         .control_iteration(
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
+            &fibril_broker::coordination::DeterministicStreamPlacement,
+            &coordination.registered_streams(),
             1,
             ReplicationDurabilityPolicy::LocalDurable,
             &live_after_death,
@@ -2380,6 +2386,8 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
         .control_iteration(
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
+            &fibril_broker::coordination::DeterministicStreamPlacement,
+            &coordination.registered_streams(),
             1,
             ReplicationDurabilityPolicy::LocalDurable,
             &live,
@@ -2418,6 +2426,8 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
         .control_iteration(
             &fibril_broker::coordination::DeterministicPartitionPlacement,
             &coordination.registered_queues(),
+            &fibril_broker::coordination::DeterministicStreamPlacement,
+            &coordination.registered_streams(),
             1,
             ReplicationDurabilityPolicy::LocalDurable,
             &live_without_owner,

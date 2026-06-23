@@ -19,7 +19,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use fibril_broker::coordination::{
-    Coordination, DeterministicPartitionPlacement, NodeInfo, QueueIdentity,
+    Coordination, DeterministicPartitionPlacement, DeterministicStreamPlacement, NodeInfo,
+    QueueIdentity,
     ReplicationDurabilityPolicy,
 };
 use fibril_broker::Partition;
@@ -95,6 +96,8 @@ impl Playground {
             .control_iteration(
                 &DeterministicPartitionPlacement,
                 &self.queues,
+                &DeterministicStreamPlacement,
+                &[],
                 1,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &self.live,

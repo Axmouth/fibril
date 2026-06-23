@@ -14,7 +14,9 @@ use fibril_broker::coordination::{
     aggregate_cohort_membership, ClusterCohortController, CohortPlan, ConsumerGroupKey,
     Coordination, CoordinationSnapshot, CoordinationStream, GlobalCohortMembership,
     LocalCohortMembership, NodeInfo, PartitionAssignment, PartitionPlacementError,
-    PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity, ReplicationDurabilityPolicy,
+    DeterministicStreamPlacement, PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity,
+    ReplicationDurabilityPolicy, StreamAssignment, StreamIdentity, StreamPlacementInput,
+    StreamPlacementPolicy,
 };
 use fibril_storage::Partition;
 use ganglion_openraft::{
@@ -25,6 +27,12 @@ use tokio::sync::watch;
 
 /// Namespace tag used for fibril queues inside ganglion resource identities.
 const QUEUE_NAMESPACE: &str = "fibril/queue";
+
+/// Namespace tag for fibril streams (Plexus) inside ganglion resource
+/// identities. Streams place through the same controller as queues but live in
+/// their own namespace: they carry an owner only (no follower set), and the
+/// fibril side keeps them in a separate `stream_assignments` map.
+const STREAM_NAMESPACE: &str = "fibril/stream";
 
 /// Attribute key carrying the replicated runtime-settings document.
 pub const RUNTIME_SETTINGS_ATTRIBUTE: &str = "fibril/runtime_settings";
@@ -245,6 +253,11 @@ pub const DEFAULT_PARTITIONING_VERSION: u64 = 0;
 /// charset that excludes `/`, so the separator is unambiguous.
 pub const QUEUE_PARTITIONING_ATTRIBUTE_PREFIX: &str = "fibril/partitioning/";
 
+/// Attribute key prefix for a stream's replicated partitioning, kept separate
+/// from the queue prefix so a stream and a same-named queue never collide.
+/// Streams have no group, so the key is `fibril/stream_partitioning/<topic>`.
+pub const STREAM_PARTITIONING_ATTRIBUTE_PREFIX: &str = "fibril/stream_partitioning/";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForwardedWritePolicy {
     /// Maximum deterministic remote leader redirects for one forwarded write.
@@ -277,6 +290,10 @@ fn queue_partitioning_key(topic: &str, group: Option<&str>) -> String {
         Some(group) => format!("{QUEUE_PARTITIONING_ATTRIBUTE_PREFIX}{topic}/{group}"),
         None => format!("{QUEUE_PARTITIONING_ATTRIBUTE_PREFIX}{topic}"),
     }
+}
+
+fn stream_partitioning_key(topic: &str) -> String {
+    format!("{STREAM_PARTITIONING_ATTRIBUTE_PREFIX}{topic}")
 }
 
 /// Replicated partitioning of one logical queue `(topic, group)`.
@@ -419,13 +436,31 @@ pub struct ClientQueueTopology {
     pub partition_count: u32,
 }
 
+/// Client-facing ownership of one stream partition: which node owns it and where
+/// to reach that node. Streams have no group and no follower set, so this is the
+/// queue shape minus those fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClientStreamTopology {
+    pub topic: String,
+    pub partition: fibril_storage::Partition,
+    pub owner_node_id: String,
+    /// Broker endpoint of the owner, if the node is known in the registry.
+    pub owner_endpoint: Option<String>,
+    pub partitioning_version: u64,
+    /// Total partition count of this stream topic — authoritative N for key
+    /// routing.
+    pub partition_count: u32,
+}
+
 /// Client-facing topology snapshot: the owner/endpoint of every assigned queue
-/// partition at a given coordination generation. Clients route to owners from
-/// this and refresh it on not-owner / stale-topology errors.
+/// and stream partition at a given coordination generation. Clients route to
+/// owners from this and refresh it on not-owner / stale-topology errors.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClientTopology {
     pub generation: u64,
     pub queues: Vec<ClientQueueTopology>,
+    #[serde(default)]
+    pub streams: Vec<ClientStreamTopology>,
 }
 
 /// Heartbeat label prefix for per-assignment applied tails:
@@ -488,7 +523,7 @@ pub fn to_ganglion_snapshot(
         })
         .collect();
 
-    let assignments = snapshot
+    let mut assignments: std::collections::BTreeMap<_, _> = snapshot
         .assignments
         .iter()
         .map(|(queue, assignment)| {
@@ -503,6 +538,20 @@ pub fn to_ganglion_snapshot(
             (resource, mapped)
         })
         .collect();
+
+    // Streams place through the same controller, in their own namespace: an
+    // owner with no followers and the default (local) durability — durability is
+    // the local keratin tier, not cross-node replication.
+    for (stream, assignment) in &snapshot.stream_assignments {
+        let resource = to_ganglion_stream_resource(stream);
+        let mapped = ganglion_core::PartitionAssignment::new(
+            resource.clone(),
+            assignment.owner.clone(),
+            Vec::new(),
+            assignment.epoch,
+        );
+        assignments.insert(resource, mapped);
+    }
 
     ganglion_core::CoordinationSnapshot {
         nodes,
@@ -558,10 +607,24 @@ pub fn to_fibril_snapshot(snapshot: &ganglion_core::CoordinationSnapshot) -> Coo
         })
         .collect();
 
+    // Stream assignments live in their own namespace and own map (owner + epoch
+    // only); the queue filter above skips them.
+    let stream_assignments = snapshot
+        .assignments
+        .iter()
+        .filter_map(|(resource, assignment)| {
+            let stream = to_fibril_stream(resource)?;
+            Some((
+                stream.clone(),
+                StreamAssignment::new(stream, assignment.owner.clone(), assignment.epoch),
+            ))
+        })
+        .collect();
+
     CoordinationSnapshot {
         nodes,
         assignments,
-        stream_assignments: std::collections::HashMap::new(),
+        stream_assignments,
         generation: snapshot.generation,
     }
 }
@@ -585,6 +648,23 @@ fn to_fibril_queue(resource: &ganglion_core::ResourceIdentity) -> Option<QueueId
         partition,
         resource.group.as_deref(),
     ))
+}
+
+fn to_ganglion_stream_resource(stream: &StreamIdentity) -> ganglion_core::ResourceIdentity {
+    ganglion_core::ResourceIdentity::new(
+        STREAM_NAMESPACE,
+        stream.topic.clone(),
+        u64::from(stream.partition.id()),
+        None,
+    )
+}
+
+fn to_fibril_stream(resource: &ganglion_core::ResourceIdentity) -> Option<StreamIdentity> {
+    if resource.namespace != STREAM_NAMESPACE {
+        return None;
+    }
+    let partition = Partition::new(u32::try_from(resource.partition).ok()?);
+    Some(StreamIdentity::new(resource.name.clone(), partition))
 }
 
 fn to_ganglion_durability(
@@ -813,6 +893,39 @@ impl GanglionCoordination {
             .resources
             .iter()
             .filter_map(to_fibril_queue)
+            .collect()
+    }
+
+    /// Add a stream partition to the cluster catalogue (forwarded merge;
+    /// idempotent). The controller places catalogued streams onto owners.
+    pub async fn register_stream(
+        &self,
+        stream: &StreamIdentity,
+    ) -> Result<(), OpenraftAdapterError> {
+        self.forward_merge(MetadataRaftCommand::RegisterResource {
+            resource: to_ganglion_stream_resource(stream),
+        })
+        .await
+    }
+
+    /// Remove a stream partition from the cluster catalogue (forwarded merge).
+    pub async fn deregister_stream(
+        &self,
+        stream: &StreamIdentity,
+    ) -> Result<(), OpenraftAdapterError> {
+        self.forward_merge(MetadataRaftCommand::DeregisterResource {
+            resource: to_ganglion_stream_resource(stream),
+        })
+        .await
+    }
+
+    /// The committed cluster stream catalogue (fibril-representable entries).
+    pub fn registered_streams(&self) -> Vec<StreamIdentity> {
+        self.node
+            .committed_snapshot()
+            .resources
+            .iter()
+            .filter_map(to_fibril_stream)
             .collect()
     }
 
@@ -1195,6 +1308,73 @@ impl GanglionCoordination {
         Err(DeclareQueueError::Coordination(
             OpenraftAdapterError::Storage("queue declare lost the CAS race repeatedly".to_string()),
         ))
+    }
+
+    /// Record a stream's partitioning (create-once, race-safe via CAS), mirroring
+    /// `declare_queue_partitioning` but on the stream-partitioning key. Streams
+    /// have no group, so the document is keyed by topic alone.
+    pub async fn declare_stream_partitioning(
+        &self,
+        topic: &str,
+        partition_count: u32,
+    ) -> Result<QueuePartitioning, DeclareQueueError> {
+        let partition_count = partition_count.max(1);
+        let key = stream_partitioning_key(topic);
+        for _ in 0..8 {
+            if let Some(raw) = self.cluster_attribute(&key) {
+                match serde_json::from_str::<QueuePartitioning>(&raw) {
+                    Ok(existing) if existing.partition_count == partition_count => {
+                        return Ok(existing);
+                    }
+                    Ok(existing) => {
+                        return Err(DeclareQueueError::PartitionCountConflict {
+                            topic: topic.to_string(),
+                            group: None,
+                            existing: existing.partition_count,
+                            requested: partition_count,
+                        });
+                    }
+                    Err(error) => {
+                        return Err(DeclareQueueError::Coordination(
+                            OpenraftAdapterError::Storage(format!(
+                                "stream `{topic}` partitioning is corrupt: {error}"
+                            )),
+                        ));
+                    }
+                }
+            }
+            let partitioning = QueuePartitioning {
+                partition_count,
+                partitioning_version: DEFAULT_PARTITIONING_VERSION,
+            };
+            let value = serde_json::to_string(&partitioning).map_err(|error| {
+                DeclareQueueError::Coordination(OpenraftAdapterError::Storage(error.to_string()))
+            })?;
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: key.clone(),
+                    expected: None,
+                    value,
+                })
+                .await
+            {
+                Ok(_) => return Ok(partitioning),
+                // Lost the create race: re-read and resolve (idempotent or conflict).
+                Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
+                Err(error) => return Err(DeclareQueueError::Coordination(error)),
+            }
+        }
+        Err(DeclareQueueError::Coordination(
+            OpenraftAdapterError::Storage(
+                "stream declare lost the CAS race repeatedly".to_string(),
+            ),
+        ))
+    }
+
+    /// Read a stream's committed partitioning, if declared.
+    pub fn stream_partitioning(&self, topic: &str) -> Option<QueuePartitioning> {
+        self.cluster_attribute(&stream_partitioning_key(topic))
+            .and_then(|raw| serde_json::from_str::<QueuePartitioning>(&raw).ok())
     }
 
     /// Grow a logical queue's partition count to `new_count` and bump its
@@ -1637,13 +1817,17 @@ impl GanglionCoordination {
         let provider = std::sync::Arc::clone(self);
         let status = std::sync::Arc::new(std::sync::RwLock::new(ControllerStatus::default()));
         let shared_status = status.clone();
+        // Streams place owner-only by the deterministic spread policy; there is
+        // no pluggable stream policy yet, so the controller owns the instance.
+        let stream_planner = DeterministicStreamPlacement;
 
         let handle = tokio::spawn(async move {
             let mut watch = provider.watch();
             loop {
                 let queues = provider.registered_queues();
+                let streams = provider.registered_streams();
                 let live = provider.live_nodes(config.liveness_ttl);
-                let outcome = if queues.is_empty() || live.is_empty() {
+                let outcome = if (queues.is_empty() && streams.is_empty()) || live.is_empty() {
                     // Nothing to place (or no live brokers): a normal idle
                     // tick, not an error.
                     Ok(provider.node.is_leader().await.then(|| provider.snapshot()))
@@ -1652,6 +1836,8 @@ impl GanglionCoordination {
                         .control_iteration(
                             planner.as_ref(),
                             &queues,
+                            &stream_planner,
+                            &streams,
                             config.target_followers,
                             config.default_durability,
                             &live,
@@ -1842,7 +2028,40 @@ impl GanglionCoordination {
                 .then_with(|| a.group.cmp(&b.group))
                 .then_with(|| a.partition.cmp(&b.partition))
         });
-        ClientTopology { generation, queues }
+
+        // Authoritative stream partitioning (count + version) per topic.
+        let stream_partitioning = |topic: &str| -> QueuePartitioning {
+            committed
+                .attributes
+                .get(&stream_partitioning_key(topic))
+                .and_then(|raw| serde_json::from_str::<QueuePartitioning>(raw).ok())
+                .unwrap_or(QueuePartitioning {
+                    partition_count: 1,
+                    partitioning_version: DEFAULT_PARTITIONING_VERSION,
+                })
+        };
+        let mut streams: Vec<ClientStreamTopology> = fibril
+            .stream_assignments
+            .values()
+            .map(|assignment| {
+                let part = stream_partitioning(&assignment.stream.topic);
+                ClientStreamTopology {
+                    topic: assignment.stream.topic.to_string(),
+                    partition: assignment.stream.partition,
+                    owner_node_id: assignment.owner.clone(),
+                    owner_endpoint: endpoints.get(&assignment.owner).cloned(),
+                    partitioning_version: part.partitioning_version,
+                    partition_count: part.partition_count,
+                }
+            })
+            .collect();
+        streams.sort_by(|a, b| a.topic.cmp(&b.topic).then_with(|| a.partition.cmp(&b.partition)));
+
+        ClientTopology {
+            generation,
+            queues,
+            streams,
+        }
     }
 
     /// Propose a new coordination snapshot through raft consensus.
@@ -1882,6 +2101,8 @@ impl GanglionCoordination {
         &self,
         planner: &dyn PartitionPlacementPolicy,
         queues: &[QueueIdentity],
+        stream_planner: &dyn StreamPlacementPolicy,
+        streams: &[StreamIdentity],
         target_followers: usize,
         default_durability: ReplicationDurabilityPolicy,
         live_nodes: &HashMap<String, NodeInfo>,
@@ -1896,7 +2117,7 @@ impl GanglionCoordination {
             let committed = self.node.committed_snapshot();
             let fibril_committed = to_fibril_snapshot(&committed);
 
-            let plan = planner
+            let mut plan = planner
                 .plan(PartitionPlacementInput {
                     nodes: live_nodes.clone(),
                     queues: queues.to_vec(),
@@ -1906,6 +2127,19 @@ impl GanglionCoordination {
                     generation: committed.generation + 1,
                 })
                 .map_err(ControlError::Planning)?;
+
+            // Streams place through the same controller pass (owner-only). Their
+            // assignments ride into the same ganglion snapshot so epoch stamping,
+            // anti-churn, and the guarded write all cover them uniformly.
+            plan.snapshot.stream_assignments = stream_planner
+                .plan(StreamPlacementInput {
+                    nodes: live_nodes.clone(),
+                    streams: streams.to_vec(),
+                    existing: fibril_committed.stream_assignments,
+                    generation: committed.generation + 1,
+                })
+                .map_err(ControlError::Planning)?
+                .assignments;
 
             let mut desired = to_ganglion_snapshot(&plan.snapshot);
 
@@ -2383,6 +2617,8 @@ mod tests {
             .control_iteration(
                 &DeterministicPartitionPlacement,
                 std::slice::from_ref(&queue),
+                &DeterministicStreamPlacement,
+                &[],
                 1,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
@@ -2397,6 +2633,8 @@ mod tests {
             .control_iteration(
                 &DeterministicPartitionPlacement,
                 std::slice::from_ref(&queue),
+                &DeterministicStreamPlacement,
+                &[],
                 1,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
@@ -2433,6 +2671,8 @@ mod tests {
             .control_iteration(
                 &DeterministicPartitionPlacement,
                 std::slice::from_ref(&queue),
+                &DeterministicStreamPlacement,
+                &[],
                 1,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
@@ -2807,6 +3047,8 @@ mod tests {
             .control_iteration(
                 &DeterministicPartitionPlacement,
                 &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
                 0,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
@@ -2833,6 +3075,94 @@ mod tests {
 
         provider.deregister_queue(&queue).await.expect("deregister");
         assert!(provider.registered_queues().is_empty());
+
+        provider.consensus_node().shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_catalogue_places_owner_and_surfaces_in_client_topology() {
+        use fibril_broker::coordination::DeterministicPartitionPlacement;
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("broker-a", raft_node);
+
+        // Declare a 2-partition stream and catalogue both partitions.
+        provider
+            .declare_stream_partitioning("events", 2)
+            .await
+            .expect("declare stream partitioning");
+        for partition in 0..2 {
+            provider
+                .register_stream(&StreamIdentity::new("events", Partition::new(partition)))
+                .await
+                .expect("register stream");
+        }
+        let mut registered = provider.registered_streams();
+        registered.sort_by_key(|s| s.partition);
+        assert_eq!(
+            registered,
+            vec![
+                StreamIdentity::new("events", Partition::new(0)),
+                StreamIdentity::new("events", Partition::new(1)),
+            ]
+        );
+
+        provider
+            .register_self(&NodeInfo {
+                node_id: "broker-a".into(),
+                broker_addr: "127.0.0.1:9100".parse().expect("addr"),
+                admin_addr: None,
+            })
+            .await
+            .expect("register node for placement");
+        let live = provider.live_nodes(Duration::from_secs(30));
+        provider
+            .control_iteration(
+                &DeterministicPartitionPlacement,
+                &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
+                0,
+                ReplicationDurabilityPolicy::LocalDurable,
+                &live,
+                8,
+            )
+            .await
+            .expect("controller iteration")
+            .expect("leader runs it");
+
+        // Both stream partitions are owned by the only live broker, kept in the
+        // stream map (never the queue map).
+        let snapshot = provider.snapshot();
+        assert!(snapshot.assignments.is_empty(), "no queue assignments");
+        for partition in 0..2 {
+            let assigned = snapshot
+                .stream_assignment_for("events", Partition::new(partition))
+                .expect("stream assigned");
+            assert_eq!(assigned.owner, "broker-a");
+        }
+
+        // The client topology carries the owner endpoint and authoritative count.
+        let topology = provider.client_topology();
+        assert!(topology.queues.is_empty());
+        assert_eq!(topology.streams.len(), 2);
+        for entry in &topology.streams {
+            assert_eq!(entry.topic, "events");
+            assert_eq!(entry.owner_node_id, "broker-a");
+            assert_eq!(entry.owner_endpoint.as_deref(), Some("127.0.0.1:9100"));
+            assert_eq!(entry.partition_count, 2);
+        }
 
         provider.consensus_node().shutdown().await.expect("shutdown");
     }
@@ -3165,6 +3495,8 @@ mod tests {
             .control_iteration(
                 &DeterministicPartitionPlacement,
                 &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
                 2,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &all_live,
@@ -3189,6 +3521,8 @@ mod tests {
             .control_iteration(
                 &DeterministicPartitionPlacement,
                 &provider.registered_queues(),
+                &DeterministicStreamPlacement,
+                &provider.registered_streams(),
                 2,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
