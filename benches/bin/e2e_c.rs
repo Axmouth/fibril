@@ -82,7 +82,7 @@ async fn run_load_test(
                     .subscribe("topic1")
                     .unwrap()
                     .prefetch(prefetch)
-                    .sub_manual_ack()
+                    .sub()
                     .await
                     .unwrap();
                 if let Some(ready_dir) = ready_dir {

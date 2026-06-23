@@ -97,9 +97,9 @@ async fn main() -> anyhow::Result<()> {
                 .subscribe(&topic)
                 .expect("subscribe")
                 .prefetch(prefetch)
-                .sub_manual_ack()
+                .sub()
                 .await
-                .expect("sub_manual_ack");
+                .expect("sub");
             while !stop.load(Ordering::Acquire) {
                 match tokio::time::timeout(Duration::from_millis(500), sub.recv()).await {
                     Ok(Some(msg)) => {

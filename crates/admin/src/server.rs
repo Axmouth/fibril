@@ -12,6 +12,7 @@ use axum::{
 use axum::extract::Path;
 use fibril_broker::{
     StromaMetrics,
+    broker::StreamAdmin,
     queue_engine::QueueEngine,
     runtime_settings::{RuntimeSettings, RuntimeSettingsManager, RuntimeSettingsSnapshot},
 };
@@ -129,6 +130,8 @@ pub struct AdminServer {
     /// Optional cluster-authoritative runtime-settings store. When absent,
     /// runtime settings are local-only and use the node's Stroma global store.
     pub runtime_settings_cluster: Option<Arc<dyn RuntimeSettingsClusterStore>>,
+    /// Optional Plexus stream observability + declare surface (the hosting broker).
+    pub streams: Option<Arc<dyn StreamAdmin>>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -166,7 +169,14 @@ impl AdminServer {
             coordination_membership: None,
             queue_repartition: None,
             runtime_settings_cluster: None,
+            streams: None,
         }
+    }
+
+    /// Attach the Plexus stream surface serving `GET/POST /admin/api/streams`.
+    pub fn with_streams(mut self, streams: Arc<dyn StreamAdmin>) -> Self {
+        self.streams = Some(streams);
+        self
     }
 
     /// Attach the coordination provider serving `GET /admin/api/topology`.
@@ -252,6 +262,7 @@ impl AdminServer {
             .route("/admin/connections", get(connections_page))
             .route("/admin/subscriptions", get(subscriptions_page))
             .route("/admin/queues", get(queues_page))
+            .route("/admin/streams", get(streams_page))
             .route("/admin/messages", get(messages_page))
             .route("/admin/diagnostics", get(diagnostics_page))
             .route("/admin/topology", get(topology_page))
@@ -268,6 +279,10 @@ impl AdminServer {
                 axum::routing::post(routes::delete_queue),
             )
             .route("/admin/api/queues_debug", get(routes::queues_debug))
+            .route(
+                "/admin/api/streams",
+                get(routes::streams).post(routes::create_stream),
+            )
             .route("/admin/api/messages", get(routes::inspect_messages))
             .route(
                 "/admin/api/runtime-settings",
@@ -390,6 +405,18 @@ async fn queues_page(
     Ok(render(Queues {
         page: "queues",
         title: "Queues",
+        auth_enabled: server.config.auth.is_some(),
+    }))
+}
+
+async fn streams_page(
+    State(server): State<Arc<AdminServer>>,
+    headers: HeaderMap,
+) -> Result<Html<String>, Redirect> {
+    page_auth(&server, &headers).await?;
+    Ok(render(Streams {
+        page: "streams",
+        title: "Streams",
         auth_enabled: server.config.auth.is_some(),
     }))
 }
@@ -522,6 +549,14 @@ struct Subscriptions {
 #[derive(Template)]
 #[template(path = "pages/queues.html")]
 struct Queues {
+    page: &'static str,
+    title: &'static str,
+    auth_enabled: bool,
+}
+
+#[derive(Template)]
+#[template(path = "pages/streams.html")]
+struct Streams {
     page: &'static str,
     title: &'static str,
     auth_enabled: bool,

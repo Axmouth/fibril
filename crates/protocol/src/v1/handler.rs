@@ -27,7 +27,10 @@ use fibril_broker::{
         OwnerStateCheckpoint, QueueEngine, RetentionConfig, StreamStore, StromaEngine, StromaError,
         StromaEvent,
     },
-    stream::{StreamChannel, StreamFilter, StreamRecord, SubscribeStart},
+    stream::{
+        StreamChannel, StreamDurability as BrokerStreamDurability, StreamFilter, StreamRecord,
+        SubscribeStart,
+    },
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_storage::{Group, Partition, Topic};
@@ -2849,15 +2852,18 @@ pub async fn handle_connection(
                         max_records: declare.retention.max_records,
                     }
                 });
+                // Map the wire durability tier to the broker enum (same ordinals).
+                let durability = BrokerStreamDurability::from_u8(declare.durability.as_u8())
+                    .unwrap_or_default();
 
                 // Materialize each partition's stream channel (idempotent). The
-                // durability tier is recorded on the wire surface; the broker
+                // durability tier is recorded for observability; the broker
                 // persists durable-first for all tiers today (the express lane for
                 // ephemeral/speculative is a later refinement).
                 let mut failure: Option<(u16, String)> = None;
                 for partition in 0..partition_count {
                     match broker
-                        .get_or_open_stream(&declare.topic, partition, retention.clone())
+                        .get_or_open_stream(&declare.topic, partition, durability, retention.clone())
                         .await
                     {
                         Ok(_) => {}

@@ -922,6 +922,9 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         Some(runtime_settings.clone()),
     );
 
+    // Plexus stream observability + declare surface (the hosting broker).
+    let admin = admin.with_streams(broker.clone());
+
     // Per-broker exclusive-cohort view (this node's local cohort membership).
     let admin = admin.with_cohorts({
         let broker = broker.clone();
