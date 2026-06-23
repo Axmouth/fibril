@@ -2921,6 +2921,7 @@ async fn handler_answers_topology_query_from_source() {
                 partition_count: 1,
             },
         ],
+        streams: Vec::new(),
     }));
 
     let (broker, dir) = open_test_broker().await;
@@ -3005,6 +3006,7 @@ async fn unowned_publish_redirects_to_current_owner() {
             partitioning_version: 0,
             partition_count: 1,
         }],
+        streams: Vec::new(),
     }));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3084,6 +3086,7 @@ async fn stale_partitioning_version_publish_is_fenced() {
             partitioning_version: 5,
             partition_count: 4,
         }],
+        streams: Vec::new(),
     }));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

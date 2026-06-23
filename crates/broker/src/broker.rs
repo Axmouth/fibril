@@ -1602,6 +1602,19 @@ impl<
         Ok(self.streams.entry(key).or_insert(opened).value().clone())
     }
 
+    /// Per-stream partition counts for client routing: `(topic, partition_count)`
+    /// over the stream channels this broker hosts. Sync (no IO) so a topology
+    /// source can call it. In standalone the broker hosts every partition, so the
+    /// count is authoritative; in a cluster it is broker-local until stream
+    /// placement lands.
+    pub fn stream_partition_counts(&self) -> Vec<(String, u32)> {
+        let mut counts: HashMap<String, u32> = HashMap::new();
+        for entry in self.streams.iter() {
+            *counts.entry(entry.key().tp.clone()).or_insert(0) += 1;
+        }
+        counts.into_iter().collect()
+    }
+
     /// Snapshot of the stream channels this broker is currently hosting, with
     /// per-partition head/tail offsets and the declared durability and retention.
     /// Open channels only (what the broker is serving), mirroring how queue stats

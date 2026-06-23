@@ -95,6 +95,13 @@ class TopologyCache:
                 endpoint=queue.owner_endpoint,
                 partitioning_version=queue.partitioning_version,
             )
+        # Streams have no group and no per-partition owner entries; they only feed
+        # the partitioning cache so a publisher spreads across their partitions.
+        for stream in topology.streams:
+            self._counts[(stream.topic, None)] = PartitioningEntry(
+                count=max(stream.partition_count, 1),
+                version=stream.partitioning_version,
+            )
 
     def apply_redirect(self, redirect: Redirect) -> None:
         """Point-update one partition's owner from a redirect."""

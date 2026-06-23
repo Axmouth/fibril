@@ -1342,9 +1342,20 @@ export interface QueueTopologyEntry {
   partitionCount: number;
 }
 
+/**
+ * A Plexus stream's partition count and version for client-side routing. Streams
+ * have no group and no per-partition owner here.
+ */
+export interface StreamTopologyEntry {
+  topic: string;
+  partitionCount: number;
+  partitioningVersion: bigint;
+}
+
 export interface TopologyOk {
   generation: bigint;
   queues: QueueTopologyEntry[];
+  streams: StreamTopologyEntry[];
 }
 
 /**
@@ -1386,6 +1397,12 @@ export function encodeTopologyOkBody(topology: TopologyOk): Uint8Array {
     w.u64(e.partitioningVersion);
     w.u32(e.partitionCount);
   }
+  w.u32(topology.streams.length);
+  for (const s of topology.streams) {
+    w.str(s.topic);
+    w.u32(s.partitionCount);
+    w.u64(s.partitioningVersion);
+  }
   return w.finish();
 }
 
@@ -1406,8 +1423,17 @@ export function decodeTopologyOkBody(body: Uint8Array): TopologyOk {
       partitionCount: r.u32(),
     });
   }
+  const streamCount = r.u32();
+  const streams: StreamTopologyEntry[] = [];
+  for (let i = 0; i < streamCount; i += 1) {
+    streams.push({
+      topic: r.str(),
+      partitionCount: r.u32(),
+      partitioningVersion: r.u64(),
+    });
+  }
   r.finish();
-  return { generation, queues };
+  return { generation, queues, streams };
 }
 
 export function encodeRedirectBody(redirect: Redirect): Uint8Array {

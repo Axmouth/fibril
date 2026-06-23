@@ -2733,6 +2733,7 @@ pub async fn handle_connection(
                     .unwrap_or(TopologyOk {
                         generation: 0,
                         queues: Vec::new(),
+                        streams: Vec::new(),
                     });
                 if let Some(topic) = &req.topic {
                     topology.queues.retain(|queue| {
@@ -2742,6 +2743,9 @@ pub async fn handle_connection(
                                 .as_deref()
                                 .is_none_or(|group| queue.group.as_deref() == Some(group))
                     });
+                    // A stream has no group; only filter it out when the request
+                    // names a different topic, never on a group mismatch.
+                    topology.streams.retain(|stream| &stream.topic == topic);
                 }
                 frame_tx_high_prio
                     .send(try_encode(Op::TopologyOk, frame.request_id, &topology)?)

@@ -254,6 +254,7 @@ def _cases() -> dict[str, tuple[bytes, object]]:
                         wire.QueueTopologyEntry("t", 0, None, "127.0.0.1:7000", 1, 2),
                         wire.QueueTopologyEntry("t", 1, None, None, 1, 2),
                     ],
+                    streams=[wire.StreamTopologyEntry("s", 3, 4)],
                 )
             ),
             wire.decode_topology_ok_body,

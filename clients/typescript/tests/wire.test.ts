@@ -365,10 +365,11 @@ test("topology ok body round-trips across entries", () => {
         partitionCount: 4,
       },
     ],
+    streams: [{ topic: "events", partitionCount: 3, partitioningVersion: 4n }],
   };
   assert.deepEqual(decodeTopologyOkBody(encodeTopologyOkBody(topology)), topology);
 
-  const emptyTopology = { generation: 0n, queues: [] };
+  const emptyTopology = { generation: 0n, queues: [], streams: [] };
   assert.deepEqual(decodeTopologyOkBody(encodeTopologyOkBody(emptyTopology)), emptyTopology);
 });
 

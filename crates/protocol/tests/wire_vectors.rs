@@ -13,8 +13,8 @@ use fibril_protocol::v1::{
     DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, Hello, HelloOk, Nack, Partition, Publish,
     PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry, ReconcileClient, ReconcilePolicy,
     ReconcileSubscription, Redirect, ResumeIdentity, ResumeOutcome, StreamDurability,
-    StreamRetention, StreamStart, Subscribe, SubscribeOk, SubscribeStream, TopologyOk,
-    TopologyRequest,
+    StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream,
+    TopologyOk, TopologyRequest,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -494,6 +494,11 @@ fn wire_encoders_match_shared_vectors() {
                         partition_count: 2,
                     },
                 ],
+                streams: vec![StreamTopologyEntry {
+                    topic: "s".into(),
+                    partition_count: 3,
+                    partitioning_version: 4,
+                }],
             },
         )
         .unwrap()

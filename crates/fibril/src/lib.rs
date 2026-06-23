@@ -45,7 +45,7 @@ use fibril_protocol::v1::handler::{
     ConnectionSettings, ProtocolServerError, QueueDeclareCoordinator,
     run_server as run_protocol_server,
 };
-use fibril_protocol::v1::{Partition, QueueTopologyEntry, TopologyOk};
+use fibril_protocol::v1::{Partition, QueueTopologyEntry, StreamTopologyEntry, TopologyOk};
 use fibril_util::StaticAuthHandler;
 use ganglion::{
     TcpRaftServer, WireFormat, WireFormatParseError,
@@ -883,7 +883,15 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     };
 
     let stroma_metrics = broker.stroma_metrics();
-    let topology_source = ganglion_parts.as_ref().map(topology_source_for_ganglion);
+    // Cluster routing comes from coordination; standalone serves a local topology
+    // so a single node still tells clients its stream partition counts (queue
+    // partitioning is cluster-only for now).
+    let topology_source: Option<Arc<dyn ClientTopologySource>> = match ganglion_parts.as_ref() {
+        Some(parts) => Some(topology_source_for_ganglion(parts)),
+        None => Some(Arc::new(LocalTopologySource {
+            broker: broker.clone(),
+        })),
+    };
     let declare_coordinator = ganglion_parts
         .as_ref()
         .map(declare_coordinator_for_ganglion);
@@ -1074,6 +1082,44 @@ pub struct CoordinationTopologySource {
     pub fetch: Arc<dyn Fn() -> ClientTopology + Send + Sync>,
 }
 
+/// Standalone topology source: a single node serving its own declared streams so
+/// clients can spread publishes across stream partitions without coordination.
+/// Queues are not surfaced (their standalone partitioning is not tracked here) and
+/// there is one owner (this node), so `owner_endpoint` is `None` and clients use
+/// their direct connection.
+struct LocalTopologySource {
+    broker: Arc<Broker<StromaEngine>>,
+}
+
+impl ClientTopologySource for LocalTopologySource {
+    fn topology(&self) -> TopologyOk {
+        let streams = self
+            .broker
+            .stream_partition_counts()
+            .into_iter()
+            .map(|(topic, partition_count)| StreamTopologyEntry {
+                topic,
+                partition_count,
+                partitioning_version: 0,
+            })
+            .collect();
+        TopologyOk {
+            generation: 0,
+            queues: Vec::new(),
+            streams,
+        }
+    }
+
+    fn owner_endpoint(
+        &self,
+        _topic: &str,
+        _partition: Partition,
+        _group: Option<&str>,
+    ) -> Option<(String, u64)> {
+        None
+    }
+}
+
 impl ClientTopologySource for CoordinationTopologySource {
     fn topology(&self) -> TopologyOk {
         let topology = (self.fetch)();
@@ -1091,6 +1137,11 @@ impl ClientTopologySource for CoordinationTopologySource {
                     partition_count: queue.partition_count,
                 })
                 .collect(),
+            // Cluster stream partitioning/placement is not surfaced yet (the
+            // coordination store does not distinguish stream from queue
+            // partitioning and streams are not placed across nodes). Tracked
+            // separately; standalone uses LocalTopologySource.
+            streams: Vec::new(),
         }
     }
 

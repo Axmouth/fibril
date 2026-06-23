@@ -302,10 +302,21 @@ export interface QueueTopologyEntryMsg {
   partition_count: number;
 }
 
+/**
+ * A Plexus stream's partition count and version for client-side routing. Streams
+ * have no group and no per-partition owner here.
+ */
+export interface StreamTopologyEntryMsg {
+  topic: string;
+  partition_count: number;
+  partitioning_version: bigint;
+}
+
 /** Topology snapshot at a coordination generation. */
 export interface TopologyOkMsg {
   generation: bigint;
   queues: QueueTopologyEntryMsg[];
+  streams: StreamTopologyEntryMsg[];
 }
 
 /**

@@ -854,6 +854,22 @@ fn one() -> u32 {
 pub struct TopologyOk {
     pub generation: u64,
     pub queues: Vec<QueueTopologyEntry>,
+    /// Plexus stream partitioning, so a publisher can spread across a stream's
+    /// partitions the same way it routes a queue. Streams have no group and no
+    /// per-partition owner here (placement is best-effort for now), so this is a
+    /// slimmer entry than `QueueTopologyEntry`.
+    #[serde(default)]
+    pub streams: Vec<StreamTopologyEntry>,
+}
+
+/// One Plexus stream's partitioning for client-side routing: the authoritative
+/// partition count and version for the topic. Repeated per stream (not per
+/// partition).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamTopologyEntry {
+    pub topic: String,
+    pub partition_count: u32,
+    pub partitioning_version: u64,
 }
 
 /// Control-flow response telling the client to retry against the current owner.

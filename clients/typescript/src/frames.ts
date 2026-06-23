@@ -35,6 +35,7 @@ import type {
   ResumeIdentity,
   SubscribeMsg,
   SubscribeOkMsg,
+  StreamTopologyEntryMsg,
   TopologyOkMsg,
   TopologyRequestMsg,
 } from "./protocol.js";
@@ -155,6 +156,22 @@ function entryFromWire(e: wire.QueueTopologyEntry): QueueTopologyEntryMsg {
     owner_endpoint: e.ownerEndpoint,
     partitioning_version: e.partitioningVersion,
     partition_count: e.partitionCount,
+  };
+}
+
+function streamEntryToWire(e: StreamTopologyEntryMsg): wire.StreamTopologyEntry {
+  return {
+    topic: e.topic,
+    partitionCount: e.partition_count,
+    partitioningVersion: e.partitioning_version,
+  };
+}
+
+function streamEntryFromWire(e: wire.StreamTopologyEntry): StreamTopologyEntryMsg {
+  return {
+    topic: e.topic,
+    partition_count: e.partitionCount,
+    partitioning_version: e.partitioningVersion,
   };
 }
 
@@ -339,6 +356,7 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
       return wire.encodeTopologyOkBody({
         generation: v.generation,
         queues: v.queues.map(entryToWire),
+        streams: (v.streams ?? []).map(streamEntryToWire),
       });
     }
     case Op.Redirect: {
@@ -534,6 +552,7 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
       return {
         generation: w.generation,
         queues: w.queues.map(entryFromWire),
+        streams: w.streams.map(streamEntryFromWire),
       } satisfies TopologyOkMsg;
     }
     case Op.Redirect: {

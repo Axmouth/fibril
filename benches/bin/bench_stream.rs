@@ -216,7 +216,6 @@ async fn main() {
         address,
         args.topic.clone(),
         args.writers,
-        args.partitions,
         args.rate_per_sec,
         args.size.max(1),
         args.confirmed,
@@ -372,7 +371,6 @@ async fn run_rate_limited_writers(
     address: SocketAddr,
     topic: String,
     writers: usize,
-    partitions: u32,
     rate_per_sec: u64,
     payload_size: usize,
     confirmed: bool,
@@ -395,7 +393,10 @@ async fn run_rate_limited_writers(
                 .connect(address)
                 .await
                 .unwrap();
-            let publisher = client.publisher(&topic).unwrap().partitions(partitions);
+            // Warm the topology cache so the publisher learns the stream's partition
+            // count and spreads across partitions on its own (no explicit override).
+            let _ = client.fetch_topology().await;
+            let publisher = client.publisher(&topic).unwrap();
             let mut stats = WriterStats::default();
 
             let period = Duration::from_secs_f64(1.0 / writer_rate as f64);

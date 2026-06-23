@@ -596,6 +596,11 @@ mod tests {
                     partition_count: 1,
                 },
             ],
+            streams: vec![StreamTopologyEntry {
+                topic: "events".into(),
+                partition_count: 4,
+                partitioning_version: 2,
+            }],
         };
 
         let frame = try_encode(Op::TopologyOk, 5, &msg).unwrap();

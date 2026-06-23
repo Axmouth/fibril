@@ -2699,6 +2699,17 @@ impl TopologyCache {
                 },
             );
         }
+        // Streams have no group and no per-partition owner entries; they only feed
+        // the partitioning cache so a publisher spreads across their partitions.
+        for stream in topology.streams {
+            self.counts.insert(
+                (stream.topic, None),
+                PartitioningEntry {
+                    count: stream.partition_count.max(1),
+                    version: stream.partitioning_version,
+                },
+            );
+        }
     }
 
     fn apply_redirect(&mut self, redirect: &Redirect) {

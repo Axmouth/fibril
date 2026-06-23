@@ -17,7 +17,8 @@ use crate::v1::{
     ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
     ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
     ReplicationStreamEnd, ReplicationStreamProgress, ReplicationStreamReset, ReplicationStreamStart,
-    ResumeIdentity, ResumeOutcome, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
+    ResumeIdentity, ResumeOutcome, StreamTopologyEntry, Subscribe, SubscribeOk, TopologyOk,
+    TopologyRequest,
     frame::Frame,
 };
 
@@ -619,6 +620,12 @@ pub fn encode_topology_ok(request_id: u64, topology: &TopologyOk) -> WireResult<
     for entry in &topology.queues {
         put_topology_entry(&mut out, entry)?;
     }
+    put_len(&mut out, topology.streams.len(), "topology streams")?;
+    for entry in &topology.streams {
+        put_str(&mut out, &entry.topic)?;
+        out.put_u32(entry.partition_count);
+        out.put_u64(entry.partitioning_version);
+    }
     Ok(frame(Op::TopologyOk, request_id, out.freeze()))
 }
 
@@ -632,8 +639,21 @@ pub fn decode_topology_ok(frame: &Frame) -> WireResult<TopologyOk> {
     for _ in 0..count {
         queues.push(reader.topology_entry()?);
     }
+    let stream_count = reader.u32()? as usize;
+    let mut streams = Vec::with_capacity(stream_count);
+    for _ in 0..stream_count {
+        streams.push(StreamTopologyEntry {
+            topic: reader.str()?.to_owned(),
+            partition_count: reader.u32()?,
+            partitioning_version: reader.u64()?,
+        });
+    }
     reader.finish()?;
-    Ok(TopologyOk { generation, queues })
+    Ok(TopologyOk {
+        generation,
+        queues,
+        streams,
+    })
 }
 
 pub fn encode_redirect(request_id: u64, redirect: &Redirect) -> WireResult<Frame> {

@@ -112,6 +112,14 @@ export class TopologyCache {
         partitioningVersion: queue.partitioning_version,
       });
     }
+    // Streams have no group and no per-partition owner entries; they only feed
+    // the partitioning cache so a publisher spreads across their partitions.
+    for (const stream of topology.streams ?? []) {
+      this.#counts.set(countKey(stream.topic, null), {
+        count: Math.max(stream.partition_count, 1),
+        version: stream.partitioning_version,
+      });
+    }
   }
 
   /** Point-update one partition's owner from a redirect. */

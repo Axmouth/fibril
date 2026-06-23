@@ -1363,9 +1363,19 @@ class QueueTopologyEntry:
 
 
 @dataclass
+class StreamTopologyEntry:
+    #: A Plexus stream's partition count and version for client-side routing.
+    #: Streams have no group and no per-partition owner here.
+    topic: str
+    partition_count: int
+    partitioning_version: int
+
+
+@dataclass
 class TopologyOk:
     generation: int
     queues: list[QueueTopologyEntry] = field(default_factory=list)
+    streams: list[StreamTopologyEntry] = field(default_factory=list)
 
 
 @dataclass
@@ -1403,6 +1413,11 @@ def encode_topology_ok_body(topology: TopologyOk) -> bytes:
         w.optional_str(e.owner_endpoint)
         w.u64(e.partitioning_version)
         w.u32(e.partition_count)
+    w.u32(len(topology.streams))
+    for s in topology.streams:
+        w.write_str(s.topic)
+        w.u32(s.partition_count)
+        w.u64(s.partitioning_version)
     return w.finish()
 
 
@@ -1424,8 +1439,18 @@ def decode_topology_ok_body(body: bytes) -> TopologyOk:
                 partition_count=r.u32(),
             )
         )
+    stream_count = r.u32()
+    streams: list[StreamTopologyEntry] = []
+    for _ in range(stream_count):
+        streams.append(
+            StreamTopologyEntry(
+                topic=r.read_str(),
+                partition_count=r.u32(),
+                partitioning_version=r.u64(),
+            )
+        )
     r.finish()
-    return TopologyOk(generation=generation, queues=queues)
+    return TopologyOk(generation=generation, queues=queues, streams=streams)
 
 
 def encode_redirect_body(redirect: Redirect) -> bytes:

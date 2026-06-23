@@ -200,6 +200,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             let topology = TopologyOk {
                                 generation: 1,
                                 queues,
+                                streams: vec![],
                             };
                             try_encode(Op::TopologyOk, frame.request_id, &topology).unwrap()
                         } else {
@@ -209,6 +210,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             let topology = config.topology.clone().unwrap_or(TopologyOk {
                                 generation: 0,
                                 queues: vec![],
+                                streams: vec![],
                             });
                             try_encode(Op::TopologyOk, frame.request_id, &topology).unwrap()
                         }
@@ -376,6 +378,7 @@ async fn fetch_topology_populates_cache_and_routes() {
                 partitioning_version: 0,
                 partition_count: 1,
             }],
+            streams: vec![],
         }),
         ..Default::default()
     })
