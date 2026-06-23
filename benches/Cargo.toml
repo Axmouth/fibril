@@ -19,6 +19,10 @@ path = "bin/steady_c.rs"
 name = "failover_verify"
 path = "bin/failover_verify.rs"
 
+[[bin]]
+name = "bench-stream"
+path = "bin/bench_stream.rs"
+
 [dependencies]
 fibril-broker = { path = "../crates/broker" }
 fibril-client = { path = "../crates/client" }
