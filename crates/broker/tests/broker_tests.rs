@@ -114,6 +114,10 @@ impl fibril_broker::queue_engine::StreamStore for FailingPublishEngine {
     ) -> Result<Offset, StromaError> {
         Err(StromaError::Unsupported("no streams in test engine".into()))
     }
+
+    fn durable_is_stream(&self, _tp: &str, _part: u32) -> bool {
+        false
+    }
 }
 
 #[async_trait]

@@ -25,8 +25,9 @@ use fibril_broker::{
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
-    Ack, ContentType, DeclareQueue, DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ErrorMsg,
-    Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy,
+    Ack, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue, DeclareQueueOk, Deliver,
+    ERR_CONFLICT, ERR_INVALID, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish,
+    PublishDelayed, QueueDlqPolicy, StreamRetention, StreamStart, SubscribeOk, SubscribeStream,
     QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
     ReconcileSubscription, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
     ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
@@ -4989,4 +4990,242 @@ async fn publisher_cache_idle_timeout_updates_existing_connection() {
 
     drop(framed);
     server_task.await.unwrap().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Plexus stream ops (declare / subscribe / publish / ack-cursor)
+// ---------------------------------------------------------------------------
+
+async fn framed_declare_plexus(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    request_id: u64,
+    topic: &str,
+    partition_count: Option<u32>,
+) -> DeclarePlexusOk {
+    framed
+        .send(
+            try_encode(
+                Op::DeclarePlexus,
+                request_id,
+                &DeclarePlexus {
+                    topic: topic.into(),
+                    partition_count,
+                    durability: Default::default(),
+                    retention: StreamRetention::default(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(framed).await;
+    assert_eq!(frame.opcode, Op::DeclarePlexusOk as u16);
+    try_decode(&frame).unwrap()
+}
+
+async fn framed_subscribe_stream(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    request_id: u64,
+    topic: &str,
+    partition: u32,
+    durable_name: Option<&str>,
+    start: StreamStart,
+    auto_ack: bool,
+) -> SubscribeOk {
+    framed
+        .send(
+            try_encode(
+                Op::SubscribeStream,
+                request_id,
+                &SubscribeStream {
+                    topic: topic.into(),
+                    partition: Partition::new(partition),
+                    durable_name: durable_name.map(str::to_string),
+                    start,
+                    filter: Vec::new(),
+                    prefetch: 16,
+                    auto_ack,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(framed).await;
+    assert_eq!(frame.opcode, Op::SubscribeOk as u16);
+    try_decode(&frame).unwrap()
+}
+
+async fn send_stream_publish(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    request_id: u64,
+    topic: &str,
+    partition: u32,
+    payload: &[u8],
+    require_confirm: bool,
+) {
+    framed
+        .send(
+            try_encode(
+                Op::Publish,
+                request_id,
+                &Publish {
+                    topic: topic.into(),
+                    partition: Partition::new(partition),
+                    group: None,
+                    require_confirm,
+                    content_type: None,
+                    headers: HashMap::new(),
+                    payload: payload.to_vec(),
+                    published: unix_millis(),
+                    partition_key: None,
+                    partitioning_version: 0,
+                    ttl_ms: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+}
+
+/// Read frames until the next `Deliver`, skipping confirms (`PublishOk`).
+async fn recv_stream_deliver(framed: &mut Framed<TcpStream, ProtoCodec>) -> Deliver {
+    loop {
+        let frame = recv_frame(framed).await;
+        if frame.opcode == Op::Deliver as u16 {
+            return try_decode(&frame).unwrap();
+        }
+        assert_eq!(frame.opcode, Op::PublishOk as u16);
+    }
+}
+
+#[tokio::test]
+async fn plexus_declare_subscribe_publish_fans_out() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+
+    let ok = framed_declare_plexus(&mut framed, 2, "plexus.fanout", Some(1)).await;
+    assert_eq!(ok.partition_count, 1);
+
+    // Live subscriber sees records published from now on.
+    framed_subscribe_stream(
+        &mut framed,
+        3,
+        "plexus.fanout",
+        0,
+        Some("consumer-1"),
+        StreamStart::Latest,
+        false,
+    )
+    .await;
+
+    send_stream_publish(&mut framed, 4, "plexus.fanout", 0, b"a", true).await;
+    let first = recv_stream_deliver(&mut framed).await;
+    assert_eq!(first.payload, b"a".to_vec());
+    assert_eq!(first.offset, 0);
+    assert_eq!(first.delivery_tag.epoch, 0);
+
+    // Ack settles the durable cursor (delivery tag == offset).
+    framed
+        .send(
+            try_encode(
+                Op::Ack,
+                5,
+                &Ack {
+                    topic: "plexus.fanout".into(),
+                    group: None,
+                    partition: Partition::new(0),
+                    tags: vec![first.delivery_tag],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    send_stream_publish(&mut framed, 6, "plexus.fanout", 0, b"b", true).await;
+    let second = recv_stream_deliver(&mut framed).await;
+    assert_eq!(second.payload, b"b".to_vec());
+    assert_eq!(second.offset, 1);
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn plexus_durable_cursor_resumes_after_ack() {
+    let settings = ConnectionSettings::new(Some(60));
+    let (mut first, first_task, dir, broker) =
+        open_protocol_connection_with_settings(settings.clone()).await;
+    handshake(&mut first).await;
+
+    framed_declare_plexus(&mut first, 2, "plexus.resume", Some(1)).await;
+
+    // Durable consumer reads from earliest, manual ack.
+    framed_subscribe_stream(
+        &mut first,
+        3,
+        "plexus.resume",
+        0,
+        Some("c1"),
+        StreamStart::Earliest,
+        false,
+    )
+    .await;
+
+    send_stream_publish(&mut first, 4, "plexus.resume", 0, b"a", false).await;
+    send_stream_publish(&mut first, 5, "plexus.resume", 0, b"b", false).await;
+
+    let d0 = recv_stream_deliver(&mut first).await;
+    assert_eq!(d0.payload, b"a".to_vec());
+    let d1 = recv_stream_deliver(&mut first).await;
+    assert_eq!(d1.payload, b"b".to_vec());
+
+    // Settle the cursor through both records.
+    first
+        .send(
+            try_encode(
+                Op::Ack,
+                6,
+                &Ack {
+                    topic: "plexus.resume".into(),
+                    group: None,
+                    partition: Partition::new(0),
+                    tags: vec![d0.delivery_tag, d1.delivery_tag],
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    // Let the durable cursor commit land before reconnecting.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    drop(first);
+    first_task.await.unwrap().unwrap();
+
+    // A fresh connection resuming the same durable name skips the acked records.
+    let (mut second, second_task, _dir, _broker) =
+        open_protocol_connection_for_broker(settings, broker, dir).await;
+    handshake(&mut second).await;
+
+    framed_subscribe_stream(
+        &mut second,
+        2,
+        "plexus.resume",
+        0,
+        Some("c1"),
+        StreamStart::Earliest,
+        false,
+    )
+    .await;
+
+    send_stream_publish(&mut second, 3, "plexus.resume", 0, b"c", false).await;
+    let resumed = recv_stream_deliver(&mut second).await;
+    assert_eq!(resumed.payload, b"c".to_vec());
+    assert_eq!(resumed.offset, 2);
+
+    drop(second);
+    second_task.await.unwrap().unwrap();
 }

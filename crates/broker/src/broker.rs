@@ -1541,6 +1541,25 @@ impl<
         Ok(self.streams.entry(key).or_insert(opened).value().clone())
     }
 
+    /// Resolve `(tp, part)` to its stream channel for routing a request, opening
+    /// it when the partition is durably marked a stream but not yet hosted (e.g. a
+    /// publish that reaches a fresh owner after failover). Returns `None` for queue
+    /// partitions, which take the lease/poll path instead.
+    pub async fn route_stream(&self, tp: &str, part: u32) -> Option<Arc<StreamChannel>> {
+        let key = QueueKey {
+            tp: tp.to_string(),
+            part: part.into(),
+            group: None,
+        };
+        if let Some(ch) = self.streams.get(&key) {
+            return Some(ch.value().clone());
+        }
+        if self.engine.durable_is_stream(tp, part) {
+            return self.get_or_open_stream(tp, part, None).await.ok();
+        }
+        None
+    }
+
     /// Whether `(tp, part)` is an open stream channel on this broker.
     pub fn is_stream(&self, tp: &str, part: u32) -> bool {
         self.streams.contains_key(&QueueKey {

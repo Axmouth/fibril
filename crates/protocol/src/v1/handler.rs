@@ -23,9 +23,10 @@ use fibril_broker::{
     },
     queue_engine::{
         DLQDiscardPolicyWire, DeclareMeta, FollowerStateCheckpointInstall, GlobalDLQ, Message,
-        MessageContentType, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
-        QueueEngine, StromaEngine, StromaError, StromaEvent,
+        MessageContentType, MessageHeaders, OwnerReplicationBatch, OwnerReplicationRead,
+        OwnerStateCheckpoint, QueueEngine, RetentionConfig, StromaEngine, StromaError, StromaEvent,
     },
+    stream::{StreamChannel, StreamFilter, StreamRecord, SubscribeStart},
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_storage::{Group, Partition, Topic};
@@ -39,7 +40,12 @@ use tokio_util::codec::Framed;
 use uuid::Uuid;
 
 type SubKey = (Topic, Partition, Option<Group>); // (topic, partition, group)
+type StreamSubKey = (Topic, Partition); // streams have no group
 type FrameSink = mpsc::Sender<Frame>;
+
+/// Buffer between a stream subscription's backfill+live driver and the per-client
+/// delivery task that turns records into `Deliver` frames.
+const STREAM_DELIVERY_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolServerError {
@@ -120,9 +126,26 @@ type CohortKey = (String, Option<String>, String);
 struct ConnState {
     authenticated: bool,
     subs: HashMap<SubKey, SubState>,
+    /// Plexus stream subscriptions on this connection, keyed by (topic, partition).
+    stream_subs: HashMap<StreamSubKey, StreamSubState>,
     /// One assignment-change forwarder task per exclusive cohort this connection
     /// is a member of (pushes `AssignmentChanged` frames). Aborted on cleanup.
     exclusive_forwarders: HashMap<CohortKey, tokio::task::JoinHandle<()>>,
+}
+
+/// State for one Plexus stream subscription: the fan-out registration plus the
+/// tasks that backfill and deliver records. Acks settle the durable cursor.
+struct StreamSubState {
+    /// The durable cursor name, when the subscription is durable (acks advance it).
+    /// `None` for an ephemeral subscription (acks are no-ops).
+    durable_name: Option<String>,
+    channel: Arc<StreamChannel>,
+    /// Fan-out registration id, for unsubscribe on cleanup.
+    fanout_sub_id: u64,
+    auto_ack: bool,
+    /// The backfill+live driver task and the delivery task; both aborted on
+    /// cleanup.
+    tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 fn has_reserved_headers(headers: &HashMap<String, String>) -> bool {
@@ -687,6 +710,7 @@ impl LogicalConnection {
             state: Mutex::new(ConnState {
                 authenticated: false,
                 subs: HashMap::new(),
+                stream_subs: HashMap::new(),
                 exclusive_forwarders: HashMap::new(),
             }),
             transport,
@@ -738,12 +762,18 @@ async fn cleanup_connection_state(
 ) {
     broker.wait_for_pending_settles().await;
 
-    let (drained_subs, drained_forwarders) = {
+    let (drained_subs, drained_stream_subs, drained_forwarders) = {
         let mut state = logical.state.lock().await;
         let subs = state.subs.drain().collect::<Vec<_>>();
+        let stream_subs = state.stream_subs.drain().collect::<Vec<_>>();
         let forwarders = state.exclusive_forwarders.drain().collect::<Vec<_>>();
-        (subs, forwarders)
+        (subs, stream_subs, forwarders)
     };
+
+    // Tear down Plexus stream subscriptions (abort tasks, detach from fan-out).
+    for (_key, stream_sub) in drained_stream_subs {
+        teardown_stream_sub(stream_sub).await;
+    }
 
     // Stop assignment forwarders (the broker also drops their senders on leave).
     for (_cohort, handle) in drained_forwarders {
@@ -1107,6 +1137,184 @@ async fn install_subscription(
         consumer_target: args.consumer_target.map(|target| target as u32),
         member_id: cohort_member,
     })
+}
+
+/// Resolve a wire `SubscribeStream` start into the broker-side start position.
+/// A durable name resumes its cursor (earliest on a fresh name); an ephemeral
+/// subscription uses the requested start.
+fn resolve_stream_start(durable_name: Option<&str>, start: StreamStart) -> SubscribeStart {
+    match durable_name {
+        Some(name) => SubscribeStart::DurableResume {
+            name: name.to_string(),
+        },
+        None => match start {
+            StreamStart::Latest => SubscribeStart::Latest,
+            StreamStart::Earliest => SubscribeStart::Earliest,
+            StreamStart::Offset { offset } => SubscribeStart::Offset(offset),
+            StreamStart::NBack { count } => SubscribeStart::NBack(count),
+            StreamStart::ByTime { time_ms } => SubscribeStart::ByTime(time_ms),
+        },
+    }
+}
+
+/// Register a stream subscription on this connection: resolve its start, attach to
+/// the fan-out channel, and spawn the backfill+live driver plus the delivery task
+/// that turns records into `Deliver` frames (auto-acking the durable cursor when
+/// requested). Returns the `SubscribeOk` to send back.
+async fn install_stream_subscription(
+    broker: &Arc<Broker<StromaEngine>>,
+    logical: &Arc<LogicalConnection>,
+    req_id_gen: &Arc<ReqIdGenerator>,
+    metrics: &Arc<TcpStats>,
+    sub: SubscribeStream,
+) -> Result<SubscribeOk, (u16, String)> {
+    let channel = broker
+        .route_stream(&sub.topic, sub.partition.id())
+        .await
+        .ok_or_else(|| {
+            (
+                ERR_NOT_FOUND,
+                format!(
+                    "stream {} partition {} not found",
+                    sub.topic,
+                    sub.partition.id()
+                ),
+            )
+        })?;
+
+    let start = resolve_stream_start(sub.durable_name.as_deref(), sub.start);
+    let filter = (!sub.filter.is_empty())
+        .then(|| StreamFilter::from_pairs(sub.filter.iter().map(|(k, v)| (k.clone(), v.clone()))));
+
+    let subscription = channel
+        .subscribe(start, filter)
+        .await
+        .map_err(|err| (500, format!("stream subscribe failed: {err}")))?;
+    let fanout_sub_id = subscription.id();
+
+    let sub_id = req_id_gen.next_id();
+    let (sink_tx, mut sink_rx) = mpsc::channel::<Arc<StreamRecord>>(STREAM_DELIVERY_CHANNEL_CAPACITY);
+
+    // Driver: backfill (durable log then ring) and then live records into the sink.
+    let driver = tokio::spawn(subscription.run(sink_tx));
+
+    // Delivery: records -> Deliver frames on the current transport. The stream
+    // delivery tag is the record offset, so an ack settles the cursor by offset.
+    let mut transport_rx = logical.transport.subscribe();
+    let req_id_gen_clone = req_id_gen.clone();
+    let metrics = metrics.clone();
+    let topic = sub.topic.clone();
+    let partition = sub.partition;
+    let auto_ack = sub.auto_ack;
+    let durable_name = sub.durable_name.clone();
+    let settle_channel = channel.clone();
+    let delivery = tokio::spawn(async move {
+        while let Some(record) = sink_rx.recv().await {
+            let deliver = Deliver {
+                sub_id,
+                topic: topic.clone(),
+                group: None,
+                partition,
+                offset: record.offset,
+                delivery_tag: DeliveryTag {
+                    epoch: record.offset,
+                },
+                published: record.published,
+                publish_received: record.publish_received,
+                content_type: record.content_type.clone().map(ContentType::from_header),
+                headers: record.headers.clone(),
+                payload: record.payload.to_vec(),
+            };
+            let frame = match wire::encode_deliver(req_id_gen_clone.next_id(), &deliver) {
+                Ok(frame) => frame,
+                Err(err) => {
+                    tracing::error!("Failed to encode stream Deliver frame: {err}");
+                    metrics.error();
+                    break;
+                }
+            };
+            if send_to_current_transport(&mut transport_rx, frame)
+                .await
+                .is_err()
+            {
+                tracing::warn!("Failed to send stream deliver frame to active transport");
+                metrics.error();
+                break;
+            }
+            if auto_ack {
+                if let Some(name) = &durable_name {
+                    if let Err(err) = settle_channel.settle(name, record.offset).await {
+                        tracing::warn!("stream auto-ack settle failed: {err}");
+                    }
+                }
+            }
+        }
+    });
+
+    logical.state.lock().await.stream_subs.insert(
+        (sub.topic.clone(), sub.partition),
+        StreamSubState {
+            durable_name: sub.durable_name,
+            channel,
+            fanout_sub_id,
+            auto_ack: sub.auto_ack,
+            tasks: vec![driver, delivery],
+        },
+    );
+
+    Ok(SubscribeOk {
+        sub_id,
+        topic: sub.topic,
+        group: None,
+        partition: sub.partition,
+        prefetch: sub.prefetch,
+        consumer_group: None,
+        consumer_target: None,
+        member_id: None,
+    })
+}
+
+/// Tear down a stream subscription's tasks and detach it from the fan-out channel.
+async fn teardown_stream_sub(sub: StreamSubState) {
+    for task in &sub.tasks {
+        task.abort();
+    }
+    sub.channel.unsubscribe(sub.fanout_sub_id).await;
+}
+
+/// Persist a record to a stream and fan it out, then confirm the producer (when
+/// requested). Used by the publish handler once a frame is routed to a stream.
+#[allow(clippy::too_many_arguments)]
+async fn handle_stream_publish(
+    channel: &Arc<StreamChannel>,
+    tx: &mpsc::Sender<Frame>,
+    request_id: u64,
+    payload: Vec<u8>,
+    published: u64,
+    require_confirm: bool,
+    content_type: Option<ContentType>,
+    headers: HashMap<String, String>,
+    publish_received: u64,
+) -> Result<(), ProtocolConnectionError> {
+    let msg_headers = MessageHeaders {
+        published,
+        publish_received,
+        content_type: to_storage_content_type(content_type),
+        extra: headers,
+    };
+    match channel.publish(msg_headers, payload).await {
+        Ok(offset) => {
+            if require_confirm {
+                tx.send(try_encode(Op::PublishOk, request_id, &PublishOk { offset })?)
+                    .await?;
+            }
+        }
+        Err(err) => {
+            send_error_response(tx, request_id, 500, format!("stream publish failed: {err}"))
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn reconcile_subscriptions(
@@ -2577,6 +2785,112 @@ pub async fn handle_connection(
                     .await?;
             }
 
+            // -------- DECLARE PLEXUS (stream) -------------------------------
+            x if x == Op::DeclarePlexus as u16 => {
+                let declare: DeclarePlexus =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, DeclarePlexus);
+
+                let requested = declare
+                    .partition_count
+                    .unwrap_or_else(|| broker.config_snapshot().default_partition_count)
+                    .max(1);
+
+                // Reuse the queue partitioning coordinator: a stream's partition
+                // count is recorded the same way (keyed by topic, group None).
+                let partition_count = if let Some(coordinator) = &declare_coordinator {
+                    match coordinator
+                        .declare_partitioning(&declare.topic, None, requested)
+                        .await
+                    {
+                        Ok(count) => count,
+                        Err(message) => {
+                            let _ = send_error_response(
+                                &frame_tx_high_prio,
+                                frame.request_id,
+                                ERR_CONFLICT,
+                                &message,
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                } else {
+                    requested
+                };
+
+                let retention = (declare.retention != StreamRetention::default()).then(|| {
+                    RetentionConfig {
+                        max_age_ms: declare.retention.max_age_ms,
+                        max_bytes: declare.retention.max_bytes,
+                        max_records: declare.retention.max_records,
+                    }
+                });
+
+                // Materialize each partition's stream channel (idempotent). The
+                // durability tier is recorded on the wire surface; the broker
+                // persists durable-first for all tiers today (the express lane for
+                // ephemeral/speculative is a later refinement).
+                let mut failure: Option<(u16, String)> = None;
+                for partition in 0..partition_count {
+                    if let Err(err) = broker
+                        .get_or_open_stream(&declare.topic, partition, retention.clone())
+                        .await
+                    {
+                        tracing::error!("Declare plexus failed: {err}");
+                        failure = Some((500, "declare plexus failed".into()));
+                        break;
+                    }
+                }
+                if let Some((code, message)) = failure {
+                    let _ =
+                        send_error_response(&frame_tx_high_prio, frame.request_id, code, &message)
+                            .await;
+                    continue;
+                }
+                frame_tx_high_prio
+                    .send(try_encode(
+                        Op::DeclarePlexusOk,
+                        frame.request_id,
+                        &DeclarePlexusOk {
+                            status: "stored".into(),
+                            partition_count,
+                        },
+                    )?)
+                    .await?;
+            }
+
+            // -------- SUBSCRIBE STREAM (Plexus) -----------------------------
+            x if x == Op::SubscribeStream as u16 => {
+                let sub: SubscribeStream =
+                    decode_or_400!(frame, frame_tx_high_prio, metrics, SubscribeStream);
+
+                match install_stream_subscription(
+                    &broker,
+                    &logical,
+                    &req_id_gen,
+                    &metrics,
+                    sub,
+                )
+                .await
+                {
+                    Ok(sub_ok) => {
+                        frame_tx_high_prio
+                            .send(try_encode(Op::SubscribeOk, frame.request_id, &sub_ok)?)
+                            .await?;
+                    }
+                    Err((code, message)) => {
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::SubscribeErr,
+                                frame.request_id,
+                                &ErrorMsg { code, message },
+                            )?)
+                            .await?;
+                        metrics.error();
+                    }
+                }
+            }
+
             // -------- ACK ----------------------------------------------------
             x if x == Op::Ack as u16 => {
                 // TODO: Decline ack when auto ack? Log?
@@ -2584,6 +2898,29 @@ pub async fn handle_connection(
                     decode_wire_or_400!(frame, frame_tx_high_prio, metrics, wire::decode_ack);
 
                 let key: SubKey = (ack.topic.clone(), ack.partition, ack.group.clone());
+
+                // Stream ack: the delivery tag is the record offset, so settling
+                // commits the durable cursor to the highest acked offset (+1). An
+                // ephemeral or auto-ack stream sub treats the ack as a no-op.
+                let stream_settle = {
+                    let state = logical.state.lock().await;
+                    state
+                        .stream_subs
+                        .get(&(ack.topic.clone(), ack.partition))
+                        .map(|sub| (sub.channel.clone(), sub.durable_name.clone(), sub.auto_ack))
+                };
+                if let Some((channel, durable_name, auto_ack)) = stream_settle {
+                    if !auto_ack {
+                        if let (Some(name), Some(max)) =
+                            (durable_name, ack.tags.iter().map(|tag| tag.epoch).max())
+                        {
+                            if let Err(err) = channel.settle(&name, max).await {
+                                tracing::warn!("stream ack settle failed: {err}");
+                            }
+                        }
+                    }
+                    continue;
+                }
 
                 let settle_target = {
                     let state = logical.state.lock().await;
@@ -2688,9 +3025,51 @@ pub async fn handle_connection(
                     continue;
                 }
 
+                // Stream fast-path: an already-open stream channel takes the
+                // fan-out path instead of the queue lease/poll publisher.
+                if broker.is_stream(&pubreq.topic, pubreq.partition.id()) {
+                    if let Some(channel) =
+                        broker.route_stream(&pubreq.topic, pubreq.partition.id()).await
+                    {
+                        handle_stream_publish(
+                            &channel,
+                            &frame_tx_low_prio,
+                            frame.request_id,
+                            pubreq.payload,
+                            pubreq.published,
+                            pubreq.require_confirm,
+                            content_type,
+                            headers,
+                            publish_received,
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+
                 let key = (pubreq.topic.clone(), pubreq.partition, pubreq.group.clone());
                 let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
+                    // Cold partition: it may be a stream this owner has not opened
+                    // yet (e.g. after failover). Consult the durable kind marker
+                    // once before falling into the queue publisher path.
+                    if let Some(channel) =
+                        broker.route_stream(&pubreq.topic, pubreq.partition.id()).await
+                    {
+                        handle_stream_publish(
+                            &channel,
+                            &frame_tx_low_prio,
+                            frame.request_id,
+                            pubreq.payload,
+                            pubreq.published,
+                            pubreq.require_confirm,
+                            content_type,
+                            headers,
+                            publish_received,
+                        )
+                        .await?;
+                        continue;
+                    }
                     let (pubh, mut conf_stream) = match broker
                         .get_publisher(&pubreq.topic, pubreq.partition, &pubreq.group)
                         .await
