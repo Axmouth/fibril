@@ -58,6 +58,17 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   reconnect-reconcile registry (they own re-subscribe and resume via the durable
   cursor) - mirror that in the other clients.
 
+- Durable stream publish does not pipeline: `handle_stream_publish` awaits
+  `channel.publish` (full persist + fan-out round trip) INLINE in the connection
+  frame loop, so one connection serializes durable publishes (~370/s each in the
+  bench, vs 20k/s for the express lanes which return at stage). Found by
+  bench-stream. Fix: batch the durable appends and fan out in offset order on the
+  durability completion (do not block the frame loop), mirroring how the queue
+  publisher pipelines. The express tiers already avoid this. Durable is correct,
+  just throughput-limited. Also note durable confirm/deliver latency is dominated
+  by the keratin fsync interval (~324ms with the server default config in the
+  bench), which is config-tunable, separate from this serialization.
+
 - Possible future channel mode: a true memory-only stream (no log at all, lost on
   restart, no durable cursors/replay/retention, lowest possible latency). Distinct
   from the `ephemeral` durability tier, which is defined as log-backed (persist
