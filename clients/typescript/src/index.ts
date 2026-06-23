@@ -2,6 +2,7 @@ export {
   Client,
   ClientOptions,
   QueueConfig,
+  StreamConfig,
   type ClientOptionsInit,
   type ReconnectOutcome,
 } from "./client.js";
@@ -21,6 +22,7 @@ export {
   Subscription,
   AutoAckedSubscription,
   SubscriptionBuilder,
+  StreamSubscriptionBuilder,
   Message,
   InflightMessage,
 } from "./subscription.js";

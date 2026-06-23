@@ -10,8 +10,14 @@ import { BrokenPipeError, DisconnectionError, FibrilError } from "./errors.js";
 import { deferred } from "./internal/deferred.js";
 import type { BoundedQueue } from "./internal/bounded-queue.js";
 import { Publisher } from "./publisher.js";
-import { SubscriptionBuilder } from "./subscription.js";
+import { SubscriptionBuilder, StreamSubscriptionBuilder } from "./subscription.js";
 import { TopologyCache, routePartition, type Route, type RoundRobin } from "./internal/topology.js";
+import type {
+  DeclarePlexus,
+  StreamDurability,
+  StreamRetention,
+  SubscribeStream,
+} from "./wire.js";
 import type {
   AssignmentChangedMsg,
   AuthMsg,
@@ -322,6 +328,85 @@ export class QueueConfig {
       dlq_policy: this.dlqPolicy,
       dlq_max_retries: this.dlqMaxRetries,
       default_message_ttl_ms: this.defaultMessageTtlMs,
+    };
+  }
+}
+
+/**
+ * Declaration for a Plexus (fan-out stream) channel. Immutable builder: each
+ * method returns a new config. A stream delivers every record to every consumer.
+ */
+export class StreamConfig {
+  readonly topic: string;
+  readonly partitionCount: number | null;
+  readonly durability: StreamDurability;
+  readonly retention: StreamRetention;
+
+  constructor(
+    topic: string,
+    partitionCount: number | null = null,
+    durability: StreamDurability = "durable",
+    retention: StreamRetention = { maxAgeMs: null, maxBytes: null, maxRecords: null },
+  ) {
+    this.topic = topic;
+    this.partitionCount = partitionCount;
+    this.durability = durability;
+    this.retention = retention;
+  }
+
+  #with(patch: Partial<{ partitionCount: number | null; durability: StreamDurability; retention: StreamRetention }>): StreamConfig {
+    return new StreamConfig(
+      this.topic,
+      patch.partitionCount ?? this.partitionCount,
+      patch.durability ?? this.durability,
+      patch.retention ?? this.retention,
+    );
+  }
+
+  /** Request a partition count. When unset, the cluster default applies. */
+  partitions(count: number): StreamConfig {
+    if (count < 1 || !Number.isInteger(count)) {
+      throw new Error("partitions must be a positive integer");
+    }
+    return this.#with({ partitionCount: count });
+  }
+
+  /** Persist asynchronously without gating delivery or confirm (lowest latency). */
+  ephemeral(): StreamConfig {
+    return this.#with({ durability: "ephemeral" });
+  }
+
+  /** Deliver immediately with a speculative marker, defer the confirm. */
+  speculative(): StreamConfig {
+    return this.#with({ durability: "speculative" });
+  }
+
+  /** Persist before confirming (the default). */
+  durable(): StreamConfig {
+    return this.#with({ durability: "durable" });
+  }
+
+  /** Drop records older than this age in milliseconds. */
+  retainForMs(ms: number): StreamConfig {
+    return this.#with({ retention: { ...this.retention, maxAgeMs: BigInt(Math.trunc(ms)) } });
+  }
+
+  /** Keep at most this many bytes of retained records. */
+  retainBytes(bytes: number | bigint): StreamConfig {
+    return this.#with({ retention: { ...this.retention, maxBytes: BigInt(bytes) } });
+  }
+
+  /** Keep at most this many records. */
+  retainRecords(records: number | bigint): StreamConfig {
+    return this.#with({ retention: { ...this.retention, maxRecords: BigInt(records) } });
+  }
+
+  toWire(): DeclarePlexus {
+    return {
+      topic: this.topic,
+      partitionCount: this.partitionCount,
+      durability: this.durability,
+      retention: this.retention,
     };
   }
 }
@@ -661,6 +746,15 @@ export class Client {
   }
 
   /**
+   * Begin a Plexus (fan-out stream) subscription. Every consumer sees every
+   * record. Chain `.durable(...)`, `.fromEarliest()`, `.filter(...)`, then call
+   * `.subManualAck()` or `.subAutoAck()`.
+   */
+  stream(topic: string): StreamSubscriptionBuilder {
+    return new StreamSubscriptionBuilder(this, topic);
+  }
+
+  /**
    * Fetch the cluster topology and refresh the routing cache. Returns the
    * snapshot. In standalone mode the broker returns an empty topology and the
    * client keeps using its direct connection.
@@ -837,6 +931,41 @@ export class Client {
       reply,
     });
     await reply.promise;
+  }
+
+  /**
+   * Declare a Plexus (fan-out stream) channel. See {@link StreamConfig} for
+   * partitioning, durability, and retention.
+   */
+  async declarePlexus(config: StreamConfig): Promise<void> {
+    const reply = deferred<void>();
+    await (await this._engineForOperation()).submit({
+      type: "declarePlexus",
+      req: config.toWire(),
+      reply,
+    });
+    await reply.promise;
+  }
+
+  /**
+   * @internal Subscribe once to a stream partition (manual ack). The supervisor
+   * calls this to (re)attach to the partition's current owner.
+   */
+  async _subscribeStreamManualOnce(req: SubscribeStream): Promise<SubscribeHandle<InternalInflight>> {
+    const reply = deferred<SubscribeResult<InternalInflight>>();
+    const engine = await this._engineFor(req.topic, req.partition, null);
+    await engine.submit({ type: "subscribeStream", req, reply });
+    const result = await reply.promise;
+    return { engine, queue: result.queue };
+  }
+
+  /** @internal Auto-ack counterpart of _subscribeStreamManualOnce. */
+  async _subscribeStreamAutoOnce(req: SubscribeStream): Promise<SubscribeHandle<InternalDelivered>> {
+    const reply = deferred<SubscribeResult<InternalDelivered>>();
+    const engine = await this._engineFor(req.topic, req.partition, null);
+    await engine.submit({ type: "subscribeStreamAutoAck", req, reply });
+    const result = await reply.promise;
+    return { engine, queue: result.queue };
   }
 
   /**

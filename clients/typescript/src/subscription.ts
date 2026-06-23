@@ -6,6 +6,7 @@ import {
 } from "./errors.js";
 import { contentTypeHeader, deserializeByContentType } from "./message.js";
 import type { DeliveryTag, SubscribeMsg } from "./protocol.js";
+import type { StreamStart, SubscribeStream } from "./wire.js";
 import type {
   Engine,
   InternalDelivered,
@@ -819,5 +820,181 @@ export class SubscriptionBuilder {
       throw new BrokenPipeError();
     }
     return initial;
+  }
+}
+
+/**
+ * Builder for a Plexus (fan-out stream) subscription.
+ *
+ * Construct with `client.stream(topic)`, optionally set a durable name, start
+ * position, header filter, and prefetch, then choose manual or auto ack. The
+ * subscription reads every partition and fans them in; the SAME durable name
+ * tracks an independent cursor per partition.
+ *
+ * @example
+ * ```ts
+ * const sub = await client
+ *   .stream("events")
+ *   .durable("analytics")
+ *   .filter("region", "eu-*")
+ *   .subManualAck();
+ * for await (const msg of sub) await msg.complete();
+ * ```
+ */
+export class StreamSubscriptionBuilder {
+  readonly #client: Client;
+  #topic: string;
+  #partitionCount: number | null = null;
+  #durableName: string | null = null;
+  #start: StreamStart = { kind: "latest" };
+  #filter: [string, string][] = [];
+  #prefetch = 16;
+
+  /** @internal */
+  constructor(client: Client, topic: string) {
+    this.#client = client;
+    this.#topic = topic;
+  }
+
+  /**
+   * Fan in over exactly this many partitions (0..count). When unset, the topology
+   * cache supplies the count (just partition 0 in standalone / cold cache). Set
+   * this for a multi-partition stream when the cache does not carry it yet.
+   */
+  partitions(count: number): this {
+    if (count < 1 || !Number.isInteger(count)) {
+      throw new Error("partitions must be a positive integer");
+    }
+    this.#partitionCount = count;
+    return this;
+  }
+
+  /**
+   * Use a durable broker-side cursor: the subscription resumes from the committed
+   * position (earliest on a fresh name) and acks advance it. Without a durable
+   * name the subscription is ephemeral and `start` governs the position.
+   */
+  durable(name: string): this {
+    this.#durableName = name;
+    return this;
+  }
+
+  /** Begin at the live tail (only records published from now on). The default. */
+  fromLatest(): this {
+    this.#start = { kind: "latest" };
+    return this;
+  }
+
+  /** Begin at the oldest retained record. */
+  fromEarliest(): this {
+    this.#start = { kind: "earliest" };
+    return this;
+  }
+
+  /** Begin at a specific offset (clamped into the retained window). */
+  fromOffset(offset: bigint): this {
+    this.#start = { kind: "offset", value: offset };
+    return this;
+  }
+
+  /** Begin `count` records back from the tail. */
+  fromLast(count: bigint): this {
+    this.#start = { kind: "nback", value: count };
+    return this;
+  }
+
+  /** Begin at the first record at or after this wall-clock time (ms). */
+  fromTime(timeMs: bigint): this {
+    this.#start = { kind: "bytime", value: timeMs };
+    return this;
+  }
+
+  /**
+   * Add a header-match clause: deliver only records whose `header` value matches
+   * `pattern` (a literal that may contain `*` wildcards). Repeatable; AND-ed.
+   */
+  filter(header: string, pattern: string): this {
+    this.#filter.push([header, pattern]);
+    return this;
+  }
+
+  /** Set the maximum number of records the broker may push ahead per partition. */
+  prefetch(prefetch: number): this {
+    if (prefetch < 1 || !Number.isInteger(prefetch)) {
+      throw new Error("prefetch must be a positive integer");
+    }
+    this.#prefetch = prefetch;
+    return this;
+  }
+
+  #partitionList(): number[] {
+    if (this.#partitionCount != null) {
+      return Array.from({ length: this.#partitionCount }, (_, i) => i);
+    }
+    return this.#client._partitionSet(this.#topic, null);
+  }
+
+  #toStreamReq(partition: number, autoAck: boolean): SubscribeStream {
+    return {
+      topic: this.#topic,
+      partition,
+      durableName: this.#durableName,
+      start: this.#start,
+      filter: this.#filter.map((c) => [...c] as [string, string]),
+      prefetch: this.#prefetch,
+      autoAck,
+    };
+  }
+
+  // Stream routing reuses the queue fan-in (FanIn/PartitionSupervisor), which work
+  // off a SubscribeMsg-shaped routing request; the resubscribe closure translates
+  // it to a SubscribeStream carrying this builder's stream options.
+  #baseReq(autoAck: boolean): SubscribeMsg {
+    return {
+      topic: this.#topic,
+      group: null,
+      prefetch: this.#prefetch,
+      auto_ack: autoAck,
+      consumer_group: null,
+      consumer_target: null,
+    };
+  }
+
+  async #initial<R>(
+    subscribeOne: (req: SubscribeMsg) => Promise<SubscribeHandle<R>>,
+    baseReq: SubscribeMsg,
+  ): Promise<Array<{ partition: number; handle: SubscribeHandle<R> }>> {
+    const initial: Array<{ partition: number; handle: SubscribeHandle<R> }> = [];
+    try {
+      for (const partition of this.#partitionList()) {
+        const handle = await subscribeOne({ ...baseReq, partition });
+        initial.push({ partition, handle });
+      }
+    } catch (err) {
+      for (const { handle } of initial) handle.queue.close();
+      if (err instanceof FibrilError) throw err;
+      throw new BrokenPipeError();
+    }
+    return initial;
+  }
+
+  /** Subscribe with manual acknowledgement; completing a message advances the cursor. */
+  async subManualAck(): Promise<Subscription> {
+    const baseReq = this.#baseReq(false);
+    const subscribeOne = (r: SubscribeMsg) =>
+      this.#client._subscribeStreamManualOnce(this.#toStreamReq(r.partition ?? 0, false));
+    const initial = await this.#initial(subscribeOne, baseReq);
+    const fanIn = new FanIn<InternalInflight>(this.#client, baseReq, subscribeOne, initial, this.#prefetch);
+    return new Subscription(fanIn);
+  }
+
+  /** Subscribe with automatic acknowledgement; the broker advances the cursor as it delivers. */
+  async subAutoAck(): Promise<AutoAckedSubscription> {
+    const baseReq = this.#baseReq(true);
+    const subscribeOne = (r: SubscribeMsg) =>
+      this.#client._subscribeStreamAutoOnce(this.#toStreamReq(r.partition ?? 0, true));
+    const initial = await this.#initial(subscribeOne, baseReq);
+    const fanIn = new FanIn<InternalDelivered>(this.#client, baseReq, subscribeOne, initial, this.#prefetch);
+    return new AutoAckedSubscription(fanIn);
   }
 }
