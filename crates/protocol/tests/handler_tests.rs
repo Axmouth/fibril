@@ -5229,3 +5229,100 @@ async fn plexus_durable_cursor_resumes_after_ack() {
     drop(second);
     second_task.await.unwrap().unwrap();
 }
+
+/// Spawn a broker behind an accept-loop listener so a test can open many client
+/// connections to it (real traffic across the wire).
+async fn start_fanout_broker() -> (
+    std::net::SocketAddr,
+    Arc<Broker<StromaEngine>>,
+    TempDir,
+) {
+    let (broker, dir) = open_test_broker().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_broker = broker.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((server, peer)) = listener.accept().await else {
+                return;
+            };
+            let broker = server_broker.clone();
+            tokio::spawn(async move {
+                let tcp_stats = TcpStats::new(10);
+                let connection_stats = ConnectionStats::new();
+                let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+                let _ = handle_connection(
+                    server,
+                    broker,
+                    tcp_stats,
+                    connection_stats,
+                    conn_id,
+                    None::<StaticAuthHandler>,
+                    ConnectionSettings::new(Some(60)),
+                    None,
+                    None,
+                )
+                .await;
+            });
+        }
+    });
+    (addr, broker, dir)
+}
+
+async fn connect_and_handshake(addr: std::net::SocketAddr) -> Framed<TcpStream, ProtoCodec> {
+    let client = TcpStream::connect(addr).await.unwrap();
+    let mut framed = Framed::new(client, ProtoCodec);
+    handshake(&mut framed).await;
+    framed
+}
+
+#[tokio::test]
+async fn plexus_fans_out_to_many_subscribers() {
+    let (addr, _broker, _dir) = start_fanout_broker().await;
+
+    let mut admin = connect_and_handshake(addr).await;
+    framed_declare_plexus(&mut admin, 1, "plexus.scale", Some(1)).await;
+
+    // Several independent fan-out consumers, each a distinct durable name, all
+    // reading from the live tail.
+    const SUBS: usize = 5;
+    let mut subs = Vec::with_capacity(SUBS);
+    for i in 0..SUBS {
+        let mut s = connect_and_handshake(addr).await;
+        framed_subscribe_stream(
+            &mut s,
+            2,
+            "plexus.scale",
+            0,
+            Some(&format!("c{i}")),
+            StreamStart::Latest,
+            true,
+        )
+        .await;
+        subs.push(s);
+    }
+
+    // Burst of records on a dedicated publisher connection.
+    let mut publisher = connect_and_handshake(addr).await;
+    const N: u64 = 50;
+    for n in 0..N {
+        send_stream_publish(
+            &mut publisher,
+            100 + n,
+            "plexus.scale",
+            0,
+            format!("m{n}").as_bytes(),
+            false,
+        )
+        .await;
+    }
+
+    // Every consumer sees every record, in offset order (fan-out, not work-share).
+    for s in &mut subs {
+        for n in 0..N {
+            let d = recv_stream_deliver(s).await;
+            assert_eq!(d.offset, n);
+            assert_eq!(d.payload, format!("m{n}").into_bytes());
+        }
+    }
+}
