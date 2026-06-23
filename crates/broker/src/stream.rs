@@ -24,7 +24,7 @@ use fibril_storage::Offset;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::queue_engine::StreamStore;
-use stroma_core::{KDurability, MessageHeaders, RetentionConfig, StagedStreamAppend, StromaError};
+use stroma_core::{KDurability, MessageHeaders, RetentionConfig, StromaError};
 
 /// Per-channel durability tier (a channel-level knob, not a separate channel
 /// type). Governs how a publish is persisted and when the producer is confirmed;
@@ -382,7 +382,18 @@ enum FanoutCmd {
     },
 }
 
-/// A durable-tier publish request handed to the per-channel ingest task.
+/// Render a durability completion failure (an error result or a dropped channel)
+/// as a message for the producer confirm.
+fn durable_error_message(
+    res: Result<Result<(), StromaError>, oneshot::error::RecvError>,
+) -> String {
+    match res {
+        Ok(Err(err)) => err.to_string(),
+        _ => "stream durable completion dropped".to_string(),
+    }
+}
+
+/// A publish request handed to the per-channel ingest task.
 struct DurableIngest {
     headers: MessageHeaders,
     payload: Vec<u8>,
@@ -461,16 +472,26 @@ impl StreamChannel {
             }
         });
 
-        // Durable publish pipeline. The ingest task enqueues each batch to keratin
-        // and immediately moves on (it never waits for keratin to stage or fsync), so
-        // keratin's writer sees a rapid stream of appends and coalesces their fsyncs
-        // on its own. It hands each enqueued batch to the drain in offset order
-        // (single-task ownership orders it, no lock). The drain resolves the staged
-        // offset and durability, then fans the batch out once durable, keeping fsync
-        // off the connection frame loop.
+        // Publish pipeline. The ingest task enqueues each batch to keratin and
+        // immediately moves on (it never waits for keratin to stage or
+        // fsync), so keratin's writer sees a rapid stream of appends and coalesces
+        // their fsyncs on its own. It hands each enqueued batch to the drain in
+        // offset order (single-task ownership orders it, no lock). The drain fans the
+        // batch out and confirms with timing set by the tier: durable fans out only
+        // after the fsync; the express tiers (speculative, ephemeral) fan out at
+        // stage and resolve durability off the critical path so delivery is never
+        // gated by the flush.
         let tp_arc: Arc<str> = Arc::from(tp);
         let (durable_ingest_tx, mut durable_ingest_rx) = mpsc::channel::<DurableIngest>(4096);
         let (durable_batch_tx, mut durable_batch_rx) = mpsc::channel::<DurableBatch>(1024);
+
+        // Ephemeral hands the write to the OS without an fsync (weakest guarantee);
+        // the other tiers persist durably (the express speculative tier just does not
+        // wait for it before delivering).
+        let ingest_durability = match durability {
+            StreamDurability::Ephemeral => KDurability::AfterWrite,
+            _ => KDurability::AfterFsync,
+        };
 
         // Opportunistically coalesce whatever is already queued into one append (no
         // timed wait): fewer appends mean less work, and keratin coalesces the rest.
@@ -502,7 +523,7 @@ impl StreamChannel {
                         &ingest_tp,
                         part,
                         append_records,
-                        Some(KDurability::AfterFsync),
+                        Some(ingest_durability),
                     )
                     .await;
                 match enqueued {
@@ -529,12 +550,14 @@ impl StreamChannel {
             }
         });
 
-        // Drain: resolve each batch's staged offset and durability in FIFO (offset)
-        // order, then fan out. The ingest pushes batches in offset order and keratin
-        // assigns and fsyncs in that order, so awaiting FIFO never stalls out of
-        // order. Fan-out happens strictly after durability (the durable-tier
-        // contract).
+        // Drain: resolve each batch's staged offset in FIFO (offset) order, then fan
+        // out with timing set by the tier. The ingest pushes batches in offset order
+        // and keratin assigns and fsyncs in that order, so FIFO never stalls out of
+        // order. Durable fans out only after the fsync (the durable-tier contract);
+        // the express tiers fan out at stage and resolve durability off the critical
+        // path (a spawned task) so delivery is not gated by the flush.
         let drain_cmd_tx = cmd_tx.clone();
+        let drain_durability = durability;
         tokio::spawn(async move {
             while let Some(item) = durable_batch_rx.recv().await {
                 let DurableBatch {
@@ -553,33 +576,76 @@ impl StreamChannel {
                         continue;
                     }
                 };
-                match durable.await {
-                    Ok(Ok(())) => {
-                        for (i, (headers, payload, confirm)) in items.into_iter().enumerate() {
-                            let record =
-                                StreamRecord::from_stored(base + i as u64, payload, headers);
-                            let off = record.offset;
-                            let (resp, rx) = oneshot::channel();
-                            if drain_cmd_tx
-                                .send(FanoutCmd::Publish { record, resp })
-                                .await
-                                .is_ok()
-                            {
-                                let _ = rx.await;
+
+                if drain_durability == StreamDurability::Durable {
+                    // Fan out only once the batch is durable, in offset order.
+                    match durable.await {
+                        Ok(Ok(())) => {
+                            for (i, (headers, payload, confirm)) in items.into_iter().enumerate() {
+                                let record =
+                                    StreamRecord::from_stored(base + i as u64, payload, headers);
+                                let off = record.offset;
+                                let (resp, rx) = oneshot::channel();
+                                if drain_cmd_tx
+                                    .send(FanoutCmd::Publish { record, resp })
+                                    .await
+                                    .is_ok()
+                                {
+                                    let _ = rx.await;
+                                }
+                                let _ = confirm.send(Ok(off));
                             }
-                            let _ = confirm.send(Ok(off));
+                        }
+                        other => {
+                            let msg = durable_error_message(other);
+                            for (_, _, confirm) in items {
+                                let _ = confirm.send(Err(StromaError::Io(msg.clone())));
+                            }
                         }
                     }
-                    other => {
-                        let msg = match other {
-                            Ok(Err(err)) => err.to_string(),
-                            _ => "stream durable completion dropped".to_string(),
-                        };
-                        for (_, _, confirm) in items {
-                            let _ = confirm.send(Err(StromaError::Io(msg.clone())));
-                        }
+                    continue;
+                }
+
+                // Express (speculative, ephemeral): deliver at stage, in offset order.
+                let ephemeral = drain_durability == StreamDurability::Ephemeral;
+                let mut pending = Vec::with_capacity(items.len());
+                for (i, (headers, payload, confirm)) in items.into_iter().enumerate() {
+                    let record = StreamRecord::from_stored(base + i as u64, payload, headers);
+                    let off = record.offset;
+                    let (resp, rx) = oneshot::channel();
+                    if drain_cmd_tx
+                        .send(FanoutCmd::Publish { record, resp })
+                        .await
+                        .is_ok()
+                    {
+                        let _ = rx.await;
+                    }
+                    if ephemeral {
+                        // Confirm now (weakest guarantee).
+                        let _ = confirm.send(Ok(off));
+                    } else {
+                        // Speculative: defer the confirm until the record is durable.
+                        pending.push((off, confirm));
                     }
                 }
+                // Resolve durability off the critical path so the next batch delivers
+                // without waiting for this batch's flush.
+                tokio::spawn(async move {
+                    let result = durable.await;
+                    if result.as_ref().map(|r| r.is_ok()).unwrap_or(false) {
+                        for (off, confirm) in pending {
+                            let _ = confirm.send(Ok(off));
+                        }
+                    } else {
+                        let msg = durable_error_message(result);
+                        for (_, confirm) in pending {
+                            let _ = confirm.send(Err(StromaError::Io(msg.clone())));
+                        }
+                        if ephemeral {
+                            tracing::warn!("ephemeral stream batch failed to persist: {msg}");
+                        }
+                    }
+                });
             }
         });
 
@@ -642,13 +708,14 @@ impl StreamChannel {
         Ok(offset)
     }
 
-    /// Pipelined durable publish: hand the record to the per-channel ingest task and
-    /// return a confirm handle that resolves with the offset once the record is
-    /// durable and fanned out. The frame loop only enqueues here (no stage or fsync
-    /// wait), so durable publishes pipeline and keratin batches their fsyncs.
-    /// Fan-out still happens strictly after durability and in offset order (the
-    /// durable-tier contract).
-    pub async fn publish_durable(
+    /// Hand the record to the per-channel ingest task and return a confirm handle
+    /// that resolves with the offset when the tier's confirm condition is met
+    /// (durable and speculative on durability, ephemeral at stage). The frame loop
+    /// only enqueues here (no stage or fsync wait), so publishes pipeline and keratin
+    /// batches their fsyncs. The drain enforces per-tier fan-out timing: durable fans
+    /// out after the fsync, the express tiers at stage. Fan-out is always in offset
+    /// order.
+    pub async fn publish_pipelined(
         &self,
         headers: MessageHeaders,
         payload: Vec<u8>,
@@ -663,36 +730,6 @@ impl StreamChannel {
             .await
             .map_err(|_| StromaError::QueueActorGone)?;
         Ok(confirm_rx)
-    }
-
-    /// Express-lane publish for the speculative and ephemeral tiers: stage the
-    /// record (assigning its offset), fan it out to live subscribers immediately,
-    /// and return the offset plus a durability handle WITHOUT waiting for the
-    /// flush. The caller decides confirm timing by tier (ephemeral confirms now,
-    /// speculative defers the confirm until the handle resolves).
-    pub async fn publish_staged(
-        &self,
-        headers: MessageHeaders,
-        payload: Vec<u8>,
-    ) -> Result<StagedStreamAppend, StromaError> {
-        // Ephemeral never fsyncs (hand to the OS, weakest guarantee); speculative
-        // persists durably in the background.
-        let durability = match self.durability {
-            StreamDurability::Ephemeral => Some(KDurability::AfterWrite),
-            _ => Some(KDurability::AfterFsync),
-        };
-        let staged = self
-            .engine
-            .append_stream_record_staged(&self.tp, self.part, &headers, payload.clone(), durability)
-            .await?;
-        let record = StreamRecord::from_stored(staged.offset, payload, headers);
-        let (resp, rx) = oneshot::channel();
-        self.cmd_tx
-            .send(FanoutCmd::Publish { record, resp })
-            .await
-            .map_err(|_| StromaError::QueueActorGone)?;
-        let _ = rx.await;
-        Ok(staged)
     }
 
     /// Resolve a start position and register a subscriber. The returned
