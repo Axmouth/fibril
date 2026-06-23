@@ -839,10 +839,12 @@ fn stroma_event_available_for_replicated_messages(
         StromaEvent::DeadLetter { reqs } => reqs.iter().all(|req| req.off < message_frontier),
         StromaEvent::DeadLetterCommit { offs } => offs.iter().all(|off| *off < message_frontier),
         // A cursor commit carries no message reference (it is a soft consumer
-        // bookmark), so it never has to wait on the message frontier.
+        // bookmark), and a stream truncation is a delete directive, so neither has
+        // to wait on the message frontier.
         StromaEvent::Declare(_)
         | StromaEvent::ResetQueue { .. }
-        | StromaEvent::CursorCommit { .. } => true,
+        | StromaEvent::CursorCommit { .. }
+        | StromaEvent::StreamTruncate { .. } => true,
         StromaEvent::Snapshot { .. } => message_tail_fully_returned,
     }
 }
