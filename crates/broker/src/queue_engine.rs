@@ -17,8 +17,8 @@ pub use stroma_core::{
     MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead,
     OwnerStateCheckpoint, PartitionKind, QuarantineInfo, QueueInspectionState, QueuePromotionOutcome,
     RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
-    ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, Stroma, StromaError, StromaEvent,
-    StromaKeratinConfig,
+    ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, StagedStreamAppend, Stroma,
+    StromaError, StromaEvent, StromaKeratinConfig,
 };
 use tokio::sync::Notify;
 
@@ -337,6 +337,18 @@ pub trait StreamStore: Send + Sync {
         payload: Vec<u8>,
     ) -> Result<Offset, StromaError>;
 
+    /// Express-path append: returns once the offset is staged (assigned), with a
+    /// handle that resolves when the record is durable. For the speculative and
+    /// ephemeral durability tiers.
+    async fn append_stream_record_staged(
+        &self,
+        tp: &str,
+        part: u32,
+        headers: &MessageHeaders,
+        payload: Vec<u8>,
+        durability: Option<KDurability>,
+    ) -> Result<StagedStreamAppend, StromaError>;
+
     async fn read_stream_records(
         &self,
         tp: &str,
@@ -400,6 +412,19 @@ impl StreamStore for StromaEngine {
     ) -> Result<Offset, StromaError> {
         self.inner
             .append_stream_record(tp, part, headers, payload)
+            .await
+    }
+
+    async fn append_stream_record_staged(
+        &self,
+        tp: &str,
+        part: u32,
+        headers: &MessageHeaders,
+        payload: Vec<u8>,
+        durability: Option<KDurability>,
+    ) -> Result<StagedStreamAppend, StromaError> {
+        self.inner
+            .append_stream_record_staged(tp, part, headers, payload, durability)
             .await
     }
 

@@ -27,7 +27,8 @@ use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue, DeclareQueueOk, Deliver,
     ERR_CONFLICT, ERR_INVALID, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish,
-    PublishDelayed, QueueDlqPolicy, StreamRetention, StreamStart, SubscribeOk, SubscribeStream,
+    HEADER_SPECULATIVE, PublishDelayed, QueueDlqPolicy, StreamDurability, StreamRetention,
+    StreamStart, SubscribeOk, SubscribeStream,
     QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
     ReconcileSubscription, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
     ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
@@ -5483,6 +5484,91 @@ async fn multi_partition_queue_blocks_plexus_no_mixed_partitions() {
             .unwrap();
         assert_eq!(recv_frame(&mut framed).await.opcode, Op::SubscribeErr as u16);
     }
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+async fn framed_declare_plexus_durability(
+    framed: &mut Framed<TcpStream, ProtoCodec>,
+    request_id: u64,
+    topic: &str,
+    durability: StreamDurability,
+) {
+    framed
+        .send(
+            try_encode(
+                Op::DeclarePlexus,
+                request_id,
+                &DeclarePlexus {
+                    topic: topic.into(),
+                    partition_count: Some(1),
+                    durability,
+                    retention: StreamRetention::default(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(framed).await.opcode, Op::DeclarePlexusOk as u16);
+}
+
+#[tokio::test]
+async fn plexus_ephemeral_delivers_and_confirms() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+    framed_declare_plexus_durability(&mut framed, 2, "plexus.eph", StreamDurability::Ephemeral)
+        .await;
+    framed_subscribe_stream(&mut framed, 3, "plexus.eph", 0, None, StreamStart::Latest, false)
+        .await;
+
+    send_stream_publish(&mut framed, 4, "plexus.eph", 0, b"x", true).await;
+    // Both the confirm and the delivery arrive; the record is not marked speculative.
+    let mut got_ok = false;
+    let mut delivered: Option<Deliver> = None;
+    for _ in 0..2 {
+        let frame = recv_frame(&mut framed).await;
+        if frame.opcode == Op::PublishOk as u16 {
+            got_ok = true;
+        } else if frame.opcode == Op::Deliver as u16 {
+            delivered = Some(try_decode(&frame).unwrap());
+        }
+    }
+    assert!(got_ok, "ephemeral publish should confirm");
+    let d = delivered.expect("ephemeral record should be delivered");
+    assert_eq!(d.payload, b"x".to_vec());
+    assert!(!d.headers.contains_key(HEADER_SPECULATIVE));
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn plexus_speculative_marks_delivery_and_confirms() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+    framed_declare_plexus_durability(&mut framed, 2, "plexus.spec", StreamDurability::Speculative)
+        .await;
+    framed_subscribe_stream(&mut framed, 3, "plexus.spec", 0, None, StreamStart::Latest, false)
+        .await;
+
+    send_stream_publish(&mut framed, 4, "plexus.spec", 0, b"y", true).await;
+    let mut got_ok = false;
+    let mut delivered: Option<Deliver> = None;
+    for _ in 0..2 {
+        let frame = recv_frame(&mut framed).await;
+        if frame.opcode == Op::PublishOk as u16 {
+            got_ok = true;
+        } else if frame.opcode == Op::Deliver as u16 {
+            delivered = Some(try_decode(&frame).unwrap());
+        }
+    }
+    assert!(got_ok, "speculative publish should confirm once durable");
+    let d = delivered.expect("speculative record should be delivered");
+    assert_eq!(d.payload, b"y".to_vec());
+    // The broker marks a speculative delivery with the server-owned header.
+    assert_eq!(d.headers.get(HEADER_SPECULATIVE).map(String::as_str), Some("1"));
 
     drop(framed);
     server_task.await.unwrap().unwrap();
