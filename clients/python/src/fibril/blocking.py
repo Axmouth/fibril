@@ -14,13 +14,21 @@ import threading
 from typing import Any, Callable, Coroutine, Optional, TypeVar
 
 from . import wire
-from .client import Address, Client, ClientOptions, QueueConfig, ReconnectOutcome
+from .client import (
+    Address,
+    Client,
+    ClientOptions,
+    QueueConfig,
+    ReconnectOutcome,
+    StreamConfig,
+)
 from .message import Publishable
 from .publisher import Delay, Publisher, PublishConfirmation, ReliablePublisher
 from .subscription import (
     AutoAckedSubscription,
     InflightMessage,
     Message,
+    StreamSubscriptionBuilder,
     Subscription,
     SubscriptionBuilder,
 )
@@ -71,8 +79,14 @@ class BlockingClient:
     def subscribe(self, topic: str) -> "BlockingSubscriptionBuilder":
         return BlockingSubscriptionBuilder(self, self._client.subscribe(topic))
 
+    def stream(self, topic: str) -> "BlockingStreamSubscriptionBuilder":
+        return BlockingStreamSubscriptionBuilder(self, self._client.stream(topic))
+
     def declare_queue(self, config: QueueConfig) -> None:
         self._run(self._client.declare_queue(config))
+
+    def declare_plexus(self, config: StreamConfig) -> None:
+        self._run(self._client.declare_plexus(config))
 
     def fetch_topology(
         self, topic: Optional[str] = None, group: Optional[str] = None
@@ -193,6 +207,58 @@ class BlockingSubscriptionBuilder:
         return self
 
     def prefetch(self, prefetch: int) -> "BlockingSubscriptionBuilder":
+        self._builder.prefetch(prefetch)
+        return self
+
+    def sub_manual_ack(self) -> "BlockingSubscription":
+        sub = self._owner._run(self._builder.sub_manual_ack())
+        return BlockingSubscription(self._owner, sub)
+
+    def sub_auto_ack(self) -> "BlockingAutoAckedSubscription":
+        sub = self._owner._run(self._builder.sub_auto_ack())
+        return BlockingAutoAckedSubscription(self._owner, sub)
+
+
+class BlockingStreamSubscriptionBuilder:
+    """Synchronous Plexus (fan-out stream) subscription builder."""
+
+    def __init__(self, owner: BlockingClient, builder: StreamSubscriptionBuilder) -> None:
+        self._owner = owner
+        self._builder = builder
+
+    def partitions(self, count: int) -> "BlockingStreamSubscriptionBuilder":
+        self._builder.partitions(count)
+        return self
+
+    def durable(self, name: str) -> "BlockingStreamSubscriptionBuilder":
+        self._builder.durable(name)
+        return self
+
+    def from_latest(self) -> "BlockingStreamSubscriptionBuilder":
+        self._builder.from_latest()
+        return self
+
+    def from_earliest(self) -> "BlockingStreamSubscriptionBuilder":
+        self._builder.from_earliest()
+        return self
+
+    def from_offset(self, offset: int) -> "BlockingStreamSubscriptionBuilder":
+        self._builder.from_offset(offset)
+        return self
+
+    def from_last(self, count: int) -> "BlockingStreamSubscriptionBuilder":
+        self._builder.from_last(count)
+        return self
+
+    def from_time(self, time_ms: int) -> "BlockingStreamSubscriptionBuilder":
+        self._builder.from_time(time_ms)
+        return self
+
+    def filter(self, header: str, pattern: str) -> "BlockingStreamSubscriptionBuilder":
+        self._builder.filter(header, pattern)
+        return self
+
+    def prefetch(self, prefetch: int) -> "BlockingStreamSubscriptionBuilder":
         self._builder.prefetch(prefetch)
         return self
 

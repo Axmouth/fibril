@@ -838,6 +838,112 @@ for msg in sub:
   </TabItem>
 </Tabs>
 
+## Plexus streams (fan-out)
+
+A [Plexus stream](/latest/concepts/plexus-streams/) delivers every record to
+every consumer. Declare it with `declare_plexus`, publish with the ordinary
+publisher (the broker routes by channel kind), and consume with `stream(...)`.
+Name the subscription to get a durable cursor that resumes after a restart and
+advances on ack; a stream subscription reads all partitions and fans them in.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+use fibril_client::StreamConfig;
+
+client
+    .declare_plexus(StreamConfig::new("events")?.partitions(4).retain_records(1_000_000))
+    .await?;
+
+// Publish uses the normal publisher.
+client.publisher("events")?.publish("hello").await?;
+
+let mut sub = client
+    .stream("events")?
+    .durable("analytics")
+    .filter("region", "eu-*")
+    .sub_manual_ack()
+    .await?;
+
+while let Some(msg) = sub.recv().await {
+    handle(msg.content()?);
+    msg.complete().await?; // advances the durable cursor
+}
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+import { StreamConfig } from "@fibril/client";
+
+await client.declarePlexus(
+  new StreamConfig("events").partitions(4).retainRecords(1_000_000),
+);
+
+await client.publisher("events").publish("hello");
+
+const sub = await client
+  .stream("events")
+  .durable("analytics")
+  .filter("region", "eu-*")
+  .subManualAck();
+
+for await (const msg of sub) {
+  handle(msg.content());
+  await msg.complete(); // advances the durable cursor
+}
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
+```python
+from fibril import StreamConfig
+
+await client.declare_plexus(StreamConfig("events").partitions(4).retain_records(1_000_000))
+
+await client.publisher("events").publish("hello")
+
+sub = await client.stream("events").durable("analytics").filter("region", "eu-*").sub_manual_ack()
+
+async for msg in sub:
+    handle(msg.text())
+    await msg.complete()  # advances the durable cursor
+```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+from fibril import StreamConfig
+
+client.declare_plexus(StreamConfig("events").partitions(4).retain_records(1_000_000))
+
+client.publisher("events").publish("hello")
+
+sub = client.stream("events").durable("analytics").filter("region", "eu-*").sub_manual_ack()
+
+for msg in sub:
+    handle(msg.text())
+    msg.complete()  # advances the durable cursor
+```
+
+  </TabItem>
+</Tabs>
+
+  </TabItem>
+</Tabs>
+
+For a live tail without a durable cursor, drop `.durable(...)` and pick a start
+position: `from_latest()` / `fromLatest()` (the default), `from_earliest()`,
+`from_offset(..)`, `from_last(..)`, or `from_time(..)`. Use `sub_auto_ack()` /
+`subAutoAck()` when you do not need explicit settlement.
+
 ## Shutdown
 
 <Tabs syncKey="client-language">
