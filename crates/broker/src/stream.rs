@@ -369,7 +369,11 @@ const BACKFILL_BATCH: usize = 256;
 enum FanoutCmd {
     Publish {
         record: StreamRecord,
-        resp: oneshot::Sender<()>,
+        /// Optional ack, fired once the record is multicast. The drain leaves this
+        /// `None` and relies on the command channel's FIFO order to keep delivery in
+        /// offset order, so it never round-trips the actor per record. Set by the
+        /// simple `publish` path that wants to await the multicast.
+        resp: Option<oneshot::Sender<()>>,
     },
     Subscribe {
         start: Offset,
@@ -473,7 +477,9 @@ impl StreamChannel {
                 match cmd {
                     FanoutCmd::Publish { record, resp } => {
                         fanout.publish(record);
-                        let _ = resp.send(());
+                        if let Some(resp) = resp {
+                            let _ = resp.send(());
+                        }
                     }
                     FanoutCmd::Subscribe {
                         start,
@@ -602,14 +608,13 @@ impl StreamChannel {
                                 let record =
                                     StreamRecord::from_stored(base + i as u64, payload, headers);
                                 let off = record.offset;
-                                let (resp, rx) = oneshot::channel();
-                                if drain_cmd_tx
-                                    .send(FanoutCmd::Publish { record, resp })
-                                    .await
-                                    .is_ok()
-                                {
-                                    let _ = rx.await;
-                                }
+                                // Hand the record to the fan-out actor in offset order;
+                                // its FIFO command channel preserves that order, so no
+                                // per-record round-trip is needed. The confirm only
+                                // needs durability (already reached), not the multicast.
+                                let _ = drain_cmd_tx
+                                    .send(FanoutCmd::Publish { record, resp: None })
+                                    .await;
                                 let _ = confirm.send(Ok(off));
                             }
                         }
@@ -629,14 +634,11 @@ impl StreamChannel {
                 for (i, (headers, payload, confirm)) in items.into_iter().enumerate() {
                     let record = StreamRecord::from_stored(base + i as u64, payload, headers);
                     let off = record.offset;
-                    let (resp, rx) = oneshot::channel();
-                    if drain_cmd_tx
-                        .send(FanoutCmd::Publish { record, resp })
-                        .await
-                        .is_ok()
-                    {
-                        let _ = rx.await;
-                    }
+                    // Deliver in offset order via the FIFO command channel, no
+                    // per-record round-trip.
+                    let _ = drain_cmd_tx
+                        .send(FanoutCmd::Publish { record, resp: None })
+                        .await;
                     if ephemeral {
                         // Confirm now (weakest guarantee).
                         let _ = confirm.send(Ok(off));
@@ -741,7 +743,10 @@ impl StreamChannel {
         let record = StreamRecord::from_stored(offset, payload, headers);
         let (resp, rx) = oneshot::channel();
         self.cmd_tx
-            .send(FanoutCmd::Publish { record, resp })
+            .send(FanoutCmd::Publish {
+                record,
+                resp: Some(resp),
+            })
             .await
             .map_err(|_| StromaError::QueueActorGone)?;
         let _ = rx.await;
