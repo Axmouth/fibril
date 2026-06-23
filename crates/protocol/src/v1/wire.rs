@@ -5,9 +5,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::v1::{
-    Ack, AssignmentChanged, Auth, ContentType, DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag,
-    ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Partition, Publish, PublishDelayed, PublishOk,
-    QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy,
+    Ack, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
+    DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
+    Partition, Publish, PublishDelayed, PublishOk, StreamDurability, StreamRetention, StreamStart,
+    SubscribeStream, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient,
+    ReconcilePolicy,
     ReconcileResult, ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
     ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
     ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
@@ -468,6 +470,92 @@ pub fn decode_subscribe_ok(frame: &Frame) -> WireResult<SubscribeOk> {
         consumer_group: reader.optional_str()?.map(ToOwned::to_owned),
         consumer_target: reader.optional_u32()?,
         member_id: reader.optional_uuid()?,
+    };
+    reader.finish()?;
+    Ok(sub)
+}
+
+pub fn encode_declare_plexus(request_id: u64, declare: &DeclarePlexus) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FDP1");
+    put_str(&mut out, &declare.topic)?;
+    put_optional_u32(&mut out, declare.partition_count);
+    out.put_u8(declare.durability.as_u8());
+    put_stream_retention(&mut out, &declare.retention);
+    Ok(frame(Op::DeclarePlexus, request_id, out.freeze()))
+}
+
+pub fn decode_declare_plexus(frame: &Frame) -> WireResult<DeclarePlexus> {
+    expect_op(frame, Op::DeclarePlexus)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FDP1", "declare plexus")?;
+    let declare = DeclarePlexus {
+        topic: reader.str()?.to_owned(),
+        partition_count: reader.optional_u32()?,
+        durability: reader.stream_durability()?,
+        retention: reader.stream_retention()?,
+    };
+    reader.finish()?;
+    Ok(declare)
+}
+
+pub fn encode_declare_plexus_ok(request_id: u64, ok: &DeclarePlexusOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FPK1");
+    put_str(&mut out, &ok.status)?;
+    out.put_u32(ok.partition_count);
+    Ok(frame(Op::DeclarePlexusOk, request_id, out.freeze()))
+}
+
+pub fn decode_declare_plexus_ok(frame: &Frame) -> WireResult<DeclarePlexusOk> {
+    expect_op(frame, Op::DeclarePlexusOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FPK1", "declare plexus ok")?;
+    let ok = DeclarePlexusOk {
+        status: reader.str()?.to_owned(),
+        partition_count: reader.u32()?,
+    };
+    reader.finish()?;
+    Ok(ok)
+}
+
+pub fn encode_subscribe_stream(request_id: u64, sub: &SubscribeStream) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSP1");
+    put_str(&mut out, &sub.topic)?;
+    put_partition(&mut out, sub.partition);
+    put_optional_str(&mut out, sub.durable_name.as_deref())?;
+    put_stream_start(&mut out, sub.start);
+    put_len(&mut out, sub.filter.len(), "stream filter")?;
+    for (key, pattern) in &sub.filter {
+        put_str(&mut out, key)?;
+        put_str(&mut out, pattern)?;
+    }
+    out.put_u32(sub.prefetch);
+    put_bool(&mut out, sub.auto_ack);
+    Ok(frame(Op::SubscribeStream, request_id, out.freeze()))
+}
+
+pub fn decode_subscribe_stream(frame: &Frame) -> WireResult<SubscribeStream> {
+    expect_op(frame, Op::SubscribeStream)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSP1", "subscribe stream")?;
+    let topic = reader.str()?.to_owned();
+    let partition = reader.partition()?;
+    let durable_name = reader.optional_str()?.map(ToOwned::to_owned);
+    let start = reader.stream_start()?;
+    let clause_count = reader.u32()? as usize;
+    let mut filter = Vec::with_capacity(clause_count);
+    for _ in 0..clause_count {
+        let key = reader.str()?.to_owned();
+        let pattern = reader.str()?.to_owned();
+        filter.push((key, pattern));
+    }
+    let sub = SubscribeStream {
+        topic,
+        partition,
+        durable_name,
+        start,
+        filter,
+        prefetch: reader.u32()?,
+        auto_ack: reader.bool()?,
     };
     reader.finish()?;
     Ok(sub)
@@ -1462,6 +1550,31 @@ fn put_partitions(out: &mut BytesMut, partitions: &[Partition]) -> WireResult<()
     Ok(())
 }
 
+fn put_stream_retention(out: &mut BytesMut, retention: &StreamRetention) {
+    put_optional_u64(out, retention.max_age_ms);
+    put_optional_u64(out, retention.max_bytes);
+    put_optional_u64(out, retention.max_records);
+}
+
+fn put_stream_start(out: &mut BytesMut, start: StreamStart) {
+    match start {
+        StreamStart::Latest => out.put_u8(0),
+        StreamStart::Earliest => out.put_u8(1),
+        StreamStart::Offset { offset } => {
+            out.put_u8(2);
+            out.put_u64(offset);
+        }
+        StreamStart::NBack { count } => {
+            out.put_u8(3);
+            out.put_u64(count);
+        }
+        StreamStart::ByTime { time_ms } => {
+            out.put_u8(4);
+            out.put_u64(time_ms);
+        }
+    }
+}
+
 fn put_content_type(out: &mut BytesMut, content_type: Option<&ContentType>) -> WireResult<()> {
     match content_type {
         None => out.put_u8(0),
@@ -1844,6 +1957,38 @@ impl<'a> Reader<'a> {
     fn bytes(&mut self) -> WireResult<&'a [u8]> {
         let len = self.u32()? as usize;
         self.take(len)
+    }
+
+    fn stream_durability(&mut self) -> WireResult<StreamDurability> {
+        let value = self.u8()?;
+        StreamDurability::from_u8(value).ok_or(WireError::UnknownTag {
+            context: "stream durability",
+            value,
+        })
+    }
+
+    fn stream_retention(&mut self) -> WireResult<StreamRetention> {
+        Ok(StreamRetention {
+            max_age_ms: self.optional_u64()?,
+            max_bytes: self.optional_u64()?,
+            max_records: self.optional_u64()?,
+        })
+    }
+
+    fn stream_start(&mut self) -> WireResult<StreamStart> {
+        match self.u8()? {
+            0 => Ok(StreamStart::Latest),
+            1 => Ok(StreamStart::Earliest),
+            2 => Ok(StreamStart::Offset { offset: self.u64()? }),
+            3 => Ok(StreamStart::NBack { count: self.u64()? }),
+            4 => Ok(StreamStart::ByTime {
+                time_ms: self.u64()?,
+            }),
+            value => Err(WireError::UnknownTag {
+                context: "stream start",
+                value,
+            }),
+        }
     }
 
     fn str(&mut self) -> WireResult<&'a str> {
@@ -2285,6 +2430,81 @@ mod tests {
         assert_eq!(got_nack.tags, nack.tags);
         assert_eq!(got_nack.requeue, nack.requeue);
         assert_eq!(got_nack.not_before, nack.not_before);
+    }
+
+    #[test]
+    fn declare_plexus_roundtrip() {
+        for declare in [
+            DeclarePlexus {
+                topic: "events".into(),
+                partition_count: Some(8),
+                durability: StreamDurability::Speculative,
+                retention: StreamRetention {
+                    max_age_ms: Some(60_000),
+                    max_bytes: None,
+                    max_records: Some(1_000_000),
+                },
+            },
+            DeclarePlexus {
+                topic: "minimal".into(),
+                partition_count: None,
+                durability: StreamDurability::Durable,
+                retention: StreamRetention::default(),
+            },
+        ] {
+            let frame = encode_declare_plexus(7, &declare).unwrap();
+            let got = decode_declare_plexus(&frame).unwrap();
+            assert_eq!(got.topic, declare.topic);
+            assert_eq!(got.partition_count, declare.partition_count);
+            assert_eq!(got.durability, declare.durability);
+            assert_eq!(got.retention, declare.retention);
+        }
+
+        let ok = DeclarePlexusOk {
+            status: "stored".into(),
+            partition_count: 8,
+        };
+        let frame = encode_declare_plexus_ok(7, &ok).unwrap();
+        let got = decode_declare_plexus_ok(&frame).unwrap();
+        assert_eq!(got.status, ok.status);
+        assert_eq!(got.partition_count, ok.partition_count);
+    }
+
+    #[test]
+    fn subscribe_stream_roundtrip() {
+        for sub in [
+            SubscribeStream {
+                topic: "events".into(),
+                partition: Partition::new(3),
+                durable_name: Some("analytics".into()),
+                start: StreamStart::ByTime { time_ms: 1234 },
+                filter: vec![
+                    ("region".into(), "eu-*".into()),
+                    ("kind".into(), "order".into()),
+                ],
+                prefetch: 64,
+                auto_ack: true,
+            },
+            SubscribeStream {
+                topic: "events".into(),
+                partition: Partition::new(0),
+                durable_name: None,
+                start: StreamStart::NBack { count: 100 },
+                filter: vec![],
+                prefetch: 1,
+                auto_ack: false,
+            },
+        ] {
+            let frame = encode_subscribe_stream(11, &sub).unwrap();
+            let got = decode_subscribe_stream(&frame).unwrap();
+            assert_eq!(got.topic, sub.topic);
+            assert_eq!(got.partition, sub.partition);
+            assert_eq!(got.durable_name, sub.durable_name);
+            assert_eq!(got.start, sub.start);
+            assert_eq!(got.filter, sub.filter);
+            assert_eq!(got.prefetch, sub.prefetch);
+            assert_eq!(got.auto_ack, sub.auto_ack);
+        }
     }
 
     #[test]

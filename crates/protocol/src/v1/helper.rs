@@ -53,6 +53,15 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::DeclareQueueOk => encode_typed(msg, "DeclareQueueOk", |msg| {
             wire::encode_declare_queue_ok(req_id, msg)
         }),
+        Op::DeclarePlexus => encode_typed(msg, "DeclarePlexus", |msg| {
+            wire::encode_declare_plexus(req_id, msg)
+        }),
+        Op::DeclarePlexusOk => encode_typed(msg, "DeclarePlexusOk", |msg| {
+            wire::encode_declare_plexus_ok(req_id, msg)
+        }),
+        Op::SubscribeStream => encode_typed(msg, "SubscribeStream", |msg| {
+            wire::encode_subscribe_stream(req_id, msg)
+        }),
         Op::ReconcileClient => encode_typed(msg, "ReconcileClient", |msg| {
             wire::encode_reconcile_client(req_id, msg)
         }),
@@ -185,6 +194,15 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::DeclareQueueOk as u16 => wire::decode_declare_queue_ok(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::DeclarePlexus as u16 => wire::decode_declare_plexus(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::DeclarePlexusOk as u16 => wire::decode_declare_plexus_ok(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::SubscribeStream as u16 => wire::decode_subscribe_stream(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::ReconcileClient as u16 => wire::decode_reconcile_client(frame)
