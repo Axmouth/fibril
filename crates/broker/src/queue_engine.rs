@@ -350,6 +350,12 @@ pub trait StreamStore: Send + Sync {
         durability: Option<KDurability>,
     ) -> Result<EnqueuedStreamAppend, StromaError>;
 
+    /// Flush and fsync a stream partition's message log (advances the durable
+    /// watermark; the fsync runs on keratin's worker stage, off the writer thread).
+    /// Called on an interval for the ephemeral tier to drain dirty pages steadily so
+    /// the writer never hits the kernel writeback cliff.
+    async fn sync_stream(&self, tp: &str, part: u32) -> Result<(), StromaError>;
+
     async fn read_stream_records(
         &self,
         tp: &str,
@@ -426,6 +432,10 @@ impl StreamStore for StromaEngine {
         self.inner
             .append_stream_records_enqueue(tp, part, records, durability)
             .await
+    }
+
+    async fn sync_stream(&self, tp: &str, part: u32) -> Result<(), StromaError> {
+        self.inner.sync_stream(tp, part).await
     }
 
     async fn read_stream_records(

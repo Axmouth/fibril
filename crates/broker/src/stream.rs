@@ -421,17 +421,34 @@ pub struct StreamChannel {
     engine: Arc<dyn StreamStore>,
     live_channel_capacity: usize,
     cmd_tx: mpsc::Sender<FanoutCmd>,
-    /// Declared durability tier, kept for observability (the broker is
-    /// durable-first for all tiers today).
+    /// Declared durability tier. Governs the drain's fan-out and confirm timing.
     durability: StreamDurability,
     /// Declared retention bound, kept for observability.
     retention: Option<RetentionConfig>,
-    /// Durable-tier publishes go here. A single ingest task stages them in order
+    /// Publishes go here. A single ingest task enqueues them to keratin in order
     /// (its single-task ownership is what orders them, no lock) and a drain task
-    /// fans them out once durable. The frame loop only enqueues here, so the fsync
-    /// is off the connection path and keratin batches the flushes.
+    /// fans them out. The frame loop only enqueues here, so the fsync is off the
+    /// connection path and keratin batches the flushes.
     durable_ingest_tx: mpsc::Sender<DurableIngest>,
+    /// Ephemeral-only periodic flush task (drains dirty pages via keratin's fsync
+    /// worker so the writer never hits the kernel writeback cliff). Aborted on drop.
+    /// `None` for other tiers, which fsync via their own durability handling.
+    flush_task: Option<tokio::task::JoinHandle<()>>,
 }
+
+impl Drop for StreamChannel {
+    fn drop(&mut self) {
+        if let Some(task) = self.flush_task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// How often the ephemeral tier flushes its message log so dirty pages drain
+/// steadily instead of piling up until the kernel throttles the writer. The flush
+/// hands its fsync to keratin's worker stage, so it does not block staging. A
+/// broker-local knob like the ring capacities.
+const EPHEMERAL_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
 impl StreamChannel {
     /// Materialize the stream in stroma and start its fan-out actor. `next` (the
@@ -649,6 +666,28 @@ impl StreamChannel {
             }
         });
 
+        // Ephemeral appends never fsync per-record, so dirty pages would pile up
+        // until the kernel throttles the writer (spiking delivery tails). A periodic
+        // flush drains them via keratin's fsync worker stage (off the writer thread,
+        // so staging keeps going). Other tiers already fsync via their durability
+        // handling, so they do not need it.
+        let flush_task = if durability == StreamDurability::Ephemeral {
+            let flush_engine = engine.clone();
+            let flush_tp = tp_arc.clone();
+            Some(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(EPHEMERAL_FLUSH_INTERVAL);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    if flush_engine.sync_stream(&flush_tp, part).await.is_err() {
+                        break;
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
         Ok(StreamChannel {
             tp: tp_arc,
             part,
@@ -658,6 +697,7 @@ impl StreamChannel {
             durability,
             retention,
             durable_ingest_tx,
+            flush_task,
         })
     }
 
