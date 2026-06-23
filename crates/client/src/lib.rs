@@ -1128,6 +1128,11 @@ impl QueueConfig {
 /// ordering — a stream subscription reads ALL partitions and fans them in, so
 /// partitioning is not consumer work-sharing.
 ///
+/// Durability tiers: only [`durable`](Self::durable) is behaviorally active
+/// today. [`speculative`](Self::speculative) and [`ephemeral`](Self::ephemeral)
+/// are accepted and recorded but currently behave as durable (the lower-latency
+/// express lane is not yet wired).
+///
 /// ```no_run
 /// # async fn example(client: fibril_client::Client) -> fibril_client::FibrilResult<()> {
 /// use fibril_client::StreamConfig;

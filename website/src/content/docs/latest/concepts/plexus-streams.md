@@ -58,17 +58,21 @@ forever.
 
 ## Durability tiers
 
-Each stream picks a durability tier at declare time:
+Each stream picks a durability tier at declare time. **Today only `durable` is
+behaviorally active.** The tier is carried end to end and recorded on the
+channel, but `speculative` and `ephemeral` currently behave exactly like
+`durable` (persist before delivering and confirming). The faster paths are a
+planned broker-side refinement (the "express lane"), not yet wired.
 
-- **durable** (default) — persist (and replicate when configured) before
-  confirming the producer.
-- **speculative** — deliver immediately with a marker, defer the confirm until
-  the record is durable.
-- **ephemeral** — persist asynchronously, do not gate delivery or the confirm.
+- **durable** (default, active) — persist (and replicate when configured) before
+  delivering and confirming the producer.
+- **speculative** (declared, not yet active) — will deliver immediately with a
+  marker and defer the producer confirm until the record is durable.
+- **ephemeral** (declared, not yet active) — will persist asynchronously and
+  never gate delivery or the confirm. Lowest latency, weakest guarantee.
 
-The tier is plumbed end to end from every client. The broker currently persists
-durable-first for all tiers. The express lane that makes speculative and
-ephemeral change delivery timing is a broker-side refinement.
+Until the express lane lands, choosing `speculative` or `ephemeral` is safe but
+gives you durable behavior.
 
 ## Acks advance the cursor
 
