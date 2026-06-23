@@ -19,8 +19,8 @@ A stream subscription tracks position with a **cursor**. There are two modes:
   the cursor for that name, advances it as you ack, and resumes it after a
   restart or reconnect, anywhere in the cluster. No offset bookkeeping on your
   side. A fresh name starts at the earliest retained record so it cannot silently
-  miss data. Different names are independent fan-out consumers (JetStream-style);
-  the same name is single-active (last commit wins).
+  miss data. Different names are independent fan-out consumers (JetStream-style).
+  The same name is single-active (last commit wins).
 - **Ephemeral.** No name. You choose a start position and the broker keeps no
   state for you, so you are at the mercy of retention. Good for a live tail or an
   ad-hoc replay.
@@ -67,7 +67,7 @@ Each stream picks a durability tier at declare time:
 - **ephemeral** — persist asynchronously, do not gate delivery or the confirm.
 
 The tier is plumbed end to end from every client. The broker currently persists
-durable-first for all tiers; the express lane that makes speculative and
+durable-first for all tiers. The express lane that makes speculative and
 ephemeral change delivery timing is a broker-side refinement.
 
 ## Acks advance the cursor

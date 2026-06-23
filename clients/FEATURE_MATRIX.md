@@ -59,8 +59,8 @@ Superscript numbers refer to the Notes under the tables.
 ## Plexus (fan-out streams)
 
 Every consumer of a stream sees every record (vs a queue, where a message is
-consumed once). A stream subscription reads ALL partitions and fans them in; the
-same durable name tracks an independent cursor per partition.
+consumed once). A stream subscription reads ALL partitions and fans them in, and
+the same durable name tracks an independent cursor per partition.
 
 | Feature | Rust | TypeScript | Python |
 | --- | --- | --- | --- |

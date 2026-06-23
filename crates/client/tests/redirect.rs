@@ -542,7 +542,7 @@ async fn subscription_fans_in_all_partitions() {
     let mut sub = client
         .subscribe("jobs")
         .unwrap()
-        .sub_manual_ack()
+        .sub()
         .await
         .unwrap();
 

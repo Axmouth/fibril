@@ -14,7 +14,7 @@ from fibril import Client
 
 async def main() -> None:
     async with await Client.connect("127.0.0.1:9876") as client:
-        sub = await client.subscribe("jobs").group("workers").prefetch(32).sub_manual_ack()
+        sub = await client.subscribe("jobs").group("workers").prefetch(32).sub()
         async for msg in sub:
             try:
                 job = msg.deserialize()

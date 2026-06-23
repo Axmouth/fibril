@@ -14,7 +14,7 @@ def main() -> None:
     with BlockingClient.connect("127.0.0.1:9876") as client:
         client.publisher("jobs").publish_confirmed({"id": 1, "task": "report"})
 
-        sub = client.subscribe("jobs").group("workers").sub_manual_ack()
+        sub = client.subscribe("jobs").group("workers").sub()
         for msg in sub:
             print(f"got {msg.deserialize()!r} at offset {msg.offset}")
             msg.complete()

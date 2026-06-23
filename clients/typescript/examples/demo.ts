@@ -57,7 +57,7 @@ console.log(`connected to ${addr}`);
 // subscriptions registered by the time messages arrive. Otherwise
 // (depending on broker semantics) we might miss the first batch.
 
-const orders = await client.subscribe("orders").group("workers").prefetch(50).subManualAck();
+const orders = await client.subscribe("orders").group("workers").prefetch(50).sub();
 
 const notices = await client.subscribe("notices").group("workers").prefetch(20).subAutoAck();
 

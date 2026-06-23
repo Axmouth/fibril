@@ -5326,3 +5326,89 @@ async fn plexus_fans_out_to_many_subscribers() {
         }
     }
 }
+
+#[tokio::test]
+async fn declaring_a_queue_then_plexus_same_topic_is_rejected() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+
+    // Declare a queue, then try to declare the same topic as a plexus stream.
+    framed
+        .send(
+            try_encode(
+                Op::DeclareQueue,
+                2,
+                &DeclareQueue {
+                    topic: "shared.kind".into(),
+                    group: None,
+                    dlq_policy: None,
+                    dlq_max_retries: None,
+                    partition_count: Some(1),
+                    default_message_ttl_ms: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(recv_frame(&mut framed).await.opcode, Op::DeclareQueueOk as u16);
+
+    framed
+        .send(
+            try_encode(
+                Op::DeclarePlexus,
+                3,
+                &DeclarePlexus {
+                    topic: "shared.kind".into(),
+                    partition_count: Some(1),
+                    durability: Default::default(),
+                    retention: StreamRetention::default(),
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::Error as u16);
+    let err: ErrorMsg = try_decode(&frame).unwrap();
+    assert_eq!(err.code, 400);
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn queue_subscribe_to_a_plexus_topic_is_rejected() {
+    let (mut framed, server_task, _dir) = open_protocol_connection().await;
+    handshake(&mut framed).await;
+
+    framed_declare_plexus(&mut framed, 2, "stream.only", Some(1)).await;
+
+    // A queue-style Subscribe to a stream partition must be rejected up front.
+    framed
+        .send(
+            try_encode(
+                Op::Subscribe,
+                3,
+                &Subscribe {
+                    topic: "stream.only".into(),
+                    partition: Partition::new(0),
+                    group: None,
+                    prefetch: 1,
+                    auto_ack: false,
+                    consumer_group: None,
+                    consumer_target: None,
+                    member_id: None,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let frame = recv_frame(&mut framed).await;
+    assert_eq!(frame.opcode, Op::SubscribeErr as u16);
+
+    drop(framed);
+    server_task.await.unwrap().unwrap();
+}

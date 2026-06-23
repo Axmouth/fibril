@@ -173,18 +173,18 @@ See also: [Plexus streams](/latest/concepts/plexus-streams/) and
 | --- | --- | --- |
 | Stream channel type (fan-out) | Implemented | Stroma StreamEngine (cursors/retention), broker fan-out actor, TCP protocol (`DeclarePlexus`/`SubscribeStream`, reuses Publish/Deliver/Ack), Rust + TypeScript + Python clients |
 | Declare plexus (partitions, durability, retention) | Implemented | `declare_plexus`/`declarePlexus` + `StreamConfig` in all three clients |
-| Durable named cursor | Implemented | Broker-side cursor per (channel, partition, name); resume on restart, advance on ack |
+| Durable named cursor | Implemented | Broker-side cursor per (channel, partition, name), resuming on restart and advancing on ack |
 | Ephemeral start position | Implemented | latest / earliest / offset / n-back / by-time |
 | Header filter | Implemented | AND of `header == pattern` with `*` glob, stream-only |
-| Client-side fan-in across partitions | Implemented | Reuses the queue fan-in supervisor (failover resubscribe + live-grow pickup); streams stay out of the reconnect-reconcile registry and resume via the cursor |
-| Durability tiers (ephemeral/speculative/durable) | Partial | Selected on declare and accepted by the broker; broker persists durable-first for all tiers (the express lane is a later refinement) |
+| Client-side fan-in across partitions | Implemented | Reuses the queue fan-in supervisor (failover resubscribe + live-grow pickup). Streams stay out of the reconnect-reconcile registry and resume via the cursor |
+| Durability tiers (ephemeral/speculative/durable) | Partial | Selected on declare and accepted by the broker. The broker persists durable-first for all tiers (the express lane is a later refinement) |
 | Cross-client wire vectors | Implemented | `DeclarePlexus`/`DeclarePlexusOk`/`SubscribeStream` pinned in `clients/wire_vectors.json`, asserted by Rust/Python/TS |
 
 Conditions and limits:
 
 - Every consumer of a stream sees every record. Partitioning a stream is for write
   throughput and per-key ordering, not consumer work-sharing.
-- A durable name is single-active (last commit wins); distinct names are
+- A durable name is single-active (last commit wins). Distinct names are
   independent fan-out consumers, each with its own per-partition cursor.
 - A fresh durable name starts at the earliest retained record so it cannot
   silently miss data.

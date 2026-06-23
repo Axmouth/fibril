@@ -68,7 +68,7 @@ publisher.publish_delayed("hello later", 30u64).await?;
 let mut sub = client
     .subscribe("email.send")?
     .prefetch(32)
-    .sub_manual_ack()
+    .sub()
     .await?;
 
 while let Some(msg) = sub.recv().await {
@@ -96,7 +96,7 @@ await publisher.publishDelayed(NewMessage.json({ body: "hello later" }), 30_000)
 const sub = await client
   .subscribe("email.send")
   .prefetch(32)
-  .subManualAck();
+  .sub();
 
 for await (const msg of sub) {
   const body = msg.deserialize<{ body: string }>();
@@ -124,7 +124,7 @@ publisher = client.publisher("email.send")
 await publisher.publish(NewMessage.json({"body": "hello"}))
 await publisher.publish_delayed(NewMessage.json({"body": "hello later"}), 30)
 
-sub = await client.subscribe("email.send").prefetch(32).sub_manual_ack()
+sub = await client.subscribe("email.send").prefetch(32).sub()
 async for msg in sub:
     await process(msg.deserialize())
     await msg.complete()
@@ -145,7 +145,7 @@ publisher = client.publisher("email.send")
 publisher.publish(NewMessage.json({"body": "hello"}))
 publisher.publish_delayed(NewMessage.json({"body": "hello later"}), 30)
 
-sub = client.subscribe("email.send").prefetch(32).sub_manual_ack()
+sub = client.subscribe("email.send").prefetch(32).sub()
 for msg in sub:
     process(msg.deserialize())
     msg.complete()

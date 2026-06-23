@@ -601,7 +601,7 @@ class FanIn<R> {
  *   .subscribe("email.send")
  *   .group("workers")
  *   .prefetch(32)
- *   .subManualAck();
+ *   .sub();
  *
  * for await (const msg of sub) {
  *   try {
@@ -680,7 +680,7 @@ export class AutoAckedSubscription implements AsyncIterable<Message> {
 /**
  * Builder for subscription requests.
  *
- * Construct with `client.subscribe(topic)`, then call `subManualAck()` or
+ * Construct with `client.subscribe(topic)`, then call `sub()` or
  * `subAutoAck()`.
  */
 export class SubscriptionBuilder {
@@ -749,7 +749,7 @@ export class SubscriptionBuilder {
    *
    * Each received `InflightMessage` must be settled by the user.
    */
-  async subManualAck(): Promise<Subscription> {
+  async sub(): Promise<Subscription> {
     const baseReq: SubscribeMsg = {
       topic: this.#topic,
       group: this.#group,
@@ -837,7 +837,7 @@ export class SubscriptionBuilder {
  *   .stream("events")
  *   .durable("analytics")
  *   .filter("region", "eu-*")
- *   .subManualAck();
+ *   .sub();
  * for await (const msg of sub) await msg.complete();
  * ```
  */
@@ -979,7 +979,7 @@ export class StreamSubscriptionBuilder {
   }
 
   /** Subscribe with manual acknowledgement; completing a message advances the cursor. */
-  async subManualAck(): Promise<Subscription> {
+  async sub(): Promise<Subscription> {
     const baseReq = this.#baseReq(false);
     const subscribeOne = (r: SubscribeMsg) =>
       this.#client._subscribeStreamManualOnce(this.#toStreamReq(r.partition ?? 0, false));

@@ -738,7 +738,7 @@ export class Client {
   /**
    * Build a subscription request.
    *
-   * Chain `.group(...)` and `.prefetch(...)`, then call `.subManualAck()` or
+   * Chain `.group(...)` and `.prefetch(...)`, then call `.sub()` or
    * `.subAutoAck()`.
    */
   subscribe(topic: string): SubscriptionBuilder {
@@ -748,7 +748,7 @@ export class Client {
   /**
    * Begin a Plexus (fan-out stream) subscription. Every consumer sees every
    * record. Chain `.durable(...)`, `.fromEarliest()`, `.filter(...)`, then call
-   * `.subManualAck()` or `.subAutoAck()`.
+   * `.sub()` or `.subAutoAck()`.
    */
   stream(topic: string): StreamSubscriptionBuilder {
     return new StreamSubscriptionBuilder(this, topic);

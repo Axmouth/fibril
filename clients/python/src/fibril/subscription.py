@@ -446,7 +446,7 @@ class SubscriptionBuilder:
         self._prefetch = prefetch
         return self
 
-    async def sub_manual_ack(self) -> Subscription:
+    async def sub(self) -> Subscription:
         base = self._base_req(auto_ack=False)
         initial = await self._fan_in_initial(base)
         fan_in = _FanIn(self._client, base, self._client.subscribe_once, initial, self._prefetch)
@@ -491,7 +491,7 @@ class StreamSubscriptionBuilder:
     """Builder for a Plexus (fan-out stream) subscription.
 
     Chain ``durable``/``from_*``/``filter``/``prefetch``/``partitions``, then call
-    ``sub_manual_ack`` or ``sub_auto_ack``. The subscription reads every partition
+    ``sub`` or ``sub_auto_ack``. The subscription reads every partition
     and fans them in; the SAME durable name tracks an independent cursor per
     partition.
     """
@@ -553,7 +553,7 @@ class StreamSubscriptionBuilder:
         self._prefetch = prefetch
         return self
 
-    async def sub_manual_ack(self) -> Subscription:
+    async def sub(self) -> Subscription:
         base = self._base_req(auto_ack=False)
         initial = await self._fan_in_initial(base)
         fan_in = _FanIn(self._client, base, self._resubscribe(False), initial, self._prefetch)

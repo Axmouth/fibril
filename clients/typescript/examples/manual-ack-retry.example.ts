@@ -10,7 +10,7 @@ await runExample("manual-ack-retry", async () => {
   const client = await connect("example-manual-ack-retry");
   try {
     const topic = uniqueTopic("retry");
-    const sub = await client.subscribe(topic).prefetch(1).subManualAck();
+    const sub = await client.subscribe(topic).prefetch(1).sub();
 
     await client.publisher(topic).publishConfirmed(NewMessage.json({ id: 1 }));
 

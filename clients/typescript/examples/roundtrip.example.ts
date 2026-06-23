@@ -10,7 +10,7 @@ await runExample("roundtrip", async () => {
   const client = await connect("example-roundtrip");
   try {
     const topic = uniqueTopic("roundtrip");
-    const sub = await client.subscribe(topic).prefetch(1).subManualAck();
+    const sub = await client.subscribe(topic).prefetch(1).sub();
 
     const offset = await client
       .publisher(topic)
