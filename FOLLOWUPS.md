@@ -58,24 +58,23 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   reconnect-reconcile registry (they own re-subscribe and resume via the durable
   cursor) - mirror that in the other clients.
 
-- Durable stream throughput is still ~847/s and UNRESOLVED. The pipelining landed
-  (keratin 303d949, fibril c49f011): publish_durable -> per-channel ingest that
-  coalesces into a batched append (append_stream_records_batch, one fsync/batch,
-  queue publisher_sink style) -> drain fans out in offset order once durable. It is
-  CORRECT (delivers at low rate) but did NOT lift the ceiling: ~847/s across inline,
-  pipelined, and coalesced versions; at 20k/s the client backlog means 0 measured
-  delivered, at 500/s latency grows to 6-10s. So the bottleneck is elsewhere, not
-  the publish structure. Key clue: the SINGLE staged append (express path,
-  append_stream_record_staged) runs at 20k/s (~50us), but the BATCHED staged append
-  (append_stream_records_batch) behaves like ~1.2ms = one fsync. Prime suspect: the
-  batch + AfterFsync staged-offset signal is firing AFTER the fsync instead of at
-  stage (so the ingest awaits fsync per batch and batches never grow past 1).
-  NEXT: instrument append_stream_records_batch latency + observed batch sizes;
-  verify keratin fires staged_offset_tx at STAGE for AppendPayload::Many + AfterFsync
-  (writer stage_reqs); compare against the queue publish_batch path which hits high
-  throughput. Express tiers (speculative/ephemeral) are unaffected: 20k/s, ~2ms
-  server->deliver. Also: durable confirm/deliver latency at light load is the
-  keratin fsync interval (~324ms in the bench), config-tunable, separate from this.
+- Durable stream throughput RESOLVED (was ~847/s). The earlier pipelining was
+  correct but the per-channel ingest awaited the staged offset between appends
+  (append_stream_records_batch), so keratin's writer never held more than one append
+  at a time and its fsync coalescing could not engage: one fsync per record. The fix
+  (keratin afb507f, fibril 588e51c) is append_stream_records_enqueue, which returns
+  before stage (housekeeping moves to a background task), so the ingest enqueues the
+  next batch without waiting for keratin to report back and keratin coalesces fsyncs
+  across the queued appends. Durable now reaches line rate (~197k records/s at 1KB,
+  ~14ms confirm) on SSD; SSD ~= tmpfs because the fsync is amortized. A follow-up
+  (keratin a430df3, fibril 4058b3f) routes ALL tiers through the same batched ingest
+  (drain sets fan-out/confirm timing by tier), so speculative now matches durable
+  (~190k/s) and ephemeral keeps the lowest latency (~1ms deliver). Bench via
+  scripts/bench-stream.sh (DURABILITY + DATA_DIR knobs). Open: ephemeral throughput
+  in confirmed mode is lower than speculative despite no fsync - a client-side churn
+  artifact of confirming at stage (very fast confirms -> high re-publish churn), not
+  a server limit (1ms delivery). Also: light-load confirm/deliver latency is the
+  keratin fsync interval, config-tunable, separate from this.
 
 - Possible future channel mode: a true memory-only stream (no log at all, lost on
   restart, no durable cursors/replay/retention, lowest possible latency). Distinct
