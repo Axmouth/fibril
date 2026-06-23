@@ -58,16 +58,24 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   reconnect-reconcile registry (they own re-subscribe and resume via the durable
   cursor) - mirror that in the other clients.
 
-- Durable stream publish does not pipeline: `handle_stream_publish` awaits
-  `channel.publish` (full persist + fan-out round trip) INLINE in the connection
-  frame loop, so one connection serializes durable publishes (~370/s each in the
-  bench, vs 20k/s for the express lanes which return at stage). Found by
-  bench-stream. Fix: batch the durable appends and fan out in offset order on the
-  durability completion (do not block the frame loop), mirroring how the queue
-  publisher pipelines. The express tiers already avoid this. Durable is correct,
-  just throughput-limited. Also note durable confirm/deliver latency is dominated
-  by the keratin fsync interval (~324ms with the server default config in the
-  bench), which is config-tunable, separate from this serialization.
+- Durable stream throughput is still ~847/s and UNRESOLVED. The pipelining landed
+  (keratin 303d949, fibril c49f011): publish_durable -> per-channel ingest that
+  coalesces into a batched append (append_stream_records_batch, one fsync/batch,
+  queue publisher_sink style) -> drain fans out in offset order once durable. It is
+  CORRECT (delivers at low rate) but did NOT lift the ceiling: ~847/s across inline,
+  pipelined, and coalesced versions; at 20k/s the client backlog means 0 measured
+  delivered, at 500/s latency grows to 6-10s. So the bottleneck is elsewhere, not
+  the publish structure. Key clue: the SINGLE staged append (express path,
+  append_stream_record_staged) runs at 20k/s (~50us), but the BATCHED staged append
+  (append_stream_records_batch) behaves like ~1.2ms = one fsync. Prime suspect: the
+  batch + AfterFsync staged-offset signal is firing AFTER the fsync instead of at
+  stage (so the ingest awaits fsync per batch and batches never grow past 1).
+  NEXT: instrument append_stream_records_batch latency + observed batch sizes;
+  verify keratin fires staged_offset_tx at STAGE for AppendPayload::Many + AfterFsync
+  (writer stage_reqs); compare against the queue publish_batch path which hits high
+  throughput. Express tiers (speculative/ephemeral) are unaffected: 20k/s, ~2ms
+  server->deliver. Also: durable confirm/deliver latency at light load is the
+  keratin fsync interval (~324ms in the bench), config-tunable, separate from this.
 
 - Possible future channel mode: a true memory-only stream (no log at all, lost on
   restart, no durable cursors/replay/retention, lowest possible latency). Distinct
