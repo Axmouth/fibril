@@ -177,7 +177,7 @@ See also: [Plexus streams](/latest/concepts/plexus-streams/) and
 | Ephemeral start position | Implemented | latest / earliest / offset / n-back / by-time |
 | Header filter | Implemented | AND of `header == pattern` with `*` glob, stream-only |
 | Client-side fan-in across partitions | Implemented | Reuses the queue fan-in supervisor (failover resubscribe + live-grow pickup). Streams stay out of the reconnect-reconcile registry and resume via the cursor |
-| Durability tiers (ephemeral/speculative/durable) | Partial | Selected on declare and accepted by the broker. The broker persists durable-first for all tiers (the express lane is a later refinement) |
+| Durability tiers (ephemeral/speculative/durable) | Implemented | Express lane wired: durable fsyncs before deliver/confirm, speculative delivers off the staged offset and defers the confirm until durable (with a `fibril.speculative` header), ephemeral delivers and confirms at staging with no fsync (AfterWrite). All log-backed |
 | Cross-client wire vectors | Implemented | `DeclarePlexus`/`DeclarePlexusOk`/`SubscribeStream` pinned in `clients/wire_vectors.json`, asserted by Rust/Python/TS |
 
 Conditions and limits:
@@ -190,8 +190,9 @@ Conditions and limits:
   silently miss data.
 - Retention drops whole sealed segments (by age/bytes/records) and clamps a cursor
   that lags past the retained window.
-- The durability-tier knob is plumbed end to end but does not yet change broker
-  delivery timing.
+- The durability tier changes delivery and confirm timing end to end: speculative
+  and ephemeral deliver off the staged offset (no fsync wait), with speculative
+  deferring the confirm until durable and ephemeral confirming immediately.
 
 ## Reconnects
 

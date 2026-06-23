@@ -1128,10 +1128,10 @@ impl QueueConfig {
 /// ordering — a stream subscription reads ALL partitions and fans them in, so
 /// partitioning is not consumer work-sharing.
 ///
-/// Durability tiers: only [`durable`](Self::durable) is behaviorally active
-/// today. [`speculative`](Self::speculative) and [`ephemeral`](Self::ephemeral)
-/// are accepted and recorded but currently behave as durable (the lower-latency
-/// express lane is not yet wired).
+/// Durability tiers trade latency for durability: [`durable`](Self::durable)
+/// fsyncs before delivering and confirming, [`speculative`](Self::speculative)
+/// delivers early and defers the confirm until durable, and
+/// [`ephemeral`](Self::ephemeral) delivers and confirms without an fsync.
 ///
 /// ```no_run
 /// # async fn example(client: fibril_client::Client) -> fibril_client::FibrilResult<()> {

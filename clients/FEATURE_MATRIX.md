@@ -73,7 +73,7 @@ the same durable name tracks an independent cursor per partition.
 | Header filter (AND of `header == pattern`, `*` glob) | done | done | done |
 | Client-side fan-in across all partitions | done | done | done |
 | Failover resubscribe + live-grow pickup | done | done | done |
-| Durability tiers honored end to end (express lane) | client-ready <sup>11</sup> | client-ready <sup>11</sup> | client-ready <sup>11</sup> |
+| Durability tiers honored end to end (express lane) | done <sup>11</sup> | done <sup>11</sup> | done <sup>11</sup> |
 
 ## Reconnect and resume
 
@@ -166,11 +166,12 @@ the same durable name tracks an independent cursor per partition.
    implementation.
 10. The Python client has unit and fake-broker integration tests. A runnable
     examples-as-tests job like the TS client's is not wired up yet.
-11. All three clients select the durability tier on declare and the broker accepts
-    it, but the broker currently persists durable-first for every tier. The
-    express lane for the ephemeral/speculative tiers (deliver before fsync, defer
-    the producer confirm) is a broker-side refinement, so the client knob is
-    plumbed end to end but does not yet change broker timing.
+11. The express lane is wired end to end. Durable persists and fsyncs before
+    delivering and confirming. Speculative delivers off the staged offset, fsyncs
+    in the background, and defers the producer confirm until durable (deliveries
+    carry a server-owned `fibril.speculative` header). Ephemeral delivers at
+    staging, confirms immediately, and persists without an fsync (AfterWrite). All
+    tiers stay log-backed, so cursors and replay work on each.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.

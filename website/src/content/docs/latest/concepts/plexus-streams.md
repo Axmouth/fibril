@@ -63,21 +63,24 @@ forever.
 
 ## Durability tiers
 
-Each stream picks a durability tier at declare time. **Today only `durable` is
-behaviorally active.** The tier is carried end to end and recorded on the
-channel, but `speculative` and `ephemeral` currently behave exactly like
-`durable` (persist before delivering and confirming). The faster paths are a
-planned broker-side refinement (the "express lane"), not yet wired.
+Each stream picks a durability tier at declare time. They trade latency for
+durability:
 
-- **durable** (default, active) — persist (and replicate when configured) before
-  delivering and confirming the producer.
-- **speculative** (declared, not yet active) — will deliver immediately with a
-  marker and defer the producer confirm until the record is durable.
-- **ephemeral** (declared, not yet active) — will persist asynchronously and
-  never gate delivery or the confirm. Lowest latency, weakest guarantee.
+- **durable** (default) — persist and fsync (and replicate when configured)
+  before delivering and confirming the producer. Survives power loss. Highest
+  latency.
+- **speculative** — deliver the instant the offset is assigned, persist (fsync)
+  in the background, and defer the producer confirm until the record is durable.
+  Readers see it sooner, the producer still gets a real durability confirmation.
+  Speculative deliveries carry a `fibril.speculative` header so a consumer knows
+  the record may not be durable yet.
+- **ephemeral** — deliver at staging and confirm immediately, persisting without
+  an fsync (the record goes to the OS but is not flushed to disk). Lowest
+  latency, weakest guarantee: a process crash is survivable, a power loss can
+  drop the newest ephemeral records.
 
-Until the express lane lands, choosing `speculative` or `ephemeral` is safe but
-gives you durable behavior.
+All three are log-backed, so durable cursors, replay, and retention work on any
+tier.
 
 ## Acks advance the cursor
 
