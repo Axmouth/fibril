@@ -349,6 +349,17 @@ pub trait StreamStore: Send + Sync {
         durability: Option<KDurability>,
     ) -> Result<StagedStreamAppend, StromaError>;
 
+    /// Batched express-path append: one keratin append (one fsync) for the whole
+    /// batch. Records occupy `base..base+records.len()`. For the durable-tier
+    /// pipeline.
+    async fn append_stream_records_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        records: Vec<(MessageHeaders, Vec<u8>)>,
+        durability: Option<KDurability>,
+    ) -> Result<StagedStreamAppend, StromaError>;
+
     async fn read_stream_records(
         &self,
         tp: &str,
@@ -425,6 +436,18 @@ impl StreamStore for StromaEngine {
     ) -> Result<StagedStreamAppend, StromaError> {
         self.inner
             .append_stream_record_staged(tp, part, headers, payload, durability)
+            .await
+    }
+
+    async fn append_stream_records_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        records: Vec<(MessageHeaders, Vec<u8>)>,
+        durability: Option<KDurability>,
+    ) -> Result<StagedStreamAppend, StromaError> {
+        self.inner
+            .append_stream_records_batch(tp, part, records, durability)
             .await
     }
 

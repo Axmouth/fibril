@@ -83,6 +83,15 @@ impl fibril_broker::queue_engine::StreamStore for FailingPublishEngine {
     ) -> Result<fibril_broker::queue_engine::StagedStreamAppend, StromaError> {
         Err(StromaError::Unsupported("no streams in test engine".into()))
     }
+    async fn append_stream_records_batch(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _records: Vec<(MessageHeaders, Vec<u8>)>,
+        _durability: Option<fibril_broker::queue_engine::KDurability>,
+    ) -> Result<fibril_broker::queue_engine::StagedStreamAppend, StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
     async fn read_stream_records(
         &self,
         _tp: &str,

@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use fibril_storage::Offset;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{Duration as TokioDuration, Instant as TokioInstant};
 
 use crate::queue_engine::StreamStore;
 use stroma_core::{KDurability, MessageHeaders, RetentionConfig, StagedStreamAppend, StromaError};
@@ -382,6 +383,22 @@ enum FanoutCmd {
     },
 }
 
+/// A durable-tier publish request handed to the per-channel ingest task.
+struct DurableIngest {
+    headers: MessageHeaders,
+    payload: Vec<u8>,
+    confirm: oneshot::Sender<Result<Offset, StromaError>>,
+}
+
+/// A staged durable-tier batch waiting on its shared fsync before fan-out, queued
+/// in offset order on the per-channel durable drain. The whole batch shares one
+/// durability handle (one keratin append, one fsync).
+struct DurableBatch {
+    records: Vec<StreamRecord>,
+    durable: oneshot::Receiver<Result<(), StromaError>>,
+    confirms: Vec<oneshot::Sender<Result<Offset, StromaError>>>,
+}
+
 /// Owner-side actor for one stream (channel, partition). Owns the [`StreamFanout`]
 /// on a single task (so the ring and registry need no locking) and bridges it to
 /// stroma: publish persists then fans out, subscribe resolves a start and hands
@@ -397,6 +414,11 @@ pub struct StreamChannel {
     durability: StreamDurability,
     /// Declared retention bound, kept for observability.
     retention: Option<RetentionConfig>,
+    /// Durable-tier publishes go here. A single ingest task stages them in order
+    /// (its single-task ownership is what orders them, no lock) and a drain task
+    /// fans them out once durable. The frame loop only enqueues here, so the fsync
+    /// is off the connection path and keratin batches the flushes.
+    durable_ingest_tx: mpsc::Sender<DurableIngest>,
 }
 
 impl StreamChannel {
@@ -438,14 +460,149 @@ impl StreamChannel {
             }
         });
 
+        // Durable publish pipeline, modeled on the queue's publisher_sink + confirm
+        // drain. Ingest coalesces queued requests into one batched append (one
+        // fsync per batch) and hands the batch to the drain in offset order
+        // (single-task ownership orders it, no lock). The drain fans the batch out
+        // once it is durable, keeping fsync off the connection frame loop.
+        let tp_arc: Arc<str> = Arc::from(tp);
+        let (durable_ingest_tx, mut durable_ingest_rx) = mpsc::channel::<DurableIngest>(4096);
+        let (durable_batch_tx, mut durable_batch_rx) = mpsc::channel::<DurableBatch>(1024);
+
+        // Ingest: coalesce queued requests into one batched append (one fsync per
+        // batch). The coalesce window mirrors the queue's publisher_sink: without
+        // it, send-backpressure pins the batch at size 1 (one fsync per record), so
+        // a short wait lets a batch form and the fsync amortize.
+        const MAX_BATCH: usize = 256;
+        const SMALL_BATCH: usize = 32;
+        const COALESCE_WINDOW: TokioDuration = TokioDuration::from_micros(250);
+        let ingest_engine = engine.clone();
+        let ingest_tp = tp_arc.clone();
+        tokio::spawn(async move {
+            let mut last_flush: Option<TokioInstant> = None;
+            while let Some(first) = durable_ingest_rx.recv().await {
+                let mut batch = vec![first];
+                while batch.len() < MAX_BATCH {
+                    match durable_ingest_rx.try_recv() {
+                        Ok(req) => batch.push(req),
+                        Err(_) => break,
+                    }
+                }
+                // Coalesce only within the window opened by the previous flush, so a
+                // lone request after a quiet period is not delayed.
+                if batch.len() < SMALL_BATCH {
+                    if let Some(last) = last_flush {
+                        let deadline = last + COALESCE_WINDOW;
+                        while batch.len() < MAX_BATCH
+                            && TokioInstant::now() < deadline
+                        {
+                            match tokio::time::timeout_at(deadline, durable_ingest_rx.recv()).await {
+                                Ok(Some(req)) => batch.push(req),
+                                _ => break,
+                            }
+                        }
+                    }
+                }
+                last_flush = Some(TokioInstant::now());
+
+                // Split into the append payloads (consumed) and the per-record
+                // metadata kept to build the fan-out records once the offset lands.
+                let mut append_records = Vec::with_capacity(batch.len());
+                let mut metas = Vec::with_capacity(batch.len());
+                for req in batch {
+                    append_records.push((req.headers.clone(), req.payload.clone()));
+                    metas.push((req.headers, req.payload, req.confirm));
+                }
+
+                let staged = ingest_engine
+                    .append_stream_records_batch(
+                        &ingest_tp,
+                        part,
+                        append_records,
+                        Some(KDurability::AfterFsync),
+                    )
+                    .await;
+                match staged {
+                    Ok(staged) => {
+                        let mut records = Vec::with_capacity(metas.len());
+                        let mut confirms = Vec::with_capacity(metas.len());
+                        for (i, (headers, payload, confirm)) in metas.into_iter().enumerate() {
+                            records.push(StreamRecord::from_stored(
+                                staged.offset + i as u64,
+                                payload,
+                                headers,
+                            ));
+                            confirms.push(confirm);
+                        }
+                        if durable_batch_tx
+                            .send(DurableBatch {
+                                records,
+                                durable: staged.durable,
+                                confirms,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        let msg = err.to_string();
+                        for (_, _, confirm) in metas {
+                            let _ = confirm.send(Err(StromaError::Io(msg.clone())));
+                        }
+                    }
+                }
+            }
+        });
+
+        // Drain: fan a batch out only once it is durable. Durability completes in
+        // offset order across batches, so awaiting FIFO never stalls out of order.
+        let drain_cmd_tx = cmd_tx.clone();
+        tokio::spawn(async move {
+            while let Some(item) = durable_batch_rx.recv().await {
+                let DurableBatch {
+                    records,
+                    durable,
+                    confirms,
+                } = item;
+                match durable.await {
+                    Ok(Ok(())) => {
+                        for (record, confirm) in records.into_iter().zip(confirms) {
+                            let offset = record.offset;
+                            let (resp, rx) = oneshot::channel();
+                            if drain_cmd_tx
+                                .send(FanoutCmd::Publish { record, resp })
+                                .await
+                                .is_ok()
+                            {
+                                let _ = rx.await;
+                            }
+                            let _ = confirm.send(Ok(offset));
+                        }
+                    }
+                    other => {
+                        let msg = match other {
+                            Ok(Err(err)) => err.to_string(),
+                            _ => "stream durable completion dropped".to_string(),
+                        };
+                        for confirm in confirms {
+                            let _ = confirm.send(Err(StromaError::Io(msg.clone())));
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(StreamChannel {
-            tp: Arc::from(tp),
+            tp: tp_arc,
             part,
             engine,
             live_channel_capacity,
             cmd_tx,
             durability,
             retention,
+            durable_ingest_tx,
         })
     }
 
@@ -494,6 +651,29 @@ impl StreamChannel {
             .map_err(|_| StromaError::QueueActorGone)?;
         let _ = rx.await;
         Ok(offset)
+    }
+
+    /// Pipelined durable publish: hand the record to the per-channel ingest task and
+    /// return a confirm handle that resolves with the offset once the record is
+    /// durable and fanned out. The frame loop only enqueues here (no stage or fsync
+    /// wait), so durable publishes pipeline and keratin batches their fsyncs.
+    /// Fan-out still happens strictly after durability and in offset order (the
+    /// durable-tier contract).
+    pub async fn publish_durable(
+        &self,
+        headers: MessageHeaders,
+        payload: Vec<u8>,
+    ) -> Result<oneshot::Receiver<Result<Offset, StromaError>>, StromaError> {
+        let (confirm_tx, confirm_rx) = oneshot::channel();
+        self.durable_ingest_tx
+            .send(DurableIngest {
+                headers,
+                payload,
+                confirm: confirm_tx,
+            })
+            .await
+            .map_err(|_| StromaError::QueueActorGone)?;
+        Ok(confirm_rx)
     }
 
     /// Express-lane publish for the speculative and ephemeral tiers: stage the
