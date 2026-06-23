@@ -1116,6 +1116,97 @@ impl QueueConfig {
     }
 }
 
+/// Declaration for a Plexus (fan-out stream) channel.
+///
+/// A stream delivers every record to every consumer (unlike a queue, where a
+/// message is consumed once). Partitions buy write throughput and per-key
+/// ordering — a stream subscription reads ALL partitions and fans them in, so
+/// partitioning is not consumer work-sharing.
+///
+/// ```no_run
+/// # async fn example(client: fibril_client::Client) -> fibril_client::FibrilResult<()> {
+/// use fibril_client::StreamConfig;
+/// client
+///     .declare_plexus(StreamConfig::new("events")?.partitions(4).retain_records(1_000_000))
+///     .await?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct StreamConfig {
+    topic: TopicName,
+    partition_count: Option<u32>,
+    durability: StreamDurability,
+    retention: StreamRetention,
+}
+
+impl StreamConfig {
+    /// Start a stream declaration for a topic.
+    pub fn new(topic: impl AsRef<str>) -> FibrilResult<Self> {
+        Ok(Self {
+            topic: TopicName::parse(topic)?,
+            partition_count: None,
+            durability: StreamDurability::default(),
+            retention: StreamRetention::default(),
+        })
+    }
+
+    /// Request a specific partition count. When unset, the cluster default
+    /// applies.
+    pub fn partitions(mut self, partition_count: u32) -> Self {
+        self.partition_count = Some(partition_count);
+        self
+    }
+
+    /// Persist asynchronously without gating delivery or the confirm (lowest
+    /// latency, weakest guarantee).
+    pub fn ephemeral(mut self) -> Self {
+        self.durability = StreamDurability::Ephemeral;
+        self
+    }
+
+    /// Deliver immediately with a speculative marker, deferring the producer
+    /// confirm until the record is durable.
+    pub fn speculative(mut self) -> Self {
+        self.durability = StreamDurability::Speculative;
+        self
+    }
+
+    /// Persist before confirming (the default).
+    pub fn durable(mut self) -> Self {
+        self.durability = StreamDurability::Durable;
+        self
+    }
+
+    /// Drop records older than this age. Follows the [`Delayable`] convention
+    /// (bare number = seconds, or a Duration).
+    pub fn retain_for(mut self, age: impl Delayable) -> Self {
+        self.retention.max_age_ms = Some(age.with_delay().as_millis() as u64);
+        self
+    }
+
+    /// Keep at most this many bytes of retained records.
+    pub fn retain_bytes(mut self, bytes: u64) -> Self {
+        self.retention.max_bytes = Some(bytes);
+        self
+    }
+
+    /// Keep at most this many records.
+    pub fn retain_records(mut self, records: u64) -> Self {
+        self.retention.max_records = Some(records);
+        self
+    }
+
+    fn into_wire(self) -> DeclarePlexus {
+        DeclarePlexus {
+            topic: self.topic.into_string(),
+            partition_count: self.partition_count,
+            durability: self.durability,
+            retention: self.retention,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 /// Builder for subscription options.
 ///
@@ -1321,6 +1412,148 @@ impl<'a> SubscriptionBuilder<'a> {
     }
 }
 
+/// Builder for a Plexus (fan-out stream) subscription.
+///
+/// Construct with [`Client::stream`], optionally set a durable name, start
+/// position, header filter, and prefetch, then choose manual or auto ack. A
+/// stream subscription reads every partition and fans them in; the SAME durable
+/// name tracks an independent cursor per partition.
+///
+/// ```no_run
+/// # async fn example(client: fibril_client::Client) -> fibril_client::FibrilResult<()> {
+/// let mut sub = client
+///     .stream("events")?
+///     .durable("analytics")
+///     .filter("region", "eu-*")
+///     .sub_manual_ack()
+///     .await?;
+/// while let Some(msg) = sub.recv().await {
+///     msg.complete().await?;
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct StreamSubscriptionBuilder<'a> {
+    client: &'a Client,
+    topic: TopicName,
+    partition_count: Option<u32>,
+    durable_name: Option<String>,
+    start: StreamStart,
+    filter: Vec<(String, String)>,
+    prefetch: u32,
+}
+
+impl<'a> StreamSubscriptionBuilder<'a> {
+    /// Fan in over exactly this many partitions (0..count). When unset, the
+    /// topology cache supplies the count (just partition 0 in standalone /
+    /// cold-cache). Set this for a multi-partition stream when the cache does not
+    /// yet carry its partitioning.
+    pub fn partitions(mut self, partition_count: u32) -> Self {
+        self.partition_count = Some(partition_count.max(1));
+        self
+    }
+
+    /// Use a durable broker-side cursor named `name`: the subscription resumes
+    /// from the committed position (earliest on a fresh name) and acks advance it.
+    /// Without a durable name the subscription is ephemeral and `start` governs the
+    /// position.
+    pub fn durable(mut self, name: impl Into<String>) -> Self {
+        self.durable_name = Some(name.into());
+        self
+    }
+
+    /// Begin at the live tail (only records published from now on). The default
+    /// for an ephemeral subscription.
+    pub fn from_latest(mut self) -> Self {
+        self.start = StreamStart::Latest;
+        self
+    }
+
+    /// Begin at the oldest retained record.
+    pub fn from_earliest(mut self) -> Self {
+        self.start = StreamStart::Earliest;
+        self
+    }
+
+    /// Begin at a specific offset (clamped into the retained window).
+    pub fn from_offset(mut self, offset: u64) -> Self {
+        self.start = StreamStart::Offset { offset };
+        self
+    }
+
+    /// Begin `count` records back from the tail.
+    pub fn from_last(mut self, count: u64) -> Self {
+        self.start = StreamStart::NBack { count };
+        self
+    }
+
+    /// Begin at the first record at or after this wall-clock time (ms).
+    pub fn from_time(mut self, time_ms: u64) -> Self {
+        self.start = StreamStart::ByTime { time_ms };
+        self
+    }
+
+    /// Add a header-match clause: deliver only records whose `header` value matches
+    /// `pattern` (a literal that may contain `*` wildcards). Repeatable; clauses
+    /// are AND-ed.
+    pub fn filter(mut self, header: impl Into<String>, pattern: impl Into<String>) -> Self {
+        self.filter.push((header.into(), pattern.into()));
+        self
+    }
+
+    /// Set the maximum number of records the broker may push ahead per partition.
+    pub fn prefetch(mut self, prefetch: u32) -> Self {
+        self.prefetch = prefetch;
+        self
+    }
+
+    fn partition_list(&self) -> Vec<Partition> {
+        match self.partition_count {
+            Some(count) => (0..count).map(Partition::new).collect(),
+            None => partition_set(self.client, self.topic.as_str(), None),
+        }
+    }
+
+    fn make_req(&self, partition: Partition, auto_ack: bool) -> SubscribeStream {
+        SubscribeStream {
+            topic: self.topic.as_str().to_string(),
+            partition,
+            durable_name: self.durable_name.clone(),
+            start: self.start,
+            filter: self.filter.clone(),
+            prefetch: self.prefetch,
+            auto_ack,
+        }
+    }
+
+    /// Subscribe with manual acknowledgements. Each [`InflightMessage`] must be
+    /// settled; completing one advances the durable cursor past its offset.
+    #[tracing::instrument(fields(topic = %self.topic, prefetch = %self.prefetch))]
+    pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
+        let partitions = self.partition_list();
+        let mut receivers = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            let req = self.make_req(partition, false);
+            receivers.push(subscribe_stream_partition_manual(self.client, req).await?);
+        }
+        Ok(Subscription::fan_in(receivers, self.prefetch))
+    }
+
+    /// Subscribe with client-side automatic acknowledgement, yielding [`Message`]
+    /// directly. The broker advances the durable cursor as it delivers.
+    #[tracing::instrument(fields(topic = %self.topic, prefetch = %self.prefetch))]
+    pub async fn sub_auto_ack(self) -> FibrilResult<AutoAckedSubscription> {
+        let partitions = self.partition_list();
+        let mut receivers = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            let req = self.make_req(partition, true);
+            receivers.push(subscribe_stream_partition_auto(self.client, req).await?);
+        }
+        Ok(AutoAckedSubscription::fan_in(receivers, self.prefetch))
+    }
+}
+
 /// The partitions a subscription should fan in over for `(topic, group)`.
 ///
 /// Cache-only by design: the authoritative count comes from the topology cache
@@ -1482,6 +1715,68 @@ async fn subscribe_partition_auto(
                         code: ERR_NOT_OWNER,
                         msg: format!(
                             "exceeded max redirects ({}) subscribing {}/{}",
+                            client.shared.opts.max_redirects, req.topic, req.partition
+                        ),
+                    });
+                }
+                client.shared.apply_redirect(&redirect);
+                attempts += 1;
+            }
+            Err(other) => return Err(other),
+        }
+    }
+}
+
+/// Subscribe to a single stream partition (manual ack), following owner redirects.
+async fn subscribe_stream_partition_manual(
+    client: &Client,
+    req: SubscribeStream,
+) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
+    let mut attempts = 0u32;
+    loop {
+        let engine = client
+            .shared
+            .engine_for(&req.topic, req.partition, None)
+            .await?;
+        match engine.subscribe_stream(req.clone()).await {
+            Ok(rx) => return Ok(rx),
+            Err(FibrilError::Redirect(redirect)) => {
+                if attempts >= client.shared.opts.max_redirects {
+                    return Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: format!(
+                            "exceeded max redirects ({}) subscribing stream {}/{}",
+                            client.shared.opts.max_redirects, req.topic, req.partition
+                        ),
+                    });
+                }
+                client.shared.apply_redirect(&redirect);
+                attempts += 1;
+            }
+            Err(other) => return Err(other),
+        }
+    }
+}
+
+/// Auto-ack counterpart of [`subscribe_stream_partition_manual`].
+async fn subscribe_stream_partition_auto(
+    client: &Client,
+    req: SubscribeStream,
+) -> FibrilResult<mpsc::Receiver<Message>> {
+    let mut attempts = 0u32;
+    loop {
+        let engine = client
+            .shared
+            .engine_for(&req.topic, req.partition, None)
+            .await?;
+        match engine.subscribe_stream_auto_ack(req.clone()).await {
+            Ok(rx) => return Ok(rx),
+            Err(FibrilError::Redirect(redirect)) => {
+                if attempts >= client.shared.opts.max_redirects {
+                    return Err(FibrilError::Failure {
+                        code: ERR_NOT_OWNER,
+                        msg: format!(
+                            "exceeded max redirects ({}) subscribing stream {}/{}",
                             client.shared.opts.max_redirects, req.topic, req.partition
                         ),
                     });
@@ -1661,6 +1956,39 @@ impl Client {
             .await?
             .declare_queue(config.into_wire())
             .await
+    }
+
+    /// Declare a Plexus (fan-out stream) channel.
+    ///
+    /// Every consumer of a stream sees every record (unlike a queue). See
+    /// [`StreamConfig`] for partitioning, durability, and retention.
+    #[tracing::instrument(skip(self), fields(topic = %config.topic))]
+    pub async fn declare_plexus(&self, config: StreamConfig) -> FibrilResult<()> {
+        self.shared
+            .engine_for_operation()
+            .await?
+            .declare_plexus(config.into_wire())
+            .await
+    }
+
+    /// Begin a stream (Plexus) subscription for a topic.
+    ///
+    /// A stream subscription reads ALL partitions and fans them in. Name the
+    /// subscription with [`StreamSubscriptionBuilder::durable`] to get a
+    /// broker-side cursor that resumes after a restart and advances on ack.
+    pub fn stream(
+        &'_ self,
+        topic: impl AsRef<str> + fmt::Debug,
+    ) -> FibrilResult<StreamSubscriptionBuilder<'_>> {
+        Ok(StreamSubscriptionBuilder {
+            client: self,
+            topic: TopicName::parse(topic)?,
+            partition_count: None,
+            durable_name: None,
+            start: StreamStart::Latest,
+            filter: Vec::new(),
+            prefetch: 16,
+        })
     }
 
     /// Fetch the cluster topology from the broker and refresh the routing
@@ -2649,8 +2977,20 @@ enum Command {
         req: Subscribe,
         reply: oneshot::Sender<FibrilResult<AutoAckedSubChannel>>,
     },
+    SubscribeStream {
+        req: SubscribeStream,
+        reply: oneshot::Sender<FibrilResult<AckableSubChannel>>,
+    },
+    SubscribeStreamAutoAcked {
+        req: SubscribeStream,
+        reply: oneshot::Sender<FibrilResult<AutoAckedSubChannel>>,
+    },
     DeclareQueue {
         req: DeclareQueue,
+        reply: oneshot::Sender<FibrilResult<()>>,
+    },
+    DeclarePlexus {
+        req: DeclarePlexus,
         reply: oneshot::Sender<FibrilResult<()>>,
     },
     Topology {
@@ -3186,10 +3526,25 @@ where
                         waiters.insert(req_id, Waiter::SubscribeAuto(reply));
                         send_or_die!(framed, Op::Subscribe, req_id, &req, fatal_error)
                     }
+                    Command::SubscribeStream { req, reply } => {
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
+                        waiters.insert(req_id, Waiter::SubscribeManual(reply));
+                        send_or_die!(framed, Op::SubscribeStream, req_id, &req, fatal_error)
+                    }
+                    Command::SubscribeStreamAutoAcked { req, reply } => {
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
+                        waiters.insert(req_id, Waiter::SubscribeAuto(reply));
+                        send_or_die!(framed, Op::SubscribeStream, req_id, &req, fatal_error)
+                    }
                     Command::DeclareQueue { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         waiters.insert(req_id, Waiter::DeclareQueue(reply));
                         send_or_die!(framed, Op::DeclareQueue, req_id, &req, fatal_error)
+                    }
+                    Command::DeclarePlexus { req, reply } => {
+                        let req_id = next_req; next_req = next_req.wrapping_add(1);
+                        waiters.insert(req_id, Waiter::DeclareQueue(reply));
+                        send_or_die!(framed, Op::DeclarePlexus, req_id, &req, fatal_error)
                     }
                     Command::Topology { reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
@@ -3502,6 +3857,27 @@ where
                                 }
                                 None => {
                                     tracing::error!("Internal error: unexpected DeclareQueueOk")
+                                }
+                            }
+                        }
+                        x if x == Op::DeclarePlexusOk as u16 => {
+                            let _ok: DeclarePlexusOk = match decode_protocol(&frame) {
+                                Ok(ok) => ok,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+
+                            match waiters.remove(&frame.request_id) {
+                                Some(Waiter::DeclareQueue(tx)) => {
+                                    let _ = tx.send(Ok(()));
+                                }
+                                Some(_other) => {
+                                    tracing::error!("Internal error: protocol violation: DeclarePlexusOk for non-declare request_id")
+                                }
+                                None => {
+                                    tracing::error!("Internal error: unexpected DeclarePlexusOk")
                                 }
                             }
                         }
@@ -3819,6 +4195,15 @@ impl EngineHandle {
         rx.await.map_err(|_e| FibrilError::BrokenPipe)?
     }
 
+    async fn declare_plexus(&self, req: DeclarePlexus) -> FibrilResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::DeclarePlexus { req, reply: tx })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        rx.await.map_err(|_e| FibrilError::BrokenPipe)?
+    }
+
     async fn fetch_topology(&self) -> FibrilResult<TopologyOk> {
         let (tx, rx) = oneshot::channel();
         self.tx
@@ -3848,6 +4233,32 @@ impl EngineHandle {
         let chans = rx.await.map_err(|_e| FibrilError::BrokenPipe)??;
         Ok(chans.auto)
         // TODO: use oneshot channel to wait for when the packet has left(better errors timing)?
+    }
+
+    async fn subscribe_stream(
+        &self,
+        req: SubscribeStream,
+    ) -> FibrilResult<mpsc::Receiver<InflightMessage>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SubscribeStream { req, reply: tx })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        let chans = rx.await.map_err(|_e| FibrilError::BrokenPipe)??;
+        Ok(chans.manual)
+    }
+
+    async fn subscribe_stream_auto_ack(
+        &self,
+        req: SubscribeStream,
+    ) -> FibrilResult<mpsc::Receiver<Message>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::SubscribeStreamAutoAcked { req, reply: tx })
+            .await
+            .map_err(|_e| FibrilError::BrokenPipe)?;
+        let chans = rx.await.map_err(|_e| FibrilError::BrokenPipe)??;
+        Ok(chans.auto)
     }
 }
 
@@ -4905,6 +5316,111 @@ mod tests {
             other => panic!("expected re-publish, got {other:?}"),
         }
         assert_eq!(task.await.unwrap().unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn declare_plexus_sends_stream_config() {
+        let (client, mut rx) = client_with_command_rx();
+        let task = tokio::spawn(async move {
+            client
+                .declare_plexus(
+                    StreamConfig::new("events")
+                        .unwrap()
+                        .partitions(4)
+                        .speculative()
+                        .retain_records(1_000)
+                        .retain_for(60u64),
+                )
+                .await
+        });
+
+        match rx.recv().await.unwrap() {
+            Command::DeclarePlexus { req, reply } => {
+                assert_eq!(req.topic, "events");
+                assert_eq!(req.partition_count, Some(4));
+                assert_eq!(req.durability, StreamDurability::Speculative);
+                assert_eq!(req.retention.max_records, Some(1_000));
+                assert_eq!(req.retention.max_age_ms, Some(60_000));
+                assert_eq!(req.retention.max_bytes, None);
+                reply.send(Ok(())).unwrap();
+            }
+            other => panic!("expected declare plexus, got {other:?}"),
+        }
+
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_subscribe_sends_durable_filtered_request() {
+        let (client, mut rx) = client_with_command_rx();
+        let task = tokio::spawn(async move {
+            client
+                .stream("events")
+                .unwrap()
+                .durable("analytics")
+                .from_earliest()
+                .filter("region", "eu-*")
+                .filter("kind", "order")
+                .prefetch(8)
+                .sub_manual_ack()
+                .await
+        });
+
+        match rx.recv().await.unwrap() {
+            Command::SubscribeStream { req, reply } => {
+                assert_eq!(req.topic, "events");
+                assert_eq!(req.partition, Partition::new(0));
+                assert_eq!(req.durable_name.as_deref(), Some("analytics"));
+                assert_eq!(req.start, StreamStart::Earliest);
+                assert_eq!(
+                    req.filter,
+                    vec![
+                        ("region".to_string(), "eu-*".to_string()),
+                        ("kind".to_string(), "order".to_string()),
+                    ]
+                );
+                assert_eq!(req.prefetch, 8);
+                assert!(!req.auto_ack);
+                let (_tx, manual) = mpsc::channel(1);
+                reply.send(Ok(AckableSubChannel { manual })).unwrap();
+            }
+            other => panic!("expected subscribe stream, got {other:?}"),
+        }
+
+        let _subscription = task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_subscribe_fans_in_over_explicit_partitions() {
+        let (client, mut rx) = client_with_command_rx();
+        let task = tokio::spawn(async move {
+            client
+                .stream("events")
+                .unwrap()
+                .partitions(3)
+                .sub_auto_ack()
+                .await
+        });
+
+        // One SubscribeStream per partition, auto-ack, default latest start.
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            match rx.recv().await.unwrap() {
+                Command::SubscribeStreamAutoAcked { req, reply } => {
+                    assert_eq!(req.topic, "events");
+                    assert!(req.auto_ack);
+                    assert_eq!(req.start, StreamStart::Latest);
+                    seen.push(req.partition.id());
+                    let (_tx, auto) = mpsc::channel(1);
+                    reply.send(Ok(AutoAckedSubChannel { auto })).unwrap();
+                }
+                other => panic!("expected auto-ack subscribe stream, got {other:?}"),
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2]);
+
+        let _subscription = task.await.unwrap().unwrap();
     }
 
     #[test]
