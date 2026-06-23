@@ -301,8 +301,128 @@ replication + stale-epoch-apply harness), so it lands after the admin-thin items
 
 ## Features (replication-related)
 
-- Plexus: a fan-out or stream channel type built on its own arc, enabled by the
-  substrate-versus-engine split below. [DN]
+- Plexus: fan-out / stream channel type. See the dedicated "Plexus streams"
+  design section below. [DN]
+
+## Plexus streams (fan-out channels) - DESIGN (not yet built, 2026-06-23)
+
+Plexus = a fan-out / stream channel type beside the work queue. Every consumer
+sees every message, vs the queue's consumed=gone. Selected per channel via
+`declare(type: queue | plexus)`. Design settled in a brainstorm, build not
+started. Supersedes the older sketch in archive DESIGN_NOTES.md 584-661.
+
+LAYER BOUNDARY (firm):
+- stroma stores the retained record log (reuse) plus a retention policy plus a
+  small named-cursor map (name -> committed offset). It has NO concept of
+  consumers, subscriptions, or fan-out. A cursor is an opaque named bookmark, not
+  a consumer.
+- fibril owns consumer matching, fan-out delivery, the newest-X in-memory ring
+  (live tail), the express lane plus confirm timing, fan-in, per-sub filtering,
+  and the consumer -> cursor-name mapping.
+
+STROMA StreamEngine (new, minimal, much smaller than the work-queue engine):
+- Plugs into the SAME substrate as the queue engine (per-partition keratin
+  message log + event log + snapshot + replication). No lease/ack/inflight/ready/
+  DLQ/TTL-redelivery.
+- State: cursors {name -> offset}, retention config, head/tail watermarks.
+- Events: CursorCommit{name, offset} and retention truncation (reuse
+  safe_message_truncate_before). They ride the existing event-log + replication
+  path, so failover restores cursors.
+- API to fibril: append (reuse), read(from_offset, max) (reuse the replication
+  read path), commit_cursor(name, offset), get_cursor(name), plus a retention
+  worker. Snapshot encodes the cursor map.
+- Build via a surgical substrate/engine seam: formalize the trait the work queue
+  already satisfies, keep WorkQueueEngine as-is, add StreamEngine.
+
+FIBRIL stream actor (per channel + partition, owner-side):
+- Holds the newest-X ring, the live-subscriber registry, each sub's position.
+- Subscribe resolves a start position (latest / earliest / offset / N-back /
+  by-time / durable-resume), backfills from the stroma log read until caught up to
+  the ring window, then attaches to the live tail. Same catch-up-then-tail pattern
+  the replication followers already use.
+- Publish (express lane): append to the ring and multicast to live subs
+  immediately, hand to stroma to persist in parallel. Confirm timing and ghost
+  flag follow the durability tier. Express lane is far simpler here than for the
+  queue (no lease, ack, or single-consumer selection).
+- Rebuilds the ring from the stroma log tail on start or failover.
+
+CURSOR TRACKING (decided): support BOTH. Broker-side is the RECOMMENDED default
+for peace of mind.
+- Broker-side durable cursor (DEFAULT, blessed): the client supplies a durable
+  NAME (trusted, gated by auth, the Kafka group.id / JetStream durable norm, no
+  broker cookie needed). The broker persists and replicates the cursor, advances
+  it on ack (at-least-once), and lets a fresh process resume anywhere after a
+  crash or redeploy. This is the "name it, it remembers, no offset bookkeeping"
+  reassurance most users want. An optional single-active-consumer lease on the
+  name stops two clients clobbering one cursor (ownership, separate from identity).
+- Client-driven start (OPT-IN, ephemeral or advanced): the client states a start
+  position, the broker stays stateless about it, retention is the only bound
+  ("beyond grace you are at the mercy of retention"). For live tails, replays, and
+  fire-hose fan-out where per-message ack is unwanted.
+- Two existing identity layers stay distinct: resume_token (broker-minted, for
+  in-grace SESSION resume) vs durable name (client-supplied, for cross-process
+  consumer resume).
+
+DURABILITY TIERS (per-channel knob, not a third channel type):
+- ephemeral: persist to the log async, do not gate delivery or confirm (lowest
+  latency).
+- speculative: deliver now plus an X-Speculative header, with the producer confirm
+  DEFERRED until durable (fast and honest, the ghost-flag pattern from
+  TODOTHOUGHTS).
+- durable: persist (and replicate to min-ISR if configured) then confirm.
+
+RETENTION wins over slow cursors. A stream drops by policy. A durable cursor that
+falls behind the new head is clamped to head and flagged "lagged" to the consumer.
+Confirmed by the "mercy of the retention policy" call.
+
+SELECTION ("subscribe to one X or all") - NO broker routing (NATS subjects
+rejected). Three composable dumb-broker pieces:
+- channel granularity = coarse separation (the user's scaling lever).
+- per-sub header FILTER = fine in-channel selection. STREAM-ONLY. Minimal fixed
+  grammar: a set of header == value matches, AND-ed, with an optional `*` glob on
+  the value (e.g. region == eu-*). EXPLICITLY OUT, with rationale: regex, OR/NOT,
+  nesting, numeric ranges, SQL-style selectors. It is a consumer skip-predicate,
+  not routing, so the broker keeps no routing state. Saves egress, not the scan.
+- topology-as-a-stream = the broker streams its own facts (catalogue, topology,
+  ownership, assignment changes) on a system Plexus channel. Clients subscribe and
+  do their OWN routing (pattern fan-in, auto-pickup of new matching channels which
+  replaces the grow-pickup and catalogue polls, load-routing later). Dumb broker,
+  smart client. This is the "different shape that just works" that replaces NATS
+  subjects. Fold in as first-class, not an afterthought.
+
+QUEUE-SIDE FILTERING: UNCERTAIN, reevaluate later, maybe. Per-sub filters break
+the work queue (orphans that match no consumer plus head-of-line, starvation
+across differing filters, an unbounded smart scan, inflight discipline) - the
+classic JMS/ActiveMQ message-selector trap. Kept STREAM-ONLY for now, queue engine
+left untouched. Guidance for selective consumption on a queue: use separate queues
+or use a stream. If ever demanded, the clean version is a deliberate design
+(bounded scan depth plus an orphan no-match TTL to DLQ plus fairness round-robin),
+not a bolt-on.
+
+CLIENT IMPACT: modest and additive. Reuse the Deliver frame, fan-in, and failover.
+New: declare(type=plexus, durability, retention), subscribe with a start position
+plus optional durable-name plus optional header filter, the speculative header,
+and settle = cursor commit (durable) or no-op (ephemeral). Recommend
+advance-on-ack (at-least-once) for the durable default rather than
+advance-on-delivery.
+
+FUTURE ESCAPE HATCHES (named so we do not paint ourselves in, not building now):
+- a keyed-index read in stroma ("records for key=K from offset X") for efficient
+  one-of-millions selective consumption. A storage index, opt-in, NOT routing.
+- queue-side filtering (above), if ever justified.
+- subjects/wildcards stay rejected as a broker feature.
+
+BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
+1. Carve the stroma substrate/engine seam (formalize the trait the work queue
+   satisfies). Low-risk enabler.
+2. StreamEngine in stroma (cursors, retention, apply, snapshot, replication).
+3. Fibril stream actor (ring, fan-out, backfill, express lane, durability tiers,
+   per-sub filter) plus broker routing by channel type.
+4. Protocol and client (declare plexus, subscribe start + durable-name + filter,
+   speculative header, settle = commit, fan-in reuse).
+5. Topology-as-a-stream system channel plus client-side pattern fan-in and
+   auto-pickup.
+[DN/USER/MEM]
 
 ## Clients
 
@@ -436,7 +556,8 @@ replication + stale-epoch-apply harness), so it lands after the admin-thin items
   clustering. A full module sketch is preserved in the archived worklog. Do the
   low-risk type modules first, then the engine impl split incrementally. [WL]
 - substrate-versus-engine split (WorkQueueEngine plus StreamEngine over a shared
-  substrate), which enables Plexus. [DN]
+  substrate), which enables Plexus. Now spec'd as build step 1 in the "Plexus
+  streams" design section above. [DN]
 - Optional de-raft finish: fibril-side de-raft is complete. Remaining is optional,
   routing the protocol dev-dep and coordination-ganglion through the `ganglion`
   umbrella crate, or the bigger approach-B of moving raft-node construction up out
