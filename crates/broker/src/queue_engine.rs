@@ -15,7 +15,7 @@ pub use stroma_core::{
     GlobalDlqSnapshot, GlobalDlqUpdateOutcome, InspectMode, IoError, KDurability,
     KeratinAppendCompletion, KeratinConfig, Message, MessageContentType, MessageHeaders,
     MessageInspectionPage, MessageInspectionStatus, OwnerReplicationBatch, OwnerReplicationRead,
-    OwnerStateCheckpoint, QuarantineInfo, QueueInspectionState, QueuePromotionOutcome,
+    OwnerStateCheckpoint, PartitionKind, QuarantineInfo, QueueInspectionState, QueuePromotionOutcome,
     RecoveryMismatchPolicy, ReplicatedAppendOutcome, ReplicatedEventBatch, ReplicatedMessageBatch,
     ReplicatedQueueApplyOutcome, RetentionConfig, SnapshotConfig, Stroma, StromaError, StromaEvent,
     StromaKeratinConfig,
@@ -368,6 +368,11 @@ pub trait StreamStore: Send + Sync {
         part: u32,
         ts_ms: u64,
     ) -> Result<Offset, StromaError>;
+
+    /// Whether `(tp, part)` is durably marked as a stream (Plexus) partition.
+    /// Read from the on-disk kind marker so the broker can route a publish to the
+    /// stream path before the partition's fan-out channel is materialized.
+    fn durable_is_stream(&self, tp: &str, part: u32) -> bool;
 }
 
 #[derive(Debug, Clone)]
@@ -442,6 +447,10 @@ impl StreamStore for StromaEngine {
         self.inner
             .stream_offset_at_or_after_time(tp, part, ts_ms)
             .await
+    }
+
+    fn durable_is_stream(&self, tp: &str, part: u32) -> bool {
+        self.inner.partition_kind(tp, part, None) == PartitionKind::Stream
     }
 }
 

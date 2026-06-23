@@ -34,6 +34,16 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 
 ## Correctness and durability
 
+- Plexus stream routing after failover relies on the per-partition `.kind` marker
+  being present on the new owner. The marker is a LOCAL file written at
+  `create_stream` time on whichever broker first declared the stream, and it is not
+  replicated with the log. So a failover to a follower that never ran the declare
+  could route a stream publish down the queue path until the stream channel is
+  opened on that node. Options: replicate the kind marker (or persist kind in the
+  replicated state), or have owner-activation/catalogue-sync open stream channels
+  for owned stream partitions. Until then, declaring the stream against the new
+  owner re-materializes it. Low risk in single-node / declare-before-publish flows.
+
 - FIXED (found by the chaos soak): a consumer stopped receiving and never caught up
   after the OWNER broker was killed and rejoined WITHOUT a failover (a bounce faster
   than failure detection, so committed ownership stayed on the same broker). It was
