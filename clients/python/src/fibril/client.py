@@ -134,9 +134,10 @@ class StreamConfig:
     A stream delivers every record to every consumer (unlike a queue). Partitions
     buy write throughput and per-key ordering, not consumer work-sharing.
 
-    Durability tiers: only ``durable`` is behaviorally active today. ``speculative``
-    and ``ephemeral`` are accepted and recorded but currently behave as durable
-    (the lower-latency express lane is not yet wired).
+    Durability tiers trade latency for durability: ``durable`` fsyncs before
+    delivering and confirming, ``speculative`` delivers early and defers the
+    confirm until durable, and ``ephemeral`` delivers and confirms without an
+    fsync.
     """
 
     topic: str

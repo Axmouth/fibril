@@ -58,22 +58,6 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   reconnect-reconcile registry (they own re-subscribe and resume via the durable
   cursor) - mirror that in the other clients.
 
-- Plexus durability express lane (speculative + ephemeral are declared/recorded
-  but behave as durable today). To build it: (1) a non-blocking stroma stream
-  append that assigns the offset synchronously and returns a durability completion
-  handle instead of awaiting the fsync (keratin already reserves the offset at
-  submit and has a completion pair, so this is the keystone). (2) Broker reorder:
-  fan out before the handle resolves; ephemeral confirms immediately (best-effort
-  persist in the background), speculative defers the producer confirm until the
-  handle fires. (3) Mark a speculative delivery with a SERVER-OWNED reserved header
-  (`fibril.speculative`, under the existing `fibril.`/`stroma.` namespace - NOT a
-  bespoke `X-Speculative`), so clients cannot set it and the broker stamps it. (4)
-  Failed-write handling: a failed deferred confirm plus gap-safe recovery. This is
-  much simpler under the convention that offsets are an unstable internal detail -
-  a lost speculative offset just means a cursor that skips it, no consumer-visible
-  identity is broken. Order: ephemeral first (no deferred confirm), then
-  speculative. See note 11 in clients/FEATURE_MATRIX.md.
-
 - Possible future channel mode: a true memory-only stream (no log at all, lost on
   restart, no durable cursors/replay/retention, lowest possible latency). Distinct
   from the `ephemeral` durability tier, which is defined as log-backed (persist
