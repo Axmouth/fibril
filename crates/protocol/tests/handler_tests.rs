@@ -1679,6 +1679,7 @@ fn protocol_coordination_snapshot(
     CoordinationSnapshot {
         nodes,
         assignments: HashMap::from([(assignment.queue.clone(), assignment)]),
+        stream_assignments: HashMap::new(),
         generation,
     }
 }
@@ -1812,6 +1813,7 @@ async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_m
         CoordinationSnapshot {
             nodes: nodes.clone(),
             assignments: HashMap::from([(queue.clone(), first_assignment.clone())]),
+            stream_assignments: HashMap::new(),
             generation: 1,
         },
     ));
@@ -1826,6 +1828,7 @@ async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_m
     coordination.update_snapshot(CoordinationSnapshot {
         nodes,
         assignments: HashMap::from([(queue, second_assignment.clone())]),
+        stream_assignments: HashMap::new(),
         generation: 2,
     });
 

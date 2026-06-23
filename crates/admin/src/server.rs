@@ -940,6 +940,7 @@ mod tests {
             CoordinationSnapshot {
                 nodes,
                 assignments,
+                stream_assignments: std::collections::HashMap::new(),
                 generation: 7,
             },
         );

@@ -561,6 +561,7 @@ pub fn to_fibril_snapshot(snapshot: &ganglion_core::CoordinationSnapshot) -> Coo
     CoordinationSnapshot {
         nodes,
         assignments,
+        stream_assignments: std::collections::HashMap::new(),
         generation: snapshot.generation,
     }
 }
@@ -2228,6 +2229,7 @@ mod tests {
         CoordinationSnapshot {
             nodes,
             assignments,
+            stream_assignments: std::collections::HashMap::new(),
             generation,
         }
     }

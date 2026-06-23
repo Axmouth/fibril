@@ -1170,6 +1170,7 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
         CoordinationSnapshot {
             nodes,
             assignments,
+            stream_assignments: std::collections::HashMap::new(),
             generation: 1,
         },
     );
@@ -1259,6 +1260,7 @@ fn coordination_snapshot(
             .into_iter()
             .map(|assignment| (assignment.queue.clone(), assignment))
             .collect(),
+        stream_assignments: std::collections::HashMap::new(),
         generation,
     }
 }

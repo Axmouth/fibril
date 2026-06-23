@@ -170,6 +170,10 @@ pub enum ReplicationDurabilityError {
 pub struct CoordinationSnapshot {
     pub nodes: HashMap<String, NodeInfo>,
     pub assignments: HashMap<QueueIdentity, PartitionAssignment>,
+    /// Stream (Plexus) partition ownership, kept in a separate map from queue
+    /// assignments: a stream partition has a single owner and no follower set
+    /// (durability is the local keratin tier, not cross-node replication).
+    pub stream_assignments: HashMap<StreamIdentity, StreamAssignment>,
     pub generation: u64,
 }
 
@@ -196,6 +200,25 @@ impl CoordinationSnapshot {
         self.assignments
             .values()
             .filter(|assignment| assignment.is_followed_by(node_id))
+            .cloned()
+            .collect()
+    }
+
+    /// The owner of a stream partition, if assigned.
+    pub fn stream_assignment_for(
+        &self,
+        topic: &str,
+        partition: Partition,
+    ) -> Option<&StreamAssignment> {
+        self.stream_assignments
+            .get(&StreamIdentity::new(topic, partition))
+    }
+
+    /// Stream partitions this node owns.
+    pub fn streams_owned_by(&self, node_id: &str) -> Vec<StreamAssignment> {
+        self.stream_assignments
+            .values()
+            .filter(|assignment| assignment.is_owned_by(node_id))
             .cloned()
             .collect()
     }
@@ -246,6 +269,7 @@ impl PartitionPlacementPolicy for DeterministicPartitionPlacement {
                 snapshot: CoordinationSnapshot {
                     nodes,
                     assignments: HashMap::new(),
+                    stream_assignments: HashMap::new(),
                     generation: input.generation,
                 },
             });
@@ -295,6 +319,7 @@ impl PartitionPlacementPolicy for DeterministicPartitionPlacement {
             snapshot: CoordinationSnapshot {
                 nodes,
                 assignments,
+                stream_assignments: HashMap::new(),
                 generation: input.generation,
             },
         })
@@ -357,6 +382,128 @@ fn queue_sort_key(queue: &QueueIdentity) -> (String, Partition, String) {
         queue.partition,
         queue.group.as_deref().unwrap_or_default().to_string(),
     )
+}
+
+// ===== Stream (Plexus) placement =============================================
+//
+// Streams are fan-out channels, not work queues. A stream partition needs a
+// single OWNER node and nothing else: there is no follower set and no
+// replica-durability policy (durability is the local keratin tier, not
+// cross-node replication). Placement spreads a stream's partitions across
+// distinct nodes first, the same small-cluster balance goal as queue placement,
+// but the resulting plan carries only owner + fencing epoch.
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StreamIdentity {
+    pub topic: Topic,
+    pub partition: Partition,
+}
+
+impl StreamIdentity {
+    pub fn new(topic: impl Into<Topic>, partition: Partition) -> Self {
+        Self {
+            topic: topic.into(),
+            partition,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamAssignment {
+    pub stream: StreamIdentity,
+    pub owner: String,
+    /// Fencing epoch: bumps when ownership moves so a deposed owner can be
+    /// fenced. Holds steady while the owner is unchanged.
+    pub epoch: u64,
+}
+
+impl StreamAssignment {
+    pub fn new(stream: StreamIdentity, owner: impl Into<String>, epoch: u64) -> Self {
+        Self {
+            stream,
+            owner: owner.into(),
+            epoch,
+        }
+    }
+
+    pub fn is_owned_by(&self, node_id: &str) -> bool {
+        self.owner == node_id
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamPlacementInput {
+    pub nodes: HashMap<String, NodeInfo>,
+    pub streams: Vec<StreamIdentity>,
+    pub existing: HashMap<StreamIdentity, StreamAssignment>,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamPlacementPlan {
+    pub assignments: HashMap<StreamIdentity, StreamAssignment>,
+}
+
+pub trait StreamPlacementPolicy: std::fmt::Debug + Send + Sync {
+    fn plan(
+        &self,
+        input: StreamPlacementInput,
+    ) -> Result<StreamPlacementPlan, PartitionPlacementError>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DeterministicStreamPlacement;
+
+impl StreamPlacementPolicy for DeterministicStreamPlacement {
+    fn plan(
+        &self,
+        input: StreamPlacementInput,
+    ) -> Result<StreamPlacementPlan, PartitionPlacementError> {
+        let mut streams = input.streams;
+        streams.sort_by_key(stream_sort_key);
+        streams.dedup();
+
+        if streams.is_empty() {
+            return Ok(StreamPlacementPlan {
+                assignments: HashMap::new(),
+            });
+        }
+
+        let node_ids = sorted_node_ids(&input.nodes);
+        if node_ids.is_empty() {
+            return Err(PartitionPlacementError::NoNodesForQueues);
+        }
+
+        let mut assignments = HashMap::with_capacity(streams.len());
+        for (idx, stream) in streams.into_iter().enumerate() {
+            let existing = input.existing.get(&stream);
+            // Keep the existing owner if it is still alive (sticky), else spread
+            // by round-robin over the sorted node set.
+            let owner = existing
+                .and_then(|assignment| {
+                    input
+                        .nodes
+                        .contains_key(&assignment.owner)
+                        .then_some(&assignment.owner)
+                })
+                .cloned()
+                .unwrap_or_else(|| node_ids[idx % node_ids.len()].clone());
+            // Reuse the prior epoch when the owner is unchanged; bump to the new
+            // generation when ownership moves so a deposed owner is fenced.
+            let epoch = existing
+                .filter(|assignment| assignment.owner == owner)
+                .map(|assignment| assignment.epoch)
+                .unwrap_or(input.generation);
+
+            assignments.insert(stream.clone(), StreamAssignment::new(stream, owner, epoch));
+        }
+
+        Ok(StreamPlacementPlan { assignments })
+    }
+}
+
+fn stream_sort_key(stream: &StreamIdentity) -> (String, Partition) {
+    (stream.topic.to_string(), stream.partition)
 }
 
 // ===== Consumer-group partition assignment ===================================
@@ -1333,6 +1480,7 @@ impl StaticCoordination {
             CoordinationSnapshot {
                 nodes,
                 assignments: HashMap::new(),
+                stream_assignments: HashMap::new(),
                 generation: 0,
             },
         )
@@ -1441,6 +1589,7 @@ pub mod contract_tests {
         CoordinationSnapshot {
             nodes,
             assignments,
+            stream_assignments: HashMap::new(),
             generation,
         }
     }
@@ -1563,6 +1712,7 @@ mod tests {
         CoordinationSnapshot {
             nodes,
             assignments,
+            stream_assignments: HashMap::new(),
             generation: 42,
         }
     }
@@ -1574,6 +1724,7 @@ mod tests {
             CoordinationSnapshot {
                 nodes: HashMap::new(),
                 assignments: HashMap::new(),
+                stream_assignments: HashMap::new(),
                 generation: 0,
             },
         );
@@ -1790,6 +1941,107 @@ mod tests {
             3,
             "3 partitions should occupy 3 distinct nodes"
         );
+    }
+
+    #[test]
+    fn stream_placement_allows_empty_set_without_nodes() {
+        let plan = DeterministicStreamPlacement
+            .plan(StreamPlacementInput {
+                nodes: HashMap::new(),
+                streams: Vec::new(),
+                existing: HashMap::new(),
+                generation: 5,
+            })
+            .unwrap();
+
+        assert!(plan.assignments.is_empty());
+    }
+
+    #[test]
+    fn stream_placement_requires_nodes_when_streams_exist() {
+        let err = DeterministicStreamPlacement
+            .plan(StreamPlacementInput {
+                nodes: HashMap::new(),
+                streams: vec![StreamIdentity::new("events", Partition::new(0))],
+                existing: HashMap::new(),
+                generation: 1,
+            })
+            .unwrap_err();
+
+        assert_eq!(err, PartitionPlacementError::NoNodesForQueues);
+    }
+
+    #[test]
+    fn stream_placement_spreads_partitions_across_distinct_nodes() {
+        // One stream's partitions land on distinct nodes before any node is
+        // reused, the same small-cluster balance goal as queue placement.
+        let plan = DeterministicStreamPlacement
+            .plan(StreamPlacementInput {
+                nodes: nodes(["node-a", "node-b", "node-c"]),
+                streams: (0..3)
+                    .map(|p| StreamIdentity::new("events", Partition::new(p)))
+                    .collect(),
+                existing: HashMap::new(),
+                generation: 1,
+            })
+            .unwrap();
+
+        let owners: std::collections::HashSet<String> = (0..3)
+            .map(|p| {
+                plan.assignments
+                    .get(&StreamIdentity::new("events", Partition::new(p)))
+                    .expect("assignment")
+                    .owner
+                    .clone()
+            })
+            .collect();
+        assert_eq!(owners.len(), 3, "3 partitions should occupy 3 distinct nodes");
+    }
+
+    #[test]
+    fn stream_placement_keeps_live_owner_and_holds_epoch() {
+        let stream = StreamIdentity::new("events", Partition::new(0));
+        let mut existing = HashMap::new();
+        existing.insert(
+            stream.clone(),
+            StreamAssignment::new(stream.clone(), "node-b", 4),
+        );
+
+        let plan = DeterministicStreamPlacement
+            .plan(StreamPlacementInput {
+                nodes: nodes(["node-a", "node-b"]),
+                streams: vec![stream.clone()],
+                existing,
+                generation: 9,
+            })
+            .unwrap();
+
+        let assignment = plan.assignments.get(&stream).expect("assignment");
+        assert_eq!(assignment.owner, "node-b", "live owner is sticky");
+        assert_eq!(assignment.epoch, 4, "unchanged owner holds its epoch");
+    }
+
+    #[test]
+    fn stream_placement_reassigns_dead_owner_and_bumps_epoch() {
+        let stream = StreamIdentity::new("events", Partition::new(0));
+        let mut existing = HashMap::new();
+        existing.insert(
+            stream.clone(),
+            StreamAssignment::new(stream.clone(), "node-gone", 4),
+        );
+
+        let plan = DeterministicStreamPlacement
+            .plan(StreamPlacementInput {
+                nodes: nodes(["node-a", "node-b"]),
+                streams: vec![stream.clone()],
+                existing,
+                generation: 9,
+            })
+            .unwrap();
+
+        let assignment = plan.assignments.get(&stream).expect("assignment");
+        assert_ne!(assignment.owner, "node-gone", "dead owner is replaced");
+        assert_eq!(assignment.epoch, 9, "owner change fences via a new epoch");
     }
 
     fn assign_balanced(
