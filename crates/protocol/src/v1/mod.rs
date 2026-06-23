@@ -62,6 +62,13 @@ pub enum Op {
     DeclareQueue = 60,
     DeclareQueueOk = 61,
 
+    // Plexus (fan-out stream) channels. Additive beside the queue ops: a stream
+    // declares with its own op, subscribes with its own op, and reuses
+    // `Publish`/`Deliver`/`Ack` (the broker routes by channel kind).
+    DeclarePlexus = 62,
+    DeclarePlexusOk = 63,
+    SubscribeStream = 64,
+
     ReconcileClient = 70,
     ReconcileServer = 71,
     ReconcileResult = 72,
@@ -262,6 +269,137 @@ pub struct DeclareQueueOk {
     /// Effective partition count of the declared queue.
     #[serde(default)]
     pub partition_count: u32,
+}
+
+/// Per-channel durability tier for a Plexus stream. Governs how a publish is
+/// persisted and when the producer is confirmed; the fan-out is identical across
+/// tiers. Mirrors the broker-side tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamDurability {
+    /// Persist asynchronously, do not gate delivery or confirm. Lowest latency.
+    Ephemeral,
+    /// Deliver immediately with a speculative marker, defer the confirm until the
+    /// record is durable.
+    Speculative,
+    /// Persist (and replicate when configured) before confirming.
+    Durable,
+}
+
+impl Default for StreamDurability {
+    fn default() -> Self {
+        Self::Durable
+    }
+}
+
+impl StreamDurability {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            StreamDurability::Ephemeral => 0,
+            StreamDurability::Speculative => 1,
+            StreamDurability::Durable => 2,
+        }
+    }
+
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(StreamDurability::Ephemeral),
+            1 => Some(StreamDurability::Speculative),
+            2 => Some(StreamDurability::Durable),
+            _ => None,
+        }
+    }
+}
+
+/// Retention bounds for a Plexus stream. Each axis is independent; a `None` axis
+/// is unbounded. The broker drops whole sealed log segments once any bound is
+/// crossed (Kafka-style segment retention).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StreamRetention {
+    /// Drop records older than this age in milliseconds.
+    #[serde(default)]
+    pub max_age_ms: Option<u64>,
+    /// Keep at most this many bytes of retained records.
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
+    /// Keep at most this many records.
+    #[serde(default)]
+    pub max_records: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeclarePlexus {
+    pub topic: String,
+    /// Desired partition count. `None` uses the cluster default. A stream
+    /// subscription reads ALL partitions (client-side fan-in), so partitions buy
+    /// write throughput and per-key ordering, not consumer work-sharing.
+    #[serde(default)]
+    pub partition_count: Option<u32>,
+    #[serde(default)]
+    pub durability: StreamDurability,
+    #[serde(default)]
+    pub retention: StreamRetention,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeclarePlexusOk {
+    pub status: String,
+    /// Effective partition count of the declared stream.
+    #[serde(default)]
+    pub partition_count: u32,
+}
+
+/// Where a stream subscription begins reading when it has no durable cursor to
+/// resume (ephemeral subscriptions, or a durable name's first run). The broker
+/// resolves this to an absolute offset against the retained window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StreamStart {
+    /// Only records published from now on.
+    Latest,
+    /// The oldest retained record.
+    Earliest,
+    /// A specific offset (clamped into the retained window).
+    Offset { offset: u64 },
+    /// `count` records back from the tail.
+    NBack { count: u64 },
+    /// The first record at or after this wall-clock time (ms).
+    ByTime { time_ms: u64 },
+}
+
+impl Default for StreamStart {
+    fn default() -> Self {
+        Self::Latest
+    }
+}
+
+/// Subscribe to one partition of a Plexus stream. A multi-partition subscription
+/// opens one `SubscribeStream` per partition and fans them in client-side. The
+/// response reuses [`SubscribeOk`]; records arrive as [`Deliver`] and are acked
+/// (cursor-advanced) with [`Ack`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscribeStream {
+    pub topic: String,
+    /// The partition to subscribe to. Serde default keeps partition 0 for
+    /// single-partition / standalone streams.
+    #[serde(default)]
+    pub partition: Partition,
+    /// Durable cursor name. When set, the subscription resumes from this cursor
+    /// (falling back to `start` semantics of earliest on a fresh name so it cannot
+    /// silently miss data) and acks advance it. When `None` the subscription is
+    /// ephemeral: `start` governs the position and acks do not persist.
+    #[serde(default)]
+    pub durable_name: Option<String>,
+    /// Initial position for an ephemeral subscription (ignored when `durable_name`
+    /// is set, which resumes the cursor or starts at earliest).
+    #[serde(default)]
+    pub start: StreamStart,
+    /// Header filter: an AND of `header == value-pattern` clauses, where the value
+    /// pattern may contain `*` wildcards (no regex). Empty matches everything.
+    #[serde(default)]
+    pub filter: Vec<(String, String)>,
+    pub prefetch: u32,
+    pub auto_ack: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
