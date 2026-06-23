@@ -21,7 +21,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use fibril_storage::Offset;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+use crate::queue_engine::StromaEngine;
+use stroma_core::{MessageHeaders, RetentionConfig, StromaError};
 
 /// Per-channel durability tier (a channel-level knob, not a separate channel
 /// type). Governs how a publish is persisted and when the producer is confirmed;
@@ -163,6 +166,22 @@ pub struct StreamRecord {
     pub payload: Arc<[u8]>,
 }
 
+impl StreamRecord {
+    fn from_stored(offset: Offset, payload: Vec<u8>, headers: MessageHeaders) -> Self {
+        StreamRecord {
+            offset,
+            published: headers.published,
+            publish_received: headers.publish_received,
+            content_type: headers
+                .content_type
+                .as_ref()
+                .map(|c| c.as_header().to_string()),
+            headers: headers.extra,
+            payload: Arc::from(payload),
+        }
+    }
+}
+
 struct Subscriber {
     tx: mpsc::Sender<Arc<StreamRecord>>,
     filter: Option<StreamFilter>,
@@ -289,7 +308,8 @@ impl StreamFanout {
         let ring_base = self.ring_base();
 
         let filter_ref = filter.as_ref();
-        let keep = |r: &Arc<StreamRecord>| filter_ref.map(|f| f.matches(&r.headers)).unwrap_or(true);
+        let keep =
+            |r: &Arc<StreamRecord>| filter_ref.map(|f| f.matches(&r.headers)).unwrap_or(true);
 
         let ring_backfill: Vec<Arc<StreamRecord>> = self
             .ring
@@ -319,6 +339,260 @@ impl StreamFanout {
     /// Whether a subscriber has been marked lagging (a live send was dropped).
     pub fn is_lagged(&self, id: u64) -> Option<bool> {
         self.subscribers.get(&id).map(|s| s.lagged)
+    }
+}
+
+/// Where a subscriber begins reading. The broker resolves this to an absolute
+/// offset against the durable log before the fan-out core sees it.
+#[derive(Debug, Clone)]
+pub enum SubscribeStart {
+    /// The live tail: only records published from now on.
+    Latest,
+    /// The oldest retained record.
+    Earliest,
+    /// A specific offset (clamped into the retained window).
+    Offset(Offset),
+    /// `n` records back from the tail.
+    NBack(u64),
+    /// The first record at or after this wall-clock time (ms).
+    ByTime(u64),
+    /// Resume a durable named cursor, falling back to earliest when the name has
+    /// no committed position yet (a fresh durable consumer reads from the start so
+    /// it cannot silently miss data).
+    DurableResume { name: String },
+}
+
+/// How many records to read per backfill batch from the durable log.
+const BACKFILL_BATCH: usize = 256;
+
+enum FanoutCmd {
+    Publish {
+        record: StreamRecord,
+        resp: oneshot::Sender<()>,
+    },
+    Subscribe {
+        start: Offset,
+        filter: Option<StreamFilter>,
+        capacity: usize,
+        resp: oneshot::Sender<Subscription>,
+    },
+    Unsubscribe {
+        id: u64,
+    },
+}
+
+/// Owner-side actor for one stream (channel, partition). Owns the [`StreamFanout`]
+/// on a single task (so the ring and registry need no locking) and bridges it to
+/// stroma: publish persists then fans out, subscribe resolves a start and hands
+/// back a catch-up plan, settle commits a durable cursor.
+pub struct StreamChannel {
+    tp: Arc<str>,
+    part: u32,
+    engine: Arc<StromaEngine>,
+    live_channel_capacity: usize,
+    cmd_tx: mpsc::Sender<FanoutCmd>,
+}
+
+impl StreamChannel {
+    /// Materialize the stream in stroma and start its fan-out actor. `next` (the
+    /// tail) is read from the durable log so the ring lines up with persisted
+    /// records after a restart.
+    pub async fn open(
+        engine: Arc<StromaEngine>,
+        tp: &str,
+        part: u32,
+        retention: Option<RetentionConfig>,
+        ring_capacity: usize,
+        live_channel_capacity: usize,
+    ) -> Result<Self, StromaError> {
+        engine.create_stream(tp, part, retention).await?;
+        let (_head, tail) = engine.stream_head_tail(tp, part).await?;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(256);
+        let mut fanout = StreamFanout::new(ring_capacity, tail);
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                match cmd {
+                    FanoutCmd::Publish { record, resp } => {
+                        fanout.publish(record);
+                        let _ = resp.send(());
+                    }
+                    FanoutCmd::Subscribe {
+                        start,
+                        filter,
+                        capacity,
+                        resp,
+                    } => {
+                        let sub = fanout.subscribe(start, filter, capacity);
+                        let _ = resp.send(sub);
+                    }
+                    FanoutCmd::Unsubscribe { id } => fanout.unsubscribe(id),
+                }
+            }
+        });
+
+        Ok(StreamChannel {
+            tp: Arc::from(tp),
+            part,
+            engine,
+            live_channel_capacity,
+            cmd_tx,
+        })
+    }
+
+    /// Publish a record: persist it durably (which assigns the offset), then fan
+    /// it out to live subscribers. Returns the assigned offset.
+    //
+    // Durable-tier behavior (persist before fan-out/confirm). The express lane for
+    // the ephemeral and speculative tiers (deliver before fsync, defer the confirm)
+    // is a refinement on top of this and needs a non-blocking append that returns
+    // the offset early.
+    pub async fn publish(
+        &self,
+        headers: MessageHeaders,
+        payload: Vec<u8>,
+    ) -> Result<Offset, StromaError> {
+        let offset = self
+            .engine
+            .append_stream_record(&self.tp, self.part, &headers, payload.clone())
+            .await?;
+        let record = StreamRecord::from_stored(offset, payload, headers);
+        let (resp, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(FanoutCmd::Publish { record, resp })
+            .await
+            .map_err(|_| StromaError::QueueActorGone)?;
+        let _ = rx.await;
+        Ok(offset)
+    }
+
+    /// Resolve a start position and register a subscriber. The returned
+    /// [`StreamSubscription`] is driven with `run` to deliver backfill then live.
+    pub async fn subscribe(
+        &self,
+        start: SubscribeStart,
+        filter: Option<StreamFilter>,
+    ) -> Result<StreamSubscription, StromaError> {
+        let start_offset = self.resolve_start(&start).await?;
+        let (resp, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(FanoutCmd::Subscribe {
+                start: start_offset,
+                filter: filter.clone(),
+                capacity: self.live_channel_capacity,
+                resp,
+            })
+            .await
+            .map_err(|_| StromaError::QueueActorGone)?;
+        let inner = rx.await.map_err(|_| StromaError::QueueActorGone)?;
+        Ok(StreamSubscription {
+            tp: self.tp.clone(),
+            part: self.part,
+            engine: self.engine.clone(),
+            filter,
+            inner,
+        })
+    }
+
+    async fn resolve_start(&self, start: &SubscribeStart) -> Result<Offset, StromaError> {
+        let (head, tail) = self.engine.stream_head_tail(&self.tp, self.part).await?;
+        Ok(match start {
+            SubscribeStart::Latest => tail,
+            SubscribeStart::Earliest => head,
+            SubscribeStart::Offset(o) => (*o).clamp(head, tail),
+            SubscribeStart::NBack(n) => tail.saturating_sub(*n).max(head),
+            SubscribeStart::ByTime(ts) => {
+                self.engine
+                    .stream_offset_at_or_after_time(&self.tp, self.part, *ts)
+                    .await?
+            }
+            SubscribeStart::DurableResume { name } => {
+                match self.engine.stream_cursor(&self.tp, self.part, name).await? {
+                    Some(o) => o.clamp(head, tail),
+                    None => head,
+                }
+            }
+        })
+    }
+
+    /// Commit a durable cursor for `name` after a consumer settled through
+    /// `offset` (advance-on-ack: the cursor moves to the next unconsumed offset).
+    pub async fn settle(&self, name: &str, offset: Offset) -> Result<(), StromaError> {
+        self.engine
+            .commit_stream_cursor(&self.tp, self.part, name, offset + 1)
+            .await
+    }
+
+    pub async fn unsubscribe(&self, id: u64) {
+        let _ = self.cmd_tx.send(FanoutCmd::Unsubscribe { id }).await;
+    }
+}
+
+/// A registered subscription plus what the broker needs to deliver it. `run`
+/// drives the whole catch-up: durable-log backfill, then ring backfill, then the
+/// live tail, all forwarded to a sink in one gap-free, in-order stream.
+pub struct StreamSubscription {
+    tp: Arc<str>,
+    part: u32,
+    engine: Arc<StromaEngine>,
+    filter: Option<StreamFilter>,
+    inner: Subscription,
+}
+
+impl StreamSubscription {
+    pub fn id(&self) -> u64 {
+        self.inner.id
+    }
+
+    fn keep(&self, record: &StreamRecord) -> bool {
+        self.filter
+            .as_ref()
+            .map(|f| f.matches(&record.headers))
+            .unwrap_or(true)
+    }
+
+    /// Deliver backfill then live records to `sink` until the sink closes or the
+    /// live channel ends. Order is strictly by offset: durable-log backfill (read
+    /// in batches), then the ring backfill, then the live tail.
+    pub async fn run(mut self, sink: mpsc::Sender<Arc<StreamRecord>>) {
+        let mut from = self.inner.log_backfill.start;
+        let to = self.inner.log_backfill.end;
+        while from < to {
+            let want = BACKFILL_BATCH.min((to - from) as usize);
+            let records = match self
+                .engine
+                .read_stream_records(&self.tp, self.part, from, want)
+                .await
+            {
+                Ok(records) => records,
+                Err(_) => return,
+            };
+            if records.is_empty() {
+                break;
+            }
+            for (offset, payload, headers) in records {
+                if offset >= to {
+                    break;
+                }
+                from = offset + 1;
+                let record = StreamRecord::from_stored(offset, payload, headers);
+                if self.keep(&record) && sink.send(Arc::new(record)).await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        for record in std::mem::take(&mut self.inner.ring_backfill) {
+            if sink.send(record).await.is_err() {
+                return;
+            }
+        }
+
+        while let Some(record) = self.inner.receiver.recv().await {
+            if sink.send(record).await.is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -465,5 +739,175 @@ mod tests {
         let sub = fo.subscribe(999, None, 16);
         assert!(sub.ring_backfill.is_empty());
         assert_eq!(sub.log_backfill, 5..5);
+    }
+}
+
+#[cfg(test)]
+mod channel_tests {
+    use super::*;
+    use crate::queue_engine::StromaEngine;
+    use std::path::PathBuf;
+    use stroma_core::{
+        KeratinConfig, MessageHeaders, SnapshotConfig, StromaKeratinConfig, TempDir,
+    };
+
+    fn temp_dir(prefix: &str) -> TempDir {
+        let base = std::env::var("CARGO_WORKSPACE_DIR")
+            .map(PathBuf::from)
+            .or_else(|_| {
+                std::env::var("CARGO_MANIFEST_DIR").map(|dir| PathBuf::from(dir).join("../.."))
+            })
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()));
+        let root = base
+            .join("test_data")
+            .join(format!("{}-{}", prefix, fastrand::u64(..)));
+        std::fs::create_dir_all(&root).unwrap();
+        TempDir { root }
+    }
+
+    async fn engine(dir: &TempDir) -> Arc<StromaEngine> {
+        Arc::new(
+            StromaEngine::open(
+                &dir.root,
+                StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+                SnapshotConfig::default(),
+            )
+            .await
+            .unwrap(),
+        )
+    }
+
+    fn hdr(extra: &[(&str, &str)]) -> MessageHeaders {
+        MessageHeaders {
+            published: 0,
+            publish_received: 0,
+            content_type: None,
+            extra: extra
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    async fn collect(rx: &mut mpsc::Receiver<Arc<StreamRecord>>, n: usize) -> Vec<Offset> {
+        let mut out = Vec::new();
+        for _ in 0..n {
+            out.push(rx.recv().await.expect("record").offset);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn backfill_from_ring_then_live() {
+        let dir = temp_dir("stream_ring");
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, None, 64, 64)
+            .await
+            .unwrap();
+        for i in 0..5u32 {
+            assert_eq!(
+                ch.publish(hdr(&[]), format!("m{i}").into_bytes())
+                    .await
+                    .unwrap(),
+                i as u64
+            );
+        }
+
+        let sub = ch.subscribe(SubscribeStart::Earliest, None).await.unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = tokio::spawn(sub.run(tx));
+
+        assert_eq!(collect(&mut rx, 5).await, vec![0, 1, 2, 3, 4]);
+        // a new publish flows through live
+        ch.publish(hdr(&[]), b"m5".to_vec()).await.unwrap();
+        assert_eq!(rx.recv().await.unwrap().offset, 5);
+
+        driver.abort();
+    }
+
+    #[tokio::test]
+    async fn backfill_reads_evicted_records_from_the_log() {
+        let dir = temp_dir("stream_log");
+        // ring holds only the newest 2, so older records must come from stroma
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, None, 2, 64)
+            .await
+            .unwrap();
+        for i in 0..6u32 {
+            ch.publish(hdr(&[]), format!("m{i}").into_bytes())
+                .await
+                .unwrap();
+        }
+
+        let sub = ch.subscribe(SubscribeStart::Earliest, None).await.unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = tokio::spawn(sub.run(tx));
+        assert_eq!(collect(&mut rx, 6).await, vec![0, 1, 2, 3, 4, 5]);
+        driver.abort();
+    }
+
+    #[tokio::test]
+    async fn durable_resume_starts_after_the_committed_cursor() {
+        let dir = temp_dir("stream_durable");
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, None, 64, 64)
+            .await
+            .unwrap();
+        for i in 0..5u32 {
+            ch.publish(hdr(&[]), format!("m{i}").into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // settle through offset 2 -> cursor at 3
+        ch.settle("group-a", 2).await.unwrap();
+
+        let sub = ch
+            .subscribe(
+                SubscribeStart::DurableResume {
+                    name: "group-a".into(),
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = tokio::spawn(sub.run(tx));
+        assert_eq!(collect(&mut rx, 2).await, vec![3, 4]);
+        driver.abort();
+    }
+
+    #[tokio::test]
+    async fn filter_applies_to_backfill_and_live() {
+        let dir = temp_dir("stream_filter");
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, None, 64, 64)
+            .await
+            .unwrap();
+        ch.publish(hdr(&[("kind", "cow")]), b"a".to_vec())
+            .await
+            .unwrap();
+        ch.publish(hdr(&[("kind", "pig")]), b"b".to_vec())
+            .await
+            .unwrap();
+
+        let sub = ch
+            .subscribe(
+                SubscribeStart::Earliest,
+                Some(StreamFilter::from_pairs([("kind", "pig")])),
+            )
+            .await
+            .unwrap();
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = tokio::spawn(sub.run(tx));
+
+        // backfill: only offset 1 (pig) survives the filter
+        assert_eq!(rx.recv().await.unwrap().offset, 1);
+        // live: cow dropped, pig delivered
+        ch.publish(hdr(&[("kind", "cow")]), b"c".to_vec())
+            .await
+            .unwrap();
+        ch.publish(hdr(&[("kind", "pig")]), b"d".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(rx.recv().await.unwrap().offset, 3);
+
+        driver.abort();
     }
 }
