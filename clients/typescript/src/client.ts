@@ -335,6 +335,10 @@ export class QueueConfig {
 /**
  * Declaration for a Plexus (fan-out stream) channel. Immutable builder: each
  * method returns a new config. A stream delivers every record to every consumer.
+ *
+ * Durability tiers: only `durable` is behaviorally active today. `speculative`
+ * and `ephemeral` are accepted and recorded but currently behave as durable (the
+ * lower-latency express lane is not yet wired).
  */
 export class StreamConfig {
   readonly topic: string;
