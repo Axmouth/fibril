@@ -76,19 +76,18 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   a server limit (1ms delivery). Also: light-load confirm/deliver latency is the
   keratin fsync interval, config-tunable, separate from this.
 
-- Ephemeral has a fat delivery TAIL on real disk, despite the best p50. Measured
-  (SSD ext4, 1KB, 150k/s, confirmed): deliver p50=1ms but p95~530ms, p99~600ms,
-  while speculative at the same rate is p95=17ms and durable p95=84ms. Confirmed it
-  is dirty-page writeback throttling, not a Fibril-internal stall: the SAME run on
-  tmpfs (RAM) collapses the tail to p95=10ms AND lifts throughput from ~115k to the
-  full 150k. Mechanism: ephemeral writes with KDurability::AfterWrite (never fsyncs),
-  so dirty pages accumulate until the kernel stalls the writer thread mid-write;
-  durable/speculative fsync steadily so writeback never hits the cliff. So ephemeral
-  only wins outright on RAM-backed or writeback-tuned storage; on a plain disk
-  speculative is the better low-latency choice. FIX LEVER (not done): give ephemeral
-  a periodic background flush (sync_file_range / lazy fsync on an interval, NOT
-  gating delivery) to drain dirty pages steadily - keeps the 1ms p50 and tames the
-  tail. Make the interval a runtime setting.
+- Ephemeral writeback tail RESOLVED (keratin db92777 + fibril da35400). It had a
+  fat delivery tail on real disk despite the best p50 (SSD, 1KB, 150k/s: p50=1ms
+  but p95~530ms) because AfterWrite never fsyncs, so dirty pages piled up until the
+  kernel throttled the writer mid-write. Confirmed by tmpfs (no writeback) having no
+  tail. Fix: a per-ephemeral-channel periodic flush task (5ms) calls Stroma::
+  sync_stream, and WriterCmd::Sync now hands the fsync to keratin's fsync WORKER
+  stage (carries the responder through FsyncReq/FsyncDone) instead of running it on
+  the writer thread, so it drains dirty pages without stalling staging. Ephemeral is
+  now p50=1ms / p95=2ms / p99=7ms at full line rate, beating tmpfs, lowest RSS, and
+  stays the lighter tier (still AfterWrite, no per-record fsync). The 5ms interval is
+  a broker-local const (EPHEMERAL_FLUSH_INTERVAL) like the ring capacities; promote
+  to a runtime setting if it needs tuning in the field.
 
 - Possible future channel mode: a true memory-only stream (no log at all, lost on
   restart, no durable cursors/replay/retention, lowest possible latency). Distinct
