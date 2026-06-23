@@ -11,12 +11,45 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 
-use fibril_protocol::v1::{ERR_INVALID, ERR_NOT_FOUND, ERR_NOT_OWNER, Subscribe};
+use fibril_protocol::v1::{ERR_INVALID, ERR_NOT_FOUND, ERR_NOT_OWNER, Partition, Subscribe, SubscribeStream};
 
 use crate::{
     Client, FibrilError, FibrilResult, InflightMessage, Message, subscribe_partition_auto,
-    subscribe_partition_manual,
+    subscribe_partition_manual, subscribe_stream_partition_auto, subscribe_stream_partition_manual,
 };
+
+/// A subscribe request the supervisor can migrate across an owner failover. Both
+/// the queue [`Subscribe`] and the stream [`SubscribeStream`] expose the routing
+/// key (topic, partition, group) the supervisor needs to track ownership.
+pub(crate) trait SupervisedReq: Clone + Send + 'static {
+    fn topic(&self) -> &str;
+    fn partition(&self) -> Partition;
+    fn group(&self) -> Option<&str>;
+}
+
+impl SupervisedReq for Subscribe {
+    fn topic(&self) -> &str {
+        &self.topic
+    }
+    fn partition(&self) -> Partition {
+        self.partition
+    }
+    fn group(&self) -> Option<&str> {
+        self.group.as_deref()
+    }
+}
+
+impl SupervisedReq for SubscribeStream {
+    fn topic(&self) -> &str {
+        &self.topic
+    }
+    fn partition(&self) -> Partition {
+        self.partition
+    }
+    fn group(&self) -> Option<&str> {
+        None // streams have no group
+    }
+}
 
 /// Whether and how a caller should retry a failed operation. Get it from
 /// [`FibrilError::retry_advice`] (or the [`FibrilError::is_retryable`] shortcut).
@@ -155,24 +188,25 @@ type ResubscribeFut<M> =
 /// populated topology no longer knows it), or re-subscribe fails permanently.
 /// Unlike the producer there is no fixed deadline: a subscription is long-lived,
 /// so it retries (with backoff) for as long as the consumer keeps it open.
-fn supervise_forward<M, F>(
+fn supervise_forward<R, M, F>(
     client: Client,
-    req: Subscribe,
+    req: R,
     mut part_rx: mpsc::Receiver<M>,
     tx: mpsc::Sender<M>,
     resubscribe: F,
 ) where
+    R: SupervisedReq,
     M: Send + 'static,
-    F: Fn(Client, Subscribe) -> ResubscribeFut<M> + Send + 'static,
+    F: Fn(Client, R) -> ResubscribeFut<M> + Send + 'static,
 {
     tokio::spawn(async move {
         let check = Duration::from_millis(SUBSCRIPTION_OWNER_CHECK_MS);
-        let owner_of = |client: &Client, req: &Subscribe| {
+        let owner_of = |client: &Client, req: &R| {
             client
                 .shared
                 .topology
                 .load()
-                .lookup(&req.topic, req.partition, req.group.as_deref())
+                .lookup(req.topic(), req.partition(), req.group())
                 .map(|entry| entry.endpoint)
         };
         loop {
@@ -246,7 +280,7 @@ fn supervise_forward<M, F>(
                 }
                 if client.shared.refresh_topology_throttled().await {
                     let topo = client.shared.topology.load();
-                    if topo.is_populated() && !topo.knows_topic(&req.topic, req.group.as_deref()) {
+                    if topo.is_populated() && !topo.knows_topic(req.topic(), req.group()) {
                         return; // topic deleted - stop re-subscribing
                     }
                 }
@@ -287,6 +321,30 @@ pub(crate) fn supervise_forward_auto(
 ) {
     supervise_forward(client, req, part_rx, tx, |client, req| {
         Box::pin(async move { subscribe_partition_auto(&client, req).await })
+    });
+}
+
+/// Supervised forward for a manual-ack Plexus stream partition.
+pub(crate) fn supervise_forward_stream_manual(
+    client: Client,
+    req: SubscribeStream,
+    part_rx: mpsc::Receiver<InflightMessage>,
+    tx: mpsc::Sender<InflightMessage>,
+) {
+    supervise_forward(client, req, part_rx, tx, |client, req| {
+        Box::pin(async move { subscribe_stream_partition_manual(&client, req).await })
+    });
+}
+
+/// Supervised forward for an auto-ack Plexus stream partition.
+pub(crate) fn supervise_forward_stream_auto(
+    client: Client,
+    req: SubscribeStream,
+    part_rx: mpsc::Receiver<Message>,
+    tx: mpsc::Sender<Message>,
+) {
+    supervise_forward(client, req, part_rx, tx, |client, req| {
+        Box::pin(async move { subscribe_stream_partition_auto(&client, req).await })
     });
 }
 

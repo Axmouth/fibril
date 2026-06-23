@@ -997,6 +997,11 @@ enum Waiter {
     DeclareQueue(oneshot::Sender<FibrilResult<()>>),
     SubscribeManual(oneshot::Sender<FibrilResult<AckableSubChannel>>),
     SubscribeAuto(oneshot::Sender<FibrilResult<AutoAckedSubChannel>>),
+    /// Stream (Plexus) subscribe. Same response as the queue variants, but the
+    /// subscription is NOT recorded in the reconcile registry: streams manage their
+    /// own fan-in / live-grow supervisor and resume via their durable cursor.
+    StreamSubscribeManual(oneshot::Sender<FibrilResult<AckableSubChannel>>),
+    StreamSubscribeAuto(oneshot::Sender<FibrilResult<AutoAckedSubChannel>>),
     Topology(oneshot::Sender<FibrilResult<TopologyOk>>),
 }
 
@@ -1532,12 +1537,43 @@ impl<'a> StreamSubscriptionBuilder<'a> {
     #[tracing::instrument(fields(topic = %self.topic, prefetch = %self.prefetch))]
     pub async fn sub_manual_ack(self) -> FibrilResult<Subscription> {
         let partitions = self.partition_list();
-        let mut receivers = Vec::with_capacity(partitions.len());
-        for partition in partitions {
-            let req = self.make_req(partition, false);
-            receivers.push(subscribe_stream_partition_manual(self.client, req).await?);
+        let mut subs = Vec::with_capacity(partitions.len());
+        for partition in &partitions {
+            let req = self.make_req(*partition, false);
+            let part_rx = subscribe_stream_partition_manual(self.client, req.clone()).await?;
+            subs.push((req, part_rx));
         }
-        Ok(Subscription::fan_in(receivers, self.prefetch))
+
+        // Static fan-in when partition resubscribe / live-grow tracking is off.
+        let Some(interval_ms) = self.client.shared.opts.partition_resubscribe_interval_ms else {
+            return Ok(Subscription::fan_in(
+                subs.into_iter().map(|(_, rx)| rx).collect(),
+                self.prefetch,
+            ));
+        };
+
+        // Dynamic fan-in: supervise each partition (re-subscribe on owner failover)
+        // and a loop picks up partitions added by a live grow. The same durable name
+        // tracks an independent cursor per partition.
+        let cap = (self.prefetch as usize).max(1) * subs.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        let client = self.client.clone();
+        for (req, part_rx) in subs {
+            supervise_forward_stream_manual(client.clone(), req, part_rx, tx.clone());
+        }
+        let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
+        tokio::spawn(stream_partition_resubscribe_loop_manual(
+            client,
+            self.topic.as_str().to_string(),
+            self.durable_name.clone(),
+            self.start,
+            self.filter.clone(),
+            self.prefetch,
+            known,
+            tx,
+            interval_ms,
+        ));
+        Ok(Subscription { rx })
     }
 
     /// Subscribe with client-side automatic acknowledgement, yielding [`Message`]
@@ -1545,12 +1581,39 @@ impl<'a> StreamSubscriptionBuilder<'a> {
     #[tracing::instrument(fields(topic = %self.topic, prefetch = %self.prefetch))]
     pub async fn sub_auto_ack(self) -> FibrilResult<AutoAckedSubscription> {
         let partitions = self.partition_list();
-        let mut receivers = Vec::with_capacity(partitions.len());
-        for partition in partitions {
-            let req = self.make_req(partition, true);
-            receivers.push(subscribe_stream_partition_auto(self.client, req).await?);
+        let mut subs = Vec::with_capacity(partitions.len());
+        for partition in &partitions {
+            let req = self.make_req(*partition, true);
+            let part_rx = subscribe_stream_partition_auto(self.client, req.clone()).await?;
+            subs.push((req, part_rx));
         }
-        Ok(AutoAckedSubscription::fan_in(receivers, self.prefetch))
+
+        let Some(interval_ms) = self.client.shared.opts.partition_resubscribe_interval_ms else {
+            return Ok(AutoAckedSubscription::fan_in(
+                subs.into_iter().map(|(_, rx)| rx).collect(),
+                self.prefetch,
+            ));
+        };
+
+        let cap = (self.prefetch as usize).max(1) * subs.len().max(1);
+        let (tx, rx) = mpsc::channel(cap);
+        let client = self.client.clone();
+        for (req, part_rx) in subs {
+            supervise_forward_stream_auto(client.clone(), req, part_rx, tx.clone());
+        }
+        let known: std::collections::HashSet<Partition> = partitions.into_iter().collect();
+        tokio::spawn(stream_partition_resubscribe_loop_auto(
+            client,
+            self.topic.as_str().to_string(),
+            self.durable_name.clone(),
+            self.start,
+            self.filter.clone(),
+            self.prefetch,
+            known,
+            tx,
+            interval_ms,
+        ));
+        Ok(AutoAckedSubscription { rx })
     }
 }
 
@@ -1660,6 +1723,91 @@ async fn partition_resubscribe_loop_auto(
             if let Ok(part_rx) = subscribe_partition_auto(&client, req.clone()).await {
                 known.insert(partition);
                 supervise_forward_auto(client.clone(), req, part_rx, tx.clone());
+            }
+        }
+    }
+}
+
+/// Live-grow pickup for a manual-ack stream subscription: on each tick it
+/// refreshes topology and subscribes to any partition added since (merging it into
+/// the same fan-in channel under the same durable name, so the new partition gets
+/// its own cursor). Stops when the subscription is dropped.
+#[allow(clippy::too_many_arguments)]
+async fn stream_partition_resubscribe_loop_manual(
+    client: Client,
+    topic: String,
+    durable_name: Option<String>,
+    start: StreamStart,
+    filter: Vec<(String, String)>,
+    prefetch: u32,
+    mut known: std::collections::HashSet<Partition>,
+    tx: mpsc::Sender<InflightMessage>,
+    interval_ms: u64,
+) {
+    let interval = std::time::Duration::from_millis(interval_ms.max(1));
+    loop {
+        tokio::select! {
+            _ = tx.closed() => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
+        let _ = client.fetch_topology().await;
+        for partition in partition_set(&client, &topic, None) {
+            if known.contains(&partition) {
+                continue;
+            }
+            let req = SubscribeStream {
+                topic: topic.clone(),
+                partition,
+                durable_name: durable_name.clone(),
+                start,
+                filter: filter.clone(),
+                prefetch,
+                auto_ack: false,
+            };
+            if let Ok(part_rx) = subscribe_stream_partition_manual(&client, req.clone()).await {
+                known.insert(partition);
+                supervise_forward_stream_manual(client.clone(), req, part_rx, tx.clone());
+            }
+        }
+    }
+}
+
+/// Auto-ack counterpart of [`stream_partition_resubscribe_loop_manual`].
+#[allow(clippy::too_many_arguments)]
+async fn stream_partition_resubscribe_loop_auto(
+    client: Client,
+    topic: String,
+    durable_name: Option<String>,
+    start: StreamStart,
+    filter: Vec<(String, String)>,
+    prefetch: u32,
+    mut known: std::collections::HashSet<Partition>,
+    tx: mpsc::Sender<Message>,
+    interval_ms: u64,
+) {
+    let interval = std::time::Duration::from_millis(interval_ms.max(1));
+    loop {
+        tokio::select! {
+            _ = tx.closed() => return,
+            _ = tokio::time::sleep(interval) => {}
+        }
+        let _ = client.fetch_topology().await;
+        for partition in partition_set(&client, &topic, None) {
+            if known.contains(&partition) {
+                continue;
+            }
+            let req = SubscribeStream {
+                topic: topic.clone(),
+                partition,
+                durable_name: durable_name.clone(),
+                start,
+                filter: filter.clone(),
+                prefetch,
+                auto_ack: true,
+            };
+            if let Ok(part_rx) = subscribe_stream_partition_auto(&client, req.clone()).await {
+                known.insert(partition);
+                supervise_forward_stream_auto(client.clone(), req, part_rx, tx.clone());
             }
         }
     }
@@ -3528,12 +3676,12 @@ where
                     }
                     Command::SubscribeStream { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::SubscribeManual(reply));
+                        waiters.insert(req_id, Waiter::StreamSubscribeManual(reply));
                         send_or_die!(framed, Op::SubscribeStream, req_id, &req, fatal_error)
                     }
                     Command::SubscribeStreamAutoAcked { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::SubscribeAuto(reply));
+                        waiters.insert(req_id, Waiter::StreamSubscribeAuto(reply));
                         send_or_die!(framed, Op::SubscribeStream, req_id, &req, fatal_error)
                     }
                     Command::DeclareQueue { req, reply } => {
@@ -3831,6 +3979,37 @@ where
                                         }
                                     }
 
+                                    // Stream subscriptions register delivery state
+                                    // (for Deliver routing + cursor-advancing acks)
+                                    // but stay OUT of the reconcile registry: the
+                                    // stream fan-in supervisor owns re-subscribe and
+                                    // the durable cursor owns resume.
+                                    Waiter::StreamSubscribeManual(tx) => {
+                                        let (txm, rxm) = mpsc::channel(ok.prefetch as usize);
+                                        subs.insert(ok.sub_id, SubState {
+                                            topic: ok.topic.clone(),
+                                            group: ok.group.clone(),
+                                            partition: ok.partition,
+                                            delivery: SubDelivery::Manual(txm),
+                                        });
+                                        if tx.send(Ok(AckableSubChannel { manual: rxm })).is_err() {
+                                            tracing::warn!("Broken pipe");
+                                        }
+                                    }
+
+                                    Waiter::StreamSubscribeAuto(tx) => {
+                                        let (txa, rxa) = mpsc::channel(ok.prefetch as usize);
+                                        subs.insert(ok.sub_id, SubState {
+                                            topic: ok.topic.clone(),
+                                            group: ok.group.clone(),
+                                            partition: ok.partition,
+                                            delivery: SubDelivery::Auto(txa),
+                                        });
+                                        if tx.send(Ok(AutoAckedSubChannel { auto: rxa })).is_err() {
+                                            tracing::warn!("Broken pipe");
+                                        }
+                                    }
+
                                     _ => {
                                         // protocol violation: SubscribeOk for non-subscribe request_id
                                         // TODO
@@ -3977,6 +4156,16 @@ where
                                             tracing::warn!("Broken pipe");
                                         }
                                     }
+                                    Waiter::StreamSubscribeManual(tx) => {
+                                        if tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message })).is_err() {
+                                            tracing::warn!("Broken pipe");
+                                        }
+                                    }
+                                    Waiter::StreamSubscribeAuto(tx) => {
+                                        if tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message })).is_err() {
+                                            tracing::warn!("Broken pipe");
+                                        }
+                                    }
                                     Waiter::Topology(tx) => {
                                         let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
 
@@ -4053,6 +4242,12 @@ fn fail_waiter(waiter: Waiter, err: FibrilError) {
             let _ = tx.send(Err(err));
         }
         Waiter::SubscribeAuto(tx) => {
+            let _ = tx.send(Err(err));
+        }
+        Waiter::StreamSubscribeManual(tx) => {
+            let _ = tx.send(Err(err));
+        }
+        Waiter::StreamSubscribeAuto(tx) => {
             let _ = tx.send(Err(err));
         }
         Waiter::Topology(tx) => {
