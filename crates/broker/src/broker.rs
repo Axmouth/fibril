@@ -27,12 +27,13 @@ use crate::coordination::{
     StaticCoordination, StickyConsumerGroupAssignor, plan_local_assignment_transitions,
 };
 use crate::queue_engine::{
-    DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StromaEngine,
+    DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StreamStore, StromaEngine,
 };
+use crate::stream::StreamChannel;
 use stroma_core::{
     AckEventMeta, AppendCompletion, AppendResult, CompletionPair, IoError, KeratinAppendCompletion,
-    MessageContentType, MessageHeaders, NackEventMeta, StromaDebugSnapshot, StromaError,
-    StromaMetrics, TaskGroup, UnixMillis,
+    MessageContentType, MessageHeaders, NackEventMeta, RetentionConfig, StromaDebugSnapshot,
+    StromaError, StromaMetrics, TaskGroup, UnixMillis,
 };
 
 // Replication/clustering types + traits now live in `replication.rs`; re-export so
@@ -1300,9 +1301,19 @@ impl std::fmt::Display for WakeReason {
 // ---------------- Broker ----------------
 
 // TODO cleanup old?
-pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
+/// Newest-X in-memory ring size per stream partition.
+// TODO(settings): lift to BrokerConfig once it moves to a builder (so adding a
+// field does not churn every exhaustive literal).
+const STREAM_RING_CAPACITY: usize = 4096;
+/// Per-subscriber live delivery buffer. When full, the subscriber is flagged
+/// lagging and re-reads the gap from its durable cursor.
+const STREAM_LIVE_CHANNEL_CAPACITY: usize = 1024;
+
+pub struct Broker<
+    E: QueueEngine + crate::queue_engine::StreamStore + std::fmt::Debug + Send + Sync + 'static,
+> {
     pub(crate) cfg: Arc<ArcSwap<BrokerConfig>>,
-    pub(crate) engine: E,
+    pub(crate) engine: Arc<E>,
     pub(crate) shutdown_publishers: CancellationToken,
     shutdown_consumers: CancellationToken,
     shutdown_settle: CancellationToken,
@@ -1313,6 +1324,10 @@ pub struct Broker<E: QueueEngine + std::fmt::Debug + Send + Sync + 'static> {
     next_tag_epoch: AtomicU64,
 
     queues: DashMap<QueueKey, Arc<QueueLoopState>>,
+    /// Owner-side stream (Plexus) channels this broker hosts, keyed like queues.
+    /// A stream partition is a fan-out actor (ring + live subscribers), distinct
+    /// from the lease/poll `queues` loop.
+    streams: DashMap<QueueKey, Arc<crate::stream::StreamChannel>>,
     records_by_tags: DashMap<DeliveryTag, TagRecord>,
     tags_by_key_offset: DashMap<(QueueKey, Offset), DeliveryTag>,
     queue_eviction_observations: DashMap<QueueKey, QueueEvictionObservation>,
@@ -1391,7 +1406,16 @@ fn shrink_sources(r: u32, n_new: u32, n_old: u32) -> impl Iterator<Item = u32> {
     (r..n_old).step_by(step)
 }
 
-impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
+impl<
+    E: QueueEngine
+        + crate::queue_engine::StreamStore
+        + std::fmt::Debug
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+> Broker<E>
+{
     pub fn new(engine: E, cfg: BrokerConfig, metrics: Option<Arc<BrokerStats>>) -> Arc<Self> {
         Self::new_with_ownership(engine, cfg, metrics, Arc::new(OwnAllQueues))
     }
@@ -1428,7 +1452,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
         let default_consumer_target = cfg.default_consumer_target;
         let this = Arc::new(Self {
             cfg: Arc::new(ArcSwap::from_pointee(cfg)),
-            engine,
+            engine: Arc::new(engine),
             shutdown_publishers: CancellationToken::new(),
             shutdown_consumers: CancellationToken::new(),
             shutdown_settle: CancellationToken::new(),
@@ -1437,6 +1461,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
             next_sub_id: AtomicU64::new(1),
             next_tag_epoch: AtomicU64::new(1),
             queues: DashMap::new(),
+            streams: DashMap::new(),
             records_by_tags: DashMap::new(),
             tags_by_key_offset: DashMap::new(),
             queue_eviction_observations: DashMap::new(),
@@ -1464,7 +1489,7 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 
     pub fn engine(&self) -> E {
-        self.engine.clone()
+        (*self.engine).clone()
     }
 
     pub fn stroma_metrics(&self) -> Arc<StromaMetrics> {
@@ -1473,6 +1498,66 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
 
     pub fn config_snapshot(&self) -> Arc<BrokerConfig> {
         self.cfg.load_full()
+    }
+
+    // ---------------- Stream (Plexus) channels ----------------
+    //
+    // A stream partition is a fan-out actor (ring + live subscribers) hosted here
+    // and backed by the same stroma substrate as a queue. Routing is by channel
+    // type: queue traffic drives the lease/poll `queues` loop, stream traffic the
+    // `streams` registry below. The wire ops that trigger these are wired in the
+    // protocol/client step.
+
+    /// Get the owner-side stream channel for `(tp, part)`, opening it (and
+    /// materializing the stream in stroma) when this broker does not host it yet.
+    /// `retention` applies on first open. Concurrent opens are safe: stroma's
+    /// create is idempotent, and the first inserted channel wins.
+    pub async fn get_or_open_stream(
+        &self,
+        tp: &str,
+        part: u32,
+        retention: Option<RetentionConfig>,
+    ) -> Result<Arc<StreamChannel>, StromaError> {
+        let key = QueueKey {
+            tp: tp.to_string(),
+            part: part.into(),
+            group: None,
+        };
+        if let Some(ch) = self.streams.get(&key) {
+            return Ok(ch.value().clone());
+        }
+        let engine: Arc<dyn StreamStore> = self.engine.clone();
+        let opened = Arc::new(
+            StreamChannel::open(
+                engine,
+                tp,
+                part,
+                retention,
+                STREAM_RING_CAPACITY,
+                STREAM_LIVE_CHANNEL_CAPACITY,
+            )
+            .await?,
+        );
+        Ok(self.streams.entry(key).or_insert(opened).value().clone())
+    }
+
+    /// Whether `(tp, part)` is an open stream channel on this broker.
+    pub fn is_stream(&self, tp: &str, part: u32) -> bool {
+        self.streams.contains_key(&QueueKey {
+            tp: tp.to_string(),
+            part: part.into(),
+            group: None,
+        })
+    }
+
+    /// Stop hosting a stream partition (drops the fan-out actor and its
+    /// subscribers). The durable log and cursors stay in stroma.
+    pub fn close_stream(&self, tp: &str, part: u32) {
+        self.streams.remove(&QueueKey {
+            tp: tp.to_string(),
+            part: part.into(),
+            group: None,
+        });
     }
 
     /// Recompute the replica-durable visibility ceiling for a queue from its
@@ -1536,7 +1621,16 @@ impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E>
     }
 }
 
-impl<E: QueueEngine + std::fmt::Debug + Clone + Send + Sync + 'static> Broker<E> {
+impl<
+    E: QueueEngine
+        + crate::queue_engine::StreamStore
+        + std::fmt::Debug
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+> Broker<E>
+{
     pub fn update_config(&self, cfg: BrokerConfig) {
         self.cfg.store(Arc::new(cfg));
         self.settings_epoch.fetch_add(1, Ordering::AcqRel);

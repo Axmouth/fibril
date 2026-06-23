@@ -317,9 +317,132 @@ pub trait QueueEngine {
     ) -> Result<(), StromaError>;
 }
 
+/// The stream (Plexus) storage surface. Separate from [`QueueEngine`] because
+/// streams are fan-out (push/tail) rather than lease/poll, so they share only the
+/// substrate, not the delivery model. The broker-side stream actor drives this.
+#[async_trait]
+pub trait StreamStore: Send + Sync {
+    async fn create_stream(
+        &self,
+        tp: &str,
+        part: u32,
+        retention: Option<RetentionConfig>,
+    ) -> Result<(), StromaError>;
+
+    async fn append_stream_record(
+        &self,
+        tp: &str,
+        part: u32,
+        headers: &MessageHeaders,
+        payload: Vec<u8>,
+    ) -> Result<Offset, StromaError>;
+
+    async fn read_stream_records(
+        &self,
+        tp: &str,
+        part: u32,
+        from: Offset,
+        max: usize,
+    ) -> Result<Vec<(Offset, Vec<u8>, MessageHeaders)>, StromaError>;
+
+    async fn commit_stream_cursor(
+        &self,
+        tp: &str,
+        part: u32,
+        name: &str,
+        offset: Offset,
+    ) -> Result<(), StromaError>;
+
+    async fn stream_cursor(
+        &self,
+        tp: &str,
+        part: u32,
+        name: &str,
+    ) -> Result<Option<Offset>, StromaError>;
+
+    async fn stream_head_tail(&self, tp: &str, part: u32) -> Result<(Offset, Offset), StromaError>;
+
+    async fn stream_offset_at_or_after_time(
+        &self,
+        tp: &str,
+        part: u32,
+        ts_ms: u64,
+    ) -> Result<Offset, StromaError>;
+}
+
 #[derive(Debug, Clone)]
 pub struct StromaEngine {
     inner: Arc<Stroma>,
+}
+
+#[async_trait]
+impl StreamStore for StromaEngine {
+    async fn create_stream(
+        &self,
+        tp: &str,
+        part: u32,
+        retention: Option<RetentionConfig>,
+    ) -> Result<(), StromaError> {
+        self.inner.create_stream(tp, part, retention).await
+    }
+
+    async fn append_stream_record(
+        &self,
+        tp: &str,
+        part: u32,
+        headers: &MessageHeaders,
+        payload: Vec<u8>,
+    ) -> Result<Offset, StromaError> {
+        self.inner
+            .append_stream_record(tp, part, headers, payload)
+            .await
+    }
+
+    async fn read_stream_records(
+        &self,
+        tp: &str,
+        part: u32,
+        from: Offset,
+        max: usize,
+    ) -> Result<Vec<(Offset, Vec<u8>, MessageHeaders)>, StromaError> {
+        self.inner.read_stream_records(tp, part, from, max).await
+    }
+
+    async fn commit_stream_cursor(
+        &self,
+        tp: &str,
+        part: u32,
+        name: &str,
+        offset: Offset,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .commit_stream_cursor(tp, part, name, offset)
+            .await
+    }
+
+    async fn stream_cursor(
+        &self,
+        tp: &str,
+        part: u32,
+        name: &str,
+    ) -> Result<Option<Offset>, StromaError> {
+        self.inner.stream_cursor(tp, part, name).await
+    }
+
+    async fn stream_head_tail(&self, tp: &str, part: u32) -> Result<(Offset, Offset), StromaError> {
+        self.inner.stream_head_tail(tp, part).await
+    }
+
+    async fn stream_offset_at_or_after_time(
+        &self,
+        tp: &str,
+        part: u32,
+        ts_ms: u64,
+    ) -> Result<Offset, StromaError> {
+        self.inner
+            .stream_offset_at_or_after_time(tp, part, ts_ms)
+            .await
+    }
 }
 
 impl StromaEngine {
@@ -341,83 +464,6 @@ impl StromaEngine {
 
     pub async fn global_store(&self) -> Result<Arc<GlobalStore>, StromaError> {
         self.inner.global_store().await
-    }
-
-    // ---------------- Stream (Plexus) engine ----------------
-    //
-    // Streams are fan-out channels with a different delivery model from the work
-    // queue (push/tail vs lease/poll), so they get their own surface rather than
-    // the QueueEngine trait. The broker-side stream actor drives these.
-
-    pub async fn create_stream(
-        &self,
-        tp: &str,
-        part: u32,
-        retention: Option<RetentionConfig>,
-    ) -> Result<(), StromaError> {
-        self.inner.create_stream(tp, part, retention).await
-    }
-
-    pub async fn append_stream_record(
-        &self,
-        tp: &str,
-        part: u32,
-        headers: &MessageHeaders,
-        payload: Vec<u8>,
-    ) -> Result<Offset, StromaError> {
-        self.inner
-            .append_stream_record(tp, part, headers, payload)
-            .await
-    }
-
-    pub async fn read_stream_records(
-        &self,
-        tp: &str,
-        part: u32,
-        from: Offset,
-        max: usize,
-    ) -> Result<Vec<(Offset, Vec<u8>, MessageHeaders)>, StromaError> {
-        self.inner.read_stream_records(tp, part, from, max).await
-    }
-
-    pub async fn commit_stream_cursor(
-        &self,
-        tp: &str,
-        part: u32,
-        name: &str,
-        offset: Offset,
-    ) -> Result<(), StromaError> {
-        self.inner
-            .commit_stream_cursor(tp, part, name, offset)
-            .await
-    }
-
-    pub async fn stream_cursor(
-        &self,
-        tp: &str,
-        part: u32,
-        name: &str,
-    ) -> Result<Option<Offset>, StromaError> {
-        self.inner.stream_cursor(tp, part, name).await
-    }
-
-    pub async fn stream_head_tail(
-        &self,
-        tp: &str,
-        part: u32,
-    ) -> Result<(Offset, Offset), StromaError> {
-        self.inner.stream_head_tail(tp, part).await
-    }
-
-    pub async fn stream_offset_at_or_after_time(
-        &self,
-        tp: &str,
-        part: u32,
-        ts_ms: u64,
-    ) -> Result<Offset, StromaError> {
-        self.inner
-            .stream_offset_at_or_after_time(tp, part, ts_ms)
-            .await
     }
 
     pub async fn read_owner_message_records(

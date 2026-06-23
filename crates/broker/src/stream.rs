@@ -23,7 +23,7 @@ use std::sync::Arc;
 use fibril_storage::Offset;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::queue_engine::StromaEngine;
+use crate::queue_engine::StreamStore;
 use stroma_core::{MessageHeaders, RetentionConfig, StromaError};
 
 /// Per-channel durability tier (a channel-level knob, not a separate channel
@@ -388,7 +388,7 @@ enum FanoutCmd {
 pub struct StreamChannel {
     tp: Arc<str>,
     part: u32,
-    engine: Arc<StromaEngine>,
+    engine: Arc<dyn StreamStore>,
     live_channel_capacity: usize,
     cmd_tx: mpsc::Sender<FanoutCmd>,
 }
@@ -398,7 +398,7 @@ impl StreamChannel {
     /// tail) is read from the durable log so the ring lines up with persisted
     /// records after a restart.
     pub async fn open(
-        engine: Arc<StromaEngine>,
+        engine: Arc<dyn StreamStore>,
         tp: &str,
         part: u32,
         retention: Option<RetentionConfig>,
@@ -534,7 +534,7 @@ impl StreamChannel {
 pub struct StreamSubscription {
     tp: Arc<str>,
     part: u32,
-    engine: Arc<StromaEngine>,
+    engine: Arc<dyn StreamStore>,
     filter: Option<StreamFilter>,
     inner: Subscription,
 }
@@ -765,7 +765,7 @@ mod channel_tests {
         TempDir { root }
     }
 
-    async fn engine(dir: &TempDir) -> Arc<StromaEngine> {
+    async fn engine(dir: &TempDir) -> Arc<dyn StreamStore> {
         Arc::new(
             StromaEngine::open(
                 &dir.root,

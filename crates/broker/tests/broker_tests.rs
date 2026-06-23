@@ -52,6 +52,70 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 struct FailingPublishEngine;
 
+// This engine exercises the queue publish-failure path only; it hosts no streams,
+// so every stream operation reports unsupported.
+#[async_trait]
+impl fibril_broker::queue_engine::StreamStore for FailingPublishEngine {
+    async fn create_stream(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _retention: Option<fibril_broker::queue_engine::RetentionConfig>,
+    ) -> Result<(), StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
+    async fn append_stream_record(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _headers: &MessageHeaders,
+        _payload: Vec<u8>,
+    ) -> Result<Offset, StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
+    async fn read_stream_records(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _from: Offset,
+        _max: usize,
+    ) -> Result<Vec<(Offset, Vec<u8>, MessageHeaders)>, StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
+    async fn commit_stream_cursor(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _name: &str,
+        _offset: Offset,
+    ) -> Result<(), StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
+    async fn stream_cursor(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _name: &str,
+    ) -> Result<Option<Offset>, StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
+    async fn stream_head_tail(
+        &self,
+        _tp: &str,
+        _part: u32,
+    ) -> Result<(Offset, Offset), StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
+    async fn stream_offset_at_or_after_time(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _ts_ms: u64,
+    ) -> Result<Offset, StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
+}
+
 #[async_trait]
 impl QueueEngine for FailingPublishEngine {
     async fn poll_ready(
@@ -7166,4 +7230,42 @@ async fn stress_single_consumer(total: usize) {
     assert!(sub.is_empty());
 
     assert_eq!(seen, total);
+}
+
+#[tokio::test]
+async fn stream_registry_opens_caches_routes_and_closes() {
+    use fibril_broker::stream::SubscribeStart;
+
+    let (broker, _dir) = open_test_broker().await;
+
+    // open is idempotent: the second call returns the same hosted channel
+    let ch1 = broker.get_or_open_stream("sensors", 0, None).await.unwrap();
+    let ch2 = broker.get_or_open_stream("sensors", 0, None).await.unwrap();
+    assert!(Arc::ptr_eq(&ch1, &ch2));
+
+    // routing predicate distinguishes hosted streams
+    assert!(broker.is_stream("sensors", 0));
+    assert!(!broker.is_stream("sensors", 1));
+    assert!(!broker.is_stream("other", 0));
+
+    // publish + subscribe flow through the hosted channel
+    let headers = MessageHeaders {
+        published: 0,
+        publish_received: 0,
+        content_type: None,
+        extra: Default::default(),
+    };
+    ch1.publish(headers.clone(), b"a".to_vec()).await.unwrap();
+    ch1.publish(headers, b"b".to_vec()).await.unwrap();
+
+    let sub = ch1.subscribe(SubscribeStart::Earliest, None).await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let driver = tokio::spawn(sub.run(tx));
+    assert_eq!(rx.recv().await.unwrap().offset, 0);
+    assert_eq!(rx.recv().await.unwrap().offset, 1);
+    driver.abort();
+
+    // closing drops the hosted channel (durable data stays in stroma)
+    broker.close_stream("sensors", 0);
+    assert!(!broker.is_stream("sensors", 0));
 }
