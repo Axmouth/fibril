@@ -1314,12 +1314,34 @@ async fn handle_stream_publish(
     };
 
     match durability {
-        // Durable: persist before fan-out and confirm (the safe default).
-        BrokerStreamDurability::Durable => match channel.publish(msg_headers, payload).await {
-            Ok(offset) => {
+        // Durable: persist before fan-out and confirm. Pipelined - the frame loop
+        // only enqueues to the channel's durable ingest, the confirm resolves when
+        // the record is durable and fanned out.
+        BrokerStreamDurability::Durable => match channel.publish_durable(msg_headers, payload).await
+        {
+            Ok(confirm_rx) => {
                 if require_confirm {
-                    tx.send(try_encode(Op::PublishOk, request_id, &PublishOk { offset })?)
-                        .await?;
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        match confirm_rx.await {
+                            Ok(Ok(offset)) => {
+                                if let Ok(frame) =
+                                    try_encode(Op::PublishOk, request_id, &PublishOk { offset })
+                                {
+                                    let _ = tx.send(frame).await;
+                                }
+                            }
+                            _ => {
+                                let _ = send_error_response(
+                                    &tx,
+                                    request_id,
+                                    500,
+                                    "durable stream record failed to persist",
+                                )
+                                .await;
+                            }
+                        }
+                    });
                 }
             }
             Err(err) => {
