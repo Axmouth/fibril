@@ -43,6 +43,7 @@ import {
   type TopologyOkMsg,
   type TopologyRequestMsg,
 } from "./protocol.js";
+import type { DeclarePlexus, SubscribeStream } from "./wire.js";
 import { BoundedQueue } from "./internal/bounded-queue.js";
 import { deferred, type Deferred } from "./internal/deferred.js";
 import { FrameReader } from "./internal/frame-reader.js";
@@ -93,8 +94,11 @@ export type Command =
   | { type: "publishDelayedUnconfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint }
   | { type: "publishDelayedConfirmed"; topic: string; group: string | null; partition: number; partition_key: Uint8Array | null; partitioning_version: bigint; content_type: ContentType | null; headers: Record<string, string>; payload: Uint8Array; published: bigint; not_before: bigint; reply: Deferred<bigint> }
   | { type: "declareQueue"; req: DeclareQueueMsg; reply: Deferred<void> }
+  | { type: "declarePlexus"; req: DeclarePlexus; reply: Deferred<void> }
   | { type: "subscribe"; req: SubscribeMsg; supervised: boolean; reply: Deferred<SubscribeResult<InternalInflight>> }
   | { type: "subscribeAutoAck"; req: SubscribeMsg; supervised: boolean; reply: Deferred<SubscribeResult<InternalDelivered>> }
+  | { type: "subscribeStream"; req: SubscribeStream; reply: Deferred<SubscribeResult<InternalInflight>> }
+  | { type: "subscribeStreamAutoAck"; req: SubscribeStream; reply: Deferred<SubscribeResult<InternalDelivered>> }
   | { type: "ack"; sub_id: bigint; tag: DeliveryTag; request_id: bigint; reply: Deferred<void> }
   | { type: "nack"; sub_id: bigint; tag: DeliveryTag; requeue: boolean; not_before: bigint | null; request_id: bigint; reply: Deferred<void> }
   | { type: "topology"; topic: string | null; group: string | null; reply: Deferred<TopologyOkMsg> };
@@ -603,6 +607,33 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         }
         return;
       }
+      case "declarePlexus": {
+        const reqId = nextReqId();
+        waiters.set(reqId, { kind: "declareQueue", deferred: cmd.reply });
+        if (!(await sendOrDie(buildFrame(Op.DeclarePlexus, reqId, cmd.req)))) {
+          waiters.delete(reqId);
+        }
+        return;
+      }
+      // Stream subscriptions reuse the manual/auto subscribe waiters but are
+      // always supervised, so they register delivery state yet stay out of the
+      // reconcile registry (the stream fan-in owns re-subscribe + cursor resume).
+      case "subscribeStream": {
+        const reqId = nextReqId();
+        waiters.set(reqId, { kind: "subscribeManual", deferred: cmd.reply, supervised: true });
+        if (!(await sendOrDie(buildFrame(Op.SubscribeStream, reqId, cmd.req)))) {
+          waiters.delete(reqId);
+        }
+        return;
+      }
+      case "subscribeStreamAutoAck": {
+        const reqId = nextReqId();
+        waiters.set(reqId, { kind: "subscribeAuto", deferred: cmd.reply, supervised: true });
+        if (!(await sendOrDie(buildFrame(Op.SubscribeStream, reqId, cmd.req)))) {
+          waiters.delete(reqId);
+        }
+        return;
+      }
       case "topology": {
         const reqId = nextReqId();
         waiters.set(reqId, { kind: "topology", deferred: cmd.reply });
@@ -731,6 +762,16 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
 
       case Op.DeclareQueueOk: {
         decodeFrameBody<DeclareQueueOkMsg>(frame);
+        const w = waiters.get(frame.requestId);
+        if (w?.kind === "declareQueue") {
+          waiters.delete(frame.requestId);
+          w.deferred.resolve();
+        }
+        return;
+      }
+
+      case Op.DeclarePlexusOk: {
+        decodeFrameBody(frame);
         const w = waiters.get(frame.requestId);
         if (w?.kind === "declareQueue") {
           waiters.delete(frame.requestId);
@@ -895,8 +936,11 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         cmd.reply.reject(cleanupError);
         break;
       case "declareQueue":
+      case "declarePlexus":
       case "subscribe":
       case "subscribeAutoAck":
+      case "subscribeStream":
+      case "subscribeStreamAutoAck":
         cmd.reply.reject(cleanupError);
         break;
       case "ack":

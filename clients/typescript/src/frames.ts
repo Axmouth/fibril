@@ -287,6 +287,13 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
       const v = value as DeclareQueueOkMsg;
       return wire.encodeDeclareQueueOkBody({ status: v.status, partitionCount: 0 });
     }
+    // Plexus (fan-out stream) ops carry the wire-shaped body directly.
+    case Op.DeclarePlexus:
+      return wire.encodeDeclarePlexusBody(value as wire.DeclarePlexus);
+    case Op.DeclarePlexusOk:
+      return wire.encodeDeclarePlexusOkBody(value as wire.DeclarePlexusOk);
+    case Op.SubscribeStream:
+      return wire.encodeSubscribeStreamBody(value as wire.SubscribeStream);
     case Op.AssignmentChanged: {
       const v = value as AssignmentChangedMsg;
       return wire.encodeAssignmentChangedBody({
@@ -478,6 +485,12 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
       const w = wire.decodeDeclareQueueOkBody(payload);
       return { status: w.status } satisfies DeclareQueueOkMsg;
     }
+    case Op.DeclarePlexus:
+      return wire.decodeDeclarePlexusBody(payload);
+    case Op.DeclarePlexusOk:
+      return wire.decodeDeclarePlexusOkBody(payload);
+    case Op.SubscribeStream:
+      return wire.decodeSubscribeStreamBody(payload);
     case Op.AssignmentChanged: {
       const w = wire.decodeAssignmentChangedBody(payload);
       return {
