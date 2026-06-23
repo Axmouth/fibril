@@ -5,5 +5,7 @@ target/
 crates/**/test_data
 /bench_data
 */bench_data
+/.bench-data
+/bench-results
 /server_data
 /.cluster-tryout-runs
