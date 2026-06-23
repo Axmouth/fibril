@@ -36,13 +36,19 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 
 - Plexus stream routing after failover relies on the per-partition `.kind` marker
   being present on the new owner. The marker is a LOCAL file written at
-  `create_stream` time on whichever broker first declared the stream, and it is not
-  replicated with the log. So a failover to a follower that never ran the declare
-  could route a stream publish down the queue path until the stream channel is
-  opened on that node. Options: replicate the kind marker (or persist kind in the
-  replicated state), or have owner-activation/catalogue-sync open stream channels
-  for owned stream partitions. Until then, declaring the stream against the new
-  owner re-materializes it. Low risk in single-node / declare-before-publish flows.
+  `create_stream` / queue `declare` time on whichever broker first declared the
+  channel, and it is not replicated with the log. Two consequences on a failover to
+  a node that never ran the declare: (1) a stream publish can fall down the queue
+  path until the stream channel is opened there, and (2) the same-topic kind guard
+  and the materialize-by-marker path default to Queue when the marker is absent, so
+  a node could in principle materialize a stream partition as a queue (a MIXED-kind
+  topic across nodes). Same-node mixing is already prevented (the declare guards key
+  off the marker and both declares iterate from partition 0, so a conflict aborts
+  before any partition of the other kind is created). The cluster fix is to make
+  kind durable/replicated: replicate the marker, or persist kind in the replicated
+  partition state, or have owner-activation/catalogue-sync open the correct engine
+  for owned partitions. Until then, declaring the channel against the new owner
+  re-materializes it. Low risk in single-node / declare-before-publish flows.
 
 - Plexus stream subscriptions in the TS and Python clients still need the dynamic
   fan-in the Rust client now has: the failover-resubscribe supervisor plus the
