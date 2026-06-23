@@ -7,7 +7,7 @@ The async surface is re-exported here. The blocking facade lives in
 
 from __future__ import annotations
 
-from .client import Client, ClientOptions, QueueConfig, ReconnectOutcome
+from .client import Client, ClientOptions, QueueConfig, ReconnectOutcome, StreamConfig
 from .errors import (
     BrokenPipeError,
     DeserializationError,
@@ -30,6 +30,7 @@ from .subscription import (
     AutoAckedSubscription,
     InflightMessage,
     Message,
+    StreamSubscriptionBuilder,
     Subscription,
     SubscriptionBuilder,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "Client",
     "ClientOptions",
     "QueueConfig",
+    "StreamConfig",
     "ReconnectOutcome",
     "Publisher",
     "PublishConfirmation",
@@ -45,6 +47,7 @@ __all__ = [
     "Subscription",
     "AutoAckedSubscription",
     "SubscriptionBuilder",
+    "StreamSubscriptionBuilder",
     "Message",
     "InflightMessage",
     "NewMessage",
