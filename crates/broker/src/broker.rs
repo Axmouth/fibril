@@ -4437,21 +4437,51 @@ impl Broker<StromaEngine> {
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
             LocalAssignmentIntent::PromoteFollowerToOwner => {
-                // Caught-up failover promotion (promote-to-local-tail under the
-                // epoch fence, with the same unapplied-events safety checks queues
-                // use) lands in 73d. Until then, stop the worker and keep the
-                // partition a follower rather than promote without those checks.
+                // Never-materialized streams have no local follower state to
+                // promote: stay cold and become owner lazily on first traffic
+                // (route_stream materializes from config), same rule as queues.
+                if !self.engine.is_materialized(&topic, partition.id(), None) {
+                    return Ok(BrokerAssignmentTransitionApply::Noop(transition.intent));
+                }
+                // Failover promotion (promote-to-local-tail under the epoch fence):
+                // drain the follower worker first so promotion never races a
+                // mid-batch replicated apply, then promote at this follower's own
+                // tails. The dead owner cannot supply expected tails; the bumped
+                // assignment epoch fences its unreplicated suffix. A refusal
+                // (unapplied cursor-commit events) leaves the stream a follower.
                 let stopped_worker = self.stop_follower_replication_worker(&identity).await;
-                tracing::warn!(
-                    topic,
-                    partition = partition.id(),
-                    stopped_worker,
-                    "stream follower promotion deferred to durable-confirm brick; stays follower"
-                );
-                Ok(BrokerAssignmentTransitionApply::Deferred {
-                    intent: transition.intent,
-                    reason: "stream failover promotion lands in the durable-confirm brick",
-                })
+                match self
+                    .promote_stream_follower_to_local_tail(&topic, partition, assignment_epoch)
+                    .await?
+                {
+                    QueuePromotionOutcome::Promoted {
+                        message_next_offset,
+                        event_next_offset,
+                        ..
+                    } => {
+                        tracing::info!(
+                            topic,
+                            partition = partition.id(),
+                            stopped_worker,
+                            message_next_offset,
+                            event_next_offset,
+                            "promoted stream follower to owner at local tails"
+                        );
+                        Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+                    }
+                    refused => {
+                        tracing::warn!(
+                            topic,
+                            partition = partition.id(),
+                            ?refused,
+                            "stream follower promotion refused; stays follower"
+                        );
+                        Ok(BrokerAssignmentTransitionApply::Deferred {
+                            intent: transition.intent,
+                            reason: "local stream promotion checks refused; stays follower",
+                        })
+                    }
+                }
             }
             LocalAssignmentIntent::StopFollower => {
                 let stopped_worker = self.stop_follower_replication_worker(&identity).await;

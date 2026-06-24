@@ -1747,6 +1747,21 @@ impl Broker<StromaEngine> {
             .map_err(BrokerError::from)
     }
 
+    /// Stream failover promotion at the follower's own tails (see the queue
+    /// `promote_replication_follower_to_local_tail` and the stream
+    /// `PromoteFollowerToOwner` transition arm for the safety argument).
+    pub async fn promote_stream_follower_to_local_tail(
+        &self,
+        topic: &str,
+        partition: Partition,
+        epoch: u64,
+    ) -> Result<QueuePromotionOutcome, BrokerError> {
+        self.engine
+            .promote_stream_follower_to_local_tail(topic, partition.id(), epoch)
+            .await
+            .map_err(BrokerError::from)
+    }
+
     pub async fn catch_up_replication_follower_from_owner(
         &self,
         owner: &dyn BrokerOwnerReplicationPeer,

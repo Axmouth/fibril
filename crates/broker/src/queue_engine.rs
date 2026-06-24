@@ -753,6 +753,19 @@ impl StromaEngine {
             .await
     }
 
+    /// Failover promotion at the stream follower's own tails, fenced at the
+    /// assignment epoch (mirrors `promote_queue_follower_to_local_tail`).
+    pub async fn promote_stream_follower_to_local_tail(
+        &self,
+        tp: &str,
+        part: u32,
+        epoch: u64,
+    ) -> Result<QueuePromotionOutcome, StromaError> {
+        self.inner
+            .promote_stream_follower_to_local_tail(tp, part, epoch)
+            .await
+    }
+
     async fn replay_dead_letter(
         &self,
         dlq_tp: &str,

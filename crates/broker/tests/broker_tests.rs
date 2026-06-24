@@ -3354,6 +3354,34 @@ async fn stream_follower_catches_up_records_and_cursor_from_owner() {
     let (follower_head, follower_tail) = follower_channel.head_tail().await.unwrap();
     assert_eq!((follower_head, follower_tail), (owner_head, owner_tail));
 
+    // Failover: the owner is gone. Promote the caught-up follower to owner at its
+    // own tails under a bumped epoch; it must accept and then serve writes.
+    let promote = LocalStreamAssignmentTransition {
+        stream: stream.clone(),
+        previous_role: Some(LocalAssignmentRole::Follower),
+        next_role: Some(LocalAssignmentRole::Owner),
+        previous: Some(StreamAssignment::new(
+            stream.clone(),
+            "owner",
+            vec!["follower".to_string()],
+            1,
+        )),
+        next: Some(StreamAssignment::new(stream.clone(), "follower", vec![], 2)),
+        intent: LocalAssignmentIntent::PromoteFollowerToOwner,
+    };
+    assert!(matches!(
+        follower
+            .apply_stream_assignment_transition(&promote)
+            .await
+            .unwrap(),
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::PromoteFollowerToOwner)
+    ));
+    let promoted_offset = follower_channel
+        .publish(headers(), b"after-promotion".to_vec())
+        .await
+        .expect("promoted follower should serve writes as the new owner");
+    assert_eq!(promoted_offset, follower_tail);
+
     owner.shutdown().await;
     follower.shutdown().await;
 }
