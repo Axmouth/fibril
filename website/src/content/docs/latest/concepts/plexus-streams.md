@@ -82,6 +82,28 @@ durability:
 All three are log-backed, so durable cursors, replay, and retention work on any
 tier.
 
+## Durability vs high availability
+
+A durability tier and replication are different guarantees, and it is worth being
+precise about which you have:
+
+- **Durable, not replicated** (a single owner) survives a process restart or power
+  loss — the records are on the owner's disk — but it does **not** survive losing
+  that node. While the owner is down the partition is unavailable, and if its disk
+  is lost the records are gone.
+- **Durable and replicated** (the durable tier with a replication factor of one or
+  more) survives node loss: the owner replicates its record and cursor logs to that
+  many followers, a durable publish confirms only once the replicas have it, and a
+  caught-up follower is promoted on failover. This is the high-availability
+  configuration.
+
+Replication is the durable tier only. The express tiers (speculative, ephemeral)
+are always owner-only — replication would contradict their latency-first intent.
+Set the replica count with the controller's `stream_replication_factor` (see
+[Configuration](/latest/configuration/)); the default of one keeps a durable
+stream available across a single node loss. Do not treat a clustered durable
+stream as HA unless it has a replication factor of at least one.
+
 ## Acks advance the cursor
 
 For a durable subscription, settling a record (manual ack, or server-side

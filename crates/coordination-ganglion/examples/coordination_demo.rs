@@ -99,6 +99,7 @@ impl Playground {
                 &DeterministicStreamPlacement,
                 &[],
                 1,
+                1,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &self.live,
                 8,

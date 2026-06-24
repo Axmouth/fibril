@@ -731,6 +731,10 @@ fn to_fibril_durability(
 #[derive(Debug, Clone)]
 pub struct ControllerConfig {
     pub target_followers: usize,
+    /// Replica followers for a DURABLE stream partition (the durable tier; the
+    /// express tiers stay owner-only). Tuned independently of the queue
+    /// `target_followers` so stream and queue fault tolerance can differ.
+    pub stream_replication_factor: usize,
     pub default_durability: ReplicationDurabilityPolicy,
     /// Bounded tick interval; the loop also wakes on snapshot changes.
     pub tick: std::time::Duration,
@@ -744,6 +748,7 @@ impl Default for ControllerConfig {
     fn default() -> Self {
         Self {
             target_followers: 1,
+            stream_replication_factor: 1,
             default_durability: ReplicationDurabilityPolicy::LocalDurable,
             tick: std::time::Duration::from_millis(2000),
             liveness_ttl: std::time::Duration::from_millis(9000),
@@ -1882,6 +1887,7 @@ impl GanglionCoordination {
                             &stream_planner,
                             &streams,
                             config.target_followers,
+                            config.stream_replication_factor,
                             config.default_durability,
                             &live,
                             config.max_cas_retries,
@@ -2147,6 +2153,7 @@ impl GanglionCoordination {
         stream_planner: &dyn StreamPlacementPolicy,
         streams: &[StreamIdentity],
         target_followers: usize,
+        stream_replication_factor: usize,
         default_durability: ReplicationDurabilityPolicy,
         live_nodes: &HashMap<String, NodeInfo>,
         max_retries: usize,
@@ -2184,7 +2191,7 @@ impl GanglionCoordination {
                 .map(|topic| {
                     let followers = match self.stream_config(&topic) {
                         Some(config) if config.durability == STREAM_DURABILITY_DURABLE => {
-                            target_followers
+                            stream_replication_factor
                         }
                         _ => 0,
                     };
@@ -2723,6 +2730,7 @@ mod tests {
                 &DeterministicStreamPlacement,
                 &[],
                 1,
+                1,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
                 8,
@@ -2738,6 +2746,7 @@ mod tests {
                 std::slice::from_ref(&queue),
                 &DeterministicStreamPlacement,
                 &[],
+                1,
                 1,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
@@ -2776,6 +2785,7 @@ mod tests {
                 std::slice::from_ref(&queue),
                 &DeterministicStreamPlacement,
                 &[],
+                1,
                 1,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
@@ -3153,6 +3163,7 @@ mod tests {
                 &DeterministicStreamPlacement,
                 &provider.registered_streams(),
                 0,
+                0,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
                 8,
@@ -3241,6 +3252,7 @@ mod tests {
                 &provider.registered_queues(),
                 &DeterministicStreamPlacement,
                 &provider.registered_streams(),
+                0,
                 0,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,
@@ -3331,6 +3343,7 @@ mod tests {
             std::sync::Arc::new(DeterministicPartitionPlacement),
             ControllerConfig {
                 target_followers: 1,
+                stream_replication_factor: 1,
                 default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 tick: Duration::from_millis(100),
                 // Generous TTL first: both brokers count as live.
@@ -3395,6 +3408,7 @@ mod tests {
             std::sync::Arc::new(DeterministicPartitionPlacement),
             ControllerConfig {
                 target_followers: 1,
+                stream_replication_factor: 1,
                 default_durability: ReplicationDurabilityPolicy::LocalDurable,
                 tick: Duration::from_millis(100),
                 liveness_ttl: Duration::from_millis(900),
@@ -3621,6 +3635,7 @@ mod tests {
                 &DeterministicStreamPlacement,
                 &provider.registered_streams(),
                 2,
+                2,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &all_live,
                 8,
@@ -3646,6 +3661,7 @@ mod tests {
                 &provider.registered_queues(),
                 &DeterministicStreamPlacement,
                 &provider.registered_streams(),
+                2,
                 2,
                 ReplicationDurabilityPolicy::LocalDurable,
                 &live,

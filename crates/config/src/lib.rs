@@ -807,6 +807,10 @@ pub struct GanglionCoordinationSection {
     pub heartbeat_interval_ms: u64,
     /// Controller: desired follower count per queue partition.
     pub target_followers: usize,
+    /// Controller: replica follower count for a DURABLE stream partition (the
+    /// durable tier; the express tiers stay owner-only). Tuned independently of
+    /// `target_followers` so stream and queue fault tolerance can differ.
+    pub stream_replication_factor: usize,
     /// Controller: default durability policy for newly assigned partitions.
     pub assignment_durability: GanglionAssignmentDurabilitySection,
     /// Controller: bounded tick interval (also wakes on snapshot changes).
@@ -829,6 +833,7 @@ impl Default for GanglionCoordinationSection {
             forwarded_write: GanglionForwardedWriteSection::default(),
             heartbeat_interval_ms: 3000,
             target_followers: 1,
+            stream_replication_factor: 1,
             assignment_durability: GanglionAssignmentDurabilitySection::default(),
             controller_tick_ms: 2000,
             liveness_ttl_ms: 9000,

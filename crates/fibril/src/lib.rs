@@ -350,6 +350,7 @@ pub async fn open_tcp_ganglion_parts(
                 Arc::new(DeterministicPartitionPlacement),
                 fibril_coordination_ganglion::ControllerConfig {
                     target_followers: section.target_followers,
+                    stream_replication_factor: section.stream_replication_factor,
                     default_durability: assignment_durability_from_config(
                         &section.assignment_durability,
                     )?,

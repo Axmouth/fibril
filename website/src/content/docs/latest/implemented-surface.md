@@ -553,6 +553,7 @@ See also: [clustering](/latest/concepts/clustering/) and
 | Automatic failover | Partial | Dead owner can trigger epoch-bumped reassignment, follower promotion at local tail, stale owner demotion |
 | Epoch fencing | Implemented | Role transitions advance log epochs before serving or applying replicated batches |
 | Replica-durable confirms | Partial | Owner waits for durable follower progress according to assignment policy, with timeout and ISR floor |
+| Durable stream replication (Plexus) | Partial | Tier-gated: the durable tier replicates record + cursor logs to `stream_replication_factor` followers (express tiers stay owner-only), durable publishes confirm on replica durability, and a caught-up follower is promoted on owner failover. Reuses the queue follower-worker, confirm gate, and failover-candidate selection |
 | `min_in_sync_replicas` | Implemented | Runtime setting, fail-fast publish refusal when healthy ISR is below floor |
 | Live repartitioning | Partial | Grow or shrink a queue's partition count in Ganglion mode (versioned routing, in-flight transition serialization, drain-and-retire on shrink); admin control + API |
 | Topology visibility | Partial | Admin API/page (with repartition + coordination-membership controls) and `fibrilctl topology`. Cross-broker lag aggregation is pending |

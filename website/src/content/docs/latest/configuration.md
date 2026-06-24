@@ -123,6 +123,7 @@ These fields are read on process start.
 | `coordination.ganglion.heartbeat_interval_ms` | `FIBRIL_COORDINATION_HEARTBEAT_INTERVAL_MS` | none | `3000` |
 | `coordination.ganglion.liveness_ttl_ms` | `FIBRIL_COORDINATION_LIVENESS_TTL_MS` | none | `9000` |
 | `coordination.ganglion.target_followers` | none | none | `1` |
+| `coordination.ganglion.stream_replication_factor` | none | none | `1` |
 | `coordination.ganglion.assignment_durability` | `FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY` | none | `local_durable` |
 | `recovery.on_mismatch` | `FIBRIL_RECOVERY_ON_MISMATCH` | none | `quarantine` |
 
@@ -134,8 +135,14 @@ default) or `ganglion` to run the embedded coordinator and form a cluster. The
 [clustering](/latest/concepts/clustering/) and
 [replication](/latest/reliability/replication/).
 
-`coordination.ganglion.target_followers` is the desired follower count per
-partition. `coordination.ganglion.assignment_durability` is the default durability
+`coordination.ganglion.target_followers` is the desired follower count per queue
+partition. `coordination.ganglion.stream_replication_factor` is the equivalent for
+DURABLE Plexus stream partitions — tuned separately so stream and queue fault
+tolerance can differ; only the durable tier replicates, the express tiers stay
+owner-only. A value of one keeps a durable stream available across a single node
+loss; zero makes durable streams owner-only (durable on disk, not HA). See
+[Plexus streams](/latest/concepts/plexus-streams/).
+`coordination.ganglion.assignment_durability` is the default durability
 policy for new assignments (`local_durable`, `replica_accepted`, `replica_durable`,
 or `majority_durable`).
 
