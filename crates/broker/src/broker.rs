@@ -23,8 +23,9 @@ use uuid::Uuid;
 use crate::coordination::{
     CohortMemberInfo, ConsumerGroupKey, Coordination, CoordinationSnapshot,
     ExclusiveConsumerGroups, LocalAssignmentIntent, LocalAssignmentTransition,
-    LocalCohortMembership, PartitionAssignment, QueueIdentity, ReplicationDurabilityPolicy,
-    StaticCoordination, StickyConsumerGroupAssignor, plan_local_assignment_transitions,
+    LocalCohortMembership, LocalStreamAssignmentTransition, PartitionAssignment, QueueIdentity,
+    ReplicationDurabilityPolicy, StaticCoordination, StickyConsumerGroupAssignor,
+    plan_local_assignment_transitions, plan_local_stream_transitions,
 };
 use crate::queue_engine::{
     DestroyOutcome, EvictOutcome, QueueEngine, QueuePromotionOutcome, StreamStore, StromaEngine,
@@ -3958,6 +3959,15 @@ impl Broker<StromaEngine> {
                     cfg,
                 )
                 .await;
+            broker
+                .apply_stream_assignment_snapshot_transitions_with_follower_replication(
+                    &node_id,
+                    &previous,
+                    &initial,
+                    resolver.clone(),
+                    cfg,
+                )
+                .await;
             previous = initial;
 
             loop {
@@ -3973,6 +3983,15 @@ impl Broker<StromaEngine> {
 
                 broker
                     .apply_assignment_snapshot_transitions_with_follower_replication(
+                        &node_id,
+                        &previous,
+                        &next,
+                        resolver.clone(),
+                        cfg,
+                    )
+                    .await;
+                broker
+                    .apply_stream_assignment_snapshot_transitions_with_follower_replication(
                         &node_id,
                         &previous,
                         &next,
@@ -4052,6 +4071,68 @@ impl Broker<StromaEngine> {
                         group = ?transition.queue.group,
                         intent = ?transition.intent,
                         "failed to apply assignment transition: {err:?}"
+                    );
+                }
+                _ => {}
+            }
+            outcomes.push(result);
+        }
+        outcomes
+    }
+
+    /// Stream analogue of
+    /// [`apply_assignment_snapshot_transitions_with_follower_replication`]:
+    /// diff the snapshot `stream_assignments`, apply each local stream role
+    /// change, and start a stream-mode follower-replication worker for any
+    /// partition this node now follows. A stream is keyed by `QueueIdentity` with
+    /// group `None`; the synthesized `PartitionAssignment` carries the owner so the
+    /// resolver finds the stream owner peer.
+    async fn apply_stream_assignment_snapshot_transitions_with_follower_replication(
+        self: &Arc<Self>,
+        node_id: &str,
+        previous: &CoordinationSnapshot,
+        next: &CoordinationSnapshot,
+        resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
+        cfg: FollowerReplicationWorkerConfig,
+    ) -> Vec<Result<BrokerAssignmentTransitionApply, BrokerError>> {
+        let transitions = plan_local_stream_transitions(node_id, previous, next);
+        let mut outcomes = Vec::with_capacity(transitions.len());
+        for transition in transitions {
+            let result = self.apply_stream_assignment_transition(&transition).await;
+            match &result {
+                Ok(BrokerAssignmentTransitionApply::Applied(
+                    LocalAssignmentIntent::BecomeFollower
+                    | LocalAssignmentIntent::DemoteOwnerToFollower,
+                )) => {
+                    if let Some(assignment) = transition.next.clone() {
+                        let queue = Self::stream_worker_identity(&assignment.stream);
+                        let synth = PartitionAssignment::new(
+                            queue,
+                            assignment.owner,
+                            assignment.followers,
+                            assignment.epoch,
+                        );
+                        if let Err(err) = self.spawn_follower_replication_worker_loop(
+                            synth,
+                            resolver.clone(),
+                            ReplicationResourceKind::Stream,
+                            cfg,
+                        ) {
+                            tracing::error!(
+                                topic = %transition.stream.topic,
+                                partition = transition.stream.partition.id(),
+                                intent = ?transition.intent,
+                                "failed to start stream follower replication worker: {err:?}"
+                            );
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(
+                        topic = %transition.stream.topic,
+                        partition = transition.stream.partition.id(),
+                        intent = ?transition.intent,
+                        "failed to apply stream assignment transition: {err:?}"
                     );
                 }
                 _ => {}
@@ -4281,6 +4362,107 @@ impl Broker<StromaEngine> {
                     group = ?group,
                     stopped_worker,
                     "stopped local follower assignment"
+                );
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+            }
+        }
+    }
+
+    /// A stream partition uses the queue handle with group `None`, so its worker
+    /// is keyed by this identity.
+    fn stream_worker_identity(stream: &crate::coordination::StreamIdentity) -> QueueIdentity {
+        QueueIdentity::new(stream.topic.clone(), stream.partition, None)
+    }
+
+    /// Apply one local stream role change. Mirrors [`apply_assignment_transition`]
+    /// but simpler: streams have no consumer leases, tracked deliveries, or offset
+    /// release. Role changes persist the assignment epoch into the (queue-handle)
+    /// logs before role-specific work, fencing stale-epoch replication at storage.
+    /// Caught-up failover promotion is deferred to the durable-confirm brick (73d);
+    /// until then a promote leaves the partition a follower.
+    pub async fn apply_stream_assignment_transition(
+        &self,
+        transition: &LocalStreamAssignmentTransition,
+    ) -> Result<BrokerAssignmentTransitionApply, BrokerError> {
+        let topic = transition.stream.topic.to_string();
+        let partition = transition.stream.partition;
+        let assignment_epoch = transition
+            .next
+            .as_ref()
+            .map(|assignment| assignment.epoch)
+            .unwrap_or(0);
+        let identity = Self::stream_worker_identity(&transition.stream);
+        match transition.intent {
+            LocalAssignmentIntent::Noop => Ok(BrokerAssignmentTransitionApply::Noop(
+                LocalAssignmentIntent::Noop,
+            )),
+            LocalAssignmentIntent::RefreshOwner | LocalAssignmentIntent::RefreshFollower => {
+                Ok(BrokerAssignmentTransitionApply::Noop(transition.intent))
+            }
+            LocalAssignmentIntent::BecomeOwner => {
+                // Cold streams become owner lazily on first traffic (route_stream
+                // materializes from coordination config), same rule as queues.
+                if self.engine.is_materialized(&topic, partition.id(), None) {
+                    self.engine
+                        .become_stream_owner_with_epoch(&topic, partition.id(), assignment_epoch)
+                        .await?;
+                    Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+                } else {
+                    Ok(BrokerAssignmentTransitionApply::Noop(transition.intent))
+                }
+            }
+            LocalAssignmentIntent::BecomeFollower => {
+                self.engine
+                    .become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
+                    .await?;
+                self.ensure_follower_replication_worker(&identity);
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+            }
+            LocalAssignmentIntent::DemoteOwnerToFollower => {
+                // Becoming a follower at the new epoch fences this deposed owner's
+                // own writes at the storage layer (the stream channel can linger;
+                // role-gated appends are rejected from here on).
+                self.engine
+                    .become_stream_follower_with_epoch(&topic, partition.id(), assignment_epoch)
+                    .await?;
+                self.ensure_follower_replication_worker(&identity);
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+            }
+            LocalAssignmentIntent::FreezeOwner => {
+                // Owner role removed entirely: bump the fencing epoch so this
+                // deposed owner can no longer serve writes.
+                self.engine
+                    .advance_stream_epoch(&topic, partition.id(), assignment_epoch)
+                    .await?;
+                Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
+            }
+            LocalAssignmentIntent::PromoteFollowerToOwner => {
+                // Caught-up failover promotion (promote-to-local-tail under the
+                // epoch fence, with the same unapplied-events safety checks queues
+                // use) lands in 73d. Until then, stop the worker and keep the
+                // partition a follower rather than promote without those checks.
+                let stopped_worker = self.stop_follower_replication_worker(&identity).await;
+                tracing::warn!(
+                    topic,
+                    partition = partition.id(),
+                    stopped_worker,
+                    "stream follower promotion deferred to durable-confirm brick; stays follower"
+                );
+                Ok(BrokerAssignmentTransitionApply::Deferred {
+                    intent: transition.intent,
+                    reason: "stream failover promotion lands in the durable-confirm brick",
+                })
+            }
+            LocalAssignmentIntent::StopFollower => {
+                let stopped_worker = self.stop_follower_replication_worker(&identity).await;
+                self.engine
+                    .advance_stream_epoch(&topic, partition.id(), assignment_epoch)
+                    .await?;
+                tracing::debug!(
+                    topic,
+                    partition = partition.id(),
+                    stopped_worker,
+                    "stopped local stream follower assignment"
                 );
                 Ok(BrokerAssignmentTransitionApply::Applied(transition.intent))
             }
