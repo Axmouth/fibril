@@ -77,6 +77,12 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::ReplicationReadOk => encode_typed(msg, "ReplicationReadOk", |msg| {
             wire::encode_replication_read_ok(req_id, msg)
         }),
+        Op::StreamReplicationRead => encode_typed(msg, "ReplicationRead", |msg| {
+            wire::encode_stream_replication_read(req_id, msg)
+        }),
+        Op::StreamReplicationReadOk => encode_typed(msg, "ReplicationReadOk", |msg| {
+            wire::encode_stream_replication_read_ok(req_id, msg)
+        }),
         Op::ReplicationApply => encode_typed(msg, "ReplicationApply", |msg| {
             wire::encode_replication_apply(req_id, msg)
         }),

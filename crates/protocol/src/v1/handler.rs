@@ -2453,6 +2453,71 @@ pub async fn handle_connection(
                 }
             }
 
+            // -------- STREAM REPLICATION READ (Plexus follower pull) -------
+            x if x == Op::StreamReplicationRead as u16 => {
+                let read: ReplicationRead = decode_wire_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    wire::decode_stream_replication_read
+                );
+
+                // The owner serves a stream's record + cursor-commit logs (group
+                // None) via the same role-gated owner read as queues; the handle's
+                // Owner role is the authority, so a non-owner read returns
+                // NotOwner. read.event_from is the cursor-commit-event offset.
+                match broker
+                    .read_owner_replication_records(
+                        &read.topic,
+                        read.partition,
+                        None,
+                        read.message_from,
+                        read.event_from,
+                        read.max_messages as usize,
+                        read.max_events as usize,
+                        usize::try_from(read.max_bytes).unwrap_or(usize::MAX),
+                        read.max_wait_ms as u64,
+                    )
+                    .await
+                {
+                    Ok(records) => match to_replication_read_ok(records) {
+                        Ok(response) => {
+                            frame_tx_high_prio
+                                .send(wire::encode_stream_replication_read_ok(
+                                    frame.request_id,
+                                    &response,
+                                )?)
+                                .await?;
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                error = %err,
+                                "failed to encode stream replication read response"
+                            );
+                            send_error_response_and_count(
+                                &frame_tx_high_prio,
+                                &metrics,
+                                frame.request_id,
+                                500,
+                                "stream replication read encoding failed",
+                            )
+                            .await;
+                        }
+                    },
+                    Err(err) => {
+                        let (code, message) = broker_error_response(&err);
+                        send_error_response_and_count(
+                            &frame_tx_high_prio,
+                            &metrics,
+                            frame.request_id,
+                            code,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+            }
+
             // -------- REPLICATION STREAM (credit-based) --------------------
             x if x == Op::ReplicationStreamStart as u16 => {
                 let start: ReplicationStreamStart =

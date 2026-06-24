@@ -764,25 +764,21 @@ pub fn decode_reconcile_result(frame: &Frame) -> WireResult<ReconcileResult> {
     Ok(ReconcileResult { subscriptions })
 }
 
-pub fn encode_replication_read(request_id: u64, read: &ReplicationRead) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FRQ1");
-    put_queue_key(&mut out, &read.topic, read.partition, read.group.as_deref())?;
+fn put_replication_read_body(out: &mut BytesMut, read: &ReplicationRead) -> WireResult<()> {
+    put_queue_key(out, &read.topic, read.partition, read.group.as_deref())?;
     out.put_u64(read.message_from);
     out.put_u64(read.event_from);
     out.put_u32(read.max_messages);
     out.put_u32(read.max_events);
     out.put_u64(read.max_bytes);
     out.put_u32(read.max_wait_ms);
-    put_optional_str(&mut out, read.reporter_node_id.as_deref())?;
-    Ok(frame(Op::ReplicationRead, request_id, out.freeze()))
+    put_optional_str(out, read.reporter_node_id.as_deref())?;
+    Ok(())
 }
 
-pub fn decode_replication_read(frame: &Frame) -> WireResult<ReplicationRead> {
-    expect_op(frame, Op::ReplicationRead)?;
-    let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FRQ1", "replication read")?;
+fn read_replication_read_body(reader: &mut Reader) -> WireResult<ReplicationRead> {
     let (topic, partition, group) = reader.queue_key()?;
-    let read = ReplicationRead {
+    Ok(ReplicationRead {
         topic,
         group,
         partition,
@@ -793,7 +789,20 @@ pub fn decode_replication_read(frame: &Frame) -> WireResult<ReplicationRead> {
         max_bytes: reader.u64()?,
         max_wait_ms: reader.u32()?,
         reporter_node_id: reader.optional_str()?.map(ToOwned::to_owned),
-    };
+    })
+}
+
+pub fn encode_replication_read(request_id: u64, read: &ReplicationRead) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FRQ1");
+    put_replication_read_body(&mut out, read)?;
+    Ok(frame(Op::ReplicationRead, request_id, out.freeze()))
+}
+
+pub fn decode_replication_read(frame: &Frame) -> WireResult<ReplicationRead> {
+    expect_op(frame, Op::ReplicationRead)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FRQ1", "replication read")?;
+    let read = read_replication_read_body(&mut reader)?;
     reader.finish()?;
     Ok(read)
 }
@@ -809,6 +818,47 @@ pub fn decode_replication_read_ok(frame: &Frame) -> WireResult<ReplicationReadOk
     expect_op(frame, Op::ReplicationReadOk)?;
     let mut reader = Reader::new(&frame.payload);
     reader.expect_magic(b"FRR2", "replication read ok")?;
+    let messages = reader.replication_message_read()?;
+    let events = reader.replication_event_read()?;
+    reader.finish()?;
+    Ok(ReplicationReadOk { messages, events })
+}
+
+// Stream (Plexus) follower replication: a distinct op that reuses the queue
+// replication read body (records + cursor-commit events). Distinct magics keep
+// the frames self-describing in a capture.
+pub fn encode_stream_replication_read(
+    request_id: u64,
+    read: &ReplicationRead,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSQ1");
+    put_replication_read_body(&mut out, read)?;
+    Ok(frame(Op::StreamReplicationRead, request_id, out.freeze()))
+}
+
+pub fn decode_stream_replication_read(frame: &Frame) -> WireResult<ReplicationRead> {
+    expect_op(frame, Op::StreamReplicationRead)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSQ1", "stream replication read")?;
+    let read = read_replication_read_body(&mut reader)?;
+    reader.finish()?;
+    Ok(read)
+}
+
+pub fn encode_stream_replication_read_ok(
+    request_id: u64,
+    read: &ReplicationReadOk,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FSR1");
+    put_replication_message_read(&mut out, &read.messages)?;
+    put_replication_event_read(&mut out, &read.events)?;
+    Ok(frame(Op::StreamReplicationReadOk, request_id, out.freeze()))
+}
+
+pub fn decode_stream_replication_read_ok(frame: &Frame) -> WireResult<ReplicationReadOk> {
+    expect_op(frame, Op::StreamReplicationReadOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FSR1", "stream replication read ok")?;
     let messages = reader.replication_message_read()?;
     let events = reader.replication_event_read()?;
     reader.finish()?;
@@ -2356,6 +2406,33 @@ mod tests {
         assert_eq!(frame.opcode, Op::ReplicationReadOk as u16);
         assert_eq!(frame.request_id, 14);
         assert_eq!(decode_replication_read_ok(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn stream_replication_read_roundtrips() {
+        let msg = ReplicationRead {
+            topic: "events".into(),
+            group: None,
+            partition: Partition::new(2),
+            message_from: 10,
+            event_from: 4,
+            max_messages: 100,
+            max_events: 50,
+            max_bytes: 1 << 20,
+            max_wait_ms: 250,
+            reporter_node_id: Some("node-b".into()),
+        };
+        let frame = encode_stream_replication_read(7, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::StreamReplicationRead as u16);
+        assert_eq!(decode_stream_replication_read(&frame).unwrap(), msg);
+    }
+
+    #[test]
+    fn stream_replication_read_ok_roundtrips() {
+        let msg = sample_replication_read_ok();
+        let frame = encode_stream_replication_read_ok(8, &msg).unwrap();
+        assert_eq!(frame.opcode, Op::StreamReplicationReadOk as u16);
+        assert_eq!(decode_stream_replication_read_ok(&frame).unwrap(), msg);
     }
 
     #[test]

@@ -102,6 +102,15 @@ pub enum Op {
     /// owner->follower: the stream ended (not-owner, closed, or fenced).
     ReplicationStreamEnd = 98,
 
+    // Plexus stream follower replication. Parallel to the queue
+    // `ReplicationRead`/`ReplicationReadOk` (reuses their body), kept a distinct
+    // op so stream replication stays separate from queue replication at the
+    // protocol layer. A stream has no group; the body carries `group: None`.
+    /// follower->owner: read a stream partition's record + cursor-event logs.
+    StreamReplicationRead = 99,
+    /// owner->follower: a stream replication batch (records + cursor events).
+    StreamReplicationReadOk = 100,
+
     Error = 255,
 }
 
