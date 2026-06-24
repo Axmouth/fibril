@@ -3945,6 +3945,8 @@ async fn declare_uses_coordinator_effective_count() {
             &'a self,
             _topic: &'a str,
             _partition_count: u32,
+            _durability: u8,
+            _retention: fibril_protocol::v1::StreamRetention,
         ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
             let effective = self.0;
             Box::pin(async move { Ok(effective) })

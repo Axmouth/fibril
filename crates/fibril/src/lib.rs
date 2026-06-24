@@ -37,7 +37,7 @@ use fibril_config::{
 };
 use fibril_coordination_ganglion::{
     ClientTopology, ClusterRuntimeSettingsUpdateOutcome, ControllerStatus, ForwardedWritePolicy,
-    GanglionCoordination,
+    GanglionCoordination, StreamRetentionConfig,
 };
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::{
@@ -45,7 +45,9 @@ use fibril_protocol::v1::handler::{
     ConnectionSettings, ProtocolServerError, DeclareCoordinator,
     run_server as run_protocol_server,
 };
-use fibril_protocol::v1::{Partition, QueueTopologyEntry, StreamTopologyEntry, TopologyOk};
+use fibril_protocol::v1::{
+    Partition, QueueTopologyEntry, StreamRetention, StreamTopologyEntry, TopologyOk,
+};
 use fibril_util::StaticAuthHandler;
 use ganglion::{
     TcpRaftServer, WireFormat, WireFormatParseError,
@@ -765,21 +767,21 @@ pub fn declare_coordinator_for_ganglion(
                 Ok(partitioning.partition_count)
             })
         }),
-        declare_stream: Arc::new(move |topic, count| {
+        declare_stream: Arc::new(move |topic, count, durability, retention| {
             let coordination = stream_coordination.clone();
             Box::pin(async move {
-                let partitioning = coordination
-                    .declare_stream_partitioning(&topic, count)
+                let config = coordination
+                    .declare_stream(&topic, count, durability, retention)
                     .await
                     .map_err(|error| error.to_string())?;
-                for partition in 0..partitioning.partition_count {
+                for partition in 0..config.partition_count {
                     let stream = StreamIdentity::new(topic.clone(), Partition::new(partition));
                     coordination
                         .register_stream(&stream)
                         .await
                         .map_err(|error| error.to_string())?;
                 }
-                Ok(partitioning.partition_count)
+                Ok(config.partition_count)
             })
         }),
     }) as Arc<dyn DeclareCoordinator>
@@ -1206,7 +1208,8 @@ pub type DeclareFut = futures::future::BoxFuture<'static, Result<u32, String>>;
 /// and keeping coordination-ganglion free of a protocol dependency.
 pub struct CoordinationDeclareCoordinator {
     pub declare: Arc<dyn Fn(String, Option<String>, u32) -> DeclareFut + Send + Sync>,
-    pub declare_stream: Arc<dyn Fn(String, u32) -> DeclareFut + Send + Sync>,
+    pub declare_stream:
+        Arc<dyn Fn(String, u32, u8, StreamRetentionConfig) -> DeclareFut + Send + Sync>,
 }
 
 impl DeclareCoordinator for CoordinationDeclareCoordinator {
@@ -1227,8 +1230,19 @@ impl DeclareCoordinator for CoordinationDeclareCoordinator {
         &'a self,
         topic: &'a str,
         partition_count: u32,
+        durability: u8,
+        retention: StreamRetention,
     ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
-        (self.declare_stream)(topic.to_string(), partition_count)
+        (self.declare_stream)(
+            topic.to_string(),
+            partition_count,
+            durability,
+            StreamRetentionConfig {
+                max_age_ms: retention.max_age_ms,
+                max_bytes: retention.max_bytes,
+                max_records: retention.max_records,
+            },
+        )
     }
 }
 

@@ -255,8 +255,12 @@ pub const QUEUE_PARTITIONING_ATTRIBUTE_PREFIX: &str = "fibril/partitioning/";
 
 /// Attribute key prefix for a stream's replicated partitioning, kept separate
 /// from the queue prefix so a stream and a same-named queue never collide.
-/// Streams have no group, so the key is `fibril/stream_partitioning/<topic>`.
-pub const STREAM_PARTITIONING_ATTRIBUTE_PREFIX: &str = "fibril/stream_partitioning/";
+/// Streams have no group, so the key is `fibril/stream_config/<topic>`. The doc
+/// is the full stream declaration (partitioning + durability + retention), so an
+/// owner that did not declare the stream can still open its partitions with the
+/// right config. Queues keep config in the replicated log; streams cannot,
+/// because the owner-only tiers have no log to ride (see the #73 design note).
+pub const STREAM_CONFIG_ATTRIBUTE_PREFIX: &str = "fibril/stream_config/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForwardedWritePolicy {
@@ -292,8 +296,30 @@ fn queue_partitioning_key(topic: &str, group: Option<&str>) -> String {
     }
 }
 
-fn stream_partitioning_key(topic: &str) -> String {
-    format!("{STREAM_PARTITIONING_ATTRIBUTE_PREFIX}{topic}")
+fn stream_config_key(topic: &str) -> String {
+    format!("{STREAM_CONFIG_ATTRIBUTE_PREFIX}{topic}")
+}
+
+/// A stream's retention bounds, mirrored from the protocol on declare. `None`
+/// fields mean unbounded on that axis.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StreamRetentionConfig {
+    pub max_age_ms: Option<u64>,
+    pub max_bytes: Option<u64>,
+    pub max_records: Option<u64>,
+}
+
+/// A stream's full declared configuration, replicated through coordination so any
+/// owner can open its partitions with the correct partitioning, durability tier,
+/// and retention. `durability` is the tier ordinal (0 ephemeral, 1 speculative,
+/// 2 durable) to keep coordination free of a protocol dependency.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct StreamConfig {
+    pub partition_count: u32,
+    pub partitioning_version: u64,
+    pub durability: u8,
+    #[serde(default)]
+    pub retention: StreamRetentionConfig,
 }
 
 /// Replicated partitioning of one logical queue `(topic, group)`.
@@ -1310,19 +1336,23 @@ impl GanglionCoordination {
         ))
     }
 
-    /// Record a stream's partitioning (create-once, race-safe via CAS), mirroring
-    /// `declare_queue_partitioning` but on the stream-partitioning key. Streams
-    /// have no group, so the document is keyed by topic alone.
-    pub async fn declare_stream_partitioning(
+    /// Record a stream's full config (create-once, race-safe via CAS), mirroring
+    /// `declare_queue_partitioning` but on the stream-config key and carrying the
+    /// durability tier + retention so any owner can open with the right config.
+    /// Streams have no group, so the document is keyed by topic alone. A re-declare
+    /// with the same partition count is idempotent; a different count conflicts.
+    pub async fn declare_stream(
         &self,
         topic: &str,
         partition_count: u32,
-    ) -> Result<QueuePartitioning, DeclareQueueError> {
+        durability: u8,
+        retention: StreamRetentionConfig,
+    ) -> Result<StreamConfig, DeclareQueueError> {
         let partition_count = partition_count.max(1);
-        let key = stream_partitioning_key(topic);
+        let key = stream_config_key(topic);
         for _ in 0..8 {
             if let Some(raw) = self.cluster_attribute(&key) {
-                match serde_json::from_str::<QueuePartitioning>(&raw) {
+                match serde_json::from_str::<StreamConfig>(&raw) {
                     Ok(existing) if existing.partition_count == partition_count => {
                         return Ok(existing);
                     }
@@ -1337,17 +1367,19 @@ impl GanglionCoordination {
                     Err(error) => {
                         return Err(DeclareQueueError::Coordination(
                             OpenraftAdapterError::Storage(format!(
-                                "stream `{topic}` partitioning is corrupt: {error}"
+                                "stream `{topic}` config is corrupt: {error}"
                             )),
                         ));
                     }
                 }
             }
-            let partitioning = QueuePartitioning {
+            let config = StreamConfig {
                 partition_count,
                 partitioning_version: DEFAULT_PARTITIONING_VERSION,
+                durability,
+                retention: retention.clone(),
             };
-            let value = serde_json::to_string(&partitioning).map_err(|error| {
+            let value = serde_json::to_string(&config).map_err(|error| {
                 DeclareQueueError::Coordination(OpenraftAdapterError::Storage(error.to_string()))
             })?;
             match self
@@ -1358,7 +1390,7 @@ impl GanglionCoordination {
                 })
                 .await
             {
-                Ok(_) => return Ok(partitioning),
+                Ok(_) => return Ok(config),
                 // Lost the create race: re-read and resolve (idempotent or conflict).
                 Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
                 Err(error) => return Err(DeclareQueueError::Coordination(error)),
@@ -1371,10 +1403,11 @@ impl GanglionCoordination {
         ))
     }
 
-    /// Read a stream's committed partitioning, if declared.
-    pub fn stream_partitioning(&self, topic: &str) -> Option<QueuePartitioning> {
-        self.cluster_attribute(&stream_partitioning_key(topic))
-            .and_then(|raw| serde_json::from_str::<QueuePartitioning>(&raw).ok())
+    /// Read a stream's committed config (partitioning + durability + retention),
+    /// if declared. Owners read this to open their assigned partitions.
+    pub fn stream_config(&self, topic: &str) -> Option<StreamConfig> {
+        self.cluster_attribute(&stream_config_key(topic))
+            .and_then(|raw| serde_json::from_str::<StreamConfig>(&raw).ok())
     }
 
     /// Grow a logical queue's partition count to `new_count` and bump its
@@ -2029,29 +2062,29 @@ impl GanglionCoordination {
                 .then_with(|| a.partition.cmp(&b.partition))
         });
 
-        // Authoritative stream partitioning (count + version) per topic.
-        let stream_partitioning = |topic: &str| -> QueuePartitioning {
+        // Authoritative stream partitioning (count + version) per topic, read from
+        // the committed stream config.
+        let stream_partitioning = |topic: &str| -> (u32, u64) {
             committed
                 .attributes
-                .get(&stream_partitioning_key(topic))
-                .and_then(|raw| serde_json::from_str::<QueuePartitioning>(raw).ok())
-                .unwrap_or(QueuePartitioning {
-                    partition_count: 1,
-                    partitioning_version: DEFAULT_PARTITIONING_VERSION,
-                })
+                .get(&stream_config_key(topic))
+                .and_then(|raw| serde_json::from_str::<StreamConfig>(raw).ok())
+                .map(|config| (config.partition_count, config.partitioning_version))
+                .unwrap_or((1, DEFAULT_PARTITIONING_VERSION))
         };
         let mut streams: Vec<ClientStreamTopology> = fibril
             .stream_assignments
             .values()
             .map(|assignment| {
-                let part = stream_partitioning(&assignment.stream.topic);
+                let (partition_count, partitioning_version) =
+                    stream_partitioning(&assignment.stream.topic);
                 ClientStreamTopology {
                     topic: assignment.stream.topic.to_string(),
                     partition: assignment.stream.partition,
                     owner_node_id: assignment.owner.clone(),
                     owner_endpoint: endpoints.get(&assignment.owner).cloned(),
-                    partitioning_version: part.partitioning_version,
-                    partition_count: part.partition_count,
+                    partitioning_version,
+                    partition_count,
                 }
             })
             .collect();
@@ -3097,11 +3130,11 @@ mod tests {
             .expect("election");
         let provider = GanglionCoordination::new("broker-a", raft_node);
 
-        // Declare a 2-partition stream and catalogue both partitions.
+        // Declare a 2-partition durable stream and catalogue both partitions.
         provider
-            .declare_stream_partitioning("events", 2)
+            .declare_stream("events", 2, 2, StreamRetentionConfig::default())
             .await
-            .expect("declare stream partitioning");
+            .expect("declare stream");
         for partition in 0..2 {
             provider
                 .register_stream(&StreamIdentity::new("events", Partition::new(partition)))
@@ -3117,6 +3150,11 @@ mod tests {
                 StreamIdentity::new("events", Partition::new(1)),
             ]
         );
+        // The declared config (durability tier + count) round-trips so an owner
+        // can open with it.
+        let config = provider.stream_config("events").expect("stream config");
+        assert_eq!(config.partition_count, 2);
+        assert_eq!(config.durability, 2);
 
         provider
             .register_self(&NodeInfo {

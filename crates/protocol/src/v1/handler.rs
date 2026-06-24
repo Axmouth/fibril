@@ -124,13 +124,17 @@ pub trait DeclareCoordinator: Send + Sync {
         partition_count: u32,
     ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
 
-    /// Record a stream's partitioning and catalogue its partitions (streams have
-    /// no group). Separate from `declare_partitioning` so a coordinator must
-    /// handle stream placement explicitly rather than fall back to queue rules.
+    /// Record a stream's full config (partitioning + durability tier + retention)
+    /// and catalogue its partitions (streams have no group). The config rides
+    /// coordination so an owner that did not declare the stream can still open its
+    /// partitions correctly. Separate from `declare_partitioning` so a coordinator
+    /// must handle stream placement explicitly rather than fall back to queue rules.
     fn declare_stream<'a>(
         &'a self,
         topic: &'a str,
         partition_count: u32,
+        durability: u8,
+        retention: StreamRetention,
     ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
 }
 
@@ -2868,7 +2872,15 @@ pub async fn handle_connection(
                 // Record the stream's partitioning in its own namespace and
                 // catalogue its partitions for placement (separate from queues).
                 let partition_count = if let Some(coordinator) = &declare_coordinator {
-                    match coordinator.declare_stream(&declare.topic, requested).await {
+                    match coordinator
+                        .declare_stream(
+                            &declare.topic,
+                            requested,
+                            declare.durability.as_u8(),
+                            declare.retention.clone(),
+                        )
+                        .await
+                    {
                         Ok(count) => count,
                         Err(message) => {
                             let _ = send_error_response(
