@@ -854,22 +854,27 @@ fn one() -> u32 {
 pub struct TopologyOk {
     pub generation: u64,
     pub queues: Vec<QueueTopologyEntry>,
-    /// Plexus stream partitioning, so a publisher can spread across a stream's
-    /// partitions the same way it routes a queue. Streams have no group and no
-    /// per-partition owner here (placement is best-effort for now), so this is a
-    /// slimmer entry than `QueueTopologyEntry`.
+    /// Plexus stream partition ownership, so a publisher can both spread across a
+    /// stream's partitions and route each to its owner, the same way it routes a
+    /// queue. Streams have no group, so this is `QueueTopologyEntry` minus that.
     #[serde(default)]
     pub streams: Vec<StreamTopologyEntry>,
 }
 
-/// One Plexus stream's partitioning for client-side routing: the authoritative
-/// partition count and version for the topic. Repeated per stream (not per
-/// partition).
+/// One Plexus stream partition's ownership, as seen by clients for routing.
+/// Mirrors `QueueTopologyEntry` without a group. `owner_endpoint` is `None` in
+/// standalone mode (no owner to route to) and while an owner is unknown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamTopologyEntry {
     pub topic: String,
-    pub partition_count: u32,
+    pub partition: Partition,
+    /// Broker endpoint of the owner, if the owner node is known in the registry.
+    pub owner_endpoint: Option<String>,
     pub partitioning_version: u64,
+    /// Total partition count of this stream topic — authoritative N for key
+    /// routing. Repeated across the stream's partition entries.
+    #[serde(default = "one")]
+    pub partition_count: u32,
 }
 
 /// Control-flow response telling the client to retry against the current owner.

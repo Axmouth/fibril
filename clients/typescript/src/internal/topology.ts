@@ -112,12 +112,19 @@ export class TopologyCache {
         partitioningVersion: queue.partitioning_version,
       });
     }
-    // Streams have no group and no per-partition owner entries; they only feed
-    // the partitioning cache so a publisher spreads across their partitions.
+    // Streams have no group (keyed under group null). They carry per-partition
+    // owners just like queues, so a publisher both spreads across partitions and
+    // routes each to its owner. A topic is either a stream or a queue, so the
+    // group-null cache entries never collide.
     for (const stream of topology.streams ?? []) {
       this.#counts.set(countKey(stream.topic, null), {
         count: Math.max(stream.partition_count, 1),
         version: stream.partitioning_version,
+      });
+      if (stream.owner_endpoint === null) continue;
+      this.#byQueue.set(queueKey(stream.topic, stream.partition, null), {
+        endpoint: stream.owner_endpoint,
+        partitioningVersion: stream.partitioning_version,
       });
     }
   }

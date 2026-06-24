@@ -18,7 +18,7 @@ use fibril_broker::{
     coordination::{
         ClusterCohortController, ConsumerGroupKey, Coordination, DeterministicPartitionPlacement,
         NodeInfo, QueueIdentity, ReplicationDurabilityPolicy, StaticCoordination,
-        StickyConsumerGroupAssignor,
+        StickyConsumerGroupAssignor, StreamIdentity,
     },
     queue_engine::{
         KeratinConfig, QueueEngine as _, RecoveryMismatchPolicy, SnapshotConfig, StromaEngine,
@@ -42,7 +42,7 @@ use fibril_coordination_ganglion::{
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::{
     ClientTopologySource, ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings,
-    ConnectionSettings, ProtocolServerError, QueueDeclareCoordinator,
+    ConnectionSettings, ProtocolServerError, DeclareCoordinator,
     run_server as run_protocol_server,
 };
 use fibril_protocol::v1::{Partition, QueueTopologyEntry, StreamTopologyEntry, TopologyOk};
@@ -740,8 +740,9 @@ pub fn topology_source_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn ClientT
 /// catalogue registration.
 pub fn declare_coordinator_for_ganglion(
     parts: &TcpGanglionParts,
-) -> Arc<dyn QueueDeclareCoordinator> {
+) -> Arc<dyn DeclareCoordinator> {
     let coordination = parts.coordination.clone();
+    let stream_coordination = parts.coordination.clone();
     Arc::new(CoordinationDeclareCoordinator {
         declare: Arc::new(move |topic, group, count| {
             let coordination = coordination.clone();
@@ -764,7 +765,24 @@ pub fn declare_coordinator_for_ganglion(
                 Ok(partitioning.partition_count)
             })
         }),
-    }) as Arc<dyn QueueDeclareCoordinator>
+        declare_stream: Arc::new(move |topic, count| {
+            let coordination = stream_coordination.clone();
+            Box::pin(async move {
+                let partitioning = coordination
+                    .declare_stream_partitioning(&topic, count)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                for partition in 0..partitioning.partition_count {
+                    let stream = StreamIdentity::new(topic.clone(), Partition::new(partition));
+                    coordination
+                        .register_stream(&stream)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(partitioning.partition_count)
+            })
+        }),
+    }) as Arc<dyn DeclareCoordinator>
 }
 
 /// Run a Fibril broker/admin server from an already loaded config.
@@ -1093,14 +1111,21 @@ struct LocalTopologySource {
 
 impl ClientTopologySource for LocalTopologySource {
     fn topology(&self) -> TopologyOk {
+        // One entry per partition (owner is this node, so `owner_endpoint` is
+        // None and clients use their direct connection), repeating the
+        // authoritative count across the topic's partitions.
         let streams = self
             .broker
             .stream_partition_counts()
             .into_iter()
-            .map(|(topic, partition_count)| StreamTopologyEntry {
-                topic,
-                partition_count,
-                partitioning_version: 0,
+            .flat_map(|(topic, partition_count)| {
+                (0..partition_count).map(move |partition| StreamTopologyEntry {
+                    topic: topic.clone(),
+                    partition: Partition::new(partition),
+                    owner_endpoint: None,
+                    partitioning_version: 0,
+                    partition_count,
+                })
             })
             .collect();
         TopologyOk {
@@ -1137,11 +1162,17 @@ impl ClientTopologySource for CoordinationTopologySource {
                     partition_count: queue.partition_count,
                 })
                 .collect(),
-            // Cluster stream partitioning/placement is not surfaced yet (the
-            // coordination store does not distinguish stream from queue
-            // partitioning and streams are not placed across nodes). Tracked
-            // separately; standalone uses LocalTopologySource.
-            streams: Vec::new(),
+            streams: topology
+                .streams
+                .into_iter()
+                .map(|stream| StreamTopologyEntry {
+                    topic: stream.topic,
+                    partition: stream.partition,
+                    owner_endpoint: stream.owner_endpoint,
+                    partitioning_version: stream.partitioning_version,
+                    partition_count: stream.partition_count,
+                })
+                .collect(),
         }
     }
 
@@ -1175,9 +1206,10 @@ pub type DeclareFut = futures::future::BoxFuture<'static, Result<u32, String>>;
 /// and keeping coordination-ganglion free of a protocol dependency.
 pub struct CoordinationDeclareCoordinator {
     pub declare: Arc<dyn Fn(String, Option<String>, u32) -> DeclareFut + Send + Sync>,
+    pub declare_stream: Arc<dyn Fn(String, u32) -> DeclareFut + Send + Sync>,
 }
 
-impl QueueDeclareCoordinator for CoordinationDeclareCoordinator {
+impl DeclareCoordinator for CoordinationDeclareCoordinator {
     fn declare_partitioning<'a>(
         &'a self,
         topic: &'a str,
@@ -1189,6 +1221,14 @@ impl QueueDeclareCoordinator for CoordinationDeclareCoordinator {
             group.map(str::to_string),
             partition_count,
         )
+    }
+
+    fn declare_stream<'a>(
+        &'a self,
+        topic: &'a str,
+        partition_count: u32,
+    ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
+        (self.declare_stream)(topic.to_string(), partition_count)
     }
 }
 

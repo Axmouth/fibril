@@ -623,8 +623,10 @@ pub fn encode_topology_ok(request_id: u64, topology: &TopologyOk) -> WireResult<
     put_len(&mut out, topology.streams.len(), "topology streams")?;
     for entry in &topology.streams {
         put_str(&mut out, &entry.topic)?;
-        out.put_u32(entry.partition_count);
+        put_partition(&mut out, entry.partition);
+        put_optional_str(&mut out, entry.owner_endpoint.as_deref())?;
         out.put_u64(entry.partitioning_version);
+        out.put_u32(entry.partition_count);
     }
     Ok(frame(Op::TopologyOk, request_id, out.freeze()))
 }
@@ -642,10 +644,17 @@ pub fn decode_topology_ok(frame: &Frame) -> WireResult<TopologyOk> {
     let stream_count = reader.u32()? as usize;
     let mut streams = Vec::with_capacity(stream_count);
     for _ in 0..stream_count {
+        let topic = reader.str()?.to_owned();
+        let partition = reader.partition()?;
+        let owner_endpoint = reader.optional_str()?.map(ToOwned::to_owned);
+        let partitioning_version = reader.u64()?;
+        let partition_count = reader.u32()?;
         streams.push(StreamTopologyEntry {
-            topic: reader.str()?.to_owned(),
-            partition_count: reader.u32()?,
-            partitioning_version: reader.u64()?,
+            topic,
+            partition,
+            owner_endpoint,
+            partitioning_version,
+            partition_count,
         });
     }
     reader.finish()?;

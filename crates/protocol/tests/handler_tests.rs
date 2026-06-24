@@ -38,7 +38,7 @@ use fibril_protocol::v1::{
     ResumeIdentity, ResumeOutcome, Subscribe, TopologyOk, TopologyRequest,
     frame::{Frame, ProtoCodec},
     handler::{
-        ClientTopologySource, ConnectionSettings, ProtocolConnectionError, QueueDeclareCoordinator,
+        ClientTopologySource, ConnectionSettings, ProtocolConnectionError, DeclareCoordinator,
         handle_connection,
     },
     helper::{try_decode, try_encode},
@@ -3930,11 +3930,20 @@ async fn declare_fans_out_partitions_standalone() {
 #[tokio::test]
 async fn declare_uses_coordinator_effective_count() {
     struct FixedCoordinator(u32);
-    impl QueueDeclareCoordinator for FixedCoordinator {
+    impl DeclareCoordinator for FixedCoordinator {
         fn declare_partitioning<'a>(
             &'a self,
             _topic: &'a str,
             _group: Option<&'a str>,
+            _partition_count: u32,
+        ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
+            let effective = self.0;
+            Box::pin(async move { Ok(effective) })
+        }
+
+        fn declare_stream<'a>(
+            &'a self,
+            _topic: &'a str,
             _partition_count: u32,
         ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
             let effective = self.0;
@@ -3960,7 +3969,7 @@ async fn declare_uses_coordinator_effective_count() {
             None::<StaticAuthHandler>,
             ConnectionSettings::new(Some(60)),
             None,
-            Some(coordinator as Arc<dyn QueueDeclareCoordinator>),
+            Some(coordinator as Arc<dyn DeclareCoordinator>),
         )
         .await
     });

@@ -365,7 +365,15 @@ test("topology ok body round-trips across entries", () => {
         partitionCount: 4,
       },
     ],
-    streams: [{ topic: "events", partitionCount: 3, partitioningVersion: 4n }],
+    streams: [
+      {
+        topic: "events",
+        partition: 2,
+        ownerEndpoint: "10.0.0.9:7100",
+        partitioningVersion: 4n,
+        partitionCount: 3,
+      },
+    ],
   };
   assert.deepEqual(decodeTopologyOkBody(encodeTopologyOkBody(topology)), topology);
 

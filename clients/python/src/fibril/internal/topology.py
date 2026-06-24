@@ -95,12 +95,20 @@ class TopologyCache:
                 endpoint=queue.owner_endpoint,
                 partitioning_version=queue.partitioning_version,
             )
-        # Streams have no group and no per-partition owner entries; they only feed
-        # the partitioning cache so a publisher spreads across their partitions.
+        # Streams have no group (keyed under group None). They carry per-partition
+        # owners just like queues, so a publisher both spreads across partitions
+        # and routes each to its owner. A topic is either a stream or a queue, so
+        # the group-None cache entries never collide.
         for stream in topology.streams:
             self._counts[(stream.topic, None)] = PartitioningEntry(
                 count=max(stream.partition_count, 1),
                 version=stream.partitioning_version,
+            )
+            if stream.owner_endpoint is None:
+                continue
+            self._by_queue[(stream.topic, stream.partition, None)] = OwnerEntry(
+                endpoint=stream.owner_endpoint,
+                partitioning_version=stream.partitioning_version,
             )
 
     def apply_redirect(self, redirect: Redirect) -> None:

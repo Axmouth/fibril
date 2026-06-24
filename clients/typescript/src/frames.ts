@@ -162,16 +162,20 @@ function entryFromWire(e: wire.QueueTopologyEntry): QueueTopologyEntryMsg {
 function streamEntryToWire(e: StreamTopologyEntryMsg): wire.StreamTopologyEntry {
   return {
     topic: e.topic,
-    partitionCount: e.partition_count,
+    partition: e.partition,
+    ownerEndpoint: e.owner_endpoint,
     partitioningVersion: e.partitioning_version,
+    partitionCount: e.partition_count,
   };
 }
 
 function streamEntryFromWire(e: wire.StreamTopologyEntry): StreamTopologyEntryMsg {
   return {
     topic: e.topic,
-    partition_count: e.partitionCount,
+    partition: e.partition,
+    owner_endpoint: e.ownerEndpoint,
     partitioning_version: e.partitioningVersion,
+    partition_count: e.partitionCount,
   };
 }
 

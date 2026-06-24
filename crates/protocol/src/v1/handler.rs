@@ -110,15 +110,26 @@ pub trait ClientTopologySource: Send + Sync {
     ) -> Option<(String, u64)>;
 }
 
-/// Server-side writer for queue-declaration coordination: records the queue's
-/// partitioning (count + version) in the replicated store, returning the
-/// EFFECTIVE partition count (which may differ from the request if the queue
-/// was already declared). `None` (standalone) means declare is local-only.
-pub trait QueueDeclareCoordinator: Send + Sync {
+/// Server-side writer for declaration coordination: records a resource's
+/// partitioning (count + version) in the replicated store and catalogues its
+/// partitions for placement, returning the EFFECTIVE partition count (which may
+/// differ from the request if the resource was already declared). `None`
+/// (standalone) means declare is local-only. Queues and streams live in
+/// separate partitioning namespaces, so each has its own method.
+pub trait DeclareCoordinator: Send + Sync {
     fn declare_partitioning<'a>(
         &'a self,
         topic: &'a str,
         group: Option<&'a str>,
+        partition_count: u32,
+    ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
+
+    /// Record a stream's partitioning and catalogue its partitions (streams have
+    /// no group). Separate from `declare_partitioning` so a coordinator must
+    /// handle stream placement explicitly rather than fall back to queue rules.
+    fn declare_stream<'a>(
+        &'a self,
+        topic: &'a str,
         partition_count: u32,
     ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
 }
@@ -1774,7 +1785,7 @@ pub async fn run_server(
     auth: Option<impl AuthHandler + Send + Sync + Clone + 'static>,
     connection_settings: ConnectionSettings,
     topology_source: Option<Arc<dyn ClientTopologySource>>,
-    declare_coordinator: Option<Arc<dyn QueueDeclareCoordinator>>,
+    declare_coordinator: Option<Arc<dyn DeclareCoordinator>>,
 ) -> Result<(), ProtocolServerError> {
     let listener = TcpListener::bind(addr)
         .await
@@ -1844,7 +1855,7 @@ pub async fn handle_connection(
     auth_handler: Option<impl AuthHandler + Send + Sync>,
     connection_settings: ConnectionSettings,
     topology_source: Option<Arc<dyn ClientTopologySource>>,
-    declare_coordinator: Option<Arc<dyn QueueDeclareCoordinator>>,
+    declare_coordinator: Option<Arc<dyn DeclareCoordinator>>,
 ) -> Result<(), ProtocolConnectionError> {
     let heartbeat_interval = connection_settings
         .heartbeat_interval
@@ -2854,13 +2865,10 @@ pub async fn handle_connection(
                     .unwrap_or_else(|| broker.config_snapshot().default_partition_count)
                     .max(1);
 
-                // Reuse the queue partitioning coordinator: a stream's partition
-                // count is recorded the same way (keyed by topic, group None).
+                // Record the stream's partitioning in its own namespace and
+                // catalogue its partitions for placement (separate from queues).
                 let partition_count = if let Some(coordinator) = &declare_coordinator {
-                    match coordinator
-                        .declare_partitioning(&declare.topic, None, requested)
-                        .await
-                    {
+                    match coordinator.declare_stream(&declare.topic, requested).await {
                         Ok(count) => count,
                         Err(message) => {
                             let _ = send_error_response(

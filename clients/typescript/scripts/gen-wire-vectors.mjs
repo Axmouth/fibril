@@ -226,6 +226,15 @@ out.topology_ok = hex(
         partitionCount: 2,
       },
     ],
+    streams: [
+      {
+        topic: "s",
+        partition: 2,
+        ownerEndpoint: "10.0.0.9:7100",
+        partitioningVersion: 4n,
+        partitionCount: 3,
+      },
+    ],
   }),
 );
 out.redirect = hex(

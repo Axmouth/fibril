@@ -1364,11 +1364,15 @@ class QueueTopologyEntry:
 
 @dataclass
 class StreamTopologyEntry:
-    #: A Plexus stream's partition count and version for client-side routing.
-    #: Streams have no group and no per-partition owner here.
+    #: Ownership of one Plexus stream partition, as seen by clients for routing.
+    #: Mirrors QueueTopologyEntry without a group. ``owner_endpoint`` is ``None``
+    #: in standalone mode and while an owner is unknown.
     topic: str
-    partition_count: int
+    partition: int
+    owner_endpoint: Optional[str]
     partitioning_version: int
+    #: Authoritative partition count for the stream, used for key routing.
+    partition_count: int
 
 
 @dataclass
@@ -1416,8 +1420,10 @@ def encode_topology_ok_body(topology: TopologyOk) -> bytes:
     w.u32(len(topology.streams))
     for s in topology.streams:
         w.write_str(s.topic)
-        w.u32(s.partition_count)
+        w.u32(s.partition)
+        w.optional_str(s.owner_endpoint)
         w.u64(s.partitioning_version)
+        w.u32(s.partition_count)
     return w.finish()
 
 
@@ -1445,8 +1451,10 @@ def decode_topology_ok_body(body: bytes) -> TopologyOk:
         streams.append(
             StreamTopologyEntry(
                 topic=r.read_str(),
-                partition_count=r.u32(),
+                partition=r.u32(),
+                owner_endpoint=r.optional_str(),
                 partitioning_version=r.u64(),
+                partition_count=r.u32(),
             )
         )
     r.finish()

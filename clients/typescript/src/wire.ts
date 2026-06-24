@@ -1343,13 +1343,17 @@ export interface QueueTopologyEntry {
 }
 
 /**
- * A Plexus stream's partition count and version for client-side routing. Streams
- * have no group and no per-partition owner here.
+ * One Plexus stream partition's ownership for client-side routing. Mirrors
+ * QueueTopologyEntry without a group. ownerEndpoint is null in standalone mode
+ * and while an owner is unknown.
  */
 export interface StreamTopologyEntry {
   topic: string;
-  partitionCount: number;
+  partition: number;
+  ownerEndpoint: string | null;
   partitioningVersion: bigint;
+  // Authoritative partition count for the stream, used for key routing.
+  partitionCount: number;
 }
 
 export interface TopologyOk {
@@ -1400,8 +1404,10 @@ export function encodeTopologyOkBody(topology: TopologyOk): Uint8Array {
   w.u32(topology.streams.length);
   for (const s of topology.streams) {
     w.str(s.topic);
-    w.u32(s.partitionCount);
+    w.u32(s.partition);
+    w.optionalStr(s.ownerEndpoint);
     w.u64(s.partitioningVersion);
+    w.u32(s.partitionCount);
   }
   return w.finish();
 }
@@ -1428,8 +1434,10 @@ export function decodeTopologyOkBody(body: Uint8Array): TopologyOk {
   for (let i = 0; i < streamCount; i += 1) {
     streams.push({
       topic: r.str(),
-      partitionCount: r.u32(),
+      partition: r.u32(),
+      ownerEndpoint: r.optionalStr(),
       partitioningVersion: r.u64(),
+      partitionCount: r.u32(),
     });
   }
   r.finish();

@@ -598,8 +598,10 @@ mod tests {
             ],
             streams: vec![StreamTopologyEntry {
                 topic: "events".into(),
-                partition_count: 4,
+                partition: Partition::new(0),
+                owner_endpoint: Some("10.0.0.7:7000".into()),
                 partitioning_version: 2,
+                partition_count: 4,
             }],
         };
 

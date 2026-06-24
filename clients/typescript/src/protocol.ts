@@ -303,13 +303,17 @@ export interface QueueTopologyEntryMsg {
 }
 
 /**
- * A Plexus stream's partition count and version for client-side routing. Streams
- * have no group and no per-partition owner here.
+ * Ownership of one Plexus stream partition, as seen by clients for routing.
+ * Mirrors QueueTopologyEntryMsg without a group.
  */
 export interface StreamTopologyEntryMsg {
   topic: string;
-  partition_count: number;
+  partition: number;
+  // Owner broker endpoint, absent when the owner node is not in the registry.
+  owner_endpoint: string | null;
   partitioning_version: bigint;
+  // Authoritative partition count for the stream, used for key routing.
+  partition_count: number;
 }
 
 /** Topology snapshot at a coordination generation. */

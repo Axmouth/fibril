@@ -496,8 +496,10 @@ fn wire_encoders_match_shared_vectors() {
                 ],
                 streams: vec![StreamTopologyEntry {
                     topic: "s".into(),
-                    partition_count: 3,
+                    partition: Partition::new(2),
+                    owner_endpoint: Some("10.0.0.9:7100".into()),
                     partitioning_version: 4,
+                    partition_count: 3,
                 }],
             },
         )
