@@ -78,6 +78,39 @@ test("replace populates counts and resolved owners", () => {
   assert.deepEqual(cache.endpoints(), new Set(["127.0.0.1:9001", "127.0.0.1:9002"]));
 });
 
+test("replace resolves stream owners under the null group", () => {
+  // A stream entry feeds both the partitioning count and the per-partition
+  // owner (keyed by null group), so a stream publish routes to its owner.
+  const cache = new TopologyCache();
+  cache.replace({
+    generation: 4n,
+    queues: [],
+    streams: [
+      {
+        topic: "logs",
+        partition: 0,
+        owner_endpoint: "127.0.0.1:9100",
+        partitioning_version: 2n,
+        partition_count: 2,
+      },
+      {
+        topic: "logs",
+        partition: 1,
+        owner_endpoint: null, // owner unresolved mid-failover
+        partitioning_version: 2n,
+        partition_count: 2,
+      },
+    ],
+  });
+
+  assert.deepEqual(cache.partitioning("logs", null), { count: 2, version: 2n });
+  assert.deepEqual(cache.lookup("logs", 0, null), {
+    endpoint: "127.0.0.1:9100",
+    partitioningVersion: 2n,
+  });
+  assert.equal(cache.lookup("logs", 1, null), undefined);
+});
+
 test("null group is distinct from a same-named string group", () => {
   const cache = new TopologyCache();
   cache.replace({

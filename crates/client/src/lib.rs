@@ -2699,14 +2699,30 @@ impl TopologyCache {
                 },
             );
         }
-        // Streams have no group and no per-partition owner entries; they only feed
-        // the partitioning cache so a publisher spreads across their partitions.
+        // Streams have no group (keyed under group None). They carry per-partition
+        // owners just like queues, so a publisher both spreads across partitions
+        // and routes each to its owner. A topic is either a stream or a queue, so
+        // the group-None cache entries never collide.
         for stream in topology.streams {
             self.counts.insert(
-                (stream.topic, None),
+                (stream.topic.clone(), None),
                 PartitioningEntry {
                     count: stream.partition_count.max(1),
                     version: stream.partitioning_version,
+                },
+            );
+            let Some(endpoint) = stream
+                .owner_endpoint
+                .as_deref()
+                .and_then(|raw| raw.parse::<SocketAddr>().ok())
+            else {
+                continue;
+            };
+            self.by_queue.insert(
+                (stream.topic, stream.partition, None),
+                OwnerEntry {
+                    endpoint,
+                    partitioning_version: stream.partitioning_version,
                 },
             );
         }
@@ -4786,6 +4802,52 @@ mod tests {
         assert!(
             !transitioning.knows_topic("ghost", None),
             "an undeclared topic is not known -> fail fast"
+        );
+    }
+
+    #[test]
+    fn replace_resolves_stream_owners_under_group_none() {
+        // A stream topology entry must populate both the partitioning count and
+        // the per-partition owner (keyed by group None), so a stream publish
+        // routes to its owner the same way a queue publish does.
+        use fibril_protocol::v1::{StreamTopologyEntry, TopologyOk};
+
+        let mut cache = TopologyCache {
+            generation: 0,
+            by_queue: HashMap::new(),
+            counts: HashMap::new(),
+            last_refresh_ms: 0,
+        };
+        cache.replace(TopologyOk {
+            generation: 9,
+            queues: Vec::new(),
+            streams: vec![
+                StreamTopologyEntry {
+                    topic: "events".into(),
+                    partition: Partition::new(0),
+                    owner_endpoint: Some("127.0.0.1:7000".into()),
+                    partitioning_version: 2,
+                    partition_count: 2,
+                },
+                StreamTopologyEntry {
+                    topic: "events".into(),
+                    partition: Partition::new(1),
+                    owner_endpoint: None, // owner unresolved mid-failover
+                    partitioning_version: 2,
+                    partition_count: 2,
+                },
+            ],
+        });
+
+        let partitioning = cache.partitioning("events", None).expect("count cached");
+        assert_eq!(partitioning.count, 2);
+        let owner = cache
+            .lookup("events", Partition::new(0), None)
+            .expect("resolved owner");
+        assert_eq!(owner.endpoint, "127.0.0.1:7000".parse().unwrap());
+        assert!(
+            cache.lookup("events", Partition::new(1), None).is_none(),
+            "an unresolved owner leaves the partition unrouted"
         );
     }
 
