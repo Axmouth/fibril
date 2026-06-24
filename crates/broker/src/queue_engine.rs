@@ -695,6 +695,54 @@ impl StromaEngine {
             .await
     }
 
+    // ----- Stream (Plexus) replication seam -----------------------------------
+    // A stream partition reuses the queue handle (record log + cursor-commit
+    // event log, no group), so these delegate to the stream-named stroma
+    // primitives. The concrete follower worker calls them like the queue ones.
+
+    pub async fn apply_replicated_stream_batch(
+        &self,
+        tp: &str,
+        part: u32,
+        messages: Option<ReplicatedMessageBatch>,
+        events: Option<ReplicatedEventBatch>,
+    ) -> Result<ReplicatedQueueApplyOutcome, StromaError> {
+        self.inner
+            .apply_replicated_stream_batch(tp, part, messages, events)
+            .await
+    }
+
+    pub async fn advance_stream_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        epoch: u64,
+    ) -> Result<u64, StromaError> {
+        self.inner.advance_stream_epoch(tp, part, epoch).await
+    }
+
+    pub async fn become_stream_follower_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        epoch: u64,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .become_stream_follower_with_epoch(tp, part, epoch)
+            .await
+    }
+
+    pub async fn become_stream_owner_with_epoch(
+        &self,
+        tp: &str,
+        part: u32,
+        epoch: u64,
+    ) -> Result<(), StromaError> {
+        self.inner
+            .become_stream_owner_with_epoch(tp, part, epoch)
+            .await
+    }
+
     async fn replay_dead_letter(
         &self,
         dlq_tp: &str,
