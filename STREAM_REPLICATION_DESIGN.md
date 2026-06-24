@@ -136,10 +136,21 @@ This keeps the queue path byte-identical (add a branch, don't rewrite) and must 
 tested on BOTH paths. It is an invasive refactor of shared data-integrity code, so
 it is the careful final piece.
 
-Status of the plumbing (all committed): keratin substrate (apply + epoch/role +
-next-offsets), fibril engine seam, protocol StreamReplicationRead op + owner
-handler, stream-mode remote peer. REMAINING: the kind-parameterized worker +
-resolver + apply wiring (consume 73b transitions) + stream assignment watcher.
+Status: 73c is DONE (committed, green end to end). Built: keratin substrate
+(apply + epoch/role + next-offsets) plus a follower stream-marker materialize in
+become_stream_follower_with_epoch; fibril engine seam; protocol
+StreamReplicationRead op + owner handler; stream-mode remote peer;
+ReplicationResourceKind{Queue,Stream} threaded through the shared catch-up +
+worker loop + (owner,kind)-keyed resolver (queue path byte-identical, all queue
+tests still green); apply_stream_assignment_transition + a stream branch in the
+existing assignment watcher that spawns a stream-mode follower worker per followed
+partition. End-to-end test:
+stream_follower_catches_up_records_and_cursor_from_owner.
+
+DEFERRED to 73d (failover): caught-up follower promotion (PromoteFollowerToOwner
+currently keeps the partition a follower) and the durable-confirm timing. DEFERRED
+to 73e: follower retention-config propagation (the follower opens with no local
+retention policy; retention is mirrored via replication for now).
 
 ## Execution plan for the follower worker (next session, step by step)
 
