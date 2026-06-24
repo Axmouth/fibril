@@ -98,6 +98,13 @@ struct Args {
     #[arg(long, default_value_t = 4)]
     readers: usize,
 
+    /// Give each reader a unique durable cursor name so auto-ack commits its
+    /// cursor per record. This exercises the cursor-commit path (and its
+    /// microbatcher) - the durable-subscriber bottleneck, distinct from the
+    /// cursorless ephemeral fan-out the default measures.
+    #[arg(long, default_value_t = false)]
+    durable_readers: bool,
+
     #[arg(long, default_value_t = 100_000)]
     rate_per_sec: u64,
 
@@ -203,6 +210,7 @@ async fn main() {
             args.partitions,
             args.readers,
             args.prefetch,
+            args.durable_readers,
             writers_done.clone(),
             measured_sent_total.clone(),
             args.drain_timeout_secs,
@@ -294,12 +302,13 @@ fn start_readers(
     partitions: u32,
     readers: usize,
     prefetch: u32,
+    durable_readers: bool,
     writers_done: Arc<AtomicBool>,
     measured_sent_total: Arc<AtomicU64>,
     drain_timeout_secs: u64,
 ) -> Vec<tokio::task::JoinHandle<ReaderStats>> {
     let mut handles = Vec::new();
-    for _ in 0..readers {
+    for reader_index in 0..readers {
         let writers_done = writers_done.clone();
         let measured_sent_total = measured_sent_total.clone();
         let topic = topic.clone();
@@ -309,16 +318,21 @@ fn start_readers(
                 .connect(address)
                 .await
                 .unwrap();
-            // Fan-out reader: auto-ack from the live tail, all partitions.
-            let mut sub = client
+            // Fan-out reader: auto-ack, all partitions. With --durable-readers each
+            // reader carries a unique durable name so auto-ack commits its cursor
+            // per record (exercising the cursor-commit microbatcher); otherwise it
+            // reads cursorless from the live tail (pure fan-out).
+            let builder = client
                 .stream(&topic)
                 .unwrap()
                 .partitions(partitions)
-                .prefetch(prefetch)
-                .from_latest()
-                .sub_auto_ack()
-                .await
-                .unwrap();
+                .prefetch(prefetch);
+            let builder = if durable_readers {
+                builder.durable(format!("bench-reader-{reader_index}"))
+            } else {
+                builder.from_latest()
+            };
+            let mut sub = builder.sub_auto_ack().await.unwrap();
 
             let mut stats = ReaderStats::default();
             let mut drain_deadline: Option<Instant> = None;

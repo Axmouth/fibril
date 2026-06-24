@@ -40,6 +40,12 @@ if [ "$confirmed" != "0" ]; then
   bench_args+=(--confirmed --confirm-window "$confirm_window")
 fi
 
+# Give each reader a unique durable cursor name so auto-ack commits its cursor
+# per record (exercises the cursor-commit microbatcher).
+if [ "${DURABLE_READERS:-0}" != "0" ]; then
+  bench_args+=(--durable-readers)
+fi
+
 mkdir -p "$data_dir" "$(dirname "$log_file")" "$(dirname "$results_file")"
 : >"$log_file"
 : >"$results_file"
