@@ -222,6 +222,15 @@ impl CoordinationSnapshot {
             .cloned()
             .collect()
     }
+
+    /// Stream partitions this node replicates as a follower.
+    pub fn streams_followed_by(&self, node_id: &str) -> Vec<StreamAssignment> {
+        self.stream_assignments
+            .values()
+            .filter(|assignment| assignment.is_followed_by(node_id))
+            .cloned()
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1433,6 +1442,113 @@ fn local_assignment_intent(
     }
 }
 
+/// One node's role change for a stream partition across a coordination snapshot
+/// diff. The stream analogue of [`LocalAssignmentTransition`], over
+/// [`StreamAssignment`] (owner + replica followers, no consumer leases). Reuses
+/// the shared [`LocalAssignmentIntent`]/[`LocalAssignmentRole`] vocabulary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalStreamAssignmentTransition {
+    pub stream: StreamIdentity,
+    pub previous_role: Option<LocalAssignmentRole>,
+    pub next_role: Option<LocalAssignmentRole>,
+    pub previous: Option<StreamAssignment>,
+    pub next: Option<StreamAssignment>,
+    pub intent: LocalAssignmentIntent,
+}
+
+/// Diff `previous` -> `next` stream assignments into this node's role changes,
+/// mirroring [`plan_local_assignment_transitions`] for streams. The apply is
+/// simpler than queues (no leases/offset release): BecomeOwner opens the
+/// channel, BecomeFollower starts a stream-replication worker.
+pub fn plan_local_stream_transitions(
+    node_id: &str,
+    previous: &CoordinationSnapshot,
+    next: &CoordinationSnapshot,
+) -> Vec<LocalStreamAssignmentTransition> {
+    let mut keys: HashSet<StreamIdentity> =
+        previous.stream_assignments.keys().cloned().collect();
+    keys.extend(next.stream_assignments.keys().cloned());
+
+    let mut keys: Vec<_> = keys.into_iter().collect();
+    keys.sort_by(|a, b| stream_sort_key(a).cmp(&stream_sort_key(b)));
+
+    keys.into_iter()
+        .filter_map(|stream| {
+            let previous_assignment = previous.stream_assignments.get(&stream).cloned();
+            let next_assignment = next.stream_assignments.get(&stream).cloned();
+            let previous_role = previous_assignment
+                .as_ref()
+                .and_then(|assignment| local_stream_role_for(node_id, assignment));
+            let next_role = next_assignment
+                .as_ref()
+                .and_then(|assignment| local_stream_role_for(node_id, assignment));
+            let intent = local_stream_assignment_intent(
+                previous_role,
+                next_role,
+                previous_assignment.as_ref(),
+                next_assignment.as_ref(),
+            );
+
+            (intent != LocalAssignmentIntent::Noop).then_some(LocalStreamAssignmentTransition {
+                stream,
+                previous_role,
+                next_role,
+                previous: previous_assignment,
+                next: next_assignment,
+                intent,
+            })
+        })
+        .collect()
+}
+
+fn local_stream_role_for(
+    node_id: &str,
+    assignment: &StreamAssignment,
+) -> Option<LocalAssignmentRole> {
+    if assignment.is_owned_by(node_id) {
+        Some(LocalAssignmentRole::Owner)
+    } else if assignment.is_followed_by(node_id) {
+        Some(LocalAssignmentRole::Follower)
+    } else {
+        None
+    }
+}
+
+fn local_stream_assignment_intent(
+    previous_role: Option<LocalAssignmentRole>,
+    next_role: Option<LocalAssignmentRole>,
+    previous: Option<&StreamAssignment>,
+    next: Option<&StreamAssignment>,
+) -> LocalAssignmentIntent {
+    match (previous_role, next_role) {
+        (None, None) => LocalAssignmentIntent::Noop,
+        (None, Some(LocalAssignmentRole::Owner)) => LocalAssignmentIntent::BecomeOwner,
+        (None, Some(LocalAssignmentRole::Follower)) => LocalAssignmentIntent::BecomeFollower,
+        (Some(LocalAssignmentRole::Owner), None) => LocalAssignmentIntent::FreezeOwner,
+        (Some(LocalAssignmentRole::Follower), None) => LocalAssignmentIntent::StopFollower,
+        (Some(LocalAssignmentRole::Owner), Some(LocalAssignmentRole::Follower)) => {
+            LocalAssignmentIntent::DemoteOwnerToFollower
+        }
+        (Some(LocalAssignmentRole::Follower), Some(LocalAssignmentRole::Owner)) => {
+            LocalAssignmentIntent::PromoteFollowerToOwner
+        }
+        (Some(LocalAssignmentRole::Owner), Some(LocalAssignmentRole::Owner)) => {
+            if previous == next {
+                LocalAssignmentIntent::Noop
+            } else {
+                LocalAssignmentIntent::RefreshOwner
+            }
+        }
+        (Some(LocalAssignmentRole::Follower), Some(LocalAssignmentRole::Follower)) => {
+            if previous == next {
+                LocalAssignmentIntent::Noop
+            } else {
+                LocalAssignmentIntent::RefreshFollower
+            }
+        }
+    }
+}
+
 pub type CoordinationStream = watch::Receiver<CoordinationSnapshot>;
 
 pub trait Coordination: std::fmt::Debug + Send + Sync {
@@ -2146,6 +2262,75 @@ mod tests {
         assert_eq!(assignment.owner, "node-a", "live owner stays");
         assert_eq!(assignment.followers.len(), 2, "follower set grew to RF");
         assert_eq!(assignment.epoch, 9, "follower churn re-stamps the epoch");
+    }
+
+    fn stream_snapshot(assignments: Vec<StreamAssignment>) -> CoordinationSnapshot {
+        CoordinationSnapshot {
+            stream_assignments: assignments
+                .into_iter()
+                .map(|assignment| (assignment.stream.clone(), assignment))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn plan_local_stream_transitions_become_owner_and_follower() {
+        let stream = StreamIdentity::new("events", Partition::new(0));
+        let previous = stream_snapshot(Vec::new());
+        let next = stream_snapshot(vec![StreamAssignment::new(
+            stream.clone(),
+            "node-a",
+            vec!["node-b".to_string()],
+            1,
+        )]);
+
+        let owner = plan_local_stream_transitions("node-a", &previous, &next);
+        assert_eq!(owner.len(), 1);
+        assert_eq!(owner[0].intent, LocalAssignmentIntent::BecomeOwner);
+
+        let follower = plan_local_stream_transitions("node-b", &previous, &next);
+        assert_eq!(follower.len(), 1);
+        assert_eq!(follower[0].intent, LocalAssignmentIntent::BecomeFollower);
+
+        // A node mentioned in neither assignment has nothing to do.
+        assert!(plan_local_stream_transitions("node-c", &previous, &next).is_empty());
+    }
+
+    #[test]
+    fn plan_local_stream_transitions_promote_and_demote_on_failover() {
+        let stream = StreamIdentity::new("events", Partition::new(0));
+        let previous = stream_snapshot(vec![StreamAssignment::new(
+            stream.clone(),
+            "node-a",
+            vec!["node-b".to_string()],
+            1,
+        )]);
+        // Owner moves a -> b (b was the follower); epoch bumps.
+        let next = stream_snapshot(vec![StreamAssignment::new(
+            stream.clone(),
+            "node-b",
+            vec!["node-a".to_string()],
+            2,
+        )]);
+
+        let demoted = plan_local_stream_transitions("node-a", &previous, &next);
+        assert_eq!(demoted[0].intent, LocalAssignmentIntent::DemoteOwnerToFollower);
+
+        let promoted = plan_local_stream_transitions("node-b", &previous, &next);
+        assert_eq!(
+            promoted[0].intent,
+            LocalAssignmentIntent::PromoteFollowerToOwner
+        );
+    }
+
+    #[test]
+    fn plan_local_stream_transitions_noop_when_unchanged() {
+        let stream = StreamIdentity::new("events", Partition::new(0));
+        let assignment = StreamAssignment::new(stream, "node-a", vec!["node-b".to_string()], 1);
+        let snapshot = stream_snapshot(vec![assignment]);
+        assert!(plan_local_stream_transitions("node-a", &snapshot, &snapshot).is_empty());
+        assert!(plan_local_stream_transitions("node-b", &snapshot, &snapshot).is_empty());
     }
 
     fn assign_balanced(
