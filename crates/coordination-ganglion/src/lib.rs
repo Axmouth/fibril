@@ -2282,6 +2282,42 @@ impl fibril_broker::broker::QueueOwnership for GanglionCoordination {
     }
 }
 
+/// Stream-ownership gate view: in cluster mode a broker serves only the stream
+/// partitions the committed snapshot assigns to it, and reads declared config
+/// from coordination so it can open a partition it did not declare.
+impl fibril_broker::broker::StreamOwnership for GanglionCoordination {
+    fn owns_stream(&self, topic: &str, partition: fibril_storage::Partition) -> bool {
+        self.tx
+            .borrow()
+            .stream_assignment_for(topic, partition)
+            .is_some_and(|assignment| assignment.is_owned_by(&self.node_id))
+    }
+
+    fn stream_open_config(
+        &self,
+        topic: &str,
+    ) -> Option<fibril_broker::broker::StreamOpenConfig> {
+        let config = self.stream_config(topic)?;
+        let retention = if config.retention.max_age_ms.is_none()
+            && config.retention.max_bytes.is_none()
+            && config.retention.max_records.is_none()
+        {
+            None
+        } else {
+            Some(fibril_broker::queue_engine::RetentionConfig {
+                max_age_ms: config.retention.max_age_ms,
+                max_bytes: config.retention.max_bytes,
+                max_records: config.retention.max_records,
+            })
+        };
+        Some(fibril_broker::broker::StreamOpenConfig {
+            durability: fibril_broker::stream::StreamDurability::from_u8(config.durability)
+                .unwrap_or_default(),
+            retention,
+        })
+    }
+}
+
 impl Coordination for GanglionCoordination {
     fn node_id(&self) -> &str {
         &self.node_id
@@ -3201,6 +3237,21 @@ mod tests {
             assert_eq!(entry.owner_endpoint.as_deref(), Some("127.0.0.1:9100"));
             assert_eq!(entry.partition_count, 2);
         }
+
+        // The StreamOwnership gate: this node owns the assigned partitions but not
+        // an unassigned one, and the declared open-config round-trips for the owner
+        // to materialize with.
+        use fibril_broker::broker::StreamOwnership as _;
+        assert!(provider.owns_stream("events", Partition::new(0)));
+        assert!(provider.owns_stream("events", Partition::new(1)));
+        assert!(
+            !provider.owns_stream("events", Partition::new(5)),
+            "an unassigned partition is not owned"
+        );
+        let open = provider
+            .stream_open_config("events")
+            .expect("declared open config");
+        assert_eq!(open.durability, fibril_broker::stream::StreamDurability::Durable);
 
         provider.consensus_node().shutdown().await.expect("shutdown");
     }

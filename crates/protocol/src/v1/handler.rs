@@ -108,6 +108,17 @@ pub trait ClientTopologySource: Send + Sync {
         partition: Partition,
         group: Option<&str>,
     ) -> Option<(String, u64)>;
+
+    /// Current owner endpoint and partitioning version for one stream partition,
+    /// if known. Used to redirect a stream publish/subscribe to its owner. The
+    /// default returns `None` (no stream placement view).
+    fn stream_owner_endpoint(
+        &self,
+        _topic: &str,
+        _partition: Partition,
+    ) -> Option<(String, u64)> {
+        None
+    }
 }
 
 /// Server-side writer for declaration coordination: records a resource's
@@ -274,6 +285,28 @@ fn owner_redirect_frame(
         topic: topic.to_string(),
         partition,
         group: group.map(str::to_string),
+        owner_endpoint,
+        partitioning_version,
+    };
+    try_encode(Op::Redirect, request_id, &redirect).ok()
+}
+
+/// Build an `Op::Redirect` frame for a stream partition if the topology source
+/// can resolve its owner. Streams have no group. `None` => fall back to a plain
+/// not-owner error.
+fn stream_owner_redirect_frame(
+    topology_source: &Option<Arc<dyn ClientTopologySource>>,
+    request_id: u64,
+    topic: &str,
+    partition: Partition,
+) -> Option<Frame> {
+    let (owner_endpoint, partitioning_version) = topology_source
+        .as_ref()?
+        .stream_owner_endpoint(topic, partition)?;
+    let redirect = Redirect {
+        topic: topic.to_string(),
+        partition,
+        group: None,
         owner_endpoint,
         partitioning_version,
     };
@@ -2955,6 +2988,38 @@ pub async fn handle_connection(
                 let sub: SubscribeStream =
                     decode_or_400!(frame, frame_tx_high_prio, metrics, SubscribeStream);
 
+                // Redirect a subscribe to a stream partition this node does not
+                // own (cluster mode), so the subscriber attaches to the owner's
+                // fan-out. Streams have no group.
+                if (broker.is_stream(&sub.topic, sub.partition.id())
+                    || broker.stream_declared_in_coordination(&sub.topic))
+                    && broker
+                        .ensure_stream_owner(&sub.topic, sub.partition.id())
+                        .is_err()
+                {
+                    if let Some(frame) = stream_owner_redirect_frame(
+                        &topology_source,
+                        frame.request_id,
+                        &sub.topic,
+                        sub.partition,
+                    ) {
+                        let _ = frame_tx_high_prio.send(frame).await;
+                    } else {
+                        frame_tx_high_prio
+                            .send(try_encode(
+                                Op::SubscribeErr,
+                                frame.request_id,
+                                &ErrorMsg {
+                                    code: ERR_NOT_OWNER,
+                                    message: "not the owner of this stream partition".into(),
+                                },
+                            )?)
+                            .await?;
+                        metrics.error();
+                    }
+                    continue;
+                }
+
                 match install_stream_subscription(
                     &broker,
                     &logical,
@@ -3116,9 +3181,37 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                // Stream fast-path: an already-open stream channel takes the
-                // fan-out path instead of the queue lease/poll publisher.
-                if broker.is_stream(&pubreq.topic, pubreq.partition.id()) {
+                // Stream fast-path: a stream takes the fan-out path instead of the
+                // queue lease/poll publisher. A stream is recognized either by an
+                // already-open local channel (standalone / hot owner) or by a
+                // coordination declaration (cluster, including an owner that has
+                // not opened it yet). A non-owner is redirected to the owner.
+                if broker.is_stream(&pubreq.topic, pubreq.partition.id())
+                    || broker.stream_declared_in_coordination(&pubreq.topic)
+                {
+                    if broker
+                        .ensure_stream_owner(&pubreq.topic, pubreq.partition.id())
+                        .is_err()
+                    {
+                        if let Some(frame) = stream_owner_redirect_frame(
+                            &topology_source,
+                            frame.request_id,
+                            &pubreq.topic,
+                            pubreq.partition,
+                        ) {
+                            let _ = frame_tx_low_prio.send(frame).await;
+                        } else {
+                            send_error_response_and_count(
+                                &frame_tx_low_prio,
+                                &metrics,
+                                frame.request_id,
+                                ERR_NOT_OWNER,
+                                "not the owner of this stream partition",
+                            )
+                            .await;
+                        }
+                        continue;
+                    }
                     if let Some(channel) =
                         broker.route_stream(&pubreq.topic, pubreq.partition.id()).await
                     {
@@ -3136,31 +3229,23 @@ pub async fn handle_connection(
                         .await?;
                         continue;
                     }
+                    // Owner but the channel could not be opened (e.g. storage
+                    // error): surface a server error rather than misrouting to the
+                    // queue path.
+                    send_error_response_and_count(
+                        &frame_tx_low_prio,
+                        &metrics,
+                        frame.request_id,
+                        500,
+                        "stream partition could not be opened",
+                    )
+                    .await;
+                    continue;
                 }
 
                 let key = (pubreq.topic.clone(), pubreq.partition, pubreq.group.clone());
                 let now_ms = unix_millis();
                 if !publishers.contains_key(&key) {
-                    // Cold partition: it may be a stream this owner has not opened
-                    // yet (e.g. after failover). Consult the durable kind marker
-                    // once before falling into the queue publisher path.
-                    if let Some(channel) =
-                        broker.route_stream(&pubreq.topic, pubreq.partition.id()).await
-                    {
-                        handle_stream_publish(
-                            &channel,
-                            &frame_tx_low_prio,
-                            frame.request_id,
-                            pubreq.payload,
-                            pubreq.published,
-                            pubreq.require_confirm,
-                            content_type,
-                            headers,
-                            publish_received,
-                        )
-                        .await?;
-                        continue;
-                    }
                     let (pubh, mut conf_stream) = match broker
                         .get_publisher(&pubreq.topic, pubreq.partition, &pubreq.group)
                         .await

@@ -492,6 +492,54 @@ async fn open_test_broker_with_ownership(
     (broker, dir)
 }
 
+#[tokio::test]
+async fn stream_ownership_gate_rejects_non_owner_and_exposes_config() {
+    use fibril_broker::broker::{
+        OwnAllQueues, StreamOpenConfig, StreamOwnership as StreamOwnershipTrait,
+    };
+    use fibril_broker::stream::StreamDurability;
+
+    // A node that owns no stream partitions but knows the declared config (the
+    // cluster non-owner case): the gate must reject, yet the config is visible so
+    // the actual owner could materialize.
+    #[derive(Debug)]
+    struct OwnsNoStreams;
+    impl StreamOwnershipTrait for OwnsNoStreams {
+        fn owns_stream(&self, _topic: &str, _partition: Partition) -> bool {
+            false
+        }
+        fn stream_open_config(&self, _topic: &str) -> Option<StreamOpenConfig> {
+            Some(StreamOpenConfig {
+                durability: StreamDurability::Durable,
+                retention: None,
+            })
+        }
+    }
+
+    let dir = test_dir!("broker_test");
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker = Broker::new_with_ownerships(
+        engine,
+        BrokerConfig::default(),
+        None,
+        Arc::new(OwnAllQueues),
+        Arc::new(OwnsNoStreams),
+    );
+
+    assert!(broker.stream_declared_in_coordination("events"));
+    assert!(!broker.owns_stream("events", 0));
+    assert!(
+        broker.ensure_stream_owner("events", 0).is_err(),
+        "a non-owner must be rejected so the handler can redirect"
+    );
+}
+
 async fn open_test_engine() -> (StromaEngine, TempDir) {
     let dir = test_dir!("broker_test");
     let engine = StromaEngine::open(

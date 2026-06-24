@@ -14,7 +14,10 @@ use fibril_admin::{
     RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
 };
 use fibril_broker::{
-    broker::{Broker, BrokerConfig, FollowerReplicationWorkerConfig, OwnAllQueues, QueueOwnership},
+    broker::{
+        Broker, BrokerConfig, FollowerReplicationWorkerConfig, OwnAllQueues, OwnAllStreams,
+        QueueOwnership, StreamOwnership,
+    },
     coordination::{
         ClusterCohortController, ConsumerGroupKey, Coordination, DeterministicPartitionPlacement,
         NodeInfo, QueueIdentity, ReplicationDurabilityPolicy, StaticCoordination,
@@ -439,6 +442,15 @@ pub fn queue_ownership_for_ganglion(parts: Option<&TcpGanglionParts>) -> Arc<dyn
     }
 }
 
+/// Stream-ownership provider used by the broker: cluster assignments in Ganglion
+/// mode (the same coordination provider as queues), own-all standalone.
+pub fn stream_ownership_for_ganglion(parts: Option<&TcpGanglionParts>) -> Arc<dyn StreamOwnership> {
+    match parts {
+        Some(parts) => parts.coordination.clone() as Arc<dyn StreamOwnership>,
+        None => Arc::new(OwnAllStreams),
+    }
+}
+
 /// Static single-node coordination view for admin topology in standalone mode.
 pub fn single_node_admin_coordination(config: &ServerConfig) -> Arc<dyn Coordination> {
     Arc::new(StaticCoordination::single_node(
@@ -853,11 +865,13 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     }
 
     let ownership = queue_ownership_for_ganglion(ganglion_parts.as_ref());
-    let broker = Broker::new_with_ownership(
+    let stream_ownership = stream_ownership_for_ganglion(ganglion_parts.as_ref());
+    let broker = Broker::new_with_ownerships(
         engine.clone(),
         broker_cfg,
         Some(metrics.broker()),
         ownership,
+        stream_ownership,
     );
 
     let _ganglion_broker_tasks = ganglion_parts
@@ -1196,6 +1210,18 @@ impl ClientTopologySource for CoordinationTopologySource {
                 queue
                     .owner_endpoint
                     .map(|endpoint| (endpoint, queue.partitioning_version))
+            })
+    }
+
+    fn stream_owner_endpoint(&self, topic: &str, partition: Partition) -> Option<(String, u64)> {
+        (self.fetch)()
+            .streams
+            .into_iter()
+            .find(|stream| stream.topic == topic && stream.partition == partition)
+            .and_then(|stream| {
+                stream
+                    .owner_endpoint
+                    .map(|endpoint| (endpoint, stream.partitioning_version))
             })
     }
 }

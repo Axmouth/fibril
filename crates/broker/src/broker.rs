@@ -447,6 +447,42 @@ impl QueueOwnership for OwnAllQueues {
     }
 }
 
+/// The declared open-config for a stream, sourced from coordination so an owner
+/// that did not declare the stream can still materialize its partitions with the
+/// right tier and retention.
+#[derive(Debug, Clone)]
+pub struct StreamOpenConfig {
+    pub durability: StreamDurability,
+    pub retention: Option<RetentionConfig>,
+}
+
+/// The broker's stream-ownership window, kept separate from `QueueOwnership`: the
+/// whole stream stack is a parallel track (own identity, placement, config), so
+/// ownership stays separate too. A single coordination provider implements both.
+pub trait StreamOwnership: std::fmt::Debug + Send + Sync {
+    /// Whether this node owns the stream partition (serves its publishes and
+    /// subscriptions). Standalone owns every partition.
+    fn owns_stream(&self, topic: &str, partition: Partition) -> bool;
+
+    /// The declared config for a stream known to coordination, used to open an
+    /// owned partition. `None` means no coordination view (standalone), where the
+    /// channel is already opened at declare time with its config.
+    fn stream_open_config(&self, topic: &str) -> Option<StreamOpenConfig>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OwnAllStreams;
+
+impl StreamOwnership for OwnAllStreams {
+    fn owns_stream(&self, _topic: &str, _partition: Partition) -> bool {
+        true
+    }
+
+    fn stream_open_config(&self, _topic: &str) -> Option<StreamOpenConfig> {
+        None
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct StaticQueueOwnership {
     owned: HashSet<OwnedQueue>,
@@ -1343,6 +1379,7 @@ pub struct Broker<
 
     metrics: Option<Arc<BrokerStats>>,
     pub(crate) ownership: Arc<dyn QueueOwnership>,
+    pub(crate) stream_ownership: Arc<dyn StreamOwnership>,
 
     /// Per-queue durable replication progress reported by followers (from
     /// stamped replication reads). Drives publish-confirm durability policies.
@@ -1485,6 +1522,18 @@ impl<
         metrics: Option<Arc<BrokerStats>>,
         ownership: Arc<dyn QueueOwnership>,
     ) -> Arc<Self> {
+        Self::new_with_ownerships(engine, cfg, metrics, ownership, Arc::new(OwnAllStreams))
+    }
+
+    /// Construct with both ownership windows. Cluster wiring passes the same
+    /// coordination provider for both; standalone defaults to own-all.
+    pub fn new_with_ownerships(
+        engine: E,
+        cfg: BrokerConfig,
+        metrics: Option<Arc<BrokerStats>>,
+        ownership: Arc<dyn QueueOwnership>,
+        stream_ownership: Arc<dyn StreamOwnership>,
+    ) -> Arc<Self> {
         let metrics_clone = metrics.clone();
         if let Some(metrics) = metrics_clone {
             metrics.register_queue_state_callback(Some(Arc::new({
@@ -1538,6 +1587,7 @@ impl<
             task_group: Arc::new(TaskGroup::new()),
             metrics,
             ownership,
+            stream_ownership,
         });
 
         // expiry worker: keeps Stroma turning inflight -> ready again
@@ -1654,6 +1704,17 @@ impl<
         if let Some(ch) = self.streams.get(&key) {
             return Some(ch.value().clone());
         }
+        // A coordination-declared stream this owner has not opened yet (e.g. an
+        // owner that did not declare it, or a fresh owner after failover):
+        // materialize with the DECLARED config from coordination, not defaults.
+        if let Some(config) = self.stream_ownership.stream_open_config(tp) {
+            return self
+                .get_or_open_stream(tp, part, config.durability, config.retention)
+                .await
+                .ok();
+        }
+        // Fallback: a durable on-disk stream marker (data already present locally)
+        // with no coordination view — open with defaults.
         if self.engine.durable_is_stream(tp, part) {
             return self
                 .get_or_open_stream(tp, part, StreamDurability::default(), None)
@@ -1780,6 +1841,35 @@ impl<
             topic: topic.to_string(),
             partition,
             group: group.map(str::to_string),
+        })
+    }
+
+    /// Whether this node owns the stream partition (standalone owns all).
+    pub fn owns_stream(&self, topic: &str, partition: u32) -> bool {
+        self.stream_ownership
+            .owns_stream(topic, Partition::new(partition))
+    }
+
+    /// Whether `topic` is a stream declared in coordination (so a non-owner can
+    /// still recognize it and redirect rather than fall into the queue path).
+    /// Always false standalone, where the local channel registry is authoritative.
+    pub fn stream_declared_in_coordination(&self, topic: &str) -> bool {
+        self.stream_ownership.stream_open_config(topic).is_some()
+    }
+
+    /// Gate a stream operation on ownership, mirroring `ensure_queue_owner`.
+    pub fn ensure_stream_owner(
+        &self,
+        topic: &str,
+        partition: u32,
+    ) -> Result<(), BrokerError> {
+        if self.owns_stream(topic, partition) {
+            return Ok(());
+        }
+        Err(BrokerError::NotOwner {
+            topic: topic.to_string(),
+            partition: Partition::new(partition),
+            group: None,
         })
     }
 
