@@ -114,6 +114,33 @@ cursor_event_from)`. This is why reuse is high.
   (8) + protocol op (9) + follower worker tick (7).
 - 73d: durable confirm (10) + applied-tail failover (11).
 
+## Follower worker: follow the queue precedent (reuse, don't fork)
+
+Per the "follow queue precedents" directive, the stream follower worker REUSES the
+queue follower-worker machinery rather than a bespoke loop:
+
+- Represent a stream partition as `QueueIdentity{topic, partition, group: None}` at
+  the worker layer (a topic is either a stream or a queue, so the runtime map keyed
+  by `QueueIdentity` never collides). The `follower_replication_workers` map, tick
+  guards, retry / OwnerChanged / shutdown lifecycle all reuse.
+- Thread a resource kind (Queue | Stream) through
+  `catch_up_replication_follower_from_owner` (+ `_with_checkpoint`) and the worker
+  loop so the ONLY divergences are: the apply call
+  (`apply_replicated_stream_batch` vs `apply_replicated_queue_batch`, replication.rs
+  ~1605) and the peer op (stream-mode peer, already built).
+- Make `BrokerOwnerReplicationPeerResolver` kind-aware so a stream assignment
+  resolves a `.with_stream_mode()` peer.
+- Resume offsets from `stream_replication_next_offsets` (already added).
+
+This keeps the queue path byte-identical (add a branch, don't rewrite) and must be
+tested on BOTH paths. It is an invasive refactor of shared data-integrity code, so
+it is the careful final piece.
+
+Status of the plumbing (all committed): keratin substrate (apply + epoch/role +
+next-offsets), fibril engine seam, protocol StreamReplicationRead op + owner
+handler, stream-mode remote peer. REMAINING: the kind-parameterized worker +
+resolver + apply wiring (consume 73b transitions) + stream assignment watcher.
+
 ## Honest durability semantics
 
 Owner-only durable survives process restart (local fsync), NOT node loss. Only
