@@ -23,8 +23,8 @@ use fibril_broker::{
     },
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
-        LocalAssignmentTransition, NodeInfo, PartitionAssignment, QueueIdentity,
-        StaticCoordination,
+        LocalAssignmentTransition, LocalStreamAssignmentTransition, NodeInfo, PartitionAssignment,
+        QueueIdentity, StaticCoordination, StreamAssignment, StreamIdentity,
     },
     queue_engine::{
         Deliverable, DestroyOutcome, EvictOutcome, FollowerStateCheckpointInstall, InspectMode,
@@ -3232,6 +3232,127 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
         .expect("second replicated message should deliver after promotion");
     assert_eq!(first.message.payload, b"first");
     assert_eq!(second.message.payload, b"second");
+
+    owner.shutdown().await;
+    follower.shutdown().await;
+}
+
+/// Durable stream replication end to end through the stream-mode pull path: an
+/// owner publishes stream records and commits a cursor; a follower becomes a
+/// stream follower and catches up via `ReplicationResourceKind::Stream`, landing
+/// the records at the owner's offsets plus the replicated cursor-commit event.
+/// Promotion is a later brick, so this asserts up to follower-has-the-data.
+#[tokio::test]
+async fn stream_follower_catches_up_records_and_cursor_from_owner() {
+    use fibril_broker::stream::StreamDurability;
+
+    let headers = || MessageHeaders {
+        published: unix_millis(),
+        publish_received: unix_millis(),
+        content_type: None,
+        extra: Default::default(),
+    };
+
+    let (owner, _owner_dir) = open_test_broker().await;
+    let (follower, _follower_dir) = open_test_broker().await;
+
+    let stream = StreamIdentity::new("events", Partition::new(0));
+
+    // Owner: open a durable stream and take ownership at the assignment epoch so
+    // its appends are stamped with epoch 1 (matching what the follower fences on).
+    let owner_channel = owner
+        .get_or_open_stream("events", 0, StreamDurability::Durable, None)
+        .await
+        .unwrap();
+    let become_owner = LocalStreamAssignmentTransition {
+        stream: stream.clone(),
+        previous_role: None,
+        next_role: Some(LocalAssignmentRole::Owner),
+        previous: None,
+        next: Some(StreamAssignment::new(
+            stream.clone(),
+            "owner",
+            vec!["follower".to_string()],
+            1,
+        )),
+        intent: LocalAssignmentIntent::BecomeOwner,
+    };
+    assert!(matches!(
+        owner
+            .apply_stream_assignment_transition(&become_owner)
+            .await
+            .unwrap(),
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::BecomeOwner)
+    ));
+    owner_channel
+        .publish(headers(), b"first".to_vec())
+        .await
+        .unwrap();
+    let last_offset = owner_channel
+        .publish(headers(), b"second".to_vec())
+        .await
+        .unwrap();
+    owner_channel.settle("group", last_offset).await.unwrap();
+
+    // Follower: take the stream follower role (storage role + epoch fence) so it
+    // accepts replicated stream batches.
+    let become_follower = LocalStreamAssignmentTransition {
+        stream: stream.clone(),
+        previous_role: None,
+        next_role: Some(LocalAssignmentRole::Follower),
+        previous: None,
+        next: Some(StreamAssignment::new(
+            stream.clone(),
+            "owner",
+            vec!["follower".to_string()],
+            1,
+        )),
+        intent: LocalAssignmentIntent::BecomeFollower,
+    };
+    assert!(matches!(
+        follower
+            .apply_stream_assignment_transition(&become_follower)
+            .await
+            .unwrap(),
+        BrokerAssignmentTransitionApply::Applied(LocalAssignmentIntent::BecomeFollower)
+    ));
+
+    // Catch up the follower from the owner over the stream-mode pull path.
+    let outcome = follower
+        .catch_up_replication_follower_from_owner(
+            owner.as_ref(),
+            "events",
+            Partition::new(0),
+            None,
+            ReplicationResourceKind::Stream,
+            BrokerReplicationCatchUpOptions {
+                message_from: 0,
+                event_from: 0,
+                max_messages_per_read: 10,
+                max_events_per_read: 10,
+                max_bytes_per_read: usize::MAX,
+                max_iterations: 4,
+                max_wait_ms: 0,
+            },
+        )
+        .await
+        .unwrap();
+    let progress = match outcome {
+        BrokerReplicationCatchUp::CaughtUp(progress) => progress,
+        other => panic!("stream follower did not catch up: {other:?}"),
+    };
+    assert_eq!(progress.applied_message_records, 2);
+    assert_eq!(progress.applied_event_records, 1);
+
+    // The follower's stream log tail matches the owner's: records landed at the
+    // owner's offsets.
+    let (owner_head, owner_tail) = owner_channel.head_tail().await.unwrap();
+    let follower_channel = follower
+        .get_or_open_stream("events", 0, StreamDurability::Durable, None)
+        .await
+        .unwrap();
+    let (follower_head, follower_tail) = follower_channel.head_tail().await.unwrap();
+    assert_eq!((follower_head, follower_tail), (owner_head, owner_tail));
 
     owner.shutdown().await;
     follower.shutdown().await;
