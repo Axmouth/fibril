@@ -108,8 +108,14 @@ stream as HA unless it has a replication factor of at least one.
 
 For a durable subscription, settling a record (manual ack, or server-side
 auto-ack) advances the cursor past it — at-least-once delivery with no offset
-math. Publishing to a stream uses the ordinary publish path; the broker routes by
-channel kind, so the same producer works for queues and streams.
+math. Cursor commits are microbatched per partition off the delivery path: a
+small window (default 100µs) coalesces a burst of acks — across every reader on
+the partition — into one durable write, keeping the high-water mark per consumer.
+This keeps high-fan-out auto-ack from committing once per record without changing
+the guarantee: the cursor only moves forward, so a crash before the next flush
+simply re-delivers a bounded window. Publishing to a stream uses the ordinary
+publish path; the broker routes by channel kind, so the same producer works for
+queues and streams.
 
 See [Client usage](/latest/clients/) for the stream API in Rust, TypeScript, and
 Python.
