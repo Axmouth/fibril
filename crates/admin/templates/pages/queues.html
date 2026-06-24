@@ -135,7 +135,10 @@ async function refresh() {
   const data = await api('/admin/api/queues_debug');
   const container = document.getElementById("queues");
   const activityByQueue = new Map((data.broker_activity || []).map(item => [queueKey(item), item]));
-  const queues = data.queues || [];
+  // Plexus streams reuse the queue handle, so they appear in the debug snapshot
+  // tagged kind="stream". They have their own page; keep the queues view to
+  // actual work queues only.
+  const queues = (data.queues || []).filter(item => item.kind !== "stream");
   const activitySummary = data.broker_activity_summary || {};
   const cleanupMetrics = data.broker_cleanup_metrics || {};
   const loaded = queues.filter(item => item.materialized).length;
