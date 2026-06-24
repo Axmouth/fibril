@@ -12,7 +12,7 @@ use fibril_broker::{
     broker::{
         BrokerError, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
         BrokerOwnerReplicationRecords, BrokerReplicationStreamApply, FollowerStreamExit,
-        ReplicatedStreamApply,
+        ReplicatedStreamApply, ReplicationResourceKind,
     },
     coordination::{Coordination, NodeInfo, PartitionAssignment},
     queue_engine::{
@@ -178,7 +178,9 @@ impl ProtocolOwnerPeerResolverConfig {
 /// resolver.
 pub struct StaticProtocolOwnerPeerResolver {
     cfg: ProtocolOwnerPeerResolverConfig,
-    peers: Mutex<HashMap<String, Arc<ProtocolOwnerReplicationPeer>>>,
+    // Keyed by (owner, kind): a stream peer reads via the stream-mode pull op, so
+    // it is cached separately from a queue peer to the same owner.
+    peers: Mutex<HashMap<(String, ReplicationResourceKind), Arc<ProtocolOwnerReplicationPeer>>>,
 }
 
 impl StaticProtocolOwnerPeerResolver {
@@ -211,6 +213,7 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
     fn resolve_owner_peer<'a>(
         &'a self,
         assignment: &'a PartitionAssignment,
+        kind: ReplicationResourceKind,
     ) -> futures::future::BoxFuture<
         'a,
         Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>,
@@ -220,8 +223,9 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
                 return Ok(None);
             };
 
+            let cache_key = (assignment.owner.clone(), kind);
             let mut peers = self.peers.lock().await;
-            if let Some(peer) = peers.get(&assignment.owner) {
+            if let Some(peer) = peers.get(&cache_key) {
                 let peer: Arc<dyn BrokerOwnerReplicationPeer> = peer.clone();
                 return Ok(Some(peer));
             }
@@ -235,8 +239,11 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
             }
+            if kind == ReplicationResourceKind::Stream {
+                built = built.with_stream_mode();
+            }
             let peer = Arc::new(built);
-            peers.insert(assignment.owner.clone(), peer.clone());
+            peers.insert(cache_key, peer.clone());
             let peer: Arc<dyn BrokerOwnerReplicationPeer> = peer;
             Ok(Some(peer))
         })
@@ -257,7 +264,9 @@ struct CachedProtocolOwnerPeer {
 pub struct CoordinationProtocolOwnerPeerResolver {
     coordination: Arc<dyn Coordination>,
     cfg: ProtocolOwnerPeerResolverConfig,
-    peers: Mutex<HashMap<String, CachedProtocolOwnerPeer>>,
+    // Keyed by (owner, kind): a stream peer reads via the stream-mode pull op, so
+    // it is cached separately from a queue peer to the same owner.
+    peers: Mutex<HashMap<(String, ReplicationResourceKind), CachedProtocolOwnerPeer>>,
 }
 
 impl CoordinationProtocolOwnerPeerResolver {
@@ -300,20 +309,22 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
     fn resolve_owner_peer<'a>(
         &'a self,
         assignment: &'a PartitionAssignment,
+        kind: ReplicationResourceKind,
     ) -> futures::future::BoxFuture<
         'a,
         Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>,
     > {
         Box::pin(async move {
+            let cache_key = (assignment.owner.clone(), kind);
             let snapshot = self.coordination.snapshot();
             let Some(node) = snapshot.nodes.get(&assignment.owner) else {
-                self.peers.lock().await.remove(&assignment.owner);
+                self.peers.lock().await.remove(&cache_key);
                 return Ok(None);
             };
             let addr = node.broker_addr;
 
             let mut peers = self.peers.lock().await;
-            if let Some(cached) = peers.get(&assignment.owner) {
+            if let Some(cached) = peers.get(&cache_key) {
                 if cached.addr == addr {
                     let peer: Arc<dyn BrokerOwnerReplicationPeer> = cached.peer.clone();
                     return Ok(Some(peer));
@@ -329,9 +340,12 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
             }
+            if kind == ReplicationResourceKind::Stream {
+                built = built.with_stream_mode();
+            }
             let peer = Arc::new(built);
             peers.insert(
-                assignment.owner.clone(),
+                cache_key,
                 CachedProtocolOwnerPeer {
                     addr,
                     peer: peer.clone(),

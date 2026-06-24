@@ -18,7 +18,8 @@ use fibril_broker::{
         BrokerReplicationCatchUpProgress, BrokerReplicationCheckpointRequired, ConsumerConfig,
         FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
         FollowerReplicationWorkerState, FollowerReplicationWorkerStatus, OwnedQueue,
-        QueueEvictionAttempt, QueueEvictionSkip, SettleRequest, SettleType, StaticQueueOwnership,
+        QueueEvictionAttempt, QueueEvictionSkip, ReplicationResourceKind, SettleRequest, SettleType,
+        StaticQueueOwnership,
     },
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
@@ -1426,6 +1427,7 @@ async fn assignment_transition_apply_can_stop_follower() {
             "transition-stop-follower",
             Partition::new(0),
             Some("workers"),
+            ReplicationResourceKind::Queue,
             records,
         )
         .await
@@ -1483,6 +1485,7 @@ async fn refresh_follower_keeps_replication_worker_progress() {
         .run_follower_replication_worker_once(
             &owner,
             &queue,
+            ReplicationResourceKind::Queue,
             FollowerReplicationWorkerConfig::default(),
         )
         .await
@@ -1937,7 +1940,13 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
 
     // Stale owner's batches (epoch 0) must be rejected, nothing applied.
     let outcome = follower
-        .apply_follower_replication_records(topic, Partition::new(0), None, stale_records)
+        .apply_follower_replication_records(
+            topic,
+            Partition::new(0),
+            None,
+            ReplicationResourceKind::Queue,
+            stale_records,
+        )
         .await
         .unwrap();
     let BrokerFollowerReplicationApply::Applied(apply) = outcome else {
@@ -1969,7 +1978,13 @@ async fn epoch_fenced_follower_rejects_stale_owner_batches() {
         .await
         .unwrap();
     let outcome = follower
-        .apply_follower_replication_records(topic, Partition::new(0), None, fresh_records)
+        .apply_follower_replication_records(
+            topic,
+            Partition::new(0),
+            None,
+            ReplicationResourceKind::Queue,
+            fresh_records,
+        )
         .await
         .unwrap();
     let BrokerFollowerReplicationApply::Applied(apply) = outcome else {
@@ -2018,6 +2033,7 @@ async fn catch_up_rejects_stale_append_without_recording_ready_state() {
             topic,
             Partition::new(0),
             None,
+            ReplicationResourceKind::Queue,
             BrokerReplicationCatchUpOptions {
                 max_messages_per_read: 10,
                 max_events_per_read: 10,
@@ -3168,7 +3184,13 @@ async fn broker_replication_read_applies_to_follower_and_promotes() {
     };
 
     let apply = follower
-        .apply_follower_replication_records("catchup", Partition::new(0), None, records)
+        .apply_follower_replication_records(
+            "catchup",
+            Partition::new(0),
+            None,
+            ReplicationResourceKind::Queue,
+            records,
+        )
         .await
         .unwrap();
     assert!(matches!(apply, BrokerFollowerReplicationApply::Applied(_)));
@@ -3282,7 +3304,13 @@ async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
         .await
         .unwrap();
     let apply = follower
-        .apply_follower_replication_records("checkpoint", Partition::new(0), None, records)
+        .apply_follower_replication_records(
+            "checkpoint",
+            Partition::new(0),
+            None,
+            ReplicationResourceKind::Queue,
+            records,
+        )
         .await
         .unwrap();
     assert!(matches!(apply, BrokerFollowerReplicationApply::Applied(_)));
@@ -3350,6 +3378,7 @@ async fn follower_apply_returns_checkpoint_required_without_materializing_queue(
             "checkpointed",
             Partition::new(0),
             None,
+            ReplicationResourceKind::Queue,
             BrokerOwnerReplicationRecords {
                 messages: OwnerReplicationRead::CheckpointRequired {
                     epoch: message_checkpoint.epoch,
@@ -3395,6 +3424,7 @@ async fn follower_apply_returns_event_checkpoint_required_after_empty_message_ba
             "event-checkpointed",
             Partition::new(0),
             None,
+            ReplicationResourceKind::Queue,
             BrokerOwnerReplicationRecords {
                 messages: OwnerReplicationRead::Batch(OwnerReplicationBatch::<Message> {
                     epoch: 4,
@@ -3466,6 +3496,7 @@ async fn broker_replication_catch_up_loop_handles_multiple_passes() {
             "multi-pass",
             Partition::new(0),
             None,
+            ReplicationResourceKind::Queue,
             BrokerReplicationCatchUpOptions {
                 max_messages_per_read: 2,
                 max_events_per_read: 2,
@@ -3566,6 +3597,7 @@ async fn checkpoint_aware_catch_up_preserves_normal_catch_up_path() {
             "checkpoint-aware-normal",
             Partition::new(0),
             None,
+            ReplicationResourceKind::Queue,
             BrokerReplicationCatchUpOptions {
                 max_messages_per_read: 2,
                 max_events_per_read: 2,
@@ -3649,6 +3681,7 @@ async fn checkpoint_aware_catch_up_repairs_overlapping_local_prefix() {
             topic,
             partition,
             None,
+            ReplicationResourceKind::Queue,
             BrokerReplicationCatchUpOptions {
                 max_messages_per_read: 10,
                 max_events_per_read: 10,
@@ -3947,7 +3980,7 @@ async fn follower_worker_tick_records_catch_up_progress() {
         ..Default::default()
     };
     let outcome = follower
-        .run_follower_replication_worker_once(&owner, &queue, cfg)
+        .run_follower_replication_worker_once(&owner, &queue, ReplicationResourceKind::Queue, cfg)
         .await
         .unwrap();
 
@@ -4061,6 +4094,7 @@ impl BrokerOwnerReplicationPeerResolver for StaticOwnerPeerResolver {
     fn resolve_owner_peer<'a>(
         &'a self,
         _assignment: &'a PartitionAssignment,
+        _kind: ReplicationResourceKind,
     ) -> BoxFuture<'a, Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>> {
         Box::pin(async move { Ok(Some(self.peer.clone())) })
     }
@@ -4242,7 +4276,12 @@ async fn follower_worker_tick_uses_owner_peer_abstraction() {
 
     let cfg = FollowerReplicationWorkerConfig::default();
     let outcome = follower
-        .run_follower_replication_worker_once(&EmptyOwnerPeer, &queue, cfg)
+        .run_follower_replication_worker_once(
+            &EmptyOwnerPeer,
+            &queue,
+            ReplicationResourceKind::Queue,
+            cfg,
+        )
         .await
         .unwrap();
 
@@ -4293,13 +4332,13 @@ async fn follower_worker_tick_long_polls_only_after_caught_up() {
     };
 
     follower
-        .run_follower_replication_worker_once(&peer, &queue, cfg)
+        .run_follower_replication_worker_once(&peer, &queue, ReplicationResourceKind::Queue, cfg)
         .await
         .unwrap();
     assert_eq!(peer.last_max_wait_ms.load(Ordering::Acquire), 0);
 
     follower
-        .run_follower_replication_worker_once(&peer, &queue, cfg)
+        .run_follower_replication_worker_once(&peer, &queue, ReplicationResourceKind::Queue, cfg)
         .await
         .unwrap();
     assert_eq!(
@@ -4371,7 +4410,13 @@ async fn follower_worker_loop_cancels_in_flight_owner_read() {
         shutdown.cancel();
     };
     let loop_result =
-        follower.run_follower_replication_worker_loop(assignment, resolver, cfg, shutdown.clone());
+        follower.run_follower_replication_worker_loop(
+            assignment,
+            resolver,
+            ReplicationResourceKind::Queue,
+            cfg,
+            shutdown.clone(),
+        );
     let (_, outcome) = tokio::time::timeout(Duration::from_secs(1), async {
         tokio::join!(canceller, loop_result)
     })
@@ -4411,6 +4456,7 @@ async fn broker_shutdown_stops_spawned_follower_worker() {
         .spawn_follower_replication_worker_loop(
             assignment,
             resolver,
+            ReplicationResourceKind::Queue,
             FollowerReplicationWorkerConfig {
                 caught_up_poll_ms: 60_000,
                 ..Default::default()
@@ -4455,7 +4501,13 @@ async fn follower_worker_loop_ticks_until_cancelled() {
         shutdown.cancel();
     };
     let loop_result =
-        follower.run_follower_replication_worker_loop(assignment, resolver, cfg, shutdown.clone());
+        follower.run_follower_replication_worker_loop(
+            assignment,
+            resolver,
+            ReplicationResourceKind::Queue,
+            cfg,
+            shutdown.clone(),
+        );
     let (_, outcome) = tokio::join!(canceller, loop_result);
 
     assert_eq!(
@@ -4479,6 +4531,7 @@ async fn follower_worker_loop_exits_when_worker_is_stopped() {
         .run_follower_replication_worker_loop(
             assignment,
             resolver,
+            ReplicationResourceKind::Queue,
             FollowerReplicationWorkerConfig::default(),
             shutdown,
         )
@@ -4516,6 +4569,7 @@ async fn follower_worker_loop_exits_when_owner_peer_is_not_owner() {
         .run_follower_replication_worker_loop(
             assignment,
             resolver,
+            ReplicationResourceKind::Queue,
             FollowerReplicationWorkerConfig::default(),
             shutdown,
         )
@@ -4557,12 +4611,22 @@ async fn follower_worker_loop_supervisor_starts_only_once() {
 
     assert!(
         follower
-            .spawn_follower_replication_worker_loop(assignment.clone(), resolver.clone(), cfg)
+            .spawn_follower_replication_worker_loop(
+                assignment.clone(),
+                resolver.clone(),
+                ReplicationResourceKind::Queue,
+                cfg,
+            )
             .unwrap()
     );
     assert!(
         !follower
-            .spawn_follower_replication_worker_loop(assignment, resolver, cfg)
+            .spawn_follower_replication_worker_loop(
+                assignment,
+                resolver,
+                ReplicationResourceKind::Queue,
+                cfg,
+            )
             .unwrap()
     );
 
@@ -4637,6 +4701,7 @@ async fn follower_worker_tick_requires_registered_worker() {
         .run_follower_replication_worker_once(
             &owner,
             &queue,
+            ReplicationResourceKind::Queue,
             FollowerReplicationWorkerConfig::default(),
         )
         .await

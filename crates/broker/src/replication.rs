@@ -78,9 +78,13 @@ pub trait BrokerOwnerReplicationPeer: Send + Sync {
 }
 
 pub trait BrokerOwnerReplicationPeerResolver: Send + Sync {
+    /// Resolve the owner peer for `assignment`. `kind` selects the read transport:
+    /// a stream peer reads via the stream-mode pull op, so its peer is built (and
+    /// cached) separately from a queue peer to the same owner.
     fn resolve_owner_peer<'a>(
         &'a self,
         assignment: &'a PartitionAssignment,
+        kind: ReplicationResourceKind,
     ) -> BoxFuture<'a, Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>>;
 }
 
@@ -153,6 +157,19 @@ pub enum FollowerReplicationWorkerLoopExit {
     Cancelled { ticks: usize },
     WorkerStopped { ticks: usize },
     OwnerChanged { ticks: usize },
+}
+
+/// Which durable resource a follower-replication path is catching up: a queue
+/// partition or a Plexus stream partition. Both are two-log entities (record log
+/// + progress/cursor-event log), so the catch-up, worker loop, and runtime map
+/// are shared; this kind selects only the divergent endpoints — the final engine
+/// apply call and the owner peer's read op (stream-mode). A stream is keyed as a
+/// `QueueIdentity` with `group: None` at the worker layer (a topic is either a
+/// queue or a stream, so the map never collides).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReplicationResourceKind {
+    Queue,
+    Stream,
 }
 
 /// Outcome of [`Broker::apply_replicated_stream_batch`].
@@ -1515,6 +1532,7 @@ impl Broker<StromaEngine> {
         topic: &str,
         partition: Partition,
         group: Option<&str>,
+        kind: ReplicationResourceKind,
         records: BrokerOwnerReplicationRecords,
     ) -> Result<BrokerFollowerReplicationApply, BrokerError> {
         let messages = match records.messages {
@@ -1600,10 +1618,21 @@ impl Broker<StromaEngine> {
             }
         };
 
-        let outcome = self
-            .engine
-            .apply_replicated_queue_batch(topic, partition.id(), group, messages, events)
-            .await?;
+        // The records->batches conversion above is identical for both kinds; only
+        // the final engine apply diverges. A stream advances its record tail after
+        // the append (and carries no consumer group).
+        let outcome = match kind {
+            ReplicationResourceKind::Queue => {
+                self.engine
+                    .apply_replicated_queue_batch(topic, partition.id(), group, messages, events)
+                    .await?
+            }
+            ReplicationResourceKind::Stream => {
+                self.engine
+                    .apply_replicated_stream_batch(topic, partition.id(), messages, events)
+                    .await?
+            }
+        };
         Ok(BrokerFollowerReplicationApply::Applied(outcome))
     }
 
@@ -1625,7 +1654,13 @@ impl Broker<StromaEngine> {
             // The owner read itself signalled a checkpoint is required.
             _ => {
                 let _ = self
-                    .apply_follower_replication_records(topic, partition, group, records)
+                    .apply_follower_replication_records(
+                        topic,
+                        partition,
+                        group,
+                        ReplicationResourceKind::Queue,
+                        records,
+                    )
                     .await?;
                 return Ok(ReplicatedStreamApply::CheckpointRequired);
             }
@@ -1633,8 +1668,14 @@ impl Broker<StromaEngine> {
 
         let apply = {
             let _follower_apply_timer = self.replication_timing.follower_apply.timer();
-            self.apply_follower_replication_records(topic, partition, group, records)
-                .await?
+            self.apply_follower_replication_records(
+                topic,
+                partition,
+                group,
+                ReplicationResourceKind::Queue,
+                records,
+            )
+            .await?
         };
 
         let outcome = match apply {
@@ -1712,6 +1753,7 @@ impl Broker<StromaEngine> {
         topic: &str,
         partition: Partition,
         group: Option<&str>,
+        kind: ReplicationResourceKind,
         options: BrokerReplicationCatchUpOptions,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
         if options.max_messages_per_read == 0
@@ -1758,8 +1800,10 @@ impl Broker<StromaEngine> {
                 _ => {
                     let apply = {
                         let _follower_apply_timer = self.replication_timing.follower_apply.timer();
-                        self.apply_follower_replication_records(topic, partition, group, records)
-                            .await?
+                        self.apply_follower_replication_records(
+                            topic, partition, group, kind, records,
+                        )
+                        .await?
                     };
                     return match apply {
                         BrokerFollowerReplicationApply::CheckpointRequired { messages, events } => {
@@ -1786,7 +1830,7 @@ impl Broker<StromaEngine> {
 
             let apply = {
                 let _follower_apply_timer = self.replication_timing.follower_apply.timer();
-                self.apply_follower_replication_records(topic, partition, group, records)
+                self.apply_follower_replication_records(topic, partition, group, kind, records)
                     .await?
             };
 
@@ -1852,6 +1896,7 @@ impl Broker<StromaEngine> {
         topic: &str,
         partition: Partition,
         group: Option<&str>,
+        kind: ReplicationResourceKind,
         options: BrokerReplicationCatchUpOptions,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
         if options.max_messages_per_read == 0
@@ -1867,7 +1912,9 @@ impl Broker<StromaEngine> {
         let mut options = options;
         for checkpoint_attempts in 0..=1 {
             let outcome = self
-                .catch_up_replication_follower_from_owner(owner, topic, partition, group, options)
+                .catch_up_replication_follower_from_owner(
+                    owner, topic, partition, group, kind, options,
+                )
                 .await?;
 
             let BrokerReplicationCatchUp::CheckpointRequired {
@@ -1920,6 +1967,7 @@ impl Broker<StromaEngine> {
         &self,
         owner: &dyn BrokerOwnerReplicationPeer,
         queue: &crate::coordination::QueueIdentity,
+        kind: ReplicationResourceKind,
         cfg: FollowerReplicationWorkerConfig,
     ) -> Result<BrokerReplicationCatchUp, BrokerError> {
         let _follower_tick_timer = self.replication_timing.follower_tick.timer();
@@ -1935,6 +1983,7 @@ impl Broker<StromaEngine> {
                 queue.topic.as_str(),
                 queue.partition,
                 queue.group.as_deref(),
+                kind,
                 options,
             )
             .await?
@@ -1944,6 +1993,7 @@ impl Broker<StromaEngine> {
                 queue.topic.as_str(),
                 queue.partition,
                 queue.group.as_deref(),
+                kind,
                 options,
             )
             .await?
@@ -1957,6 +2007,7 @@ impl Broker<StromaEngine> {
         self: &Arc<Self>,
         assignment: PartitionAssignment,
         resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
+        kind: ReplicationResourceKind,
         cfg: FollowerReplicationWorkerConfig,
         shutdown: CancellationToken,
     ) -> Result<FollowerReplicationWorkerLoopExit, BrokerError> {
@@ -1989,7 +2040,7 @@ impl Broker<StromaEngine> {
                 return Ok(FollowerReplicationWorkerLoopExit::Cancelled { ticks });
             }
 
-            let Some(owner) = resolver.resolve_owner_peer(&assignment).await? else {
+            let Some(owner) = resolver.resolve_owner_peer(&assignment, kind).await? else {
                 tracing::warn!(
                     topic = %assignment.queue.topic,
                     partition = assignment.queue.partition.id(),
@@ -2019,7 +2070,10 @@ impl Broker<StromaEngine> {
                     return Ok(FollowerReplicationWorkerLoopExit::WorkerStopped { ticks });
                 }
                 outcome = async {
-                    if cfg.stream_enabled {
+                    // The credit-based streaming transport has no stream-mode op
+                    // (only the StreamReplicationRead pull op is stream-aware), so
+                    // a Plexus stream always catches up via the pull path.
+                    if cfg.stream_enabled && kind == ReplicationResourceKind::Queue {
                         self.run_follower_replication_stream_tick(
                             owner.as_ref(),
                             &assignment.queue,
@@ -2031,6 +2085,7 @@ impl Broker<StromaEngine> {
                         self.run_follower_replication_worker_once(
                             owner.as_ref(),
                             &assignment.queue,
+                            kind,
                             cfg,
                         )
                         .await
@@ -2145,7 +2200,12 @@ impl Broker<StromaEngine> {
                     ..cfg
                 };
                 let outcome = self
-                    .run_follower_replication_worker_once(owner, queue, fallback)
+                    .run_follower_replication_worker_once(
+                        owner,
+                        queue,
+                        ReplicationResourceKind::Queue,
+                        fallback,
+                    )
                     .await?;
                 worker.lock().await.record_catch_up(fallback, &outcome);
                 Ok(())
@@ -2158,6 +2218,7 @@ impl Broker<StromaEngine> {
         self: &Arc<Self>,
         assignment: PartitionAssignment,
         resolver: Arc<dyn BrokerOwnerReplicationPeerResolver>,
+        kind: ReplicationResourceKind,
         cfg: FollowerReplicationWorkerConfig,
     ) -> Result<bool, BrokerError> {
         let runtime = self.follower_replication_worker_runtime(&assignment.queue)?;
@@ -2173,7 +2234,9 @@ impl Broker<StromaEngine> {
                 let partition = assignment.queue.partition;
                 let group = assignment.queue.group.clone();
                 match broker
-                    .run_follower_replication_worker_loop(assignment, resolver, cfg, shutdown)
+                    .run_follower_replication_worker_loop(
+                        assignment, resolver, kind, cfg, shutdown,
+                    )
                     .await
                 {
                     Ok(outcome) => {

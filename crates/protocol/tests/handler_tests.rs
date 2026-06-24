@@ -11,7 +11,8 @@ use fibril_broker::{
     broker::{
         Broker, BrokerConfig, BrokerOwnerReplicationPeer, BrokerOwnerReplicationPeerResolver,
         FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
-        FollowerReplicationWorkerStatus, OwnedQueue, QueueEvictionAttempt, StaticQueueOwnership,
+        FollowerReplicationWorkerStatus, OwnedQueue, QueueEvictionAttempt, ReplicationResourceKind,
+        StaticQueueOwnership,
     },
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
@@ -1583,7 +1584,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
     );
 
     let peer = resolver
-        .resolve_owner_peer(&assignment)
+        .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("owner peer");
@@ -1626,7 +1627,7 @@ async fn static_protocol_owner_peer_resolver_returns_none_for_unknown_owner() {
 
     assert!(
         resolver
-            .resolve_owner_peer(&assignment)
+            .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
             .await
             .unwrap()
             .is_none()
@@ -1646,12 +1647,12 @@ async fn static_protocol_owner_peer_resolver_reuses_peer_for_owner() {
     );
 
     let first = resolver
-        .resolve_owner_peer(&assignment)
+        .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("first owner peer");
     let second = resolver
-        .resolve_owner_peer(&assignment)
+        .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("second owner peer");
@@ -1704,7 +1705,7 @@ async fn coordination_protocol_owner_peer_resolver_returns_none_for_missing_owne
 
     assert!(
         resolver
-            .resolve_owner_peer(&assignment)
+            .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
             .await
             .unwrap()
             .is_none()
@@ -1730,12 +1731,12 @@ async fn coordination_protocol_owner_peer_resolver_reuses_stable_owner_address()
     let resolver = CoordinationProtocolOwnerPeerResolver::new(coordination);
 
     let first = resolver
-        .resolve_owner_peer(&assignment)
+        .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("first owner peer");
     let second = resolver
-        .resolve_owner_peer(&assignment)
+        .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("second owner peer");
@@ -1766,7 +1767,7 @@ async fn coordination_protocol_owner_peer_resolver_replaces_peer_when_owner_addr
     let resolver = CoordinationProtocolOwnerPeerResolver::new(coordination.clone());
 
     let first = resolver
-        .resolve_owner_peer(&assignment)
+        .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("first owner peer");
@@ -1778,7 +1779,7 @@ async fn coordination_protocol_owner_peer_resolver_replaces_peer_when_owner_addr
     ));
 
     let second = resolver
-        .resolve_owner_peer(&assignment)
+        .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("second owner peer");
@@ -1820,7 +1821,7 @@ async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_m
     let resolver = CoordinationProtocolOwnerPeerResolver::new(coordination.clone());
 
     let first = resolver
-        .resolve_owner_peer(&first_assignment)
+        .resolve_owner_peer(&first_assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("first owner peer");
@@ -1833,7 +1834,7 @@ async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_m
     });
 
     let second = resolver
-        .resolve_owner_peer(&second_assignment)
+        .resolve_owner_peer(&second_assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("second owner peer");
@@ -1881,7 +1882,7 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
     );
 
     let peer = resolver
-        .resolve_owner_peer(&assignment)
+        .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
         .await
         .unwrap()
         .expect("owner peer");
@@ -2562,6 +2563,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     let loop_task = follower_broker.run_follower_replication_worker_loop(
         assignment,
         resolver.clone(),
+        ReplicationResourceKind::Queue,
         cfg,
         shutdown.clone(),
     );
@@ -2726,6 +2728,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     let loop_task = follower_broker.run_follower_replication_worker_loop(
         assignment,
         resolver.clone(),
+        ReplicationResourceKind::Queue,
         cfg,
         shutdown.clone(),
     );
@@ -2833,6 +2836,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     let loop_task = follower_broker.run_follower_replication_worker_loop(
         assignment,
         resolver.clone(),
+        ReplicationResourceKind::Queue,
         worker_cfg,
         shutdown.clone(),
     );

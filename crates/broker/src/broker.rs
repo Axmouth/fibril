@@ -4032,6 +4032,7 @@ impl Broker<StromaEngine> {
                         if let Err(err) = self.spawn_follower_replication_worker_loop(
                             assignment,
                             resolver.clone(),
+                            ReplicationResourceKind::Queue,
                             cfg,
                         ) {
                             tracing::error!(

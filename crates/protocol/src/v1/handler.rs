@@ -19,7 +19,7 @@ use fibril_broker::{
     broker::{
         Broker, BrokerError, BrokerFollowerReplicationApply, BrokerOwnerReplicationRecords,
         ConsumerConfig, ConsumerHandle, ConsumerLease, ExclusiveAssignmentUpdate, PublisherHandle,
-        SettleRequest, SettleType,
+        ReplicationResourceKind, SettleRequest, SettleType,
     },
     queue_engine::{
         DLQDiscardPolicyWire, DeclareMeta, FollowerStateCheckpointInstall, GlobalDLQ, Message,
@@ -2697,6 +2697,7 @@ pub async fn handle_connection(
                         &topic,
                         partition,
                         group.as_deref(),
+                        ReplicationResourceKind::Queue,
                         records,
                     )
                     .await
