@@ -141,6 +141,84 @@ next-offsets), fibril engine seam, protocol StreamReplicationRead op + owner
 handler, stream-mode remote peer. REMAINING: the kind-parameterized worker +
 resolver + apply wiring (consume 73b transitions) + stream assignment watcher.
 
+## Execution plan for the follower worker (next session, step by step)
+
+All anchors are fibril `crates/broker/src/replication.rs` unless noted. The whole
+transport plumbing below the worker is already committed (keratin substrate +
+engine seam + `StreamReplicationRead` op + owner handler + stream-mode peer +
+`stream_replication_next_offsets`). Build the worker bottom-up; commit per step.
+
+Step W1 - resource kind + the apply branch (the ONLY data divergence):
+- Add `pub enum ReplicationResourceKind { Queue, Stream }` (broker replication
+  module).
+- The divergence point is `apply_follower_replication_records` (~line 1513): its
+  final call is `engine.apply_replicated_queue_batch(topic, partition.id(), group,
+  messages, events)` (~line 1605). Add a `kind` param; when `Stream`, call
+  `engine.apply_replicated_stream_batch(topic, partition.id(), messages, events)`
+  (group is always None for streams). The records->batches conversion above is
+  identical - keep it shared, branch only the final engine call.
+- The checkpoint-required arms stay the same shape.
+
+Step W2 - thread `kind` through catch-up + worker (no behavior change for Queue):
+- `catch_up_replication_follower_from_owner` (+ `_with_checkpoint`): add `kind`,
+  pass to `apply_follower_replication_records`.
+- `run_follower_replication_worker_once` (~1919) and
+  `run_follower_replication_worker_loop` (~1956): add `kind`, pass down. Queue
+  callers pass `Queue` (mechanical).
+- Keep the runtime map (`follower_replication_workers`, keyed by `QueueIdentity`)
+  as-is: a stream is `QueueIdentity{topic, partition, group: None}` (a topic is
+  either a stream or a queue, so no collision).
+
+Step W3 - resolver kind-awareness:
+- `BrokerOwnerReplicationPeerResolver` (trait ~line 80) `resolve_owner_peer`
+  builds a `ProtocolOwnerReplicationPeer`. For a stream assignment it must build
+  `...new_reconnecting(...).with_stream_mode()`. Simplest: pass `kind` to
+  `resolve_owner_peer`, or carry it on the assignment wrapper. The endpoint lookup
+  (assignment.owner -> node endpoint) is identical.
+- The fibril resolver impl lives in `crates/fibril/src/lib.rs` (built from
+  coordination) and the test resolver in `crates/broker/tests/broker_tests.rs`
+  (~4061) and `crates/protocol/.../replication.rs`. Update each to honor `kind`.
+
+Step W4 - spawn + offsets:
+- `spawn_follower_replication_worker_loop` (~2157): accept `kind`; for streams
+  spawn with a `PartitionAssignment` synthesized from the `StreamAssignment`
+  (owner + followers + epoch, group None) + `kind = Stream`.
+- The worker resumes from `engine.stream_replication_next_offsets(tp, part)` for
+  streams (record_next, cursor_event_next) instead of the queue worker-state
+  offsets. Wire this into how the worker seeds `message_next_offset` /
+  `event_next_offset` for the Stream kind.
+
+Step W5 - apply wiring + stream assignment watcher:
+- Add `apply_stream_assignment_transition` consuming 73b
+  `plan_local_stream_transitions` (broker/src/coordination.rs):
+  - BecomeOwner -> `engine.become_stream_owner_with_epoch(tp, part, epoch)` +
+    `route_stream` opens the channel (already materializes from coordination
+    config).
+  - BecomeFollower -> `engine.become_stream_follower_with_epoch(tp, part, epoch)`
+    + `spawn_follower_replication_worker_loop(.., Stream)`.
+  - DemoteOwnerToFollower / PromoteFollowerToOwner / FreezeOwner / StopFollower:
+    mirror the queue arms in `apply_assignment_transition` (broker.rs ~4103),
+    minus consumer-lease/offset-release (streams have none).
+- Add a stream assignment watcher mirroring
+  `spawn_assignment_watcher_with_follower_replication` (broker.rs ~3939) +
+  `apply_assignment_snapshot_transitions_with_follower_replication` (~4013),
+  driven off the coordination snapshot `stream_assignments` diff. Wire it in
+  `crates/fibril/src/lib.rs` next to the queue watcher (cluster mode only).
+
+Step W6 - test end to end:
+- Mirror a queue replication integration test: two brokers, declare a durable
+  stream RF>=1, publish to the owner, assert the follower's log + cursors match
+  (records readable at owner offsets, cursor committed), then kill the owner and
+  assert a caught-up follower is promoted and serves (the promotion path is 73d,
+  so this step may assert up to follower-has-the-data; promotion lands in 73d).
+- Keep all existing QUEUE replication tests green (the kind=Queue path must be
+  byte-identical).
+
+Then 73d (durable confirm via `ReplicationDurabilityPolicy`: ReplicaAccepted =
+accept-after-write, ReplicaDurable/Majority = fsync-before-ack; caught-up-follower
+promotion reusing the applied-tail selection + a `promote_stream_follower_*`
+keratin fn) and 73e (RF setting + per-stream override + honest docs).
+
 ## Honest durability semantics
 
 Owner-only durable survives process restart (local fsync), NOT node loss. Only
