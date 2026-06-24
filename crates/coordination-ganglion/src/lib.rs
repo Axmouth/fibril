@@ -309,6 +309,11 @@ pub struct StreamRetentionConfig {
     pub max_records: Option<u64>,
 }
 
+/// Stream durability tier ordinal for the durable tier (matches the protocol
+/// `StreamDurability` ordinals: 0 ephemeral, 1 speculative, 2 durable). Only the
+/// durable tier replicates across nodes.
+pub const STREAM_DURABILITY_DURABLE: u8 = 2;
+
 /// A stream's full declared configuration, replicated through coordination so any
 /// owner can open its partitions with the correct partitioning, durability tier,
 /// and retention. `durability` is the tier ordinal (0 ephemeral, 1 speculative,
@@ -573,7 +578,7 @@ pub fn to_ganglion_snapshot(
         let mapped = ganglion_core::PartitionAssignment::new(
             resource.clone(),
             assignment.owner.clone(),
-            Vec::new(),
+            assignment.followers.clone(),
             assignment.epoch,
         );
         assignments.insert(resource, mapped);
@@ -642,7 +647,12 @@ pub fn to_fibril_snapshot(snapshot: &ganglion_core::CoordinationSnapshot) -> Coo
             let stream = to_fibril_stream(resource)?;
             Some((
                 stream.clone(),
-                StreamAssignment::new(stream, assignment.owner.clone(), assignment.epoch),
+                StreamAssignment::new(
+                    stream,
+                    assignment.owner.clone(),
+                    assignment.followers.clone(),
+                    assignment.epoch,
+                ),
             ))
         })
         .collect();
@@ -2161,14 +2171,32 @@ impl GanglionCoordination {
                 })
                 .map_err(ControlError::Planning)?;
 
-            // Streams place through the same controller pass (owner-only). Their
-            // assignments ride into the same ganglion snapshot so epoch stamping,
-            // anti-churn, and the guarded write all cover them uniformly.
+            // Streams place through the same controller pass. Their assignments
+            // ride into the same ganglion snapshot so epoch stamping, anti-churn,
+            // and the guarded write all cover them uniformly. Only the durable
+            // tier replicates: it gets `target_followers` replicas; the cheaper
+            // tiers stay owner-only (0 followers).
+            let stream_target_followers: HashMap<String, usize> = streams
+                .iter()
+                .map(|stream| stream.topic.to_string())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .map(|topic| {
+                    let followers = match self.stream_config(&topic) {
+                        Some(config) if config.durability == STREAM_DURABILITY_DURABLE => {
+                            target_followers
+                        }
+                        _ => 0,
+                    };
+                    (topic, followers)
+                })
+                .collect();
             plan.snapshot.stream_assignments = stream_planner
                 .plan(StreamPlacementInput {
                     nodes: live_nodes.clone(),
                     streams: streams.to_vec(),
                     existing: fibril_committed.stream_assignments,
+                    target_followers: stream_target_followers,
                     generation: committed.generation + 1,
                 })
                 .map_err(ControlError::Planning)?

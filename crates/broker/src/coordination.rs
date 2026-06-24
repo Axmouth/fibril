@@ -412,16 +412,26 @@ impl StreamIdentity {
 pub struct StreamAssignment {
     pub stream: StreamIdentity,
     pub owner: String,
+    /// Replica followers for the durable tier (empty for owner-only tiers).
+    /// A durable stream replicates its log to these nodes so the partition
+    /// survives owner node loss; one of them is promoted on failover.
+    pub followers: Vec<String>,
     /// Fencing epoch: bumps when ownership moves so a deposed owner can be
     /// fenced. Holds steady while the owner is unchanged.
     pub epoch: u64,
 }
 
 impl StreamAssignment {
-    pub fn new(stream: StreamIdentity, owner: impl Into<String>, epoch: u64) -> Self {
+    pub fn new(
+        stream: StreamIdentity,
+        owner: impl Into<String>,
+        followers: Vec<String>,
+        epoch: u64,
+    ) -> Self {
         Self {
             stream,
             owner: owner.into(),
+            followers,
             epoch,
         }
     }
@@ -429,13 +439,21 @@ impl StreamAssignment {
     pub fn is_owned_by(&self, node_id: &str) -> bool {
         self.owner == node_id
     }
+
+    pub fn is_followed_by(&self, node_id: &str) -> bool {
+        self.followers.iter().any(|follower| follower == node_id)
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamPlacementInput {
     pub nodes: HashMap<String, NodeInfo>,
     pub streams: Vec<StreamIdentity>,
     pub existing: HashMap<StreamIdentity, StreamAssignment>,
+    /// Replica follower count per stream topic; absent means 0 (owner-only, the
+    /// ephemeral/speculative tiers). Durable streams set this to the replication
+    /// factor so the planner spreads followers across distinct nodes.
+    pub target_followers: HashMap<String, usize>,
     pub generation: u64,
 }
 
@@ -488,14 +506,33 @@ impl StreamPlacementPolicy for DeterministicStreamPlacement {
                 })
                 .cloned()
                 .unwrap_or_else(|| node_ids[idx % node_ids.len()].clone());
-            // Reuse the prior epoch when the owner is unchanged; bump to the new
-            // generation when ownership moves so a deposed owner is fenced.
+            // Spread replica followers across distinct nodes for the durable
+            // tier (0 for owner-only tiers), reusing the queue follower planner.
+            let target_followers = input
+                .target_followers
+                .get(stream.topic.as_str())
+                .copied()
+                .unwrap_or(0);
+            let followers = plan_followers(
+                &node_ids,
+                &owner,
+                existing
+                    .map(|assignment| assignment.followers.as_slice())
+                    .unwrap_or(&[]),
+                target_followers,
+            );
+            // Reuse the prior epoch when owner and follower set are unchanged;
+            // bump to the new generation when ownership moves so a deposed owner
+            // is fenced.
             let epoch = existing
-                .filter(|assignment| assignment.owner == owner)
+                .filter(|assignment| assignment.owner == owner && assignment.followers == followers)
                 .map(|assignment| assignment.epoch)
                 .unwrap_or(input.generation);
 
-            assignments.insert(stream.clone(), StreamAssignment::new(stream, owner, epoch));
+            assignments.insert(
+                stream.clone(),
+                StreamAssignment::new(stream, owner, followers, epoch),
+            );
         }
 
         Ok(StreamPlacementPlan { assignments })
@@ -1943,14 +1980,19 @@ mod tests {
         );
     }
 
+    fn stream_target_followers(topic: &str, count: usize) -> HashMap<String, usize> {
+        let mut map = HashMap::new();
+        map.insert(topic.to_string(), count);
+        map
+    }
+
     #[test]
     fn stream_placement_allows_empty_set_without_nodes() {
         let plan = DeterministicStreamPlacement
             .plan(StreamPlacementInput {
-                nodes: HashMap::new(),
                 streams: Vec::new(),
-                existing: HashMap::new(),
                 generation: 5,
+                ..Default::default()
             })
             .unwrap();
 
@@ -1961,10 +2003,9 @@ mod tests {
     fn stream_placement_requires_nodes_when_streams_exist() {
         let err = DeterministicStreamPlacement
             .plan(StreamPlacementInput {
-                nodes: HashMap::new(),
                 streams: vec![StreamIdentity::new("events", Partition::new(0))],
-                existing: HashMap::new(),
                 generation: 1,
+                ..Default::default()
             })
             .unwrap_err();
 
@@ -1981,8 +2022,8 @@ mod tests {
                 streams: (0..3)
                     .map(|p| StreamIdentity::new("events", Partition::new(p)))
                     .collect(),
-                existing: HashMap::new(),
                 generation: 1,
+                ..Default::default()
             })
             .unwrap();
 
@@ -2004,7 +2045,7 @@ mod tests {
         let mut existing = HashMap::new();
         existing.insert(
             stream.clone(),
-            StreamAssignment::new(stream.clone(), "node-b", 4),
+            StreamAssignment::new(stream.clone(), "node-b", Vec::new(), 4),
         );
 
         let plan = DeterministicStreamPlacement
@@ -2013,6 +2054,7 @@ mod tests {
                 streams: vec![stream.clone()],
                 existing,
                 generation: 9,
+                ..Default::default()
             })
             .unwrap();
 
@@ -2027,7 +2069,7 @@ mod tests {
         let mut existing = HashMap::new();
         existing.insert(
             stream.clone(),
-            StreamAssignment::new(stream.clone(), "node-gone", 4),
+            StreamAssignment::new(stream.clone(), "node-gone", Vec::new(), 4),
         );
 
         let plan = DeterministicStreamPlacement
@@ -2036,12 +2078,74 @@ mod tests {
                 streams: vec![stream.clone()],
                 existing,
                 generation: 9,
+                ..Default::default()
             })
             .unwrap();
 
         let assignment = plan.assignments.get(&stream).expect("assignment");
         assert_ne!(assignment.owner, "node-gone", "dead owner is replaced");
         assert_eq!(assignment.epoch, 9, "owner change fences via a new epoch");
+    }
+
+    #[test]
+    fn stream_placement_spreads_followers_for_the_durable_tier() {
+        // A durable stream (target_followers > 0) gets distinct-node replicas;
+        // owner-only tiers (absent / 0) get none.
+        let durable = StreamIdentity::new("durable", Partition::new(0));
+        let ephemeral = StreamIdentity::new("ephemeral", Partition::new(0));
+        let plan = DeterministicStreamPlacement
+            .plan(StreamPlacementInput {
+                nodes: nodes(["node-a", "node-b", "node-c"]),
+                streams: vec![durable.clone(), ephemeral.clone()],
+                target_followers: stream_target_followers("durable", 2),
+                generation: 1,
+                ..Default::default()
+            })
+            .unwrap();
+
+        let durable_assignment = plan.assignments.get(&durable).expect("durable assigned");
+        assert_eq!(
+            durable_assignment.followers.len(),
+            2,
+            "durable stream replicates to its follower count"
+        );
+        assert!(
+            !durable_assignment.followers.contains(&durable_assignment.owner),
+            "the owner is never its own follower"
+        );
+
+        let ephemeral_assignment = plan.assignments.get(&ephemeral).expect("ephemeral assigned");
+        assert!(
+            ephemeral_assignment.followers.is_empty(),
+            "owner-only tiers get no followers"
+        );
+    }
+
+    #[test]
+    fn stream_placement_bumps_epoch_on_follower_churn() {
+        // A follower-set change (e.g. RF grew) re-stamps the epoch even though the
+        // owner is unchanged, mirroring queue placement.
+        let stream = StreamIdentity::new("durable", Partition::new(0));
+        let mut existing = HashMap::new();
+        existing.insert(
+            stream.clone(),
+            StreamAssignment::new(stream.clone(), "node-a", vec!["node-b".to_string()], 4),
+        );
+
+        let plan = DeterministicStreamPlacement
+            .plan(StreamPlacementInput {
+                nodes: nodes(["node-a", "node-b", "node-c"]),
+                streams: vec![stream.clone()],
+                existing,
+                target_followers: stream_target_followers("durable", 2),
+                generation: 9,
+            })
+            .unwrap();
+
+        let assignment = plan.assignments.get(&stream).expect("assignment");
+        assert_eq!(assignment.owner, "node-a", "live owner stays");
+        assert_eq!(assignment.followers.len(), 2, "follower set grew to RF");
+        assert_eq!(assignment.epoch, 9, "follower churn re-stamps the epoch");
     }
 
     fn assign_balanced(
