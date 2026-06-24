@@ -721,6 +721,16 @@ impl StromaEngine {
         self.inner.advance_stream_epoch(tp, part, epoch).await
     }
 
+    /// A stream follower's `(record_next, cursor_event_next)` offsets, so its
+    /// replication worker resumes at the right place.
+    pub async fn stream_replication_next_offsets(
+        &self,
+        tp: &str,
+        part: u32,
+    ) -> Result<(Offset, Offset), StromaError> {
+        self.inner.stream_replication_next_offsets(tp, part).await
+    }
+
     pub async fn become_stream_follower_with_epoch(
         &self,
         tp: &str,
