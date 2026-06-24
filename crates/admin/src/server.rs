@@ -279,6 +279,7 @@ impl AdminServer {
                 axum::routing::post(routes::delete_queue),
             )
             .route("/admin/api/queues_debug", get(routes::queues_debug))
+            .route("/admin/api/streams_debug", get(routes::streams_debug))
             .route(
                 "/admin/api/streams",
                 get(routes::streams).post(routes::create_stream),

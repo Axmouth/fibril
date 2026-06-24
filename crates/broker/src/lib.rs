@@ -13,4 +13,4 @@ pub use fibril_storage::{
     DeliverableMessage, DeliveryTag, Group, Offset, Partition, StorageError, Topic,
 };
 pub use fibril_util::{UnixMillis, unix_millis};
-pub use stroma_core::StromaMetrics;
+pub use stroma_core::{PartitionKind, StromaMetrics};

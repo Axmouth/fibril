@@ -6,6 +6,7 @@ use axum::{
     response::Response,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use fibril_broker::PartitionKind;
 use fibril_broker::coordination::ReplicationDurabilityPolicy;
 use fibril_broker::queue_engine::{
     DLQDiscardPolicyWire, DeclareMeta, DestroyOutcome, GlobalDLQ, GlobalDlqSnapshot,
@@ -433,62 +434,89 @@ pub async fn queues(
     }
 }
 
+/// Build the partition debug payload for one channel kind. A stream reuses the
+/// queue handle, so [`debug_snapshot`](fibril_broker::queue_engine::QueueEngine::debug_snapshot)
+/// returns both kinds; this filters to one (`keep_streams` selects which),
+/// recomputes the counts, then merges the same broker observability. Queues and
+/// streams get a symmetric shape so each admin page reads exactly its resource.
+async fn partition_debug_value(
+    server: &AdminServer,
+    keep_streams: bool,
+) -> Result<serde_json::Value, StatusCode> {
+    let snapshot = match server.storage.debug_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            tracing::error!("Error fetching partition debug info: {err}");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let mut snapshot = snapshot;
+    snapshot
+        .queues
+        .retain(|q| matches!(q.kind, PartitionKind::Stream) == keep_streams);
+    snapshot.queue_count = snapshot.queues.len();
+    snapshot.materialized_queue_count = snapshot.queues.iter().filter(|q| q.materialized).count();
+
+    let mut value = serde_json::to_value(snapshot).unwrap_or_default();
+    if let Some(observability) = &server.broker_queue_observability
+        && let Some(object) = value.as_object_mut()
+    {
+        let observability = observability();
+        if let Some(queues) = observability.get("queues") {
+            object.insert("broker_activity".into(), queues.clone());
+        } else {
+            object.insert("broker_activity".into(), observability.clone());
+        }
+        if let Some(summary) = observability.get("summary") {
+            object.insert("broker_activity_summary".into(), summary.clone());
+        }
+        if let Some(replication_followers) = observability.get("replication_followers") {
+            object.insert(
+                "replication_followers".into(),
+                replication_followers.clone(),
+            );
+        }
+        if let Some(replication_summary) = observability.get("replication_summary") {
+            object.insert("replication_summary".into(), replication_summary.clone());
+        }
+        if let Some(owned_replicas) = observability.get("owned_replicas") {
+            object.insert("owned_replicas".into(), owned_replicas.clone());
+        }
+        if let Some(owned_replica_summary) = observability.get("owned_replica_summary") {
+            object.insert(
+                "owned_replica_summary".into(),
+                owned_replica_summary.clone(),
+            );
+        }
+        if let Some(replication_timing) = observability.get("replication_timing") {
+            object.insert("replication_timing".into(), replication_timing.clone());
+        }
+        object.insert(
+            "broker_cleanup_metrics".into(),
+            serde_json::to_value(server.metrics.broker().snapshot().queue_cleanup)
+                .unwrap_or_default(),
+        );
+    }
+    Ok(value)
+}
+
 pub async fn queues_debug(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     check_auth(&server, &headers).await?;
+    Ok(Json(partition_debug_value(&server, false).await?))
+}
 
-    let queues = server.storage.debug_snapshot().await;
-
-    if let Ok(queues) = queues {
-        let mut value = serde_json::to_value(queues).unwrap_or_default();
-        if let Some(observability) = &server.broker_queue_observability
-            && let Some(object) = value.as_object_mut()
-        {
-            let observability = observability();
-            if let Some(queues) = observability.get("queues") {
-                object.insert("broker_activity".into(), queues.clone());
-            } else {
-                object.insert("broker_activity".into(), observability.clone());
-            }
-            if let Some(summary) = observability.get("summary") {
-                object.insert("broker_activity_summary".into(), summary.clone());
-            }
-            if let Some(replication_followers) = observability.get("replication_followers") {
-                object.insert(
-                    "replication_followers".into(),
-                    replication_followers.clone(),
-                );
-            }
-            if let Some(replication_summary) = observability.get("replication_summary") {
-                object.insert("replication_summary".into(), replication_summary.clone());
-            }
-            if let Some(owned_replicas) = observability.get("owned_replicas") {
-                object.insert("owned_replicas".into(), owned_replicas.clone());
-            }
-            if let Some(owned_replica_summary) = observability.get("owned_replica_summary") {
-                object.insert(
-                    "owned_replica_summary".into(),
-                    owned_replica_summary.clone(),
-                );
-            }
-            if let Some(replication_timing) = observability.get("replication_timing") {
-                object.insert("replication_timing".into(), replication_timing.clone());
-            }
-            object.insert(
-                "broker_cleanup_metrics".into(),
-                serde_json::to_value(server.metrics.broker().snapshot().queue_cleanup)
-                    .unwrap_or_default(),
-            );
-        }
-        Ok(Json(value))
-    } else if let Err(_err) = queues {
-        tracing::error!("Error fetching queue debug info: {_err}");
-        Err(StatusCode::INTERNAL_SERVER_ERROR)
-    } else {
-        Ok(Json(serde_json::json!({})))
-    }
+/// Stream counterpart to [`queues_debug`]: the same debug snapshot filtered to
+/// Plexus stream partitions (role, epoch, applied offsets, replication state).
+pub async fn streams_debug(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    check_auth(&server, &headers).await?;
+    Ok(Json(partition_debug_value(&server, true).await?))
 }
 
 pub async fn inspect_messages(
