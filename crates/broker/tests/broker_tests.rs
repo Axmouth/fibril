@@ -3386,6 +3386,90 @@ async fn stream_follower_catches_up_records_and_cursor_from_owner() {
     follower.shutdown().await;
 }
 
+/// A durable stream with replicas confirms a publish only after the replication
+/// durability policy is met: the tier-derived policy (durable + 1 follower =>
+/// ReplicaDurable nodes 2) is cached when the owner role is applied, so the
+/// confirm gate waits for the follower to report durable progress past the
+/// offset, then resolves.
+#[tokio::test]
+async fn durable_stream_publish_confirm_waits_for_follower_progress() {
+    use fibril_broker::broker::{OwnAllQueues, StreamOpenConfig, StreamOwnership as StreamOwnershipTrait};
+    use fibril_broker::stream::StreamDurability;
+
+    #[derive(Debug)]
+    struct DurableStreamOwner;
+    impl StreamOwnershipTrait for DurableStreamOwner {
+        fn owns_stream(&self, _topic: &str, _partition: Partition) -> bool {
+            true
+        }
+        fn stream_open_config(&self, _topic: &str) -> Option<StreamOpenConfig> {
+            Some(StreamOpenConfig {
+                durability: StreamDurability::Durable,
+                retention: None,
+            })
+        }
+    }
+
+    let dir = test_dir!("broker_test");
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker = Broker::new_with_ownerships(
+        engine,
+        BrokerConfig {
+            replication_confirm_timeout_ms: 300,
+            ..Default::default()
+        },
+        None,
+        Arc::new(OwnAllQueues),
+        Arc::new(DurableStreamOwner),
+    );
+
+    let stream = StreamIdentity::new("events", Partition::new(0));
+    // Owner of a durable stream with one assigned follower: the cached policy is
+    // ReplicaDurable nodes 2 (owner + one replica).
+    let become_owner = LocalStreamAssignmentTransition {
+        stream: stream.clone(),
+        previous_role: None,
+        next_role: Some(LocalAssignmentRole::Owner),
+        previous: None,
+        next: Some(StreamAssignment::new(
+            stream.clone(),
+            "owner",
+            vec!["follower-b".to_string()],
+            1,
+        )),
+        intent: LocalAssignmentIntent::BecomeOwner,
+    };
+    broker
+        .apply_stream_assignment_transition(&become_owner)
+        .await
+        .unwrap();
+
+    // No follower progress yet: the confirm for offset 0 must time out.
+    let err = broker
+        .await_replication_confirm("events", Partition::new(0), None, 0)
+        .await
+        .expect_err("confirm must wait without follower progress");
+    assert!(
+        format!("{err:?}").contains("timed out"),
+        "expected a timeout error, got: {err:?}"
+    );
+
+    // The follower reports durable progress past offset 0; the confirm resolves.
+    broker.record_follower_replication_progress("events", Partition::new(0), None, "follower-b", 1, 0);
+    broker
+        .await_replication_confirm("events", Partition::new(0), None, 0)
+        .await
+        .expect("confirm resolves once the follower reports durable progress");
+
+    broker.shutdown().await;
+}
+
 #[tokio::test]
 async fn broker_state_checkpoint_export_installs_then_messages_catch_up() {
     let (owner, _owner_dir) = open_test_broker().await;

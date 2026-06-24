@@ -1747,6 +1747,26 @@ impl Broker<StromaEngine> {
             .map_err(BrokerError::from)
     }
 
+    /// Wait until the cached assignment's replication durability policy is
+    /// satisfied for `offset` (the owner's local durable write already counts).
+    /// Returns immediately when there is no cached assignment (standalone) or the
+    /// policy is local-durable. Used by both the queue and stream publish-confirm
+    /// paths; streams pass group `None`.
+    pub async fn await_replication_confirm(
+        &self,
+        topic: &str,
+        partition: Partition,
+        group: Option<&str>,
+        offset: Offset,
+    ) -> Result<(), BrokerError> {
+        let key = QueueKey {
+            tp: topic.to_string(),
+            part: partition,
+            group: group.map(str::to_string),
+        };
+        self.replication_confirm_gate().await_confirm(&key, offset).await
+    }
+
     /// Stream failover promotion at the follower's own tails (see the queue
     /// `promote_replication_follower_to_local_tail` and the stream
     /// `PromoteFollowerToOwner` transition arm for the safety argument).

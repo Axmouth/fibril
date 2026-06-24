@@ -4374,12 +4374,34 @@ impl Broker<StromaEngine> {
         QueueIdentity::new(stream.topic.clone(), stream.partition, None)
     }
 
+    /// The replication confirm policy for a stream partition. Only the durable
+    /// tier with replicas waits on replication; the express tiers and any
+    /// owner-only (no-follower) stream confirm on the local durable write. The
+    /// per-stream replication-factor / majority override is a later brick (73e);
+    /// today a replicated durable stream requires all assigned replicas durable.
+    fn stream_durability_policy(
+        &self,
+        topic: &str,
+        follower_count: usize,
+    ) -> ReplicationDurabilityPolicy {
+        let durable = self
+            .stream_ownership
+            .stream_open_config(topic)
+            .map(|cfg| cfg.durability == StreamDurability::Durable)
+            .unwrap_or(false);
+        if durable && follower_count > 0 {
+            ReplicationDurabilityPolicy::ReplicaDurable {
+                nodes: 1 + follower_count,
+            }
+        } else {
+            ReplicationDurabilityPolicy::LocalDurable
+        }
+    }
+
     /// Apply one local stream role change. Mirrors [`apply_assignment_transition`]
     /// but simpler: streams have no consumer leases, tracked deliveries, or offset
     /// release. Role changes persist the assignment epoch into the (queue-handle)
     /// logs before role-specific work, fencing stale-epoch replication at storage.
-    /// Caught-up failover promotion is deferred to the durable-confirm brick (73d);
-    /// until then a promote leaves the partition a follower.
     pub async fn apply_stream_assignment_transition(
         &self,
         transition: &LocalStreamAssignmentTransition,
@@ -4392,6 +4414,29 @@ impl Broker<StromaEngine> {
             .map(|assignment| assignment.epoch)
             .unwrap_or(0);
         let identity = Self::stream_worker_identity(&transition.stream);
+        // Cache the assignment governing this stream (with its tier-derived
+        // confirm policy) so the owner's durable-publish confirm gate can wait on
+        // replica durability, mirroring the queue apply.
+        match &transition.next {
+            Some(next) => {
+                let durability = self.stream_durability_policy(&topic, next.followers.len());
+                let assignment = PartitionAssignment::new(
+                    identity.clone(),
+                    next.owner.clone(),
+                    next.followers.clone(),
+                    next.epoch,
+                )
+                .with_durability(durability);
+                self.cache_queue_assignment(&assignment);
+            }
+            None => {
+                self.assignment_cache.remove(&QueueKey {
+                    tp: topic.clone(),
+                    part: partition,
+                    group: None,
+                });
+            }
+        }
         match transition.intent {
             LocalAssignmentIntent::Noop => Ok(BrokerAssignmentTransitionApply::Noop(
                 LocalAssignmentIntent::Noop,

@@ -1338,6 +1338,7 @@ async fn teardown_stream_sub(sub: StreamSubState) {
 /// requested). Used by the publish handler once a frame is routed to a stream.
 #[allow(clippy::too_many_arguments)]
 async fn handle_stream_publish(
+    broker: &Arc<Broker<StromaEngine>>,
     channel: &Arc<StreamChannel>,
     tx: &mpsc::Sender<Frame>,
     request_id: u64,
@@ -1368,13 +1369,39 @@ async fn handle_stream_publish(
         Ok(confirm_rx) => {
             if require_confirm {
                 let tx = tx.clone();
+                let broker = broker.clone();
+                let topic = channel.topic().to_string();
+                let partition = Partition::new(channel.partition());
                 tokio::spawn(async move {
                     match confirm_rx.await {
                         Ok(Ok(offset)) => {
-                            if let Ok(frame) =
-                                try_encode(Op::PublishOk, request_id, &PublishOk { offset })
+                            // Local durability first, then the assignment's
+                            // replication policy (a replicated durable stream
+                            // waits for replica acks) before the producer sees
+                            // the confirm. A no-op for express tiers / owner-only
+                            // streams (the gate short-circuits on local-durable).
+                            match broker
+                                .await_replication_confirm(&topic, partition, None, offset)
+                                .await
                             {
-                                let _ = tx.send(frame).await;
+                                Ok(()) => {
+                                    if let Ok(frame) = try_encode(
+                                        Op::PublishOk,
+                                        request_id,
+                                        &PublishOk { offset },
+                                    ) {
+                                        let _ = tx.send(frame).await;
+                                    }
+                                }
+                                Err(err) => {
+                                    let _ = send_error_response(
+                                        &tx,
+                                        request_id,
+                                        500,
+                                        format!("stream replication confirm failed: {err}"),
+                                    )
+                                    .await;
+                                }
                             }
                         }
                         _ => {
@@ -2462,6 +2489,20 @@ pub async fn handle_connection(
                     wire::decode_stream_replication_read
                 );
 
+                // A stamped read doubles as the stream follower's durable-progress
+                // report (group None), feeding the owner's replica-durable confirm
+                // gate exactly as the queue ReplicationRead path does.
+                if let Some(reporter) = &read.reporter_node_id {
+                    broker.record_follower_replication_progress(
+                        &read.topic,
+                        read.partition,
+                        None,
+                        reporter,
+                        read.message_from,
+                        read.event_from,
+                    );
+                }
+
                 // The owner serves a stream's record + cursor-commit logs (group
                 // None) via the same role-gated owner read as queues; the handle's
                 // Owner role is the authority, so a non-owner read returns
@@ -3282,6 +3323,7 @@ pub async fn handle_connection(
                         broker.route_stream(&pubreq.topic, pubreq.partition.id()).await
                     {
                         handle_stream_publish(
+                            &broker,
                             &channel,
                             &frame_tx_low_prio,
                             frame.request_id,
