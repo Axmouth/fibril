@@ -2217,11 +2217,17 @@ impl GanglionCoordination {
                 if !owner_died || planned.owner == current.owner {
                     continue;
                 }
-                let queue = match to_fibril_queue(resource) {
-                    Some(queue) => queue,
-                    None => continue,
+                // The applied-tail label is keyed by QueueIdentity. A stream
+                // follower reuses the queue follower worker (group None), so it
+                // already publishes its tail under that same key - derive it the
+                // same way for the stream resource.
+                let label = if let Some(queue) = to_fibril_queue(resource) {
+                    applied_tail_label(&queue)
+                } else if let Some(stream) = to_fibril_stream(resource) {
+                    applied_tail_label(&QueueIdentity::new(stream.topic, stream.partition, None))
+                } else {
+                    continue;
                 };
-                let label = applied_tail_label(&queue);
                 let best = current
                     .followers
                     .iter()
