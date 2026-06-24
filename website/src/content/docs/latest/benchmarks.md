@@ -345,26 +345,48 @@ The tiers separate as designed:
 
 ### Fan-out scaling
 
-Every reader is an independent subscriber that receives the whole stream.
-Ephemeral tier, 1KB, 100k/s offered, one partition, scaling the reader count:
+Every reader is an independent subscriber that receives the whole stream, so the
+delivered rate is `readers x publish rate` until a bottleneck bites. 1KB, 100k/s
+offered, one partition, scaling the reader count.
 
-| Readers | Publish rate | Delivered total | Per reader | deliver p50/p95/p99/max | RSS peak |
+Ephemeral tier, cursorless readers reading from the live tail:
+
+| Readers | Publish rate | Delivered rate | Per reader | deliver p50/p95/p99/max | RSS peak |
 | ---: | ---: | ---: | ---: | --- | ---: |
-| 1 | 99,918/s | 99,918/s | 99,918/s | 1 / 2 / 4 / 12 ms | 61 MiB |
-| 2 | 99,800/s | 199,599/s | 99,800/s | 1 / 2 / 5 / 16 ms | 63 MiB |
-| 4 | 99,901/s | 399,603/s | 99,901/s | 1 / 2 / 8 / 21 ms | 65 MiB |
-| 8 | 99,902/s | 799,219/s | 99,902/s | 1 / 3 / 13 / 29 ms | 70 MiB |
-| 16 | 95,132/s | 1,522,114/s | 95,132/s | 166 / 182 / 213 / 221 ms | 108 MiB |
+| 1 | 99,990/s | 99,990/s | 99,990/s | 0 / 2 / 3 / 17 ms | 58 MiB |
+| 2 | 99,990/s | 199,980/s | 99,990/s | 1 / 2 / 4 / 20 ms | 60 MiB |
+| 4 | 100,006/s | 400,023/s | 100,006/s | 0 / 2 / 3 / 17 ms | 66 MiB |
+| 8 | 99,984/s | 799,866/s | 99,983/s | 1 / 3 / 17 / 52 ms | 80 MiB |
+| 16 | 97,165/s | 1,546,066/s | 96,629/s | 3 / 52 / 171 / 233 ms | 169 MiB |
+| 32 | 93,687/s | 850,976/s | 26,593/s | 969 / 1175 / 1269 / 1387 ms | 206 MiB |
 
-Delivered throughput scales linearly with readers (each reader receives the full
-stream, so the total reaches about 1.5M records/s at sixteen readers) and the
-publish rate is barely affected. Fan-out is nearly free up to eight readers on a
-single partition, where every reader still sees the full 100k/s at low
-single-digit-millisecond latency. The knee at sixteen readers is the single
-per-partition fan-out actor and its delivery tasks saturating at roughly 1.5M
-frames/s. The lever past that is partitions: each partition has its own fan-out
-actor and reader connections, so spreading a stream across partitions scales
-fan-out horizontally.
+Durable tier, auto-ack readers (each commits a durable cursor per record):
+
+| Readers | Publish rate | Delivered rate | Per reader | deliver p50/p95/p99/max | RSS peak |
+| ---: | ---: | ---: | ---: | --- | ---: |
+| 1 | 100,000/s | 99,570/s | 99,570/s | 59 / 85 / 115 / 173 ms | 87 MiB |
+| 2 | 100,000/s | 199,256/s | 99,628/s | 60 / 93 / 143 / 178 ms | 88 MiB |
+| 4 | 100,000/s | 396,174/s | 99,043/s | 64 / 90 / 115 / 150 ms | 89 MiB |
+| 8 | 99,990/s | 788,713/s | 98,589/s | 62 / 97 / 127 / 176 ms | 87 MiB |
+| 16 | 99,832/s | 1,105,715/s | 69,107/s | 196 / 613 / 646 / 732 ms | 140 MiB |
+| 32 | 95,410/s | 759,266/s | 23,727/s | 1067 / 1250 / 1360 / 1505 ms | 201 MiB |
+
+Both tiers fan out near-linearly while a single partition's fan-out actor has
+headroom: every reader sees the full 100k/s up to eight readers. The ephemeral
+tier peaks around 1.5M frames/s at sixteen readers (the single per-partition
+fan-out actor and its delivery tasks saturating); past that knee one partition
+thrashes, so thirty-two readers delivers less aggregate than sixteen, at
+backlog-driven latency. The durable tier holds the same near-linear shape to
+eight readers and pays a steady delivery-latency floor for the
+fsync-before-deliver guarantee; its per-reader cursor work brings the knee in a
+little earlier. Durable auto-ack at this fan-out is only viable because cursor
+commits are microbatched (coalesced per partition into one durable record and one
+actor message per window) — committing a cursor per record inline collapsed
+delivery to tens of records per second per reader at multi-second latency.
+
+The lever past the single-partition knee is partitions: each partition has its
+own fan-out actor and reader connections, so spreading a stream across partitions
+scales fan-out horizontally.
 
 ### Reading these numbers
 
