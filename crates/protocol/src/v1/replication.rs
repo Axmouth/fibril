@@ -469,6 +469,10 @@ pub struct ProtocolOwnerReplicationPeer {
     close_token: CancellationToken,
     /// Stamped into replication reads for owner-side progress tracking.
     reporter_node_id: Option<String>,
+    /// When set, the peer reads a STREAM partition: it sends
+    /// `StreamReplicationRead` and expects `StreamReplicationReadOk`. The body is
+    /// identical to the queue read; only the op differs.
+    stream_mode: bool,
 }
 
 impl ProtocolOwnerReplicationPeer {
@@ -480,12 +484,19 @@ impl ProtocolOwnerReplicationPeer {
             reconnect: None,
             close_token: CancellationToken::new(),
             reporter_node_id: None,
+            stream_mode: false,
         }
     }
 
     /// Stamp replication reads with this follower's identity.
     pub fn with_reporter(mut self, node_id: impl Into<String>) -> Self {
         self.reporter_node_id = Some(node_id.into());
+        self
+    }
+
+    /// Read stream partitions (send `StreamReplicationRead`) instead of queues.
+    pub fn with_stream_mode(mut self) -> Self {
+        self.stream_mode = true;
         self
     }
 
@@ -500,6 +511,7 @@ impl ProtocolOwnerReplicationPeer {
             request_lock: Mutex::new(()),
             next_request_id: AtomicU64::new(20_000),
             reporter_node_id: None,
+            stream_mode: false,
             reconnect: Some(ProtocolOwnerPeerConnectConfig {
                 addr,
                 auth,
@@ -576,11 +588,16 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 guard = self.request_lock.lock() => guard,
             };
             let request_id = self.next_request_id();
+            let read_op = if self.stream_mode {
+                Op::StreamReplicationRead
+            } else {
+                Op::ReplicationRead
+            };
             let mut conn = self.take_conn().await?;
             if let Err(err) = conn
                 .send(
                     try_encode(
-                        Op::ReplicationRead,
+                        read_op,
                         request_id,
                         &ReplicationRead {
                             topic: topic.to_string(),
@@ -604,12 +621,19 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                 )));
             }
 
+            let recv = async {
+                if self.stream_mode {
+                    recv_stream_replication_read_ok_response(&mut conn, request_id).await
+                } else {
+                    recv_replication_read_ok_response(&mut conn, request_id).await
+                }
+            };
             let read: ReplicationReadOk = match tokio::select! {
                 biased;
                 _ = self.close_token.cancelled() => {
                     Err(ProtocolReplicationRequestError::ConnectionClosed)
                 }
-                response = recv_replication_read_ok_response(&mut conn, request_id) => {
+                response = recv => {
                     response
                 }
             } {
@@ -891,6 +915,15 @@ async fn recv_replication_read_ok_response(
 ) -> Result<ReplicationReadOk, ProtocolReplicationRequestError> {
     let frame = recv_response_frame(conn, request_id, Op::ReplicationReadOk).await?;
     wire::decode_replication_read_ok(&frame)
+        .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
+}
+
+async fn recv_stream_replication_read_ok_response(
+    conn: &mut Conn,
+    request_id: u64,
+) -> Result<ReplicationReadOk, ProtocolReplicationRequestError> {
+    let frame = recv_response_frame(conn, request_id, Op::StreamReplicationReadOk).await?;
+    wire::decode_stream_replication_read_ok(&frame)
         .map_err(|err| ProtocolReplicationRequestError::Decode(err.to_string()))
 }
 
