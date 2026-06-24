@@ -373,20 +373,40 @@ Durable tier, auto-ack readers (each commits a durable cursor per record):
 
 Both tiers fan out near-linearly while a single partition's fan-out actor has
 headroom: every reader sees the full 100k/s up to eight readers. The ephemeral
-tier peaks around 1.5M frames/s at sixteen readers (the single per-partition
-fan-out actor and its delivery tasks saturating); past that knee one partition
-thrashes, so thirty-two readers delivers less aggregate than sixteen, at
+tier peaks around 1.5M frames/s at sixteen readers, where the single
+per-partition fan-out actor and its delivery tasks saturate. Past that knee one
+partition thrashes, so thirty-two readers delivers less aggregate than sixteen at
 backlog-driven latency. The durable tier holds the same near-linear shape to
 eight readers and pays a steady delivery-latency floor for the
-fsync-before-deliver guarantee; its per-reader cursor work brings the knee in a
-little earlier. Durable auto-ack at this fan-out is only viable because cursor
-commits are microbatched (coalesced per partition into one durable record and one
-actor message per window) — committing a cursor per record inline collapsed
+fsync-before-deliver guarantee, with its per-reader cursor work bringing the knee
+in a little earlier. Durable auto-ack at this fan-out is only viable because
+cursor commits are microbatched, coalesced per partition into one durable record
+and one actor message per window. Committing a cursor per record inline collapsed
 delivery to tens of records per second per reader at multi-second latency.
 
-The lever past the single-partition knee is partitions: each partition has its
-own fan-out actor and reader connections, so spreading a stream across partitions
-scales fan-out horizontally.
+Those two tables are bounded by delivery throughput: aggregate frames per second
+(readers times publish rate) saturating one partition's fan-out actor. That is a
+separate question from how many readers a partition can fan out to when delivery
+throughput is not the bottleneck. Holding the rate low (1KB ephemeral, 1k/s
+offered) so the aggregate stays well under the ceiling, reader count scales
+cleanly:
+
+| Readers | Publish rate | Delivered rate | Per reader | deliver p50/p95/p99/max | RSS peak |
+| ---: | ---: | ---: | ---: | --- | ---: |
+| 32 | 1,000/s | 32,000/s | 1,000/s | 4 / 6 / 7 / 9 ms | 40 MiB |
+| 64 | 1,000/s | 64,000/s | 1,000/s | 4 / 6 / 7 / 9 ms | 47 MiB |
+| 128 | 1,000/s | 128,000/s | 1,000/s | 4 / 6 / 7 / 9 ms | 61 MiB |
+| 256 | 1,000/s | 256,000/s | 1,000/s | 4 / 7 / 7 / 11 ms | 84 MiB |
+
+All 256 readers on a single partition keep up at a flat few-millisecond latency,
+and memory grows gently with connection count. Fan-out reach is cheap: the limit
+is total delivered frames per second, not the number of readers, so one partition
+serves many readers as long as readers times rate stays under its delivery
+ceiling.
+
+The lever past the single-partition delivery ceiling is partitions: each
+partition has its own fan-out actor and reader connections, so spreading a stream
+across partitions scales delivery throughput horizontally.
 
 ### Reading these numbers
 
