@@ -396,6 +396,16 @@ pub struct BrokerConfig {
     /// In-flight batch buffer depth (credit window) for the streaming follower
     /// (setup-time: applies on the next stream).
     pub replication_stream_buffer_batches: usize,
+    /// Microbatch window (microseconds) the per-stream cursor-commit coalescer
+    /// lingers to gather more acks before flushing them as ONE durable batch event
+    /// and ONE actor command. A cursor is a monotonic high-water mark, so a window
+    /// collapses many acks per name to one. Small by default to keep stream
+    /// latency low; only when the immediately-available batch is tiny does it wait.
+    /// `0` flushes every drained batch with no timed wait.
+    pub stream_cursor_commit_window_us: u64,
+    /// Cap on distinct cursors flushed in one commit batch; reaching it flushes
+    /// immediately without waiting out the window.
+    pub stream_cursor_commit_max_batch: usize,
     /// Partition count for a queue declared without an explicit count.
     pub default_partition_count: u32,
     /// Soft target partitions-per-consumer for exclusive consumer groups. When
@@ -429,6 +439,8 @@ impl Default for BrokerConfig {
             replication_stream_apply_linger_us: 2_000,
             replication_stream_apply_max_merge_bytes: 16 * 1024 * 1024,
             replication_stream_buffer_batches: FOLLOWER_STREAM_BUFFER_BATCHES,
+            stream_cursor_commit_window_us: 100,
+            stream_cursor_commit_max_batch: 1024,
             default_partition_count: 1,
             default_consumer_target: None,
         }
@@ -1647,6 +1659,7 @@ impl<
                 retention,
                 STREAM_RING_CAPACITY,
                 STREAM_LIVE_CHANNEL_CAPACITY,
+                self.cfg.clone(),
             )
             .await?,
         );

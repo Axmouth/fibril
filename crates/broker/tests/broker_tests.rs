@@ -104,6 +104,14 @@ impl fibril_broker::queue_engine::StreamStore for FailingPublishEngine {
     ) -> Result<(), StromaError> {
         Err(StromaError::Unsupported("no streams in test engine".into()))
     }
+    async fn commit_stream_cursors(
+        &self,
+        _tp: &str,
+        _part: u32,
+        _commits: Vec<(String, Offset)>,
+    ) -> Result<(), StromaError> {
+        Err(StromaError::Unsupported("no streams in test engine".into()))
+    }
     async fn stream_cursor(
         &self,
         _tp: &str,
@@ -3293,6 +3301,9 @@ async fn stream_follower_catches_up_records_and_cursor_from_owner() {
         .await
         .unwrap();
     owner_channel.settle("group", last_offset).await.unwrap();
+    // settle is microbatched; flush so the cursor-commit event is durable before
+    // the follower pulls it.
+    owner_channel.flush_cursor_commits().await.unwrap();
 
     // Follower: take the stream follower role (storage role + epoch fence) so it
     // accepts replicated stream batches.

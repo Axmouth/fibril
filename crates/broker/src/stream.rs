@@ -20,9 +20,11 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use fibril_storage::Offset;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::broker::BrokerConfig;
 use crate::queue_engine::StreamStore;
 use stroma_core::{KDurability, MessageHeaders, RetentionConfig, StromaError};
 
@@ -434,6 +436,12 @@ pub struct StreamChannel {
     /// fans them out. The frame loop only enqueues here, so the fsync is off the
     /// connection path and keratin batches the flushes.
     durable_ingest_tx: mpsc::Sender<DurableIngest>,
+    /// Acks/settles go here. A per-channel committer task coalesces a window of
+    /// cursor advances (high-water mark per name) into one durable batch commit
+    /// off the delivery hot path, so high-fan-out auto-ack stops committing one
+    /// record at a time. Dropping the channel (on `StreamChannel` drop) closes the
+    /// committer, which flushes whatever is pending before exiting.
+    cursor_commit_tx: mpsc::Sender<CursorCommitMsg>,
     /// Ephemeral-only periodic flush task (drains dirty pages via keratin's fsync
     /// worker so the writer never hits the kernel writeback cliff). Aborted on drop.
     /// `None` for other tiers, which fsync via their own durability handling.
@@ -454,6 +462,130 @@ impl Drop for StreamChannel {
 /// broker-local knob like the ring capacities.
 const EPHEMERAL_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
 
+/// Message to the per-channel cursor-commit microbatcher.
+enum CursorCommitMsg {
+    /// Advance a cursor (coalesced into the current window).
+    Settle { name: String, offset: Offset },
+    /// Flush all pending cursors durably now, then acknowledge. Used by tests and
+    /// graceful teardown to make prior settles durable on demand.
+    Flush { ack: oneshot::Sender<()> },
+}
+
+/// Record a cursor advance in the pending batch, keeping the highest offset per
+/// name (a cursor is a monotonic high-water mark, so a window collapses to its max).
+fn merge_cursor(pending: &mut HashMap<String, Offset>, name: String, offset: Offset) {
+    pending
+        .entry(name)
+        .and_modify(|cur| {
+            if offset > *cur {
+                *cur = offset;
+            }
+        })
+        .or_insert(offset);
+}
+
+/// Per-channel cursor-commit microbatcher. Coalesces a window of settles into ONE
+/// durable batch commit and ONE actor command (via `commit_stream_cursors`),
+/// instead of one durable append + one actor message per record. Modeled on the
+/// queue `publisher_sink` coalescer: drain whatever is immediately available, and
+/// only wait out the (small) window when the batch is still tiny, so bursty acks
+/// never pay linger latency. A Flush message commits immediately and acks. Reads
+/// the window/batch settings live each round. Exits when the channel closes
+/// (StreamChannel dropped), flushing what is pending.
+async fn run_cursor_committer(
+    engine: Arc<dyn StreamStore>,
+    tp: Arc<str>,
+    part: u32,
+    cfg: Arc<ArcSwap<BrokerConfig>>,
+    mut rx: mpsc::Receiver<CursorCommitMsg>,
+) {
+    loop {
+        // Block until the first message of a new window arrives.
+        let Some(first) = rx.recv().await else {
+            break;
+        };
+        let mut pending: HashMap<String, Offset> = HashMap::new();
+        let mut acks: Vec<oneshot::Sender<()>> = Vec::new();
+        let mut closed = false;
+        let mut force_flush = false;
+        match first {
+            CursorCommitMsg::Settle { name, offset } => merge_cursor(&mut pending, name, offset),
+            CursorCommitMsg::Flush { ack } => {
+                acks.push(ack);
+                force_flush = true;
+            }
+        }
+
+        // Live tunables: a settings change takes effect on the next window.
+        let snap = cfg.load();
+        let max_batch = snap.stream_cursor_commit_max_batch.max(1);
+        let window_us = snap.stream_cursor_commit_window_us;
+
+        // Drain everything already queued without waiting.
+        while pending.len() < max_batch {
+            match rx.try_recv() {
+                Ok(CursorCommitMsg::Settle { name, offset }) => {
+                    merge_cursor(&mut pending, name, offset)
+                }
+                Ok(CursorCommitMsg::Flush { ack }) => {
+                    acks.push(ack);
+                    force_flush = true;
+                    break;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+
+        // Only linger when the batch is still small, no flush was requested, and a
+        // window is configured, so already-bursty traffic flushes immediately.
+        if !closed && !force_flush && pending.len() < max_batch && window_us > 0 {
+            let deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_micros(window_us);
+            loop {
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(CursorCommitMsg::Settle { name, offset })) => {
+                        merge_cursor(&mut pending, name, offset);
+                        if pending.len() >= max_batch {
+                            break;
+                        }
+                    }
+                    Ok(Some(CursorCommitMsg::Flush { ack })) => {
+                        acks.push(ack);
+                        break;
+                    }
+                    Ok(None) => {
+                        closed = true;
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        if !pending.is_empty() {
+            let commits: Vec<(String, Offset)> = pending.into_iter().collect();
+            if let Err(err) = engine.commit_stream_cursors(&tp, part, commits).await {
+                tracing::warn!(
+                    topic = %tp,
+                    partition = part,
+                    "stream cursor batch commit failed: {err}"
+                );
+            }
+        }
+        // Acknowledge flush waiters only after the durable commit completed.
+        for ack in acks {
+            let _ = ack.send(());
+        }
+        if closed {
+            break;
+        }
+    }
+}
+
 impl StreamChannel {
     /// Materialize the stream in stroma and start its fan-out actor. `next` (the
     /// tail) is read from the durable log so the ring lines up with persisted
@@ -466,6 +598,7 @@ impl StreamChannel {
         retention: Option<RetentionConfig>,
         ring_capacity: usize,
         live_channel_capacity: usize,
+        cfg: Arc<ArcSwap<BrokerConfig>>,
     ) -> Result<Self, StromaError> {
         engine.create_stream(tp, part, retention.clone()).await?;
         let (_head, tail) = engine.stream_head_tail(tp, part).await?;
@@ -690,6 +823,21 @@ impl StreamChannel {
             None
         };
 
+        // Per-channel cursor-commit microbatcher: coalesce a window of acks into
+        // one durable batch commit + one actor command, off the delivery hot path.
+        let (cursor_commit_tx, cursor_commit_rx) = mpsc::channel::<CursorCommitMsg>(8192);
+        {
+            let committer_engine = engine.clone();
+            let committer_tp = tp_arc.clone();
+            tokio::spawn(run_cursor_committer(
+                committer_engine,
+                committer_tp,
+                part,
+                cfg,
+                cursor_commit_rx,
+            ));
+        }
+
         Ok(StreamChannel {
             tp: tp_arc,
             part,
@@ -699,6 +847,7 @@ impl StreamChannel {
             durability,
             retention,
             durable_ingest_tx,
+            cursor_commit_tx,
             flush_task,
         })
     }
@@ -826,12 +975,32 @@ impl StreamChannel {
         })
     }
 
-    /// Commit a durable cursor for `name` after a consumer settled through
-    /// `offset` (advance-on-ack: the cursor moves to the next unconsumed offset).
+    /// Settle a consumer through `offset` (advance-on-ack: the cursor moves to the
+    /// next unconsumed offset). Hands the advance to the per-channel cursor
+    /// microbatcher, which coalesces a window of settles (high-water mark per name)
+    /// into one durable batch commit off the hot path, instead of one durable
+    /// append per record. At-least-once is preserved: a crash before the next flush
+    /// just re-delivers a bounded window, since the cursor only moves forward.
     pub async fn settle(&self, name: &str, offset: Offset) -> Result<(), StromaError> {
-        self.engine
-            .commit_stream_cursor(&self.tp, self.part, name, offset + 1)
+        self.cursor_commit_tx
+            .send(CursorCommitMsg::Settle {
+                name: name.to_string(),
+                offset: offset + 1,
+            })
             .await
+            .map_err(|_| StromaError::QueueActorGone)
+    }
+
+    /// Flush all pending cursor commits durably and wait for the commit to land.
+    /// Makes prior `settle`s durable on demand (tests, graceful teardown); the
+    /// steady-state path relies on the microbatch window instead.
+    pub async fn flush_cursor_commits(&self) -> Result<(), StromaError> {
+        let (ack, wait) = oneshot::channel();
+        self.cursor_commit_tx
+            .send(CursorCommitMsg::Flush { ack })
+            .await
+            .map_err(|_| StromaError::QueueActorGone)?;
+        wait.await.map_err(|_| StromaError::QueueActorGone)
     }
 
     pub async fn unsubscribe(&self, id: u64) {
@@ -1088,6 +1257,10 @@ mod channel_tests {
         )
     }
 
+    fn test_cfg() -> Arc<ArcSwap<BrokerConfig>> {
+        Arc::new(ArcSwap::from_pointee(BrokerConfig::default()))
+    }
+
     fn hdr(extra: &[(&str, &str)]) -> MessageHeaders {
         MessageHeaders {
             published: 0,
@@ -1111,7 +1284,7 @@ mod channel_tests {
     #[tokio::test]
     async fn backfill_from_ring_then_live() {
         let dir = temp_dir("stream_ring");
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64)
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64, test_cfg())
             .await
             .unwrap();
         for i in 0..5u32 {
@@ -1139,7 +1312,7 @@ mod channel_tests {
     async fn backfill_reads_evicted_records_from_the_log() {
         let dir = temp_dir("stream_log");
         // ring holds only the newest 2, so older records must come from stroma
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 2, 64)
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 2, 64, test_cfg())
             .await
             .unwrap();
         for i in 0..6u32 {
@@ -1158,7 +1331,7 @@ mod channel_tests {
     #[tokio::test]
     async fn durable_resume_starts_after_the_committed_cursor() {
         let dir = temp_dir("stream_durable");
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64)
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64, test_cfg())
             .await
             .unwrap();
         for i in 0..5u32 {
@@ -1167,8 +1340,10 @@ mod channel_tests {
                 .unwrap();
         }
 
-        // settle through offset 2 -> cursor at 3
+        // settle through offset 2 -> cursor at 3 (microbatched; flush to make it
+        // durable before resuming).
         ch.settle("group-a", 2).await.unwrap();
+        ch.flush_cursor_commits().await.unwrap();
 
         let sub = ch
             .subscribe(
@@ -1188,7 +1363,7 @@ mod channel_tests {
     #[tokio::test]
     async fn filter_applies_to_backfill_and_live() {
         let dir = temp_dir("stream_filter");
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64)
+        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64, test_cfg())
             .await
             .unwrap();
         ch.publish(hdr(&[("kind", "cow")]), b"a".to_vec())

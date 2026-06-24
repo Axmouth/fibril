@@ -31,7 +31,7 @@ use fibril_broker::{
         ConnectionRuntimeSettings as BrokerConnectionRuntimeSettings, ConsumerGroupRuntimeSettings,
         DeliveryRuntimeSettings, IdleQueueCleanupRuntimeSettings, PartitioningRuntimeSettings,
         ReplicationRuntimeSettings, RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLocks,
-        RuntimeSettingsManager, RuntimeSettingsSnapshot,
+        RuntimeSettingsManager, RuntimeSettingsSnapshot, StreamRuntimeSettings,
     },
 };
 use fibril_config::{
@@ -107,6 +107,9 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
                 .consumer_groups
                 .default_target_per_consumer,
         },
+        // Cursor-commit microbatch knobs are runtime-tunable via the cluster
+        // settings document; the static seed uses the defaults.
+        stream: StreamRuntimeSettings::default(),
     }
 }
 

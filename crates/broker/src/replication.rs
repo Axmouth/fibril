@@ -861,6 +861,7 @@ fn stroma_event_available_for_replicated_messages(
         StromaEvent::Declare(_)
         | StromaEvent::ResetQueue { .. }
         | StromaEvent::CursorCommit { .. }
+        | StromaEvent::CursorCommitBatch { .. }
         | StromaEvent::StreamTruncate { .. } => true,
         StromaEvent::Snapshot { .. } => message_tail_fully_returned,
     }

@@ -372,6 +372,16 @@ pub trait StreamStore: Send + Sync {
         offset: Offset,
     ) -> Result<(), StromaError>;
 
+    /// Commit a coalesced batch of cursors in one durable record and one actor
+    /// apply (see `Stroma::commit_stream_cursors`). Backs the cursor-commit
+    /// microbatcher.
+    async fn commit_stream_cursors(
+        &self,
+        tp: &str,
+        part: u32,
+        commits: Vec<(String, Offset)>,
+    ) -> Result<(), StromaError>;
+
     async fn stream_cursor(
         &self,
         tp: &str,
@@ -458,6 +468,15 @@ impl StreamStore for StromaEngine {
         self.inner
             .commit_stream_cursor(tp, part, name, offset)
             .await
+    }
+
+    async fn commit_stream_cursors(
+        &self,
+        tp: &str,
+        part: u32,
+        commits: Vec<(String, Offset)>,
+    ) -> Result<(), StromaError> {
+        self.inner.commit_stream_cursors(tp, part, commits).await
     }
 
     async fn stream_cursor(

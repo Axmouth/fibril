@@ -23,6 +23,8 @@ pub struct RuntimeSettings {
     pub partitioning: PartitioningRuntimeSettings,
     #[serde(default)]
     pub consumer_groups: ConsumerGroupRuntimeSettings,
+    #[serde(default)]
+    pub stream: StreamRuntimeSettings,
 }
 
 /// Partitioning-related runtime settings.
@@ -38,6 +40,29 @@ impl Default for PartitioningRuntimeSettings {
     fn default() -> Self {
         Self {
             default_partition_count: 1,
+        }
+    }
+}
+
+/// Plexus stream runtime settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct StreamRuntimeSettings {
+    /// Microbatch window (microseconds) the per-stream cursor-commit coalescer
+    /// lingers to gather more acks before flushing them as one durable batch.
+    /// Small to keep stream latency low; `0` flushes every drained batch with no
+    /// timed wait.
+    pub cursor_commit_window_us: u64,
+    /// Cap on distinct cursors flushed in one commit batch; reaching it flushes
+    /// immediately without waiting out the window.
+    pub cursor_commit_max_batch: usize,
+}
+
+impl Default for StreamRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            cursor_commit_window_us: 100,
+            cursor_commit_max_batch: 1024,
         }
     }
 }
@@ -115,6 +140,7 @@ impl Default for RuntimeSettings {
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
             consumer_groups: ConsumerGroupRuntimeSettings::default(),
+            stream: StreamRuntimeSettings::default(),
         }
     }
 }
@@ -452,6 +478,8 @@ impl BrokerConfig {
                 .stream_apply_max_merge_bytes,
             replication_stream_buffer_batches: settings.replication.stream_buffer_batches,
             default_partition_count: settings.partitioning.default_partition_count,
+            stream_cursor_commit_window_us: settings.stream.cursor_commit_window_us,
+            stream_cursor_commit_max_batch: settings.stream.cursor_commit_max_batch,
             default_consumer_target: settings.consumer_groups.default_target_per_consumer,
         }
     }
@@ -642,6 +670,7 @@ mod tests {
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
             consumer_groups: ConsumerGroupRuntimeSettings::default(),
+            stream: StreamRuntimeSettings::default(),
         };
 
         let decoded = decode_snapshot(GlobalValue {
@@ -680,6 +709,7 @@ mod tests {
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
             consumer_groups: ConsumerGroupRuntimeSettings::default(),
+            stream: StreamRuntimeSettings::default(),
         };
 
         let config = BrokerConfig::from_runtime_settings(&settings);
