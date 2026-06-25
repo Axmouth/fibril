@@ -48,6 +48,8 @@ _ENCODERS: dict[Op, _Encoder] = {
     Op.RECONCILE_RESULT: wire.encode_reconcile_result_body,
     Op.TOPOLOGY: wire.encode_topology_request_body,
     Op.TOPOLOGY_OK: wire.encode_topology_ok_body,
+    Op.TOPOLOGY_UPDATE: wire.encode_topology_update_body,
+    Op.TOPOLOGY_UPDATE_ACK: wire.encode_topology_update_ack_body,
     Op.REDIRECT: wire.encode_redirect_body,
 }
 
@@ -74,6 +76,8 @@ _DECODERS: dict[Op, _Decoder] = {
     Op.RECONCILE_RESULT: wire.decode_reconcile_result_body,
     Op.TOPOLOGY: wire.decode_topology_request_body,
     Op.TOPOLOGY_OK: wire.decode_topology_ok_body,
+    Op.TOPOLOGY_UPDATE: wire.decode_topology_update_body,
+    Op.TOPOLOGY_UPDATE_ACK: wire.decode_topology_update_ack_body,
     Op.REDIRECT: wire.decode_redirect_body,
 }
 

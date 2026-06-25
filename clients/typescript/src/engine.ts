@@ -42,6 +42,7 @@ import {
   type SubscribeOkMsg,
   type TopologyOkMsg,
   type TopologyRequestMsg,
+  type TopologyUpdateAckMsg,
 } from "./protocol.js";
 import type { DeclarePlexus, SubscribeStream } from "./wire.js";
 import { BoundedQueue } from "./internal/bounded-queue.js";
@@ -206,6 +207,7 @@ export class Engine {
     opts: ClientOptions,
     subscriptionRegistry: SubscriptionRegistry = new Map(),
     onAssignmentChanged?: (msg: AssignmentChangedMsg) => void,
+    onTopologyUpdate?: (topology: TopologyOkMsg) => bigint,
   ): Promise<Engine> {
     const reader = new FrameReader(socket);
     const iter = reader[Symbol.asyncIterator]();
@@ -312,6 +314,7 @@ export class Engine {
       initialSubscriptions: restoredSubscriptions,
       shutdownMode,
       onAssignmentChanged,
+      onTopologyUpdate,
     });
 
     return new Engine(commandQueue, socket, completed, shutdownMode, resumeIdentity, hello.resume_outcome);
@@ -392,6 +395,7 @@ interface EngineLoopArgs {
   initialSubscriptions: Map<bigint, SubState>;
   shutdownMode: ShutdownMode;
   onAssignmentChanged?: (msg: AssignmentChangedMsg) => void;
+  onTopologyUpdate?: (topology: TopologyOkMsg) => bigint;
 }
 
 async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
@@ -404,6 +408,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     initialSubscriptions,
     shutdownMode,
     onAssignmentChanged,
+    onTopologyUpdate,
   } = args;
 
   const subs = new Map<bigint, SubState>(initialSubscriptions);
@@ -849,6 +854,22 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
         // exclusivity is enforced by the broker gate regardless.
         if (onAssignmentChanged) {
           onAssignmentChanged(decodeFrameBody<AssignmentChangedMsg>(frame));
+        }
+        return;
+      }
+
+      case Op.TopologyUpdate: {
+        // Broker-pushed routing refresh (generation changed). Apply it to the
+        // shared routing cache so subsequent ops route to the new owners, then
+        // ack the generation now reflected so the broker can fence a cutover.
+        if (onTopologyUpdate) {
+          const topology = decodeFrameBody<TopologyOkMsg>(frame);
+          const generation = onTopologyUpdate(topology);
+          await sendOrDie(
+            buildFrame(Op.TopologyUpdateAck, frame.requestId, {
+              generation,
+            } satisfies TopologyUpdateAckMsg),
+          );
         }
         return;
       }

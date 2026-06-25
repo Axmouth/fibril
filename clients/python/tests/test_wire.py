@@ -259,6 +259,22 @@ def _cases() -> dict[str, tuple[bytes, object]]:
             ),
             wire.decode_topology_ok_body,
         ),
+        "topology_update": (
+            wire.encode_topology_update_body(
+                wire.TopologyOk(
+                    generation=12,
+                    queues=[
+                        wire.QueueTopologyEntry("t", 0, None, "127.0.0.1:7000", 1, 2),
+                    ],
+                    streams=[wire.StreamTopologyEntry("s", 2, "10.0.0.9:7100", 4, 3)],
+                )
+            ),
+            wire.decode_topology_update_body,
+        ),
+        "topology_update_ack": (
+            wire.encode_topology_update_ack_body(wire.TopologyUpdateAck(generation=12)),
+            wire.decode_topology_update_ack_body,
+        ),
         "redirect": (
             wire.encode_redirect_body(wire.Redirect("t", 1, "g", "h:1", 3)),
             wire.decode_redirect_body,
@@ -375,6 +391,8 @@ _ENCODERS = {
     "subscribe_ok": wire.encode_subscribe_ok_body,
     "topology_req": wire.encode_topology_request_body,
     "topology_ok": wire.encode_topology_ok_body,
+    "topology_update": wire.encode_topology_update_body,
+    "topology_update_ack": wire.encode_topology_update_ack_body,
     "redirect": wire.encode_redirect_body,
     "reconcile_client": wire.encode_reconcile_client_body,
     "declare_plexus": wire.encode_declare_plexus_body,

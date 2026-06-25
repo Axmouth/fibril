@@ -1447,6 +1447,83 @@ export function decodeTopologyOkBody(body: Uint8Array): TopologyOk {
   return { generation, queues, streams };
 }
 
+/**
+ * Unsolicited broker->client topology push. Same body as TopologyOk under a
+ * distinct magic so a push is distinguishable from a request reply.
+ */
+export function encodeTopologyUpdateBody(topology: TopologyOk): Uint8Array {
+  const w = new Writer();
+  w.magic("FTU1");
+  w.u64(topology.generation);
+  w.u32(topology.queues.length);
+  for (const e of topology.queues) {
+    w.queueKey(e.topic, e.partition, e.group);
+    w.optionalStr(e.ownerEndpoint);
+    w.u64(e.partitioningVersion);
+    w.u32(e.partitionCount);
+  }
+  w.u32(topology.streams.length);
+  for (const s of topology.streams) {
+    w.str(s.topic);
+    w.u32(s.partition);
+    w.optionalStr(s.ownerEndpoint);
+    w.u64(s.partitioningVersion);
+    w.u32(s.partitionCount);
+  }
+  return w.finish();
+}
+
+export function decodeTopologyUpdateBody(body: Uint8Array): TopologyOk {
+  const r = new Reader(body);
+  r.expectMagic("FTU1");
+  const generation = r.u64();
+  const n = r.u32();
+  const queues: QueueTopologyEntry[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const key = r.queueKey();
+    queues.push({
+      topic: key.topic,
+      partition: key.partition,
+      group: key.group,
+      ownerEndpoint: r.optionalStr(),
+      partitioningVersion: r.u64(),
+      partitionCount: r.u32(),
+    });
+  }
+  const streamCount = r.u32();
+  const streams: StreamTopologyEntry[] = [];
+  for (let i = 0; i < streamCount; i += 1) {
+    streams.push({
+      topic: r.str(),
+      partition: r.u32(),
+      ownerEndpoint: r.optionalStr(),
+      partitioningVersion: r.u64(),
+      partitionCount: r.u32(),
+    });
+  }
+  r.finish();
+  return { generation, queues, streams };
+}
+
+export interface TopologyUpdateAck {
+  generation: bigint;
+}
+
+export function encodeTopologyUpdateAckBody(ack: TopologyUpdateAck): Uint8Array {
+  const w = new Writer();
+  w.magic("FTA1");
+  w.u64(ack.generation);
+  return w.finish();
+}
+
+export function decodeTopologyUpdateAckBody(body: Uint8Array): TopologyUpdateAck {
+  const r = new Reader(body);
+  r.expectMagic("FTA1");
+  const generation = r.u64();
+  r.finish();
+  return { generation };
+}
+
 export function encodeRedirectBody(redirect: Redirect): Uint8Array {
   const w = new Writer();
   w.magic("FRD1");

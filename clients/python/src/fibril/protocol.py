@@ -59,4 +59,10 @@ class Op(IntEnum):
     TOPOLOGY_OK = 91
     REDIRECT = 92
 
+    # Unsolicited broker->client routing push (generation changed) and the
+    # client's ack of the generation it applied, so the broker can fence a
+    # repartition cutover on client acks.
+    TOPOLOGY_UPDATE = 101
+    TOPOLOGY_UPDATE_ACK = 102
+
     ERROR = 255

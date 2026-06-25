@@ -1386,6 +1386,17 @@ class TopologyOk:
 
 
 @dataclass
+class TopologyUpdateAck:
+    """Client ack of a pushed topology update at a generation.
+
+    Lets the broker fence a repartition cutover until clients have applied the
+    new routing.
+    """
+
+    generation: int
+
+
+@dataclass
 class Redirect:
     topic: str
     partition: int
@@ -1462,6 +1473,80 @@ def decode_topology_ok_body(body: bytes) -> TopologyOk:
         )
     r.finish()
     return TopologyOk(generation=generation, queues=queues, streams=streams)
+
+
+def encode_topology_update_body(topology: TopologyOk) -> bytes:
+    """Unsolicited broker->client topology push.
+
+    Same body as TopologyOk under a distinct magic so a push is distinguishable
+    from a request reply.
+    """
+    w = Writer()
+    w.magic("FTU1")
+    w.u64(topology.generation)
+    w.u32(len(topology.queues))
+    for e in topology.queues:
+        w.queue_key(e.topic, e.partition, e.group)
+        w.optional_str(e.owner_endpoint)
+        w.u64(e.partitioning_version)
+        w.u32(e.partition_count)
+    w.u32(len(topology.streams))
+    for s in topology.streams:
+        w.write_str(s.topic)
+        w.u32(s.partition)
+        w.optional_str(s.owner_endpoint)
+        w.u64(s.partitioning_version)
+        w.u32(s.partition_count)
+    return w.finish()
+
+
+def decode_topology_update_body(body: bytes) -> TopologyOk:
+    r = Reader(body)
+    r.expect_magic("FTU1")
+    generation = r.u64()
+    n = r.u32()
+    queues: list[QueueTopologyEntry] = []
+    for _ in range(n):
+        topic, partition, group = r.queue_key()
+        queues.append(
+            QueueTopologyEntry(
+                topic=topic,
+                partition=partition,
+                group=group,
+                owner_endpoint=r.optional_str(),
+                partitioning_version=r.u64(),
+                partition_count=r.u32(),
+            )
+        )
+    stream_count = r.u32()
+    streams: list[StreamTopologyEntry] = []
+    for _ in range(stream_count):
+        streams.append(
+            StreamTopologyEntry(
+                topic=r.read_str(),
+                partition=r.u32(),
+                owner_endpoint=r.optional_str(),
+                partitioning_version=r.u64(),
+                partition_count=r.u32(),
+            )
+        )
+    r.finish()
+    return TopologyOk(generation=generation, queues=queues, streams=streams)
+
+
+def encode_topology_update_ack_body(ack: TopologyUpdateAck) -> bytes:
+    w = Writer()
+    w.magic("FTA1")
+    w.u64(ack.generation)
+    return w.finish()
+
+
+def decode_topology_update_ack_body(body: bytes) -> TopologyUpdateAck:
+    r = Reader(body)
+    r.expect_magic("FTA1")
+    generation = r.u64()
+    r.finish()
+    return TopologyUpdateAck(generation=generation)
 
 
 def encode_redirect_body(redirect: Redirect) -> bytes:

@@ -38,6 +38,7 @@ import type {
   StreamTopologyEntryMsg,
   TopologyOkMsg,
   TopologyRequestMsg,
+  TopologyUpdateAckMsg,
 } from "./protocol.js";
 import * as wire from "./wire.js";
 
@@ -363,6 +364,18 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
         streams: (v.streams ?? []).map(streamEntryToWire),
       });
     }
+    case Op.TopologyUpdate: {
+      const v = value as TopologyOkMsg;
+      return wire.encodeTopologyUpdateBody({
+        generation: v.generation,
+        queues: v.queues.map(entryToWire),
+        streams: (v.streams ?? []).map(streamEntryToWire),
+      });
+    }
+    case Op.TopologyUpdateAck: {
+      const v = value as TopologyUpdateAckMsg;
+      return wire.encodeTopologyUpdateAckBody({ generation: v.generation });
+    }
     case Op.Redirect: {
       const v = value as RedirectMsg;
       return wire.encodeRedirectBody({
@@ -558,6 +571,18 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
         queues: w.queues.map(entryFromWire),
         streams: w.streams.map(streamEntryFromWire),
       } satisfies TopologyOkMsg;
+    }
+    case Op.TopologyUpdate: {
+      const w = wire.decodeTopologyUpdateBody(payload);
+      return {
+        generation: w.generation,
+        queues: w.queues.map(entryFromWire),
+        streams: w.streams.map(streamEntryFromWire),
+      } satisfies TopologyOkMsg;
+    }
+    case Op.TopologyUpdateAck: {
+      const w = wire.decodeTopologyUpdateAckBody(payload);
+      return { generation: w.generation } satisfies TopologyUpdateAckMsg;
     }
     case Op.Redirect: {
       const w = wire.decodeRedirectBody(payload);

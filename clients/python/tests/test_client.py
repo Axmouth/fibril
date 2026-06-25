@@ -178,3 +178,32 @@ async def test_partition_key_routes_consistently(broker: FakeBroker) -> None:
         assert [p.partition for p in broker.publishes] == [expected, expected]
     finally:
         await client.shutdown()
+
+
+async def test_applies_pushed_topology_update_and_acks(broker: FakeBroker) -> None:
+    owner_endpoint = "127.0.0.1:7123"
+    broker.push_topology_on_hello = wire.TopologyOk(
+        generation=7,
+        queues=[wire.QueueTopologyEntry("jobs", 0, None, owner_endpoint, 1, 1)],
+    )
+    client = await _connect(broker)
+    try:
+        # The reader loop applies the push asynchronously after connect returns.
+        for _ in range(100):
+            if client._topology.lookup("jobs", 0, None) is not None:
+                break
+            await asyncio.sleep(0.01)
+        owner = client._topology.lookup("jobs", 0, None)
+        assert owner is not None
+        assert owner.endpoint == owner_endpoint
+        assert client._topology.generation == 7
+
+        # The client must ack the generation it now reflects.
+        for _ in range(100):
+            if broker.topology_acks:
+                break
+            await asyncio.sleep(0.01)
+        assert broker.topology_acks
+        assert broker.topology_acks[-1].generation == 7
+    finally:
+        await client.shutdown()

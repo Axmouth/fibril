@@ -246,11 +246,13 @@ class _PooledConnection:
         port: int,
         opts: ClientOptions,
         on_assignment: Optional[AssignmentHandler],
+        on_topology_update: Optional[object] = None,
     ) -> None:
         self._host = host
         self._port = port
         self._opts = opts
         self._on_assignment = on_assignment
+        self._on_topology_update = on_topology_update
         self._engine: Optional[Engine] = None
         self._lock = asyncio.Lock()
 
@@ -263,7 +265,12 @@ class _PooledConnection:
             reader, writer = await _open_connection(self._host, self._port)
             try:
                 engine = await Engine.start(
-                    reader, writer, self._opts.engine_options(), {}, self._on_assignment
+                    reader,
+                    writer,
+                    self._opts.engine_options(),
+                    {},
+                    self._on_assignment,
+                    self._on_topology_update,
                 )
             except BaseException:
                 writer.close()
@@ -276,6 +283,35 @@ class _PooledConnection:
             self._engine.shutdown()
 
 
+def _prune_pool_to_topology(
+    cache: TopologyCache, pool: dict[str, "_PooledConnection"]
+) -> None:
+    """Drop pooled connections to endpoints that no longer own anything, so a
+    failed-over owner's stale connection is gone. A full topology view (refresh
+    or push) is authoritative about the live owner set."""
+    live = cache.endpoints()
+    for endpoint in list(pool):
+        if endpoint not in live:
+            pool.pop(endpoint).shutdown()
+
+
+def _apply_pushed_topology(
+    topology: wire.TopologyOk,
+    cache: TopologyCache,
+    pool: dict[str, "_PooledConnection"],
+) -> int:
+    """Apply a broker-pushed topology snapshot to the routing cache and prune the
+    pool, mirroring fetch_topology's apply path. A push only moves the cache
+    forward: a stale push (older generation than the cache already holds) is
+    ignored so an out-of-order delivery cannot regress routing. Returns the
+    generation the cache reflects after the call, which the engine acks."""
+    if topology.generation > cache.generation:
+        cache.replace(topology)
+        cache.last_refresh_ms = asyncio.get_running_loop().time() * 1000
+        _prune_pool_to_topology(cache, pool)
+    return cache.generation
+
+
 class Client:
     """Fibril broker client: one bootstrap connection plus routed pooled owners."""
 
@@ -286,6 +322,8 @@ class Client:
         engine: Engine,
         registry: SubscriptionRegistry,
         assignment_listeners: set[AssignmentHandler],
+        topology: TopologyCache,
+        pool: dict[str, "_PooledConnection"],
     ) -> None:
         self._address = address
         self._opts = opts
@@ -293,8 +331,11 @@ class Client:
         self._registry = registry
         self._assignment_listeners = assignment_listeners
         self._bootstrap_endpoint = _endpoint_key(*address)
-        self._topology = TopologyCache()
-        self._pool: dict[str, _PooledConnection] = {}
+        # Created in connect() before the bootstrap engine starts and shared here,
+        # so a topology push the broker sends right after HELLO has somewhere to
+        # land with no wiring race.
+        self._topology = topology
+        self._pool = pool
         self._round_robin = RoundRobin()
         self._cohort_member_id: Optional[wire.Uuid] = None
         self._user_shutdown = False
@@ -318,13 +359,24 @@ class Client:
                 except Exception:
                     pass
 
+        # The routing cache and pool are created here, before the bootstrap engine
+        # starts, so a topology push the broker sends right after HELLO has
+        # somewhere to land with no wiring race. The Client below shares them.
+        topology = TopologyCache()
+        pool: dict[str, _PooledConnection] = {}
+
+        def on_topology_update(t: wire.TopologyOk) -> int:
+            return _apply_pushed_topology(t, topology, pool)
+
         reader, writer = await _open_connection(*addr)
         try:
-            engine = await Engine.start(reader, writer, opts.engine_options(), registry, emit)
+            engine = await Engine.start(
+                reader, writer, opts.engine_options(), registry, emit, on_topology_update
+            )
         except BaseException:
             writer.close()
             raise
-        client = cls(addr, opts, engine, registry, listeners)
+        client = cls(addr, opts, engine, registry, listeners, topology, pool)
         return client
 
     def _emit_assignment(self, event: wire.AssignmentChanged) -> None:
@@ -357,6 +409,7 @@ class Client:
                 self._opts.engine_options(old.resume_identity),
                 self._registry,
                 self._emit_assignment,
+                self._on_topology_update,
             )
         except BaseException:
             writer.close()
@@ -441,11 +494,16 @@ class Client:
         topology = await engine.fetch_topology(topic, group)
         self._topology.replace(topology)
         self._topology.last_refresh_ms = asyncio.get_running_loop().time() * 1000
-        live = self._topology.endpoints()
-        for endpoint in list(self._pool):
-            if endpoint not in live:
-                self._pool.pop(endpoint).shutdown()
+        _prune_pool_to_topology(self._topology, self._pool)
         return topology
+
+    def _on_topology_update(self, topology: wire.TopologyOk) -> int:
+        """Apply a broker-pushed topology snapshot and return the acked generation.
+
+        Used by reconnect and pooled engines (the bootstrap engine uses the
+        equivalent closure created in connect, sharing the same cache and pool).
+        """
+        return _apply_pushed_topology(topology, self._topology, self._pool)
 
     def route(self, topic: str, group: Optional[str], key: Optional[bytes]) -> Route:
         return route_partition(self._topology, topic, group, key, self._round_robin)
@@ -509,7 +567,9 @@ class Client:
         conn = self._pool.get(owner.endpoint)
         if conn is None:
             host, port = parse_address(owner.endpoint)
-            conn = _PooledConnection(host, port, self._opts, self._emit_assignment)
+            conn = _PooledConnection(
+                host, port, self._opts, self._emit_assignment, self._on_topology_update
+            )
             self._pool[owner.endpoint] = conn
         return await conn.engine_for_operation()
 

@@ -53,6 +53,12 @@ export enum Op {
   TopologyOk = 91,
   Redirect = 92,
 
+  // Unsolicited broker->client routing push (generation changed) and the
+  // client's ack of the generation it applied. Lets the broker fence a
+  // repartition cutover on client acks.
+  TopologyUpdate = 101,
+  TopologyUpdateAck = 102,
+
   Error = 255,
 }
 
@@ -321,6 +327,14 @@ export interface TopologyOkMsg {
   generation: bigint;
   queues: QueueTopologyEntryMsg[];
   streams: StreamTopologyEntryMsg[];
+}
+
+/**
+ * Client ack of a pushed TopologyUpdate at a generation. Lets the broker fence a
+ * repartition cutover until clients have applied the new routing.
+ */
+export interface TopologyUpdateAckMsg {
+  generation: bigint;
 }
 
 /**

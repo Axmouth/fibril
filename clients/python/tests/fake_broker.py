@@ -31,6 +31,8 @@ class FakeBroker:
     # Payloads delivered (one Deliver frame each) right after a SUBSCRIBE_OK.
     deliver_on_subscribe: list[bytes] = field(default_factory=list)
     deliver_auto_ack: bool = False
+    # When set, a TOPOLOGY_UPDATE is pushed right after HELLO_OK.
+    push_topology_on_hello: Optional[wire.TopologyOk] = None
 
     # Records for assertions.
     publishes: list[wire.Publish] = field(default_factory=list)
@@ -39,6 +41,7 @@ class FakeBroker:
     declares: list[wire.DeclareQueue] = field(default_factory=list)
     subscribes: list[wire.Subscribe] = field(default_factory=list)
     reconciles: list[wire.ReconcileClient] = field(default_factory=list)
+    topology_acks: list[wire.TopologyUpdateAck] = field(default_factory=list)
 
     host: str = field(init=False, default="127.0.0.1")
     port: int = field(init=False, default=0)
@@ -99,6 +102,21 @@ class FakeBroker:
                 compliance=self.compliance,
             )
             await self._send(writer, build_frame(Op.HELLO_OK, rid, encode_body(Op.HELLO_OK, ok)))
+            if self.push_topology_on_hello is not None:
+                await self._send(
+                    writer,
+                    build_frame(
+                        Op.TOPOLOGY_UPDATE,
+                        0,
+                        encode_body(Op.TOPOLOGY_UPDATE, self.push_topology_on_hello),
+                    ),
+                )
+            return
+
+        if op == Op.TOPOLOGY_UPDATE_ACK:
+            ack = decode_body(Op.TOPOLOGY_UPDATE_ACK, frame.payload)
+            assert isinstance(ack, wire.TopologyUpdateAck)
+            self.topology_acks.append(ack)
             return
 
         if op == Op.AUTH:

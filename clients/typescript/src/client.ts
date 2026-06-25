@@ -519,6 +519,7 @@ class PooledConnection {
     private readonly port: number,
     private readonly opts: ClientOptions,
     private readonly onAssignmentChanged?: (event: AssignmentChangedMsg) => void,
+    private readonly onTopologyUpdate?: (topology: TopologyOkMsg) => bigint,
   ) {}
 
   async engineForOperation(): Promise<Engine> {
@@ -532,6 +533,7 @@ class PooledConnection {
           this.opts,
           new Map(),
           this.onAssignmentChanged,
+          this.onTopologyUpdate,
         );
         this.#engine = engine;
         return engine;
@@ -549,6 +551,44 @@ class PooledConnection {
   shutdown(): void {
     this.#engine?.shutdown();
   }
+}
+
+/**
+ * Drop pooled connections to endpoints that no longer own anything, so a
+ * failed-over owner's stale connection is gone. A full topology view (refresh or
+ * push) is authoritative about the live owner set.
+ */
+function prunePoolToTopology(
+  cache: TopologyCache,
+  pool: Map<string, PooledConnection>,
+): void {
+  const live = cache.endpoints();
+  for (const [endpoint, conn] of pool) {
+    if (!live.has(endpoint)) {
+      conn.shutdown();
+      pool.delete(endpoint);
+    }
+  }
+}
+
+/**
+ * Apply a broker-pushed topology snapshot to the routing cache and prune the
+ * pool, mirroring fetchTopology's apply path. A push only moves the cache
+ * forward: a stale push (older generation than the cache already holds) is
+ * ignored so an out-of-order delivery cannot regress routing. Returns the
+ * generation the cache reflects after the call, which the engine acks.
+ */
+function applyPushedTopology(
+  topology: TopologyOkMsg,
+  cache: TopologyCache,
+  pool: Map<string, PooledConnection>,
+): bigint {
+  if (topology.generation > cache.generation) {
+    cache.replace(topology);
+    cache.lastRefreshMs = Date.now();
+    prunePoolToTopology(cache, pool);
+  }
+  return cache.generation;
 }
 
 /**
@@ -570,12 +610,14 @@ export class Client {
   #reconnectPromise: Promise<void> | null = null;
   #userShutdown = false;
   readonly #subscriptions: SubscriptionRegistry;
-  // Routing cache, warmed by fetchTopology and point-updated by redirects. Empty
-  // means "no routing info" (standalone broker or cold client).
-  readonly #topology = new TopologyCache();
+  // Routing cache, warmed by fetchTopology, point-updated by redirects, and
+  // replaced by broker topology pushes. Empty means "no routing info" (standalone
+  // broker or cold client). Created in connect() before the bootstrap engine
+  // starts so a topology push has somewhere to land with no wiring race.
+  readonly #topology: TopologyCache;
   // Connections to non-bootstrap owners, keyed by "host:port". The bootstrap
   // connection is the EngineSlot above and is never pooled here.
-  readonly #pool = new Map<string, PooledConnection>();
+  readonly #pool: Map<string, PooledConnection>;
   // Cursor for keyless round-robin partition spread.
   readonly #roundRobin: RoundRobin = { next: 0 };
   readonly #bootstrapEndpoint: string;
@@ -599,18 +641,27 @@ export class Client {
     }
   };
 
+  // Bound so it can be handed to every Engine.start as the topology-push
+  // callback: apply the pushed routing snapshot and return the generation to ack.
+  readonly #onTopologyUpdate = (topology: TopologyOkMsg): bigint =>
+    this._applyPushedTopology(topology);
+
   private constructor(
     address: { host: string; port: number },
     opts: ClientOptions,
     engine: Engine,
     subscriptions: SubscriptionRegistry,
     assignmentListeners: Set<(event: AssignmentChangedMsg) => void>,
+    topology: TopologyCache,
+    pool: Map<string, PooledConnection>,
   ) {
     this.#address = address;
     this.#opts = opts;
     this.#engine = new EngineSlot(engine);
     this.#subscriptions = subscriptions;
     this.#assignmentListeners = assignmentListeners;
+    this.#topology = topology;
+    this.#pool = pool;
     this.#bootstrapEndpoint = endpointKey(address.host, address.port);
   }
 
@@ -653,9 +704,22 @@ export class Client {
         }
       }
     };
+    // The routing cache and pool are created here, before the bootstrap engine
+    // starts, so a topology push the broker sends right after HELLO has somewhere
+    // to land with no wiring race. The Client below shares these exact objects.
+    const topology = new TopologyCache();
+    const pool = new Map<string, PooledConnection>();
+    const onTopologyUpdate = (t: TopologyOkMsg): bigint =>
+      applyPushedTopology(t, topology, pool);
     let engine: Engine;
     try {
-      engine = await Engine.start(socket, opts, subscriptions, emitAssignment);
+      engine = await Engine.start(
+        socket,
+        opts,
+        subscriptions,
+        emitAssignment,
+        onTopologyUpdate,
+      );
     } catch (err) {
       socket.destroy();
       if (err instanceof FibrilError) throw err;
@@ -663,7 +727,15 @@ export class Client {
         `Engine failed to start: ${(err as Error).message}`,
       );
     }
-    return new Client(addr, opts, engine, subscriptions, assignmentListeners);
+    return new Client(
+      addr,
+      opts,
+      engine,
+      subscriptions,
+      assignmentListeners,
+      topology,
+      pool,
+    );
   }
 
   /**
@@ -690,6 +762,7 @@ export class Client {
         this.#opts.withResumeIdentity(oldEngine.resumeIdentity),
         this.#subscriptions,
         this.#emitAssignment,
+        this.#onTopologyUpdate,
       );
     } catch (err) {
       socket.destroy();
@@ -784,16 +857,17 @@ export class Client {
     const topology = await (await this._engineForOperation()).fetchTopology(filter);
     this.#topology.replace(topology);
     this.#topology.lastRefreshMs = Date.now();
-    // A full refresh is authoritative: drop pooled connections to endpoints that
-    // no longer own anything so a failed-over owner's stale connection is gone.
-    const live = this.#topology.endpoints();
-    for (const [endpoint, conn] of this.#pool) {
-      if (!live.has(endpoint)) {
-        conn.shutdown();
-        this.#pool.delete(endpoint);
-      }
-    }
+    prunePoolToTopology(this.#topology, this.#pool);
     return topology;
+  }
+
+  /**
+   * @internal Apply a broker-pushed topology snapshot to the routing cache and
+   * prune the pool. Used by the bootstrap engine's push callback (via the shared
+   * objects) and by reconnect/pooled engines through `#onTopologyUpdate`.
+   */
+  _applyPushedTopology(topology: TopologyOkMsg): bigint {
+    return applyPushedTopology(topology, this.#topology, this.#pool);
   }
 
   /** @internal The routing cache, exposed for the pool/router layer and tests. */
@@ -862,7 +936,13 @@ export class Client {
     let conn = this.#pool.get(owner.endpoint);
     if (!conn) {
       const addr = parseAddress(owner.endpoint);
-      conn = new PooledConnection(addr.host, addr.port, this.#opts, this.#emitAssignment);
+      conn = new PooledConnection(
+        addr.host,
+        addr.port,
+        this.#opts,
+        this.#emitAssignment,
+        this.#onTopologyUpdate,
+      );
       this.#pool.set(owner.endpoint, conn);
     }
     return conn.engineForOperation();

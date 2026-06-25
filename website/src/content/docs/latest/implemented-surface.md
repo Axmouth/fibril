@@ -557,7 +557,7 @@ See also: [clustering](/latest/concepts/clustering/) and
 | `min_in_sync_replicas` | Implemented | Runtime setting, fail-fast publish refusal when healthy ISR is below floor |
 | Live repartitioning | Partial | Grow or shrink a queue's partition count in Ganglion mode (versioned routing, in-flight transition serialization, drain-and-retire on shrink); admin control + API |
 | Topology visibility | Partial | Admin API/page (with repartition + coordination-membership controls) and `fibrilctl topology`. Cross-broker lag aggregation is pending |
-| Live topology push | Partial | Broker pushes a `TopologyUpdate` to each connection when the coordination generation changes; the Rust client applies it to its routing cache and acks the generation. TypeScript and Python push handling, and repartition-cutover fencing on the acks, are pending |
+| Live topology push | Partial | Broker pushes a `TopologyUpdate` to each connection when the coordination generation changes; the Rust, TypeScript, and Python clients apply it to their routing cache and ack the generation. Repartition-cutover fencing on the acks is pending |
 | Cohort visibility (admin) | Partial | Per-broker exclusive-cohort membership on the subscriptions page and `/admin/api/cohorts`; cluster-wide cohort assignment is broker-local, not centrally committed |
 | Multi-node cohort coordinator test | Partial | Coordination-level e2e covers cross-broker membership aggregation and rebalance. Full broker/client scenario coverage is still growing |
 

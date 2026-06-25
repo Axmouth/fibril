@@ -440,8 +440,13 @@ import {
   decodeDeclarePlexusOkBody,
   encodeSubscribeStreamBody,
   decodeSubscribeStreamBody,
+  encodeTopologyUpdateBody,
+  decodeTopologyUpdateBody,
+  encodeTopologyUpdateAckBody,
+  decodeTopologyUpdateAckBody,
   type DeclarePlexus,
   type SubscribeStream,
+  type TopologyOk,
 } from "../src/wire.js";
 
 const toHex = (b: Uint8Array): string =>
@@ -507,4 +512,38 @@ test("plexus stream bodies match shared vectors and round-trip", () => {
   };
   assert.equal(toHex(encodeSubscribeStreamBody(subMin)), VECTORS.subscribe_stream_min);
   assert.deepEqual(decodeSubscribeStreamBody(encodeSubscribeStreamBody(subMin)), subMin);
+});
+
+test("topology update push + ack bodies match shared vectors and round-trip", () => {
+  const topology: TopologyOk = {
+    generation: 12n,
+    queues: [
+      {
+        topic: "t",
+        partition: 0,
+        group: null,
+        ownerEndpoint: "127.0.0.1:7000",
+        partitioningVersion: 1n,
+        partitionCount: 2,
+      },
+    ],
+    streams: [
+      {
+        topic: "s",
+        partition: 2,
+        ownerEndpoint: "10.0.0.9:7100",
+        partitioningVersion: 4n,
+        partitionCount: 3,
+      },
+    ],
+  };
+  assert.equal(toHex(encodeTopologyUpdateBody(topology)), VECTORS.topology_update);
+  assert.deepEqual(decodeTopologyUpdateBody(encodeTopologyUpdateBody(topology)), topology);
+
+  const ack = { generation: 12n };
+  assert.equal(
+    toHex(encodeTopologyUpdateAckBody(ack)),
+    VECTORS.topology_update_ack,
+  );
+  assert.deepEqual(decodeTopologyUpdateAckBody(encodeTopologyUpdateAckBody(ack)), ack);
 });

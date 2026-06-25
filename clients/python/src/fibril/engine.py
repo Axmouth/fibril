@@ -127,6 +127,7 @@ class Engine:
         resume_outcome: wire.ResumeOutcome,
         restored: dict[int, _SubState],
         on_assignment_changed: Optional[object] = None,
+        on_topology_update: Optional[object] = None,
     ) -> None:
         self._reader = reader
         self._writer = writer
@@ -135,6 +136,7 @@ class Engine:
         self.resume_identity = resume_identity
         self.resume_outcome = resume_outcome
         self._on_assignment_changed = on_assignment_changed
+        self._on_topology_update = on_topology_update
 
         self._subs: dict[int, _SubState] = dict(restored)
         self._waiters: dict[int, _Waiter] = {}
@@ -158,6 +160,7 @@ class Engine:
         opts: EngineOptions,
         registry: Optional[SubscriptionRegistry] = None,
         on_assignment_changed: Optional[object] = None,
+        on_topology_update: Optional[object] = None,
     ) -> "Engine":
         registry = registry if registry is not None else {}
 
@@ -241,6 +244,7 @@ class Engine:
             hello.resume_outcome,
             restored,
             on_assignment_changed,
+            on_topology_update,
         )
 
     def shutdown(self) -> None:
@@ -483,6 +487,23 @@ class Engine:
             if self._on_assignment_changed is not None:
                 msg = decode_body(Op.ASSIGNMENT_CHANGED, frame.payload)
                 self._on_assignment_changed(msg)  # type: ignore[operator]
+            return
+
+        if op == Op.TOPOLOGY_UPDATE:
+            # Broker-pushed routing refresh (generation changed). Apply it to the
+            # shared routing cache so subsequent ops route to the new owners, then
+            # ack the generation now reflected so the broker can fence a cutover.
+            if self._on_topology_update is not None:
+                topology = decode_body(Op.TOPOLOGY_UPDATE, frame.payload)
+                generation = self._on_topology_update(topology)  # type: ignore[operator]
+                ack = wire.TopologyUpdateAck(generation=generation)
+                await self._send_or_die(
+                    build_frame(
+                        Op.TOPOLOGY_UPDATE_ACK,
+                        frame.request_id,
+                        encode_body(Op.TOPOLOGY_UPDATE_ACK, ack),
+                    )
+                )
             return
 
         if op == Op.PING:

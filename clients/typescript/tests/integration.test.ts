@@ -410,6 +410,62 @@ test("disabled auto reconnect returns broken pipe for closed engine", async () =
   }
 });
 
+test("client applies a pushed topology update and acks it", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    const ownerEndpoint = "127.0.0.1:7123";
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+        // Push a topology with one queue partition owned by ownerEndpoint.
+        const topology: TopologyOkMsg = {
+          generation: 7n,
+          queues: [
+            {
+              topic: "jobs",
+              partition: 0,
+              group: null,
+              owner_endpoint: ownerEndpoint,
+              partitioning_version: 1n,
+              partition_count: 1,
+            },
+          ],
+          streams: [],
+        };
+        broker.send(s, buildFrame(Op.TopologyUpdate, 0n, topology));
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions(),
+    );
+
+    // The cache should reflect the pushed owner once the reader loop applies it.
+    let owner = client._topology().lookup("jobs", 0, null);
+    for (let i = 0; i < 100 && !owner; i += 1) {
+      await new Promise((r) => setTimeout(r, 10));
+      owner = client._topology().lookup("jobs", 0, null);
+    }
+    assert.equal(owner?.endpoint, ownerEndpoint);
+    assert.equal(client._topology().generation, 7n);
+
+    // The client must ack the generation it now reflects.
+    let ack: Frame | undefined;
+    for (let i = 0; i < 100 && !ack; i += 1) {
+      ack = broker.received.find((r) => r.opcode === Op.TopologyUpdateAck);
+      if (!ack) await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.ok(ack, "client should ack the pushed topology update");
+    assert.equal(decodeFrameBody<{ generation: bigint }>(ack).generation, 7n);
+
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("shutdown client does not auto reconnect", async () => {
   const broker = new FakeBroker();
   await broker.start();
