@@ -400,7 +400,7 @@ See also: [admin dashboard](/latest/admin-dashboard/).
 | Queues page | Implemented | Dashboard and API, per-partition expand, follower-replication view, DLQ-policy column, hide-inactive toggle + search filter |
 | Create queue | Implemented | `POST /admin/api/queues` + dashboard form (partition count, optional DLQ policy, optional default message TTL) |
 | Delete queue (single-node) | Implemented | `POST /admin/api/queues/delete` + per-row dashboard button; refuses while messages are inflight (409) and in cluster mode (501) pending coordinated teardown |
-| Streams page | Implemented | Dashboard and API (`GET /admin/api/streams`), per-topic partition rows with head/tail/retained and the declared durability and retention |
+| Streams page | Implemented | Dashboard and API (`GET /admin/api/streams`), per-topic partition rows with head/tail/retained, declared durability and retention, plus per-partition role and applied offset and a follower-replication view (`GET /admin/api/streams_debug`) |
 | Create stream | Implemented | `POST /admin/api/streams` + dashboard form (partition count, durability tier, optional retention by records/bytes/age) |
 | Settings page | Implemented | Dashboard and API, incl. replication and streaming-replication settings |
 | Message inspection page | Implemented | Dashboard and API |
