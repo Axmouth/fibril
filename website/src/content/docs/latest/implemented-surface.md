@@ -34,6 +34,7 @@ See also: [core model](/latest/concepts/core-model/) and
 | Partitioned queue declaration | Implemented | `DeclareQueue.partition_count`, Rust client declare builder, config default, coordination catalogue |
 | Producer partition routing | Implemented | Rust client topology cache, round-robin keyless routing, `partition_key` stable routing, version-fenced publish frames |
 | Subscription fan-in | Implemented | Rust client opens per-partition subscriptions from topology and merges deliveries into one logical stream |
+| Cluster catalogue (client) | Implemented | Rust, TypeScript, and Python clients expose the live set of declared queues and streams (with partition counts) via a snapshot accessor and a change-subscription, derived from topology and kept live by topology pushes (no extra round-trips) |
 | Operator-chosen partition id | Out of scope | Normal user-facing paths should choose queue and optional key, not a partition number |
 
 Conditions and limits:

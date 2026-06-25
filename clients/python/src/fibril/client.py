@@ -312,6 +312,89 @@ def _apply_pushed_topology(
     return cache.generation
 
 
+@dataclass(frozen=True)
+class QueueInfo:
+    """A declared queue as seen in the cluster :class:`Catalogue`."""
+
+    topic: str
+    #: The queue's group namespace, or ``None`` for the ungrouped default.
+    group: Optional[str]
+    partition_count: int
+
+
+@dataclass(frozen=True)
+class StreamInfo:
+    """A declared Plexus stream as seen in the cluster :class:`Catalogue`."""
+
+    topic: str
+    partition_count: int
+
+
+@dataclass(frozen=True)
+class Catalogue:
+    """A snapshot of the channels declared in the cluster: every queue and Plexus
+    stream the client currently knows about, with partition counts. Derived from
+    the topology and kept live by topology pushes, so it needs no extra
+    round-trips. ``queues`` and ``streams`` are sorted (by topic, then group) for a
+    stable order. Read the current snapshot with :meth:`Client.catalogue` or
+    subscribe to changes with :meth:`Client.on_catalogue_change`."""
+
+    queues: tuple[QueueInfo, ...]
+    streams: tuple[StreamInfo, ...]
+    generation: int
+
+
+CatalogueHandler = Callable[[Catalogue], None]
+
+
+@dataclass
+class _CatalogueState:
+    """Latest catalogue snapshot plus its change listeners. Created in connect()
+    before the bootstrap engine starts so a push has somewhere to land with no
+    wiring race (same reasoning as the routing cache and pool)."""
+
+    current: Catalogue = field(
+        default_factory=lambda: Catalogue(queues=(), streams=(), generation=0)
+    )
+    listeners: set[CatalogueHandler] = field(default_factory=set)
+
+
+def _catalogue_from_topology(topology: wire.TopologyOk) -> Catalogue:
+    """Derive the catalogue from a topology snapshot. The topology lists one entry
+    per partition, so queues dedupe by (topic, group) and streams by topic; both
+    come back sorted for a deterministic order."""
+    queues: dict[tuple[str, Optional[str]], QueueInfo] = {}
+    for q in topology.queues:
+        queues[(q.topic, q.group)] = QueueInfo(q.topic, q.group, max(q.partition_count, 1))
+    streams: dict[str, StreamInfo] = {}
+    for s in topology.streams:
+        streams[s.topic] = StreamInfo(s.topic, max(s.partition_count, 1))
+    return Catalogue(
+        queues=tuple(queues[k] for k in sorted(queues, key=lambda k: (k[0], k[1] or ""))),
+        streams=tuple(streams[k] for k in sorted(streams)),
+        generation=topology.generation,
+    )
+
+
+def _refresh_catalogue(topology: wire.TopologyOk, state: _CatalogueState) -> None:
+    """Refresh the catalogue snapshot from a full topology and notify listeners if
+    the set of declared queues or streams changed. Monotonic and self-guarding: a
+    stale topology (generation not newer than the snapshot already held) is
+    ignored. Owner-only churn updates the stored generation but fires no listener."""
+    nxt = _catalogue_from_topology(topology)
+    prev = state.current
+    if nxt.generation <= prev.generation and prev.generation != 0:
+        return
+    changed = nxt.queues != prev.queues or nxt.streams != prev.streams
+    state.current = nxt
+    if changed:
+        for listener in list(state.listeners):
+            try:
+                listener(nxt)
+            except Exception:
+                pass
+
+
 class Client:
     """Fibril broker client: one bootstrap connection plus routed pooled owners."""
 
@@ -324,6 +407,7 @@ class Client:
         assignment_listeners: set[AssignmentHandler],
         topology: TopologyCache,
         pool: dict[str, "_PooledConnection"],
+        catalogue: _CatalogueState,
     ) -> None:
         self._address = address
         self._opts = opts
@@ -336,6 +420,7 @@ class Client:
         # land with no wiring race.
         self._topology = topology
         self._pool = pool
+        self._catalogue = catalogue
         self._round_robin = RoundRobin()
         self._cohort_member_id: Optional[wire.Uuid] = None
         self._user_shutdown = False
@@ -364,9 +449,12 @@ class Client:
         # somewhere to land with no wiring race. The Client below shares them.
         topology = TopologyCache()
         pool: dict[str, _PooledConnection] = {}
+        catalogue = _CatalogueState()
 
         def on_topology_update(t: wire.TopologyOk) -> int:
-            return _apply_pushed_topology(t, topology, pool)
+            generation = _apply_pushed_topology(t, topology, pool)
+            _refresh_catalogue(t, catalogue)
+            return generation
 
         reader, writer = await _open_connection(*addr)
         try:
@@ -376,7 +464,7 @@ class Client:
         except BaseException:
             writer.close()
             raise
-        client = cls(addr, opts, engine, registry, listeners, topology, pool)
+        client = cls(addr, opts, engine, registry, listeners, topology, pool, catalogue)
         return client
 
     def _emit_assignment(self, event: wire.AssignmentChanged) -> None:
@@ -392,6 +480,25 @@ class Client:
 
         def unsubscribe() -> None:
             self._assignment_listeners.discard(handler)
+
+        return unsubscribe
+
+    def catalogue(self) -> Catalogue:
+        """The current cluster catalogue: every queue and Plexus stream this client
+        knows about, with partition counts. Read straight from the cached topology
+        with no round-trip. Empty on a cold or standalone client; kept live by
+        broker topology pushes."""
+        return self._catalogue.current
+
+    def on_catalogue_change(self, handler: CatalogueHandler) -> Callable[[], None]:
+        """Observe cluster catalogue changes. The handler fires with a full
+        :class:`Catalogue` snapshot when the set of declared queues or streams
+        changes (a channel added or removed, or a partition count change).
+        Owner-only failover churn does not fire. Returns an unsubscribe."""
+        self._catalogue.listeners.add(handler)
+
+        def unsubscribe() -> None:
+            self._catalogue.listeners.discard(handler)
 
         return unsubscribe
 
@@ -495,6 +602,7 @@ class Client:
         self._topology.replace(topology)
         self._topology.last_refresh_ms = asyncio.get_running_loop().time() * 1000
         _prune_pool_to_topology(self._topology, self._pool)
+        _refresh_catalogue(topology, self._catalogue)
         return topology
 
     def _on_topology_update(self, topology: wire.TopologyOk) -> int:
@@ -503,7 +611,9 @@ class Client:
         Used by reconnect and pooled engines (the bootstrap engine uses the
         equivalent closure created in connect, sharing the same cache and pool).
         """
-        return _apply_pushed_topology(topology, self._topology, self._pool)
+        generation = _apply_pushed_topology(topology, self._topology, self._pool)
+        _refresh_catalogue(topology, self._catalogue)
+        return generation
 
     def route(self, topic: str, group: Optional[str], key: Optional[bytes]) -> Route:
         return route_partition(self._topology, topic, group, key, self._round_robin)

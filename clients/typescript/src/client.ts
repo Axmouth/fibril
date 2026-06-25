@@ -591,6 +591,118 @@ function applyPushedTopology(
   return cache.generation;
 }
 
+/** A declared queue as seen in the cluster {@link Catalogue}. */
+export interface QueueInfo {
+  topic: string;
+  /** The queue's group namespace, or null for the ungrouped default. */
+  group: string | null;
+  partitionCount: number;
+}
+
+/** A declared Plexus stream as seen in the cluster {@link Catalogue}. */
+export interface StreamInfo {
+  topic: string;
+  partitionCount: number;
+}
+
+/**
+ * A snapshot of the channels declared in the cluster: every queue and Plexus
+ * stream the client currently knows about, with partition counts. Derived from
+ * the topology and kept live by topology pushes, so it needs no extra
+ * round-trips. `queues` and `streams` are sorted (by topic, then group) for a
+ * stable order. Read the current snapshot with {@link Client.catalogue} or
+ * subscribe to changes with {@link Client.onCatalogueChange}.
+ */
+export interface Catalogue {
+  queues: QueueInfo[];
+  streams: StreamInfo[];
+  generation: bigint;
+}
+
+/** Shared catalogue state: the latest snapshot plus its change listeners. Created
+ * in connect() before the bootstrap engine starts, so a push has somewhere to
+ * land with no wiring race (same reasoning as the routing cache and pool). */
+interface CatalogueState {
+  current: Catalogue;
+  listeners: Set<(catalogue: Catalogue) => void>;
+}
+
+function emptyCatalogue(): Catalogue {
+  return { queues: [], streams: [], generation: 0n };
+}
+
+/** Derive the catalogue from a topology snapshot. The topology lists one entry
+ * per partition, so queues dedupe by (topic, group) and streams by topic; both
+ * are returned sorted for a deterministic order. */
+function catalogueFromTopology(topology: TopologyOkMsg): Catalogue {
+  const queues = new Map<string, QueueInfo>();
+  for (const e of topology.queues) {
+    // "/" is rejected in topic and group names, so it is a safe dedupe-key join.
+    queues.set(e.topic + "/" + (e.group ?? ""), {
+      topic: e.topic,
+      group: e.group,
+      partitionCount: Math.max(e.partition_count, 1),
+    });
+  }
+  const streams = new Map<string, StreamInfo>();
+  for (const e of topology.streams ?? []) {
+    streams.set(e.topic, {
+      topic: e.topic,
+      partitionCount: Math.max(e.partition_count, 1),
+    });
+  }
+  return {
+    queues: [...queues.values()].sort((a, b) =>
+      a.topic === b.topic
+        ? (a.group ?? "").localeCompare(b.group ?? "")
+        : a.topic.localeCompare(b.topic),
+    ),
+    streams: [...streams.values()].sort((a, b) => a.topic.localeCompare(b.topic)),
+    generation: topology.generation,
+  };
+}
+
+function cataloguesEqual(a: Catalogue, b: Catalogue): boolean {
+  if (a.queues.length !== b.queues.length || a.streams.length !== b.streams.length) {
+    return false;
+  }
+  return (
+    a.queues.every((x, i) => {
+      const y = b.queues[i]!;
+      return x.topic === y.topic && x.group === y.group && x.partitionCount === y.partitionCount;
+    }) &&
+    a.streams.every((x, i) => {
+      const y = b.streams[i]!;
+      return x.topic === y.topic && x.partitionCount === y.partitionCount;
+    })
+  );
+}
+
+/**
+ * Refresh the catalogue snapshot from a full topology and notify listeners if the
+ * set of declared queues or streams changed. Monotonic and self-guarding: a stale
+ * topology (generation not newer than the snapshot already held) is ignored.
+ * Owner-only churn updates the stored generation but fires no listener.
+ */
+function refreshCatalogue(topology: TopologyOkMsg, state: CatalogueState): void {
+  const next = catalogueFromTopology(topology);
+  const prev = state.current;
+  if (next.generation <= prev.generation && prev.generation !== 0n) {
+    return;
+  }
+  const changed = !cataloguesEqual(prev, next);
+  state.current = next;
+  if (changed) {
+    for (const listener of [...state.listeners]) {
+      try {
+        listener(next);
+      } catch {
+        // A listener throwing must not break frame processing.
+      }
+    }
+  }
+}
+
 /**
  * Fibril broker client. Manages a single connection and dispatches
  * publish/subscribe operations through an internal engine.
@@ -618,6 +730,9 @@ export class Client {
   // Connections to non-bootstrap owners, keyed by "host:port". The bootstrap
   // connection is the EngineSlot above and is never pooled here.
   readonly #pool: Map<string, PooledConnection>;
+  // Latest catalogue snapshot plus its change listeners. Created in connect()
+  // before the bootstrap engine starts (same race reasoning as the routing cache).
+  readonly #catalogue: CatalogueState;
   // Cursor for keyless round-robin partition spread.
   readonly #roundRobin: RoundRobin = { next: 0 };
   readonly #bootstrapEndpoint: string;
@@ -654,6 +769,7 @@ export class Client {
     assignmentListeners: Set<(event: AssignmentChangedMsg) => void>,
     topology: TopologyCache,
     pool: Map<string, PooledConnection>,
+    catalogue: CatalogueState,
   ) {
     this.#address = address;
     this.#opts = opts;
@@ -662,7 +778,31 @@ export class Client {
     this.#assignmentListeners = assignmentListeners;
     this.#topology = topology;
     this.#pool = pool;
+    this.#catalogue = catalogue;
     this.#bootstrapEndpoint = endpointKey(address.host, address.port);
+  }
+
+  /**
+   * The current cluster catalogue: every queue and Plexus stream this client
+   * knows about, with partition counts. Read straight from the cached topology -
+   * no round-trip. Empty on a cold or standalone client; kept live by broker
+   * topology pushes.
+   */
+  catalogue(): Catalogue {
+    return this.#catalogue.current;
+  }
+
+  /**
+   * Observe cluster catalogue changes. The handler fires with a full
+   * {@link Catalogue} snapshot when the set of declared queues or streams changes
+   * (a channel added or removed, or a partition count change). Owner-only
+   * failover churn does not fire. Returns an unsubscribe function.
+   */
+  onCatalogueChange(handler: (catalogue: Catalogue) => void): () => void {
+    this.#catalogue.listeners.add(handler);
+    return () => {
+      this.#catalogue.listeners.delete(handler);
+    };
   }
 
   /**
@@ -709,8 +849,15 @@ export class Client {
     // to land with no wiring race. The Client below shares these exact objects.
     const topology = new TopologyCache();
     const pool = new Map<string, PooledConnection>();
-    const onTopologyUpdate = (t: TopologyOkMsg): bigint =>
-      applyPushedTopology(t, topology, pool);
+    const catalogueState: CatalogueState = {
+      current: emptyCatalogue(),
+      listeners: new Set(),
+    };
+    const onTopologyUpdate = (t: TopologyOkMsg): bigint => {
+      const generation = applyPushedTopology(t, topology, pool);
+      refreshCatalogue(t, catalogueState);
+      return generation;
+    };
     let engine: Engine;
     try {
       engine = await Engine.start(
@@ -735,6 +882,7 @@ export class Client {
       assignmentListeners,
       topology,
       pool,
+      catalogueState,
     );
   }
 
@@ -858,6 +1006,7 @@ export class Client {
     this.#topology.replace(topology);
     this.#topology.lastRefreshMs = Date.now();
     prunePoolToTopology(this.#topology, this.#pool);
+    refreshCatalogue(topology, this.#catalogue);
     return topology;
   }
 

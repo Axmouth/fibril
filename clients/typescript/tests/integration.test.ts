@@ -22,7 +22,7 @@ import {
   type SubscribeMsg,
   type TopologyOkMsg,
 } from "../src/protocol.js";
-import { Client, ClientOptions, QueueConfig } from "../src/client.js";
+import { Client, ClientOptions, QueueConfig, type Catalogue } from "../src/client.js";
 import { BrokenPipeError, DisconnectionError, RedirectError } from "../src/errors.js";
 import { NewMessage } from "../src/message.js";
 import { fnv1a } from "../src/internal/topology.js";
@@ -459,6 +459,74 @@ test("client applies a pushed topology update and acks it", async () => {
     }
     assert.ok(ack, "client should ack the pushed topology update");
     assert.equal(decodeFrameBody<{ generation: bigint }>(ack).generation, 7n);
+
+    // The push also refreshes the catalogue snapshot.
+    const catalogue = client.catalogue();
+    assert.equal(catalogue.generation, 7n);
+    assert.equal(catalogue.queues.length, 1);
+    assert.equal(catalogue.queues[0]?.topic, "jobs");
+    assert.equal(catalogue.streams.length, 0);
+
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+test("catalogue change feed reports declared queues and streams", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        const topology: TopologyOkMsg = {
+          generation: 5n,
+          queues: [
+            {
+              topic: "jobs",
+              partition: 0,
+              group: "workers",
+              owner_endpoint: null,
+              partitioning_version: 1n,
+              partition_count: 3,
+            },
+          ],
+          streams: [
+            {
+              topic: "events",
+              partition: 0,
+              owner_endpoint: null,
+              partitioning_version: 1n,
+              partition_count: 2,
+            },
+          ],
+        };
+        broker.send(s, buildFrame(Op.TopologyOk, f.requestId, topology));
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions(),
+    );
+
+    const changed = new Promise<Catalogue>((resolve) => {
+      client.onCatalogueChange(resolve);
+    });
+    await client.fetchTopology();
+    const catalogue = await changed;
+
+    assert.equal(catalogue.generation, 5n);
+    assert.equal(catalogue.queues.length, 1);
+    assert.equal(catalogue.queues[0]?.topic, "jobs");
+    assert.equal(catalogue.queues[0]?.group, "workers");
+    assert.equal(catalogue.queues[0]?.partitionCount, 3);
+    assert.equal(catalogue.streams.length, 1);
+    assert.equal(catalogue.streams[0]?.topic, "events");
+    assert.equal(catalogue.streams[0]?.partitionCount, 2);
+    assert.deepEqual(client.catalogue(), catalogue);
 
     await client.shutdown();
   } finally {

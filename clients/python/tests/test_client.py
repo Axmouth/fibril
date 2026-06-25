@@ -207,3 +207,43 @@ async def test_applies_pushed_topology_update_and_acks(broker: FakeBroker) -> No
         assert broker.topology_acks[-1].generation == 7
     finally:
         await client.shutdown()
+
+
+async def test_catalogue_reflects_pushed_topology(broker: FakeBroker) -> None:
+    broker.push_topology_on_hello = wire.TopologyOk(
+        generation=7,
+        queues=[wire.QueueTopologyEntry("jobs", 0, "workers", None, 1, 3)],
+        streams=[wire.StreamTopologyEntry("events", 0, None, 1, 2)],
+    )
+    client = await _connect(broker)
+    try:
+        for _ in range(100):
+            if client.catalogue().generation == 7:
+                break
+            await asyncio.sleep(0.01)
+        cat = client.catalogue()
+        assert cat.generation == 7
+        assert [(q.topic, q.group, q.partition_count) for q in cat.queues] == [
+            ("jobs", "workers", 3)
+        ]
+        assert [(s.topic, s.partition_count) for s in cat.streams] == [("events", 2)]
+    finally:
+        await client.shutdown()
+
+
+async def test_on_catalogue_change_fires(broker: FakeBroker) -> None:
+    broker.topology = wire.TopologyOk(
+        generation=5,
+        queues=[wire.QueueTopologyEntry("jobs", 0, None, None, 1, 1)],
+    )
+    client = await _connect(broker)
+    try:
+        seen: list = []
+        client.on_catalogue_change(seen.append)
+        await client.fetch_topology()
+        assert len(seen) == 1
+        assert seen[0].generation == 5
+        assert seen[0].queues[0].topic == "jobs"
+        assert client.catalogue() == seen[0]
+    finally:
+        await client.shutdown()

@@ -98,6 +98,76 @@ pub struct AssignmentEvent {
     pub revoked: Vec<Partition>,
 }
 
+/// A declared queue as seen in the cluster [`Catalogue`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueInfo {
+    pub topic: String,
+    /// The queue's group namespace, or `None` for the ungrouped default.
+    pub group: Option<String>,
+    /// Authoritative partition count.
+    pub partition_count: u32,
+}
+
+/// A declared Plexus stream as seen in the cluster [`Catalogue`]. Streams have no
+/// group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamInfo {
+    pub topic: String,
+    /// Authoritative partition count.
+    pub partition_count: u32,
+}
+
+/// A snapshot of the channels declared in the cluster: every queue and Plexus
+/// stream the client currently knows about, with partition counts. Built from the
+/// topology the broker hands out and kept live by topology pushes, so it needs no
+/// extra round-trips. `queues` and `streams` are sorted (by topic, then group) for
+/// a stable iteration order. Read the current snapshot with [`Client::catalogue`]
+/// or subscribe to changes with [`Client::catalogue_events`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Catalogue {
+    pub queues: Vec<QueueInfo>,
+    pub streams: Vec<StreamInfo>,
+    /// Coordination generation this snapshot reflects.
+    pub generation: u64,
+}
+
+impl Catalogue {
+    /// Derive the catalogue from a topology snapshot. The topology lists one entry
+    /// per partition, so queues dedupe by `(topic, group)` and streams by topic. A
+    /// `BTreeMap` gives a deterministic sorted order.
+    fn from_topology(topology: &TopologyOk) -> Self {
+        let mut queues = std::collections::BTreeMap::new();
+        for entry in &topology.queues {
+            queues.insert(
+                (entry.topic.clone(), entry.group.clone()),
+                entry.partition_count.max(1),
+            );
+        }
+        let mut streams = std::collections::BTreeMap::new();
+        for entry in &topology.streams {
+            streams.insert(entry.topic.clone(), entry.partition_count.max(1));
+        }
+        Self {
+            queues: queues
+                .into_iter()
+                .map(|((topic, group), partition_count)| QueueInfo {
+                    topic,
+                    group,
+                    partition_count,
+                })
+                .collect(),
+            streams: streams
+                .into_iter()
+                .map(|(topic, partition_count)| StreamInfo {
+                    topic,
+                    partition_count,
+                })
+                .collect(),
+            generation: topology.generation,
+        }
+    }
+}
+
 /// Error type returned by the Fibril Rust client.
 ///
 /// Most operations return [`FibrilResult`]. Connection and shutdown related
@@ -1986,6 +2056,8 @@ impl Client {
             round_robin: std::sync::atomic::AtomicUsize::new(0),
             assignment_tx,
             cohort_member_id,
+            catalogue: ArcSwap::from_pointee(Catalogue::default()),
+            catalogue_tx: broadcast::channel(CATALOGUE_EVENT_CAPACITY).0,
             me: std::sync::OnceLock::new(),
         });
         let _ = shared.me.set(Arc::downgrade(&shared));
@@ -2180,7 +2252,26 @@ impl Client {
         // Full refresh -> prune pooled connections to endpoints that are no
         // longer owners (e.g. a demoted/dead owner after failover).
         self.shared.prune_pool_to_topology();
+        self.shared.refresh_catalogue(&topology);
         Ok(topology)
+    }
+
+    /// The current cluster [`Catalogue`]: every queue and Plexus stream this
+    /// client knows about, with partition counts. Read straight from the cached
+    /// topology - no round-trip. Empty on a cold or standalone client; warmed by
+    /// the connect-time topology fetch and kept live by broker topology pushes.
+    pub fn catalogue(&self) -> Catalogue {
+        self.shared.catalogue.load().as_ref().clone()
+    }
+
+    /// Subscribe to cluster catalogue changes. Each [`Catalogue`] delivered is a
+    /// full snapshot, emitted when the set of declared queues or streams changes
+    /// (a channel added or removed, or a partition count change). Owner-only
+    /// failover churn does not emit. Lossy broadcast - a slow consumer may miss
+    /// intermediate snapshots but a fresh receiver still sees the next change.
+    /// Returns a fresh receiver each call.
+    pub fn catalogue_events(&self) -> broadcast::Receiver<Catalogue> {
+        self.shared.catalogue_tx.subscribe()
     }
 
     /// Gracefully shut down the client.
@@ -2777,6 +2868,12 @@ struct ClientShared {
     /// exclusive subscribe and then carried on every other exclusive subscribe
     /// (across brokers) and across reconnects, so the cohort sees one member.
     cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+    /// Latest catalogue snapshot (declared queues + streams), derived from the
+    /// topology and refreshed on every full topology replace (push or fetch).
+    catalogue: ArcSwap<Catalogue>,
+    /// Fan-out of catalogue changes to app subscribers. Lossy broadcast (a slow
+    /// consumer may miss intermediate snapshots, never the latest on resubscribe).
+    catalogue_tx: broadcast::Sender<Catalogue>,
     /// Weak self-reference, set once right after construction. Connection reader
     /// loops hold a clone so a broker-pushed `TopologyUpdate` can be applied back
     /// into this routing cache (and the pool pruned) without a strong cycle.
@@ -2786,6 +2883,11 @@ struct ClientShared {
 /// Buffer of assignment events retained per [`Client::assignment_events`]
 /// receiver before a slow consumer starts lagging (older events dropped).
 const ASSIGNMENT_EVENT_CAPACITY: usize = 256;
+
+/// Buffer of catalogue snapshots retained per [`Client::catalogue_events`]
+/// receiver. Catalogue changes are infrequent, and only the latest matters, so a
+/// small buffer is plenty.
+const CATALOGUE_EVENT_CAPACITY: usize = 16;
 
 /// Wire cohort id sent for [`SubscriptionBuilder::exclusive`]. A queue has a
 /// single exclusive cohort, so the id is a fixed constant — membership is keyed
@@ -2989,7 +3091,27 @@ impl ClientShared {
         // connections to endpoints that are no longer owners (same reasoning as a
         // full refresh).
         self.prune_pool_to_topology();
+        self.refresh_catalogue(&topology);
         self.topology.load().generation
+    }
+
+    /// Refresh the catalogue snapshot from a full topology and broadcast a change
+    /// event if the set of declared queues or streams actually changed. Monotonic
+    /// and self-guarding: a stale topology (generation not newer than the snapshot
+    /// already held) is ignored, so it is safe to call unconditionally. Owner-only
+    /// churn (same channels, new owners, bumped generation) updates the stored
+    /// generation but emits no event - the catalogue is unchanged.
+    fn refresh_catalogue(&self, topology: &TopologyOk) {
+        let next = Catalogue::from_topology(topology);
+        let prev = self.catalogue.load();
+        if next.generation <= prev.generation && prev.generation != 0 {
+            return;
+        }
+        let changed = prev.queues != next.queues || prev.streams != next.streams;
+        self.catalogue.store(Arc::new(next.clone()));
+        if changed {
+            let _ = self.catalogue_tx.send(next);
+        }
     }
 
     /// Update the routing cache from a broker redirect (point-update to the new
@@ -5055,6 +5177,8 @@ mod tests {
             round_robin: std::sync::atomic::AtomicUsize::new(0),
             assignment_tx,
             cohort_member_id,
+            catalogue: ArcSwap::from_pointee(Catalogue::default()),
+            catalogue_tx: broadcast::channel(CATALOGUE_EVENT_CAPACITY).0,
             me: std::sync::OnceLock::new(),
         });
         let _ = shared.me.set(Arc::downgrade(&shared));
@@ -5442,6 +5566,100 @@ mod tests {
         let owner = applied.expect("pushed topology should populate the routing cache");
         assert_eq!(owner.endpoint, owner_addr);
         assert_eq!(client.shared.topology.load().generation, 7);
+
+        // The push also refreshes the catalogue snapshot.
+        let catalogue = client.catalogue();
+        assert_eq!(catalogue.generation, 7);
+        assert_eq!(catalogue.queues.len(), 1);
+        assert_eq!(catalogue.queues[0].topic, "jobs");
+        assert_eq!(catalogue.queues[0].partition_count, 1);
+        assert!(catalogue.streams.is_empty());
+
+        server.await.unwrap();
+        client.shutdown().await;
+    }
+
+    // A topology change must surface on the catalogue change feed and in the
+    // catalogue snapshot accessor. Driven through fetch_topology for deterministic
+    // timing (the push path is covered by the test above).
+    #[tokio::test]
+    async fn catalogue_events_report_declared_queues_and_streams() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut framed = Framed::new(conn, ProtoCodec);
+            let hello = framed.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            framed
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id: uuid::Uuid::new_v4(),
+                            client_id: uuid::Uuid::new_v4(),
+                            resume_token: uuid::Uuid::new_v4(),
+                            resume_outcome: ResumeOutcome::New,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // Answer the fetch_topology request with one queue and one stream.
+            let req = framed.next().await.unwrap().unwrap();
+            assert_eq!(req.opcode, Op::Topology as u16);
+            let topology = TopologyOk {
+                generation: 5,
+                queues: vec![QueueTopologyEntry {
+                    topic: "jobs".into(),
+                    partition: Partition::new(0),
+                    group: Some("workers".into()),
+                    owner_endpoint: None,
+                    partitioning_version: 1,
+                    partition_count: 3,
+                }],
+                streams: vec![StreamTopologyEntry {
+                    topic: "events".into(),
+                    partition: Partition::new(0),
+                    owner_endpoint: None,
+                    partitioning_version: 1,
+                    partition_count: 2,
+                }],
+            };
+            framed
+                .send(wire::encode_topology_ok(req.request_id, &topology).unwrap())
+                .await
+                .unwrap();
+        });
+
+        let client = ClientOptions::new()
+            .disable_topology_warm()
+            .connect(addr)
+            .await
+            .unwrap();
+
+        let mut events = client.catalogue_events();
+        client.fetch_topology().await.unwrap();
+
+        let catalogue = events.recv().await.unwrap();
+        assert_eq!(catalogue.generation, 5);
+        assert_eq!(catalogue.queues.len(), 1);
+        assert_eq!(catalogue.queues[0].topic, "jobs");
+        assert_eq!(catalogue.queues[0].group.as_deref(), Some("workers"));
+        assert_eq!(catalogue.queues[0].partition_count, 3);
+        assert_eq!(catalogue.streams.len(), 1);
+        assert_eq!(catalogue.streams[0].topic, "events");
+        assert_eq!(catalogue.streams[0].partition_count, 2);
+
+        // The accessor returns the same snapshot.
+        assert_eq!(client.catalogue(), catalogue);
 
         server.await.unwrap();
         client.shutdown().await;

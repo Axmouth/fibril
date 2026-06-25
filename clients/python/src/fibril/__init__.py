@@ -7,7 +7,16 @@ The async surface is re-exported here. The blocking facade lives in
 
 from __future__ import annotations
 
-from .client import Client, ClientOptions, QueueConfig, ReconnectOutcome, StreamConfig
+from .client import (
+    Catalogue,
+    Client,
+    ClientOptions,
+    QueueConfig,
+    QueueInfo,
+    ReconnectOutcome,
+    StreamConfig,
+    StreamInfo,
+)
 from .errors import (
     BrokenPipeError,
     DeserializationError,
@@ -40,6 +49,9 @@ __all__ = [
     "ClientOptions",
     "QueueConfig",
     "StreamConfig",
+    "Catalogue",
+    "QueueInfo",
+    "StreamInfo",
     "ReconnectOutcome",
     "Publisher",
     "PublishConfirmation",

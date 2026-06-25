@@ -499,6 +499,21 @@ rejected). Three composable dumb-broker pieces:
   feed for tools. Build it on the same facts ONLY if/when that discovery feature is
   wanted; it is not a prerequisite for routing or cutover. (#52)
 
+  DISCOVERY LAYER 1 DONE (#91): all three clients expose a live cluster catalogue
+  (declared queues + streams with partition counts) via a snapshot accessor
+  (catalogue()) AND a change subscription (Rust catalogue_events() broadcast;
+  TS/Python on_catalogue_change handler). Derived from the topology already held,
+  refreshed on every full replace (push or fetch), generation-guarded, emits only
+  on real add/remove/partition-count change (not owner-only churn). No wire change.
+
+  DISCOVERY LAYER 2 (#92, NOT building yet, user-deferred): client-side rough
+  routing - subscribe_pattern(glob) fans in across all matching queues/streams and
+  auto-attaches newly matching channels on each catalogue change. Reuses the
+  existing fan-in supervisor + grow-pickup + the Layer 1 change feed. Small glob
+  grammar only (prefix/suffix *), matching the per-sub filter grammar. No broker
+  change. Scope line: catalogue is declared channels + owners, NOT node membership
+  or connection presence (those are a separate observability concern).
+
 QUEUE-SIDE FILTERING: UNCERTAIN, reevaluate later, maybe. Per-sub filters break
 the work queue (orphans that match no consumer plus head-of-line, starvation
 across differing filters, an unbounded smart scan, inflight discipline) - the
