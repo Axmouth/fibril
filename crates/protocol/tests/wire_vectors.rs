@@ -1,9 +1,15 @@
 //! Pins the Rust wire encoders to the shared cross-client vectors at
 //! `clients/wire_vectors.json`. The Python and TypeScript clients assert against
 //! the same file, so all three implementations agree on the exact bytes for
-//! every op body. Regenerate the file from any one implementation and the others
-//! must still match.
+//! every op body.
+//!
+//! This Rust test is the canonical generator: run
+//! `WIRE_VECTORS_REGEN=1 cargo test -p fibril-protocol --test wire_vectors`
+//! to rewrite the fixture from these encoders (it records every `check`ed vector
+//! and writes them sorted), then the TypeScript and Python suites must still
+//! match. There is no separate generator script.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -42,13 +48,43 @@ fn load_vectors() -> Value {
 
 /// Encoders return a full `Frame`; the body is the payload (magic + fields),
 /// which is exactly what the other clients encode and what the fixture holds.
+thread_local! {
+    /// Every `(name, hex)` passed through `check`, in call order, so a regen run
+    /// can write the full fixture from the Rust encoders.
+    static COLLECTED: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+}
+
+fn regen() -> bool {
+    std::env::var_os("WIRE_VECTORS_REGEN").is_some()
+}
+
 fn check(vectors: &Value, name: &str, payload: bytes::Bytes) {
+    let actual = hex_encode(&payload);
+    COLLECTED.with(|c| c.borrow_mut().push((name.to_string(), actual.clone())));
+    if regen() {
+        return;
+    }
     let expected = vectors
         .get(name)
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("missing vector {name}"));
-    let actual = hex_encode(&payload);
     assert_eq!(actual, expected, "{name} bytes diverge from shared vectors");
+}
+
+/// Write the collected vectors to the shared fixture, sorted by name for a
+/// deterministic file. Called at the end of the test only under `WIRE_VECTORS_REGEN`.
+fn write_regenerated_vectors() {
+    let mut items =
+        COLLECTED.with(|c| c.borrow().clone());
+    items.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut map = serde_json::Map::new();
+    for (name, hex) in items {
+        map.insert(name, Value::String(hex));
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../clients/wire_vectors.json");
+    let json = serde_json::to_string_pretty(&Value::Object(map)).expect("serialize vectors");
+    std::fs::write(&path, json + "\n").unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    eprintln!("regenerated {} vectors at {}", path.display(), path.display());
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -640,4 +676,8 @@ fn wire_encoders_match_shared_vectors() {
         .unwrap()
         .payload,
     );
+
+    if regen() {
+        write_regenerated_vectors();
+    }
 }
