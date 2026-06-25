@@ -13,6 +13,28 @@ check what is already wired and under what conditions.
 
 ## Recently landed
 
+- Plexus streams: a fan-out channel type alongside the work queue, where every
+  subscriber receives every matching record and position is a durable named
+  cursor rather than consume-and-delete. Per-stream durability tiers (durable,
+  speculative, ephemeral) trade delivery latency for durability, partitioning
+  spreads writes with transparent client-side fan-in, header filters narrow a
+  subscription, and acks advance the durable cursor. Wired in the broker,
+  protocol, Rust/TypeScript/Python clients, and the admin streams page. See
+  [Plexus streams](/latest/concepts/plexus-streams/).
+- Stream cluster placement and ownership: durable streams are placed across nodes
+  (spread owner-first), their config lives in coordination, and a non-owner
+  redirects publishers and subscribers to the current owner.
+- Durable stream replication, tier-gated: the durable tier replicates its record
+  and cursor logs to followers, a durable publish confirms once enough replicas
+  are durable, and a caught-up follower is promoted on owner loss. The express
+  tiers stay owner-only by design. Owner-only durable survives restart, replicated
+  durable survives node loss.
+- Stream cursor-commit microbatching: high-fan-out auto-ack coalesces cursor
+  commits per partition into one durable write and one actor message per window,
+  so durable subscriptions stay fast under many readers.
+- Live repartitioning (experimental): grow or shrink a queue's partition count in
+  coordinated mode from the admin topology page, with versioned routing and
+  drain-on-shrink.
 - A Python client landed at full feature parity with the Rust and TypeScript
   clients, with both an async API and a thin blocking facade over the same core.
   See [client usage](/latest/clients/).
@@ -77,8 +99,6 @@ check what is already wired and under what conditions.
 - Finish the combined Offset plus Topic/Group newtype pass after the current
   partition newtype pass, including the planned `Arc<str>` direction for
   Topic/Group.
-- Add a user-facing replication, partitioning, and consumer-group explainer that
-  connects the pieces without exposing implementation noise.
 - Improve client feedback for reconnect cases where reconciliation closes a
   subscription stream.
 - Keep improving DLQ replay and message inspection workflows, especially bulk operations and clearer operator feedback.
@@ -112,10 +132,8 @@ check what is already wired and under what conditions.
 
 ## Longer term
 
-- Hardening the experimental replication and clustering path into production
-  guidance and supported defaults.
-- Live repartitioning. The current direction is fixed-at-create partition count
-  first, with live grow or shrink treated as a separate migration feature.
+- Hardening the experimental replication and clustering path (queues and streams)
+  into production guidance and supported defaults.
 - Durable broker restart reconciliation. This would let clients reclaim
   persisted session and inflight ownership after a broker process restart,
   using a startup grace window before normal redelivery resumes. Current
