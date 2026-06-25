@@ -111,6 +111,14 @@ pub enum Op {
     /// owner->follower: a stream replication batch (records + cursor events).
     StreamReplicationReadOk = 100,
 
+    /// broker->client PUSH: live topology snapshot, sent unsolicited when the
+    /// coordination generation changes (reuses the `TopologyOk` body). The client
+    /// refreshes its routing cache and replies with `TopologyUpdateAck`.
+    TopologyUpdate = 101,
+    /// client->broker: acknowledges applying a pushed topology at a generation, so
+    /// the broker can fence a repartition cutover on client acknowledgement.
+    TopologyUpdateAck = 102,
+
     Error = 255,
 }
 
@@ -873,6 +881,14 @@ pub struct TopologyOk {
     /// queue. Streams have no group, so this is `QueueTopologyEntry` minus that.
     #[serde(default)]
     pub streams: Vec<StreamTopologyEntry>,
+}
+
+/// Client acknowledgement of a pushed [`TopologyUpdate`] at `generation`. Lets
+/// the broker fence a repartition cutover until clients have applied the new
+/// routing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TopologyUpdateAck {
+    pub generation: u64,
 }
 
 /// One Plexus stream partition's ownership, as seen by clients for routing.

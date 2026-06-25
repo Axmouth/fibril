@@ -474,8 +474,21 @@ rejected). Three composable dumb-broker pieces:
   ownership, assignment changes) on a system Plexus channel. Clients subscribe and
   do their OWN routing (pattern fan-in, auto-pickup of new matching channels which
   replaces the grow-pickup and catalogue polls, load-routing later). Dumb broker,
-  smart client. This is the "different shape that just works" that replaces NATS
-  subjects. Fold in as first-class, not an afterthought.
+  smart client.
+
+  REFRAMED (2026-06-25): for LIVE ROUTING UPDATES + repartition cutover fencing,
+  the mechanism is a TopologyUpdate PUSH FRAME + client ack over the existing
+  connection (see #62), not a stream. A stream is the wrong tool there: subscribing
+  to a topology stream needs topology to find its owner (circular bootstrap), a
+  fan-out stream gives no per-client apply ack (which fencing requires), and a push
+  can be targeted per connection. Clients already get the initial snapshot via
+  TopologyRequest, so push deltas + ack covers live routing end to end.
+
+  topology-as-a-stream is therefore NOT the routing path. It survives only as an
+  OPTIONAL higher-level DISCOVERY layer: subscribe-to-a-pattern / auto-pickup of
+  matching channels (the "replace NATS subjects" vision) and a consumable catalogue
+  feed for tools. Build it on the same facts ONLY if/when that discovery feature is
+  wanted; it is not a prerequisite for routing or cutover. (#52)
 
 QUEUE-SIDE FILTERING: UNCERTAIN, reevaluate later, maybe. Per-sub filters break
 the work queue (orphans that match no consumer plus head-of-line, starvation

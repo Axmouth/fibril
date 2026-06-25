@@ -18,7 +18,7 @@ use crate::v1::{
     ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
     ReplicationStreamEnd, ReplicationStreamProgress, ReplicationStreamReset, ReplicationStreamStart,
     ResumeIdentity, ResumeOutcome, StreamTopologyEntry, Subscribe, SubscribeOk, TopologyOk,
-    TopologyRequest,
+    TopologyRequest, TopologyUpdateAck,
     frame::Frame,
 };
 
@@ -615,28 +615,26 @@ pub fn decode_topology_request(frame: &Frame) -> WireResult<TopologyRequest> {
     Ok(request)
 }
 
-pub fn encode_topology_ok(request_id: u64, topology: &TopologyOk) -> WireResult<Frame> {
-    let mut out = payload_builder(b"FTO1");
+/// Shared body codec for the topology snapshot, used by both the `TopologyOk`
+/// response and the unsolicited `TopologyUpdate` push so they carry identical bytes.
+fn put_topology_body(out: &mut BytesMut, topology: &TopologyOk) -> WireResult<()> {
     out.put_u64(topology.generation);
-    put_len(&mut out, topology.queues.len(), "topology queues")?;
+    put_len(out, topology.queues.len(), "topology queues")?;
     for entry in &topology.queues {
-        put_topology_entry(&mut out, entry)?;
+        put_topology_entry(out, entry)?;
     }
-    put_len(&mut out, topology.streams.len(), "topology streams")?;
+    put_len(out, topology.streams.len(), "topology streams")?;
     for entry in &topology.streams {
-        put_str(&mut out, &entry.topic)?;
-        put_partition(&mut out, entry.partition);
-        put_optional_str(&mut out, entry.owner_endpoint.as_deref())?;
+        put_str(out, &entry.topic)?;
+        put_partition(out, entry.partition);
+        put_optional_str(out, entry.owner_endpoint.as_deref())?;
         out.put_u64(entry.partitioning_version);
         out.put_u32(entry.partition_count);
     }
-    Ok(frame(Op::TopologyOk, request_id, out.freeze()))
+    Ok(())
 }
 
-pub fn decode_topology_ok(frame: &Frame) -> WireResult<TopologyOk> {
-    expect_op(frame, Op::TopologyOk)?;
-    let mut reader = Reader::new(&frame.payload);
-    reader.expect_magic(b"FTO1", "topology ok")?;
+fn read_topology_body(reader: &mut Reader) -> WireResult<TopologyOk> {
     let generation = reader.u64()?;
     let count = reader.u32()? as usize;
     let mut queues = Vec::with_capacity(count);
@@ -659,12 +657,61 @@ pub fn decode_topology_ok(frame: &Frame) -> WireResult<TopologyOk> {
             partition_count,
         });
     }
-    reader.finish()?;
     Ok(TopologyOk {
         generation,
         queues,
         streams,
     })
+}
+
+pub fn encode_topology_ok(request_id: u64, topology: &TopologyOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FTO1");
+    put_topology_body(&mut out, topology)?;
+    Ok(frame(Op::TopologyOk, request_id, out.freeze()))
+}
+
+pub fn decode_topology_ok(frame: &Frame) -> WireResult<TopologyOk> {
+    expect_op(frame, Op::TopologyOk)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FTO1", "topology ok")?;
+    let topology = read_topology_body(&mut reader)?;
+    reader.finish()?;
+    Ok(topology)
+}
+
+/// Unsolicited broker->client topology push. Same body as `TopologyOk` under a
+/// distinct op + magic so the client can tell a push from its own request reply.
+pub fn encode_topology_update(request_id: u64, topology: &TopologyOk) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FTU1");
+    put_topology_body(&mut out, topology)?;
+    Ok(frame(Op::TopologyUpdate, request_id, out.freeze()))
+}
+
+pub fn decode_topology_update(frame: &Frame) -> WireResult<TopologyOk> {
+    expect_op(frame, Op::TopologyUpdate)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FTU1", "topology update")?;
+    let topology = read_topology_body(&mut reader)?;
+    reader.finish()?;
+    Ok(topology)
+}
+
+pub fn encode_topology_update_ack(
+    request_id: u64,
+    ack: &TopologyUpdateAck,
+) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FTA1");
+    out.put_u64(ack.generation);
+    Ok(frame(Op::TopologyUpdateAck, request_id, out.freeze()))
+}
+
+pub fn decode_topology_update_ack(frame: &Frame) -> WireResult<TopologyUpdateAck> {
+    expect_op(frame, Op::TopologyUpdateAck)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FTA1", "topology update ack")?;
+    let generation = reader.u64()?;
+    reader.finish()?;
+    Ok(TopologyUpdateAck { generation })
 }
 
 pub fn encode_redirect(request_id: u64, redirect: &Redirect) -> WireResult<Frame> {
@@ -2578,6 +2625,37 @@ mod tests {
         let got = decode_declare_plexus_ok(&frame).unwrap();
         assert_eq!(got.status, ok.status);
         assert_eq!(got.partition_count, ok.partition_count);
+    }
+
+    #[test]
+    fn topology_update_and_ack_roundtrip() {
+        // The push reuses the TopologyOk body under its own op + magic.
+        let topology = TopologyOk {
+            generation: 42,
+            queues: vec![QueueTopologyEntry {
+                topic: "t".into(),
+                group: None,
+                partition: Partition::new(0),
+                owner_endpoint: Some("127.0.0.1:7000".into()),
+                partitioning_version: 1,
+                partition_count: 2,
+            }],
+            streams: vec![StreamTopologyEntry {
+                topic: "s".into(),
+                partition: Partition::new(1),
+                owner_endpoint: None,
+                partitioning_version: 3,
+                partition_count: 4,
+            }],
+        };
+        let frame = encode_topology_update(9, &topology).unwrap();
+        assert_eq!(frame.opcode, Op::TopologyUpdate as u16);
+        assert_eq!(decode_topology_update(&frame).unwrap(), topology);
+
+        let ack = TopologyUpdateAck { generation: 42 };
+        let frame = encode_topology_update_ack(9, &ack).unwrap();
+        assert_eq!(frame.opcode, Op::TopologyUpdateAck as u16);
+        assert_eq!(decode_topology_update_ack(&frame).unwrap(), ack);
     }
 
     #[test]

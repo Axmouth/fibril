@@ -100,6 +100,13 @@ impl From<mpsc::error::SendError<Frame>> for ProtocolConnectionError {
 pub trait ClientTopologySource: Send + Sync {
     /// Full client-facing topology snapshot for `Op::Topology`.
     fn topology(&self) -> TopologyOk;
+
+    /// Current coordination generation, for cheap change detection on the push
+    /// path. The default builds the full snapshot; impls with a cheaper handle to
+    /// the generation should override.
+    fn generation(&self) -> u64 {
+        self.topology().generation
+    }
     /// Current owner endpoint and partitioning version for one queue partition,
     /// if known. Used to build an `Op::Redirect`.
     fn owner_endpoint(
@@ -1907,6 +1914,9 @@ pub enum LoopEvent {
     Frame(Frame),
     Disconnect,
     Timeout,
+    /// Time to check whether the coordination generation changed and, if so, push
+    /// a `TopologyUpdate` to this connection.
+    TopologyTick,
 }
 
 // TODO: Resolve publish drowning out delivery
@@ -1932,6 +1942,13 @@ pub async fn handle_connection(
     let mut last_seen = Instant::now();
     let mut heartbeat = tokio::time::interval(tokio::time::Duration::from_secs(heartbeat_interval));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Live topology push: poll the coordination generation on a short tick and
+    // push a TopologyUpdate only when it changes (so the wire only carries
+    // deltas). Seed from the current generation so the initial snapshot is left
+    // to the client's TopologyRequest, not duplicated here.
+    let mut topology_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
+    topology_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_pushed_topology_gen = topology_source.as_ref().map(|s| s.generation());
     heartbeat.tick().await; // consume first tick
     // ---- Framed socket -----------------------------------------------------
     let peer_addr = socket.peer_addr().ok();
@@ -2270,6 +2287,9 @@ pub async fn handle_connection(
                 }
             }
 
+            // ---- Topology push tick ----
+            _ = topology_tick.tick() => LoopEvent::TopologyTick,
+
             // ---- Incoming frame ----
             frame = reader.next() => {
                 match frame {
@@ -2297,6 +2317,37 @@ pub async fn handle_connection(
             LoopEvent::Heartbeat => {
                 let settings = connection_settings.runtime_snapshot();
                 expire_idle_publishers(&mut publishers, settings.publisher_cache_idle_timeout_ms);
+                continue;
+            }
+            LoopEvent::TopologyTick => {
+                // Push the topology only when the coordination generation moved
+                // and the connection is allowed to receive (authenticated when
+                // auth is required). The client refreshes its cache and acks.
+                let authed =
+                    auth_handler.is_none() || logical.state.lock().await.authenticated;
+                if authed {
+                    if let Some(source) = topology_source.as_ref() {
+                        let generation = source.generation();
+                        if last_pushed_topology_gen != Some(generation) {
+                            let topo = source.topology();
+                            match wire::encode_topology_update(
+                                req_id_gen_clone.next_id(),
+                                &topo,
+                            ) {
+                                Ok(f) => {
+                                    if frame_tx_high_prio.send(f).await.is_ok() {
+                                        last_pushed_topology_gen = Some(generation);
+                                    } else {
+                                        break; // send failed -> connection gone
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::warn!("encode topology update failed: {err}");
+                                }
+                            }
+                        }
+                    }
+                }
                 continue;
             }
         };
@@ -2906,6 +2957,25 @@ pub async fn handle_connection(
                 frame_tx_high_prio
                     .send(try_encode(Op::TopologyOk, frame.request_id, &topology)?)
                     .await?;
+            }
+
+            // -------- TOPOLOGY UPDATE ACK -----------------------------------
+            x if x == Op::TopologyUpdateAck as u16 => {
+                // The client applied a pushed topology at this generation. Today
+                // this just confirms the round-trip; wiring it to fence a
+                // repartition cutover (wait for client acks before retiring old
+                // partitions) is the next brick.
+                match wire::decode_topology_update_ack(&frame) {
+                    Ok(ack) => {
+                        tracing::trace!(
+                            generation = ack.generation,
+                            "client acked topology update"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!("bad topology update ack: {err}");
+                    }
+                }
             }
 
             // -------- DECLARE QUEUE -----------------------------------------

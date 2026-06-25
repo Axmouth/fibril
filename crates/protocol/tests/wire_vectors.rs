@@ -20,7 +20,7 @@ use fibril_protocol::v1::{
     PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry, ReconcileClient, ReconcilePolicy,
     ReconcileSubscription, Redirect, ResumeIdentity, ResumeOutcome, StreamDurability,
     StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream,
-    TopologyOk, TopologyRequest,
+    TopologyOk, TopologyRequest, TopologyUpdateAck,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -46,11 +46,9 @@ fn load_vectors() -> Value {
     serde_json::from_str(&text).expect("parse wire_vectors.json")
 }
 
-/// Encoders return a full `Frame`; the body is the payload (magic + fields),
-/// which is exactly what the other clients encode and what the fixture holds.
+// Every `(name, hex)` passed through `check`, in call order, so a regen run can
+// write the full fixture from the Rust encoders.
 thread_local! {
-    /// Every `(name, hex)` passed through `check`, in call order, so a regen run
-    /// can write the full fixture from the Rust encoders.
     static COLLECTED: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -58,6 +56,8 @@ fn regen() -> bool {
     std::env::var_os("WIRE_VECTORS_REGEN").is_some()
 }
 
+/// Encoders return a full `Frame`; the body is the payload (magic + fields),
+/// which is exactly what the other clients encode and what the fixture holds.
 fn check(vectors: &Value, name: &str, payload: bytes::Bytes) {
     let actual = hex_encode(&payload);
     COLLECTED.with(|c| c.borrow_mut().push((name.to_string(), actual.clone())));
@@ -541,6 +541,42 @@ fn wire_encoders_match_shared_vectors() {
         )
         .unwrap()
         .payload,
+    );
+
+    check(
+        &v,
+        "topology_update",
+        wire::encode_topology_update(
+            rid,
+            &TopologyOk {
+                generation: 12,
+                queues: vec![QueueTopologyEntry {
+                    topic: "t".into(),
+                    partition: Partition::new(0),
+                    group: None,
+                    owner_endpoint: Some("127.0.0.1:7000".into()),
+                    partitioning_version: 1,
+                    partition_count: 2,
+                }],
+                streams: vec![StreamTopologyEntry {
+                    topic: "s".into(),
+                    partition: Partition::new(2),
+                    owner_endpoint: Some("10.0.0.9:7100".into()),
+                    partitioning_version: 4,
+                    partition_count: 3,
+                }],
+            },
+        )
+        .unwrap()
+        .payload,
+    );
+
+    check(
+        &v,
+        "topology_update_ack",
+        wire::encode_topology_update_ack(rid, &TopologyUpdateAck { generation: 12 })
+            .unwrap()
+            .payload,
     );
 
     check(

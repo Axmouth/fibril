@@ -36,7 +36,7 @@ use fibril_protocol::v1::{
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
     ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
-    ResumeIdentity, ResumeOutcome, Subscribe, TopologyOk, TopologyRequest,
+    ResumeIdentity, ResumeOutcome, Subscribe, TopologyOk, TopologyRequest, TopologyUpdateAck,
     frame::{Frame, ProtoCodec},
     handler::{
         ClientTopologySource, ConnectionSettings, ProtocolConnectionError, DeclareCoordinator,
@@ -2917,6 +2917,109 @@ impl ClientTopologySource for FixedTopology {
                     .map(|e| (e, q.partitioning_version))
             })
     }
+}
+
+/// A topology source whose generation can be bumped at runtime, to drive the
+/// broker's change-detected push.
+struct BumpingTopology {
+    generation: Arc<std::sync::atomic::AtomicU64>,
+}
+impl ClientTopologySource for BumpingTopology {
+    fn topology(&self) -> TopologyOk {
+        TopologyOk {
+            generation: self.generation.load(std::sync::atomic::Ordering::SeqCst),
+            queues: Vec::new(),
+            streams: Vec::new(),
+        }
+    }
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn owner_endpoint(
+        &self,
+        _topic: &str,
+        _partition: Partition,
+        _group: Option<&str>,
+    ) -> Option<(String, u64)> {
+        None
+    }
+}
+
+/// The broker pushes a `TopologyUpdate` when the coordination generation changes
+/// and accepts the client's ack without disturbing the connection.
+#[tokio::test]
+async fn broker_pushes_topology_update_on_generation_change() {
+    let generation = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let source = Arc::new(BumpingTopology {
+        generation: generation.clone(),
+    });
+
+    let (broker, dir) = open_test_broker().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (server, peer) = listener.accept().await.unwrap();
+        let tcp_stats = TcpStats::new(10);
+        let connection_stats = ConnectionStats::new();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+        handle_connection(
+            server,
+            broker,
+            tcp_stats,
+            connection_stats,
+            conn_id,
+            None::<StaticAuthHandler>,
+            ConnectionSettings::new(Some(60)),
+            Some(source as Arc<dyn ClientTopologySource>),
+            None,
+        )
+        .await
+    });
+
+    let client = TcpStream::connect(addr).await.unwrap();
+    let mut framed = Framed::new(client, ProtoCodec);
+    handshake(&mut framed).await;
+
+    // Bump the coordination generation; the broker pushes on its next tick.
+    generation.store(2, std::sync::atomic::Ordering::SeqCst);
+    let pushed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = recv_frame(&mut framed).await;
+            if frame.opcode == Op::TopologyUpdate as u16 {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("broker pushed a topology update");
+    let topo: TopologyOk = try_decode(&pushed).unwrap();
+    assert_eq!(topo.generation, 2);
+
+    // The client acks; the connection stays healthy and still serves requests.
+    framed
+        .send(try_encode(Op::TopologyUpdateAck, 7, &TopologyUpdateAck { generation: 2 }).unwrap())
+        .await
+        .unwrap();
+    framed
+        .send(try_encode(Op::Topology, 8, &TopologyRequest::default()).unwrap())
+        .await
+        .unwrap();
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let frame = recv_frame(&mut framed).await;
+            if frame.opcode == Op::TopologyOk as u16 {
+                return frame;
+            }
+        }
+    })
+    .await
+    .expect("server still answers after the ack");
+    let ok: TopologyOk = try_decode(&resp).unwrap();
+    assert_eq!(ok.generation, 2);
+
+    drop(framed);
+    let _ = server_task.await;
+    drop(dir);
 }
 
 /// The handler answers `Op::Topology` from its injected topology source,

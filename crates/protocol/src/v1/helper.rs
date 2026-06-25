@@ -115,6 +115,12 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::TopologyOk => encode_typed(msg, "TopologyOk", |msg| {
             wire::encode_topology_ok(req_id, msg)
         }),
+        Op::TopologyUpdate => encode_typed(msg, "TopologyOk", |msg| {
+            wire::encode_topology_update(req_id, msg)
+        }),
+        Op::TopologyUpdateAck => encode_typed(msg, "TopologyUpdateAck", |msg| {
+            wire::encode_topology_update_ack(req_id, msg)
+        }),
         Op::Redirect => encode_typed(msg, "Redirect", |msg| wire::encode_redirect(req_id, msg)),
         Op::ReplicationStreamStart => encode_typed(msg, "ReplicationStreamStart", |msg| {
             wire::encode_replication_stream_start(req_id, msg)
@@ -256,6 +262,12 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::TopologyOk as u16 => wire::decode_topology_ok(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::TopologyUpdate as u16 => wire::decode_topology_update(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::TopologyUpdateAck as u16 => wire::decode_topology_update_ack(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::Redirect as u16 => wire::decode_redirect(frame)
