@@ -1973,31 +1973,25 @@ impl Client {
         let user_shutdown = Arc::new(AtomicBool::new(false));
         let (assignment_tx, _) = broadcast::channel(ASSIGNMENT_EVENT_CAPACITY);
         let cohort_member_id = Arc::new(std::sync::OnceLock::new());
-        let slot = Arc::new(
-            EngineSlot::connect(
-                address,
-                opts.clone(),
-                user_shutdown.clone(),
-                assignment_tx.clone(),
-                cohort_member_id.clone(),
-            )
-            .await?,
-        );
-        let mut pool = HashMap::new();
-        pool.insert(address, slot);
-        let warm_timeout_ms = opts.topology_warm_timeout_ms;
-        let client = Client {
-            shared: Arc::new(ClientShared {
-                bootstrap: vec![address],
-                opts,
-                user_shutdown,
-                pool: parking_lot::RwLock::new(pool),
-                topology: ArcSwap::from_pointee(TopologyCache::default()),
-                round_robin: std::sync::atomic::AtomicUsize::new(0),
-                assignment_tx,
-                cohort_member_id,
-            }),
-        };
+        // Build the shared state first (empty pool), then wire its weak
+        // self-reference so the bootstrap connection's reader loop can apply
+        // pushed topology back into this cache. The slot is connected via
+        // engine_slot, which now hands the engine that weak handle.
+        let shared = Arc::new(ClientShared {
+            bootstrap: vec![address],
+            opts,
+            user_shutdown,
+            pool: parking_lot::RwLock::new(HashMap::new()),
+            topology: ArcSwap::from_pointee(TopologyCache::default()),
+            round_robin: std::sync::atomic::AtomicUsize::new(0),
+            assignment_tx,
+            cohort_member_id,
+            me: std::sync::OnceLock::new(),
+        });
+        let _ = shared.me.set(Arc::downgrade(&shared));
+        shared.engine_slot(address).await?;
+        let warm_timeout_ms = shared.opts.topology_warm_timeout_ms;
+        let client = Client { shared };
         // Warm the topology cache once so the first publish spreads across
         // partitions and the first subscription fans in over all of them.
         // Best-effort and bounded: a server that does not answer must not stall
@@ -2783,6 +2777,10 @@ struct ClientShared {
     /// exclusive subscribe and then carried on every other exclusive subscribe
     /// (across brokers) and across reconnects, so the cohort sees one member.
     cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+    /// Weak self-reference, set once right after construction. Connection reader
+    /// loops hold a clone so a broker-pushed `TopologyUpdate` can be applied back
+    /// into this routing cache (and the pool pruned) without a strong cycle.
+    me: std::sync::OnceLock<std::sync::Weak<ClientShared>>,
 }
 
 /// Buffer of assignment events retained per [`Client::assignment_events`]
@@ -2851,6 +2849,7 @@ impl ClientShared {
                 self.user_shutdown.clone(),
                 self.assignment_tx.clone(),
                 self.cohort_member_id.clone(),
+                self.me.get().cloned().unwrap_or_default(),
             )
             .await?,
         );
@@ -2969,6 +2968,30 @@ impl ClientShared {
         });
     }
 
+    /// Apply a broker-pushed topology snapshot to the routing cache and prune the
+    /// pool, mirroring the [`refresh_topology_throttled`](Self::refresh_topology_throttled)
+    /// apply path. The push carries the full current topology (not a delta), so a
+    /// plain replace is correct. A push only moves the cache forward: a stale push
+    /// (older generation than the cache already reflects) is ignored so an
+    /// out-of-order delivery cannot regress routing. Returns the generation the
+    /// cache reflects after the call, which the caller acks back to the broker.
+    fn apply_pushed_topology(&self, topology: TopologyOk) -> u64 {
+        let applied_at = unix_millis();
+        self.topology.rcu(|old| {
+            let mut updated = (**old).clone();
+            if topology.generation > updated.generation {
+                updated.replace(topology.clone());
+                updated.last_refresh_ms = applied_at;
+            }
+            updated
+        });
+        // A push gives the complete current owner set, so prune pooled
+        // connections to endpoints that are no longer owners (same reasoning as a
+        // full refresh).
+        self.prune_pool_to_topology();
+        self.topology.load().generation
+    }
+
     /// Update the routing cache from a broker redirect (point-update to the new
     /// owner), so the retry — and subsequent ops — route correctly.
     fn apply_redirect(&self, redirect: &Redirect) {
@@ -2995,6 +3018,11 @@ struct EngineSlot {
     /// Shared cohort member id cache (survives reconnects); the read loop fills it
     /// from the first exclusive SubscribeOk.
     cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+    /// Weak handle back to the owning shared client, handed to each engine the
+    /// slot starts so a pushed `TopologyUpdate` lands in the routing cache.
+    /// Defaulted to an empty weak for slots built around a pre-made engine (tests
+    /// and the in-memory path), which never run a network reader loop.
+    topology_sink: std::sync::Weak<ClientShared>,
 }
 
 impl EngineSlot {
@@ -3018,6 +3046,7 @@ impl EngineSlot {
             reconnect_lock: Mutex::new(()),
             assignment_tx,
             cohort_member_id,
+            topology_sink: std::sync::Weak::new(),
         }
     }
 
@@ -3028,6 +3057,7 @@ impl EngineSlot {
         user_shutdown: Arc<AtomicBool>,
         assignment_tx: broadcast::Sender<AssignmentEvent>,
         cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+        topology_sink: std::sync::Weak<ClientShared>,
     ) -> FibrilResult<Self> {
         let subscriptions = Arc::new(RwLock::new(HashMap::new()));
         let stream = TcpStream::connect(address)
@@ -3045,9 +3075,10 @@ impl EngineSlot {
             subscriptions.clone(),
             assignment_tx.clone(),
             cohort_member_id.clone(),
+            topology_sink.clone(),
         )
         .await?;
-        Ok(Self::from_engine(
+        let mut slot = Self::from_engine(
             address,
             opts,
             user_shutdown,
@@ -3055,7 +3086,9 @@ impl EngineSlot {
             engine,
             assignment_tx,
             cohort_member_id,
-        ))
+        );
+        slot.topology_sink = topology_sink;
+        Ok(slot)
     }
 
     fn current(&self) -> Arc<EngineHandle> {
@@ -3090,6 +3123,7 @@ impl EngineSlot {
             self.subscriptions.clone(),
             self.assignment_tx.clone(),
             self.cohort_member_id.clone(),
+            self.topology_sink.clone(),
         )
         .await?;
         let outcome = ReconnectOutcome {
@@ -3395,6 +3429,7 @@ async fn start_engine<S>(
     subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
     assignment_tx: broadcast::Sender<AssignmentEvent>,
     cohort_member_id: Arc<std::sync::OnceLock<Uuid>>,
+    topology_sink: std::sync::Weak<ClientShared>,
 ) -> FibrilResult<Arc<EngineHandle>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -4160,6 +4195,38 @@ where
                                 }
                                 None => {
                                     tracing::error!("Internal error: unexpected TopologyOk")
+                                }
+                            }
+                        }
+                        x if x == Op::TopologyUpdate as u16 => {
+                            // Broker-pushed routing refresh (generation changed).
+                            // Apply it to the shared cache so subsequent ops route
+                            // to the new owners, then ack the generation we now
+                            // reflect so the broker can fence a cutover on it.
+                            let topology: TopologyOk = match decode_protocol(&frame) {
+                                Ok(topology) => topology,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+                            // The shared client outlives its connections; a dropped
+                            // upgrade means the client is shutting down, so there is
+                            // nothing to update and no point acking.
+                            if let Some(shared) = topology_sink.upgrade() {
+                                let generation = shared.apply_pushed_topology(topology);
+                                let ack = TopologyUpdateAck { generation };
+                                let res = send_protocol_frame(
+                                    &mut framed,
+                                    Op::TopologyUpdateAck,
+                                    frame.request_id,
+                                    &ack,
+                                )
+                                .await;
+                                if let Err(err) = res {
+                                    tracing::warn!("Broken pipe");
+                                    fatal_error = Some(err);
+                                    break;
                                 }
                             }
                         }
@@ -4979,21 +5046,19 @@ mod tests {
         ));
         let mut pool = HashMap::new();
         pool.insert(address, slot);
-        (
-            Client {
-                shared: Arc::new(ClientShared {
-                    bootstrap: vec![address],
-                    opts,
-                    user_shutdown,
-                    pool: parking_lot::RwLock::new(pool),
-                    topology: ArcSwap::from_pointee(TopologyCache::default()),
-                    round_robin: std::sync::atomic::AtomicUsize::new(0),
-                    assignment_tx,
-                    cohort_member_id,
-                }),
-            },
-            rx,
-        )
+        let shared = Arc::new(ClientShared {
+            bootstrap: vec![address],
+            opts,
+            user_shutdown,
+            pool: parking_lot::RwLock::new(pool),
+            topology: ArcSwap::from_pointee(TopologyCache::default()),
+            round_robin: std::sync::atomic::AtomicUsize::new(0),
+            assignment_tx,
+            cohort_member_id,
+            me: std::sync::OnceLock::new(),
+        });
+        let _ = shared.me.set(Arc::downgrade(&shared));
+        (Client { shared }, rx)
     }
 
     #[tokio::test]
@@ -5290,6 +5355,96 @@ mod tests {
 
         client.shutdown().await;
         server.await.unwrap();
+    }
+
+    // A broker-pushed TopologyUpdate (sent when the coordination generation
+    // changes) must land in the client's routing cache so subsequent ops route to
+    // the new owner, and the client must ack the generation it now reflects so the
+    // broker can fence a repartition cutover on it.
+    #[tokio::test]
+    async fn client_applies_pushed_topology_update_and_acks() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let owner_addr: SocketAddr = "127.0.0.1:7123".parse().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut framed = Framed::new(conn, ProtoCodec);
+            let hello = framed.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            framed
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id: uuid::Uuid::new_v4(),
+                            client_id: uuid::Uuid::new_v4(),
+                            resume_token: uuid::Uuid::new_v4(),
+                            resume_outcome: ResumeOutcome::New,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // Push a topology with one queue partition owned by owner_addr.
+            let topology = TopologyOk {
+                generation: 7,
+                queues: vec![QueueTopologyEntry {
+                    topic: "jobs".into(),
+                    partition: Partition::new(0),
+                    group: None,
+                    owner_endpoint: Some(owner_addr.to_string()),
+                    partitioning_version: 1,
+                    partition_count: 1,
+                }],
+                streams: vec![],
+            };
+            framed
+                .send(wire::encode_topology_update(0, &topology).unwrap())
+                .await
+                .unwrap();
+
+            // The client must ack the generation it now reflects.
+            let ack_frame = framed.next().await.unwrap().unwrap();
+            assert_eq!(ack_frame.opcode, Op::TopologyUpdateAck as u16);
+            let ack: TopologyUpdateAck = try_decode(&ack_frame).unwrap();
+            assert_eq!(ack.generation, 7);
+        });
+
+        let client = ClientOptions::new()
+            .disable_topology_warm()
+            .connect(addr)
+            .await
+            .unwrap();
+
+        // Wait for the cache to reflect the pushed owner (the reader loop applies
+        // the push asynchronously after connect returns).
+        let mut applied = None;
+        for _ in 0..100 {
+            if let Some(owner) =
+                client
+                    .shared
+                    .topology
+                    .load()
+                    .lookup("jobs", Partition::new(0), None)
+            {
+                applied = Some(owner);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let owner = applied.expect("pushed topology should populate the routing cache");
+        assert_eq!(owner.endpoint, owner_addr);
+        assert_eq!(client.shared.topology.load().generation, 7);
+
+        server.await.unwrap();
+        client.shutdown().await;
     }
 
     // Regression: when the owner broker restarts in place (bounce faster than

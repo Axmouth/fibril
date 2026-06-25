@@ -484,6 +484,12 @@ rejected). Three composable dumb-broker pieces:
   can be targeted per connection. Clients already get the initial snapshot via
   TopologyRequest, so push deltas + ack covers live routing end to end.
 
+  STATUS: the broker push half and the Rust client apply + ack are built (#62,
+  #88). The Rust client reader loop applies a pushed TopologyUpdate to its routing
+  cache (replace + pool prune, generation-guarded against stale pushes) and acks
+  the generation it now reflects. Remaining: TS/Python push handling and using the
+  recorded acks to fence a repartition cutover (#89).
+
   topology-as-a-stream is therefore NOT the routing path. It survives only as an
   OPTIONAL higher-level DISCOVERY layer: subscribe-to-a-pattern / auto-pickup of
   matching channels (the "replace NATS subjects" vision) and a consumable catalogue
