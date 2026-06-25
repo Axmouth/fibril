@@ -345,25 +345,29 @@ export class StreamConfig {
   readonly partitionCount: number | null;
   readonly durability: StreamDurability;
   readonly retention: StreamRetention;
+  readonly replicationFactorValue: number | null;
 
   constructor(
     topic: string,
     partitionCount: number | null = null,
     durability: StreamDurability = "durable",
     retention: StreamRetention = { maxAgeMs: null, maxBytes: null, maxRecords: null },
+    replicationFactor: number | null = null,
   ) {
     this.topic = topic;
     this.partitionCount = partitionCount;
     this.durability = durability;
     this.retention = retention;
+    this.replicationFactorValue = replicationFactor;
   }
 
-  #with(patch: Partial<{ partitionCount: number | null; durability: StreamDurability; retention: StreamRetention }>): StreamConfig {
+  #with(patch: Partial<{ partitionCount: number | null; durability: StreamDurability; retention: StreamRetention; replicationFactor: number | null }>): StreamConfig {
     return new StreamConfig(
       this.topic,
       patch.partitionCount ?? this.partitionCount,
       patch.durability ?? this.durability,
       patch.retention ?? this.retention,
+      patch.replicationFactor ?? this.replicationFactorValue,
     );
   }
 
@@ -405,12 +409,25 @@ export class StreamConfig {
     return this.#with({ retention: { ...this.retention, maxRecords: BigInt(records) } });
   }
 
+  /**
+   * Per-stream durable-tier replication factor (follower count). When unset, the
+   * cluster default applies. Only the durable tier replicates; the express tiers
+   * stay owner-only. A value of 0 makes a durable stream owner-only.
+   */
+  replicationFactor(replicas: number): StreamConfig {
+    if (replicas < 0 || !Number.isInteger(replicas)) {
+      throw new Error("replicationFactor must be a non-negative integer");
+    }
+    return this.#with({ replicationFactor: replicas });
+  }
+
   toWire(): DeclarePlexus {
     return {
       topic: this.topic,
       partitionCount: this.partitionCount,
       durability: this.durability,
       retention: this.retention,
+      replicationFactor: this.replicationFactorValue,
     };
   }
 }

@@ -783,11 +783,11 @@ pub fn declare_coordinator_for_ganglion(
                 Ok(partitioning.partition_count)
             })
         }),
-        declare_stream: Arc::new(move |topic, count, durability, retention| {
+        declare_stream: Arc::new(move |topic, count, durability, retention, replication_factor| {
             let coordination = stream_coordination.clone();
             Box::pin(async move {
                 let config = coordination
-                    .declare_stream(&topic, count, durability, retention)
+                    .declare_stream(&topic, count, durability, retention, replication_factor)
                     .await
                     .map_err(|error| error.to_string())?;
                 for partition in 0..config.partition_count {
@@ -1238,8 +1238,9 @@ pub type DeclareFut = futures::future::BoxFuture<'static, Result<u32, String>>;
 /// and keeping coordination-ganglion free of a protocol dependency.
 pub struct CoordinationDeclareCoordinator {
     pub declare: Arc<dyn Fn(String, Option<String>, u32) -> DeclareFut + Send + Sync>,
-    pub declare_stream:
-        Arc<dyn Fn(String, u32, u8, StreamRetentionConfig) -> DeclareFut + Send + Sync>,
+    pub declare_stream: Arc<
+        dyn Fn(String, u32, u8, StreamRetentionConfig, Option<u32>) -> DeclareFut + Send + Sync,
+    >,
 }
 
 impl DeclareCoordinator for CoordinationDeclareCoordinator {
@@ -1262,6 +1263,7 @@ impl DeclareCoordinator for CoordinationDeclareCoordinator {
         partition_count: u32,
         durability: u8,
         retention: StreamRetention,
+        replication_factor: Option<u32>,
     ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
         (self.declare_stream)(
             topic.to_string(),
@@ -1272,6 +1274,7 @@ impl DeclareCoordinator for CoordinationDeclareCoordinator {
                 max_bytes: retention.max_bytes,
                 max_records: retention.max_records,
             },
+            replication_factor,
         )
     }
 }

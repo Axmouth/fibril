@@ -290,6 +290,7 @@ def _cases() -> dict[str, tuple[bytes, object]]:
                     retention=wire.StreamRetention(
                         max_age_ms=60000, max_bytes=None, max_records=1_000_000
                     ),
+                    replication_factor=2,
                 )
             ),
             wire.decode_declare_plexus_body,

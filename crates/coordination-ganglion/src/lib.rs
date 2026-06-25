@@ -325,6 +325,11 @@ pub struct StreamConfig {
     pub durability: u8,
     #[serde(default)]
     pub retention: StreamRetentionConfig,
+    /// Per-stream durable-tier replication factor (follower count). `None` uses
+    /// the controller's cluster default `stream_replication_factor`. Only the
+    /// durable tier replicates.
+    #[serde(default)]
+    pub replication_factor: Option<u32>,
 }
 
 /// Replicated partitioning of one logical queue `(topic, group)`.
@@ -1362,6 +1367,7 @@ impl GanglionCoordination {
         partition_count: u32,
         durability: u8,
         retention: StreamRetentionConfig,
+        replication_factor: Option<u32>,
     ) -> Result<StreamConfig, DeclareQueueError> {
         let partition_count = partition_count.max(1);
         let key = stream_config_key(topic);
@@ -1393,6 +1399,7 @@ impl GanglionCoordination {
                 partitioning_version: DEFAULT_PARTITIONING_VERSION,
                 durability,
                 retention: retention.clone(),
+                replication_factor,
             };
             let value = serde_json::to_string(&config).map_err(|error| {
                 DeclareQueueError::Coordination(OpenraftAdapterError::Storage(error.to_string()))
@@ -2191,7 +2198,11 @@ impl GanglionCoordination {
                 .map(|topic| {
                     let followers = match self.stream_config(&topic) {
                         Some(config) if config.durability == STREAM_DURABILITY_DURABLE => {
-                            stream_replication_factor
+                            // Per-stream override beats the cluster default.
+                            config
+                                .replication_factor
+                                .map(|rf| rf as usize)
+                                .unwrap_or(stream_replication_factor)
                         }
                         _ => 0,
                     };
@@ -3213,7 +3224,7 @@ mod tests {
 
         // Declare a 2-partition durable stream and catalogue both partitions.
         provider
-            .declare_stream("events", 2, 2, StreamRetentionConfig::default())
+            .declare_stream("events", 2, 2, StreamRetentionConfig::default(), None)
             .await
             .expect("declare stream");
         for partition in 0..2 {
@@ -3236,6 +3247,22 @@ mod tests {
         let config = provider.stream_config("events").expect("stream config");
         assert_eq!(config.partition_count, 2);
         assert_eq!(config.durability, 2);
+        // No per-stream override: the cluster default applies at placement.
+        assert_eq!(config.replication_factor, None);
+
+        // A per-stream replication-factor override round-trips through the config,
+        // so the controller can prefer it over the cluster default.
+        provider
+            .declare_stream("crit", 1, 2, StreamRetentionConfig::default(), Some(2))
+            .await
+            .expect("declare crit");
+        assert_eq!(
+            provider
+                .stream_config("crit")
+                .expect("crit config")
+                .replication_factor,
+            Some(2)
+        );
 
         provider
             .register_self(&NodeInfo {

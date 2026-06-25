@@ -538,6 +538,7 @@ fn wire_encoders_match_shared_vectors() {
                     max_bytes: None,
                     max_records: Some(1_000_000),
                 },
+                replication_factor: Some(2),
             },
         )
         .unwrap()
@@ -554,6 +555,7 @@ fn wire_encoders_match_shared_vectors() {
                 partition_count: None,
                 durability: StreamDurability::Durable,
                 retention: StreamRetention::default(),
+                replication_factor: None,
             },
         )
         .unwrap()

@@ -1157,6 +1157,7 @@ pub struct StreamConfig {
     partition_count: Option<u32>,
     durability: StreamDurability,
     retention: StreamRetention,
+    replication_factor: Option<u32>,
 }
 
 impl StreamConfig {
@@ -1167,6 +1168,7 @@ impl StreamConfig {
             partition_count: None,
             durability: StreamDurability::default(),
             retention: StreamRetention::default(),
+            replication_factor: None,
         })
     }
 
@@ -1216,12 +1218,22 @@ impl StreamConfig {
         self
     }
 
+    /// Per-stream durable-tier replication factor (follower count). When unset,
+    /// the cluster default applies. Only the durable tier replicates; the express
+    /// tiers stay owner-only regardless. A value of 0 makes a durable stream
+    /// owner-only (durable on disk, not highly available).
+    pub fn replication_factor(mut self, replicas: u32) -> Self {
+        self.replication_factor = Some(replicas);
+        self
+    }
+
     fn into_wire(self) -> DeclarePlexus {
         DeclarePlexus {
             topic: self.topic.into_string(),
             partition_count: self.partition_count,
             durability: self.durability,
             retention: self.retention,
+            replication_factor: self.replication_factor,
         }
     }
 }

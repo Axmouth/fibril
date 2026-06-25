@@ -348,6 +348,11 @@ pub struct DeclarePlexus {
     pub durability: StreamDurability,
     #[serde(default)]
     pub retention: StreamRetention,
+    /// Per-stream replication factor (durable-tier follower count). `None` uses
+    /// the cluster default `stream_replication_factor`. Only the durable tier
+    /// replicates; the express tiers stay owner-only regardless.
+    #[serde(default)]
+    pub replication_factor: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

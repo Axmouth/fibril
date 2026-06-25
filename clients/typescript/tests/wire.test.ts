@@ -462,6 +462,7 @@ test("plexus stream bodies match shared vectors and round-trip", () => {
     partitionCount: 4,
     durability: "speculative",
     retention: { maxAgeMs: 60000n, maxBytes: null, maxRecords: 1000000n },
+    replicationFactor: 2,
   };
   assert.equal(toHex(encodeDeclarePlexusBody(declare)), VECTORS.declare_plexus);
   assert.deepEqual(decodeDeclarePlexusBody(encodeDeclarePlexusBody(declare)), declare);
@@ -471,6 +472,7 @@ test("plexus stream bodies match shared vectors and round-trip", () => {
     partitionCount: null,
     durability: "durable",
     retention: { maxAgeMs: null, maxBytes: null, maxRecords: null },
+    replicationFactor: null,
   };
   assert.equal(toHex(encodeDeclarePlexusBody(declareMin)), VECTORS.declare_plexus_min);
   assert.deepEqual(decodeDeclarePlexusBody(encodeDeclarePlexusBody(declareMin)), declareMin);

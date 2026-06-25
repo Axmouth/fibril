@@ -3956,6 +3956,7 @@ async fn declare_uses_coordinator_effective_count() {
             _partition_count: u32,
             _durability: u8,
             _retention: fibril_protocol::v1::StreamRetention,
+            _replication_factor: Option<u32>,
         ) -> futures::future::BoxFuture<'a, Result<u32, String>> {
             let effective = self.0;
             Box::pin(async move { Ok(effective) })
@@ -5049,6 +5050,7 @@ async fn framed_declare_plexus(
                     partition_count,
                     durability: Default::default(),
                     retention: StreamRetention::default(),
+                    replication_factor: None,
                 },
             )
             .unwrap(),
@@ -5400,6 +5402,7 @@ async fn declaring_a_queue_then_plexus_same_topic_is_rejected() {
                     partition_count: Some(1),
                     durability: Default::default(),
                     retention: StreamRetention::default(),
+                    replication_factor: None,
                 },
             )
             .unwrap(),
@@ -5488,6 +5491,7 @@ async fn multi_partition_queue_blocks_plexus_no_mixed_partitions() {
                     partition_count: Some(3),
                     durability: Default::default(),
                     retention: StreamRetention::default(),
+                    replication_factor: None,
                 },
             )
             .unwrap(),
@@ -5541,6 +5545,7 @@ async fn framed_declare_plexus_durability(
                     partition_count: Some(1),
                     durability,
                     retention: StreamRetention::default(),
+                    replication_factor: None,
                 },
             )
             .unwrap(),

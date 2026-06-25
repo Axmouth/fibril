@@ -99,10 +99,14 @@ precise about which you have:
 
 Replication is the durable tier only. The express tiers (speculative, ephemeral)
 are always owner-only — replication would contradict their latency-first intent.
-Set the replica count with the controller's `stream_replication_factor` (see
-[Configuration](/latest/configuration/)); the default of one keeps a durable
-stream available across a single node loss. Do not treat a clustered durable
-stream as HA unless it has a replication factor of at least one.
+Set the cluster default replica count with the controller's
+`stream_replication_factor` (see [Configuration](/latest/configuration/)); the
+default of one keeps a durable stream available across a single node loss. A
+single stream can override it at declare time with the replication-factor builder
+(`replication_factor` in Rust and Python, `replicationFactor` in TypeScript), so
+a critical stream can ask for more replicas while the rest use the default. Do
+not treat a clustered durable stream as HA unless it has a replication factor of
+at least one.
 
 ## Acks advance the cursor
 

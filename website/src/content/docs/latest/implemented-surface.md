@@ -172,7 +172,7 @@ See also: [Plexus streams](/latest/concepts/plexus-streams/) and
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Stream channel type (fan-out) | Implemented | Stroma StreamEngine (cursors/retention), broker fan-out actor, TCP protocol (`DeclarePlexus`/`SubscribeStream`, reuses Publish/Deliver/Ack), Rust + TypeScript + Python clients |
-| Declare plexus (partitions, durability, retention) | Implemented | `declare_plexus`/`declarePlexus` + `StreamConfig` in all three clients |
+| Declare plexus (partitions, durability, retention, replication factor) | Implemented | `declare_plexus`/`declarePlexus` + `StreamConfig` in all three clients, including a per-stream replication-factor override that beats the cluster default |
 | Durable named cursor | Implemented | Broker-side cursor per (channel, partition, name), resuming on restart and advancing on ack |
 | Ephemeral start position | Implemented | latest / earliest / offset / n-back / by-time |
 | Header filter | Implemented | AND of `header == pattern` with `*` glob, stream-only |

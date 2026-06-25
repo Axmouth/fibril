@@ -146,6 +146,7 @@ pub trait DeclareCoordinator: Send + Sync {
         partition_count: u32,
         durability: u8,
         retention: StreamRetention,
+        replication_factor: Option<u32>,
     ) -> futures::future::BoxFuture<'a, Result<u32, String>>;
 }
 
@@ -3018,6 +3019,7 @@ pub async fn handle_connection(
                             requested,
                             declare.durability.as_u8(),
                             declare.retention.clone(),
+                            declare.replication_factor,
                         )
                         .await
                     {

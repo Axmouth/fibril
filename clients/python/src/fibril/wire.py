@@ -1149,6 +1149,7 @@ class DeclarePlexus:
     partition_count: Optional[int] = None
     durability: StreamDurability = "durable"
     retention: StreamRetention = field(default_factory=StreamRetention)
+    replication_factor: Optional[int] = None
 
 
 def encode_declare_plexus_body(d: DeclarePlexus) -> bytes:
@@ -1163,6 +1164,7 @@ def encode_declare_plexus_body(d: DeclarePlexus) -> bytes:
     w.optional_u64(d.retention.max_age_ms)
     w.optional_u64(d.retention.max_bytes)
     w.optional_u64(d.retention.max_records)
+    w.optional_u32(d.replication_factor)
     return w.finish()
 
 
@@ -1180,8 +1182,9 @@ def decode_declare_plexus_body(body: bytes) -> DeclarePlexus:
         max_bytes=r.optional_u64(),
         max_records=r.optional_u64(),
     )
+    replication_factor = r.optional_u32()
     r.finish()
-    return DeclarePlexus(topic, partition_count, durability, retention)
+    return DeclarePlexus(topic, partition_count, durability, retention, replication_factor)
 
 
 @dataclass

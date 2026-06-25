@@ -1117,6 +1117,7 @@ export interface DeclarePlexus {
   partitionCount: number | null;
   durability: StreamDurability;
   retention: StreamRetention;
+  replicationFactor: number | null;
 }
 
 export function encodeDeclarePlexusBody(d: DeclarePlexus): Uint8Array {
@@ -1128,6 +1129,7 @@ export function encodeDeclarePlexusBody(d: DeclarePlexus): Uint8Array {
   w.optionalU64(d.retention.maxAgeMs);
   w.optionalU64(d.retention.maxBytes);
   w.optionalU64(d.retention.maxRecords);
+  w.optionalU32(d.replicationFactor);
   return w.finish();
 }
 
@@ -1146,8 +1148,9 @@ export function decodeDeclarePlexusBody(body: Uint8Array): DeclarePlexus {
     maxBytes: r.optionalU64(),
     maxRecords: r.optionalU64(),
   };
+  const replicationFactor = r.optionalU32();
   r.finish();
-  return { topic, partitionCount, durability, retention };
+  return { topic, partitionCount, durability, retention, replicationFactor };
 }
 
 export interface DeclarePlexusOk {

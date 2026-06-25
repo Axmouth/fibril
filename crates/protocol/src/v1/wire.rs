@@ -482,6 +482,7 @@ pub fn encode_declare_plexus(request_id: u64, declare: &DeclarePlexus) -> WireRe
     put_optional_u32(&mut out, declare.partition_count);
     out.put_u8(declare.durability.as_u8());
     put_stream_retention(&mut out, &declare.retention);
+    put_optional_u32(&mut out, declare.replication_factor);
     Ok(frame(Op::DeclarePlexus, request_id, out.freeze()))
 }
 
@@ -494,6 +495,7 @@ pub fn decode_declare_plexus(frame: &Frame) -> WireResult<DeclarePlexus> {
         partition_count: reader.optional_u32()?,
         durability: reader.stream_durability()?,
         retention: reader.stream_retention()?,
+        replication_factor: reader.optional_u32()?,
     };
     reader.finish()?;
     Ok(declare)
@@ -2550,12 +2552,14 @@ mod tests {
                     max_bytes: None,
                     max_records: Some(1_000_000),
                 },
+                replication_factor: Some(2),
             },
             DeclarePlexus {
                 topic: "minimal".into(),
                 partition_count: None,
                 durability: StreamDurability::Durable,
                 retention: StreamRetention::default(),
+                replication_factor: None,
             },
         ] {
             let frame = encode_declare_plexus(7, &declare).unwrap();

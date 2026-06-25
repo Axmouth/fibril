@@ -144,6 +144,7 @@ class StreamConfig:
     partition_count: Optional[int] = None
     durability: wire.StreamDurability = "durable"
     retention: wire.StreamRetention = field(default_factory=wire.StreamRetention)
+    replication_factor: Optional[int] = None
 
     def partitions(self, count: int) -> "StreamConfig":
         if count < 1:
@@ -172,12 +173,24 @@ class StreamConfig:
     def retain_records(self, max_records: int) -> "StreamConfig":
         return replace(self, retention=replace(self.retention, max_records=max_records))
 
+    def replicas(self, replication_factor: int) -> "StreamConfig":
+        """Per-stream durable-tier replication factor (follower count).
+
+        When unset, the cluster default applies. Only the durable tier
+        replicates; the express tiers stay owner-only. ``0`` makes a durable
+        stream owner-only (durable on disk, not highly available).
+        """
+        if replication_factor < 0:
+            raise ValueError("replication_factor must be non-negative")
+        return replace(self, replication_factor=replication_factor)
+
     def to_wire(self) -> wire.DeclarePlexus:
         return wire.DeclarePlexus(
             topic=self.topic,
             partition_count=self.partition_count,
             durability=self.durability,
             retention=self.retention,
+            replication_factor=self.replication_factor,
         )
 
 
