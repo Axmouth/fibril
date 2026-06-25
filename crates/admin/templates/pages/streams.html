@@ -232,7 +232,7 @@ async function submitCreateStream() {
 document.getElementById("create.submit").addEventListener("click", submitCreateStream);
 document.getElementById("stream-search").addEventListener("input", refresh);
 
-setInterval(refresh, 2000);
+autoRefresh(refresh, 2000);
 refresh();
 </script>
 {% endblock %}

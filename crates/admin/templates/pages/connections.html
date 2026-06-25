@@ -16,7 +16,7 @@ async function refresh() {
       <td>${r.authenticated}</td>
     </tr>`).join('');
 }
-setInterval(refresh, 2000);
+autoRefresh(refresh, 2000);
 refresh();
 </script>
 {% endblock %}

@@ -437,7 +437,7 @@ async function deleteQueue(btn) {
 document.getElementById("queue-search").addEventListener("input", refresh);
 document.getElementById("queue-hide-inactive").addEventListener("change", refresh);
 
-setInterval(refresh, 2000);
+autoRefresh(refresh, 2000);
 refresh();
 </script>
 {% endblock %}

@@ -177,7 +177,7 @@ async function refresh() {
   renderRecovery(stroma.recovery);
 }
 
-setInterval(refresh, 3000);
+autoRefresh(refresh, 3000);
 refresh();
 </script>
 {% endblock %}

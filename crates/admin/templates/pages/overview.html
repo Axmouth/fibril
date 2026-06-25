@@ -213,7 +213,7 @@ async function refresh() {
     + reconcileClientClosed
     + reconcileServerDropped;
 }
-setInterval(refresh, 2000);
+autoRefresh(refresh, 2000);
 refresh();
 </script>
 {% endblock %}

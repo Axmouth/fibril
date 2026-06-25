@@ -118,6 +118,7 @@
 </section>
 
 <script src="/static/js/api.js"></script>
+<script src="/static/js/admin.js"></script>
 <script>
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -529,7 +530,7 @@ document.getElementById("topology-diagram").addEventListener("click", () => {
 });
 applyViewMode();
 
-setInterval(refresh, 3000);
+autoRefresh(refresh, 3000);
 refresh();
 </script>
 {% endblock %}

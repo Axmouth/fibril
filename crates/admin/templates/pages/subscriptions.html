@@ -65,7 +65,7 @@ function refreshAll() {
   refreshCohorts();
 }
 
-setInterval(refreshAll, 2000);
+autoRefresh(refreshAll, 2000);
 refreshAll();
 </script>
 {% endblock %}
