@@ -84,9 +84,11 @@ A few variations are worth trying:
   visualizer of real wire traffic and partition routing (publishes, confirms,
   deliveries, pings, errors as moving dots across partition lanes, with a metrics
   HUD). Interactive keys steer it live: `Tab` to focus a client, `space` to
-  pause/resume it, `[` / `]` to change the publish rate, `c` to toggle confirms,
-  `g` to switch keyed vs round-robin routing, and `q` to quit (which tears the
-  broker down). Add `--ganglion --nodes 3` to run the visualizer against a real
+  pause/resume it, `k` / `r` to kill / restart it (watch its unacked messages
+  redeliver on reconnect), `n` to nack its next delivery (watch the requeue +
+  redelivery), `[` / `]` to change the publish rate, `c` to toggle confirms, `g`
+  to switch keyed vs round-robin routing, and `q` to quit (which tears the broker
+  down). Add `--ganglion --nodes 3` to run the visualizer against a real
   cluster: it fetches topology, connects to every broker, and routes each publish
   and subscribe to the partition's owner, with lanes colored by owning broker.
 

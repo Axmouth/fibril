@@ -18,8 +18,8 @@ use crossterm::{
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 use fibril_protocol::v1::{
-    Auth, DeclareQueue, Deliver, ErrorMsg, Hello, Op, PROTOCOL_V1, Partition, Pong, Publish,
-    Subscribe, TopologyOk, TopologyRequest,
+    Ack, Auth, DeclareQueue, DeliveryTag, Deliver, ErrorMsg, Hello, Nack, Op, PROTOCOL_V1,
+    Partition, Pong, Publish, Subscribe, TopologyOk, TopologyRequest,
     frame::{Frame, ProtoCodec},
     helper::{Conn, try_decode, try_encode},
 };
@@ -100,6 +100,11 @@ struct Control {
     keyed: AtomicBool,
     /// Per-client publish pause.
     paused: Vec<AtomicBool>,
+    /// Per-client liveness: cleared by `k` (the client drops its connections),
+    /// set by `r` (it reconnects and re-subscribes).
+    alive: Vec<AtomicBool>,
+    /// Per-client count of deliveries to nack (requeue) instead of ack next.
+    nack_next: Vec<AtomicU64>,
 }
 
 fn rate_to_period_us(rate: f64) -> u64 {
@@ -112,11 +117,14 @@ fn rate_to_period_us(rate: f64) -> u64 {
 
 impl Control {
     fn new(rate: f64, confirm: bool, keyed: bool, clients: usize) -> Self {
+        let clients = clients.max(1);
         Self {
             period_us: AtomicU64::new(rate_to_period_us(rate)),
             confirm: AtomicBool::new(confirm),
             keyed: AtomicBool::new(keyed),
-            paused: (0..clients.max(1)).map(|_| AtomicBool::new(false)).collect(),
+            paused: (0..clients).map(|_| AtomicBool::new(false)).collect(),
+            alive: (0..clients).map(|_| AtomicBool::new(true)).collect(),
+            nack_next: (0..clients).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 
@@ -163,6 +171,33 @@ impl Control {
             .count()
     }
 
+    fn is_alive(&self, client: usize) -> bool {
+        self.alive.get(client).is_none_or(|a| a.load(Ordering::Relaxed))
+    }
+
+    fn set_alive(&self, client: usize, alive: bool) {
+        if let Some(a) = self.alive.get(client) {
+            a.store(alive, Ordering::Relaxed);
+        }
+    }
+
+    /// Request that the client nack (requeue) its next delivery.
+    fn request_nack(&self, client: usize) {
+        if let Some(n) = self.nack_next.get(client) {
+            n.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Consume one pending nack request for the client, returning whether the
+    /// next delivery should be nacked rather than acked.
+    fn take_nack(&self, client: usize) -> bool {
+        let Some(n) = self.nack_next.get(client) else {
+            return false;
+        };
+        n.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1))
+            .is_ok()
+    }
+
     /// Scale the publish rate. `factor > 1` speeds up (shorter period).
     fn scale_rate(&self, factor: f64) {
         let current = self.period_us.load(Ordering::Relaxed).max(1) as f64;
@@ -186,6 +221,8 @@ enum VizOp {
     Publish,
     Confirm,
     Deliver,
+    Ack,
+    Nack,
     Ping,
     Pong,
     Error,
@@ -198,6 +235,8 @@ impl VizOp {
             VizOp::Publish => Color::Blue,
             VizOp::Confirm => Color::Cyan,
             VizOp::Deliver => Color::Green,
+            VizOp::Ack => Color::LightGreen,
+            VizOp::Nack => Color::LightRed,
             VizOp::Ping | VizOp::Pong => Color::DarkGray,
             VizOp::Error => Color::Red,
         }
@@ -384,8 +423,11 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 
     for (i, rect) in layout.client_boxes.iter().enumerate() {
         let focused = i == app.focus;
+        let down = !app.control.is_alive(i);
         let paused = app.control.is_paused(i);
-        let color = if focused {
+        let color = if down {
+            Color::Red
+        } else if focused {
             Color::White
         } else if paused {
             Color::DarkGray
@@ -393,8 +435,9 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
             Color::Gray
         };
         let label = format!(
-            "client {i}{}{}",
+            "client {i}{}{}{}",
             if focused { " *" } else { "" },
+            if down { " down" } else { "" },
             if paused { " ||" } else { "" }
         );
         draw_box(f, *rect, &label, color);
@@ -470,11 +513,11 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
             app.clients,
         )),
         Line::from(Span::styled(
-            "publish=blue confirm=cyan deliver=green setup/ping=gray error=red",
+            "publish=blue confirm=cyan deliver=green ack=lgreen nack=lred setup/ping=gray error=red",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "Tab focus  space pause  [ ] rate  c confirm  g routing  q quit",
+            "Tab focus  space pause  k/r kill/restart  n nack  [ ] rate  c confirm  g routing  q quit",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -573,6 +616,9 @@ async fn run_ui(app: &mut App, rx: &mut mpsc::Receiver<VisualEvent>) -> anyhow::
                 KeyCode::Char('[') => app.control.scale_rate(1.0 / 1.3),
                 KeyCode::Char('c') => app.control.toggle_confirm(),
                 KeyCode::Char('g') => app.control.toggle_keyed(),
+                KeyCode::Char('k') => app.control.set_alive(app.focus, false),
+                KeyCode::Char('r') => app.control.set_alive(app.focus, true),
+                KeyCode::Char('n') => app.control.request_nack(app.focus),
                 _ => {}
             }
         }
@@ -789,17 +835,44 @@ async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Resul
     })
 }
 
-/// One client: connect to every broker, subscribe to its owned partitions on
-/// each partition's owner, then publish (routed to each partition's owner) while
-/// consuming. Rate, confirm, routing, and pause are read live from `control`, so
-/// interactive keys steer it without a restart. Emits a VisualEvent per frame in
-/// and out (best-effort, never blocking).
+/// Hold each delivery this long before acking, so there is always a small window
+/// of unacked in-flight to redeliver when a consumer is killed.
+const ACK_DELAY: Duration = Duration::from_millis(450);
+
+/// Supervise one client: run a session while the client is alive, and reconnect
+/// after `r` brings it back (or after an error). On `k` the session returns and
+/// the connections drop, so the broker reclaims the client's unacked in-flight
+/// and redelivers it when the client reconnects.
 async fn run_client(
     args: Args,
     client: usize,
     cluster: Arc<Cluster>,
     control: Arc<Control>,
     vis: mpsc::Sender<VisualEvent>,
+) -> anyhow::Result<()> {
+    loop {
+        if !control.is_alive(client) {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            continue;
+        }
+        if let Err(err) = run_session(&args, client, &cluster, &control, &vis).await {
+            tracing::debug!("client {client} session ended: {err}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// One session: connect to every broker, subscribe (manual ack) to this client's
+/// owned partitions on each partition's owner, then publish (routed to the owner)
+/// while consuming. Deliveries are acked after a short delay (so the ack return
+/// path is visible and there is unacked in-flight to redeliver on a kill), unless
+/// a nack was requested. Returns when the client is killed or a connection fails.
+async fn run_session(
+    args: &Args,
+    client: usize,
+    cluster: &Cluster,
+    control: &Control,
+    vis: &mpsc::Sender<VisualEvent>,
 ) -> anyhow::Result<()> {
     let auth = parse_auth(&args.auth);
 
@@ -808,7 +881,7 @@ async fn run_client(
     let mut conns: Vec<Conn> = Vec::with_capacity(cluster.brokers.len());
     for endpoint in &cluster.brokers {
         let mut conn = connect(endpoint).await?;
-        handshake(&mut conn, client, &auth, &vis).await?;
+        handshake(&mut conn, client, &auth, vis).await?;
         conns.push(conn);
     }
 
@@ -835,7 +908,7 @@ async fn run_client(
                 partition: Partition::new(p),
                 group: args.group.clone(),
                 prefetch: 64,
-                auto_ack: true,
+                auto_ack: false,
                 consumer_group: None,
                 consumer_target: None,
                 member_id: None,
@@ -843,7 +916,7 @@ async fn run_client(
         )?)
         .await?;
         emit(
-            &vis,
+            vis,
             VisualEvent {
                 client,
                 op: VizOp::Subscribe,
@@ -867,16 +940,27 @@ async fn run_client(
     }
     let mut reads = select_all(reads);
 
-    // Publish on a manually advanced deadline so the rate can change live without
-    // a received frame resetting the cadence.
     let payload = vec![b'x'; args.payload_size];
     let parts = args.partitions.max(1) as u64;
     let key_space = (parts * 3).max(1);
     let mut seq: u64 = 0;
     let mut next_pub = Instant::now();
+    // Deliveries awaiting their delayed ack: (deadline, broker, partition, tag).
+    let mut pending_acks: VecDeque<(Instant, usize, Partition, DeliveryTag)> = VecDeque::new();
+    // Stateful so a busy loop cannot starve the kill check.
+    let mut alive_check = tokio::time::interval(Duration::from_millis(150));
+    alive_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
+        let ack_deadline = pending_acks.front().map(|(d, ..)| *d);
         tokio::select! {
+            _ = alive_check.tick() => {
+                if !control.is_alive(client) {
+                    // Drop the connections: the broker reclaims the unacked
+                    // in-flight and redelivers it when this client reconnects.
+                    return Ok(());
+                }
+            }
             _ = tokio::time::sleep_until(next_pub.into()) => {
                 next_pub = Instant::now() + control.period();
                 if control.is_paused(client) {
@@ -906,7 +990,7 @@ async fn run_client(
                     .send(try_encode(Op::Publish, next_req_id(), &msg)?)
                     .await?;
                 emit(
-                    &vis,
+                    vis,
                     VisualEvent {
                         client,
                         op: VizOp::Publish,
@@ -916,6 +1000,36 @@ async fn run_client(
                     },
                 );
             }
+            _ = async { match ack_deadline {
+                Some(d) => tokio::time::sleep_until(d.into()).await,
+                None => std::future::pending().await,
+            } } => {
+                let now = Instant::now();
+                while let Some(&(deadline, broker, partition, tag)) = pending_acks.front() {
+                    if deadline > now {
+                        break;
+                    }
+                    pending_acks.pop_front();
+                    sinks[broker]
+                        .send(try_encode(Op::Ack, next_req_id(), &Ack {
+                            topic: args.topic.clone(),
+                            group: args.group.clone(),
+                            partition,
+                            tags: vec![tag],
+                        })?)
+                        .await?;
+                    emit(
+                        vis,
+                        VisualEvent {
+                            client,
+                            op: VizOp::Ack,
+                            to_broker: true,
+                            partition: Some(partition.id()),
+                            latency_ms: None,
+                        },
+                    );
+                }
+            }
             Some((broker, frame)) = reads.next() => {
                 let frame = frame?;
                 match frame.opcode {
@@ -923,7 +1037,7 @@ async fn run_client(
                         let d: Deliver = try_decode(&frame)?;
                         let latency = unix_millis().saturating_sub(d.published);
                         emit(
-                            &vis,
+                            vis,
                             VisualEvent {
                                 client,
                                 op: VizOp::Deliver,
@@ -932,10 +1046,40 @@ async fn run_client(
                                 latency_ms: Some(latency),
                             },
                         );
+                        if control.take_nack(client) {
+                            // Requeue now -> the broker redelivers it.
+                            sinks[broker]
+                                .send(try_encode(Op::Nack, next_req_id(), &Nack {
+                                    topic: args.topic.clone(),
+                                    group: args.group.clone(),
+                                    partition: d.partition,
+                                    tags: vec![d.delivery_tag],
+                                    requeue: true,
+                                    not_before: None,
+                                })?)
+                                .await?;
+                            emit(
+                                vis,
+                                VisualEvent {
+                                    client,
+                                    op: VizOp::Nack,
+                                    to_broker: true,
+                                    partition: Some(d.partition.id()),
+                                    latency_ms: None,
+                                },
+                            );
+                        } else {
+                            pending_acks.push_back((
+                                Instant::now() + ACK_DELAY,
+                                broker,
+                                d.partition,
+                                d.delivery_tag,
+                            ));
+                        }
                     }
                     x if x == Op::PublishOk as u16 => {
                         emit(
-                            &vis,
+                            vis,
                             VisualEvent {
                                 client,
                                 op: VizOp::Confirm,
@@ -951,7 +1095,7 @@ async fn run_client(
                             .send(try_encode(Op::Pong, frame.request_id, &Pong)?)
                             .await?;
                         emit(
-                            &vis,
+                            vis,
                             VisualEvent {
                                 client,
                                 op: VizOp::Ping,
@@ -961,7 +1105,7 @@ async fn run_client(
                             },
                         );
                         emit(
-                            &vis,
+                            vis,
                             VisualEvent {
                                 client,
                                 op: VizOp::Pong,
@@ -975,7 +1119,7 @@ async fn run_client(
                         let e: ErrorMsg = try_decode(&frame)?;
                         tracing::debug!("client {client} error {}: {}", e.code, e.message);
                         emit(
-                            &vis,
+                            vis,
                             VisualEvent {
                                 client,
                                 op: VizOp::Error,

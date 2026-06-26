@@ -106,15 +106,25 @@ Done (work live on the standalone `--viz` broker):
       (the cyan confirm return path appears). `g` - switch keyed vs round-robin
       routing (the lane spread changes).
 
-Queued (need more than a live setting flip):
+Done (manual-ack pass): consumers now subscribe with manual ack, so each delivery
+shows an ack return path and there is unacked in-flight to redeliver. Each client
+is run by a supervisor that reconnects when it is brought back.
 
-- `k` / `r` - kill / restart the focused client's connection. To show redelivery
-  on lease expiry it needs manual-ack (auto-ack settles on delivery, so nothing
-  is in flight to redeliver) plus a per-client supervisor to reconnect.
-- `n` - nack the next delivery (also needs manual-ack).
+- [x] `k` / `r` - kill / restart the focused client. On `k` the session drops its
+      connections, the broker reclaims the unacked in-flight, and on `r` the client
+      reconnects, re-subscribes, and receives the redeliveries (at-least-once).
+- [x] `n` - nack (requeue) the focused client's next delivery, which the broker
+      redelivers.
+
+Queued:
+
 - `+` / `-` - add / remove a partition (live repartition). Needs ganglion (live
-  repartition is coordination-only), so it does not apply to the standalone
-  `--viz` broker as is.
+  repartition is coordination-only). Now that the visualizer routes across a
+  cluster (see below), this is feasible against `--viz --ganglion` via the admin
+  repartition API, with the lanes appearing/draining live.
+- Redelivery to a PEER (not the same client on reconnect) needs an exclusive
+  consumer group (cohort) so a surviving member takes over the killed member's
+  partitions.
 
 ## Cluster owner-routing - DONE
 
