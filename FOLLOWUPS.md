@@ -484,14 +484,23 @@ rejected). Three composable dumb-broker pieces:
   can be targeted per connection. Clients already get the initial snapshot via
   TopologyRequest, so push deltas + ack covers live routing end to end.
 
-  STATUS: the broker push half plus the Rust, TypeScript, and Python client apply
-  + ack are built (#62, #88, #89). Each client reader loop applies a pushed
-  TopologyUpdate to its routing cache (replace + pool prune, generation-guarded
-  against stale pushes) and acks the generation it now reflects. The routing cache
-  and connection pool are created before the bootstrap connection starts so a push
-  sent right after HELLO has somewhere to land with no wiring race. Remaining (#90):
-  use the broker-recorded acks to fence a repartition cutover (do not retire old
-  partitions until routing clients have acked the new generation).
+  STATUS: DONE end to end (#62, #88, #89, #90). The broker pushes a TopologyUpdate
+  on generation change; the Rust, TS, and Python clients apply it (replace + pool
+  prune, generation-guarded) and ack the generation. The routing cache + pool are
+  created before the bootstrap connection so a push sent right after HELLO lands
+  with no wiring race. #90: the broker records per-connection acked generations
+  (TopologyAdoptionTracker), reports the cluster minimum as a heartbeat label, and
+  the repartition controller fences a cutover's finalize on cluster-wide adoption
+  (drained AND adopted-or-timed-out), bounded by repartition_adoption_timeout_ms.
+  Full mechanism + assumptions: website dev note "Live routing and cutover".
+
+  FOLLOW-UP (efficiency, not correctness): the topology generation is the
+  coordination committed generation, which advances on every committed change
+  including node heartbeat label updates. So a TopologyUpdate is pushed to clients
+  roughly once per heartbeat while anything changes, and the routing cache is
+  re-applied to an often-identical snapshot. Key the push (and the adoption
+  comparison) off a topology-content version rather than the raw coordination
+  generation, so pushes carry real deltas only. (#93)
 
   topology-as-a-stream is therefore NOT the routing path. It survives only as an
   OPTIONAL higher-level DISCOVERY layer: subscribe-to-a-pattern / auto-pickup of

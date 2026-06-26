@@ -45,17 +45,14 @@ use fibril_coordination_ganglion::{
 use fibril_metrics::{Metrics, MetricsConfig};
 use fibril_protocol::v1::handler::{
     ClientTopologySource, ConnectionRuntimeSettings as ProtocolConnectionRuntimeSettings,
-    ConnectionSettings, ProtocolServerError, DeclareCoordinator,
+    ConnectionSettings, DeclareCoordinator, ProtocolServerError, TopologyAdoptionTracker,
     run_server as run_protocol_server,
 };
 use fibril_protocol::v1::{
     Partition, QueueTopologyEntry, StreamRetention, StreamTopologyEntry, TopologyOk,
 };
 use fibril_util::StaticAuthHandler;
-use ganglion::{
-    TcpRaftServer, WireFormat, WireFormatParseError,
-    openraft::BasicNode,
-};
+use ganglion::{TcpRaftServer, WireFormat, WireFormatParseError, openraft::BasicNode};
 
 /// Map the startup config's runtime-seed section into the broker's
 /// `RuntimeSettings` (the initial cluster document before replicated overrides).
@@ -506,8 +503,13 @@ pub fn spawn_ganglion_runtime_settings_sync(
         .spawn_runtime_settings_sync(runtime_settings)
 }
 
-/// Build advisory heartbeat labels from local broker state.
-pub fn broker_heartbeat_labels(broker: &Broker<StromaEngine>) -> BTreeMap<String, String> {
+/// Build advisory heartbeat labels from local broker state. `topology_adoption`,
+/// when present, contributes the node's lowest acked topology generation so the
+/// repartition controller can fence a cutover on cluster-wide client adoption.
+pub fn broker_heartbeat_labels(
+    broker: &Broker<StromaEngine>,
+    topology_adoption: Option<&TopologyAdoptionTracker>,
+) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
     for worker in broker
         .sparse_queue_observability_report()
@@ -548,6 +550,17 @@ pub fn broker_heartbeat_labels(broker: &Broker<StromaEngine>) -> BTreeMap<String
             fibril_coordination_ganglion::encode_repartition_drained(&reports),
         );
     }
+
+    // Report the lowest topology generation this node's clients have acked, so the
+    // repartition controller can fence a cutover on cluster-wide adoption. Absent
+    // when no connected client has acked (no signal -> the controller leans on the
+    // adoption timeout).
+    if let Some(min_acked) = topology_adoption.and_then(|a| a.min_acked_generation()) {
+        labels.insert(
+            fibril_coordination_ganglion::TOPOLOGY_ADOPTION_LABEL.to_string(),
+            min_acked.to_string(),
+        );
+    }
     labels
 }
 
@@ -558,6 +571,7 @@ pub fn spawn_ganglion_broker_tasks(
     broker: Arc<Broker<StromaEngine>>,
     config: &ServerConfig,
     runtime: &RuntimeSettings,
+    topology_adoption: Option<Arc<TopologyAdoptionTracker>>,
 ) -> GanglionBrokerTaskHandles {
     let resolver = Arc::new(
         fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::with_config(
@@ -581,6 +595,7 @@ pub fn spawn_ganglion_broker_tasks(
     );
 
     let tails_broker = broker.clone();
+    let labels_adoption = topology_adoption.clone();
     let heartbeat = parts.coordination.spawn_heartbeat_with_labels(
         NodeInfo {
             node_id: config.coordination.node_id.clone(),
@@ -588,7 +603,7 @@ pub fn spawn_ganglion_broker_tasks(
             admin_addr: Some(config.admin.listener.bind),
         },
         Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
-        move || broker_heartbeat_labels(&tails_broker),
+        move || broker_heartbeat_labels(&tails_broker, labels_adoption.as_deref()),
     );
 
     let coordination = parts.coordination.clone();
@@ -656,7 +671,16 @@ pub fn spawn_ganglion_broker_tasks(
     let coordination = parts.coordination.clone();
     let repartition_broker = broker.clone();
     let repartition_tick_ms = config.coordination.ganglion.heartbeat_interval_ms;
+    let adoption_timeout =
+        Duration::from_millis(config.coordination.ganglion.repartition_adoption_timeout_ms);
     let repartition_watcher = tokio::spawn(async move {
+        // When each drained-complete transition first became eligible to finalize,
+        // keyed by (topic, group, version). Used to bound the wait for client
+        // adoption so a silent or stuck client cannot stall a cutover forever.
+        let mut drain_complete_since: std::collections::HashMap<
+            (String, Option<String>, u64),
+            std::time::Instant,
+        > = std::collections::HashMap::new();
         loop {
             tokio::time::sleep(Duration::from_millis(repartition_tick_ms)).await;
             let active = coordination.active_repartition_transitions();
@@ -665,6 +689,10 @@ pub fn spawn_ganglion_broker_tasks(
                 .iter()
                 .map(|(topic, group, _)| (topic.clone(), group.clone()))
                 .collect();
+            // Forget adoption timers for transitions that are no longer active.
+            drain_complete_since.retain(|(topic, group, _), _| {
+                active_keys.contains(&(topic.clone(), group.clone()))
+            });
             for (topic, group) in repartition_broker.active_repartition_queues() {
                 if !active_keys.contains(&(topic.clone(), group.clone())) {
                     repartition_broker.clear_repartition_transition(&topic, group.as_deref());
@@ -693,6 +721,36 @@ pub fn spawn_ganglion_broker_tasks(
                 let complete = (0..doc.n_old).all(|r| drained.contains(&r));
                 if complete {
                     let is_leader = coordination.is_leader().await;
+                    // Stamp the adoption target generation the first time we see a
+                    // drained transition without one (the generation only exists
+                    // after the cutover, so it cannot be set at marker creation).
+                    if doc.adoption_generation.is_none() && is_leader {
+                        let _ = coordination
+                            .stamp_repartition_adoption_generation(&topic, group.as_deref(), &doc)
+                            .await;
+                    }
+                    // Fence the finalize (retire + clear) on cluster-wide client
+                    // adoption of the new routing: proceed once every node's acked
+                    // topology generation has caught up to the transition's, or the
+                    // adoption timeout elapses (the publish version-fence is the
+                    // correctness backstop, so the timeout is safe).
+                    let timer_key = (topic.clone(), group.clone(), doc.version);
+                    let first_complete = *drain_complete_since
+                        .entry(timer_key.clone())
+                        .or_insert_with(std::time::Instant::now);
+                    let adopted = match doc.adoption_generation {
+                        Some(target) => coordination
+                            .global_topology_adoption()
+                            .is_some_and(|acked| acked >= target),
+                        None => false,
+                    };
+                    let timed_out = first_complete.elapsed() >= adoption_timeout;
+                    if !(adopted || timed_out) {
+                        // Drained but not yet adopted: wait for clients (or the
+                        // timeout) before retiring partitions or clearing the marker.
+                        continue;
+                    }
+                    drain_complete_since.remove(&timer_key);
                     if doc.n_new < doc.n_old {
                         // Still-retired fence: only touch indices that are still
                         // outside the live partition count. If a later grow has
@@ -756,9 +814,7 @@ pub fn topology_source_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn ClientT
 
 /// Protocol declare coordinator for Ganglion-backed partition metadata and
 /// catalogue registration.
-pub fn declare_coordinator_for_ganglion(
-    parts: &TcpGanglionParts,
-) -> Arc<dyn DeclareCoordinator> {
+pub fn declare_coordinator_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn DeclareCoordinator> {
     let coordination = parts.coordination.clone();
     let stream_coordination = parts.coordination.clone();
     Arc::new(CoordinationDeclareCoordinator {
@@ -783,23 +839,25 @@ pub fn declare_coordinator_for_ganglion(
                 Ok(partitioning.partition_count)
             })
         }),
-        declare_stream: Arc::new(move |topic, count, durability, retention, replication_factor| {
-            let coordination = stream_coordination.clone();
-            Box::pin(async move {
-                let config = coordination
-                    .declare_stream(&topic, count, durability, retention, replication_factor)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                for partition in 0..config.partition_count {
-                    let stream = StreamIdentity::new(topic.clone(), Partition::new(partition));
-                    coordination
-                        .register_stream(&stream)
+        declare_stream: Arc::new(
+            move |topic, count, durability, retention, replication_factor| {
+                let coordination = stream_coordination.clone();
+                Box::pin(async move {
+                    let config = coordination
+                        .declare_stream(&topic, count, durability, retention, replication_factor)
                         .await
                         .map_err(|error| error.to_string())?;
-                }
-                Ok(config.partition_count)
-            })
-        }),
+                    for partition in 0..config.partition_count {
+                        let stream = StreamIdentity::new(topic.clone(), Partition::new(partition));
+                        coordination
+                            .register_stream(&stream)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                    }
+                    Ok(config.partition_count)
+                })
+            },
+        ),
     }) as Arc<dyn DeclareCoordinator>
 }
 
@@ -878,9 +936,21 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         stream_ownership,
     );
 
-    let _ganglion_broker_tasks = ganglion_parts
-        .as_ref()
-        .map(|parts| spawn_ganglion_broker_tasks(parts, broker.clone(), &config, runtime));
+    // Tracks the lowest topology generation each connection has acked, so the
+    // repartition controller can fence a cutover on cluster-wide client adoption.
+    // Shared between the connection handlers (which record acks) and the heartbeat
+    // labels (which report this node's minimum).
+    let topology_adoption = Arc::new(TopologyAdoptionTracker::new());
+
+    let _ganglion_broker_tasks = ganglion_parts.as_ref().map(|parts| {
+        spawn_ganglion_broker_tasks(
+            parts,
+            broker.clone(),
+            &config,
+            runtime,
+            Some(topology_adoption.clone()),
+        )
+    });
 
     let connection_settings = ConnectionSettings::new(None)
         .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms)
@@ -974,9 +1044,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     // Per-broker exclusive-cohort view (this node's local cohort membership).
     let admin = admin.with_cohorts({
         let broker = broker.clone();
-        Arc::new(move || {
-            serde_json::to_value(broker.local_cohort_membership()).unwrap_or_default()
-        })
+        Arc::new(move || serde_json::to_value(broker.local_cohort_membership()).unwrap_or_default())
     });
 
     // The coordination listener handle must outlive the server futures.
@@ -991,8 +1059,9 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             admin
                 .with_coordination(parts.coordination.clone())
                 .with_consensus_topology(Arc::new(move || {
-                    let mut value = serde_json::to_value(topology_source.consensus_node().topology())
-                        .unwrap_or(serde_json::Value::Null);
+                    let mut value =
+                        serde_json::to_value(topology_source.consensus_node().topology())
+                            .unwrap_or(serde_json::Value::Null);
                     if let Some(object) = value.as_object_mut() {
                         object.insert(
                             "healthy".into(),
@@ -1044,6 +1113,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             connection_settings,
             topology_source,
             declare_coordinator,
+            Some(topology_adoption),
         )
         .await
         .map_err(FibrilServerError::BrokerListener)

@@ -12,9 +12,9 @@ use std::{collections::HashMap, time::Duration};
 
 use fibril_broker::coordination::{
     aggregate_cohort_membership, ClusterCohortController, CohortPlan, ConsumerGroupKey,
-    Coordination, CoordinationSnapshot, CoordinationStream, GlobalCohortMembership,
-    LocalCohortMembership, NodeInfo, PartitionAssignment, PartitionPlacementError,
-    DeterministicStreamPlacement, PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity,
+    Coordination, CoordinationSnapshot, CoordinationStream, DeterministicStreamPlacement,
+    GlobalCohortMembership, LocalCohortMembership, NodeInfo, PartitionAssignment,
+    PartitionPlacementError, PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity,
     ReplicationDurabilityPolicy, StreamAssignment, StreamIdentity, StreamPlacementInput,
     StreamPlacementPolicy,
 };
@@ -149,6 +149,13 @@ pub const REPARTITION_TRANSITION_PREFIX: &str = "fibril/repartition/";
 /// pre-cutover backlog it has drained during a repartition.
 pub const REPARTITION_DRAINED_LABEL: &str = "fibril/repartition_drained";
 
+/// Heartbeat label key under which a node reports the lowest topology generation
+/// its client connections have acked (the minimum across connections that have
+/// acked at least once). The repartition controller takes the cluster-wide
+/// minimum of these to fence a cutover until clients have adopted the new
+/// routing. Absent when the node has no acked client connections.
+pub const TOPOLOGY_ADOPTION_LABEL: &str = "fibril/topology_adoption";
+
 /// Replicated marker for an in-progress grow of a queue `(topic, group)`.
 /// Present only while the transition runs (the controller clears it once every
 /// old partition has drained). `version` scopes drain reports to this grow so a
@@ -158,6 +165,15 @@ pub struct RepartitionTransitionDoc {
     pub version: u64,
     pub n_old: u32,
     pub n_new: u32,
+    /// Topology generation at/after which the new partitioning became visible to
+    /// clients, captured just after the routing cutover (the version bump). The
+    /// controller fences the transition's finalize until clients have acked a
+    /// topology generation at least this high (cluster-wide adoption), or an
+    /// adoption timeout elapses. `None` on markers written before this field
+    /// existed, or before the cutover has stamped it - treated as "no adoption
+    /// gate" so an in-flight upgrade never stalls.
+    #[serde(default)]
+    pub adoption_generation: Option<u64>,
 }
 
 /// The old partition `r` a new partition `p` sources from under integer-multiple
@@ -222,6 +238,16 @@ pub fn aggregate_repartition_drained<'a>(
         }
     }
     drained
+}
+
+/// The cluster-wide minimum topology generation acked by clients, taken across
+/// every node's adoption label. Unparseable or absent labels contribute nothing.
+/// `None` when no node reports an adoption label (no client has acked anywhere).
+pub fn aggregate_topology_adoption<'a>(labels: impl IntoIterator<Item = &'a str>) -> Option<u64> {
+    labels
+        .into_iter()
+        .filter_map(|raw| raw.parse::<u64>().ok())
+        .min()
 }
 
 /// Replicated runtime-settings document: the cluster truth. `cluster_version`
@@ -1100,6 +1126,20 @@ impl GanglionCoordination {
         aggregate_repartition_drained(labels, topic, group, version)
     }
 
+    /// The cluster-wide minimum topology generation acked by client connections,
+    /// taken across every node's adoption label. `None` when no node reports a
+    /// label (no client anywhere has acked) - the controller reads that as "no
+    /// adoption yet" and leans on the adoption timeout. A node with acked clients
+    /// reports its own minimum; the cluster minimum is the lowest of those.
+    pub fn global_topology_adoption(&self) -> Option<u64> {
+        let snapshot = self.node.committed_snapshot();
+        let labels = snapshot
+            .nodes
+            .values()
+            .filter_map(|node| node.labels.get(TOPOLOGY_ADOPTION_LABEL).map(String::as_str));
+        aggregate_topology_adoption(labels)
+    }
+
     /// Every queue with an in-progress repartition transition, read from the
     /// committed attributes. Owners iterate these to hold/drain/lift their
     /// partitions. Cleared markers (empty value) decode to None and are skipped.
@@ -1540,7 +1580,8 @@ impl GanglionCoordination {
             });
         }
         let next_version = current.partitioning_version + 1;
-        // 1. Marker first, so new partitions are held the moment they appear.
+        // 1. Marker first, so new partitions are held the moment they appear. The
+        //    adoption generation is unknown until the cutover, so it starts None.
         self.begin_repartition_transition(
             topic,
             group,
@@ -1548,6 +1589,7 @@ impl GanglionCoordination {
                 version: next_version,
                 n_old,
                 n_new: new_count,
+                adoption_generation: None,
             },
         )
         .await
@@ -1559,8 +1601,34 @@ impl GanglionCoordination {
                 .await
                 .map_err(RepartitionQueueError::Coordination)?;
         }
-        // 3. Bump the version last: this is the routing cutover.
+        // 3. Bump the version last: this is the routing cutover. The marker's
+        //    adoption generation is stamped lazily by the controller once it sees
+        //    the transition (the generation only exists after this bump).
         self.repartition_queue(topic, group, new_count).await
+    }
+
+    /// Stamp a transition marker with the topology generation that now reflects
+    /// the new partitioning, so the controller can fence the finalize on clients
+    /// adopting it. Called by the controller the first time it sees a marker with
+    /// no adoption generation (the generation only exists after the cutover, so it
+    /// cannot be set at marker creation). Idempotent: re-stamping with the same
+    /// fields is a no-op overwrite.
+    pub async fn stamp_repartition_adoption_generation(
+        &self,
+        topic: &str,
+        group: Option<&str>,
+        doc: &RepartitionTransitionDoc,
+    ) -> Result<(), OpenraftAdapterError> {
+        let adoption_generation = self.node.committed_snapshot().generation;
+        self.begin_repartition_transition(
+            topic,
+            group,
+            &RepartitionTransitionDoc {
+                adoption_generation: Some(adoption_generation),
+                ..doc.clone()
+            },
+        )
+        .await
     }
 
     /// Operator entry point for a live shrink: `new_count` must be a factor of the
@@ -1598,7 +1666,8 @@ impl GanglionCoordination {
             });
         }
         let next_version = current.partitioning_version + 1;
-        // 1. Marker first: surviving partitions are held before the cutover.
+        // 1. Marker first: surviving partitions are held before the cutover. The
+        //    adoption generation is unknown until the cutover, so it starts None.
         self.begin_repartition_transition(
             topic,
             group,
@@ -1606,11 +1675,14 @@ impl GanglionCoordination {
                 version: next_version,
                 n_old,
                 n_new: new_count,
+                adoption_generation: None,
             },
         )
         .await
         .map_err(RepartitionQueueError::Coordination)?;
         // 2. Bump the version (routing cutover) via a CAS to the smaller count.
+        //    The marker's adoption generation is stamped lazily by the controller
+        //    once it sees the transition.
         let key = queue_partitioning_key(topic, group);
         for _ in 0..8 {
             let Some(current_raw) = self.cluster_attribute(&key) else {
@@ -1788,8 +1860,7 @@ impl GanglionCoordination {
     pub fn spawn_runtime_settings_sync(
         self: &std::sync::Arc<Self>,
         manager: std::sync::Arc<fibril_broker::runtime_settings::RuntimeSettingsManager>,
-    ) -> tokio::task::JoinHandle<()>
-    {
+    ) -> tokio::task::JoinHandle<()> {
         let provider = std::sync::Arc::clone(self);
         tokio::spawn(async move {
             let mut watch = provider.node.watch_committed();
@@ -1867,8 +1938,7 @@ impl GanglionCoordination {
     ) -> (
         tokio::task::JoinHandle<()>,
         std::sync::Arc<std::sync::RwLock<ControllerStatus>>,
-    )
-    {
+    ) {
         let provider = std::sync::Arc::clone(self);
         let status = std::sync::Arc::new(std::sync::RwLock::new(ControllerStatus::default()));
         let shared_status = status.clone();
@@ -1972,8 +2042,7 @@ impl GanglionCoordination {
         self: &std::sync::Arc<Self>,
         info: NodeInfo,
         interval: std::time::Duration,
-    ) -> tokio::task::JoinHandle<()>
-    {
+    ) -> tokio::task::JoinHandle<()> {
         self.spawn_heartbeat_with_labels(info, interval, || std::collections::BTreeMap::new())
     }
 
@@ -2111,7 +2180,11 @@ impl GanglionCoordination {
                 }
             })
             .collect();
-        streams.sort_by(|a, b| a.topic.cmp(&b.topic).then_with(|| a.partition.cmp(&b.partition)));
+        streams.sort_by(|a, b| {
+            a.topic
+                .cmp(&b.topic)
+                .then_with(|| a.partition.cmp(&b.partition))
+        });
 
         ClientTopology {
             generation,
@@ -2345,10 +2418,7 @@ impl fibril_broker::broker::StreamOwnership for GanglionCoordination {
             .is_some_and(|assignment| assignment.is_owned_by(&self.node_id))
     }
 
-    fn stream_open_config(
-        &self,
-        topic: &str,
-    ) -> Option<fibril_broker::broker::StreamOpenConfig> {
+    fn stream_open_config(&self, topic: &str) -> Option<fibril_broker::broker::StreamOpenConfig> {
         let config = self.stream_config(topic)?;
         let retention = if config.retention.max_age_ms.is_none()
             && config.retention.max_bytes.is_none()
@@ -2469,6 +2539,7 @@ mod cohort_transport_tests {
             version: 3,
             n_old: 4,
             n_new: 8,
+            adoption_generation: None,
         };
         let encoded = encode_repartition_transition(&doc);
         assert_eq!(decode_repartition_transition(&encoded), Some(doc));
@@ -2484,6 +2555,16 @@ mod cohort_transport_tests {
         assert_eq!(repartition_source_partition(4, 4), 0);
         // Staying partitions map to themselves.
         assert_eq!(repartition_source_partition(1, 4), 1);
+    }
+
+    #[test]
+    fn aggregate_topology_adoption_takes_cluster_minimum() {
+        // No labels -> no adoption signal.
+        assert_eq!(aggregate_topology_adoption(std::iter::empty()), None);
+        // The minimum across reporting nodes is the cluster adoption floor.
+        assert_eq!(aggregate_topology_adoption(["7", "5", "9"]), Some(5));
+        // Unparseable labels are ignored, not treated as zero.
+        assert_eq!(aggregate_topology_adoption(["", "8", "oops"]), Some(8));
     }
 
     #[test]
@@ -2671,7 +2752,11 @@ mod tests {
             .expect_err("stale generation must be rejected");
         assert!(matches!(err, OpenraftAdapterError::StaleGeneration));
 
-        coordination.consensus_node().shutdown().await.expect("shutdown");
+        coordination
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     /// Failover choreography: the raft leader IS the controller. The controller
@@ -2829,7 +2914,11 @@ mod tests {
         .expect("standby should observe the failover");
 
         for provider in &providers {
-            provider.consensus_node().shutdown().await.expect("shutdown");
+            provider
+                .consensus_node()
+                .shutdown()
+                .await
+                .expect("shutdown");
         }
     }
 
@@ -2908,7 +2997,11 @@ mod tests {
             "the ungrouped queue is unaffected by the grouped declare"
         );
 
-        provider.consensus_node().shutdown().await.expect("shutdown");
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2997,7 +3090,11 @@ mod tests {
             Some(grown_again)
         );
 
-        provider.consensus_node().shutdown().await.expect("shutdown");
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     /// A logical queue can be declared through any broker in the raft group,
@@ -3108,7 +3205,11 @@ mod tests {
         ));
 
         for provider in &providers {
-            provider.consensus_node().shutdown().await.expect("shutdown");
+            provider
+                .consensus_node()
+                .shutdown()
+                .await
+                .expect("shutdown");
         }
         for server in &servers {
             server.shutdown();
@@ -3201,7 +3302,11 @@ mod tests {
         provider.deregister_queue(&queue).await.expect("deregister");
         assert!(provider.registered_queues().is_empty());
 
-        provider.consensus_node().shutdown().await.expect("shutdown");
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3324,9 +3429,16 @@ mod tests {
         let open = provider
             .stream_open_config("events")
             .expect("declared open config");
-        assert_eq!(open.durability, fibril_broker::stream::StreamDurability::Durable);
+        assert_eq!(
+            open.durability,
+            fibril_broker::stream::StreamDurability::Durable
+        );
 
-        provider.consensus_node().shutdown().await.expect("shutdown");
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     /// Loop-level controller test: assigns catalogue queues for live brokers,
@@ -3466,7 +3578,11 @@ mod tests {
         .expect("controller moves ownership off the dead broker");
 
         controller.abort();
-        provider.consensus_node().shutdown().await.expect("shutdown");
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     /// A runtime-settings update published on one broker becomes
@@ -3569,7 +3685,11 @@ mod tests {
             .expect_err("invalid settings are rejected before cluster publish");
         assert!(matches!(err, OpenraftAdapterError::Config(_)));
 
-        provider.consensus_node().shutdown().await.expect("shutdown");
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3602,7 +3722,11 @@ mod tests {
                 if message.contains("decode runtime settings cluster document")
         ));
 
-        provider.consensus_node().shutdown().await.expect("shutdown");
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     /// Candidate selection: with multiple followers, failover prefers the
@@ -3711,7 +3835,11 @@ mod tests {
             "the displaced candidate stays in the replica set: {moved:?}"
         );
 
-        provider.consensus_node().shutdown().await.expect("shutdown");
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     /// Self-registration merges into the shared node table (no clobbering)
@@ -3758,7 +3886,11 @@ mod tests {
         // The watch/trait surface sees the registrations too.
         assert_eq!(provider.snapshot().nodes.len(), 2);
 
-        provider.consensus_node().shutdown().await.expect("shutdown");
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     /// The ganglion provider must satisfy the same contract as every other
@@ -3865,7 +3997,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        coordination.consensus_node().shutdown().await.expect("shutdown");
+        coordination
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3918,6 +4054,7 @@ mod tests {
                         version: 1,
                         n_old: 2,
                         n_new: 4,
+                        adoption_generation: None,
                     })
             {
                 break;
@@ -3943,7 +4080,11 @@ mod tests {
             Err(RepartitionQueueError::NotIntegerMultipleGrowth { .. })
         ));
 
-        coordination.consensus_node().shutdown().await.expect("shutdown");
+        coordination
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3984,6 +4125,7 @@ mod tests {
                         version: 1,
                         n_old: 4,
                         n_new: 2,
+                        adoption_generation: None,
                     })
             {
                 break;
@@ -4014,7 +4156,11 @@ mod tests {
             Err(RepartitionQueueError::NotIntegerFactorShrink { .. })
         ));
 
-        coordination.consensus_node().shutdown().await.expect("shutdown");
+        coordination
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4040,6 +4186,7 @@ mod tests {
             version: 1,
             n_old: 2,
             n_new: 4,
+            adoption_generation: None,
         };
         coordination
             .begin_repartition_transition("orders", None, &doc)
@@ -4084,7 +4231,11 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        coordination.consensus_node().shutdown().await.expect("shutdown");
+        coordination
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4174,7 +4325,11 @@ mod tests {
             .expect("publish b");
         await_generation(1, plan_b.assignment.clone()).await;
 
-        coordination.consensus_node().shutdown().await.expect("shutdown");
+        coordination
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4261,7 +4416,11 @@ mod tests {
         assert_eq!(loads.get("m1").copied(), Some(2));
         assert_eq!(loads.get("m2").copied(), Some(2));
 
-        coordination.consensus_node().shutdown().await.expect("shutdown");
+        coordination
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 
     /// The end-to-end cross-broker case the single-node label test cannot show:
@@ -4425,6 +4584,10 @@ mod tests {
             "rebalance should bump the plan generation"
         );
 
-        coordination.consensus_node().shutdown().await.expect("shutdown");
+        coordination
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
     }
 }

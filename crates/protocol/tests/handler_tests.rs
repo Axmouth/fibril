@@ -27,20 +27,20 @@ use fibril_broker::{
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
     Ack, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue, DeclareQueueOk, Deliver,
-    ERR_CONFLICT, ERR_INVALID, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1, Publish,
-    HEADER_SPECULATIVE, PublishDelayed, QueueDlqPolicy, StreamDurability, StreamRetention,
-    StreamStart, SubscribeOk, SubscribeStream,
-    QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
-    ReconcileSubscription, ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
-    ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
-    ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
-    ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
-    ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
-    ResumeIdentity, ResumeOutcome, Subscribe, TopologyOk, TopologyRequest, TopologyUpdateAck,
+    ERR_CONFLICT, ERR_INVALID, ErrorMsg, HEADER_SPECULATIVE, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
+    Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient,
+    ReconcilePolicy, ReconcileResult, ReconcileSubscription, ReplicationApply, ReplicationApplyOk,
+    ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
+    ReplicationCheckpointInstallOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
+    ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
+    ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
+    ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
+    StreamStart, Subscribe, SubscribeOk, SubscribeStream, TopologyOk, TopologyRequest,
+    TopologyUpdateAck,
     frame::{Frame, ProtoCodec},
     handler::{
-        ClientTopologySource, ConnectionSettings, ProtocolConnectionError, DeclareCoordinator,
-        handle_connection,
+        ClientTopologySource, ConnectionSettings, DeclareCoordinator, ProtocolConnectionError,
+        TopologyAdoptionTracker, handle_connection,
     },
     helper::{try_decode, try_encode},
     replication::{
@@ -157,6 +157,7 @@ async fn open_protocol_connection_for_broker(
         settings,
         None,
         None,
+        None,
     ));
 
     (Framed::new(client, ProtoCodec), server_task, dir, broker)
@@ -190,6 +191,7 @@ async fn start_protocol_listener_for_broker(
             conn_id,
             auth,
             settings,
+            None,
             None,
             None,
         )
@@ -1229,9 +1231,13 @@ async fn replication_apply_writes_follower_log_records() {
         open_protocol_connection_for_broker(ConnectionSettings::new(Some(60)), broker, dir).await;
     handshake(&mut framed).await;
 
-    let event_payload = StromaEvent::Enqueue { off: 0, retries: 0, expire_at: None }
-        .encode()
-        .unwrap();
+    let event_payload = StromaEvent::Enqueue {
+        off: 0,
+        retries: 0,
+        expire_at: None,
+    }
+    .encode()
+    .unwrap();
     framed
         .send(
             try_encode(
@@ -2972,6 +2978,7 @@ async fn broker_pushes_topology_update_on_generation_change() {
             ConnectionSettings::new(Some(60)),
             Some(source as Arc<dyn ClientTopologySource>),
             None,
+            None,
         )
         .await
     });
@@ -2997,7 +3004,14 @@ async fn broker_pushes_topology_update_on_generation_change() {
 
     // The client acks; the connection stays healthy and still serves requests.
     framed
-        .send(try_encode(Op::TopologyUpdateAck, 7, &TopologyUpdateAck { generation: 2 }).unwrap())
+        .send(
+            try_encode(
+                Op::TopologyUpdateAck,
+                7,
+                &TopologyUpdateAck { generation: 2 },
+            )
+            .unwrap(),
+        )
         .await
         .unwrap();
     framed
@@ -3066,6 +3080,7 @@ async fn handler_answers_topology_query_from_source() {
             None::<StaticAuthHandler>,
             ConnectionSettings::new(Some(60)),
             Some(source as Arc<dyn ClientTopologySource>),
+            None,
             None,
         )
         .await
@@ -3151,6 +3166,7 @@ async fn unowned_publish_redirects_to_current_owner() {
             ConnectionSettings::new(Some(60)),
             Some(source as Arc<dyn ClientTopologySource>),
             None,
+            None,
         )
         .await
     });
@@ -3230,6 +3246,7 @@ async fn stale_partitioning_version_publish_is_fenced() {
             None::<StaticAuthHandler>,
             ConnectionSettings::new(Some(60)),
             Some(source as Arc<dyn ClientTopologySource>),
+            None,
             None,
         )
         .await
@@ -3392,6 +3409,7 @@ async fn start_multi_connection_listener(
                     conn_id,
                     None::<StaticAuthHandler>,
                     settings,
+                    None,
                     None,
                     None,
                 )
@@ -4085,6 +4103,7 @@ async fn declare_uses_coordinator_effective_count() {
             ConnectionSettings::new(Some(60)),
             None,
             Some(coordinator as Arc<dyn DeclareCoordinator>),
+            None,
         )
         .await
     });
@@ -5374,11 +5393,7 @@ async fn plexus_durable_cursor_resumes_after_ack() {
 
 /// Spawn a broker behind an accept-loop listener so a test can open many client
 /// connections to it (real traffic across the wire).
-async fn start_fanout_broker() -> (
-    std::net::SocketAddr,
-    Arc<Broker<StromaEngine>>,
-    TempDir,
-) {
+async fn start_fanout_broker() -> (std::net::SocketAddr, Arc<Broker<StromaEngine>>, TempDir) {
     let (broker, dir) = open_test_broker().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -5401,6 +5416,7 @@ async fn start_fanout_broker() -> (
                     conn_id,
                     None::<StaticAuthHandler>,
                     ConnectionSettings::new(Some(60)),
+                    None,
                     None,
                     None,
                 )
@@ -5493,7 +5509,10 @@ async fn declaring_a_queue_then_plexus_same_topic_is_rejected() {
         )
         .await
         .unwrap();
-    assert_eq!(recv_frame(&mut framed).await.opcode, Op::DeclareQueueOk as u16);
+    assert_eq!(
+        recv_frame(&mut framed).await.opcode,
+        Op::DeclareQueueOk as u16
+    );
 
     framed
         .send(
@@ -5580,7 +5599,10 @@ async fn multi_partition_queue_blocks_plexus_no_mixed_partitions() {
         )
         .await
         .unwrap();
-    assert_eq!(recv_frame(&mut framed).await.opcode, Op::DeclareQueueOk as u16);
+    assert_eq!(
+        recv_frame(&mut framed).await.opcode,
+        Op::DeclareQueueOk as u16
+    );
 
     // Declaring it as a plexus must fail (partition 0 collides before any stream
     // partition is materialized).
@@ -5625,7 +5647,10 @@ async fn multi_partition_queue_blocks_plexus_no_mixed_partitions() {
             )
             .await
             .unwrap();
-        assert_eq!(recv_frame(&mut framed).await.opcode, Op::SubscribeErr as u16);
+        assert_eq!(
+            recv_frame(&mut framed).await.opcode,
+            Op::SubscribeErr as u16
+        );
     }
 
     drop(framed);
@@ -5664,8 +5689,16 @@ async fn plexus_ephemeral_delivers_and_confirms() {
     handshake(&mut framed).await;
     framed_declare_plexus_durability(&mut framed, 2, "plexus.eph", StreamDurability::Ephemeral)
         .await;
-    framed_subscribe_stream(&mut framed, 3, "plexus.eph", 0, None, StreamStart::Latest, false)
-        .await;
+    framed_subscribe_stream(
+        &mut framed,
+        3,
+        "plexus.eph",
+        0,
+        None,
+        StreamStart::Latest,
+        false,
+    )
+    .await;
 
     send_stream_publish(&mut framed, 4, "plexus.eph", 0, b"x", true).await;
     // Both the confirm and the delivery arrive; the record is not marked speculative.
@@ -5694,8 +5727,16 @@ async fn plexus_speculative_marks_delivery_and_confirms() {
     handshake(&mut framed).await;
     framed_declare_plexus_durability(&mut framed, 2, "plexus.spec", StreamDurability::Speculative)
         .await;
-    framed_subscribe_stream(&mut framed, 3, "plexus.spec", 0, None, StreamStart::Latest, false)
-        .await;
+    framed_subscribe_stream(
+        &mut framed,
+        3,
+        "plexus.spec",
+        0,
+        None,
+        StreamStart::Latest,
+        false,
+    )
+    .await;
 
     send_stream_publish(&mut framed, 4, "plexus.spec", 0, b"y", true).await;
     let mut got_ok = false;
@@ -5712,8 +5753,41 @@ async fn plexus_speculative_marks_delivery_and_confirms() {
     let d = delivered.expect("speculative record should be delivered");
     assert_eq!(d.payload, b"y".to_vec());
     // The broker marks a speculative delivery with the server-owned header.
-    assert_eq!(d.headers.get(HEADER_SPECULATIVE).map(String::as_str), Some("1"));
+    assert_eq!(
+        d.headers.get(HEADER_SPECULATIVE).map(String::as_str),
+        Some("1")
+    );
 
     drop(framed);
     server_task.await.unwrap().unwrap();
+}
+
+#[test]
+fn topology_adoption_tracker_reports_minimum_of_acked_connections() {
+    let tracker = TopologyAdoptionTracker::new();
+    let a = uuid::Uuid::new_v4();
+    let b = uuid::Uuid::new_v4();
+
+    // No acks yet -> no adoption signal.
+    assert_eq!(tracker.min_acked_generation(), None);
+
+    // The minimum is taken across connections that have acked.
+    tracker.record(a, 7);
+    assert_eq!(tracker.min_acked_generation(), Some(7));
+    tracker.record(b, 5);
+    assert_eq!(tracker.min_acked_generation(), Some(5));
+
+    // Acks are monotonic per connection: a stale ack never lowers a connection.
+    tracker.record(b, 3);
+    assert_eq!(tracker.min_acked_generation(), Some(5));
+
+    // The laggard catching up raises the cluster minimum.
+    tracker.record(b, 9);
+    assert_eq!(tracker.min_acked_generation(), Some(7));
+
+    // A gone connection no longer holds the minimum down.
+    tracker.remove(&a);
+    assert_eq!(tracker.min_acked_generation(), Some(9));
+    tracker.remove(&b);
+    assert_eq!(tracker.min_acked_generation(), None);
 }

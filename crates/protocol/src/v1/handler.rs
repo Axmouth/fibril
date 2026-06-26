@@ -119,12 +119,62 @@ pub trait ClientTopologySource: Send + Sync {
     /// Current owner endpoint and partitioning version for one stream partition,
     /// if known. Used to redirect a stream publish/subscribe to its owner. The
     /// default returns `None` (no stream placement view).
-    fn stream_owner_endpoint(
-        &self,
-        _topic: &str,
-        _partition: Partition,
-    ) -> Option<(String, u64)> {
+    fn stream_owner_endpoint(&self, _topic: &str, _partition: Partition) -> Option<(String, u64)> {
         None
+    }
+}
+
+/// Tracks, per live client connection, the highest topology generation that
+/// client has acked (via `Op::TopologyUpdateAck`). The broker reports the
+/// cluster-wide minimum as a heartbeat label so the repartition controller can
+/// fence a cutover until clients have adopted the new routing.
+///
+/// Only connections that have acked at least once count: a silent or pre-push
+/// client never appears here, so it never drags the minimum down (the publish
+/// version-fence plus an adoption timeout cover those). A connection's entry is
+/// removed when it closes. Acks are monotonic per connection, and arrive at most
+/// once per generation change per connection, so a `Mutex` on this cold path is
+/// fine (it is never touched on the per-message hot path).
+#[derive(Debug, Default)]
+pub struct TopologyAdoptionTracker {
+    acked: std::sync::Mutex<std::collections::HashMap<Uuid, u64>>,
+}
+
+impl TopologyAdoptionTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record that `conn` has applied topology up to `generation`. Monotonic per
+    /// connection: a stale ack never lowers a connection's recorded generation.
+    pub fn record(&self, conn: Uuid, generation: u64) {
+        let mut acked = self.acked.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = acked.entry(conn).or_insert(0);
+        if generation > *entry {
+            *entry = generation;
+        }
+    }
+
+    /// Drop a connection's adoption state when it closes, so a gone client never
+    /// holds the cluster-wide minimum down.
+    pub fn remove(&self, conn: &Uuid) {
+        self.acked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(conn);
+    }
+
+    /// The lowest generation acked across connections that have acked at least
+    /// once, or `None` when no connection has acked yet. `None` means "no
+    /// adoption signal" - the controller treats it as not-yet-adopted and leans
+    /// on the timeout.
+    pub fn min_acked_generation(&self) -> Option<u64> {
+        self.acked
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .copied()
+            .min()
     }
 }
 
@@ -1253,7 +1303,8 @@ async fn install_stream_subscription(
     let fanout_sub_id = subscription.id();
 
     let sub_id = req_id_gen.next_id();
-    let (sink_tx, mut sink_rx) = mpsc::channel::<Arc<StreamRecord>>(STREAM_DELIVERY_CHANNEL_CAPACITY);
+    let (sink_tx, mut sink_rx) =
+        mpsc::channel::<Arc<StreamRecord>>(STREAM_DELIVERY_CHANNEL_CAPACITY);
 
     // Driver: backfill (durable log then ring) and then live records into the sink.
     let driver = tokio::spawn(subscription.run(sink_tx));
@@ -1393,11 +1444,9 @@ async fn handle_stream_publish(
                                 .await
                             {
                                 Ok(()) => {
-                                    if let Ok(frame) = try_encode(
-                                        Op::PublishOk,
-                                        request_id,
-                                        &PublishOk { offset },
-                                    ) {
+                                    if let Ok(frame) =
+                                        try_encode(Op::PublishOk, request_id, &PublishOk { offset })
+                                    {
                                         let _ = tx.send(frame).await;
                                     }
                                 }
@@ -1426,7 +1475,8 @@ async fn handle_stream_publish(
             }
         }
         Err(err) => {
-            send_error_response(tx, request_id, 500, format!("stream publish failed: {err}")).await?;
+            send_error_response(tx, request_id, 500, format!("stream publish failed: {err}"))
+                .await?;
         }
     }
     Ok(())
@@ -1858,6 +1908,7 @@ pub async fn run_server(
     connection_settings: ConnectionSettings,
     topology_source: Option<Arc<dyn ClientTopologySource>>,
     declare_coordinator: Option<Arc<dyn DeclareCoordinator>>,
+    topology_adoption: Option<Arc<TopologyAdoptionTracker>>,
 ) -> Result<(), ProtocolServerError> {
     let listener = TcpListener::bind(addr)
         .await
@@ -1882,6 +1933,7 @@ pub async fn run_server(
         let connection_settings = connection_settings.clone();
         let topology_source = topology_source.clone();
         let declare_coordinator = declare_coordinator.clone();
+        let topology_adoption = topology_adoption.clone();
         tokio::spawn(async move {
             tracing::info!("Connection {conn_id} opening..");
             if let Err(e) = handle_connection(
@@ -1894,6 +1946,7 @@ pub async fn run_server(
                 connection_settings,
                 topology_source,
                 declare_coordinator,
+                topology_adoption.clone(),
             )
             .await
             {
@@ -1901,6 +1954,11 @@ pub async fn run_server(
             }
 
             connection_stats.remove_connection(&conn_id);
+            // Drop this connection's topology-adoption state so a gone client
+            // never holds the cutover-fencing minimum down.
+            if let Some(adoption) = topology_adoption.as_ref() {
+                adoption.remove(&conn_id);
+            }
 
             tracing::info!("Connection {conn_id} closed..");
         });
@@ -1931,6 +1989,7 @@ pub async fn handle_connection(
     connection_settings: ConnectionSettings,
     topology_source: Option<Arc<dyn ClientTopologySource>>,
     declare_coordinator: Option<Arc<dyn DeclareCoordinator>>,
+    topology_adoption: Option<Arc<TopologyAdoptionTracker>>,
 ) -> Result<(), ProtocolConnectionError> {
     let heartbeat_interval = connection_settings
         .heartbeat_interval
@@ -2323,17 +2382,13 @@ pub async fn handle_connection(
                 // Push the topology only when the coordination generation moved
                 // and the connection is allowed to receive (authenticated when
                 // auth is required). The client refreshes its cache and acks.
-                let authed =
-                    auth_handler.is_none() || logical.state.lock().await.authenticated;
+                let authed = auth_handler.is_none() || logical.state.lock().await.authenticated;
                 if authed {
                     if let Some(source) = topology_source.as_ref() {
                         let generation = source.generation();
                         if last_pushed_topology_gen != Some(generation) {
                             let topo = source.topology();
-                            match wire::encode_topology_update(
-                                req_id_gen_clone.next_id(),
-                                &topo,
-                            ) {
+                            match wire::encode_topology_update(req_id_gen_clone.next_id(), &topo) {
                                 Ok(f) => {
                                     if frame_tx_high_prio.send(f).await.is_ok() {
                                         last_pushed_topology_gen = Some(generation);
@@ -2613,8 +2668,12 @@ pub async fn handle_connection(
 
             // -------- REPLICATION STREAM (credit-based) --------------------
             x if x == Op::ReplicationStreamStart as u16 => {
-                let start: ReplicationStreamStart =
-                    decode_wire_or_400!(frame, frame_tx_high_prio, metrics, wire::decode_replication_stream_start);
+                let start: ReplicationStreamStart = decode_wire_or_400!(
+                    frame,
+                    frame_tx_high_prio,
+                    metrics,
+                    wire::decode_replication_stream_start
+                );
                 let stream_id = frame.request_id;
                 let (control_tx, control_rx) = mpsc::channel(64);
                 // Replace any existing stream on this id (drops the old sender,
@@ -2846,7 +2905,9 @@ pub async fn handle_connection(
                 // attach. Reject it at the routing boundary (use SubscribeStream)
                 // rather than installing a consumer that would never be fed.
                 if broker.is_stream(&sub.topic, sub.partition.id())
-                    || broker.engine().durable_is_stream(&sub.topic, sub.partition.id())
+                    || broker
+                        .engine()
+                        .durable_is_stream(&sub.topic, sub.partition.id())
                 {
                     frame_tx_high_prio
                         .send(try_encode(
@@ -2961,12 +3022,15 @@ pub async fn handle_connection(
 
             // -------- TOPOLOGY UPDATE ACK -----------------------------------
             x if x == Op::TopologyUpdateAck as u16 => {
-                // The client applied a pushed topology at this generation. Today
-                // this just confirms the round-trip; wiring it to fence a
-                // repartition cutover (wait for client acks before retiring old
-                // partitions) is the next brick.
+                // The client applied a pushed topology at this generation. Record
+                // it per connection so the broker can report the cluster-wide
+                // minimum and the repartition controller can fence a cutover until
+                // clients have adopted the new routing.
                 match wire::decode_topology_update_ack(&frame) {
                     Ok(ack) => {
+                        if let Some(adoption) = topology_adoption.as_ref() {
+                            adoption.record(conn_id, ack.generation);
+                        }
                         tracing::trace!(
                             generation = ack.generation,
                             "client acked topology update"
@@ -3109,16 +3173,15 @@ pub async fn handle_connection(
                     requested
                 };
 
-                let retention = (declare.retention != StreamRetention::default()).then(|| {
-                    RetentionConfig {
+                let retention =
+                    (declare.retention != StreamRetention::default()).then(|| RetentionConfig {
                         max_age_ms: declare.retention.max_age_ms,
                         max_bytes: declare.retention.max_bytes,
                         max_records: declare.retention.max_records,
-                    }
-                });
+                    });
                 // Map the wire durability tier to the broker enum (same ordinals).
-                let durability = BrokerStreamDurability::from_u8(declare.durability.as_u8())
-                    .unwrap_or_default();
+                let durability =
+                    BrokerStreamDurability::from_u8(declare.durability.as_u8()).unwrap_or_default();
 
                 // Materialize each partition's stream channel (idempotent). The
                 // durability tier is recorded for observability; the broker
@@ -3127,7 +3190,12 @@ pub async fn handle_connection(
                 let mut failure: Option<(u16, String)> = None;
                 for partition in 0..partition_count {
                     match broker
-                        .get_or_open_stream(&declare.topic, partition, durability, retention.clone())
+                        .get_or_open_stream(
+                            &declare.topic,
+                            partition,
+                            durability,
+                            retention.clone(),
+                        )
                         .await
                     {
                         Ok(_) => {}
@@ -3199,14 +3267,8 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                match install_stream_subscription(
-                    &broker,
-                    &logical,
-                    &req_id_gen,
-                    &metrics,
-                    sub,
-                )
-                .await
+                match install_stream_subscription(&broker, &logical, &req_id_gen, &metrics, sub)
+                    .await
                 {
                     Ok(sub_ok) => {
                         frame_tx_high_prio
@@ -3391,8 +3453,9 @@ pub async fn handle_connection(
                         }
                         continue;
                     }
-                    if let Some(channel) =
-                        broker.route_stream(&pubreq.topic, pubreq.partition.id()).await
+                    if let Some(channel) = broker
+                        .route_stream(&pubreq.topic, pubreq.partition.id())
+                        .await
                     {
                         handle_stream_publish(
                             &broker,

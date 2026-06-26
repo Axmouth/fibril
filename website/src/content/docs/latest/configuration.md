@@ -124,6 +124,7 @@ These fields are read on process start.
 | `coordination.ganglion.liveness_ttl_ms` | `FIBRIL_COORDINATION_LIVENESS_TTL_MS` | none | `9000` |
 | `coordination.ganglion.target_followers` | none | none | `1` |
 | `coordination.ganglion.stream_replication_factor` | none | none | `1` |
+| `coordination.ganglion.repartition_adoption_timeout_ms` | none | none | `30000` |
 | `coordination.ganglion.assignment_durability` | `FIBRIL_COORDINATION_ASSIGNMENT_DURABILITY` | none | `local_durable` |
 | `recovery.on_mismatch` | `FIBRIL_RECOVERY_ON_MISMATCH` | none | `quarantine` |
 
@@ -162,6 +163,14 @@ controls how long a broker can go without a fresh heartbeat before the cluster
 considers it unavailable. The TTL must be at least twice the heartbeat interval.
 For heavy replication benchmarks, a longer TTL can avoid false failover while
 the node is under artificial load.
+
+`coordination.ganglion.repartition_adoption_timeout_ms` bounds how long a live
+repartition's finalize (retiring shrunk-away partitions and clearing the
+transition marker) waits for clients to adopt the new routing once the backlog
+has drained. Adoption is observed from client topology acks. The timeout keeps a
+silent or stuck client from stalling a cutover forever; publish version-fencing
+is the correctness backstop regardless. See
+[live routing and cutover](/latest/development/live-routing-and-cutover/).
 
 ## Runtime Seeds
 

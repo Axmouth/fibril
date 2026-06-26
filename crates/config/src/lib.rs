@@ -818,6 +818,13 @@ pub struct GanglionCoordinationSection {
     /// Controller: heartbeats older than this mark a broker dead. Must exceed
     /// worst-case election + retry time. Default 3x heartbeat interval.
     pub liveness_ttl_ms: u64,
+    /// Controller: how long a repartition's finalize (retiring shrunk-away
+    /// partitions and clearing the marker) waits for clients to adopt the new
+    /// routing once the backlog has drained. Adoption is observed from client
+    /// topology acks; this timeout bounds the wait so a silent or stuck client
+    /// cannot stall a cutover forever (publish version-fencing remains the
+    /// correctness backstop). Default 30s.
+    pub repartition_adoption_timeout_ms: u64,
 }
 
 impl Default for GanglionCoordinationSection {
@@ -837,6 +844,7 @@ impl Default for GanglionCoordinationSection {
             assignment_durability: GanglionAssignmentDurabilitySection::default(),
             controller_tick_ms: 2000,
             liveness_ttl_ms: 9000,
+            repartition_adoption_timeout_ms: 30_000,
         }
     }
 }
@@ -1678,10 +1686,7 @@ mod tests {
                 nodes: Some(2),
             }
         );
-        assert_eq!(
-            config.recovery.on_mismatch,
-            RecoveryMismatchMode::Refuse
-        );
+        assert_eq!(config.recovery.on_mismatch, RecoveryMismatchMode::Refuse);
     }
 
     #[test]

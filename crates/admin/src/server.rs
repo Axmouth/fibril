@@ -816,6 +816,7 @@ mod tests {
             ConnectionSettings::new(Some(60)),
             None,
             None,
+            None,
         ));
 
         (Framed::new(client, ProtoCodec), server_task)
@@ -1213,7 +1214,12 @@ mod tests {
         let app = AdminServer::router(server);
 
         let response = app
-            .oneshot(Request::builder().uri("/readyz").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
 
