@@ -8,7 +8,8 @@
 
 use std::collections::VecDeque;
 use std::io::stdout;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, ValueEnum};
@@ -86,6 +87,93 @@ enum KeyMode {
     Keyed,
     /// Spread round-robin across partitions, no key.
     RoundRobin,
+}
+
+/// Live, lock-free demo controls shared between the UI (which mutates them on key
+/// presses) and the client drivers (which read them each publish). Interactive
+/// keys steer the running demo without restarting anything.
+struct Control {
+    /// Microseconds between publishes, per client.
+    period_us: AtomicU64,
+    confirm: AtomicBool,
+    /// true = keyed routing, false = round-robin.
+    keyed: AtomicBool,
+    /// Per-client publish pause.
+    paused: Vec<AtomicBool>,
+}
+
+fn rate_to_period_us(rate: f64) -> u64 {
+    if rate <= 0.0 {
+        200_000
+    } else {
+        (1_000_000.0 / rate).clamp(1_000.0, 2_000_000.0) as u64
+    }
+}
+
+impl Control {
+    fn new(rate: f64, confirm: bool, keyed: bool, clients: usize) -> Self {
+        Self {
+            period_us: AtomicU64::new(rate_to_period_us(rate)),
+            confirm: AtomicBool::new(confirm),
+            keyed: AtomicBool::new(keyed),
+            paused: (0..clients.max(1)).map(|_| AtomicBool::new(false)).collect(),
+        }
+    }
+
+    fn period(&self) -> Duration {
+        Duration::from_micros(self.period_us.load(Ordering::Relaxed).max(1))
+    }
+
+    fn rate_per_sec(&self) -> f64 {
+        1_000_000.0 / self.period_us.load(Ordering::Relaxed).max(1) as f64
+    }
+
+    fn confirm(&self) -> bool {
+        self.confirm.load(Ordering::Relaxed)
+    }
+
+    fn keyed(&self) -> bool {
+        self.keyed.load(Ordering::Relaxed)
+    }
+
+    fn is_paused(&self, client: usize) -> bool {
+        self.paused
+            .get(client)
+            .is_some_and(|p| p.load(Ordering::Relaxed))
+    }
+
+    fn toggle_pause(&self, client: usize) {
+        if let Some(p) = self.paused.get(client) {
+            p.fetch_xor(true, Ordering::Relaxed);
+        }
+    }
+
+    fn toggle_confirm(&self) {
+        self.confirm.fetch_xor(true, Ordering::Relaxed);
+    }
+
+    fn toggle_keyed(&self) {
+        self.keyed.fetch_xor(true, Ordering::Relaxed);
+    }
+
+    fn paused_count(&self) -> usize {
+        self.paused
+            .iter()
+            .filter(|p| p.load(Ordering::Relaxed))
+            .count()
+    }
+
+    /// Scale the publish rate. `factor > 1` speeds up (shorter period).
+    fn scale_rate(&self, factor: f64) {
+        let current = self.period_us.load(Ordering::Relaxed).max(1) as f64;
+        let next = (current / factor).clamp(1_000.0, 2_000_000.0) as u64;
+        self.period_us.store(next, Ordering::Relaxed);
+    }
+}
+
+/// Best-effort visual emit: never block the protocol on the UI draining events.
+fn emit(vis: &mpsc::Sender<VisualEvent>, ev: VisualEvent) {
+    let _ = vis.try_send(ev);
 }
 
 /// Operation class of a frame, for coloring and metrics.
@@ -201,6 +289,9 @@ struct App {
     addr: String,
     balls: Vec<Ball>,
     metrics: Metrics,
+    /// Client index the interactive keys act on.
+    focus: usize,
+    control: Arc<Control>,
 }
 
 static REQ: AtomicU64 = AtomicU64::new(1);
@@ -288,7 +379,21 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let layout = compute_layout(area, app.clients, app.partitions);
 
     for (i, rect) in layout.client_boxes.iter().enumerate() {
-        draw_box(f, *rect, &format!("client {i}"), Color::Gray);
+        let focused = i == app.focus;
+        let paused = app.control.is_paused(i);
+        let color = if focused {
+            Color::White
+        } else if paused {
+            Color::DarkGray
+        } else {
+            Color::Gray
+        };
+        let label = format!(
+            "client {i}{}{}",
+            if focused { " *" } else { "" },
+            if paused { " ||" } else { "" }
+        );
+        draw_box(f, *rect, &label, color);
     }
     for (p, rect) in layout.lane_boxes.iter().enumerate() {
         draw_box(f, *rect, &format!("part {p}"), Color::Yellow);
@@ -343,8 +448,21 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
             p50,
             p99
         )),
+        Line::from(format!(
+            "rate {:.0}/s   confirm {}   routing {}   focus client {}   paused {}/{}",
+            app.control.rate_per_sec(),
+            if app.control.confirm() { "on" } else { "off" },
+            if app.control.keyed() { "keyed" } else { "round-robin" },
+            app.focus,
+            app.control.paused_count(),
+            app.clients,
+        )),
         Line::from(Span::styled(
-            "publish=blue  confirm=cyan  deliver=green  setup/ping=gray  error=red    (q / Esc to quit)",
+            "publish=blue confirm=cyan deliver=green setup/ping=gray error=red",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "Tab focus  space pause  [ ] rate  c confirm  g routing  q quit",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -420,9 +538,18 @@ async fn run_ui(app: &mut App, rx: &mut mpsc::Receiver<VisualEvent>) -> anyhow::
     let result = loop {
         if event::poll(Duration::from_millis(1))?
             && let Event::Key(key) = event::read()?
-            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
         {
-            break Ok(());
+            match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
+                KeyCode::Tab => app.focus = (app.focus + 1) % app.clients.max(1),
+                KeyCode::Char(' ') => app.control.toggle_pause(app.focus),
+                // `]` speeds up (shorter period), `[` slows down.
+                KeyCode::Char(']') => app.control.scale_rate(1.3),
+                KeyCode::Char('[') => app.control.scale_rate(1.0 / 1.3),
+                KeyCode::Char('c') => app.control.toggle_confirm(),
+                KeyCode::Char('g') => app.control.toggle_keyed(),
+                _ => {}
+            }
         }
 
         let mut drained = 0;
@@ -552,22 +679,30 @@ async fn declare_topic(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::
         },
     )?)
     .await?;
-    let _ = vis
-        .send(VisualEvent {
+    emit(
+        vis,
+        VisualEvent {
             client: 0,
             op: VizOp::Declare,
             to_broker: true,
             partition: None,
             latency_ms: None,
-        })
-        .await;
+        },
+    );
     expect(&mut conn, Op::DeclareQueueOk).await?;
     Ok(())
 }
 
-/// One client: handshake, subscribe to its assigned partitions, then publish at
-/// the configured rate while consuming. Emits a VisualEvent per frame in/out.
-async fn run_client(args: Args, client: usize, vis: mpsc::Sender<VisualEvent>) -> anyhow::Result<()> {
+/// One client: handshake, subscribe to its assigned partitions, then publish
+/// while consuming. Publish rate, confirm mode, routing, and pause are read live
+/// from `control` each cycle, so interactive keys steer it without a restart.
+/// Emits a VisualEvent per frame in and out (best-effort, never blocking).
+async fn run_client(
+    args: Args,
+    client: usize,
+    control: Arc<Control>,
+    vis: mpsc::Sender<VisualEvent>,
+) -> anyhow::Result<()> {
     let auth = parse_auth(&args.auth);
     let mut conn = connect(&args.addr).await?;
     handshake(&mut conn, client, &auth, &vis).await?;
@@ -592,64 +727,66 @@ async fn run_client(args: Args, client: usize, vis: mpsc::Sender<VisualEvent>) -
             },
         )?)
         .await?;
-        let _ = vis
-            .send(VisualEvent {
+        emit(
+            &vis,
+            VisualEvent {
                 client,
                 op: VizOp::Subscribe,
                 to_broker: true,
                 partition: Some(p),
                 latency_ms: None,
-            })
-            .await;
+            },
+        );
         expect(&mut conn, Op::SubscribeOk).await?;
     }
 
-    // Single task: publish on a steady ticker and read frames in one select, so
-    // the same connection answers broker pings inline (no split, no lost pongs).
-    let period = if args.rate > 0.0 {
-        Duration::from_secs_f64(1.0 / args.rate)
-    } else {
-        Duration::from_millis(200)
-    };
+    // One select loop: publish on a manually advanced deadline (so the rate can
+    // change live and a received frame does not reset the cadence) and read
+    // frames inline, so the same connection answers broker pings.
     let payload = vec![b'x'; args.payload_size];
-    let key_space = (args.partitions as u64 * 3).max(1);
-    let mut ticker = tokio::time::interval(period);
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let parts = args.partitions.max(1) as u64;
+    let key_space = (parts * 3).max(1);
     let mut seq: u64 = 0;
+    let mut next_pub = Instant::now();
 
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
+            _ = tokio::time::sleep_until(next_pub.into()) => {
+                next_pub = Instant::now() + control.period();
+                if control.is_paused(client) {
+                    continue;
+                }
                 let key = format!("key-{}", seq % key_space);
-                let partition = match args.key_mode {
-                    KeyMode::Keyed => (fnv1a(key.as_bytes()) % args.partitions.max(1) as u64) as u32,
-                    KeyMode::RoundRobin => (seq % args.partitions.max(1) as u64) as u32,
+                let partition = if control.keyed() {
+                    (fnv1a(key.as_bytes()) % parts) as u32
+                } else {
+                    (seq % parts) as u32
                 };
                 seq += 1;
                 let msg = Publish {
                     topic: args.topic.clone(),
                     group: args.group.clone(),
                     partition: Partition::new(partition),
-                    require_confirm: args.confirm,
+                    require_confirm: control.confirm(),
                     content_type: None,
                     headers: std::collections::HashMap::new(),
                     published: unix_millis(),
                     payload: payload.clone(),
-                    partition_key: matches!(args.key_mode, KeyMode::Keyed)
-                        .then(|| key.into_bytes()),
+                    partition_key: control.keyed().then(|| key.into_bytes()),
                     partitioning_version: 0,
                     ttl_ms: None,
                 };
                 conn.send(try_encode(Op::Publish, next_req_id(), &msg)?).await?;
-                let _ = vis
-                    .send(VisualEvent {
+                emit(
+                    &vis,
+                    VisualEvent {
                         client,
                         op: VizOp::Publish,
                         to_broker: true,
                         partition: Some(partition),
                         latency_ms: None,
-                    })
-                    .await;
+                    },
+                );
             }
             frame = conn.next() => {
                 let Some(frame) = frame else { break };
@@ -658,60 +795,66 @@ async fn run_client(args: Args, client: usize, vis: mpsc::Sender<VisualEvent>) -
                     x if x == Op::Deliver as u16 => {
                         let d: Deliver = try_decode(&frame)?;
                         let latency = unix_millis().saturating_sub(d.published);
-                        let _ = vis
-                            .send(VisualEvent {
+                        emit(
+                            &vis,
+                            VisualEvent {
                                 client,
                                 op: VizOp::Deliver,
                                 to_broker: false,
                                 partition: Some(d.partition.id()),
                                 latency_ms: Some(latency),
-                            })
-                            .await;
+                            },
+                        );
                     }
                     x if x == Op::PublishOk as u16 => {
-                        let _ = vis
-                            .send(VisualEvent {
+                        emit(
+                            &vis,
+                            VisualEvent {
                                 client,
                                 op: VizOp::Confirm,
                                 to_broker: false,
                                 partition: None,
                                 latency_ms: None,
-                            })
-                            .await;
+                            },
+                        );
                     }
                     x if x == Op::Ping as u16 => {
-                        let _ = vis
-                            .send(VisualEvent {
+                        // Answer the ping first, then emit the cosmetic frames.
+                        conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
+                        emit(
+                            &vis,
+                            VisualEvent {
                                 client,
                                 op: VizOp::Ping,
                                 to_broker: false,
                                 partition: None,
                                 latency_ms: None,
-                            })
-                            .await;
-                        conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
-                        let _ = vis
-                            .send(VisualEvent {
+                            },
+                        );
+                        emit(
+                            &vis,
+                            VisualEvent {
                                 client,
                                 op: VizOp::Pong,
                                 to_broker: true,
                                 partition: None,
                                 latency_ms: None,
-                            })
-                            .await;
+                            },
+                        );
                     }
                     x if x == Op::Error as u16 => {
                         let e: ErrorMsg = try_decode(&frame)?;
                         tracing::debug!("client {client} error {}: {}", e.code, e.message);
-                        let _ = vis
-                            .send(VisualEvent {
+                        emit(
+                            &vis,
+                            VisualEvent {
                                 client,
                                 op: VizOp::Error,
                                 to_broker: false,
                                 partition: None,
                                 latency_ms: None,
-                            })
-                            .await;
+                            },
+                        );
                     }
                     _ => {}
                 }
@@ -735,11 +878,19 @@ async fn main() -> anyhow::Result<()> {
         return Err(err);
     }
 
+    let control = Arc::new(Control::new(
+        args.rate,
+        args.confirm,
+        matches!(args.key_mode, KeyMode::Keyed),
+        args.clients,
+    ));
+
     for client in 0..args.clients {
         let args = args.clone();
         let tx = tx.clone();
+        let control = control.clone();
         tokio::spawn(async move {
-            if let Err(err) = run_client(args, client, tx).await {
+            if let Err(err) = run_client(args, client, control, tx).await {
                 tracing::debug!("client {client} ended: {err}");
             }
         });
@@ -753,6 +904,8 @@ async fn main() -> anyhow::Result<()> {
         addr: args.addr.clone(),
         balls: Vec::new(),
         metrics: Metrics::default(),
+        focus: 0,
+        control,
     };
 
     run_ui(&mut app, &mut rx).await

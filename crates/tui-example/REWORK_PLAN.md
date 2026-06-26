@@ -91,24 +91,30 @@ An empty cluster is a dull demo. The tryout should come up already alive:
 This is partly a `scripts/cluster-tryout.sh` change (seeding + a flag), not just
 the TUI crate, but it is what makes the one-command demo land.
 
-## Phase 2 (queued for later): interactive keys
+## Phase 2: interactive keys
 
 The stretch that turns the viz from a passive board into a guided tour of
-Fibril's distinctive behavior. Each binding maps to one feature you can watch
-happen live. Draft bindings:
+Fibril's distinctive behavior. Driven by a lock-free `Control` (atomics) shared
+between the UI (mutates on key press) and the drivers (read live each cycle).
 
-- `Tab` - move focus between clients / partition lanes. `q` / `Esc` - quit.
-- `space` - pause/resume the focused consumer. Watch its partition lane lag grow,
-  then drain on resume (prefetch + lag).
-- `k` / `r` - kill / restart the focused consumer's connection. Watch the broker
-  redeliver its in-flight on lease expiry and, in a cohort, reassign its
-  partitions to a peer (failover ride-through).
-- `n` - nack the next delivery on the focused consumer. Watch redelivery (and
-  delayed redelivery for retry-after).
-- `+` / `-` - add / remove a partition (live repartition, which we have
-  server-side). Lanes appear/drain and keyed routing re-spreads.
-- `[` / `]` - decrease / increase publish rate. `c` - toggle confirm mode.
-  `g` - switch keyed vs round-robin routing.
+Done (work live on the standalone `--viz` broker):
+
+- [x] `Tab` - move focus between clients. `q` / `Esc` - quit.
+- [x] `space` - pause/resume the focused client's publishing (its lane goes quiet,
+      then resumes).
+- [x] `[` / `]` - decrease / increase publish rate. `c` - toggle confirm mode
+      (the cyan confirm return path appears). `g` - switch keyed vs round-robin
+      routing (the lane spread changes).
+
+Queued (need more than a live setting flip):
+
+- `k` / `r` - kill / restart the focused client's connection. To show redelivery
+  on lease expiry it needs manual-ack (auto-ack settles on delivery, so nothing
+  is in flight to redeliver) plus a per-client supervisor to reconnect.
+- `n` - nack the next delivery (also needs manual-ack).
+- `+` / `-` - add / remove a partition (live repartition). Needs ganglion (live
+  repartition is coordination-only), so it does not apply to the standalone
+  `--viz` broker as is.
 
 These are designed now but implemented after Phase 1 (Core + partitions). They
 pair with the one-command demo north star: fire it up, then press keys to make
