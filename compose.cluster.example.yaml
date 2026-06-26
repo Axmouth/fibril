@@ -69,6 +69,51 @@ services:
     volumes:
       - broker-3-data:/app/server_data
 
+  # One-shot seeder so the cluster comes up already alive: a couple of
+  # multi-partition queues (one grouped) and a Plexus stream, so the topology
+  # page shows ownership spread across the three brokers instead of an empty
+  # board. Runs once after the brokers are healthy, then exits.
+  seed:
+    <<: *broker
+    restart: "no"
+    depends_on:
+      broker-1:
+        condition: service_healthy
+      broker-2:
+        condition: service_healthy
+      broker-3:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        broker=broker-1:9876
+        admin=http://broker-1:8081
+        echo "fibril seed: declaring demo queues and a stream..."
+        # A queue declare fails until the coordination group has elected a
+        # leader, so retry the first one until it lands.
+        n=0
+        until fibrilctl --broker "$$broker" queue declare orders --partitions 4; do
+          n=$$((n + 1))
+          if [ "$$n" -ge 60 ]; then
+            echo "fibril seed: gave up waiting for the cluster to be ready"
+            exit 1
+          fi
+          echo "fibril seed: cluster not ready yet, retrying..."
+          sleep 2
+        done
+        fibrilctl --broker "$$broker" queue declare payments --partitions 3
+        fibrilctl --broker "$$broker" queue declare emails --group marketing --partitions 2
+        if curl -fsS -X POST "$$admin/admin/api/streams" \
+          -H 'content-type: application/json' \
+          -d '{"tp":"events","partition_count":3,"durability":"speculative"}'; then
+          echo ""
+        else
+          echo "fibril seed: stream declare skipped"
+        fi
+        echo "fibril seed: done"
+
 volumes:
   broker-1-data:
   broker-2-data:

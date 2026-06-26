@@ -32,7 +32,10 @@ printf 'fibril tryout: starting a 3-broker cluster (the first run pulls the imag
 
 cat <<EOF
 
-Fibril cluster is starting. Open a dashboard and visit the topology page:
+Fibril cluster is starting. It seeds a few demo queues and a stream on startup,
+so the topology page shows partition ownership spread across the brokers (give it
+a few seconds after the brokers are up). Open a dashboard and visit the topology
+page:
 
   http://127.0.0.1:8081/      http://127.0.0.1:8082/      http://127.0.0.1:8083/
 

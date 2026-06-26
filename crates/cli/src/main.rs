@@ -16,9 +16,10 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
-    /// Broker address to connect to. Defaults to the configured broker bind.
+    /// Broker address to connect to (host:port; hostnames are resolved). Defaults
+    /// to the configured broker bind.
     #[arg(long, global = true)]
-    broker: Option<SocketAddr>,
+    broker: Option<String>,
 
     /// Broker username.
     #[arg(long, global = true, default_value = "fibril")]
@@ -223,6 +224,10 @@ struct DeclareQueueArgs {
     #[arg(long)]
     group: Option<String>,
 
+    /// Partition count for the queue (spread across owners in a cluster).
+    #[arg(long)]
+    partitions: Option<u32>,
+
     /// Retry count before dead-letter behavior applies.
     #[arg(long)]
     max_retries: Option<u32>,
@@ -302,12 +307,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
     match cli.command {
         Command::Queue { command } => {
-            let broker_addr = cli
-                .broker
-                .unwrap_or_else(|| connect_addr_for_bind(config.broker.listener.bind));
+            let broker_addr = cli.broker.clone().unwrap_or_else(|| {
+                connect_addr_for_bind(config.broker.listener.bind).to_string()
+            });
             let client = ClientOptions::new()
                 .auth(cli.username, cli.password)
-                .connect(broker_addr)
+                .connect(broker_addr.clone())
                 .await
                 .with_context(|| format!("failed to connect to broker at {broker_addr}"))?;
 
@@ -394,6 +399,9 @@ async fn declare_queue(
 
     if let Some(group) = normalize_group_arg(args.group.as_deref()) {
         config = config.group(group)?;
+    }
+    if let Some(partitions) = args.partitions {
+        config = config.partitions(partitions);
     }
     if let Some(max_retries) = args.max_retries {
         config = config.max_retries(max_retries);
@@ -858,6 +866,7 @@ mod tests {
         let args = DeclareQueueArgs {
             topic: "jobs".to_string(),
             group: None,
+            partitions: None,
             max_retries: None,
             dlq: Some(DlqPolicyArg::Global),
             dlq_topic: Some("jobs.dlq".to_string()),

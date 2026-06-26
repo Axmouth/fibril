@@ -36,8 +36,11 @@ curl -fsSL fibril.sh/tryout.sh | sh
 ```
 
 This fetches a small Compose file and starts a three-broker coordinated cluster,
-then prints an admin dashboard URL for each broker. Open one and visit the
-topology page to watch ownership, followers, and fencing epochs.
+then prints an admin dashboard URL for each broker. The cluster seeds a few demo
+queues (one grouped) and a Plexus stream on startup, so the topology page shows
+partition ownership spread across the brokers right away instead of an empty
+board. Open one and visit the topology page to watch ownership, followers, and
+fencing epochs.
 
 If you would rather not pipe a script into your shell, fetch the Compose file and
 run it yourself:
