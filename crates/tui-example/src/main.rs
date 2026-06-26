@@ -1,856 +1,759 @@
+//! Live terminal visualizer of real Fibril wire traffic against a running broker.
+//!
+//! It drives the protocol at the frame level (so the handshake, subscribe,
+//! publish, confirm, deliver, ping/pong and errors are all visible) and animates
+//! every frame as a moving dot between client nodes and the broker's partition
+//! lanes. Runtime-configurable, with small illustrative defaults. Point it at a live
+//! broker with `--addr` (e.g. the one-command cluster demo).
+
+use std::collections::VecDeque;
+use std::io::stdout;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use clap::{Parser, ValueEnum};
 use crossterm::{
-    cursor,
-    event::{self, Event, KeyCode},
-    execute,
-    terminal::{Clear, ClearType, disable_raw_mode},
+    cursor, execute,
+    terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 use fibril_protocol::v1::{
-    Auth, Deliver, ErrorMsg, Hello, HelloOk, Op, PROTOCOL_V1, Partition, Pong, Publish, Subscribe,
-    SubscribeOk,
+    Auth, DeclareQueue, Deliver, ErrorMsg, Hello, Op, PROTOCOL_V1, Partition, Pong, Publish,
+    Subscribe,
     frame::ProtoCodec,
     helper::{Conn, try_decode, try_encode},
 };
-use fibril_util::{init_tracing, unix_millis};
+use fibril_util::unix_millis;
 use futures::{SinkExt, StreamExt};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::Rect,
-    style::Color,
+    style::{Color, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
-};
-use std::{collections::HashMap, io::stdout};
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant},
 };
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::codec::Framed;
 
-#[derive(Debug)]
-pub enum VisualEvent {
-    Auth { pub_id: usize },
-    AuthOk { sub_id: usize },
-    Hello { pub_id: usize },
-    HelloOk { sub_id: usize },
-    Subscribe { sub_id: usize },
-    SubscribeOk { sub_id: usize },
-    Publish { pub_id: usize, topic: String },
-    Deliver { sub_id: usize, offset: u64 },
-    Ping,
-    Pong,
-    ErrorMsg { sub_id: usize, code: u16 },
+/// Live visualizer of real Fibril traffic and partition routing.
+#[derive(Debug, Clone, Parser)]
+#[command(name = "fibril-tui", about = "Live Fibril traffic + partition visualizer")]
+struct Args {
+    /// Broker address to connect to.
+    #[arg(long, default_value = "127.0.0.1:9876")]
+    addr: String,
+
+    /// Number of client connections (each both publishes and consumes).
+    #[arg(long, default_value_t = 4)]
+    clients: usize,
+
+    /// Partition count to declare for the demo topic.
+    #[arg(long, default_value_t = 4)]
+    partitions: u32,
+
+    /// Topic to publish to and consume from.
+    #[arg(long, default_value = "demo")]
+    topic: String,
+
+    /// Optional queue group namespace.
+    #[arg(long)]
+    group: Option<String>,
+
+    /// Publish rate per client, in messages per second.
+    #[arg(long, default_value_t = 6.0)]
+    rate: f64,
+
+    /// Payload size in bytes per message.
+    #[arg(long, default_value_t = 64)]
+    payload_size: usize,
+
+    /// Require a publish confirm (shows the confirm return path).
+    #[arg(long)]
+    confirm: bool,
+
+    /// Broker credentials as `user:pass`.
+    #[arg(long, default_value = "fibril:fibril")]
+    auth: String,
+
+    /// How keyed publishes pick a partition.
+    #[arg(long, value_enum, default_value_t = KeyMode::Keyed)]
+    key_mode: KeyMode,
 }
 
-#[derive(Clone)]
-struct Node {
-    id: usize,
-    label: String,
-    x: u16,
-    y: u16,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum KeyMode {
+    /// Route by `hash(key) % partitions` (per-key ordering is visible).
+    Keyed,
+    /// Spread round-robin across partitions, no key.
+    RoundRobin,
+}
+
+/// Operation class of a frame, for coloring and metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum VizOp {
+    Hello,
+    Auth,
+    Subscribe,
+    Declare,
+    Publish,
+    Confirm,
+    Deliver,
+    Ping,
+    Pong,
+    Error,
+}
+
+impl VizOp {
+    fn color(self) -> Color {
+        match self {
+            VizOp::Hello | VizOp::Auth | VizOp::Subscribe | VizOp::Declare => Color::DarkGray,
+            VizOp::Publish => Color::Blue,
+            VizOp::Confirm => Color::Cyan,
+            VizOp::Deliver => Color::Green,
+            VizOp::Ping | VizOp::Pong => Color::DarkGray,
+            VizOp::Error => Color::Red,
+        }
+    }
+}
+
+/// A frame observed on a client connection, sent to the UI to animate.
+#[derive(Debug, Clone)]
+struct VisualEvent {
+    client: usize,
+    op: VizOp,
+    /// Direction: true = client -> broker, false = broker -> client.
+    to_broker: bool,
+    /// Partition lane this frame belongs to, when known.
+    partition: Option<u32>,
+    /// Publish -> deliver latency in ms, on a Deliver.
+    latency_ms: Option<u64>,
+}
+
+/// Logical endpoint of an animated dot, resolved to a cell against the current
+/// (responsive) layout each frame so resizes do not strand in-flight dots.
+#[derive(Debug, Clone, Copy)]
+enum Endpoint {
+    Client(usize),
+    Lane(u32),
 }
 
 #[derive(Debug, Clone)]
-struct InFlight {
-    from: usize,
-    to: usize,
+struct Ball {
+    from: Endpoint,
+    to: Endpoint,
     progress: f32,
     color: Color,
 }
 
+#[derive(Default)]
+struct Metrics {
+    published: u64,
+    confirmed: u64,
+    delivered: u64,
+    errors: u64,
+    latencies: VecDeque<u64>,
+    // Rate sampling.
+    last_sample: Option<(u64, u64, u64, Instant)>,
+    pub_rate: f64,
+    deliver_rate: f64,
+    confirm_rate: f64,
+}
+
+impl Metrics {
+    fn record_latency(&mut self, ms: u64) {
+        self.latencies.push_back(ms);
+        while self.latencies.len() > 512 {
+            self.latencies.pop_front();
+        }
+    }
+
+    fn percentile(&self, pct: f64) -> Option<u64> {
+        if self.latencies.is_empty() {
+            return None;
+        }
+        let mut sorted: Vec<u64> = self.latencies.iter().copied().collect();
+        sorted.sort_unstable();
+        let idx = ((pct / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+        sorted.get(idx).copied()
+    }
+
+    /// Refresh per-second rates from cumulative counters. Call about once a second.
+    fn refresh_rates(&mut self) {
+        let now = Instant::now();
+        if let Some((p0, d0, c0, t0)) = self.last_sample {
+            let dt = now.duration_since(t0).as_secs_f64();
+            if dt >= 0.25 {
+                self.pub_rate = (self.published - p0) as f64 / dt;
+                self.deliver_rate = (self.delivered - d0) as f64 / dt;
+                self.confirm_rate = (self.confirmed - c0) as f64 / dt;
+                self.last_sample = Some((self.published, self.delivered, self.confirmed, now));
+            }
+        } else {
+            self.last_sample = Some((self.published, self.delivered, self.confirmed, now));
+        }
+    }
+}
+
 struct App {
-    pubs: Vec<Node>,
-    subs: Vec<Node>,
-    broker: Node,
-    inflight: Vec<InFlight>,
-    path_cache: HashMap<(usize, usize), Vec<(u16, u16)>>,
+    clients: usize,
+    partitions: u32,
+    topic: String,
+    addr: String,
+    balls: Vec<Ball>,
+    metrics: Metrics,
 }
 
 static REQ: AtomicU64 = AtomicU64::new(1);
-
-fn get_path<'a>(app: &'a mut App, from: &Node, to: &Node) -> &'a [(u16, u16)] {
-    app.path_cache
-        .entry((from.id, to.id))
-        .or_insert_with(|| route_path(from, to))
-}
 
 fn next_req_id() -> u64 {
     REQ.fetch_add(1, Ordering::Relaxed)
 }
 
-fn random_idle_duration() -> Duration {
-    // 200ms - 3s idle
-    Duration::from_millis(fastrand::u64(200..3000))
+/// FNV-1a, matching the client/broker so keyed routing lands on the same lane.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
-fn random_burst_size() -> usize {
-    // 1-8 messages per burst
-    fastrand::usize(1..=1600)
+// ===== Layout =================================================================
+
+struct Layout {
+    client_boxes: Vec<Rect>,
+    lane_boxes: Vec<Rect>,
+    hud: Rect,
 }
 
-fn random_inter_message_delay() -> Duration {
-    // 20-200ms between messages in a burst
-    Duration::from_millis(fastrand::u64(20..200))
-}
+fn compute_layout(area: Rect, clients: usize, partitions: u32) -> Layout {
+    let box_w: u16 = 16;
+    let hud_h: u16 = 8;
+    let top = area.y + 1;
+    let usable_h = area.height.saturating_sub(hud_h + 2).max(1);
 
-fn init_app() -> App {
-    let pubs = (0..6)
-        .map(|i| Node {
-            id: i,
-            label: format!("PUB {}", i),
-            x: 2,
-            y: 2 + i as u16 * 4,
-        })
-        .collect();
+    let client_x = area.x + 1;
+    let lane_x = area.x + area.width.saturating_sub(box_w + 1);
 
-    let subs = (0..6)
-        .map(|i| Node {
-            id: 100 + i,
-            label: format!("SUB {}", i),
-            x: 60,
-            y: 2 + i as u16 * 4,
-        })
-        .collect();
-
-    let broker = Node {
-        id: 50,
-        label: "BROKER".into(),
-        x: 30,
-        y: 8,
+    let lay = |n: usize, x: u16| -> Vec<Rect> {
+        let n = n.max(1);
+        let step = (usable_h / n as u16).max(1);
+        let h = step.saturating_sub(1).clamp(1, 3);
+        (0..n)
+            .map(|i| Rect::new(x, top + i as u16 * step, box_w, h))
+            .collect()
     };
 
-    App {
-        pubs,
-        subs,
-        broker,
-        inflight: Vec::new(),
-        path_cache: HashMap::new(),
+    Layout {
+        client_boxes: lay(clients, client_x),
+        lane_boxes: lay(partitions as usize, lane_x),
+        hud: Rect::new(area.x + 1, area.y + area.height.saturating_sub(hud_h), area.width.saturating_sub(2), hud_h),
     }
 }
 
-fn find_node(app: &App, id: usize) -> Option<Node> {
-    app.pubs
-        .iter()
-        .chain(app.subs.iter())
-        .chain(std::iter::once(&app.broker))
-        .find(|n| n.id == id)
-        .cloned()
-}
-
-fn node_rect(n: &Node) -> Rect {
-    Rect::new(n.x, n.y, 12, 3)
-}
-
-fn out_port(n: &Node) -> (u16, u16) {
-    (n.x + 12 + 1, n.y + 1)
-}
-fn in_port(n: &Node) -> (u16, u16) {
-    (n.x.saturating_sub(1), n.y + 1)
-}
-
-fn route_path(from: &Node, to: &Node) -> Vec<(u16, u16)> {
-    let (sx, sy) = out_port(from);
-    let (ex, ey) = in_port(to);
-    let mid_x = (sx + ex) / 2;
-
-    vec![(sx, sy), (mid_x, sy), (mid_x, ey), (ex, ey)]
-}
-
-fn draw_hline(f: &mut ratatui::Frame, app: &App, x1: u16, x2: u16, y: u16, color: Color) {
-    let (a, b, glyph) = if x1 <= x2 {
-        (x1, x2, "→")
-    } else {
-        (x2, x1, "←")
-    };
-
-    for x in a..=b {
-        if is_near_any_node(app, x, y, 1) {
-            continue;
-        }
-        f.render_widget(
-            Paragraph::new(glyph).style(ratatui::style::Style::default().fg(color)),
-            Rect::new(x, y, 1, 1),
-        );
+fn endpoint_cell(layout: &Layout, ep: Endpoint) -> Option<(u16, u16)> {
+    match ep {
+        Endpoint::Client(i) => layout
+            .client_boxes
+            .get(i)
+            .map(|r| (r.x + r.width, r.y + r.height / 2)),
+        Endpoint::Lane(p) => layout
+            .lane_boxes
+            .get(p as usize)
+            .map(|r| (r.x.saturating_sub(1), r.y + r.height / 2)),
     }
 }
 
-fn draw_vline(f: &mut ratatui::Frame, app: &App, y1: u16, y2: u16, x: u16, color: Color) {
-    let (a, b, glyph) = if y1 <= y2 {
-        (y1, y2, "↓")
-    } else {
-        (y2, y1, "↑")
-    };
-
-    for y in a..=b {
-        if is_near_any_node(app, x, y, 1) {
-            continue;
-        }
-        f.render_widget(
-            Paragraph::new(glyph).style(ratatui::style::Style::default().fg(color)),
-            Rect::new(x, y, 1, 1),
-        );
+fn draw_box(f: &mut ratatui::Frame, rect: Rect, title: &str, color: Color) {
+    if rect.height == 0 || rect.width == 0 {
+        return;
     }
-}
-
-fn draw_path(f: &mut ratatui::Frame, app: &mut App, from: &Node, to: &Node, color: Color) {
-    let path = get_path(app, from, to).to_vec();
-
-    for seg in path.windows(2) {
-        let (x1, y1) = seg[0];
-        let (x2, y2) = seg[1];
-
-        if x1 == x2 {
-            draw_vline(f, app, y1, y2, x1, color);
-        } else {
-            draw_hline(f, app, x1, x2, y1, color);
-        }
-    }
-}
-
-fn interpolate_along_path(path: &[(u16, u16)], t: f32) -> (u16, u16) {
-    let mut segments = Vec::new();
-    let mut total = 0.0;
-
-    for w in path.windows(2) {
-        let dx = w[1].0.abs_diff(w[0].0) as f32;
-        let dy = w[1].1.abs_diff(w[0].1) as f32;
-        let len = dx + dy; // Manhattan length
-        segments.push((w[0], w[1], len));
-        total += len;
-    }
-
-    let mut d = t.clamp(0.0, 1.0) * total;
-
-    for (from, to, len) in segments {
-        if d <= len {
-            if from.0 == to.0 {
-                let y = if to.1 > from.1 {
-                    from.1 + d as u16
-                } else {
-                    from.1 - d as u16
-                };
-                return (from.0, y);
-            } else {
-                let x = if to.0 > from.0 {
-                    from.0 + d as u16
-                } else {
-                    from.0 - d as u16
-                };
-                return (x, from.1);
-            }
-        }
-        d -= len;
-    }
-
-    *path.last().unwrap()
-}
-
-fn is_near_any_node(app: &App, x: u16, y: u16, pad: u16) -> bool {
-    app.pubs
-        .iter()
-        .chain(app.subs.iter())
-        .chain(std::iter::once(&app.broker))
-        .any(|n| {
-            let r = node_rect(n);
-            let x0 = r.x.saturating_sub(pad);
-            let y0 = r.y.saturating_sub(pad);
-            let x1 = r.x + r.width + pad;
-            let y1 = r.y + r.height + pad;
-            x >= x0 && x < x1 && y >= y0 && y < y1
-        })
-}
-
-fn draw_node(f: &mut ratatui::Frame, n: &Node) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(n.label.as_str());
-
-    f.render_widget(block, Rect::new(n.x, n.y, 12, 3));
+        .border_style(Style::default().fg(color))
+        .title(Span::styled(title.to_string(), Style::default().fg(color)));
+    f.render_widget(block, rect);
 }
 
-fn ease_in_out(t: f32) -> f32 {
-    // smoothstep
-    t * t * (3.0 - 2.0 * t)
-}
-
-fn draw_cached_path(f: &mut ratatui::Frame, app: &App, path: &[(u16, u16)], color: Color) {
-    for seg in path.windows(2) {
-        let (x1, y1) = seg[0];
-        let (x2, y2) = seg[1];
-
-        if x1 == x2 {
-            draw_vline(f, app, y1, y2, x1, color);
-        } else {
-            draw_hline(f, app, x1, x2, y1, color);
-        }
-    }
-}
-
-fn draw_hud(f: &mut ratatui::Frame, app: &App) {
-    let text = format!(
-        "inflight: {} \npubs:     {} \nsubs:     {} \n(Q/Esc: quit)",
-        app.inflight.len(),
-        app.pubs.len(),
-        app.subs.len()
-    );
-
-    let hud = Paragraph::new(text).block(Block::default().borders(Borders::ALL).title("Status"));
-
-    f.render_widget(hud, Rect::new(1, 26, 18, 6));
-}
-
-fn draw_ui(f: &mut ratatui::Frame, app: &mut App) {
+fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     let area = f.area();
-
-    if area.width < 80 || area.height < 20 {
+    if area.width < 48 || area.height < 16 {
         f.render_widget(
-            Paragraph::new("Terminal too small - resize me!")
-                .style(ratatui::style::Style::default().fg(Color::Red)),
+            Paragraph::new("Terminal too small - resize me").style(Style::default().fg(Color::Red)),
             area,
         );
         return;
     }
+    let layout = compute_layout(area, app.clients, app.partitions);
 
-    // nodes
-    draw_node(f, &app.broker);
-
-    for p in &app.pubs {
-        draw_node(f, p);
+    for (i, rect) in layout.client_boxes.iter().enumerate() {
+        draw_box(f, *rect, &format!("client {i}"), Color::Gray);
+    }
+    for (p, rect) in layout.lane_boxes.iter().enumerate() {
+        draw_box(f, *rect, &format!("part {p}"), Color::Yellow);
     }
 
-    for s in &app.subs {
-        draw_node(f, s);
-    }
-    let broker = app.broker.clone();
-    for p in &app.pubs.clone() {
-        let path = get_path(app, p, &broker).to_vec();
-        draw_cached_path(f, app, &path, Color::DarkGray);
-    }
-    for s in &app.subs.clone() {
-        let path = get_path(app, &broker, s).to_vec();
-        draw_cached_path(f, app, &path, Color::DarkGray);
-    }
-
-    // pipes
-    for p in app.pubs.clone() {
-        // darker shadow
-        draw_path(f, app, &p, &app.broker.clone(), Color::Black);
-
-        // actual pipe
-        draw_path(f, app, &p, &app.broker.clone(), Color::DarkGray);
-    }
-    for s in app.subs.clone() {
-        // darker shadow
-        draw_path(f, app, &app.broker.clone(), &s, Color::Black);
-
-        // actual pipe
-        draw_path(f, app, &app.broker.clone(), &s, Color::DarkGray);
-    }
-
-    // moving dots
-    for m in app.inflight.clone() {
-        let (from, to) = match (find_node(app, m.from), find_node(app, m.to)) {
-            (Some(f), Some(t)) => (f, t),
-            _ => continue,
+    for ball in &app.balls {
+        let (Some((x0, y0)), Some((x1, y1))) = (
+            endpoint_cell(&layout, ball.from),
+            endpoint_cell(&layout, ball.to),
+        ) else {
+            continue;
         };
-
-        let path = get_path(app, &from, &to);
-        let eased = ease_in_out(m.progress);
-        let (x, y) = interpolate_along_path(path, eased);
-
-        if is_near_any_node(app, x, y, 0) {
+        let t = ease(ball.progress);
+        let x = lerp(x0, x1, t);
+        let y = lerp(y0, y1, t);
+        if x < area.x || y < area.y || x >= area.x + area.width || y >= area.y + area.height {
             continue;
         }
-
-        let glyph = if m.progress < 0.2 || m.progress > 0.8 {
-            "•"
-        } else if m.progress < 0.4 || m.progress > 0.6 {
-            "●"
+        let glyph = if ball.progress < 0.25 || ball.progress > 0.75 {
+            "·"
         } else {
-            "⬤"
+            "●"
         };
-
         f.render_widget(
-            Paragraph::new(glyph).style(ratatui::style::Style::default().fg(m.color)),
+            Paragraph::new(glyph).style(Style::default().fg(ball.color)),
             Rect::new(x, y, 1, 1),
         );
     }
 
-    draw_hud(f, app);
+    draw_hud(f, app, layout.hud);
 }
 
-pub async fn run_ui(mut rx: mpsc::Receiver<VisualEvent>) -> anyhow::Result<()> {
-    use crossterm::{
-        cursor, execute,
-        terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
-    };
-
-    let mut stdout = stdout();
-    enable_raw_mode()?;
-    execute!(stdout, Clear(ClearType::All), cursor::Hide)?;
-
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-
-    let mut app = init_app();
-    let mut last_tick = Instant::now();
-
-    'ui: loop {
-        // 1. Handle keyboard input (non-blocking)
-        if event::poll(Duration::from_millis(1))?
-            && let Event::Key(key) = event::read()?
-        {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => {
-                    break 'ui;
-                }
-                _ => {}
-            }
-        }
-
-        // 2. Drain visual events
-        while let Ok(ev) = rx.try_recv() {
-            handle_event(&mut app, ev);
-        }
-
-        // 3. Animate
-        let dt = last_tick.elapsed().as_secs_f32();
-        last_tick = Instant::now();
-        update_inflight(&mut app, dt);
-
-        // 4. Draw
-        terminal.draw(|f| draw_ui(f, &mut app))?;
-
-        tokio::time::sleep(Duration::from_millis(33)).await;
-    }
-
-    // ---- CLEANUP (IMPORTANT) ----------------------------------------------
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), cursor::Show, Clear(ClearType::All))?;
-    terminal.show_cursor()?;
-
-    Ok(())
+fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let m = &app.metrics;
+    let p50 = m.percentile(50.0).map(|v| format!("{v}ms")).unwrap_or_else(|| "-".into());
+    let p99 = m.percentile(99.0).map(|v| format!("{v}ms")).unwrap_or_else(|| "-".into());
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("fibril viz  ", Style::default().fg(Color::Cyan)),
+            Span::raw(format!(
+                "{}  clients {}  partitions {}  topic {}",
+                app.addr, app.clients, app.partitions, app.topic
+            )),
+        ]),
+        Line::from(format!(
+            "published {} ({:.0}/s)   confirmed {} ({:.0}/s)   delivered {} ({:.0}/s)   errors {}",
+            m.published, m.pub_rate, m.confirmed, m.confirm_rate, m.delivered, m.deliver_rate, m.errors
+        )),
+        Line::from(format!(
+            "in-flight (animating) {}   publish->deliver p50 {}  p99 {}",
+            app.balls.len(),
+            p50,
+            p99
+        )),
+        Line::from(Span::styled(
+            "publish=blue  confirm=cyan  deliver=green  setup/ping=gray  error=red    (q / Esc to quit)",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("status")),
+        area,
+    );
 }
 
-fn update_inflight(app: &mut App, dt: f32) {
-    for m in &mut app.inflight {
-        m.progress = (m.progress + dt * 0.4).min(1.0);
-    }
-    app.inflight.retain(|m| m.progress < 1.0);
+fn ease(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn lerp(a: u16, b: u16, t: f32) -> u16 {
+    let a = a as f32;
+    let b = b as f32;
+    (a + (b - a) * t).round() as u16
 }
 
 fn handle_event(app: &mut App, ev: VisualEvent) {
-    match ev {
-        VisualEvent::Publish { pub_id, .. } => {
-            app.inflight.push(InFlight {
-                from: pub_id,
-                to: app.broker.id,
-                progress: 0.0,
-                color: Color::Blue,
-            });
+    match ev.op {
+        VizOp::Publish => app.metrics.published += 1,
+        VizOp::Confirm => app.metrics.confirmed += 1,
+        VizOp::Deliver => {
+            app.metrics.delivered += 1;
+            if let Some(ms) = ev.latency_ms {
+                app.metrics.record_latency(ms);
+            }
         }
-        VisualEvent::Deliver { sub_id, .. } => {
-            app.inflight.push(InFlight {
-                from: app.broker.id,
-                to: sub_id,
-                progress: 0.0,
-                color: Color::Green,
-            });
-        }
-        VisualEvent::ErrorMsg { sub_id, .. } => {
-            app.inflight.push(InFlight {
-                from: app.broker.id,
-                to: sub_id,
-                progress: 0.0,
-                color: Color::Red,
-            });
-        }
-        VisualEvent::Hello { pub_id, .. } => {
-            app.inflight.push(InFlight {
-                from: pub_id,
-                to: app.broker.id,
-                progress: 0.0,
-                color: Color::White,
-            });
-        }
-        VisualEvent::HelloOk { sub_id, .. } => {
-            app.inflight.push(InFlight {
-                from: app.broker.id,
-                to: sub_id,
-                progress: 0.0,
-                color: Color::LightBlue,
-            });
-        }
-        VisualEvent::Subscribe { sub_id, .. } => {
-            app.inflight.push(InFlight {
-                from: sub_id,
-                to: app.broker.id,
-                progress: 0.0,
-                color: Color::Cyan,
-            });
-        }
-        VisualEvent::SubscribeOk { sub_id, .. } => {
-            app.inflight.push(InFlight {
-                from: app.broker.id,
-                to: sub_id,
-                progress: 0.0,
-                color: Color::Magenta,
-            });
-        }
-        VisualEvent::Auth { pub_id, .. } => {
-            app.inflight.push(InFlight {
-                from: pub_id,
-                to: app.broker.id,
-                progress: 0.0,
-                color: Color::LightYellow,
-            });
-        }
-        VisualEvent::AuthOk { sub_id, .. } => {
-            app.inflight.push(InFlight {
-                from: app.broker.id,
-                to: sub_id,
-                progress: 0.0,
-                color: Color::LightGreen,
-            });
-        }
-        VisualEvent::Ping => {}
-        VisualEvent::Pong => {}
+        VizOp::Error => app.metrics.errors += 1,
+        _ => {}
+    }
+
+    // Frames with no partition (setup, confirm, ping, pong) animate to and from
+    // the first lane, which reads as the broker hub.
+    let lane = ev.partition.unwrap_or(0).min(app.partitions.saturating_sub(1));
+    let (from, to) = if ev.to_broker {
+        (Endpoint::Client(ev.client), Endpoint::Lane(lane))
+    } else {
+        (Endpoint::Lane(lane), Endpoint::Client(ev.client))
+    };
+    app.balls.push(Ball {
+        from,
+        to,
+        progress: 0.0,
+        color: ev.op.color(),
+    });
+}
+
+fn update_balls(app: &mut App, dt: f32) {
+    for b in &mut app.balls {
+        b.progress = (b.progress + dt * 1.1).min(1.0);
+    }
+    app.balls.retain(|b| b.progress < 1.0);
+    // Bound the animation set so a burst cannot grow it without limit.
+    if app.balls.len() > 4000 {
+        let excess = app.balls.len() - 4000;
+        app.balls.drain(0..excess);
     }
 }
 
-pub async fn visual_client(
-    mut conn: Conn,
-    pub_id: usize,
-    sub_id: usize,
-    vis_tx: mpsc::Sender<VisualEvent>,
+async fn run_ui(app: &mut App, rx: &mut mpsc::Receiver<VisualEvent>) -> anyhow::Result<()> {
+    use crossterm::event::{self, Event, KeyCode};
+
+    let mut out = stdout();
+    enable_raw_mode()?;
+    execute!(out, Clear(ClearType::All), cursor::Hide)?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
+
+    let mut last = Instant::now();
+    let mut last_rate = Instant::now();
+    let result = loop {
+        if event::poll(Duration::from_millis(1))?
+            && let Event::Key(key) = event::read()?
+            && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+        {
+            break Ok(());
+        }
+
+        let mut drained = 0;
+        while let Ok(ev) = rx.try_recv() {
+            handle_event(app, ev);
+            drained += 1;
+            if drained > 4096 {
+                break;
+            }
+        }
+
+        let dt = last.elapsed().as_secs_f32();
+        last = Instant::now();
+        update_balls(app, dt);
+        if last_rate.elapsed() >= Duration::from_millis(500) {
+            app.metrics.refresh_rates();
+            last_rate = Instant::now();
+        }
+
+        terminal.draw(|f| draw_ui(f, app))?;
+        tokio::time::sleep(Duration::from_millis(33)).await;
+    };
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), cursor::Show, Clear(ClearType::All))?;
+    terminal.show_cursor()?;
+    result
+}
+
+// ===== Protocol driving =======================================================
+
+fn parse_auth(auth: &str) -> Option<(String, String)> {
+    auth.split_once(':')
+        .map(|(u, p)| (u.to_string(), p.to_string()))
+}
+
+async fn connect(addr: &str) -> anyhow::Result<Conn> {
+    let stream = TcpStream::connect(addr).await?;
+    stream.set_nodelay(true)?;
+    Ok(Framed::new(stream, ProtoCodec))
+}
+
+/// Handshake (hello + optional auth). Emits the setup frames for `client`.
+async fn handshake(
+    conn: &mut Conn,
+    client: usize,
+    auth: &Option<(String, String)>,
+    vis: &mpsc::Sender<VisualEvent>,
 ) -> anyhow::Result<()> {
-    // ---- HELLO handshake -------------------------------------------------
+    let setup = |op: VizOp, to_broker: bool| VisualEvent {
+        client,
+        op,
+        to_broker,
+        partition: None,
+        latency_ms: None,
+    };
 
-    // Visual: client initiating hello
-    let _ = vis_tx.send(VisualEvent::Hello { pub_id }).await;
-    let (ping_tx, mut ping_rx) = mpsc::channel::<u64>(64);
-
-    // Send HELLO
     conn.send(try_encode(
         Op::Hello,
         next_req_id(),
         &Hello {
-            client_name: format!("tui-client-{}", pub_id),
+            client_name: format!("tui-{client}"),
             client_version: "0.1".into(),
             protocol_version: PROTOCOL_V1,
             resume: None,
         },
     )?)
     .await?;
-    let _ = vis_tx.send(VisualEvent::Hello { pub_id }).await;
+    let _ = vis.send(setup(VizOp::Hello, true)).await;
+    expect(conn, Op::HelloOk).await?;
+    let _ = vis.send(setup(VizOp::Hello, false)).await;
 
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-    // Wait for HELLOOK / HELLOERR
-    let frame = conn
-        .next()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("connection closed during hello"))??;
-
-    loop {
-        match frame.opcode {
-            x if x == Op::HelloOk as u16 => {
-                let ok: HelloOk = try_decode(&frame)?;
-                tracing::debug!("HELLO OK, negotiated protocol {}", ok.protocol_version);
-
-                let _ = vis_tx.send(VisualEvent::HelloOk { sub_id }).await;
-                break;
-            }
-            x if x == Op::HelloErr as u16 => {
-                let err: ErrorMsg = try_decode(&frame)?;
-                let _ = vis_tx
-                    .send(VisualEvent::ErrorMsg {
-                        sub_id,
-                        code: err.code,
-                    })
-                    .await;
-                break;
-                // anyhow::bail!("HELLO rejected: {}", err.message);
-            }
-            x if x == Op::Ping as u16 => {
-                ping_tx.send(frame.request_id).await?;
-            }
-            x if x == Op::Pong as u16 => {
-                // pass
-            }
-            _ => {
-                // anyhow::bail!("unexpected frame during HELLO: {}", frame.opcode);
-            }
-        }
+    if let Some((user, pass)) = auth {
+        conn.send(try_encode(
+            Op::Auth,
+            next_req_id(),
+            &Auth {
+                username: user.clone(),
+                password: pass.clone(),
+            },
+        )?)
+        .await?;
+        let _ = vis.send(setup(VizOp::Auth, true)).await;
+        expect(conn, Op::AuthOk).await?;
+        let _ = vis.send(setup(VizOp::Auth, false)).await;
     }
-
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-    // Send AUTH
-    conn.send(try_encode(
-        Op::Auth,
-        next_req_id(),
-        &Auth {
-            username: "fibril".to_string(),
-            password: "fibril".to_string(),
-        },
-    )?)
-    .await?;
-    let _ = vis_tx.send(VisualEvent::Auth { pub_id }).await;
-
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-    // Wait for HELLOOK / HELLOERR
-    let frame = conn
-        .next()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("connection closed during hello"))??;
-
-    loop {
-        match frame.opcode {
-            x if x == Op::AuthOk as u16 => {
-                let _ = vis_tx.send(VisualEvent::AuthOk { sub_id }).await;
-                break;
-            }
-            x if x == Op::Ping as u16 => {
-                ping_tx.send(frame.request_id).await?;
-            }
-            x if x == Op::Pong as u16 => {
-                // pass
-            }
-            x if x == Op::AuthErr as u16 => {
-                let err: ErrorMsg = try_decode(&frame)?;
-                let _ = vis_tx
-                    .send(VisualEvent::ErrorMsg {
-                        sub_id,
-                        code: err.code,
-                    })
-                    .await;
-                break;
-                // anyhow::bail!("HELLO rejected: {}", err.message);
-            }
-            _ => {
-                // anyhow::bail!("unexpected frame during HELLO: {}", frame.opcode);
-            }
-        }
-    }
-
-    // ---- SUBSCRIBE -------------------------------------------------------
-    conn.send(try_encode(
-        Op::Subscribe,
-        next_req_id(),
-        &Subscribe {
-            topic: "t1".into(),
-            partition: Partition::new(0),
-            group: Some("g1".to_string()),
-            prefetch: 100,
-            auto_ack: true,
-            consumer_group: None,
-            consumer_target: None,
-            member_id: None,
-        },
-    )?)
-    .await?;
-    let _ = vis_tx.send(VisualEvent::Subscribe { sub_id }).await;
-
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-    // Read the response.
-    let frame = conn
-        .next()
-        .await
-        .ok_or_else(|| anyhow::anyhow!("connection closed during subscribe"))??;
-
-    loop {
-        match frame.opcode {
-            x if x == Op::SubscribeOk as u16 => {
-                let _ok: SubscribeOk = try_decode(&frame)?;
-
-                let _ = vis_tx.send(VisualEvent::SubscribeOk { sub_id }).await;
-                break;
-            }
-            x if x == Op::Ping as u16 => {
-                ping_tx.send(frame.request_id).await?;
-            }
-            x if x == Op::Pong as u16 => {
-                // pass
-            }
-
-            x if x == Op::Error as u16 => {
-                let err: ErrorMsg = try_decode(&frame)?;
-                anyhow::bail!(
-                    "SUBSCRIBE rejected: code={} msg='{}'",
-                    err.code,
-                    err.message
-                );
-            }
-
-            _ => {
-                anyhow::bail!("unexpected frame during SUBSCRIBE: {}", frame.opcode);
-            }
-        }
-    }
-
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-
-    let (mut sink, mut stream) = conn.split();
-    let (pub_tx, mut pub_rx) = mpsc::channel::<Publish>(64);
-    let publish_tx = vis_tx.clone();
-
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(random_idle_duration()).await;
-
-            let burst = random_burst_size();
-
-            for _ in 0..burst {
-                // 🔵 Visual: intent to publish (matches the blue-ball glyph the UI renders)
-                let _ = publish_tx
-                    .send(VisualEvent::Publish {
-                        pub_id,
-                        topic: "t1".into(),
-                    })
-                    .await;
-
-                // Enqueue actual publish
-                if pub_tx
-                    .send(Publish {
-                        topic: "t1".into(),
-                        group: Some("g1".to_string()),
-                        partition: Partition::new(0),
-                        require_confirm: false,
-                        content_type: None,
-                        headers: HashMap::new(),
-                        published: unix_millis(),
-                        payload: b"hello".repeat(10000).to_vec(),
-                        partition_key: None,
-                        partitioning_version: 0,
-                        ttl_ms: None,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-
-                tokio::time::sleep(random_inter_message_delay()).await;
-            }
-        }
-    });
-
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                biased;
-
-                // ---- PING -> PONG --------------------------------------------
-                Some(req_id) = ping_rx.recv() => {
-                    let frame = match try_encode(Op::Pong, req_id, &Pong) {
-                        Ok(frame) => frame,
-                        Err(err) => {
-                            tracing::error!("pong encode failed: {err}");
-                            break;
-                        }
-                    };
-                    if let Err(err) = sink.send(frame).await {
-                        tracing::error!("pong send failed: {err}");
-                        break;
-                    }
-                }
-                // ---- PUBLISH --------------------------------------------------
-                Some(p) = pub_rx.recv() => {
-                    let frame = match try_encode(Op::Publish, next_req_id(), &p) {
-                        Ok(frame) => frame,
-                        Err(err) => {
-                            tracing::error!("publish encode failed: {err}");
-                            break;
-                        }
-                    };
-                    if let Err(err) = sink.send(frame).await {
-                        tracing::error!("publish send failed: {err}");
-                        break;
-                    }
-                }
-
-                // ---- CHANNEL CLOSED ------------------------------------------
-                else => {
-                    break;
-                }
-            }
-        }
-    });
-
-    while let Some(frame) = stream.next().await {
-        let frame = frame?;
-        tracing::debug!("Received frame with code {:?}", frame.opcode);
-        match frame.opcode {
-            x if x == Op::Deliver as u16 => {
-                let d: Deliver = try_decode(&frame)?;
-                // latencies.push(unix_millis() - d.published);
-                tracing::debug!("CLIENT got DELIVER offset={}", d.offset);
-                let _ = vis_tx
-                    .send(VisualEvent::Deliver {
-                        sub_id,
-                        offset: d.offset,
-                    })
-                    .await;
-            }
-            x if x == Op::Ping as u16 => {
-                ping_tx.send(frame.request_id).await?;
-            }
-            x if x == Op::Pong as u16 => {
-                // pass
-            }
-            x if x == Op::Error as u16 => {
-                let e: ErrorMsg = try_decode(&frame)?;
-                tracing::debug!("CLIENT got ErrorMsg code={} msg='{}'", e.code, e.message);
-                let _ = vis_tx
-                    .send(VisualEvent::ErrorMsg {
-                        sub_id,
-                        code: e.code,
-                    })
-                    .await;
-            }
-            _ => {}
-        }
-
-        // let elapsed = last_laten.elapsed();
-
-        // if elapsed.as_secs() >= 2 {
-        //     last_laten = Instant::now();
-
-        //     latencies.sort();
-
-        //     compute_stats(latencies.clone());
-
-        //     latencies.clear();
-        // }
-    }
-
     Ok(())
 }
 
-async fn connect_to_server() -> anyhow::Result<Conn> {
-    let stream = TcpStream::connect("127.0.0.1:9876").await?;
-    Ok(Framed::new(stream, ProtoCodec))
+/// Read frames until one with `op` arrives (answering pings on the way).
+async fn expect(conn: &mut Conn, op: Op) -> anyhow::Result<()> {
+    while let Some(frame) = conn.next().await {
+        let frame = frame?;
+        if frame.opcode == op as u16 {
+            return Ok(());
+        }
+        if frame.opcode == Op::Ping as u16 {
+            conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
+            continue;
+        }
+        if frame.opcode == Op::Error as u16
+            || frame.opcode == Op::HelloErr as u16
+            || frame.opcode == Op::AuthErr as u16
+        {
+            let err: ErrorMsg = try_decode(&frame)?;
+            anyhow::bail!("server error {} waiting for {:?}: {}", err.code, op, err.message);
+        }
+    }
+    anyhow::bail!("connection closed waiting for {op:?}")
+}
+
+/// Declare the demo topic with the requested partition count (one-shot).
+async fn declare_topic(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Result<()> {
+    let auth = parse_auth(&args.auth);
+    let mut conn = connect(&args.addr).await?;
+    handshake(&mut conn, 0, &auth, vis).await?;
+    conn.send(try_encode(
+        Op::DeclareQueue,
+        next_req_id(),
+        &DeclareQueue {
+            topic: args.topic.clone(),
+            group: args.group.clone(),
+            dlq_policy: None,
+            dlq_max_retries: None,
+            partition_count: Some(args.partitions.max(1)),
+            default_message_ttl_ms: None,
+        },
+    )?)
+    .await?;
+    let _ = vis
+        .send(VisualEvent {
+            client: 0,
+            op: VizOp::Declare,
+            to_broker: true,
+            partition: None,
+            latency_ms: None,
+        })
+        .await;
+    expect(&mut conn, Op::DeclareQueueOk).await?;
+    Ok(())
+}
+
+/// One client: handshake, subscribe to its assigned partitions, then publish at
+/// the configured rate while consuming. Emits a VisualEvent per frame in/out.
+async fn run_client(args: Args, client: usize, vis: mpsc::Sender<VisualEvent>) -> anyhow::Result<()> {
+    let auth = parse_auth(&args.auth);
+    let mut conn = connect(&args.addr).await?;
+    handshake(&mut conn, client, &auth, &vis).await?;
+
+    // Cover the partitions: client i owns partitions where p % clients == i.
+    let owned: Vec<u32> = (0..args.partitions)
+        .filter(|p| (*p as usize) % args.clients.max(1) == client)
+        .collect();
+    for &p in &owned {
+        conn.send(try_encode(
+            Op::Subscribe,
+            next_req_id(),
+            &Subscribe {
+                topic: args.topic.clone(),
+                partition: Partition::new(p),
+                group: args.group.clone(),
+                prefetch: 64,
+                auto_ack: true,
+                consumer_group: None,
+                consumer_target: None,
+                member_id: None,
+            },
+        )?)
+        .await?;
+        let _ = vis
+            .send(VisualEvent {
+                client,
+                op: VizOp::Subscribe,
+                to_broker: true,
+                partition: Some(p),
+                latency_ms: None,
+            })
+            .await;
+        expect(&mut conn, Op::SubscribeOk).await?;
+    }
+
+    // Single task: publish on a steady ticker and read frames in one select, so
+    // the same connection answers broker pings inline (no split, no lost pongs).
+    let period = if args.rate > 0.0 {
+        Duration::from_secs_f64(1.0 / args.rate)
+    } else {
+        Duration::from_millis(200)
+    };
+    let payload = vec![b'x'; args.payload_size];
+    let key_space = (args.partitions as u64 * 3).max(1);
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut seq: u64 = 0;
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                let key = format!("key-{}", seq % key_space);
+                let partition = match args.key_mode {
+                    KeyMode::Keyed => (fnv1a(key.as_bytes()) % args.partitions.max(1) as u64) as u32,
+                    KeyMode::RoundRobin => (seq % args.partitions.max(1) as u64) as u32,
+                };
+                seq += 1;
+                let msg = Publish {
+                    topic: args.topic.clone(),
+                    group: args.group.clone(),
+                    partition: Partition::new(partition),
+                    require_confirm: args.confirm,
+                    content_type: None,
+                    headers: std::collections::HashMap::new(),
+                    published: unix_millis(),
+                    payload: payload.clone(),
+                    partition_key: matches!(args.key_mode, KeyMode::Keyed)
+                        .then(|| key.into_bytes()),
+                    partitioning_version: 0,
+                    ttl_ms: None,
+                };
+                conn.send(try_encode(Op::Publish, next_req_id(), &msg)?).await?;
+                let _ = vis
+                    .send(VisualEvent {
+                        client,
+                        op: VizOp::Publish,
+                        to_broker: true,
+                        partition: Some(partition),
+                        latency_ms: None,
+                    })
+                    .await;
+            }
+            frame = conn.next() => {
+                let Some(frame) = frame else { break };
+                let frame = frame?;
+                match frame.opcode {
+                    x if x == Op::Deliver as u16 => {
+                        let d: Deliver = try_decode(&frame)?;
+                        let latency = unix_millis().saturating_sub(d.published);
+                        let _ = vis
+                            .send(VisualEvent {
+                                client,
+                                op: VizOp::Deliver,
+                                to_broker: false,
+                                partition: Some(d.partition.id()),
+                                latency_ms: Some(latency),
+                            })
+                            .await;
+                    }
+                    x if x == Op::PublishOk as u16 => {
+                        let _ = vis
+                            .send(VisualEvent {
+                                client,
+                                op: VizOp::Confirm,
+                                to_broker: false,
+                                partition: None,
+                                latency_ms: None,
+                            })
+                            .await;
+                    }
+                    x if x == Op::Ping as u16 => {
+                        let _ = vis
+                            .send(VisualEvent {
+                                client,
+                                op: VizOp::Ping,
+                                to_broker: false,
+                                partition: None,
+                                latency_ms: None,
+                            })
+                            .await;
+                        conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
+                        let _ = vis
+                            .send(VisualEvent {
+                                client,
+                                op: VizOp::Pong,
+                                to_broker: true,
+                                partition: None,
+                                latency_ms: None,
+                            })
+                            .await;
+                    }
+                    x if x == Op::Error as u16 => {
+                        let e: ErrorMsg = try_decode(&frame)?;
+                        tracing::debug!("client {client} error {}: {}", e.code, e.message);
+                        let _ = vis
+                            .send(VisualEvent {
+                                client,
+                                op: VizOp::Error,
+                                to_broker: false,
+                                partition: None,
+                                latency_ms: None,
+                            })
+                            .await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
+    let args = Args::parse();
+    let (tx, mut rx) = mpsc::channel(8192);
 
-    let (tx, rx) = mpsc::channel(1024);
-
-    execute!(stdout(), Clear(ClearType::All))?;
-    execute!(stdout(), cursor::Hide)?;
-    for i in 0..6 {
-        let conn = connect_to_server().await?;
-        let tx = tx.clone();
-        tokio::spawn(visual_client(conn, i, 100 + i, tx));
+    // Declare the topic up front so the partitions exist before clients route to
+    // them. Best-effort: a broker that rejects re-declare is fine.
+    if let Err(err) = declare_topic(&args, &tx).await {
+        eprintln!("fibril-tui: could not declare `{}`: {err}", args.topic);
+        eprintln!("fibril-tui: is a broker listening at {}?", args.addr);
+        return Err(err);
     }
-    tokio::spawn(run_ui(rx)).await??;
 
-    execute!(stdout(), cursor::Show)?;
-    disable_raw_mode()?;
+    for client in 0..args.clients {
+        let args = args.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(err) = run_client(args, client, tx).await {
+                tracing::debug!("client {client} ended: {err}");
+            }
+        });
+    }
+    drop(tx);
 
-    Ok(())
+    let mut app = App {
+        clients: args.clients,
+        partitions: args.partitions.max(1),
+        topic: args.topic.clone(),
+        addr: args.addr.clone(),
+        balls: Vec::new(),
+        metrics: Metrics::default(),
+    };
+
+    run_ui(&mut app, &mut rx).await
 }

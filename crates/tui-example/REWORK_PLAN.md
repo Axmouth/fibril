@@ -121,12 +121,17 @@ failover / repartition / redelivery happen on screen.
 
 ## Checklist
 
-- [ ] CLI config (clap) + small defaults.
-- [ ] Refactor per-connection frame driver -> one instrumented driver emitting a
-      `VisualEvent` per frame.
-- [ ] One node per client + responsive layout.
-- [ ] Lifecycle return paths (confirm, ack) + colors.
-- [ ] Metrics HUD + p50/p99 latency.
-- [ ] Partition lanes + keyed routing.
-- [ ] `--addr` live-server config.
+Phase 1 (Core + partitions) - DONE:
+
+- [x] CLI config (clap) + small defaults.
+- [x] Refactor per-connection frame driver -> one instrumented driver emitting a
+      `VisualEvent` per frame (single select loop per client, answers pings inline).
+- [x] One node per client + responsive layout.
+- [x] Lifecycle return paths (confirm, deliver, pong) + colors. Manual-ack return
+      path is a Phase 2 addition (Phase 1 uses auto-ack).
+- [x] Metrics HUD + p50/p99 publish->deliver latency (from the deliver frame).
+- [x] Partition lanes + keyed routing (FNV-1a, matching the broker).
+- [x] `--addr` live-server config (plus declares the topic with `--partitions`).
 - [ ] tryout `--viz` launch hook; confirm trap-cleanup destroys launched servers.
+
+Phase 2 (queued): interactive keys (see above).
