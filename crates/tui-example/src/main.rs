@@ -19,12 +19,12 @@ use crossterm::{
 };
 use fibril_protocol::v1::{
     Auth, DeclareQueue, Deliver, ErrorMsg, Hello, Op, PROTOCOL_V1, Partition, Pong, Publish,
-    Subscribe,
-    frame::ProtoCodec,
+    Subscribe, TopologyOk, TopologyRequest,
+    frame::{Frame, ProtoCodec},
     helper::{Conn, try_decode, try_encode},
 };
 use fibril_util::unix_millis;
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, stream::select_all};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -292,6 +292,10 @@ struct App {
     /// Client index the interactive keys act on.
     focus: usize,
     control: Arc<Control>,
+    /// partition -> owning broker index, for coloring lanes by owner.
+    partition_owner: Vec<usize>,
+    /// Distinct brokers, so single-broker (standalone) skips owner coloring.
+    broker_count: usize,
 }
 
 static REQ: AtomicU64 = AtomicU64::new(1);
@@ -396,7 +400,15 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
         draw_box(f, *rect, &label, color);
     }
     for (p, rect) in layout.lane_boxes.iter().enumerate() {
-        draw_box(f, *rect, &format!("part {p}"), Color::Yellow);
+        // In a cluster, color each partition lane by its owning broker so the
+        // ownership spread is visible. A single broker stays uniform.
+        let (color, label) = if app.broker_count > 1 {
+            let owner = app.partition_owner.get(p).copied().unwrap_or(0);
+            (broker_color(owner), format!("part {p} @b{owner}"))
+        } else {
+            (Color::Yellow, format!("part {p}"))
+        };
+        draw_box(f, *rect, &label, color);
     }
 
     for ball in &app.balls {
@@ -470,6 +482,19 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("status")),
         area,
     );
+}
+
+/// A stable color per broker index, for tinting partition lanes by owner.
+fn broker_color(broker: usize) -> Color {
+    const PALETTE: [Color; 6] = [
+        Color::Yellow,
+        Color::Magenta,
+        Color::Cyan,
+        Color::LightGreen,
+        Color::LightRed,
+        Color::LightBlue,
+    ];
+    PALETTE[broker % PALETTE.len()]
 }
 
 fn ease(t: f32) -> f32 {
@@ -661,8 +686,36 @@ async fn expect(conn: &mut Conn, op: Op) -> anyhow::Result<()> {
     anyhow::bail!("connection closed waiting for {op:?}")
 }
 
-/// Declare the demo topic with the requested partition count (one-shot).
-async fn declare_topic(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Result<()> {
+/// The brokers to talk to and which one owns each partition.
+struct Cluster {
+    /// Broker endpoints. `brokers[0]` is the bootstrap address.
+    brokers: Vec<String>,
+    /// partition -> index into `brokers`. Defaults to 0 (bootstrap) for a
+    /// partition whose owner is unknown (e.g. standalone, where queue
+    /// partitioning is not carried in the client topology).
+    partition_owner: Vec<usize>,
+}
+
+/// Read frames until a `TopologyOk`, answering pings on the way.
+async fn recv_topology(conn: &mut Conn) -> anyhow::Result<TopologyOk> {
+    while let Some(frame) = conn.next().await {
+        let frame = frame?;
+        if frame.opcode == Op::TopologyOk as u16 {
+            return Ok(try_decode(&frame)?);
+        }
+        if frame.opcode == Op::Ping as u16 {
+            conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
+        }
+    }
+    anyhow::bail!("connection closed waiting for topology")
+}
+
+/// Declare the demo topic and learn which broker owns each partition, so clients
+/// can route publishes and subscribes to the owner. In a cluster the controller
+/// assigns owners shortly after declare, so poll briefly until every partition
+/// has one. Standalone brokers do not carry queue ownership in the topology, so
+/// owners stay unknown and default to the bootstrap broker (which owns all).
+async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Result<Cluster> {
     let auth = parse_auth(&args.auth);
     let mut conn = connect(&args.addr).await?;
     handshake(&mut conn, 0, &auth, vis).await?;
@@ -690,28 +743,90 @@ async fn declare_topic(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::
         },
     );
     expect(&mut conn, Op::DeclareQueueOk).await?;
-    Ok(())
+
+    let parts = args.partitions.max(1) as usize;
+    let mut owners: Vec<Option<String>> = vec![None; parts];
+    for _ in 0..20 {
+        conn.send(try_encode(
+            Op::Topology,
+            next_req_id(),
+            &TopologyRequest {
+                topic: Some(args.topic.clone()),
+                group: args.group.clone(),
+            },
+        )?)
+        .await?;
+        let topo = recv_topology(&mut conn).await?;
+        for q in &topo.queues {
+            if q.topic == args.topic
+                && q.group == args.group
+                && let (Some(ep), Some(slot)) =
+                    (q.owner_endpoint.as_ref(), owners.get_mut(q.partition.id() as usize))
+            {
+                *slot = Some(ep.clone());
+            }
+        }
+        if owners.iter().all(Option::is_some) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+    }
+
+    let mut brokers = vec![args.addr.clone()];
+    let mut partition_owner = vec![0usize; parts];
+    for (p, owner) in owners.iter().enumerate() {
+        if let Some(ep) = owner {
+            let idx = brokers.iter().position(|b| b == ep).unwrap_or_else(|| {
+                brokers.push(ep.clone());
+                brokers.len() - 1
+            });
+            partition_owner[p] = idx;
+        }
+    }
+    Ok(Cluster {
+        brokers,
+        partition_owner,
+    })
 }
 
-/// One client: handshake, subscribe to its assigned partitions, then publish
-/// while consuming. Publish rate, confirm mode, routing, and pause are read live
-/// from `control` each cycle, so interactive keys steer it without a restart.
-/// Emits a VisualEvent per frame in and out (best-effort, never blocking).
+/// One client: connect to every broker, subscribe to its owned partitions on
+/// each partition's owner, then publish (routed to each partition's owner) while
+/// consuming. Rate, confirm, routing, and pause are read live from `control`, so
+/// interactive keys steer it without a restart. Emits a VisualEvent per frame in
+/// and out (best-effort, never blocking).
 async fn run_client(
     args: Args,
     client: usize,
+    cluster: Arc<Cluster>,
     control: Arc<Control>,
     vis: mpsc::Sender<VisualEvent>,
 ) -> anyhow::Result<()> {
     let auth = parse_auth(&args.auth);
-    let mut conn = connect(&args.addr).await?;
-    handshake(&mut conn, client, &auth, &vis).await?;
 
-    // Cover the partitions: client i owns partitions where p % clients == i.
+    // Connect to every broker (bootstrap plus each partition owner) and handshake,
+    // so a publish or subscribe can be routed to the partition's owner.
+    let mut conns: Vec<Conn> = Vec::with_capacity(cluster.brokers.len());
+    for endpoint in &cluster.brokers {
+        let mut conn = connect(endpoint).await?;
+        handshake(&mut conn, client, &auth, &vis).await?;
+        conns.push(conn);
+    }
+
+    let owner_of = |partition: u32| -> usize {
+        cluster
+            .partition_owner
+            .get(partition as usize)
+            .copied()
+            .unwrap_or(0)
+    };
+
+    // Cover the partitions: client i owns partitions where p % clients == i, and
+    // subscribes to each on that partition's owner connection.
     let owned: Vec<u32> = (0..args.partitions)
         .filter(|p| (*p as usize) % args.clients.max(1) == client)
         .collect();
     for &p in &owned {
+        let conn = &mut conns[owner_of(p)];
         conn.send(try_encode(
             Op::Subscribe,
             next_req_id(),
@@ -737,12 +852,23 @@ async fn run_client(
                 latency_ms: None,
             },
         );
-        expect(&mut conn, Op::SubscribeOk).await?;
+        expect(conn, Op::SubscribeOk).await?;
     }
 
-    // One select loop: publish on a manually advanced deadline (so the rate can
-    // change live and a received frame does not reset the cadence) and read
-    // frames inline, so the same connection answers broker pings.
+    // Split each connection: sinks stay indexed by broker for routed sends, and
+    // the read halves merge into one tagged stream so any broker's frames are
+    // handled in the same select loop (and answered on the right connection).
+    let mut sinks: Vec<futures::stream::SplitSink<Conn, Frame>> = Vec::new();
+    let mut reads = Vec::new();
+    for (idx, conn) in conns.into_iter().enumerate() {
+        let (sink, stream) = conn.split();
+        sinks.push(sink);
+        reads.push(stream.map(move |r| (idx, r)).boxed());
+    }
+    let mut reads = select_all(reads);
+
+    // Publish on a manually advanced deadline so the rate can change live without
+    // a received frame resetting the cadence.
     let payload = vec![b'x'; args.payload_size];
     let parts = args.partitions.max(1) as u64;
     let key_space = (parts * 3).max(1);
@@ -776,7 +902,9 @@ async fn run_client(
                     partitioning_version: 0,
                     ttl_ms: None,
                 };
-                conn.send(try_encode(Op::Publish, next_req_id(), &msg)?).await?;
+                sinks[owner_of(partition)]
+                    .send(try_encode(Op::Publish, next_req_id(), &msg)?)
+                    .await?;
                 emit(
                     &vis,
                     VisualEvent {
@@ -788,8 +916,7 @@ async fn run_client(
                     },
                 );
             }
-            frame = conn.next() => {
-                let Some(frame) = frame else { break };
+            Some((broker, frame)) = reads.next() => {
                 let frame = frame?;
                 match frame.opcode {
                     x if x == Op::Deliver as u16 => {
@@ -819,8 +946,10 @@ async fn run_client(
                         );
                     }
                     x if x == Op::Ping as u16 => {
-                        // Answer the ping first, then emit the cosmetic frames.
-                        conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
+                        // Answer on the broker that pinged, then emit the visuals.
+                        sinks[broker]
+                            .send(try_encode(Op::Pong, frame.request_id, &Pong)?)
+                            .await?;
                         emit(
                             &vis,
                             VisualEvent {
@@ -859,6 +988,7 @@ async fn run_client(
                     _ => {}
                 }
             }
+            else => break,
         }
     }
 
@@ -870,13 +1000,16 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let (tx, mut rx) = mpsc::channel(8192);
 
-    // Declare the topic up front so the partitions exist before clients route to
-    // them. Best-effort: a broker that rejects re-declare is fine.
-    if let Err(err) = declare_topic(&args, &tx).await {
-        eprintln!("fibril-tui: could not declare `{}`: {err}", args.topic);
-        eprintln!("fibril-tui: is a broker listening at {}?", args.addr);
-        return Err(err);
-    }
+    // Declare the topic and learn which broker owns each partition, so clients can
+    // route to owners. Falls back to the bootstrap broker for unknown owners.
+    let cluster = match discover(&args, &tx).await {
+        Ok(cluster) => Arc::new(cluster),
+        Err(err) => {
+            eprintln!("fibril-tui: could not set up `{}`: {err}", args.topic);
+            eprintln!("fibril-tui: is a broker listening at {}?", args.addr);
+            return Err(err);
+        }
+    };
 
     let control = Arc::new(Control::new(
         args.rate,
@@ -889,8 +1022,9 @@ async fn main() -> anyhow::Result<()> {
         let args = args.clone();
         let tx = tx.clone();
         let control = control.clone();
+        let cluster = cluster.clone();
         tokio::spawn(async move {
-            if let Err(err) = run_client(args, client, control, tx).await {
+            if let Err(err) = run_client(args, client, cluster, control, tx).await {
                 tracing::debug!("client {client} ended: {err}");
             }
         });
@@ -906,6 +1040,8 @@ async fn main() -> anyhow::Result<()> {
         metrics: Metrics::default(),
         focus: 0,
         control,
+        partition_owner: cluster.partition_owner.clone(),
+        broker_count: cluster.brokers.len(),
     };
 
     run_ui(&mut app, &mut rx).await

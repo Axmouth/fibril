@@ -86,7 +86,9 @@ A few variations are worth trying:
   HUD). Interactive keys steer it live: `Tab` to focus a client, `space` to
   pause/resume it, `[` / `]` to change the publish rate, `c` to toggle confirms,
   `g` to switch keyed vs round-robin routing, and `q` to quit (which tears the
-  broker down).
+  broker down). Add `--ganglion --nodes 3` to run the visualizer against a real
+  cluster: it fetches topology, connects to every broker, and routes each publish
+  and subscribe to the partition's owner, with lanes colored by owning broker.
 
 This needs `cargo`, plus `jq` and `curl` for the coordinated-mode checks. The
 first run builds the broker and CLI, so it takes longer than later runs.

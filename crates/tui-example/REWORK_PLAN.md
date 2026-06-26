@@ -116,6 +116,16 @@ Queued (need more than a live setting flip):
   repartition is coordination-only), so it does not apply to the standalone
   `--viz` broker as is.
 
+## Cluster owner-routing - DONE
+
+The visualizer now fetches topology (declare then poll until every partition has
+an owner), connects to every broker, and routes each publish and subscribe to the
+partition's owner connection (read halves merged with `select_all`, sinks indexed
+by broker so pings are answered on the right connection). Lanes are colored by
+owning broker. Degrades cleanly to a single broker when ownership is unknown
+(standalone). Launch against a real cluster with
+`scripts/cluster-tryout.sh --viz --ganglion --nodes 3`.
+
 These are designed now but implemented after Phase 1 (Core + partitions). They
 pair with the one-command demo north star: fire it up, then press keys to make
 failover / repartition / redelivery happen on screen.

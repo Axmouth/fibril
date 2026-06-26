@@ -21,6 +21,7 @@
 #   scripts/cluster-tryout.sh --keep       # leave the cluster running to play with (detaches, prints a kill command)
 #   scripts/cluster-tryout.sh --ganglion --hold   # like --keep but stay attached; Ctrl-C tears the whole cluster down
 #   scripts/cluster-tryout.sh --viz   # one standalone broker + the live traffic visualizer (q to quit + tear down)
+#   scripts/cluster-tryout.sh --viz --ganglion --nodes 3   # 3-broker cluster + the visualizer routing across owners
 #
 # In --ganglion mode the servers share an embedded raft coordinator over real
 # TCP: the script asserts all nodes agree on one leader and voter set.
@@ -145,12 +146,12 @@ if [[ "$HOLD" == true && "$KEEP" == true ]]; then
   echo "FAIL: --hold and --keep are mutually exclusive (--keep detaches and leaves the cluster after exit; --hold stays attached and tears it down on Ctrl-C)" >&2
   exit 2
 fi
-# The visualizer drives the protocol at the frame level and connects to a single
-# broker (it does not follow owner redirects), so pin it to one standalone node:
-# that node owns every partition, so all the demo traffic flows cleanly.
-if [[ "$VIZ" == true ]]; then
+# The visualizer fetches topology and routes to each partition's owner, so it
+# works against a cluster (--viz --ganglion) or a single broker. With no
+# --ganglion it is pinned to one standalone node (which owns every partition) for
+# the simplest clean-traffic demo.
+if [[ "$VIZ" == true && "$GANGLION" != true ]]; then
   NODES=1
-  GANGLION=false
 fi
 
 require_positive_int_env() {
