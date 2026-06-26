@@ -495,14 +495,26 @@ rejected). Three composable dumb-broker pieces:
   Full mechanism + assumptions: website dev note "Live routing and cutover".
 
   #93 DONE (push efficiency): the broker now triggers the push on the routing
-  CONTENT (queues + streams), not the raw coordination generation (which churns
-  every heartbeat via the liveness timestamp). The pushed frame still carries the
-  live generation for the client to ack. Because content-gated pushes stop firing
-  once a cutover settles, the adoption gate's adoption_generation is now stamped
-  EAGERLY at the cutover (grow/shrink) instead of lazily by the controller, so a
+  CONTENT (queues + streams), not the raw coordination generation. CORRECTION to
+  the original premise: heartbeats do NOT bump the generation - the openraft state
+  machine absorbs label-only RegisterNode updates silently (storage.rs special
+  case). The generation DOES bump on any committed metadata change cluster-wide
+  (other topics' declares, transition markers, runtime settings, unrelated
+  failovers), so generation-triggering pushed identical topology to every client on
+  any such change; content-triggering narrows to this client's routing. The pushed
+  frame still carries the live generation to ack. Because content-gated pushes stop
+  firing once a cutover settles (while unrelated activity keeps bumping generation),
+  adoption_generation is stamped EAGERLY at the cutover (not lazily), so a
   connection's acked generation stays at a value the gate can clear. Tests:
-  broker_pushes_topology_update_on_generation_change (content change pushes) and
+  broker_pushes_topology_update_on_generation_change (content change pushes),
   broker_does_not_push_topology_when_content_unchanged (churn does not).
+
+  HARDENING (from a pathological-case review): global_topology_adoption now counts
+  only LIVE nodes (heartbeat within liveness TTL). A dead node's frozen adoption
+  label represented departed clients and pinned the cluster minimum down, stalling
+  every cutover on the timeout. Added pure-fn tests (live_topology_adoption excludes
+  dead nodes; repartition_adoption_satisfied gate decision) and a client test that
+  a stale/out-of-order push is ignored but still acked with the current generation.
 
   topology-as-a-stream is therefore NOT the routing path. It survives only as an
   OPTIONAL higher-level DISCOVERY layer: subscribe-to-a-pattern / auto-pickup of

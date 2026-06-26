@@ -250,6 +250,27 @@ pub fn aggregate_topology_adoption<'a>(labels: impl IntoIterator<Item = &'a str>
         .min()
 }
 
+/// The cluster-wide minimum acked topology generation across only the LIVE nodes,
+/// given each node's `(heartbeat_label, adoption_label)` pair. A dead node's
+/// adoption label is frozen at its last value and represents departed clients (the
+/// clients that were connected to it are gone), so counting it would wrongly pin
+/// the minimum down and stall every cutover on the adoption timeout. A node with
+/// no heartbeat label counts as live (static or manually registered). `None` when
+/// no live node reports an adoption label.
+pub fn live_topology_adoption<'a>(
+    nodes: impl IntoIterator<Item = (Option<&'a str>, Option<&'a str>)>,
+    now_ms: u64,
+    ttl_ms: u64,
+) -> Option<u64> {
+    let live_labels = nodes.into_iter().filter_map(|(heartbeat, adoption)| {
+        let alive = heartbeat
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .is_none_or(|beat| now_ms.saturating_sub(beat) <= ttl_ms);
+        alive.then_some(adoption).flatten()
+    });
+    aggregate_topology_adoption(live_labels)
+}
+
 /// Replicated runtime-settings document: the cluster truth. `cluster_version`
 /// is independent of each node's local store version (those differ per node);
 /// CAS on the serialized document makes concurrent publishers race-safe.
@@ -1127,17 +1148,24 @@ impl GanglionCoordination {
     }
 
     /// The cluster-wide minimum topology generation acked by client connections,
-    /// taken across every node's adoption label. `None` when no node reports a
-    /// label (no client anywhere has acked) - the controller reads that as "no
-    /// adoption yet" and leans on the adoption timeout. A node with acked clients
-    /// reports its own minimum; the cluster minimum is the lowest of those.
-    pub fn global_topology_adoption(&self) -> Option<u64> {
+    /// taken across only the LIVE nodes' adoption labels (heartbeat within `ttl`).
+    /// Dead nodes are excluded: their frozen adoption label represents departed
+    /// clients and would otherwise pin the minimum down and stall every cutover on
+    /// the adoption timeout. `None` when no live node reports a label (no client
+    /// has acked) - the controller reads that as "no adoption yet" and leans on the
+    /// adoption timeout. A node with acked clients reports its own minimum; the
+    /// cluster minimum is the lowest of those.
+    pub fn global_topology_adoption(&self, ttl: std::time::Duration) -> Option<u64> {
         let snapshot = self.node.committed_snapshot();
-        let labels = snapshot
-            .nodes
-            .values()
-            .filter_map(|node| node.labels.get(TOPOLOGY_ADOPTION_LABEL).map(String::as_str));
-        aggregate_topology_adoption(labels)
+        let now = unix_millis_now();
+        let ttl_ms = ttl.as_millis() as u64;
+        let nodes = snapshot.nodes.values().map(|node| {
+            (
+                node.labels.get(HEARTBEAT_LABEL).map(String::as_str),
+                node.labels.get(TOPOLOGY_ADOPTION_LABEL).map(String::as_str),
+            )
+        });
+        live_topology_adoption(nodes, now, ttl_ms)
     }
 
     /// Every queue with an in-progress repartition transition, read from the
@@ -2605,6 +2633,40 @@ mod cohort_transport_tests {
         assert_eq!(aggregate_topology_adoption(["7", "5", "9"]), Some(5));
         // Unparseable labels are ignored, not treated as zero.
         assert_eq!(aggregate_topology_adoption(["", "8", "oops"]), Some(8));
+    }
+
+    #[test]
+    fn live_topology_adoption_excludes_dead_nodes() {
+        let now = 100_000u64;
+        let ttl = 5_000u64;
+        // A fresh node acked 9; a dead node's frozen label says 3. The dead node
+        // must not pin the cluster minimum, so the live minimum is 9.
+        let fresh = (Some("99000"), Some("9"));
+        let dead = (Some("1000"), Some("3"));
+        assert_eq!(live_topology_adoption([fresh, dead], now, ttl), Some(9));
+
+        // Two live nodes: the minimum across them wins.
+        let fresh_low = (Some("98000"), Some("4"));
+        assert_eq!(
+            live_topology_adoption([fresh, fresh_low], now, ttl),
+            Some(4)
+        );
+
+        // A node with no heartbeat label counts as live (static/manual entry).
+        let static_node = (None, Some("2"));
+        assert_eq!(
+            live_topology_adoption([fresh, static_node], now, ttl),
+            Some(2)
+        );
+
+        // Only a dead node reports -> no live adoption signal.
+        assert_eq!(live_topology_adoption([dead], now, ttl), None);
+
+        // No nodes / no adoption labels -> no signal.
+        assert_eq!(
+            live_topology_adoption([(Some("99000"), None)], now, ttl),
+            None
+        );
     }
 
     #[test]

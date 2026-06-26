@@ -25,11 +25,16 @@ a live repartition is finalized safely, plus the assumptions each step relies on
    routing cache (replace + pool prune, generation-guarded against stale/out-of-order
    pushes) and acks the generation it now reflects (`TopologyUpdateAck`, op 102).
    The initial snapshot still comes from the client's `TopologyRequest`; the push
-   carries the deltas. The trigger is content, not the raw coordination generation:
-   that generation bumps on every committed change including node heartbeat
-   liveness timestamps, so triggering on it would re-push an identical topology to
-   every client each heartbeat. The pushed frame still carries the live generation,
-   which is what the client acks.
+   carries the deltas. The trigger is the routing content, not the raw coordination
+   generation. The generation bumps on any committed metadata change cluster-wide
+   (any topic's declare, a transition marker, runtime settings, an unrelated
+   failover), so triggering on it would re-push an identical topology to every
+   client whenever anything anywhere changed. (Heartbeats and other label-only
+   updates do not bump the generation - the state machine absorbs them silently -
+   so this is not a per-heartbeat storm, but it is still far more often than a
+   given client's routing actually changes.) Content-triggering pushes only when
+   this client's routing changed. The pushed frame still carries the live
+   generation, which is what the client acks.
 
 4. **Adoption tracking.** The broker records, per connection, the highest
    generation that connection has acked (`TopologyAdoptionTracker`). It reports
@@ -91,6 +96,13 @@ drain-complete, bounded by `coordination.ganglion.repartition_adoption_timeout_m
   tracker only after it acks at least once. A silent or pre-push client never
   drags the cluster minimum down; it is covered by the version-fence and the
   timeout. A connection's entry is dropped when it closes.
+- **Only live nodes count.** `global_topology_adoption` reads adoption labels from
+  nodes whose heartbeat is within the liveness TTL. A dead node's adoption label is
+  frozen at its last value and represents departed clients (the clients connected
+  to it are gone), so counting it would wrongly pin the cluster minimum down and
+  stall every cutover on the timeout. Live nodes self-heal: each heartbeat replaces
+  a node's whole label set, so a live node that loses all its clients drops its
+  adoption label on its next beat.
 - **No adoption signal means "not adopted yet."** If no connection anywhere has
   acked, `global_topology_adoption()` is `None` and the gate leans entirely on the
   timeout.
@@ -101,15 +113,18 @@ drain-complete, bounded by `coordination.ganglion.repartition_adoption_timeout_m
   state) before the bootstrap connection starts, so a push the broker sends right
   after HELLO has somewhere to land. Wiring the apply target after construction
   would let the first push be acked without being applied (a false ack).
-- **Topology generation churns; the push does not.** The generation is the
-  coordination committed generation, which advances on every committed change
-  including node heartbeat liveness timestamps. The push is therefore triggered on
-  the routing *content* (queues + streams), not the generation, so an idle cluster
-  whose generation keeps ticking does not re-push an identical topology. The pushed
-  frame still carries the live generation for the client to ack.
+- **The push triggers on content, not the generation.** The generation advances on
+  any committed metadata change cluster-wide (other topics, markers, runtime
+  settings, unrelated failovers), not just this client's routing - and not on
+  label-only updates like heartbeats, which the state machine absorbs without
+  bumping it. Triggering on the routing *content* (queues + streams) pushes only
+  when this client's routing actually changed. The pushed frame still carries the
+  live generation for the client to ack.
 - **The adoption gate is stamped eagerly, at the cutover.** Because pushes are
   content-gated, a connection stops re-acking once the cutover settles (no further
-  content change). So the marker's `adoption_generation` is captured at the cutover
-  (the generation a post-cutover push carries), not lazily at drain-complete time
-  (by which point the generation has churned far past what clients acked). A marker
-  with no `adoption_generation` predates this fencing and is treated as ungated.
+  content change for that queue), even though unrelated cluster activity keeps
+  bumping the generation. So the marker's `adoption_generation` is captured at the
+  cutover (the generation a post-cutover push carries), not lazily at drain-complete
+  time (by which point the generation may have advanced past what clients acked,
+  leaving the gate unsatisfiable until the timeout). A marker with no
+  `adoption_generation` predates this fencing and is treated as ungated.

@@ -5446,12 +5446,7 @@ mod tests {
             .connect(addr)
             .await
             .unwrap();
-        let mut sub = client
-            .subscribe("jobs")
-            .unwrap()
-            .sub()
-            .await
-            .unwrap();
+        let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap();
         let outcome = client.reconnect().await.unwrap();
 
         assert_eq!(outcome.resume_outcome, ResumeOutcome::Resumed);
@@ -5576,6 +5571,95 @@ mod tests {
         assert!(catalogue.streams.is_empty());
 
         server.await.unwrap();
+        client.shutdown().await;
+    }
+
+    // A stale (out-of-order) topology push must not regress the routing cache, and
+    // the client must still ack honestly with the generation it actually reflects -
+    // never the lower, stale generation.
+    #[tokio::test]
+    async fn client_ignores_stale_topology_push_and_acks_current() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let owner_new: SocketAddr = "127.0.0.1:7201".parse().unwrap();
+        let owner_stale: SocketAddr = "127.0.0.1:7202".parse().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut framed = Framed::new(conn, ProtoCodec);
+            let hello = framed.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            framed
+                .send(
+                    try_encode(
+                        Op::HelloOk,
+                        hello.request_id,
+                        &HelloOk {
+                            protocol_version: PROTOCOL_V1,
+                            owner_id: uuid::Uuid::new_v4(),
+                            client_id: uuid::Uuid::new_v4(),
+                            resume_token: uuid::Uuid::new_v4(),
+                            resume_outcome: ResumeOutcome::New,
+                            server_name: "fake".into(),
+                            compliance: COMPLIANCE_STRING.into(),
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            let push = |generation: u64, owner: SocketAddr| TopologyOk {
+                generation,
+                queues: vec![QueueTopologyEntry {
+                    topic: "jobs".into(),
+                    partition: Partition::new(0),
+                    group: None,
+                    owner_endpoint: Some(owner.to_string()),
+                    partitioning_version: 1,
+                    partition_count: 1,
+                }],
+                streams: vec![],
+            };
+
+            // Newer generation first, then a stale (lower) generation.
+            framed
+                .send(wire::encode_topology_update(0, &push(7, owner_new)).unwrap())
+                .await
+                .unwrap();
+            let ack: TopologyUpdateAck =
+                try_decode(&framed.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ack.generation, 7);
+
+            framed
+                .send(wire::encode_topology_update(0, &push(3, owner_stale)).unwrap())
+                .await
+                .unwrap();
+            // The stale push is ignored, but still acked with the CURRENT generation.
+            let ack: TopologyUpdateAck =
+                try_decode(&framed.next().await.unwrap().unwrap()).unwrap();
+            assert_eq!(ack.generation, 7);
+        });
+
+        let client = ClientOptions::new()
+            .disable_topology_warm()
+            .connect(addr)
+            .await
+            .unwrap();
+
+        // Both acks observed by the server task means both pushes were processed.
+        server.await.unwrap();
+
+        // Routing did not regress to the stale owner, and the generation held.
+        let owner = client
+            .shared
+            .topology
+            .load()
+            .lookup("jobs", Partition::new(0), None)
+            .expect("routing cache populated");
+        assert_eq!(owner.endpoint, owner_new);
+        assert_eq!(client.shared.topology.load().generation, 7);
+
         client.shutdown().await;
     }
 
@@ -5822,12 +5906,7 @@ mod tests {
             .connect(addr)
             .await
             .unwrap();
-        let mut sub = client
-            .subscribe("jobs")
-            .unwrap()
-            .sub()
-            .await
-            .unwrap();
+        let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap();
         let outcome = client.reconnect().await.unwrap();
 
         // Resume was rejected, yet the client still reconciled (the regression).
@@ -6175,7 +6254,11 @@ mod tests {
         let (client, mut rx) = client_with_command_rx();
         let task = tokio::spawn(async move {
             client
-                .declare_queue(QueueConfig::new("ephemeral").unwrap().default_message_ttl(30u64))
+                .declare_queue(
+                    QueueConfig::new("ephemeral")
+                        .unwrap()
+                        .default_message_ttl(30u64),
+                )
                 .await
         });
 
@@ -6236,13 +6319,8 @@ mod tests {
         // which would interleave an extra Subscribe with the auto-subscribe below.
         let mut keep_open: Vec<Box<dyn std::any::Any + Send>> = Vec::new();
         let manual_client = client.clone();
-        let manual = tokio::spawn(async move {
-            manual_client
-                .subscribe("jobs")
-                .unwrap()
-                .sub()
-                .await
-        });
+        let manual =
+            tokio::spawn(async move { manual_client.subscribe("jobs").unwrap().sub().await });
 
         match rx.recv().await.unwrap() {
             Command::Subscribe { req, reply } => {

@@ -503,6 +503,26 @@ pub fn spawn_ganglion_runtime_settings_sync(
         .spawn_runtime_settings_sync(runtime_settings)
 }
 
+/// Whether a drained repartition transition may finalize (retire shrunk-away
+/// partitions and clear the marker). Proceeds once the fleet has adopted the new
+/// routing - the cluster-wide acked topology generation has reached the
+/// transition's `adoption_generation` - or the adoption wait has timed out. A
+/// transition with no `adoption_generation` predates adoption fencing and is not
+/// gated. Publish version-fencing is the correctness backstop, so the timeout is a
+/// safe upper bound. Pure so the gate decision is unit tested directly.
+pub fn repartition_adoption_satisfied(
+    adoption_generation: Option<u64>,
+    global_adoption: Option<u64>,
+    elapsed: Duration,
+    timeout: Duration,
+) -> bool {
+    let adopted = match adoption_generation {
+        Some(target) => global_adoption.is_some_and(|acked| acked >= target),
+        None => true,
+    };
+    adopted || elapsed >= timeout
+}
+
 /// Build advisory heartbeat labels from local broker state. `topology_adoption`,
 /// when present, contributes the node's lowest acked topology generation so the
 /// repartition controller can fence a cutover on cluster-wide client adoption.
@@ -673,6 +693,10 @@ pub fn spawn_ganglion_broker_tasks(
     let repartition_tick_ms = config.coordination.ganglion.heartbeat_interval_ms;
     let adoption_timeout =
         Duration::from_millis(config.coordination.ganglion.repartition_adoption_timeout_ms);
+    // Only live nodes' adoption labels count toward the cutover gate; a dead
+    // node's frozen label must not stall it. Same liveness window the controller
+    // uses to detect dead brokers.
+    let adoption_liveness_ttl = Duration::from_millis(config.coordination.ganglion.liveness_ttl_ms);
     let repartition_watcher = tokio::spawn(async move {
         // When each drained-complete transition first became eligible to finalize,
         // keyed by (topic, group, version). Used to bound the wait for client
@@ -732,14 +756,14 @@ pub fn spawn_ganglion_broker_tasks(
                     let first_complete = *drain_complete_since
                         .entry(timer_key.clone())
                         .or_insert_with(std::time::Instant::now);
-                    let adopted = match doc.adoption_generation {
-                        Some(target) => coordination
-                            .global_topology_adoption()
-                            .is_some_and(|acked| acked >= target),
-                        None => true,
-                    };
-                    let timed_out = first_complete.elapsed() >= adoption_timeout;
-                    if !(adopted || timed_out) {
+                    let global_adoption =
+                        coordination.global_topology_adoption(adoption_liveness_ttl);
+                    if !repartition_adoption_satisfied(
+                        doc.adoption_generation,
+                        global_adoption,
+                        first_complete.elapsed(),
+                        adoption_timeout,
+                    ) {
                         // Drained but not yet adopted: wait for clients (or the
                         // timeout) before retiring partitions or clearing the marker.
                         continue;
@@ -1346,6 +1370,54 @@ impl DeclareCoordinator for CoordinationDeclareCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repartition_finalize_gate_waits_for_adoption_then_times_out() {
+        let timeout = Duration::from_secs(30);
+        let target = Some(5);
+
+        // Stamped but the fleet has not caught up, and the wait is young -> hold.
+        assert!(!repartition_adoption_satisfied(
+            target,
+            Some(4),
+            Duration::from_secs(1),
+            timeout
+        ));
+        // No adoption signal at all (e.g. no acking clients), young -> hold.
+        assert!(!repartition_adoption_satisfied(
+            target,
+            None,
+            Duration::from_secs(1),
+            timeout
+        ));
+        // The fleet caught up to the target -> finalize, regardless of the timer.
+        assert!(repartition_adoption_satisfied(
+            target,
+            Some(5),
+            Duration::from_secs(1),
+            timeout
+        ));
+        assert!(repartition_adoption_satisfied(
+            target,
+            Some(6),
+            Duration::from_secs(1),
+            timeout
+        ));
+        // Not adopted, but the adoption wait has elapsed -> finalize via timeout.
+        assert!(repartition_adoption_satisfied(
+            target,
+            None,
+            Duration::from_secs(31),
+            timeout
+        ));
+        // An unstamped transition (pre-adoption-fencing marker) is never gated.
+        assert!(repartition_adoption_satisfied(
+            None,
+            None,
+            Duration::from_secs(0),
+            timeout
+        ));
+    }
 
     #[test]
     fn runtime_seed_maps_config_defaults() {
