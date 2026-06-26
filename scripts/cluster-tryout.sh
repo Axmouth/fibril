@@ -20,6 +20,7 @@
 #   scripts/cluster-tryout.sh --nodes 100 --ganglion --summary --resource-summary --admin-wait-secs 5 --cluster-wait-secs 90
 #   scripts/cluster-tryout.sh --keep       # leave the cluster running to play with (detaches, prints a kill command)
 #   scripts/cluster-tryout.sh --ganglion --hold   # like --keep but stay attached; Ctrl-C tears the whole cluster down
+#   scripts/cluster-tryout.sh --viz   # one standalone broker + the live traffic visualizer (q to quit + tear down)
 #
 # In --ganglion mode the servers share an embedded raft coordinator over real
 # TCP: the script asserts all nodes agree on one leader and voter set.
@@ -29,6 +30,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 NODES=3
 KEEP=false
 HOLD=false
+VIZ=false
 GANGLION=false
 STAGGERED=false
 SUMMARY=false
@@ -75,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --nodes) NODES="$2"; shift 2 ;;
     --keep) KEEP=true; shift ;;
     --hold) HOLD=true; shift ;;
+    --viz) VIZ=true; HOLD=true; shift ;;
     --ganglion) GANGLION=true; shift ;;
     --staggered) GANGLION=true; STAGGERED=true; shift ;;
     --summary) SUMMARY=true; shift ;;
@@ -141,6 +144,13 @@ fi
 if [[ "$HOLD" == true && "$KEEP" == true ]]; then
   echo "FAIL: --hold and --keep are mutually exclusive (--keep detaches and leaves the cluster after exit; --hold stays attached and tears it down on Ctrl-C)" >&2
   exit 2
+fi
+# The visualizer drives the protocol at the frame level and connects to a single
+# broker (it does not follow owner redirects), so pin it to one standalone node:
+# that node owns every partition, so all the demo traffic flows cleanly.
+if [[ "$VIZ" == true ]]; then
+  NODES=1
+  GANGLION=false
 fi
 
 require_positive_int_env() {
@@ -438,6 +448,13 @@ else
   cargo build --quiet -p fibril -p fibril-cli
   SERVER=target/debug/fibril-server
   CTL=target/debug/fibrilctl
+fi
+
+TUI=""
+if [[ "$VIZ" == true ]]; then
+  echo "building fibril-tui-example..."
+  cargo build --quiet -p fibril-tui-example
+  TUI="$(dirname "$SERVER")/fibril-tui-example"
 fi
 
 PEERS=""
@@ -1599,7 +1616,18 @@ if [[ "$KEEP" == true ]]; then
   echo "logs/data: $RUN_DIR ; stop with: kill ${PIDS[*]}"
 fi
 
-if [[ "$HOLD" == true ]]; then
+if [[ "$VIZ" == true ]]; then
+  broker_addr="127.0.0.1:$((BASE_BROKER_PORT + 1))"
+  admin_port=$((BASE_ADMIN_PORT + 1))
+  echo
+  echo "broker dashboard: http://127.0.0.1:$admin_port/   (topology: http://127.0.0.1:$admin_port/admin/topology)"
+  echo "launching the live traffic visualizer against $broker_addr"
+  echo "press q (or Esc) in the visualizer to quit and tear the broker down."
+  sleep 1
+  # Run attached. When the TUI exits, fall through to the EXIT trap, which stops
+  # the broker because KEEP is false.
+  "$TUI" --addr "$broker_addr" --partitions 4 --topic demo --rate 6 || true
+elif [[ "$HOLD" == true ]]; then
   echo
   echo "cluster held open (--hold). Admin dashboards:"
   for i in $(seq 1 "$NODES"); do

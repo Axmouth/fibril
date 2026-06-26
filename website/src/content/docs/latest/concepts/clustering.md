@@ -80,6 +80,10 @@ A few variations are worth trying:
   kills the partition owner mid-load, and checks that no confirmed message is lost.
 - `--repartition-smoke` grows and then shrinks a queue's partition count under
   live traffic.
+- `--viz` starts a single standalone broker and drops you into a live terminal
+  visualizer of real wire traffic and partition routing (publishes, confirms,
+  deliveries, pings, errors as moving dots across partition lanes, with a metrics
+  HUD). Press `q` to quit, which tears the broker down.
 
 This needs `cargo`, plus `jq` and `curl` for the coordinated-mode checks. The
 first run builds the broker and CLI, so it takes longer than later runs.
