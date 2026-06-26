@@ -494,13 +494,15 @@ rejected). Three composable dumb-broker pieces:
   (drained AND adopted-or-timed-out), bounded by repartition_adoption_timeout_ms.
   Full mechanism + assumptions: website dev note "Live routing and cutover".
 
-  FOLLOW-UP (efficiency, not correctness): the topology generation is the
-  coordination committed generation, which advances on every committed change
-  including node heartbeat label updates. So a TopologyUpdate is pushed to clients
-  roughly once per heartbeat while anything changes, and the routing cache is
-  re-applied to an often-identical snapshot. Key the push (and the adoption
-  comparison) off a topology-content version rather than the raw coordination
-  generation, so pushes carry real deltas only. (#93)
+  #93 DONE (push efficiency): the broker now triggers the push on the routing
+  CONTENT (queues + streams), not the raw coordination generation (which churns
+  every heartbeat via the liveness timestamp). The pushed frame still carries the
+  live generation for the client to ack. Because content-gated pushes stop firing
+  once a cutover settles, the adoption gate's adoption_generation is now stamped
+  EAGERLY at the cutover (grow/shrink) instead of lazily by the controller, so a
+  connection's acked generation stays at a value the gate can clear. Tests:
+  broker_pushes_topology_update_on_generation_change (content change pushes) and
+  broker_does_not_push_topology_when_content_unchanged (churn does not).
 
   topology-as-a-stream is therefore NOT the routing path. It survives only as an
   OPTIONAL higher-level DISCOVERY layer: subscribe-to-a-pattern / auto-pickup of

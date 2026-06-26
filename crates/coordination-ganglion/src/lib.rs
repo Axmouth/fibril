@@ -11,17 +11,17 @@
 use std::{collections::HashMap, time::Duration};
 
 use fibril_broker::coordination::{
-    aggregate_cohort_membership, ClusterCohortController, CohortPlan, ConsumerGroupKey,
-    Coordination, CoordinationSnapshot, CoordinationStream, DeterministicStreamPlacement,
-    GlobalCohortMembership, LocalCohortMembership, NodeInfo, PartitionAssignment,
-    PartitionPlacementError, PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity,
-    ReplicationDurabilityPolicy, StreamAssignment, StreamIdentity, StreamPlacementInput,
-    StreamPlacementPolicy,
+    ClusterCohortController, CohortPlan, ConsumerGroupKey, Coordination, CoordinationSnapshot,
+    CoordinationStream, DeterministicStreamPlacement, GlobalCohortMembership,
+    LocalCohortMembership, NodeInfo, PartitionAssignment, PartitionPlacementError,
+    PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity, ReplicationDurabilityPolicy,
+    StreamAssignment, StreamIdentity, StreamPlacementInput, StreamPlacementPolicy,
+    aggregate_cohort_membership,
 };
 use fibril_storage::Partition;
 use ganglion_openraft::{
-    client_write_remote_with_hint, MetadataRaftCommand, MetadataRaftResponse, MetadataRejection,
-    OpenraftAdapterError, RaftMetadataNode, RemoteWriteError, WireFormat,
+    MetadataRaftCommand, MetadataRaftResponse, MetadataRejection, OpenraftAdapterError,
+    RaftMetadataNode, RemoteWriteError, WireFormat, client_write_remote_with_hint,
 };
 use tokio::sync::watch;
 
@@ -1601,18 +1601,35 @@ impl GanglionCoordination {
                 .await
                 .map_err(RepartitionQueueError::Coordination)?;
         }
-        // 3. Bump the version last: this is the routing cutover. The marker's
-        //    adoption generation is stamped lazily by the controller once it sees
-        //    the transition (the generation only exists after this bump).
-        self.repartition_queue(topic, group, new_count).await
+        // 3. Bump the version: this is the routing cutover.
+        let result = self.repartition_queue(topic, group, new_count).await?;
+        // 4. Stamp the marker with the topology generation now in effect so the
+        //    controller can fence the finalize on client adoption of the new
+        //    routing. Done right after the cutover (not at marker creation) because
+        //    the generation only exists once the version bump commits.
+        self.stamp_repartition_adoption_generation(
+            topic,
+            group,
+            &RepartitionTransitionDoc {
+                version: next_version,
+                n_old,
+                n_new: new_count,
+                adoption_generation: None,
+            },
+        )
+        .await
+        .map_err(RepartitionQueueError::Coordination)?;
+        Ok(result)
     }
 
-    /// Stamp a transition marker with the topology generation that now reflects
-    /// the new partitioning, so the controller can fence the finalize on clients
-    /// adopting it. Called by the controller the first time it sees a marker with
-    /// no adoption generation (the generation only exists after the cutover, so it
-    /// cannot be set at marker creation). Idempotent: re-stamping with the same
-    /// fields is a no-op overwrite.
+    /// Stamp a transition marker with the topology generation that now reflects the
+    /// new partitioning, so the controller can fence the finalize on clients
+    /// adopting it. Called right after the routing cutover (the generation only
+    /// exists once the version bump commits, so it cannot be set at marker
+    /// creation). Idempotent: re-stamping with the same fields is a no-op
+    /// overwrite. A client that applies the post-cutover topology push acks a
+    /// generation at least this high, so the adoption gate stays satisfiable even
+    /// though pushes are content-gated and stop firing once the cutover settles.
     pub async fn stamp_repartition_adoption_generation(
         &self,
         topic: &str,
@@ -1681,9 +1698,8 @@ impl GanglionCoordination {
         .await
         .map_err(RepartitionQueueError::Coordination)?;
         // 2. Bump the version (routing cutover) via a CAS to the smaller count.
-        //    The marker's adoption generation is stamped lazily by the controller
-        //    once it sees the transition.
         let key = queue_partitioning_key(topic, group);
+        let mut applied = None;
         for _ in 0..8 {
             let Some(current_raw) = self.cluster_attribute(&key) else {
                 return Err(RepartitionQueueError::NotDeclared {
@@ -1698,7 +1714,8 @@ impl GanglionCoordination {
                     )))
                 })?;
             if existing.partition_count == new_count {
-                return Ok(existing);
+                applied = Some(existing);
+                break;
             }
             let next = QueuePartitioning {
                 partition_count: new_count,
@@ -1717,14 +1734,37 @@ impl GanglionCoordination {
                 })
                 .await
             {
-                Ok(_) => return Ok(next),
+                Ok(_) => {
+                    applied = Some(next);
+                    break;
+                }
                 Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
                 Err(error) => return Err(RepartitionQueueError::Coordination(error)),
             }
         }
-        Err(RepartitionQueueError::Coordination(
-            OpenraftAdapterError::Storage("queue shrink lost the CAS race repeatedly".to_string()),
-        ))
+        let Some(applied) = applied else {
+            return Err(RepartitionQueueError::Coordination(
+                OpenraftAdapterError::Storage(
+                    "queue shrink lost the CAS race repeatedly".to_string(),
+                ),
+            ));
+        };
+        // 3. Stamp the marker with the topology generation now in effect so the
+        //    controller can fence the finalize on client adoption of the smaller
+        //    routing (only known once the cutover above has committed).
+        self.stamp_repartition_adoption_generation(
+            topic,
+            group,
+            &RepartitionTransitionDoc {
+                version: next_version,
+                n_old,
+                n_new: new_count,
+                adoption_generation: None,
+            },
+        )
+        .await
+        .map_err(RepartitionQueueError::Coordination)?;
+        Ok(applied)
     }
 
     pub fn runtime_settings_document(
@@ -2622,7 +2662,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use ganglion_openraft::{default_raft_config, InProcessRouter};
+    use ganglion_openraft::{InProcessRouter, default_raft_config};
 
     fn unique_dir(tag: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -4047,15 +4087,14 @@ mod tests {
                 .map(|q| q.partition.id())
                 .collect();
             let marker = coordination.repartition_transition("orders", None);
+            // adoption_generation is stamped (to Some) at the cutover, so match the
+            // transition shape and require it to be set rather than a fixed value.
             if part.as_ref().map(|p| p.partition_count) == Some(4)
                 && registered.is_superset(&std::collections::HashSet::from([2, 3]))
+                && marker.as_ref().map(|m| (m.version, m.n_old, m.n_new)) == Some((1, 2, 4))
                 && marker
-                    == Some(RepartitionTransitionDoc {
-                        version: 1,
-                        n_old: 2,
-                        n_new: 4,
-                        adoption_generation: None,
-                    })
+                    .as_ref()
+                    .is_some_and(|m| m.adoption_generation.is_some())
             {
                 break;
             }
@@ -4119,14 +4158,13 @@ mod tests {
         loop {
             let part = coordination.queue_partitioning("orders", None);
             let marker = coordination.repartition_transition("orders", None);
+            // adoption_generation is stamped (to Some) at the cutover, so match the
+            // transition shape and require it to be set rather than a fixed value.
             if part.as_ref().map(|p| p.partition_count) == Some(2)
+                && marker.as_ref().map(|m| (m.version, m.n_old, m.n_new)) == Some((1, 4, 2))
                 && marker
-                    == Some(RepartitionTransitionDoc {
-                        version: 1,
-                        n_old: 4,
-                        n_new: 2,
-                        adoption_generation: None,
-                    })
+                    .as_ref()
+                    .is_some_and(|m| m.adoption_generation.is_some())
             {
                 break;
             }

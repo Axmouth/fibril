@@ -19,12 +19,17 @@ a live repartition is finalized safely, plus the assumptions each step relies on
    owner). This is what makes routing *correct* during any change; everything
    below only makes it *cleaner and quieter*.
 
-3. **Live topology push.** When the coordination generation changes the broker
-   pushes a `TopologyUpdate` (op 101, same body as `TopologyOk`) to each
-   connection. The client applies it to its routing cache (replace + pool prune,
-   generation-guarded against stale/out-of-order pushes) and acks the generation
-   it now reflects (`TopologyUpdateAck`, op 102). The initial snapshot still comes
-   from the client's `TopologyRequest`; the push carries the deltas.
+3. **Live topology push.** When the routing *content* changes (owners, partition
+   counts, partitioning versions) the broker pushes a `TopologyUpdate` (op 101,
+   same body as `TopologyOk`) to each connection. The client applies it to its
+   routing cache (replace + pool prune, generation-guarded against stale/out-of-order
+   pushes) and acks the generation it now reflects (`TopologyUpdateAck`, op 102).
+   The initial snapshot still comes from the client's `TopologyRequest`; the push
+   carries the deltas. The trigger is content, not the raw coordination generation:
+   that generation bumps on every committed change including node heartbeat
+   liveness timestamps, so triggering on it would re-push an identical topology to
+   every client each heartbeat. The pushed frame still carries the live generation,
+   which is what the client acks.
 
 4. **Adoption tracking.** The broker records, per connection, the highest
    generation that connection has acked (`TopologyAdoptionTracker`). It reports
@@ -54,12 +59,14 @@ generation. To relate them, the transition marker carries an
 "The fleet adopted this repartition" then means "every node's acked generation has
 reached `adoption_generation`."
 
-`adoption_generation` is stamped **lazily by the controller**, the first time it
-sees a drained transition without one. It cannot be set at marker creation because
-the generation only exists after the version bump commits. Stamping at first
-observation uses a generation at or slightly after the true cutover generation, so
-it can over-wait by at most about one tick; clients keep acking newer generations,
-so they always reach it.
+`adoption_generation` is stamped **eagerly, right after the cutover** (the grow or
+shrink stamps it once the version bump commits). It cannot be set at marker
+creation because the generation only exists after that bump. Eager stamping is
+what makes the gate work with content-gated pushes: the post-cutover push carries
+a generation at least this high and the client acks it, but no further push fires
+while the cutover drains, so a connection's acked generation stays at the cutover
+value. Stamping that value (rather than a later, churned one) keeps the gate
+satisfiable.
 
 ## The finalize gate
 
@@ -94,11 +101,15 @@ drain-complete, bounded by `coordination.ganglion.repartition_adoption_timeout_m
   state) before the bootstrap connection starts, so a push the broker sends right
   after HELLO has somewhere to land. Wiring the apply target after construction
   would let the first push be acked without being applied (a false ack).
-- **Topology generation churns.** It is the coordination committed generation,
-  which advances on every committed change, including node heartbeat label
-  updates. So a `TopologyUpdate` is currently pushed to clients roughly once per
-  heartbeat while anything is changing, and clients re-apply an often-identical
-  snapshot (the catalogue change-feed suppresses no-op notifications, but the
-  routing cache is replaced redundantly). This is correct but chattier than
-  necessary; keying the push off a topology-content version rather than the raw
-  coordination generation is a tracked follow-up.
+- **Topology generation churns; the push does not.** The generation is the
+  coordination committed generation, which advances on every committed change
+  including node heartbeat liveness timestamps. The push is therefore triggered on
+  the routing *content* (queues + streams), not the generation, so an idle cluster
+  whose generation keeps ticking does not re-push an identical topology. The pushed
+  frame still carries the live generation for the client to ack.
+- **The adoption gate is stamped eagerly, at the cutover.** Because pushes are
+  content-gated, a connection stops re-acking once the cutover settles (no further
+  content change). So the marker's `adoption_generation` is captured at the cutover
+  (the generation a post-cutover push carries), not lazily at drain-complete time
+  (by which point the generation has churned far past what clients acked). A marker
+  with no `adoption_generation` predates this fencing and is treated as ungated.

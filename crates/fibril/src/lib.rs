@@ -721,19 +721,13 @@ pub fn spawn_ganglion_broker_tasks(
                 let complete = (0..doc.n_old).all(|r| drained.contains(&r));
                 if complete {
                     let is_leader = coordination.is_leader().await;
-                    // Stamp the adoption target generation the first time we see a
-                    // drained transition without one (the generation only exists
-                    // after the cutover, so it cannot be set at marker creation).
-                    if doc.adoption_generation.is_none() && is_leader {
-                        let _ = coordination
-                            .stamp_repartition_adoption_generation(&topic, group.as_deref(), &doc)
-                            .await;
-                    }
                     // Fence the finalize (retire + clear) on cluster-wide client
                     // adoption of the new routing: proceed once every node's acked
-                    // topology generation has caught up to the transition's, or the
-                    // adoption timeout elapses (the publish version-fence is the
-                    // correctness backstop, so the timeout is safe).
+                    // topology generation has caught up to the transition's adoption
+                    // generation (stamped at the cutover), or the adoption timeout
+                    // elapses (the publish version-fence is the correctness backstop,
+                    // so the timeout is safe). A marker with no adoption generation
+                    // predates this fencing and is not gated.
                     let timer_key = (topic.clone(), group.clone(), doc.version);
                     let first_complete = *drain_complete_since
                         .entry(timer_key.clone())
@@ -742,7 +736,7 @@ pub fn spawn_ganglion_broker_tasks(
                         Some(target) => coordination
                             .global_topology_adoption()
                             .is_some_and(|acked| acked >= target),
-                        None => false,
+                        None => true,
                     };
                     let timed_out = first_complete.elapsed() >= adoption_timeout;
                     if !(adopted || timed_out) {

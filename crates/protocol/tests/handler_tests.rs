@@ -2932,9 +2932,19 @@ struct BumpingTopology {
 }
 impl ClientTopologySource for BumpingTopology {
     fn topology(&self) -> TopologyOk {
+        let generation = self.generation.load(std::sync::atomic::Ordering::SeqCst);
         TopologyOk {
-            generation: self.generation.load(std::sync::atomic::Ordering::SeqCst),
-            queues: Vec::new(),
+            generation,
+            // The routing content tracks the generation (partitioning_version), so
+            // bumping the generation is a real content change the broker pushes on.
+            queues: vec![QueueTopologyEntry {
+                topic: "jobs".into(),
+                partition: Partition::new(0),
+                group: None,
+                owner_endpoint: Some("127.0.0.1:7000".into()),
+                partitioning_version: generation,
+                partition_count: 1,
+            }],
             streams: Vec::new(),
         }
     }
@@ -3030,6 +3040,95 @@ async fn broker_pushes_topology_update_on_generation_change() {
     .expect("server still answers after the ack");
     let ok: TopologyOk = try_decode(&resp).unwrap();
     assert_eq!(ok.generation, 2);
+
+    drop(framed);
+    let _ = server_task.await;
+    drop(dir);
+}
+
+/// A topology source whose generation bumps every read but whose routing content
+/// never changes - models the coordination generation churning on heartbeats.
+struct QuietTopology {
+    generation: Arc<std::sync::atomic::AtomicU64>,
+}
+impl ClientTopologySource for QuietTopology {
+    fn topology(&self) -> TopologyOk {
+        TopologyOk {
+            generation: self
+                .generation
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            queues: vec![QueueTopologyEntry {
+                topic: "jobs".into(),
+                partition: Partition::new(0),
+                group: None,
+                owner_endpoint: Some("127.0.0.1:7000".into()),
+                partitioning_version: 1,
+                partition_count: 1,
+            }],
+            streams: Vec::new(),
+        }
+    }
+    fn owner_endpoint(
+        &self,
+        _topic: &str,
+        _partition: Partition,
+        _group: Option<&str>,
+    ) -> Option<(String, u64)> {
+        None
+    }
+}
+
+/// The broker must NOT push a `TopologyUpdate` when the coordination generation
+/// churns (e.g. heartbeat liveness timestamps) but the routing content is
+/// unchanged. Otherwise every client gets an identical topology each heartbeat.
+#[tokio::test]
+async fn broker_does_not_push_topology_when_content_unchanged() {
+    let source = Arc::new(QuietTopology {
+        generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+    });
+
+    let (broker, dir) = open_test_broker().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(async move {
+        let (server, peer) = listener.accept().await.unwrap();
+        let tcp_stats = TcpStats::new(10);
+        let connection_stats = ConnectionStats::new();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+        handle_connection(
+            server,
+            broker,
+            tcp_stats,
+            connection_stats,
+            conn_id,
+            None::<StaticAuthHandler>,
+            ConnectionSettings::new(Some(60)),
+            Some(source as Arc<dyn ClientTopologySource>),
+            None,
+            None,
+        )
+        .await
+    });
+
+    let client = TcpStream::connect(addr).await.unwrap();
+    let mut framed = Framed::new(client, ProtoCodec);
+    handshake(&mut framed).await;
+
+    // Over several topology ticks (1s each) the generation churns but content does
+    // not, so no TopologyUpdate should arrive.
+    let pushed = tokio::time::timeout(std::time::Duration::from_millis(2500), async {
+        loop {
+            let frame = recv_frame(&mut framed).await;
+            if frame.opcode == Op::TopologyUpdate as u16 {
+                return true;
+            }
+        }
+    })
+    .await;
+    assert!(
+        pushed.is_err(),
+        "no topology push expected on content-stable churn"
+    );
 
     drop(framed);
     let _ = server_task.await;

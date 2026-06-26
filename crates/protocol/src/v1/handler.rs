@@ -2007,7 +2007,13 @@ pub async fn handle_connection(
     // to the client's TopologyRequest, not duplicated here.
     let mut topology_tick = tokio::time::interval(tokio::time::Duration::from_secs(1));
     topology_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut last_pushed_topology_gen = topology_source.as_ref().map(|s| s.generation());
+    // The last routing topology pushed to this connection, used to push only on a
+    // real content change. The coordination generation churns every heartbeat (the
+    // liveness timestamp is committed state), so triggering on it would push an
+    // identical topology to every client each heartbeat. Seeded with the current
+    // topology so the initial snapshot - already delivered via TopologyRequest - is
+    // not re-pushed.
+    let mut last_pushed_topology = topology_source.as_ref().map(|s| s.topology());
     heartbeat.tick().await; // consume first tick
     // ---- Framed socket -----------------------------------------------------
     let peer_addr = socket.peer_addr().ok();
@@ -2379,19 +2385,28 @@ pub async fn handle_connection(
                 continue;
             }
             LoopEvent::TopologyTick => {
-                // Push the topology only when the coordination generation moved
-                // and the connection is allowed to receive (authenticated when
-                // auth is required). The client refreshes its cache and acks.
+                // Push the topology only when the routing content changed (owners,
+                // partition counts, or partitioning versions) and the connection is
+                // allowed to receive (authenticated when auth is required). The
+                // pushed frame still carries the live coordination generation, which
+                // the client acks - so a connection's acked generation advances to
+                // the cutover generation on the post-cutover push and the adoption
+                // gate sees it. The client refreshes its cache and acks.
                 let authed = auth_handler.is_none() || logical.state.lock().await.authenticated;
                 if authed {
                     if let Some(source) = topology_source.as_ref() {
-                        let generation = source.generation();
-                        if last_pushed_topology_gen != Some(generation) {
-                            let topo = source.topology();
+                        let topo = source.topology();
+                        let changed = match &last_pushed_topology {
+                            Some(prev) => {
+                                prev.queues != topo.queues || prev.streams != topo.streams
+                            }
+                            None => true,
+                        };
+                        if changed {
                             match wire::encode_topology_update(req_id_gen_clone.next_id(), &topo) {
                                 Ok(f) => {
                                     if frame_tx_high_prio.send(f).await.is_ok() {
-                                        last_pushed_topology_gen = Some(generation);
+                                        last_pushed_topology = Some(topo);
                                     } else {
                                         break; // send failed -> connection gone
                                     }
