@@ -55,6 +55,7 @@ export default defineConfig({
             { label: "Configuration design", slug: "latest/development/config-design" },
             { label: "Metadata policy", slug: "latest/development/metadata-policy" },
             { label: "Partition routing", slug: "latest/development/partition-routing" },
+            { label: "Live routing and cutover", slug: "latest/development/live-routing-and-cutover" },
             { label: "Coordination internals", slug: "latest/development/coordination-internals" },
             { label: "Replication design", slug: "latest/development/replication-design" },
             { label: "Recovery quarantine internals", slug: "latest/development/recovery-internals" },
