@@ -18,8 +18,8 @@ use crossterm::{
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 use fibril_protocol::v1::{
-    Ack, Auth, DeclareQueue, DeliveryTag, Deliver, ErrorMsg, Hello, Nack, Op, PROTOCOL_V1,
-    Partition, Pong, Publish, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
+    Ack, AssignmentChanged, Auth, DeclareQueue, DeliveryTag, Deliver, ErrorMsg, Hello, Nack, Op,
+    PROTOCOL_V1, Partition, Pong, Publish, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
     frame::{Frame, ProtoCodec},
     helper::{Conn, try_decode, try_encode},
 };
@@ -343,6 +343,9 @@ struct App {
     broker_count: usize,
     /// Exclusive consumer group name, when running in cohort mode.
     cohort: Option<String>,
+    /// partition -> client currently assigned it, in cohort mode. Updated from
+    /// the broker's `AssignmentChanged` pushes so failover is visible on screen.
+    partition_client: Vec<Option<usize>>,
 }
 
 static REQ: AtomicU64 = AtomicU64::new(1);
@@ -453,12 +456,20 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
     for (p, rect) in layout.lane_boxes.iter().enumerate() {
         // In a cluster, color each partition lane by its owning broker so the
         // ownership spread is visible. A single broker stays uniform.
-        let (color, label) = if app.broker_count > 1 {
+        let (color, mut label) = if app.broker_count > 1 {
             let owner = app.partition_owner.get(p).copied().unwrap_or(0);
             (broker_color(owner), format!("part {p} @b{owner}"))
         } else {
             (Color::Yellow, format!("part {p}"))
         };
+        // In cohort mode, append the client currently assigned this partition, so
+        // the per-partition exclusive ownership (and its failover) is visible.
+        if app.cohort.is_some() {
+            match app.partition_client.get(p).copied().flatten() {
+                Some(c) => label.push_str(&format!(" c{c}")),
+                None => label.push_str(" c-"),
+            }
+        }
         draw_box(f, *rect, &label, color);
     }
 
@@ -609,7 +620,11 @@ fn update_balls(app: &mut App, dt: f32) {
     }
 }
 
-async fn run_ui(app: &mut App, rx: &mut mpsc::Receiver<VisualEvent>) -> anyhow::Result<()> {
+async fn run_ui(
+    app: &mut App,
+    rx: &mut mpsc::Receiver<VisualEvent>,
+    assign_rx: &mut mpsc::Receiver<(usize, Vec<u32>)>,
+) -> anyhow::Result<()> {
     use crossterm::event::{self, Event, KeyCode};
 
     let mut out = stdout();
@@ -645,6 +660,21 @@ async fn run_ui(app: &mut App, rx: &mut mpsc::Receiver<VisualEvent>) -> anyhow::
             drained += 1;
             if drained > 4096 {
                 break;
+            }
+        }
+
+        // Apply cohort assignment pushes: clear the client's old lanes, then claim
+        // its current set, so a killed member's partitions visibly move to a peer.
+        while let Ok((client, assigned)) = assign_rx.try_recv() {
+            for slot in app.partition_client.iter_mut() {
+                if *slot == Some(client) {
+                    *slot = None;
+                }
+            }
+            for p in assigned {
+                if let Some(slot) = app.partition_client.get_mut(p as usize) {
+                    *slot = Some(client);
+                }
             }
         }
 
@@ -887,13 +917,14 @@ async fn run_client(
     cluster: Arc<Cluster>,
     control: Arc<Control>,
     vis: mpsc::Sender<VisualEvent>,
+    assign: mpsc::Sender<(usize, Vec<u32>)>,
 ) -> anyhow::Result<()> {
     loop {
         if !control.is_alive(client) {
             tokio::time::sleep(Duration::from_millis(150)).await;
             continue;
         }
-        if let Err(err) = run_session(&args, client, &cluster, &control, &vis).await {
+        if let Err(err) = run_session(&args, client, &cluster, &control, &vis, &assign).await {
             tracing::debug!("client {client} session ended: {err}");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -911,6 +942,7 @@ async fn run_session(
     cluster: &Cluster,
     control: &Control,
     vis: &mpsc::Sender<VisualEvent>,
+    assign: &mpsc::Sender<(usize, Vec<u32>)>,
 ) -> anyhow::Result<()> {
     let auth = parse_auth(&args.auth);
 
@@ -1188,6 +1220,14 @@ async fn run_session(
                             },
                         );
                     }
+                    x if x == Op::AssignmentChanged as u16 => {
+                        // Cohort rebalance: the broker pushes this member's full
+                        // current partition set. Forward it so the UI can show
+                        // which client owns each lane (and watch failover move them).
+                        let a: AssignmentChanged = try_decode(&frame)?;
+                        let assigned = a.assigned.iter().map(|p| p.id()).collect();
+                        let _ = assign.try_send((client, assigned));
+                    }
                     x if x == Op::Error as u16 => {
                         let e: ErrorMsg = try_decode(&frame)?;
                         tracing::debug!("client {client} error {}: {}", e.code, e.message);
@@ -1216,6 +1256,9 @@ async fn run_session(
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let (tx, mut rx) = mpsc::channel(8192);
+    // Separate channel for cohort assignment pushes (client -> its full current
+    // partition set), so the UI can show which client owns each partition.
+    let (assign_tx, mut assign_rx) = mpsc::channel::<(usize, Vec<u32>)>(256);
 
     // Declare the topic and learn which broker owns each partition, so clients can
     // route to owners. Falls back to the bootstrap broker for unknown owners.
@@ -1238,15 +1281,17 @@ async fn main() -> anyhow::Result<()> {
     for client in 0..args.clients {
         let args = args.clone();
         let tx = tx.clone();
+        let assign_tx = assign_tx.clone();
         let control = control.clone();
         let cluster = cluster.clone();
         tokio::spawn(async move {
-            if let Err(err) = run_client(args, client, cluster, control, tx).await {
+            if let Err(err) = run_client(args, client, cluster, control, tx, assign_tx).await {
                 tracing::debug!("client {client} ended: {err}");
             }
         });
     }
     drop(tx);
+    drop(assign_tx);
 
     let mut app = App {
         clients: args.clients,
@@ -1260,7 +1305,8 @@ async fn main() -> anyhow::Result<()> {
         partition_owner: cluster.partition_owner.clone(),
         broker_count: cluster.brokers.len(),
         cohort: args.consumer_group.clone(),
+        partition_client: vec![None; args.partitions.max(1) as usize],
     };
 
-    run_ui(&mut app, &mut rx).await
+    run_ui(&mut app, &mut rx, &mut assign_rx).await
 }

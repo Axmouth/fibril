@@ -122,6 +122,9 @@ id and a reused server-minted member id, exactly as the high-level client's
 `.exclusive()` does, and the broker's per-partition gate delivers each partition
 to one member. Killing a member (`k`) now moves its partitions to a surviving
 peer (not just redelivery-to-self on reconnect). The cohort name shows in the HUD.
+Each lane also shows the client currently assigned it (`c{n}`), updated from the
+broker's `AssignmentChanged` pushes, so the failover is visible as the label moves
+from the killed member to its peer.
 
 Queued:
 
