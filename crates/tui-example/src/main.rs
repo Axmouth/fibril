@@ -19,7 +19,7 @@ use crossterm::{
 };
 use fibril_protocol::v1::{
     Ack, Auth, DeclareQueue, DeliveryTag, Deliver, ErrorMsg, Hello, Nack, Op, PROTOCOL_V1,
-    Partition, Pong, Publish, Subscribe, TopologyOk, TopologyRequest,
+    Partition, Pong, Publish, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
     frame::{Frame, ProtoCodec},
     helper::{Conn, try_decode, try_encode},
 };
@@ -79,6 +79,12 @@ struct Args {
     /// How keyed publishes pick a partition.
     #[arg(long, value_enum, default_value_t = KeyMode::Keyed)]
     key_mode: KeyMode,
+
+    /// Join an exclusive consumer group (cohort) of this name: the broker divides
+    /// the partitions across the clients, and a killed client's partitions move to
+    /// a surviving peer. Without it, clients consume fixed partitions.
+    #[arg(long)]
+    consumer_group: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -335,6 +341,8 @@ struct App {
     partition_owner: Vec<usize>,
     /// Distinct brokers, so single-broker (standalone) skips owner coloring.
     broker_count: usize,
+    /// Exclusive consumer group name, when running in cohort mode.
+    cohort: Option<String>,
 }
 
 static REQ: AtomicU64 = AtomicU64::new(1);
@@ -489,8 +497,16 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("fibril viz  ", Style::default().fg(Color::Cyan)),
             Span::raw(format!(
-                "{}  clients {}  partitions {}  topic {}",
-                app.addr, app.clients, app.partitions, app.topic
+                "{}  clients {}  brokers {}  partitions {}  topic {}{}",
+                app.addr,
+                app.clients,
+                app.broker_count,
+                app.partitions,
+                app.topic,
+                match &app.cohort {
+                    Some(g) => format!("  cohort {g}"),
+                    None => String::new(),
+                },
             )),
         ]),
         Line::from(format!(
@@ -732,6 +748,28 @@ async fn expect(conn: &mut Conn, op: Op) -> anyhow::Result<()> {
     anyhow::bail!("connection closed waiting for {op:?}")
 }
 
+/// Send a subscribe and return the `SubscribeOk` (answering pings on the way), so
+/// the caller can read the server-minted cohort member id to reuse on the rest of
+/// an exclusive member's subscribes.
+async fn subscribe(conn: &mut Conn, sub: &Subscribe) -> anyhow::Result<SubscribeOk> {
+    conn.send(try_encode(Op::Subscribe, next_req_id(), sub)?).await?;
+    while let Some(frame) = conn.next().await {
+        let frame = frame?;
+        match frame.opcode {
+            x if x == Op::SubscribeOk as u16 => return Ok(try_decode(&frame)?),
+            x if x == Op::Ping as u16 => {
+                conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
+            }
+            x if x == Op::Error as u16 || x == Op::SubscribeErr as u16 => {
+                let err: ErrorMsg = try_decode(&frame)?;
+                anyhow::bail!("subscribe rejected {}: {}", err.code, err.message);
+            }
+            _ => {}
+        }
+    }
+    anyhow::bail!("connection closed during subscribe")
+}
+
 /// The brokers to talk to and which one owns each partition.
 struct Cluster {
     /// Broker endpoints. `brokers[0]` is the bootstrap address.
@@ -893,39 +931,74 @@ async fn run_session(
             .unwrap_or(0)
     };
 
-    // Cover the partitions: client i owns partitions where p % clients == i, and
-    // subscribes to each on that partition's owner connection.
-    let owned: Vec<u32> = (0..args.partitions)
-        .filter(|p| (*p as usize) % args.clients.max(1) == client)
-        .collect();
-    for &p in &owned {
-        let conn = &mut conns[owner_of(p)];
-        conn.send(try_encode(
-            Op::Subscribe,
-            next_req_id(),
-            &Subscribe {
-                topic: args.topic.clone(),
-                partition: Partition::new(p),
-                group: args.group.clone(),
-                prefetch: 64,
-                auto_ack: false,
-                consumer_group: None,
-                consumer_target: None,
-                member_id: None,
-            },
-        )?)
-        .await?;
-        emit(
-            vis,
-            VisualEvent {
-                client,
-                op: VizOp::Subscribe,
-                to_broker: true,
-                partition: Some(p),
-                latency_ms: None,
-            },
-        );
-        expect(conn, Op::SubscribeOk).await?;
+    if let Some(group_name) = &args.consumer_group {
+        // Exclusive cohort: every client subscribes to EVERY partition (on its
+        // owner) with the same cohort id, and the broker's per-partition gate
+        // delivers each partition to exactly one member. Killing a member moves
+        // its partitions to a surviving subscriber. The first subscribe mints a
+        // cluster-scoped member id; reuse it so every broker sees one member.
+        let mut member_id = None;
+        for p in 0..args.partitions {
+            let ok = subscribe(
+                &mut conns[owner_of(p)],
+                &Subscribe {
+                    topic: args.topic.clone(),
+                    partition: Partition::new(p),
+                    group: args.group.clone(),
+                    prefetch: 64,
+                    auto_ack: false,
+                    consumer_group: Some(group_name.clone()),
+                    consumer_target: None,
+                    member_id,
+                },
+            )
+            .await?;
+            if member_id.is_none() {
+                member_id = ok.member_id;
+            }
+            emit(
+                vis,
+                VisualEvent {
+                    client,
+                    op: VizOp::Subscribe,
+                    to_broker: true,
+                    partition: Some(p),
+                    latency_ms: None,
+                },
+            );
+        }
+    } else {
+        // Competing consumers: client i owns partitions where p % clients == i,
+        // and subscribes to each on that partition's owner connection.
+        let owned: Vec<u32> = (0..args.partitions)
+            .filter(|p| (*p as usize) % args.clients.max(1) == client)
+            .collect();
+        for &p in &owned {
+            subscribe(
+                &mut conns[owner_of(p)],
+                &Subscribe {
+                    topic: args.topic.clone(),
+                    partition: Partition::new(p),
+                    group: args.group.clone(),
+                    prefetch: 64,
+                    auto_ack: false,
+                    consumer_group: None,
+                    consumer_target: None,
+                    member_id: None,
+                },
+            )
+            .await?;
+            emit(
+                vis,
+                VisualEvent {
+                    client,
+                    op: VizOp::Subscribe,
+                    to_broker: true,
+                    partition: Some(p),
+                    latency_ms: None,
+                },
+            );
+        }
     }
 
     // Split each connection: sinks stay indexed by broker for routed sends, and
@@ -1186,6 +1259,7 @@ async fn main() -> anyhow::Result<()> {
         control,
         partition_owner: cluster.partition_owner.clone(),
         broker_count: cluster.brokers.len(),
+        cohort: args.consumer_group.clone(),
     };
 
     run_ui(&mut app, &mut rx).await

@@ -116,15 +116,19 @@ is run by a supervisor that reconnects when it is brought back.
 - [x] `n` - nack (requeue) the focused client's next delivery, which the broker
       redelivers.
 
+Done (cohort pass): `--consumer-group <name>` makes every client an exclusive
+cohort member - each subscribes to every partition (on its owner) with the cohort
+id and a reused server-minted member id, exactly as the high-level client's
+`.exclusive()` does, and the broker's per-partition gate delivers each partition
+to one member. Killing a member (`k`) now moves its partitions to a surviving
+peer (not just redelivery-to-self on reconnect). The cohort name shows in the HUD.
+
 Queued:
 
 - `+` / `-` - add / remove a partition (live repartition). Needs ganglion (live
   repartition is coordination-only). Now that the visualizer routes across a
-  cluster (see below), this is feasible against `--viz --ganglion` via the admin
-  repartition API, with the lanes appearing/draining live.
-- Redelivery to a PEER (not the same client on reconnect) needs an exclusive
-  consumer group (cohort) so a surviving member takes over the killed member's
-  partitions.
+  cluster, this is feasible against `--viz --ganglion` via the admin repartition
+  API, with the lanes appearing/draining live.
 
 ## Cluster owner-routing - DONE
 
