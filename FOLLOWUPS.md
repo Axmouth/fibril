@@ -207,7 +207,16 @@ inventory as it lands (see the docs-currency directive in the Docs section).
     crate (`broker.listener.advertise: Option<...>` + `FIBRIL_BROKER_ADVERTISE`
     parsed there), not Stroma runtime settings (changing it requires
     re-registering). Broker port comes from the existing bind config, no magic
-    numbers. [USER]
+    numbers.
+  - Evolution (only if needed): multiple advertised addresses at once, the Kafka
+    `advertised.listeners` pattern, for serving in-network AND external clients
+    simultaneously. Requires named bind listeners plus selection by the listener
+    the client bootstrapped through (return the advertised address for THAT
+    listener) - a set with no selection rule just defers the choice. At that
+    point `owner_endpoint` becomes a per-listener map across the protocol and the
+    three clients. Do NOT pre-bloat the wire/data model for this now (speculative
+    churn); ship the single value first and grow to a map when the need is real.
+    [USER]
 - Programmatic scale up and down: join (learner to voter to rebalance) and
   drain-and-leave via fibrilctl plus the admin API, autoscaler-drivable. [PLAN]
 - Consumer assignment push and client fan-in narrowing: today a cohort client
