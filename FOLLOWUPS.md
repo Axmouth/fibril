@@ -7,7 +7,7 @@ design notes). Audit follow-ups live in [AUDITS.md](AUDITS.md), the audit status
 board, and are not duplicated here.
 
 Source tags: `[WL]` worklog, `[PLAN]` replication planning, `[DN]` design notes,
-`[MEM]` memory, `[RACE]` race-windows, `[AUDIT]` audit board, `[REC]` recommended direction.
+`[MEM]` memory, `[RACE]` race-windows, `[AUDIT]` audit board, `[AUTHOR]` author note.
 Tiers are grouped by concern, not strictly ordered.
 
 - Stream/staging perf levers from the staging-efficiency audit. DONE: removed the
@@ -153,7 +153,7 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   Robust fix: persist the role (or "not owner") so recovery restores a non-owner
   state and ownership is always coordination's decision, never a default (covers
   eviction AND restart). The gate masks this in normal operation, so it is
-  defense-in-depth. [REC]
+  defense-in-depth. [AUTHOR]
 - Ex-owner rejoins the cluster after losing privileges while its replicas were
   not fully caught up and its data was not shared: define and handle the
   mechanics (ties to epoch fencing plus recovery verification). [WL]
@@ -227,7 +227,7 @@ inventory as it lands (see the docs-currency directive in the Docs section).
     Kafka-style named bind listeners with selection by the listener the client
     bootstrapped through (return the advertised address for THAT listener). More
     moving parts (multiple listeners + per-listener map); the ordered-list probe
-    is the lighter first cut. [REC]
+    is the lighter first cut. [AUTHOR]
 - Programmatic scale up and down: join (learner to voter to rebalance) and
   drain-and-leave via fibrilctl plus the admin API, autoscaler-drivable. [PLAN]
 - Consumer assignment push and client fan-in narrowing: today a cohort client
@@ -241,19 +241,19 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 - Settings tiering: basic, advanced, expert, with collapsible sections. [DN/WL]
 - Settings presets, orthogonal to tiers: opinionated bundles such as low-latency,
   hands-off, and power-user. Tiers are how much you see, presets are what the
-  defaults do. [REC]
+  defaults do. [AUTHOR]
 - Relational settings nudges (soft warn, not reject): for example warn when a
   failover-sensitive timeout is set below the failure-detection cadence. Needs
   cross-setting advisories at config load and runtime PUT, plus an inline admin
-  hint. Pairs with settings tiering. [REC]
+  hint. Pairs with settings tiering. [AUTHOR]
 - Eager opt-in startup recovery: `recover_all` exists but is unused (recovery is
   lazy via `queue_handle`). A config to eagerly recover all on-disk partitions at
   boot makes `recovery.on_mismatch = refuse` a literal refuse-to-start. Lazy
-  stays the default. [REC]
+  stays the default. [AUTHOR]
 - Snapshot cadence: wire `snap_cfg.every_events` as an additional knob alongside
   the time and dirty triggers. The gate is commented out in
   `periodic_snapshot_step`, `last_snapshot_event_offset` is already tracked, so
-  wiring is low-risk. Currently `#[allow(dead_code)]` with a FIXME. [REC]
+  wiring is low-risk. Currently `#[allow(dead_code)]` with a FIXME. [AUTHOR]
 - Onboarding and easy trial (move on this soon): make "cluster from nothing"
   genuinely fast and low-ceremony. The local tryout still needs a clone and a
   build, so it is not really a 60-second path. Most of the pipeline is already
@@ -269,10 +269,10 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   - A curl-to-shell bootstrap that fetches and runs that compose for a single
     pasted command. Offer the compose itself as the safe default. This is what
     would earn back a real "60 seconds from nothing" claim.
-  - In-memory (non-durable) mode for an even lighter trial. [WL/REC]
+  - In-memory (non-durable) mode for an even lighter trial. [WL/AUTHOR]
 - Admin dashboard: a lost-connection banner. When the admin page can no longer
   reach its broker (broker down, failover, network blip), show a clear banner
-  instead of silently stale data. [REC]
+  instead of silently stale data. [AUTHOR]
 ### Queue lifecycle, retention, expiry (ordered plan)
 
 Small user-facing features, ordered cheapest-and-highest-visibility first. The
@@ -616,7 +616,7 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
    speculative header, settle = commit, fan-in reuse).
 5. Topology-as-a-stream system channel plus client-side pattern fan-in and
    auto-pickup.
-[DN/REC/MEM]
+[DN/AUTHOR/MEM]
 
 ## Clients
 
@@ -734,7 +734,7 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   - SERVER-GATED client items (build the client half when the server side lands):
     - Lease preservation across re-subscribe (a shared at-least-once limitation).
   Pairs with AUDITS.md "Client API parity" and the client reliability docs item.
-  [REC/AUDIT]
+  [AUTHOR/AUDIT]
   See clients/ARCHITECTURE.md for the design reference and clients/FEATURE_MATRIX.md
   for status. Next client: Python.
 
@@ -746,14 +746,14 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   churns all of them and discourages putting new tunables in config (e.g. the
   stream ring/live-channel sizes are module consts in broker.rs as a result). A
   builder with defaults lets new fields land without touching existing call sites,
-  and is the clean home for those stream tunables. [REC]
+  and is the clean home for those stream tunables. [AUTHOR]
 
 - Rework the `tui-example` (`crates/tui-example`): a small TUI app that connects
   to a broker and visualizes messages (packs) flowing in and out. It has disabled
   instrumentation (latency tracking + compute_stats were dead, removed in the
   dedup sweep). Bring it back to a clean, illustrative live-client demo. Also
   `benches/bin/bench_e2e.rs` is half-disabled (dead channels, hardcoded
-  reporter/broker params) and wants the same treatment. [REC]
+  reporter/broker params) and wants the same treatment. [AUTHOR]
 - `stroma.rs` by-concern file split: a readability refactor independent of
   clustering. A full module sketch is preserved in the archived worklog. Do the
   low-risk type modules first, then the engine impl split incrementally. [WL]
@@ -805,7 +805,7 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   partitioned fan-in, and redirects. [AUDIT]
 - A test pass to ensure tests pin correct behavior, not current bugs. [WL]
 - Revisit the audits in [AUDITS.md](AUDITS.md) and harvest anything still
-  actionable (several are Audited with open Next items). [REC]
+  actionable (several are Audited with open Next items). [AUTHOR]
 
 ## Far horizon (v2+)
 
