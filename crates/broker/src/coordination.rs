@@ -27,7 +27,10 @@ impl QueueIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeInfo {
     pub node_id: String,
-    pub broker_addr: SocketAddr,
+    /// The broker endpoint to advertise to peers and clients, as a connectable
+    /// `host:port` string (resolved at connect time). A `String` rather than a
+    /// `SocketAddr` so it can carry a service name when `bind` is `0.0.0.0`.
+    pub broker_addr: String,
     pub admin_addr: Option<SocketAddr>,
 }
 
@@ -1617,7 +1620,8 @@ impl StaticCoordination {
         }
     }
 
-    pub fn single_node(node_id: impl Into<String>, broker_addr: SocketAddr) -> Self {
+    pub fn single_node(node_id: impl Into<String>, broker_addr: impl Into<String>) -> Self {
+        let broker_addr = broker_addr.into();
         let node_id = node_id.into();
         let mut nodes = HashMap::new();
         nodes.insert(
@@ -1677,10 +1681,7 @@ pub struct NoopCoordination {
 impl Default for NoopCoordination {
     fn default() -> Self {
         Self {
-            inner: StaticCoordination::single_node(
-                "local",
-                "127.0.0.1:0".parse().expect("valid loopback socket"),
-            ),
+            inner: StaticCoordination::single_node("local", "127.0.0.1:0"),
         }
     }
 }
@@ -1721,7 +1722,7 @@ pub mod contract_tests {
                 node_id.to_string(),
                 NodeInfo {
                     node_id: node_id.to_string(),
-                    broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+                    broker_addr: format!("127.0.0.1:{port}"),
                     admin_addr: None,
                 },
             );
@@ -1842,7 +1843,7 @@ mod tests {
             "node-a".to_string(),
             NodeInfo {
                 node_id: "node-a".to_string(),
-                broker_addr: "127.0.0.1:1001".parse().unwrap(),
+                broker_addr: "127.0.0.1:1001".to_string(),
                 admin_addr: Some("127.0.0.1:2001".parse().unwrap()),
             },
         );
@@ -1850,7 +1851,7 @@ mod tests {
             "node-b".to_string(),
             NodeInfo {
                 node_id: "node-b".to_string(),
-                broker_addr: "127.0.0.1:1002".parse().unwrap(),
+                broker_addr: "127.0.0.1:1002".to_string(),
                 admin_addr: None,
             },
         );
@@ -1899,7 +1900,7 @@ mod tests {
             .owner_for("emails", Partition::new(0), Some("workers"))
             .expect("owner node");
         assert_eq!(owner.node_id, "node-a");
-        assert_eq!(owner.broker_addr, "127.0.0.1:1001".parse().unwrap());
+        assert_eq!(owner.broker_addr, "127.0.0.1:1001");
 
         let owned = coordination.owned_assignments();
         assert_eq!(owned.len(), 1);
@@ -3163,7 +3164,7 @@ mod tests {
                     node_id.clone(),
                     NodeInfo {
                         node_id,
-                        broker_addr: format!("127.0.0.1:{}", 10_000 + idx).parse().unwrap(),
+                        broker_addr: format!("127.0.0.1:{}", 10_000 + idx),
                         admin_addr: None,
                     },
                 )
@@ -3581,7 +3582,7 @@ mod tests {
                     node_id.to_string(),
                     NodeInfo {
                         node_id: node_id.to_string(),
-                        broker_addr: format!("127.0.0.1:{}", 10_000 + idx).parse().unwrap(),
+                        broker_addr: format!("127.0.0.1:{}", 10_000 + idx),
                         admin_addr: None,
                     },
                 )

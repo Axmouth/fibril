@@ -1192,7 +1192,7 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
         local_node.clone(),
         NodeInfo {
             node_id: local_node.clone(),
-            broker_addr: "127.0.0.1:1001".parse().unwrap(),
+            broker_addr: "127.0.0.1:1001".to_string(),
             admin_addr: None,
         },
     );
@@ -1200,7 +1200,7 @@ async fn static_coordination_can_drive_broker_ownership_gate() {
         remote_node.clone(),
         NodeInfo {
             node_id: remote_node.clone(),
-            broker_addr: "127.0.0.1:1002".parse().unwrap(),
+            broker_addr: "127.0.0.1:1002".to_string(),
             admin_addr: None,
         },
     );
@@ -1292,7 +1292,7 @@ fn coordination_nodes() -> HashMap<String, NodeInfo> {
         "node-a".to_string(),
         NodeInfo {
             node_id: "node-a".to_string(),
-            broker_addr: "127.0.0.1:1001".parse().unwrap(),
+            broker_addr: "127.0.0.1:1001".to_string(),
             admin_addr: None,
         },
     );
@@ -1300,7 +1300,7 @@ fn coordination_nodes() -> HashMap<String, NodeInfo> {
         "node-b".to_string(),
         NodeInfo {
             node_id: "node-b".to_string(),
-            broker_addr: "127.0.0.1:1002".parse().unwrap(),
+            broker_addr: "127.0.0.1:1002".to_string(),
             admin_addr: None,
         },
     );

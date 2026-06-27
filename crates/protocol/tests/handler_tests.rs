@@ -1581,7 +1581,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
     )
     .await;
     let resolver =
-        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
+        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr.to_string())]));
     let assignment = PartitionAssignment::new(
         QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
         "owner-a",
@@ -1642,9 +1642,9 @@ async fn static_protocol_owner_peer_resolver_returns_none_for_unknown_owner() {
 
 #[tokio::test]
 async fn static_protocol_owner_peer_resolver_reuses_peer_for_owner() {
-    let addr = "127.0.0.1:9".parse().unwrap();
+    let addr: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
     let resolver =
-        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
+        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr.to_string())]));
     let assignment = PartitionAssignment::new(
         QueueIdentity::new("replication.resolver.cached", Partition::new(0), None),
         "owner-a",
@@ -1677,7 +1677,7 @@ fn protocol_coordination_snapshot(
                 assignment.owner.clone(),
                 NodeInfo {
                     node_id: assignment.owner.clone(),
-                    broker_addr,
+                    broker_addr: broker_addr.to_string(),
                     admin_addr: None,
                 },
             )])
@@ -1803,7 +1803,7 @@ async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_m
         "owner-a".to_string(),
         NodeInfo {
             node_id: "owner-a".to_string(),
-            broker_addr: "127.0.0.1:10001".parse().unwrap(),
+            broker_addr: "127.0.0.1:10001".to_string(),
             admin_addr: None,
         },
     );
@@ -1811,7 +1811,7 @@ async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_m
         "owner-b".to_string(),
         NodeInfo {
             node_id: "owner-b".to_string(),
-            broker_addr: "127.0.0.1:10002".parse().unwrap(),
+            broker_addr: "127.0.0.1:10002".to_string(),
             admin_addr: None,
         },
     );
@@ -1877,7 +1877,7 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
     )
     .await;
     let resolver = StaticProtocolOwnerPeerResolver::with_config(
-        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("owner-a".to_string(), addr)]))
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("owner-a".to_string(), addr.to_string())]))
             .with_auth("fibril", "secret"),
     );
     let assignment = PartitionAssignment::new(
@@ -1970,7 +1970,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
     // listener — the resolver dials it from the snapshot), queue in catalogue.
     let node = |id: &str, addr: std::net::SocketAddr| fibril_broker::coordination::NodeInfo {
         node_id: id.to_string(),
-        broker_addr: addr,
+        broker_addr: addr.to_string(),
         admin_addr: None,
     };
     coordination
@@ -2151,7 +2151,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
 
     let node = |id: &str, addr: std::net::SocketAddr| fibril_broker::coordination::NodeInfo {
         node_id: id.to_string(),
-        broker_addr: addr,
+        broker_addr: addr.to_string(),
         admin_addr: None,
     };
     coordination
@@ -2359,7 +2359,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
 
     let node = |id: &str, port: u16| fibril_broker::coordination::NodeInfo {
         node_id: id.to_string(),
-        broker_addr: format!("127.0.0.1:{port}").parse().unwrap(),
+        broker_addr: format!("127.0.0.1:{port}"),
         admin_addr: None,
     };
     coordination
@@ -2527,7 +2527,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     )
     .await;
     let resolver =
-        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
+        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr.to_string())]));
     let resolver = Arc::new(resolver);
 
     let (follower_broker, _follower_dir) = open_test_broker().await;
@@ -2690,7 +2690,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     let (addr, server_task) =
         start_checkpoint_required_owner_server(checkpoint, message_records, event_records).await;
     let resolver =
-        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr)]));
+        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr.to_string())]));
     let resolver = Arc::new(resolver);
 
     let (follower_broker, _follower_dir) = open_test_broker().await;
@@ -2828,7 +2828,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
         .await
         .unwrap();
     let resolver = Arc::new(StaticProtocolOwnerPeerResolver::with_config(
-        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("owner-a".to_string(), addr)]))
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("owner-a".to_string(), addr.to_string())]))
             .with_reporter("follower-a"),
     ));
     let assignment = PartitionAssignment::new(

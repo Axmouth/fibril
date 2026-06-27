@@ -928,7 +928,7 @@ mod tests {
             "broker-a".to_string(),
             NodeInfo {
                 node_id: "broker-a".to_string(),
-                broker_addr: "127.0.0.1:9000".parse().unwrap(),
+                broker_addr: "127.0.0.1:9000".to_string(),
                 admin_addr: Some("127.0.0.1:9100".parse().unwrap()),
             },
         );

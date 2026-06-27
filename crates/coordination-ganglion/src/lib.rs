@@ -599,7 +599,7 @@ pub fn to_ganglion_snapshot(
                 node_id.clone(),
                 ganglion_core::NodeInfo::new(
                     info.node_id.clone(),
-                    info.broker_addr.to_string(),
+                    info.broker_addr.clone(),
                     info.admin_addr.map(|addr| addr.to_string()),
                 ),
             )
@@ -657,20 +657,22 @@ pub fn to_fibril_snapshot(snapshot: &ganglion_core::CoordinationSnapshot) -> Coo
     let nodes: HashMap<String, NodeInfo> = snapshot
         .nodes
         .iter()
-        .filter_map(|(node_id, info)| {
-            let broker_addr = info.endpoint.parse().ok()?;
+        .map(|(node_id, info)| {
+            // The broker endpoint is kept as a connectable string (it may be a
+            // service name), so it is carried through verbatim rather than parsed.
+            let broker_addr = info.endpoint.clone();
             let admin_addr = info
                 .admin_endpoint
                 .as_ref()
                 .and_then(|endpoint| endpoint.parse().ok());
-            Some((
+            (
                 node_id.clone(),
                 NodeInfo {
                     node_id: info.node_id.clone(),
                     broker_addr,
                     admin_addr,
                 },
-            ))
+            )
         })
         .collect();
 
@@ -935,7 +937,7 @@ impl GanglionCoordination {
     ) -> Result<(), OpenraftAdapterError> {
         let mut node = ganglion_core::NodeInfo::new(
             info.node_id.clone(),
-            info.broker_addr.to_string(),
+            info.broker_addr.clone(),
             info.admin_addr.map(|addr| addr.to_string()),
         );
         node.labels = labels;
@@ -2155,9 +2157,9 @@ impl GanglionCoordination {
                     .and_then(|raw| raw.parse::<u64>().ok())
                     .is_none_or(|beat| now.saturating_sub(beat) <= ttl_ms)
             })
-            .filter_map(|node| {
-                let broker_addr = node.endpoint.parse().ok()?;
-                Some((
+            .map(|node| {
+                let broker_addr = node.endpoint.clone();
+                (
                     node.node_id.clone(),
                     NodeInfo {
                         node_id: node.node_id.clone(),
@@ -2167,7 +2169,7 @@ impl GanglionCoordination {
                             .as_ref()
                             .and_then(|endpoint| endpoint.parse().ok()),
                     },
-                ))
+                )
             })
             .collect()
     }
@@ -2743,7 +2745,7 @@ mod tests {
             "broker-a".to_string(),
             NodeInfo {
                 node_id: "broker-a".to_string(),
-                broker_addr: "127.0.0.1:9000".parse().expect("addr"),
+                broker_addr: "127.0.0.1:9000".to_string(),
                 admin_addr: None,
             },
         );
@@ -2751,7 +2753,7 @@ mod tests {
             "broker-b".to_string(),
             NodeInfo {
                 node_id: "broker-b".to_string(),
-                broker_addr: "127.0.0.1:9001".parse().expect("addr"),
+                broker_addr: "127.0.0.1:9001".to_string(),
                 admin_addr: Some("127.0.0.1:9101".parse().expect("addr")),
             },
         );
@@ -2913,7 +2915,7 @@ mod tests {
         let queue = QueueIdentity::new("orders", Partition::new(0), Some("workers"));
         let live_node = |id: &str, port: u16| NodeInfo {
             node_id: id.to_string(),
-            broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+            broker_addr: format!("127.0.0.1:{port}"),
             admin_addr: None,
         };
         let mut live: HashMap<String, NodeInfo> = HashMap::new();
@@ -3364,7 +3366,7 @@ mod tests {
         provider
             .register_self(&NodeInfo {
                 node_id: "broker-a".into(),
-                broker_addr: "127.0.0.1:9000".parse().expect("addr"),
+                broker_addr: "127.0.0.1:9000".to_string(),
                 admin_addr: None,
             })
             .await
@@ -3474,7 +3476,7 @@ mod tests {
         provider
             .register_self(&NodeInfo {
                 node_id: "broker-a".into(),
-                broker_addr: "127.0.0.1:9100".parse().expect("addr"),
+                broker_addr: "127.0.0.1:9100".to_string(),
                 admin_addr: None,
             })
             .await
@@ -3566,7 +3568,7 @@ mod tests {
 
         let broker = |id: &str, port: u16| NodeInfo {
             node_id: id.to_string(),
-            broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+            broker_addr: format!("127.0.0.1:{port}"),
             admin_addr: None,
         };
         provider
@@ -3855,7 +3857,7 @@ mod tests {
         let queue = QueueIdentity::new("orders", Partition::new(0), None);
         let info = |id: &str, port: u16| NodeInfo {
             node_id: id.to_string(),
-            broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+            broker_addr: format!("127.0.0.1:{port}"),
             admin_addr: None,
         };
         let tails = |message: u64, event: u64| {
@@ -3964,7 +3966,7 @@ mod tests {
 
         let broker = |id: &str, port: u16| NodeInfo {
             node_id: id.to_string(),
-            broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+            broker_addr: format!("127.0.0.1:{port}"),
             admin_addr: None,
         };
         provider
@@ -4459,7 +4461,7 @@ mod tests {
         // has members m1 + m2 (as the heartbeat would carry).
         let info = NodeInfo {
             node_id: "broker-a".into(),
-            broker_addr: "127.0.0.1:9000".parse().expect("addr"),
+            broker_addr: "127.0.0.1:9000".to_string(),
             admin_addr: None,
         };
         let membership = vec![LocalCohortMembership {
@@ -4559,7 +4561,7 @@ mod tests {
             async move {
                 let info = NodeInfo {
                     node_id: node_id.into(),
-                    broker_addr: format!("127.0.0.1:{port}").parse().expect("addr"),
+                    broker_addr: format!("127.0.0.1:{port}"),
                     admin_addr: None,
                 };
                 let mut labels = BTreeMap::new();

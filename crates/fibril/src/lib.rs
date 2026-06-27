@@ -456,7 +456,11 @@ pub fn stream_ownership_for_ganglion(parts: Option<&TcpGanglionParts>) -> Arc<dy
 pub fn single_node_admin_coordination(config: &ServerConfig) -> Arc<dyn Coordination> {
     Arc::new(StaticCoordination::single_node(
         config.coordination.node_id.clone(),
-        config.broker.listener.bind,
+        config
+            .broker_advertise_addresses()
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| config.broker.listener.bind.to_string()),
     ))
 }
 
@@ -616,10 +620,18 @@ pub fn spawn_ganglion_broker_tasks(
 
     let tails_broker = broker.clone();
     let labels_adoption = topology_adoption.clone();
+    // Advertise the configured/derived address (a routable host:port, possibly a
+    // service name) so peers and clients can dial back even when bind is 0.0.0.0.
+    // Fall back to the bind address when nothing else is known.
+    let advertise_endpoint = config
+        .broker_advertise_addresses()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| config.broker.listener.bind.to_string());
     let heartbeat = parts.coordination.spawn_heartbeat_with_labels(
         NodeInfo {
             node_id: config.coordination.node_id.clone(),
-            broker_addr: config.broker.listener.bind,
+            broker_addr: advertise_endpoint,
             admin_addr: Some(config.admin.listener.bind),
         },
         Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),

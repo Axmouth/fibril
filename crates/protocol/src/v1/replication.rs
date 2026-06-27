@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -125,7 +124,7 @@ pub struct ProtocolOwnerPeerAuth {
 
 #[derive(Debug, Clone)]
 pub struct ProtocolOwnerPeerResolverConfig {
-    pub nodes: HashMap<String, SocketAddr>,
+    pub nodes: HashMap<String, String>,
     pub auth: Option<ProtocolOwnerPeerAuth>,
     pub client_name: String,
     pub client_version: String,
@@ -135,7 +134,7 @@ pub struct ProtocolOwnerPeerResolverConfig {
 }
 
 impl ProtocolOwnerPeerResolverConfig {
-    pub fn new(nodes: HashMap<String, SocketAddr>) -> Self {
+    pub fn new(nodes: HashMap<String, String>) -> Self {
         Self {
             nodes,
             auth: None,
@@ -184,7 +183,7 @@ pub struct StaticProtocolOwnerPeerResolver {
 }
 
 impl StaticProtocolOwnerPeerResolver {
-    pub fn new(nodes: HashMap<String, SocketAddr>) -> Self {
+    pub fn new(nodes: HashMap<String, String>) -> Self {
         Self {
             cfg: ProtocolOwnerPeerResolverConfig::new(nodes),
             peers: Mutex::new(HashMap::new()),
@@ -219,7 +218,7 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
         Result<Option<Arc<dyn BrokerOwnerReplicationPeer>>, BrokerError>,
     > {
         Box::pin(async move {
-            let Some(addr) = self.cfg.nodes.get(&assignment.owner).copied() else {
+            let Some(addr) = self.cfg.nodes.get(&assignment.owner).cloned() else {
                 return Ok(None);
             };
 
@@ -251,7 +250,7 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
 }
 
 struct CachedProtocolOwnerPeer {
-    addr: SocketAddr,
+    addr: String,
     peer: Arc<ProtocolOwnerReplicationPeer>,
 }
 
@@ -321,7 +320,7 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
                 self.peers.lock().await.remove(&cache_key);
                 return Ok(None);
             };
-            let addr = node.broker_addr;
+            let addr = node.broker_addr.clone();
 
             let mut peers = self.peers.lock().await;
             if let Some(cached) = peers.get(&cache_key) {
@@ -332,7 +331,7 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
             }
 
             let mut built = ProtocolOwnerReplicationPeer::new_reconnecting(
-                addr,
+                addr.clone(),
                 self.cfg.auth.clone(),
                 self.cfg.client_name.clone(),
                 self.cfg.client_version.clone(),
@@ -358,12 +357,12 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
 }
 
 async fn open_protocol_owner_conn(
-    addr: SocketAddr,
+    addr: String,
     auth: Option<&ProtocolOwnerPeerAuth>,
     client_name: &str,
     client_version: &str,
 ) -> Result<Conn, BrokerError> {
-    let stream = TcpStream::connect(addr)
+    let stream = TcpStream::connect(addr.as_str())
         .await
         .map_err(|err| BrokerError::Unknown(format!("owner peer connect failed: {err}")))?;
     let mut conn = tokio_util::codec::Framed::new(stream, ProtoCodec);
@@ -414,7 +413,7 @@ async fn open_protocol_owner_conn(
 }
 
 pub async fn connect_protocol_owner_peer(
-    addr: SocketAddr,
+    addr: String,
     auth: Option<&ProtocolOwnerPeerAuth>,
     client_name: &str,
     client_version: &str,
@@ -426,7 +425,7 @@ pub async fn connect_protocol_owner_peer(
 
 #[derive(Debug, Clone)]
 struct ProtocolOwnerPeerConnectConfig {
-    addr: SocketAddr,
+    addr: String,
     auth: Option<ProtocolOwnerPeerAuth>,
     client_name: String,
     client_version: String,
@@ -435,7 +434,7 @@ struct ProtocolOwnerPeerConnectConfig {
 impl ProtocolOwnerPeerConnectConfig {
     async fn open(&self) -> Result<Conn, BrokerError> {
         open_protocol_owner_conn(
-            self.addr,
+            self.addr.clone(),
             self.auth.as_ref(),
             &self.client_name,
             &self.client_version,
@@ -515,7 +514,7 @@ impl ProtocolOwnerReplicationPeer {
     }
 
     pub fn new_reconnecting(
-        addr: SocketAddr,
+        addr: String,
         auth: Option<ProtocolOwnerPeerAuth>,
         client_name: String,
         client_version: String,
