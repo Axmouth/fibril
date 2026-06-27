@@ -185,12 +185,29 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   broker registers in the node table (and that clients are redirected to as an
   owner endpoint) is just `config.broker.listener.bind`. In a container that is
   `0.0.0.0:9876`, which a peer cannot dial back, so cross-broker owner routing and
-  replication only work when the bind happens to be a reachable address. A
-  `FIBRIL_BROKER_ADVERTISE` knob (advertise the service name or routable host,
-  default to the bind when unset) is needed before the Docker visualizer can route
-  across a multi-broker cluster, and it cleans up containerized replication too.
-  The single-broker `compose.viz.example.yaml` sidesteps this (owner endpoints are
-  unknown, so the visualizer talks to the one broker). [USER]
+  replication only work when the bind happens to be a reachable address. Needed
+  before the Docker visualizer can route across a multi-broker cluster, and it
+  cleans up containerized replication too. The single-broker
+  `compose.viz.example.yaml` sidesteps this (owner endpoints are unknown, so the
+  visualizer talks to the one broker).
+  - Resolution order to keep the common case zero-config: explicit advertise >
+    derived from the coordination peer host (our own entry in
+    `FIBRIL_COORDINATION_PEERS`) + the broker port, in ganglion mode > the bind
+    address (standalone / fallback). The peer-derived default is deterministic at
+    startup and covers the in-network case (incl. the containerized cluster viz),
+    since repartition/replication are ganglion-only anyway.
+  - Auto-derive limits: an accepted socket's `local_addr()` resolves a 0.0.0.0
+    bind to the real interface IP, but it is unavailable until first connect, is
+    a container-internal IP rather than the stable service name, and is ambiguous
+    on multi-homed hosts - a fallback hint at best. Clients reaching the cluster
+    from OUTSIDE the network via mapped ports cannot be auto-derived (the Kafka
+    advertised.listeners multi-listener problem), so the explicit override must
+    exist.
+  - Settings discipline: a startup/topology value, so it lives in the config
+    crate (`broker.listener.advertise: Option<...>` + `FIBRIL_BROKER_ADVERTISE`
+    parsed there), not Stroma runtime settings (changing it requires
+    re-registering). Broker port comes from the existing bind config, no magic
+    numbers. [USER]
 - Programmatic scale up and down: join (learner to voter to rebalance) and
   drain-and-leave via fibrilctl plus the admin API, autoscaler-drivable. [PLAN]
 - Consumer assignment push and client fan-in narrowing: today a cohort client
