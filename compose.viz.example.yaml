@@ -1,0 +1,51 @@
+# Single-broker Fibril with the live terminal visualizer, for watching real wire
+# traffic and partition routing with no clone and no Rust toolchain. It starts one
+# standalone broker and drops you into the TUI, which animates publishes, confirms,
+# deliveries, acks, pings and errors as moving dots across partition lanes, with a
+# metrics HUD.
+#
+# Run it (the visualizer needs a real terminal, so use `compose run`, not `up`):
+#
+#   docker compose -f compose.viz.example.yaml run --rm viz
+#
+# Press `q` to quit. Then stop the broker and remove its data volume with:
+#
+#   docker compose -f compose.viz.example.yaml down -v
+#
+# The visualizer connects to the broker over the compose network. This is a single
+# standalone broker (no clustering), so every partition is owned by the one broker.
+# To watch ownership spread across a real cluster, see compose.cluster.example.yaml
+# and the admin topology page.
+
+services:
+  broker:
+    image: ghcr.io/axmouth/fibril-server:main
+    restart: unless-stopped
+    ports:
+      - "9876:9876"   # broker (client connections)
+      - "8081:8081"   # admin dashboard
+    environment:
+      FIBRIL_BROKER_BIND: 0.0.0.0:9876
+      FIBRIL_ADMIN_BIND: 0.0.0.0:8081
+    volumes:
+      - broker-data:/app/server_data
+
+  # The visualizer. Run with `docker compose run --rm viz` so it gets a real
+  # terminal (tty + stdin); it is not a background service, so `up` skips it.
+  viz:
+    image: ghcr.io/axmouth/fibril-server:main
+    # Profiled so a plain `up` starts only the broker. `compose run viz` starts it
+    # regardless of profile and brings the broker up as its dependency.
+    profiles: ["viz"]
+    depends_on:
+      broker:
+        condition: service_healthy
+    entrypoint: ["fibril-tui-example"]
+    command: ["--addr", "broker:9876", "--clients", "4", "--partitions", "4"]
+    tty: true
+    stdin_open: true
+    environment:
+      TERM: xterm-256color
+
+volumes:
+  broker-data:

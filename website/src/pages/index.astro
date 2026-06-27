@@ -37,7 +37,8 @@ const github = "https://github.com/Axmouth/fibril";
         <h1>Useful messaging without broker ceremony.</h1>
         <p class="lead">
           Fibril is a lightweight message broker focused on durable queues,
-          explicit delivery semantics, leasing, retries, and predictable operational behavior.
+          explicit delivery semantics, leasing, retries, and predictable operational behavior,
+          with fan-out streams alongside the work queues when you need broadcast.
           Most applications need durable queues, predictable delivery semantics,
           reconnect behavior that doesn't surprise them, and operational controls
           that are easy to understand during incidents. Fibril optimizes for that path.
@@ -60,6 +61,7 @@ const github = "https://github.com/Axmouth/fibril";
       <FeatureCard number="01" title="Durable by default">Append-only logs, snapshot, and replay are part of the model.</FeatureCard>
       <FeatureCard number="02" title="Clients that read like intent">Complete, retry, delay, or fail work without building broker rituals into your app.</FeatureCard>
       <FeatureCard number="03" title="Lease under load">Pull-based delivery and bounded prefetch make pressure visible.</FeatureCard>
+      <FeatureCard number="04" title="Fan-out streams">Plexus streams broadcast each record to every subscriber, alongside the work queues, with durability tiers you opt into.</FeatureCard>
     </section>
 
     <section class="section-split">

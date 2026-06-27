@@ -56,6 +56,36 @@ Stop and remove everything, including the data volumes:
 docker compose -f fibril-cluster.yaml down -v
 ```
 
+## Watch traffic in the terminal visualizer
+
+To see real wire traffic and partition routing rather than the topology page, the
+visualizer tryout brings up one broker and drops you into a live terminal view,
+again with no clone and no build. It needs Docker with the Compose plugin and a
+real terminal (it is interactive):
+
+```sh
+curl -fsSL fibril.sh/viz.sh | sh
+```
+
+This animates publishes, confirms, deliveries, acks, pings and errors as moving
+dots across partition lanes, with a metrics HUD. Press `q` to quit, which tears
+the broker back down. It is a single standalone broker, so every partition is
+owned by the one broker. For ownership spread across machines, use the cluster
+tryout above and its topology page.
+
+If you would rather not pipe a script into your shell, fetch the Compose file and
+run the visualizer yourself (it needs `run`, not `up`, for a real terminal):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Axmouth/fibril/main/compose.viz.example.yaml -o fibril-viz.yaml
+docker compose -f fibril-viz.yaml run --rm viz
+docker compose -f fibril-viz.yaml down -v   # stop the broker and remove its data
+```
+
+The richer interactive keys (kill and restart a consumer, nack, change the rate,
+consumer-group cohorts, routing across a real cluster) are available when you run
+the visualizer from source with `--viz`, described next.
+
 ## Try a cluster locally
 
 You can also stand up the cluster from source instead of the published image, with

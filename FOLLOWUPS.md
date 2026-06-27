@@ -181,6 +181,16 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 
 ## Operability and quality of life
 
+- Broker advertise address, separate from the bind address: today the address a
+  broker registers in the node table (and that clients are redirected to as an
+  owner endpoint) is just `config.broker.listener.bind`. In a container that is
+  `0.0.0.0:9876`, which a peer cannot dial back, so cross-broker owner routing and
+  replication only work when the bind happens to be a reachable address. A
+  `FIBRIL_BROKER_ADVERTISE` knob (advertise the service name or routable host,
+  default to the bind when unset) is needed before the Docker visualizer can route
+  across a multi-broker cluster, and it cleans up containerized replication too.
+  The single-broker `compose.viz.example.yaml` sidesteps this (owner endpoints are
+  unknown, so the visualizer talks to the one broker). [USER]
 - Programmatic scale up and down: join (learner to voter to rebalance) and
   drain-and-leave via fibrilctl plus the admin API, autoscaler-drivable. [PLAN]
 - Consumer assignment push and client fan-in narrowing: today a cohort client
