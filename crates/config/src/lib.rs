@@ -244,6 +244,16 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_BROKER_BIND")? {
             self.broker.listener.bind = parse_env("FIBRIL_BROKER_BIND", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_BROKER_ADVERTISE")? {
+            // Comma-separated `host:port` entries, in priority order. Blank
+            // entries (e.g. a trailing comma) are dropped.
+            self.broker.listener.advertise = value
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_BIND")? {
             self.admin.listener.bind = parse_env("FIBRIL_ADMIN_BIND", &value)?;
         }
@@ -696,6 +706,7 @@ impl Default for BrokerSection {
         Self {
             listener: ListenerSection {
                 bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 9876)),
+                advertise: Vec::new(),
             },
         }
     }
@@ -713,6 +724,7 @@ impl Default for AdminSection {
         Self {
             listener: ListenerSection {
                 bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 8081)),
+                advertise: Vec::new(),
             },
             auth: AdminAuthSection::default(),
         }
@@ -1023,13 +1035,67 @@ fn default_event_log_section() -> KeratinLogSection {
 #[serde(default)]
 pub struct ListenerSection {
     pub bind: SocketAddr,
+    /// Addresses to advertise to peers and clients, separate from `bind`, in
+    /// priority order (clients try them in turn). Broker listener only; ignored
+    /// for the admin listener. Each is a `host:port` the cluster can dial back -
+    /// e.g. a service name when `bind` is `0.0.0.0`. Empty means derive from the
+    /// coordination peer host (in ganglion mode) or fall back to `bind`. Held as
+    /// raw `host:port` strings here; resolved to routable addresses at startup.
+    pub advertise: Vec<String>,
 }
 
 impl Default for ListenerSection {
     fn default() -> Self {
         Self {
             bind: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
+            advertise: Vec::new(),
         }
+    }
+}
+
+/// Derive an advertise `host:port` from this node's own coordination peer entry
+/// (its host) combined with the broker port. Returns `None` when this node has no
+/// peer entry or the host is empty. The peer entry is `host:coord_port`; the host
+/// is everything before the last `:` (so a bracketed IPv6 literal stays intact),
+/// recombined with the broker port.
+pub fn derive_advertise_from_peers(
+    peers: &std::collections::BTreeMap<String, String>,
+    raft_node_id: u64,
+    broker_port: u16,
+) -> Option<String> {
+    let entry = peers.get(&raft_node_id.to_string())?;
+    let host = entry.rsplit_once(':').map(|(h, _)| h).unwrap_or(entry).trim();
+    if host.is_empty() {
+        return None;
+    }
+    Some(format!("{host}:{broker_port}"))
+}
+
+impl ServerConfig {
+    /// The broker addresses to advertise to peers and clients, in priority order:
+    /// explicitly configured entries first, then the peer-derived address (ganglion
+    /// only), deduplicated. Holds only addresses we actually know - it never pads
+    /// with a placeholder or the (possibly unroutable) bind address. An empty
+    /// result tells the caller to fall back to the bind address.
+    pub fn broker_advertise_addresses(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for entry in &self.broker.listener.advertise {
+            let entry = entry.trim();
+            if !entry.is_empty() && !out.iter().any(|existing| existing == entry) {
+                out.push(entry.to_string());
+            }
+        }
+        if self.coordination.mode == CoordinationMode::Ganglion
+            && let Some(derived) = derive_advertise_from_peers(
+                &self.coordination.ganglion.peers,
+                self.coordination.ganglion.raft_node_id,
+                self.broker.listener.bind.port(),
+            )
+            && !out.contains(&derived)
+        {
+            out.push(derived);
+        }
+        out
     }
 }
 
@@ -1216,6 +1282,65 @@ pub struct InternalIdleQueueCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn derive_advertise_uses_own_peer_host_with_broker_port() {
+        let mut peers = std::collections::BTreeMap::new();
+        peers.insert("1".to_string(), "broker-1:7000".to_string());
+        peers.insert("2".to_string(), "broker-2:7000".to_string());
+        // Our raft id is 2, broker port 9876 -> advertise broker-2:9876.
+        assert_eq!(
+            derive_advertise_from_peers(&peers, 2, 9876),
+            Some("broker-2:9876".to_string())
+        );
+        // No entry for this node -> nothing derived.
+        assert_eq!(derive_advertise_from_peers(&peers, 9, 9876), None);
+    }
+
+    #[test]
+    fn derive_advertise_keeps_ipv6_host_intact() {
+        let mut peers = std::collections::BTreeMap::new();
+        peers.insert("1".to_string(), "[::1]:7000".to_string());
+        assert_eq!(
+            derive_advertise_from_peers(&peers, 1, 9876),
+            Some("[::1]:9876".to_string())
+        );
+    }
+
+    #[test]
+    fn broker_advertise_addresses_explicit_then_derived_deduped() {
+        let mut config = ServerConfig::default();
+        config.coordination.mode = CoordinationMode::Ganglion;
+        config.coordination.ganglion.raft_node_id = 1;
+        config
+            .coordination
+            .ganglion
+            .peers
+            .insert("1".to_string(), "broker-1:7000".to_string());
+        config.broker.listener.bind = "0.0.0.0:9876".parse().unwrap();
+        // Explicit entry first, then the peer-derived one.
+        config.broker.listener.advertise = vec!["public.example:9876".to_string()];
+        assert_eq!(
+            config.broker_advertise_addresses(),
+            vec![
+                "public.example:9876".to_string(),
+                "broker-1:9876".to_string()
+            ]
+        );
+        // The derived entry is not duplicated if already listed explicitly.
+        config.broker.listener.advertise = vec!["broker-1:9876".to_string()];
+        assert_eq!(
+            config.broker_advertise_addresses(),
+            vec!["broker-1:9876".to_string()]
+        );
+    }
+
+    #[test]
+    fn broker_advertise_addresses_empty_when_static_and_unset() {
+        let config = ServerConfig::default();
+        // Static mode, no explicit advertise -> nothing known, caller uses bind.
+        assert!(config.broker_advertise_addresses().is_empty());
+    }
 
     #[test]
     fn defaults_match_current_server_behavior() {
