@@ -124,6 +124,11 @@ A few variations are worth trying:
   run the visualizer against a real
   cluster: it fetches topology, connects to every broker, and routes each publish
   and subscribe to the partition's owner, with lanes colored by owning broker.
+  Against a `--ganglion` cluster, `+` / `-` live-repartition the demo queue
+  (double or halve its partition count) through the admin API: the lanes grow or
+  drain on screen as the clients reconnect against the new layout. Live
+  repartition is coordination-only, so the keys do nothing against a single
+  standalone broker.
 
 This needs `cargo`, plus `jq` and `curl` for the coordinated-mode checks. The
 first run builds the broker and CLI, so it takes longer than later runs.

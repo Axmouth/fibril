@@ -20,6 +20,7 @@ use crossterm::{
 use fibril_protocol::v1::{
     Ack, AssignmentChanged, Auth, DeclareQueue, DeliveryTag, Deliver, ErrorMsg, Hello, Nack, Op,
     PROTOCOL_V1, Partition, Pong, Publish, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
+    TopologyUpdateAck,
     frame::{Frame, ProtoCodec},
     helper::{Conn, try_decode, try_encode},
 };
@@ -43,6 +44,12 @@ struct Args {
     /// Broker address to connect to.
     #[arg(long, default_value = "127.0.0.1:9876")]
     addr: String,
+
+    /// Admin API address for live repartition (the `+` / `-` keys). Repartition
+    /// is coordination-only, so this has an effect only against a `--ganglion`
+    /// cluster. Defaults to the standard admin port on the bootstrap host.
+    #[arg(long, default_value = "127.0.0.1:8081")]
+    admin_addr: String,
 
     /// Number of client connections (each both publishes and consumes).
     #[arg(long, default_value_t = 4)]
@@ -346,6 +353,11 @@ struct App {
     /// partition -> client currently assigned it, in cohort mode. Updated from
     /// the broker's `AssignmentChanged` pushes so failover is visible on screen.
     partition_client: Vec<Option<usize>>,
+    /// Topology generation the UI has applied. Bumps on a live repartition, which
+    /// the UI then mirrors into the partition count, lanes, and ownership.
+    topology_gen: u64,
+    /// Whether a repartition request is currently in flight (for the HUD).
+    repartitioning: bool,
 }
 
 static REQ: AtomicU64 = AtomicU64::new(1);
@@ -508,11 +520,12 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled("fibril viz  ", Style::default().fg(Color::Cyan)),
             Span::raw(format!(
-                "{}  clients {}  brokers {}  partitions {}  topic {}{}",
+                "{}  clients {}  brokers {}  partitions {}{}  topic {}{}",
                 app.addr,
                 app.clients,
                 app.broker_count,
                 app.partitions,
+                if app.repartitioning { " (repartitioning...)" } else { "" },
                 app.topic,
                 match &app.cohort {
                     Some(g) => format!("  cohort {g}"),
@@ -544,7 +557,7 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(Span::styled(
-            "Tab focus  space pause  k/r kill/restart  n nack  [ ] rate  c confirm  g routing  q quit",
+            "Tab focus  space pause  k/r kill/restart  n nack  [ ] rate  c confirm  g routing  +/- partitions  q quit",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -620,8 +633,48 @@ fn update_balls(app: &mut App, dt: f32) {
     }
 }
 
+/// Upper bound on the lanes a live repartition will grow to, so the demo stays
+/// readable and does not march off the screen.
+const MAX_PARTITIONS: u32 = 32;
+
+/// Kick off a live repartition in the background: double (grow) or halve (shrink)
+/// the partition count via the admin API. The broker then pushes the new topology
+/// to the sessions, which apply it (restarting against the new layout) and ack the
+/// cutover. A no-op while one is already in flight, or when growing or shrinking
+/// would not change the count.
+fn trigger_repartition(app: &App, args: &Args, topo: &Arc<Topology>, grow: bool) {
+    if topo.repartitioning.load(Ordering::Relaxed) {
+        return;
+    }
+    let current = app.partitions.max(1);
+    let target = if grow {
+        (current * 2).min(MAX_PARTITIONS)
+    } else {
+        (current / 2).max(1)
+    };
+    if target == current {
+        return;
+    }
+    topo.repartitioning.store(true, Ordering::Relaxed);
+    let args = args.clone();
+    let topo = topo.clone();
+    tokio::spawn(async move {
+        if let Err(err) =
+            admin_repartition(&args.admin_addr, &args.topic, &args.group, target).await
+        {
+            tracing::debug!("repartition to {target} failed: {err}");
+        }
+        // Leave the in-flight flag set briefly so the HUD shows the cutover while
+        // the broker pushes the new topology and the sessions apply and ack it.
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        topo.repartitioning.store(false, Ordering::Relaxed);
+    });
+}
+
 async fn run_ui(
     app: &mut App,
+    args: &Args,
+    topo: &Arc<Topology>,
     rx: &mut mpsc::Receiver<VisualEvent>,
     assign_rx: &mut mpsc::Receiver<(usize, Vec<u32>)>,
 ) -> anyhow::Result<()> {
@@ -650,6 +703,15 @@ async fn run_ui(
                 KeyCode::Char('k') => app.control.set_alive(app.focus, false),
                 KeyCode::Char('r') => app.control.set_alive(app.focus, true),
                 KeyCode::Char('n') => app.control.request_nack(app.focus),
+                // `+` doubles the partition count, `-` halves it (the repartition
+                // API grows to a multiple and shrinks to a factor). Accept the
+                // unshifted `=` / `_` too. Coordination-only: a no-op standalone.
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    trigger_repartition(app, args, topo, true)
+                }
+                KeyCode::Char('-') | KeyCode::Char('_') => {
+                    trigger_repartition(app, args, topo, false)
+                }
                 _ => {}
             }
         }
@@ -676,6 +738,20 @@ async fn run_ui(
                     *slot = Some(client);
                 }
             }
+        }
+
+        // Mirror a live repartition into the UI: pick up the new partition count,
+        // ownership, and lane set when the topology generation has advanced.
+        app.repartitioning = topo.repartitioning.load(Ordering::Relaxed);
+        if topo.generation() != app.topology_gen {
+            let snap = topo.snapshot();
+            app.partitions = snap.cluster.partitions() as u32;
+            app.broker_count = snap.cluster.brokers.len();
+            app.partition_owner = snap.cluster.partition_owner.clone();
+            // Reset cohort ownership: members re-push their assignments after they
+            // resubscribe against the new layout.
+            app.partition_client = vec![None; snap.cluster.partitions()];
+            app.topology_gen = snap.generation;
         }
 
         let dt = last.elapsed().as_secs_f32();
@@ -801,6 +877,7 @@ async fn subscribe(conn: &mut Conn, sub: &Subscribe) -> anyhow::Result<Subscribe
 }
 
 /// The brokers to talk to and which one owns each partition.
+#[derive(Clone)]
 struct Cluster {
     /// Broker endpoints. `brokers[0]` is the bootstrap address.
     brokers: Vec<String>,
@@ -808,6 +885,84 @@ struct Cluster {
     /// partition whose owner is unknown (e.g. standalone, where queue
     /// partitioning is not carried in the client topology).
     partition_owner: Vec<usize>,
+}
+
+impl Cluster {
+    fn partitions(&self) -> usize {
+        self.partition_owner.len().max(1)
+    }
+}
+
+/// A cluster snapshot paired with the generation it was taken at, so a session can
+/// detect when a live repartition has superseded it.
+struct ClusterSnapshot {
+    cluster: Cluster,
+    generation: u64,
+}
+
+/// Shared, live view of the cluster, so a live repartition can swap in a new
+/// partition count and ownership while clients are running. `generation` bumps on
+/// every swap; sessions capture the generation they started with and return when
+/// it changes, so their supervisor reconnects against the fresh topology.
+struct Topology {
+    cluster: std::sync::RwLock<Cluster>,
+    /// Internal swap counter: bumps on every applied change so sessions restart.
+    generation: AtomicU64,
+    /// Highest coordination generation applied from a broker `TopologyUpdate`
+    /// push, so concurrent sessions apply each push exactly once.
+    last_coord_gen: AtomicU64,
+    /// Set while a repartition request is in flight, for the HUD.
+    repartitioning: AtomicBool,
+}
+
+impl Topology {
+    fn new(cluster: Cluster, coord_gen: u64) -> Self {
+        Self {
+            cluster: std::sync::RwLock::new(cluster),
+            generation: AtomicU64::new(0),
+            last_coord_gen: AtomicU64::new(coord_gen),
+            repartitioning: AtomicBool::new(false),
+        }
+    }
+
+    /// A consistent cluster snapshot plus its generation, both read under the lock
+    /// so they cannot tear against a concurrent swap. Recovers a poisoned lock
+    /// rather than panicking.
+    fn snapshot(&self) -> ClusterSnapshot {
+        let cluster = self.cluster.read().unwrap_or_else(|p| p.into_inner());
+        ClusterSnapshot {
+            cluster: cluster.clone(),
+            generation: self.generation.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Current generation, for the cheap per-tick staleness check.
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Install a new cluster and bump the generation, so running sessions restart.
+    /// The bump happens under the write lock, so `snapshot` never pairs a new
+    /// generation with the old cluster.
+    fn swap(&self, cluster: Cluster) {
+        let mut guard = self.cluster.write().unwrap_or_else(|p| p.into_inner());
+        *guard = cluster;
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Apply a broker-pushed topology at coordination generation `coord_gen`, but
+    /// only once across all sessions: the first to see a newer generation swaps in
+    /// the new cluster (which restarts every session against it). Returns whether
+    /// this call performed the swap. Acking the push is the caller's job and
+    /// happens regardless, so the broker can finalize the cutover fence.
+    fn apply_pushed(&self, cluster: Cluster, coord_gen: u64) -> bool {
+        let prev = self.last_coord_gen.fetch_max(coord_gen, Ordering::Relaxed);
+        if coord_gen <= prev {
+            return false;
+        }
+        self.swap(cluster);
+        true
+    }
 }
 
 /// Read frames until a `TopologyOk`, answering pings on the way.
@@ -829,7 +984,7 @@ async fn recv_topology(conn: &mut Conn) -> anyhow::Result<TopologyOk> {
 /// assigns owners shortly after declare, so poll briefly until every partition
 /// has one. Standalone brokers do not carry queue ownership in the topology, so
 /// owners stay unknown and default to the bootstrap broker (which owns all).
-async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Result<Cluster> {
+async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Result<(Cluster, u64)> {
     let auth = parse_auth(&args.auth);
     let mut conn = connect(&args.addr).await?;
     handshake(&mut conn, 0, &auth, vis).await?;
@@ -858,8 +1013,21 @@ async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Resul
     );
     expect(&mut conn, Op::DeclareQueueOk).await?;
 
-    let parts = args.partitions.max(1) as usize;
+    let (owners, generation) = poll_owners(&mut conn, args, args.partitions.max(1) as usize).await?;
+    Ok((build_cluster(args, &owners), generation))
+}
+
+/// Poll the topology until every partition in `0..parts` has a known owner (or a
+/// brief timeout elapses), returning the owner endpoint per partition along with
+/// the coordination generation last seen (so pushes at the same generation are
+/// not reapplied).
+async fn poll_owners(
+    conn: &mut Conn,
+    args: &Args,
+    parts: usize,
+) -> anyhow::Result<(Vec<Option<String>>, u64)> {
     let mut owners: Vec<Option<String>> = vec![None; parts];
+    let mut generation = 0;
     for _ in 0..20 {
         conn.send(try_encode(
             Op::Topology,
@@ -870,7 +1038,8 @@ async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Resul
             },
         )?)
         .await?;
-        let topo = recv_topology(&mut conn).await?;
+        let topo = recv_topology(conn).await?;
+        generation = topo.generation;
         for q in &topo.queues {
             if q.topic == args.topic
                 && q.group == args.group
@@ -885,9 +1054,14 @@ async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Resul
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
+    Ok((owners, generation))
+}
 
+/// Turn per-partition owner endpoints into a `Cluster`: the bootstrap address is
+/// broker 0, and each distinct owner endpoint gets the next broker index.
+fn build_cluster(args: &Args, owners: &[Option<String>]) -> Cluster {
     let mut brokers = vec![args.addr.clone()];
-    let mut partition_owner = vec![0usize; parts];
+    let mut partition_owner = vec![0usize; owners.len()];
     for (p, owner) in owners.iter().enumerate() {
         if let Some(ep) = owner {
             let idx = brokers.iter().position(|b| b == ep).unwrap_or_else(|| {
@@ -897,10 +1071,76 @@ async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Resul
             partition_owner[p] = idx;
         }
     }
-    Ok(Cluster {
+    Cluster {
         brokers,
         partition_owner,
-    })
+    }
+}
+
+/// Build a `Cluster` from a broker-pushed topology, sizing the partition set to
+/// the highest partition id present for the topic so a grow or shrink is picked up.
+fn cluster_from_topology(args: &Args, topology: &TopologyOk) -> Cluster {
+    let count = topology
+        .queues
+        .iter()
+        .filter(|q| q.topic == args.topic && q.group == args.group)
+        .map(|q| q.partition.id() as usize + 1)
+        .max()
+        .unwrap_or(1);
+    let mut owners: Vec<Option<String>> = vec![None; count];
+    for q in &topology.queues {
+        if q.topic == args.topic
+            && q.group == args.group
+            && let Some(slot) = owners.get_mut(q.partition.id() as usize)
+        {
+            *slot = q.owner_endpoint.clone();
+        }
+    }
+    build_cluster(args, &owners)
+}
+
+/// Minimal HTTP POST to the admin repartition endpoint. Kept dependency-free (a
+/// hand-written request over a raw socket) so the visualizer does not pull in an
+/// HTTP client. Assumes the demo default of admin auth disabled.
+async fn admin_repartition(
+    admin_addr: &str,
+    topic: &str,
+    group: &Option<String>,
+    partition_count: u32,
+) -> anyhow::Result<()> {
+    let group_field = match group {
+        Some(g) => format!(",\"group\":\"{}\"", json_escape(g)),
+        None => String::new(),
+    };
+    let body = format!(
+        "{{\"topic\":\"{}\"{},\"partition_count\":{}}}",
+        json_escape(topic),
+        group_field,
+        partition_count
+    );
+    let request = format!(
+        "POST /admin/api/repartition HTTP/1.1\r\nHost: {admin_addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+
+    let mut stream = TcpStream::connect(admin_addr).await?;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await?;
+    let head = String::from_utf8_lossy(&response);
+    let status = head.lines().next().unwrap_or_default();
+    if status.contains(" 200") {
+        Ok(())
+    } else {
+        anyhow::bail!("admin repartition rejected: {}", status.trim())
+    }
+}
+
+/// Escape a string for embedding in a JSON string literal (the few cases that
+/// matter for a topic or group name).
+fn json_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Hold each delivery this long before acking, so there is always a small window
@@ -914,7 +1154,7 @@ const ACK_DELAY: Duration = Duration::from_millis(450);
 async fn run_client(
     args: Args,
     client: usize,
-    cluster: Arc<Cluster>,
+    topo: Arc<Topology>,
     control: Arc<Control>,
     vis: mpsc::Sender<VisualEvent>,
     assign: mpsc::Sender<(usize, Vec<u32>)>,
@@ -924,7 +1164,11 @@ async fn run_client(
             tokio::time::sleep(Duration::from_millis(150)).await;
             continue;
         }
-        if let Err(err) = run_session(&args, client, &cluster, &control, &vis, &assign).await {
+        // Snapshot the topology this session runs against. The session returns
+        // when the generation bumps (a live repartition), so the next pass picks
+        // up the new partition count and ownership.
+        let snap = topo.snapshot();
+        if let Err(err) = run_session(&args, client, &snap, &topo, &control, &vis, &assign).await {
             tracing::debug!("client {client} session ended: {err}");
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -939,12 +1183,17 @@ async fn run_client(
 async fn run_session(
     args: &Args,
     client: usize,
-    cluster: &Cluster,
+    snap: &ClusterSnapshot,
+    topo: &Topology,
     control: &Control,
     vis: &mpsc::Sender<VisualEvent>,
     assign: &mpsc::Sender<(usize, Vec<u32>)>,
 ) -> anyhow::Result<()> {
     let auth = parse_auth(&args.auth);
+    let cluster = &snap.cluster;
+    // Partition count comes from the snapshot, not the CLI, so a live repartition
+    // grows or shrinks the lanes this session drives.
+    let part_count = cluster.partitions() as u32;
 
     // Connect to every broker (bootstrap plus each partition owner) and handshake,
     // so a publish or subscribe can be routed to the partition's owner.
@@ -953,6 +1202,36 @@ async fn run_session(
         let mut conn = connect(endpoint).await?;
         handshake(&mut conn, client, &auth, vis).await?;
         conns.push(conn);
+    }
+
+    // Report topology adoption for these fresh connections so a repartition
+    // cutover fence is satisfied by client adoption, not just the 30s timeout.
+    // The broker pushes a TopologyUpdate only on a change, and a reconnect seeds
+    // at the current topology, so a session that reconnected after a cutover would
+    // otherwise never ack the post-cutover generation. Ask for the current
+    // generation (no deliveries are flowing yet) and ack it on every connection.
+    {
+        conns[0]
+            .send(try_encode(
+                Op::Topology,
+                next_req_id(),
+                &TopologyRequest {
+                    topic: Some(args.topic.clone()),
+                    group: args.group.clone(),
+                },
+            )?)
+            .await?;
+        let coord_gen = recv_topology(&mut conns[0]).await?.generation;
+        for conn in conns.iter_mut() {
+            conn.send(try_encode(
+                Op::TopologyUpdateAck,
+                next_req_id(),
+                &TopologyUpdateAck {
+                    generation: coord_gen,
+                },
+            )?)
+            .await?;
+        }
     }
 
     let owner_of = |partition: u32| -> usize {
@@ -970,7 +1249,7 @@ async fn run_session(
         // its partitions to a surviving subscriber. The first subscribe mints a
         // cluster-scoped member id; reuse it so every broker sees one member.
         let mut member_id = None;
-        for p in 0..args.partitions {
+        for p in 0..part_count {
             let ok = subscribe(
                 &mut conns[owner_of(p)],
                 &Subscribe {
@@ -1002,7 +1281,7 @@ async fn run_session(
     } else {
         // Competing consumers: client i owns partitions where p % clients == i,
         // and subscribes to each on that partition's owner connection.
-        let owned: Vec<u32> = (0..args.partitions)
+        let owned: Vec<u32> = (0..part_count)
             .filter(|p| (*p as usize) % args.clients.max(1) == client)
             .collect();
         for &p in &owned {
@@ -1046,7 +1325,7 @@ async fn run_session(
     let mut reads = select_all(reads);
 
     let payload = vec![b'x'; args.payload_size];
-    let parts = args.partitions.max(1) as u64;
+    let parts = part_count.max(1) as u64;
     let key_space = (parts * 3).max(1);
     let mut seq: u64 = 0;
     let mut next_pub = Instant::now();
@@ -1063,6 +1342,11 @@ async fn run_session(
                 if !control.is_alive(client) {
                     // Drop the connections: the broker reclaims the unacked
                     // in-flight and redelivers it when this client reconnects.
+                    return Ok(());
+                }
+                if topo.generation() != snap.generation {
+                    // A live repartition swapped the topology: end this session so
+                    // the supervisor reconnects against the new partition layout.
                     return Ok(());
                 }
             }
@@ -1228,6 +1512,25 @@ async fn run_session(
                         let assigned = a.assigned.iter().map(|p| p.id()).collect();
                         let _ = assign.try_send((client, assigned));
                     }
+                    x if x == Op::TopologyUpdate as u16 => {
+                        // Broker-pushed routing refresh (a live repartition). Apply
+                        // it once across sessions so the lanes and ownership follow
+                        // the new layout, then ack the generation so the broker can
+                        // finalize the cutover fence. Without this ack the
+                        // repartition would stay pending forever.
+                        let pushed: TopologyOk = try_decode(&frame)?;
+                        let coord_gen = pushed.generation;
+                        topo.apply_pushed(cluster_from_topology(args, &pushed), coord_gen);
+                        sinks[broker]
+                            .send(try_encode(
+                                Op::TopologyUpdateAck,
+                                frame.request_id,
+                                &TopologyUpdateAck {
+                                    generation: coord_gen,
+                                },
+                            )?)
+                            .await?;
+                    }
                     x if x == Op::Error as u16 => {
                         let e: ErrorMsg = try_decode(&frame)?;
                         tracing::debug!("client {client} error {}: {}", e.code, e.message);
@@ -1262,8 +1565,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Declare the topic and learn which broker owns each partition, so clients can
     // route to owners. Falls back to the bootstrap broker for unknown owners.
-    let cluster = match discover(&args, &tx).await {
-        Ok(cluster) => Arc::new(cluster),
+    let (cluster, coord_gen) = match discover(&args, &tx).await {
+        Ok(found) => found,
         Err(err) => {
             eprintln!("fibril-tui: could not set up `{}`: {err}", args.topic);
             eprintln!("fibril-tui: is a broker listening at {}?", args.addr);
@@ -1278,35 +1581,42 @@ async fn main() -> anyhow::Result<()> {
         args.clients,
     ));
 
+    let init_partitions = cluster.partitions() as u32;
+    let init_partition_owner = cluster.partition_owner.clone();
+    let init_broker_count = cluster.brokers.len();
+    let topo = Arc::new(Topology::new(cluster, coord_gen));
+
     for client in 0..args.clients {
         let args = args.clone();
         let tx = tx.clone();
         let assign_tx = assign_tx.clone();
         let control = control.clone();
-        let cluster = cluster.clone();
+        let topo = topo.clone();
         tokio::spawn(async move {
-            if let Err(err) = run_client(args, client, cluster, control, tx, assign_tx).await {
+            if let Err(err) = run_client(args, client, topo, control, tx, assign_tx).await {
                 tracing::debug!("client {client} ended: {err}");
             }
         });
     }
-    drop(tx);
     drop(assign_tx);
+    drop(tx);
 
     let mut app = App {
         clients: args.clients,
-        partitions: args.partitions.max(1),
+        partitions: init_partitions,
         topic: args.topic.clone(),
         addr: args.addr.clone(),
         balls: Vec::new(),
         metrics: Metrics::default(),
         focus: 0,
         control,
-        partition_owner: cluster.partition_owner.clone(),
-        broker_count: cluster.brokers.len(),
+        partition_owner: init_partition_owner,
+        broker_count: init_broker_count,
         cohort: args.consumer_group.clone(),
-        partition_client: vec![None; args.partitions.max(1) as usize],
+        partition_client: vec![None; init_partitions as usize],
+        topology_gen: topo.generation.load(Ordering::Relaxed),
+        repartitioning: false,
     };
 
-    run_ui(&mut app, &mut rx, &mut assign_rx).await
+    run_ui(&mut app, &args, &topo, &mut rx, &mut assign_rx).await
 }

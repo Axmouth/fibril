@@ -126,12 +126,13 @@ Each lane also shows the client currently assigned it (`c{n}`), updated from the
 broker's `AssignmentChanged` pushes, so the failover is visible as the label moves
 from the killed member to its peer.
 
-Queued:
-
-- `+` / `-` - add / remove a partition (live repartition). Needs ganglion (live
-  repartition is coordination-only). Now that the visualizer routes across a
-  cluster, this is feasible against `--viz --ganglion` via the admin repartition
-  API, with the lanes appearing/draining live.
+Done (live repartition pass): `+` / `-` double / halve the demo queue's partition
+count via the admin repartition API (`--admin-addr`, default `127.0.0.1:8081`).
+The broker pushes the new topology, the sessions apply it and restart against the
+new layout, and the lanes grow or drain live. Each session acks the current
+coordination generation right after connecting, so the cutover fence finalizes on
+client adoption (in a couple of seconds) rather than the 30s adoption timeout.
+Coordination-only, so it is a no-op against a single standalone broker.
 
 ## Cluster owner-routing - DONE
 

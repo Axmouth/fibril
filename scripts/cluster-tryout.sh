@@ -1626,8 +1626,10 @@ if [[ "$VIZ" == true ]]; then
   echo "press q (or Esc) in the visualizer to quit and tear the broker down."
   sleep 1
   # Run attached. When the TUI exits, fall through to the EXIT trap, which stops
-  # the broker because KEEP is false.
-  "$TUI" --addr "$broker_addr" --partitions 4 --topic demo --rate 6 || true
+  # the broker because KEEP is false. Pass the admin address so the +/- live
+  # repartition keys work (against a --ganglion cluster).
+  "$TUI" --addr "$broker_addr" --admin-addr "127.0.0.1:$admin_port" \
+    --partitions 4 --topic demo --rate 6 || true
 elif [[ "$HOLD" == true ]]; then
   echo
   echo "cluster held open (--hold). Admin dashboards:"
