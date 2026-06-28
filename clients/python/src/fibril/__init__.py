@@ -43,6 +43,14 @@ from .subscription import (
     Subscription,
     SubscriptionBuilder,
 )
+from .routing import (
+    PatternMessage,
+    PatternSource,
+    PatternSubscribeBuilder,
+    PatternSubscription,
+    RoutingClient,
+    StreamPatternSubscribeBuilder,
+)
 
 __all__ = [
     "Client",
@@ -60,6 +68,12 @@ __all__ = [
     "AutoAckedSubscription",
     "SubscriptionBuilder",
     "StreamSubscriptionBuilder",
+    "RoutingClient",
+    "PatternSubscribeBuilder",
+    "StreamPatternSubscribeBuilder",
+    "PatternSubscription",
+    "PatternSource",
+    "PatternMessage",
     "Message",
     "InflightMessage",
     "NewMessage",

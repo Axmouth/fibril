@@ -583,6 +583,15 @@ class Client:
 
         return StreamSubscriptionBuilder(self, topic)
 
+    def routing(self) -> "RoutingClient":
+        """Opt in to the routing/discovery surface. Returns a
+        :class:`RoutingClient` sharing this connection; the plain client stays
+        usable. Pattern subscribe and auto-pickup of matching channels live there,
+        off the default surface."""
+        from .routing import RoutingClient
+
+        return RoutingClient(self)
+
     async def declare_queue(self, config: QueueConfig) -> None:
         engine = await self._engine_for_operation()
         await engine.declare_queue(config.to_wire())
