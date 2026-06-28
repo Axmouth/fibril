@@ -746,10 +746,12 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
 - ACK WINDOW: BUILT 2026-06-28 (keratin e952542 settled RangeSet + 78de9ef
   is_settled rename). The settled set replaced the bitset window, the frontier is
   derived, and the dead ack-window command/handle surface was deleted.
-  FORMAT_VERSION bumped to 4. Residual follow-ups: (a) rename
-  `lowest_unacked_offset` -> `lowest_unsettled_offset` for consistency (left
-  alone here because it is part of the fibril-facing queue-engine trait, so it
-  crosses the repo boundary). (b) Broader dead-command audit: several
+  FORMAT_VERSION bumped to 4. Residual follow-ups: (a) DONE 2026-06-28 (keratin
+  cd738d3 + fibril af21b63) - renamed `lowest_unacked_offset` ->
+  `lowest_unsettled_offset` and the sibling `lowest_not_acked_offset` ->
+  `lowest_not_settled_offset` (plus the GetLowestUnacked / GetLowestNotAcked
+  commands and the broker `partition_lowest_unsettled_offset`) across both repos.
+  (b) Broader dead-command audit: several
   `QueueCommand` query variants (e.g. GetLowestUnacked, GetLowestNotAcked,
   GetNextDeliverable, GetRetries, FilterNotEnqueued) may have no external handle
   caller now that the broker surface has narrowed - sweep for handle methods with
