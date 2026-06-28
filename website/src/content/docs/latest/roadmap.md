@@ -11,6 +11,70 @@ distributed-system features.
 For the reverse view, use [implemented surface](/latest/implemented-surface/) to
 check what is already wired and under what conditions.
 
+## Releases and the path to 1.0
+
+Fibril follows SemVer. While on 0.x the public API and wire protocol are not
+frozen and can change between minor releases. Versions move one minor at a time,
+with no vanity jumps: the number tracks the stability promise, not perceived
+completeness. Per-feature maturity lives in [project status](/latest/status/).
+
+1.0 is not a quality badge, it is a commitment: a stable API and wire protocol
+plus confidence in the durability and replication semantics. It ships only when
+all four of these hold.
+
+1. Cluster confidence. Replication and failover are proven by deterministic
+   simulation testing, a green chaos and soak suite, and at least one real
+   multi-node deployment run.
+2. API and wire-protocol freeze. The protocol is versioned with a back-compat
+   policy and client public APIs are stable, including the Offset/Topic newtype
+   and `Arc<str>` pass.
+3. Operational lifecycle. Graceful drain and durable restart reconciliation,
+   with a failure-semantics runbook, so restarts and upgrades are first-class.
+4. Security baseline. TLS in transit and auth/authz beyond the static handler.
+
+### 0.1 (current)
+
+Durable single-node queues and Plexus streams, the Rust, TypeScript, and Python
+clients, the admin dashboard, and an experimental cluster path (coordination,
+replication, failover, live repartitioning). Single-node features are Available,
+the cluster path is Experimental, and the API and wire protocol may still change.
+
+### 0.2 (next)
+
+Operational ergonomics and reconnect polish:
+
+- Graceful drain announcement so a planned restart or upgrade is transparent to
+  in-flight work (gate 3).
+- Reconnect reconciliation polish: a typed subscription-close reason,
+  auto-resubscribe for safe recreate cases, and resolved grace-policy defaults.
+- Start the freeze work: the Offset/Topic newtype plus `Arc<str>` pass (gate 2).
+
+### Toward 1.0 (later 0.x minors)
+
+Each subsequent minor knocks off part of a gate, incrementally:
+
+- Durable restart reconciliation and a failure-semantics runbook finish the
+  operational lifecycle (gate 3).
+- TLS and authz land the security baseline (gate 4).
+- Deterministic simulation, a chaos and soak suite, and a real multi-node run
+  build cluster confidence (gate 1).
+- The wire protocol is versioned with a back-compat policy and the client APIs
+  are frozen (gate 2).
+
+### After 1.0 (parallel, non-gating)
+
+These add reach and polish without gating 1.0, and several can proceed in
+parallel before then:
+
+- More first-party clients: Go, C#, Java.
+- Observability exporters (Prometheus, OpenTelemetry).
+- Continued performance refinement (async replication fsync, staging micro-opts).
+- Optional symmetric conveniences such as wildcard publishers, if a real need
+  appears.
+
+Deliberately out of scope: transactions, content-routing scripting, and
+SQL/stream-processing. Those would be a different product.
+
 ## Recently landed
 
 Highlights only. For the full wired surface and its conditions, see
@@ -48,6 +112,9 @@ Highlights only. For the full wired surface and its conditions, see
   timing and health signals, from the dashboard, API, and `fibrilctl`.
 
 ## Near term
+
+The near, medium, and longer-term lists below are the detailed backlog that
+feeds the milestones above.
 
 - Refactor server bootstrap wiring into the `fibril` library enough to make
   multi-node coordination and cohort-controller tests stand up real brokers
