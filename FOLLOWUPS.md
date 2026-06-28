@@ -49,31 +49,23 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 
 ## Correctness and durability
 
-- BUG (found 2026-06-28 via the cluster tryout, after the admin error-swallow fix):
-  on the bootstrap/declaring node a queue actor's command channel ends up CLOSED
-  while its handle stays in the materialized map, so anything routed through that
-  channel fails. Symptoms on the leader only (broker-2/3 clean): admin
-  /admin/api/queues 500s with "io: Status report failed: channel closed" (the
-  whole sweep aborts on one dead actor), and the expiry worker logs
-  "Expiry worker error: queue actor is gone" (broker.rs:3842) every poll, forever.
-  Repro: the one-command cluster tryout seeds queues by declaring against broker-1,
-  which materializes actors for ALL declared partitions, then the controller makes
-  it owner of most and FOLLOWER of a couple. broker-2/3 materialize their
-  partitions fresh from catalogue-sync and are fine. HYPOTHESIS (needs confirming):
-  the owner->follower demotion on the declaring node tears down the owner actor's
-  command loop but leaves the queue_handle marked materialized with a dead sender,
-  whereas a fresh follower materialization keeps a live actor. Two fixes, both
-  worth doing:
-  (a) ROBUSTNESS: get_queues_stats (keratin) and the expiry worker sweep should
-      tolerate a per-partition error - skip-and-mark that queue, not fail the whole
-      operation. A single transient dead actor must not blank the admin queues page
-      or kill the expiry pass for every other queue.
-  (b) ROOT CAUSE: do not leave a materialized handle pointing at a torn-down actor.
-      On owner->follower demotion either keep a live follower-mode actor that
-      answers status_report, or drop/replace the handle so it re-materializes
-      correctly. Confirm the exact demotion path first (instrument before patching).
-  The admin route no longer hides this (commit surfacing queue/debug errors), so it
-  is visible now, but the underlying actor-lifecycle gap remains.
+- FIXED 2026-06-28 (found via the cluster tryout after the admin error-swallow fix):
+  the admin /admin/api/queues endpoint 500d on a node hosting a Plexus stream, and
+  the expiry worker logged "queue actor is gone" (broker.rs:3842) every poll. The
+  earlier owner->follower-demotion hypothesis was WRONG. Real cause: the work-queue
+  sweeps (get_queues_stats, collect_expired, next_expiry_hint, the TTL-drop sweep)
+  iterated ALL materialized handles, including stream partitions. A stream runs a
+  StreamEngine with no work-queue command actor, so a status report or lease-expiry
+  collection routed to one failed with "Status report failed: channel closed", and
+  one such failure aborted the whole sweep. Leader-specific only because that node
+  happened to host the stream. Fixes shipped: (a) per-queue tolerance - get_queues_stats
+  reports a tagged Ok/Error enum per queue (keratin 9ad589c, fibril a331b35) and the
+  admin route returns the error instead of swallowing it to {} (fibril 86b82dc);
+  (b) ROOT CAUSE - exclude stream-kind partitions from the work-queue sweeps
+  (keratin 4994353). Remaining latent siblings (TTL-drop ~stroma.rs:2642, validate)
+  and the structural fix that makes this misrouting impossible by construction
+  (type-level WorkQueueHandle/StreamHandle projection, single map) are tracked as
+  task #99.
 
 - Plexus stream routing after failover relies on the per-partition `.kind` marker
   being present on the new owner. The marker is a LOCAL file written at
@@ -269,11 +261,10 @@ inventory as it lands (see the docs-currency directive in the Docs section).
     (no data volume, lost on restart). This is really a storage feature (a
     pluggable Keratin write target / memory-only tier), larger than onboarding -
     see the "In-memory (non-durable) queues" item in the non-replication track.
-  - MINOR (observed during the smoke test, worth a look): the leader broker's
-    `/admin/api/queues` returned `{}` right after seeding while the other brokers
-    listed all three queues, likely lazy local engine materialization on the
-    owner. The topology page (which the tryout points users to) reads
-    `/admin/api/topology` and was correct, so this is not on the trial path.
+  - The leader `/admin/api/queues` returning `{}` after seeding, noticed during the
+    smoke test, was NOT lazy materialization - it was the stream-in-work-queue-sweep
+    bug, now FIXED (see the FIXED entry under "Correctness and durability"). Not a
+    trial-path issue.
   [WL/AUTHOR]
 - Admin dashboard: a lost-connection banner. When the admin page can no longer
   reach its broker (broker down, failover, network blip), show a clear banner
