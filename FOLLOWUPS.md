@@ -733,28 +733,45 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
 
 ## Code health and structure
 
-- Routing/pattern-subscribe parity gaps (the `client.routing()` discovery surface
-  landed on Rust, TS, and async Python): (a) the Python BLOCKING facade does not
-  yet expose `routing()` / pattern subscribe - add a blocking wrapper over the
-  async `PatternSubscription`; (b) integration tests for the cross-channel fan-in
-  exist only in Rust (wire mock); the TS/Python wire mocks do not yet speak stream
-  subscribe, and an auto-attach-on-catalogue-change test is missing everywhere
-  (the watcher rides the already-tested catalogue feed); (c) assess whether
-  pattern subscribe deserves its own docs page rather than the clients.mdx entry.
+- Routing/pattern-subscribe parity: DONE on Rust, TS, async + blocking Python.
+  Integration coverage: Rust (static queue fan-in), TS (queue fan-in AND
+  auto-attach via a pushed topology update), Python (queue fan-in). Remaining
+  smaller gaps: (a) no auto-attach integration test for Rust or Python (TS proves
+  the shared design end to end. The watcher rides the already-tested catalogue
+  feed); (b) no STREAM-pattern integration test in any client (the wire mocks do
+  not exercise the stream-subscribe + deliver path for a pattern); (c) assess
+  whether pattern subscribe deserves its own docs page rather than the clients.mdx
+  entry.
 
-- ASSESS whether the per-queue ACK WINDOW is still earning its keep. The queue
-  carries an ack-window (base offset + bitset: `set_ack_window`,
-  `ack_window_base`, `ack_bits_bytes`, `SetAckWindow` / `SetAckWindowFromBytes`)
-  that records out-of-order acks above a contiguous settled frontier. Question:
-  with the current work-queue model (consumed=gone, lease/ack, a settled frontier
-  that advances as a prefix), what does the window still buy beyond the frontier
-  plus the inflight set? Map every reader/writer (delivery gating, snapshot,
-  replication state-checkpoint, recovery) and decide: (a) it is load-bearing for
-  out-of-order ack tracking and stays, (b) it is redundant with the inflight set
-  + frontier and can be derived rather than stored, or (c) it can be dropped and
-  the surface (commands + client) trimmed. Either way, capture WHAT it offers so
-  the decision is on record, not folklore. Pairs with the newtypes / state-model
-  clarity goals.
+- ACK WINDOW assessment (2026-06-28): KEEP it, it is load-bearing. In
+  `QueueInternalState` (keratin stroma/core/src/state.rs) the ack state is
+  `settled_until` (the contiguous acked-prefix frontier) plus an out-of-order
+  record `ack_window_base` + `ack_bits` (a fixed `ACK_WINDOW`-wide bitset). On
+  `ack(offset)`: an ack at the frontier advances `settled_until` then
+  `advance_frontier` slides the bitset absorbing the now-contiguous run; an ack
+  ABOVE the frontier sets a bit so the frontier can advance through it later. So
+  the window is exactly the out-of-order ack tracker that makes `settled_until`
+  contiguous and monotonic.
+  - NOT derivable from the inflight set: an out-of-order ack removes the offset
+    from `inflight`, so without the bitset there is no record that it was acked
+    (vs never-existed) and the frontier could not advance through it.
+  - NOT redundant with the frontier alone: the frontier is only the contiguous
+    prefix, out-of-order acks live strictly above it.
+  - What it OFFERS: a bounded, snapshot-able, replicable record of out-of-order
+    settlements driving a contiguous monotonic `settled_until`, which gates
+    message-log retention/truncation, delivery start, and the replication
+    confirm. The byte-blob accessors (`ack_bits_bytes` /
+    `SetAckWindowFromBytes`) + `ack_window_base` exist to ship that state in
+    snapshots / state-checkpoints and to followers.
+  - Real follow-ups (not removal): (1) an ack farther than `ACK_WINDOW` past the
+    frontier is dropped in memory (durable in the event log, reconciled on
+    replay/snapshot), so in-memory and durable ack state can briefly diverge for
+    a far ack. Document or remove that cap. (2) Consider replacing the
+    fixed-size bitset with an unbounded `RangeSet<Offset>` of acked offsets
+    (mirroring `ready: RangeSet`): out-of-order acks are usually near-contiguous,
+    so a RangeSet is compact, drops the window cap, and could subsume
+    `ack_window_base` + `ack_bits` + the byte-blob commands behind a simpler
+    `acked` set the frontier consumes from the low end.
 
 - Code-TODO triage (from a quick scan, ~58 in fibril crates + ~37 in keratin/stroma. Most
   are minor inline idea-markers, the full sweep is the #63 hygiene pass). The

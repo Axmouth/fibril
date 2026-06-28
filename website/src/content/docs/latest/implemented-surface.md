@@ -35,7 +35,7 @@ See also: [core model](/latest/concepts/core-model/) and
 | Producer partition routing | Implemented | Rust client topology cache, round-robin keyless routing, `partition_key` stable routing, version-fenced publish frames |
 | Subscription fan-in | Implemented | Rust client opens per-partition subscriptions from topology and merges deliveries into one logical stream |
 | Cluster catalogue (client) | Implemented | Rust, TypeScript, and Python clients expose the live set of declared queues and streams (with partition counts) via a snapshot accessor and a change-subscription, derived from topology and kept live by topology pushes (no extra round-trips) |
-| Pattern subscribe / discovery routing (client) | Implemented | Opt-in `client.routing()` returns a routing view; `subscribe_pattern` (queues) and `subscribe_stream_pattern` (streams) fan in across every channel whose topic matches a `*`-glob and auto-attach channels that start matching later (driven by the catalogue feed). Manual and auto-ack variants. Rust, TypeScript, and Python. Client-side only, no broker changes |
+| Pattern subscribe / discovery routing (client) | Implemented | Opt-in `client.routing()` returns a routing view. `subscribe_pattern` (queues) and `subscribe_stream_pattern` (streams) fan in across every channel whose topic matches a `*`-glob and auto-attach channels that start matching later (driven by the catalogue feed). Manual and auto-ack variants. Rust, TypeScript, and Python. Client-side only, no broker changes |
 | Operator-chosen partition id | Out of scope | Normal user-facing paths should choose queue and optional key, not a partition number |
 
 Conditions and limits:

@@ -42,7 +42,7 @@ impl std::ops::Deref for RoutingClient {
 
 impl Client {
     /// Opt in to the routing/discovery surface. Returns an owned [`RoutingClient`]
-    /// sharing this connection; the plain client stays usable.
+    /// sharing this connection. The plain client stays usable.
     pub fn routing(&self) -> RoutingClient {
         RoutingClient {
             client: self.clone(),
@@ -214,14 +214,14 @@ impl StreamPatternSubscribeBuilder {
         self
     }
 
-    /// Use a durable broker-side cursor of this name on every attached stream;
+    /// Use a durable broker-side cursor of this name on every attached stream.
     /// each stream tracks its own cursor under the name.
     pub fn durable(mut self, name: impl Into<String>) -> Self {
         self.durable_name = Some(name.into());
         self
     }
 
-    /// Start with manual acknowledgement; completing a message advances its
+    /// Start with manual acknowledgement. Completing a message advances its
     /// stream's durable cursor past the offset.
     pub async fn sub(self) -> FibrilResult<PatternSubscription> {
         let StreamPatternSubscribeBuilder {
@@ -246,7 +246,7 @@ impl StreamPatternSubscribeBuilder {
         Ok(PatternSubscription { rx })
     }
 
-    /// Start with client-side automatic acknowledgement, yielding [`Message`]; the
+    /// Start with client-side automatic acknowledgement, yielding [`Message`]. The
     /// broker advances each stream's durable cursor as it delivers.
     pub async fn sub_auto_ack(self) -> FibrilResult<AutoAckPatternSubscription> {
         let StreamPatternSubscribeBuilder {
@@ -274,7 +274,7 @@ impl StreamPatternSubscribeBuilder {
 
 /// A live manual-ack fan-in over every channel matching a glob, with auto-pickup
 /// of channels that start matching later. Each item carries its [`PatternSource`]
-/// so the caller can route by origin; the [`InflightMessage`] is settled exactly
+/// so the caller can route by origin. The [`InflightMessage`] is settled exactly
 /// as for a single-channel subscription. Dropping it stops every attached channel
 /// and the catalogue watcher.
 pub struct PatternSubscription {
@@ -365,7 +365,7 @@ async fn run_pattern<T: Send + 'static>(
 
     let mut events = client.catalogue_events();
     loop {
-        // The feed is lossy; a Lagged error just means the snapshot moved on, so
+        // The feed is lossy. A Lagged error just means the snapshot moved on, so
         // reconcile against the current catalogue either way.
         tokio::select! {
             _ = out.closed() => return,

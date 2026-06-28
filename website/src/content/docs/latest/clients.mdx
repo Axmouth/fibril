@@ -952,7 +952,7 @@ whose topic matches, or `subscribe_stream_pattern(glob)` for Plexus streams. The
 subscription keeps attaching channels that start matching later, so queues or
 streams declared after you subscribe are picked up without a reconnect. Each
 delivery is paired with the channel it came from. The glob is the same
-`*`-wildcard grammar as the header filter (no regex); `"*"` matches everything.
+`*`-wildcard grammar as the header filter (no regex), and `"*"` matches everything.
 Manual (`sub` / `.sub()`) and auto-ack (`sub_auto_ack` / `.subAutoAck()`)
 variants both exist, and the routing view still publishes and subscribes
 normally, so it composes with reliable publishing.
@@ -988,6 +988,9 @@ for await (const { source, message } of sub) {
   </TabItem>
   <TabItem label="Python">
 
+<Tabs syncKey="python-style">
+  <TabItem label="Async">
+
 ```python
 sub = await client.routing().subscribe_pattern("events.*").sub()
 
@@ -995,6 +998,20 @@ async for item in sub:
     handle(item.source.topic, item.message.text())
     await item.message.complete()
 ```
+
+  </TabItem>
+  <TabItem label="Blocking">
+
+```python
+sub = client.routing().subscribe_pattern("events.*").sub()
+
+for item in sub:
+    handle(item.source.topic, item.message.text())
+    item.message.complete()
+```
+
+  </TabItem>
+</Tabs>
 
   </TabItem>
 </Tabs>

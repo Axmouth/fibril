@@ -494,7 +494,7 @@ class BlockingStreamPatternSubscribeBuilder:
 
 
 class BlockingPatternSubscription:
-    """Synchronous pattern subscription. Iterate with ``for``; each item is a
+    """Synchronous pattern subscription. Iterate with ``for``. Each item is a
     :class:`BlockingPatternMessage`."""
 
     def __init__(

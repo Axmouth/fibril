@@ -129,7 +129,7 @@ class PatternSubscribeBuilder:
         return self
 
     async def sub(self) -> "PatternSubscription[InflightMessage]":
-        """Start with manual acknowledgement; each delivered message must be settled."""
+        """Start with manual acknowledgement. Each delivered message must be settled."""
         prefetch = self._prefetch
         consumer_group = self._consumer_group
         out: BoundedQueue[PatternMessage[InflightMessage]] = _merged_queue(prefetch)
@@ -197,13 +197,13 @@ class StreamPatternSubscribeBuilder:
         return self
 
     def durable(self, name: str) -> "StreamPatternSubscribeBuilder":
-        """Use a durable broker-side cursor of this name on every attached stream;
+        """Use a durable broker-side cursor of this name on every attached stream.
         each stream tracks its own cursor under the name."""
         self._durable_name = name
         return self
 
     async def sub(self) -> "PatternSubscription[InflightMessage]":
-        """Start with manual acknowledgement; completing a message advances its
+        """Start with manual acknowledgement. Completing a message advances its
         stream's durable cursor."""
         config = self._config()
         out: BoundedQueue[PatternMessage[InflightMessage]] = _merged_queue(config.prefetch)
@@ -319,7 +319,7 @@ class _PatternFanIn(Generic[M]):
         self._unsubscribe = self._client.on_catalogue_change(self._on_change)
 
     def _on_change(self, _catalogue) -> None:
-        # The listener is synchronous; schedule the async reconcile on the loop.
+        # The listener is synchronous, so schedule the async reconcile on the loop.
         if not self._closed:
             asyncio.create_task(self._reconcile())
 
@@ -424,7 +424,7 @@ async def _pump(sub, source: PatternSource, out) -> None:
             await out.send(PatternMessage(source, message))
     except Exception:
         # The merged queue closed (pattern subscription dropped) or the channel
-        # errored; either way this forwarder is done. Cancellation propagates as
+        # errored. Either way this forwarder is done. Cancellation propagates as
         # BaseException and ends the task.
         pass
 
