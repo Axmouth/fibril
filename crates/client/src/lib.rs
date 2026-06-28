@@ -4461,10 +4461,11 @@ where
                                 // subs cleared
                                 subs.clear();
 
-                                // TODO: notify subscriptions
-                                // TODO: possibly resubscribe
-                                // TODO: possibly redeliver in-flight messages
-                                // close all subscription channels
+                                // Closing the subscription channels signals the
+                                // failover supervisor, which owns re-subscribe and
+                                // at-least-once redelivery against the new owner
+                                // (see failover.rs); unsupervised subs are restored
+                                // by the reconcile-on-reconnect path.
                                 shutdown_engine.notify_waiters();
 
                                 break; // or trigger reconnect

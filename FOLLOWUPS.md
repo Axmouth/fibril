@@ -722,6 +722,24 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
 
 ## Code health and structure
 
+- Code-TODO triage (from a quick scan, ~58 in fibril crates + ~37 in keratin/stroma;
+  most are minor inline idea-markers - the full sweep is the #63 hygiene pass). The
+  few worth elevating rather than leaving buried in comments:
+  - `protocol/.../handler.rs` "Resolve publish drowning out delivery" - delivery
+    fairness / head-of-line starvation when a connection publishes hard. Real,
+    untracked. Worth a focused look (fair scheduling between the publish and deliver
+    paths on a connection).
+  - `broker/src/broker.rs` x3 "do not keep handle (memory leak) if relevant
+    connection dies" - per-connection handles retained after the connection drops;
+    a slow leak over a long-lived broker's lifetime. Confirm and bound.
+  - `keratin-log/src/writer.rs` "tests showing guaranteed order" + "more tests for
+    failures and edge cases (batch flush on shutdown, etc.)" - test-coverage gaps in
+    the durability-critical writer; plus the noted "more pipelining" lever.
+  - Already tracked elsewhere (no action): the snapshot-cadence FIXME (stroma.rs ->
+    "Snapshot cadence" item), the BrokerConfig builder TODO (the item below), and the
+    failover-retry-constant knobs (settings tiering). Stale comment trimmed: the
+    client reconnection-path "possibly resubscribe/redeliver" TODOs were superseded
+    by the failover supervisor + reconcile and reworded in place. [AUTHOR]
 - Convert wide config structs (starting with `BrokerConfig`, and `StromaOptions`)
   to a builder pattern. They are currently constructed with exhaustive struct
   literals across many call sites (tests, replication, main), so adding a field
