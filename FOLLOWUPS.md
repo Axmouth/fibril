@@ -180,6 +180,22 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 
 ## Performance and scale
 
+- Arc<str> + soft interning for topic/group (#65): ASSESSED 2026-06-28, NOT WORTH
+  IT - do not pursue the broad refactor. Findings: the per-message hot path
+  already allocates the topic exactly once (publish decodes `reader.str()?
+  .to_owned()`) and routing is alloc-free (`slot_lookup_no_alloc` takes `&str`),
+  so there is no repeated-clone pattern for Arc<str> to optimize - the many
+  topic `.to_string()` / `.clone()` sites in broker.rs are cold (admin, topology,
+  list, assignment events). A microbench (50 topics, 5M ops) showed interning is
+  ~3x SLOWER than the current short-string alloc even with no lock contention
+  (String::to_owned 7.8 ns/op; Mutex<HashMap> intern 24.5; RwLock read+clone
+  24.4) because you still materialize the str to hash it, then pay a map lookup +
+  atomic refcount. Memory dedup is also small (topics <=128 B; duplicated topic
+  strings across partitions are KB-scale unless partition counts are enormous).
+  Cost would be large (60+ String->Arc<str> fields across keratin/fibril/protocol
+  + wire). If extreme partition-count memory ever shows up in profiling, intern
+  ONLY the cold registry/state storage, never the message path. Verdict: skip.
+
 - Owner-side read and encode fan-out (shared tail, private catch-up) for RF >= 3. [WL]
 - Parallel-fsync, now unblocked since the recovery event-to-message verification
   landed. [WL]
