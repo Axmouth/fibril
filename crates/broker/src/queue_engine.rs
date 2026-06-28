@@ -1103,16 +1103,20 @@ impl QueueEngine for StromaEngine {
             queues: Default::default(),
         };
 
-        for ((tp, group), stat) in stats {
+        for ((tp, group), report) in stats {
+            let entry = match report {
+                Ok(stat) => fibril_metrics::QueueStateSnapshot::Ok {
+                    ready_count: stat.ready_count,
+                    inflight_count: stat.inflight_count,
+                },
+                Err(err) => fibril_metrics::QueueStateSnapshot::Error { message: err },
+            };
             snapshot.queues.insert(
                 fibril_metrics::QueueKey {
                     topic: tp.to_string(),
                     group: group.map(|s| s.to_string()),
                 },
-                fibril_metrics::QueueStateSnapshot {
-                    ready_count: stat.ready_count,
-                    inflight_count: stat.inflight_count,
-                },
+                entry,
             );
         }
 

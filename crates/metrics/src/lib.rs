@@ -340,10 +340,19 @@ pub struct StorageStatsSnapshot {
     pub avg_flush_latency_ms: Option<f64>,
 }
 
+/// Per-queue stats, or the error encountered reading them. A queue reports one or
+/// the other (never bogus zero counts alongside an error), so one unreachable
+/// queue surfaces as an error entry rather than blanking the whole list.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct QueueStateSnapshot {
-    pub ready_count: usize,
-    pub inflight_count: usize,
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum QueueStateSnapshot {
+    Ok {
+        ready_count: usize,
+        inflight_count: usize,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize)]
@@ -379,10 +388,7 @@ impl QueuesStateSnapshot {
             };
             map.insert(
                 key_str,
-                json!({
-                    "ready_count": stat.ready_count,
-                    "inflight_count": stat.inflight_count,
-                }),
+                serde_json::to_value(stat).unwrap_or(serde_json::Value::Null),
             );
         }
         serde_json::Value::Object(map)
