@@ -2049,7 +2049,7 @@ impl Client {
         // pushed topology back into this cache. The slot is connected via
         // engine_slot, which now hands the engine that weak handle.
         let shared = Arc::new(ClientShared {
-            bootstrap: vec![address],
+            bootstrap: vec![address.to_string()],
             opts,
             user_shutdown,
             pool: parking_lot::RwLock::new(HashMap::new()),
@@ -2062,7 +2062,7 @@ impl Client {
             me: std::sync::OnceLock::new(),
         });
         let _ = shared.me.set(Arc::downgrade(&shared));
-        shared.engine_slot(address).await?;
+        shared.engine_slot(address.to_string()).await?;
         let warm_timeout_ms = shared.opts.topology_warm_timeout_ms;
         let client = Client { shared };
         // Warm the topology cache once so the first publish spreads across
@@ -2696,30 +2696,19 @@ impl AutoAckedSubscription {
 
 // ===== Engine =================================================================
 
-/// Pick the first owner address usable by the connection pool, which is keyed by a
-/// resolved `SocketAddr`. An address that does not parse as one (a service name,
-/// say) is logged and skipped rather than silently dropped, and the next address is
-/// tried. Returns `None` when no address is usable. Connecting to service names
-/// directly by trying each in order is a later client brick.
-fn first_socket_endpoint(addrs: &[AdvertisedAddress]) -> Option<SocketAddr> {
-    for addr in addrs {
-        match addr.target().parse::<SocketAddr>() {
-            Ok(endpoint) => return Some(endpoint),
-            Err(error) => tracing::warn!(
-                endpoint = %addr.target(),
-                %error,
-                "owner endpoint is not a socket address, skipping it"
-            ),
-        }
-    }
-    None
+/// The first owner endpoint to dial, as a connectable `host:port` string. The
+/// connection pool resolves it at connect time, so a service name works directly.
+/// Returns `None` when the owner advertises no endpoints. Trying each address in
+/// the list in order (a true connect-probe) is a later refinement.
+fn first_owner_target(addrs: &[AdvertisedAddress]) -> Option<String> {
+    addrs.first().map(AdvertisedAddress::target)
 }
 
 /// Owner of one queue partition for client routing.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields consumed once routing is wired
 struct OwnerEntry {
-    endpoint: SocketAddr,
+    endpoint: String,
     partitioning_version: u64,
 }
 
@@ -2785,8 +2774,8 @@ impl TopologyCache {
 
     /// The set of endpoints that currently own at least one partition. Used to
     /// prune pooled connections to endpoints that are no longer owners.
-    fn endpoints(&self) -> std::collections::HashSet<SocketAddr> {
-        self.by_queue.values().map(|entry| entry.endpoint).collect()
+    fn endpoints(&self) -> std::collections::HashSet<String> {
+        self.by_queue.values().map(|entry| entry.endpoint.clone()).collect()
     }
 
     fn replace(&mut self, topology: TopologyOk) {
@@ -2801,7 +2790,7 @@ impl TopologyCache {
                     version: queue.partitioning_version,
                 },
             );
-            let Some(endpoint) = first_socket_endpoint(&queue.owner_endpoints) else {
+            let Some(endpoint) = first_owner_target(&queue.owner_endpoints) else {
                 continue;
             };
             self.by_queue.insert(
@@ -2824,7 +2813,7 @@ impl TopologyCache {
                     version: stream.partitioning_version,
                 },
             );
-            let Some(endpoint) = first_socket_endpoint(&stream.owner_endpoints) else {
+            let Some(endpoint) = first_owner_target(&stream.owner_endpoints) else {
                 continue;
             };
             self.by_queue.insert(
@@ -2838,7 +2827,7 @@ impl TopologyCache {
     }
 
     fn apply_redirect(&mut self, redirect: &Redirect) {
-        if let Some(endpoint) = first_socket_endpoint(&redirect.owner_endpoints) {
+        if let Some(endpoint) = first_owner_target(&redirect.owner_endpoints) {
             self.by_queue.insert(
                 (
                     redirect.topic.clone(),
@@ -2861,12 +2850,12 @@ impl TopologyCache {
 
 #[derive(Debug)]
 struct ClientShared {
-    bootstrap: Vec<SocketAddr>,
+    bootstrap: Vec<String>,
     opts: ClientOptions,
     user_shutdown: Arc<AtomicBool>,
     // parking_lot: no poison, faster, and only ever held briefly (get + clone),
     // never across an await — the connect happens outside the lock.
-    pool: parking_lot::RwLock<HashMap<SocketAddr, Arc<EngineSlot>>>,
+    pool: parking_lot::RwLock<HashMap<String, Arc<EngineSlot>>>,
     // ArcSwap: lock-free read-mostly routing snapshot; readers can hold the
     // snapshot across awaits, writers update via rcu. last_refresh_ms lives
     // inside so it stays consistent with the swapped map.
@@ -2952,13 +2941,13 @@ impl ClientShared {
     }
 
     /// Get-or-create the connection slot for an endpoint, connecting on miss.
-    async fn engine_slot(&self, addr: SocketAddr) -> FibrilResult<Arc<EngineSlot>> {
+    async fn engine_slot(&self, addr: String) -> FibrilResult<Arc<EngineSlot>> {
         if let Some(slot) = self.pool.read().get(&addr).cloned() {
             return Ok(slot);
         }
         let slot = Arc::new(
             EngineSlot::connect(
-                addr,
+                addr.clone(),
                 self.opts.clone(),
                 self.user_shutdown.clone(),
                 self.assignment_tx.clone(),
@@ -2979,7 +2968,7 @@ impl ClientShared {
     /// The bootstrap connection slot — the default route until queue-based
     /// routing is enabled (A5.5).
     async fn bootstrap_slot(&self) -> FibrilResult<Arc<EngineSlot>> {
-        self.engine_slot(self.bootstrap[0]).await
+        self.engine_slot(self.bootstrap[0].clone()).await
     }
 
     async fn engine_for_operation(&self) -> FibrilResult<Arc<EngineHandle>> {
@@ -3002,7 +2991,7 @@ impl ClientShared {
     ) -> FibrilResult<Arc<EngineHandle>> {
         if let Some(owner) = self.topology.load().lookup(topic, partition, group) {
             return self
-                .engine_slot(owner.endpoint)
+                .engine_slot(owner.endpoint.clone())
                 .await?
                 .engine_for_operation()
                 .await;
@@ -3028,14 +3017,14 @@ impl ClientShared {
             return false;
         }
 
-        let mut candidates: Vec<SocketAddr> = self.bootstrap.clone();
-        candidates.extend(self.pool.read().keys().copied());
+        let mut candidates: Vec<String> = self.bootstrap.clone();
+        candidates.extend(self.pool.read().keys().cloned());
         let mut seen = std::collections::HashSet::new();
         for addr in candidates {
-            if !seen.insert(addr) {
+            if !seen.insert(addr.clone()) {
                 continue;
             }
-            let Ok(slot) = self.engine_slot(addr).await else {
+            let Ok(slot) = self.engine_slot(addr.clone()).await else {
                 continue;
             };
             let Ok(engine) = slot.engine_for_operation().await else {
@@ -3069,8 +3058,8 @@ impl ClientShared {
     /// A pruned endpoint that is needed again is simply reconnected on demand.
     fn prune_pool_to_topology(&self) {
         let live = self.topology.load().endpoints();
-        let bootstrap: std::collections::HashSet<SocketAddr> =
-            self.bootstrap.iter().copied().collect();
+        let bootstrap: std::collections::HashSet<String> =
+            self.bootstrap.iter().cloned().collect();
         let mut pool = self.pool.write();
         pool.retain(|addr, slot| {
             let has_subscriptions = slot
@@ -3141,7 +3130,9 @@ impl ClientShared {
 /// pool holds one of these per endpoint.
 #[derive(Debug)]
 struct EngineSlot {
-    address: SocketAddr,
+    /// Connect target as a `host:port` string, resolved at connect time so it can
+    /// be a service name. Also the connection pool key.
+    address: String,
     opts: ClientOptions,
     user_shutdown: Arc<AtomicBool>,
     subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
@@ -3163,7 +3154,7 @@ impl EngineSlot {
     /// Build a slot around an already-connected engine (after the initial
     /// handshake, and for tests using an in-memory engine).
     fn from_engine(
-        address: SocketAddr,
+        address: String,
         opts: ClientOptions,
         user_shutdown: Arc<AtomicBool>,
         subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
@@ -3186,7 +3177,7 @@ impl EngineSlot {
 
     /// Connect a fresh slot to `address` (handshake included).
     async fn connect(
-        address: SocketAddr,
+        address: String,
         opts: ClientOptions,
         user_shutdown: Arc<AtomicBool>,
         assignment_tx: broadcast::Sender<AssignmentEvent>,
@@ -3194,7 +3185,7 @@ impl EngineSlot {
         topology_sink: std::sync::Weak<ClientShared>,
     ) -> FibrilResult<Self> {
         let subscriptions = Arc::new(RwLock::new(HashMap::new()));
-        let stream = TcpStream::connect(address)
+        let stream = TcpStream::connect(address.as_str())
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
         stream
@@ -3240,7 +3231,7 @@ impl EngineSlot {
         let old_engine = self.current();
         let mut opts = self.opts.clone();
         opts.resume_identity = Some(old_engine.resume_identity.clone());
-        let stream = TcpStream::connect(self.address)
+        let stream = TcpStream::connect(self.address.as_str())
             .await
             .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
 
@@ -5057,7 +5048,7 @@ mod tests {
         let owner = cache
             .lookup("events", Partition::new(0), None)
             .expect("resolved owner");
-        assert_eq!(owner.endpoint, "127.0.0.1:7000".parse().unwrap());
+        assert_eq!(owner.endpoint, "127.0.0.1:7000");
         assert!(
             cache.lookup("events", Partition::new(1), None).is_none(),
             "an unresolved owner leaves the partition unrouted"
@@ -5165,12 +5156,12 @@ mod tests {
         opts: ClientOptions,
     ) -> (Client, mpsc::Receiver<Command>) {
         let (engine, rx) = engine_with_command_rx();
-        let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let address = "127.0.0.1:0".to_string();
         let user_shutdown = Arc::new(AtomicBool::new(false));
         let (assignment_tx, _) = broadcast::channel(ASSIGNMENT_EVENT_CAPACITY);
         let cohort_member_id = Arc::new(std::sync::OnceLock::new());
         let slot = Arc::new(EngineSlot::from_engine(
-            address,
+            address.clone(),
             opts.clone(),
             user_shutdown.clone(),
             Arc::new(RwLock::new(HashMap::new())),
@@ -5179,7 +5170,7 @@ mod tests {
             cohort_member_id.clone(),
         ));
         let mut pool = HashMap::new();
-        pool.insert(address, slot);
+        pool.insert(address.clone(), slot);
         let shared = Arc::new(ClientShared {
             bootstrap: vec![address],
             opts,
@@ -5223,9 +5214,9 @@ mod tests {
     #[tokio::test]
     async fn prune_pool_drops_dead_owner_after_failover() {
         let (client, _rx) = client_with_command_rx();
-        let bootstrap_addr = client.shared.bootstrap[0];
+        let bootstrap_addr = client.shared.bootstrap[0].clone();
 
-        let make_slot = |addr: SocketAddr| -> Arc<EngineSlot> {
+        let make_slot = |addr: String| -> Arc<EngineSlot> {
             let (engine, _rx) = engine_with_command_rx();
             Arc::new(EngineSlot::from_engine(
                 addr,
@@ -5238,12 +5229,12 @@ mod tests {
             ))
         };
 
-        let owner_addr: SocketAddr = "127.0.0.1:7001".parse().unwrap();
-        let dead_addr: SocketAddr = "127.0.0.1:7002".parse().unwrap();
+        let owner_addr = "127.0.0.1:7001".to_string();
+        let dead_addr = "127.0.0.1:7002".to_string();
         {
             let mut pool = client.shared.pool.write();
-            pool.insert(owner_addr, make_slot(owner_addr));
-            pool.insert(dead_addr, make_slot(dead_addr));
+            pool.insert(owner_addr.clone(), make_slot(owner_addr.clone()));
+            pool.insert(dead_addr.clone(), make_slot(dead_addr.clone()));
         }
 
         // New topology after failover: owner_addr owns a partition, dead_addr
@@ -5252,7 +5243,7 @@ mod tests {
         topo.by_queue.insert(
             ("jobs".to_string(), Partition::new(0), None),
             OwnerEntry {
-                endpoint: owner_addr,
+                endpoint: owner_addr.clone(),
                 partitioning_version: 0,
             },
         );
@@ -5496,7 +5487,7 @@ mod tests {
     async fn client_applies_pushed_topology_update_and_acks() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let owner_addr: SocketAddr = "127.0.0.1:7123".parse().unwrap();
+        let owner_addr = "127.0.0.1:7123".to_string();
 
         let server = tokio::spawn(async move {
             let (conn, _) = listener.accept().await.unwrap();
@@ -5571,7 +5562,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         let owner = applied.expect("pushed topology should populate the routing cache");
-        assert_eq!(owner.endpoint, owner_addr);
+        assert_eq!(owner.endpoint, "127.0.0.1:7123");
         assert_eq!(client.shared.topology.load().generation, 7);
 
         // The push also refreshes the catalogue snapshot.
@@ -5593,8 +5584,8 @@ mod tests {
     async fn client_ignores_stale_topology_push_and_acks_current() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let owner_new: SocketAddr = "127.0.0.1:7201".parse().unwrap();
-        let owner_stale: SocketAddr = "127.0.0.1:7202".parse().unwrap();
+        let owner_new = "127.0.0.1:7201".to_string();
+        let owner_stale = "127.0.0.1:7202".to_string();
 
         let server = tokio::spawn(async move {
             let (conn, _) = listener.accept().await.unwrap();
@@ -5621,7 +5612,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let push = |generation: u64, owner: SocketAddr| TopologyOk {
+            let push = |generation: u64, owner: String| TopologyOk {
                 generation,
                 queues: vec![QueueTopologyEntry {
                     topic: "jobs".into(),
@@ -5636,7 +5627,7 @@ mod tests {
 
             // Newer generation first, then a stale (lower) generation.
             framed
-                .send(wire::encode_topology_update(0, &push(7, owner_new)).unwrap())
+                .send(wire::encode_topology_update(0, &push(7, owner_new.clone())).unwrap())
                 .await
                 .unwrap();
             let ack: TopologyUpdateAck =
@@ -5669,7 +5660,7 @@ mod tests {
             .load()
             .lookup("jobs", Partition::new(0), None)
             .expect("routing cache populated");
-        assert_eq!(owner.endpoint, owner_new);
+        assert_eq!(owner.endpoint, "127.0.0.1:7201");
         assert_eq!(client.shared.topology.load().generation, 7);
 
         client.shutdown().await;

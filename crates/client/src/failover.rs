@@ -250,7 +250,7 @@ fn supervise_forward<R, M, F>(
                         // re-establishing this stream (or closing it so we
                         // re-subscribe). Cheap when the connection is healthy.
                         if let Some(owner_addr) = current {
-                            match client.shared.engine_slot(owner_addr).await {
+                            match client.shared.engine_slot(owner_addr.clone()).await {
                                 Ok(slot) => {
                                     if let Err(e) = slot.engine_for_operation().await {
                                         tracing::debug!(%owner_addr, error = ?e, "subscription owner reconnect failed, will retry");
