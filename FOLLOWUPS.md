@@ -228,22 +228,27 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   the time and dirty triggers. The gate is commented out in
   `periodic_snapshot_step`, `last_snapshot_event_offset` is already tracked, so
   wiring is low-risk. Currently `#[allow(dead_code)]` with a FIXME. [AUTHOR]
-- Onboarding and easy trial (move on this soon): make "cluster from nothing"
-  genuinely fast and low-ceremony. The local tryout still needs a clone and a
-  build, so it is not really a 60-second path. Most of the pipeline is already
-  done: a `Dockerfile`, a CI job (`server-docker-image`) that publishes
-  `ghcr.io/<owner>/fibril-server` (`:main` and `:sha-...`) on every push to main,
-  and a single-server `compose.server.example.yaml`. Remaining to reach a
-  one-command trial:
-  - Make the GHCR package public so `docker run` and compose work anonymously
-    (a GitHub package-visibility toggle, not a repo change).
-  - Add a multi-node cluster compose (a few `fibril-server` services in ganglion
-    mode, shared network, service-DNS peers, bootstrap on one) plus the admin
-    dashboard, so a coordinated cluster comes up in one `docker compose up`.
-  - A curl-to-shell bootstrap that fetches and runs that compose for a single
-    pasted command. Offer the compose itself as the safe default. This is what
-    would earn back a real "60 seconds from nothing" claim.
-  - In-memory (non-durable) mode for an even lighter trial. [WL/AUTHOR]
+- Onboarding and easy trial - LARGELY DONE, verified end to end 2026-06-28. The
+  one-command path exists and works: `ghcr.io/axmouth/fibril-server` is public
+  (anonymous `docker pull` confirmed), `compose.cluster.example.yaml` brings up a
+  three-broker ganglion cluster with service-DNS peers, a healthcheck-gated
+  one-shot seeder (demo queues + a stream), and each admin dashboard exposed, and
+  `website/public/tryout.sh` (served at `fibril.sh/tryout.sh`, documented in
+  `concepts/clustering.md`) is the curl-to-shell bootstrap. The quickstart page
+  covers single-broker `docker run` and links the under-a-minute cluster tryout.
+  Verified: cluster forms (healthy consensus, leader elected), seed declares
+  orders/payments/emails + the events stream, and `/admin/api/topology` shows
+  partition ownership spread across the three brokers.
+  - REMAINING (genuine): in-memory (non-durable) mode for an even lighter trial
+    (no data volume, lost on restart). This is really a storage feature (a
+    pluggable Keratin write target / memory-only tier), larger than onboarding -
+    see the "In-memory (non-durable) queues" item in the non-replication track.
+  - MINOR (observed during the smoke test, worth a look): the leader broker's
+    `/admin/api/queues` returned `{}` right after seeding while the other brokers
+    listed all three queues, likely lazy local engine materialization on the
+    owner. The topology page (which the tryout points users to) reads
+    `/admin/api/topology` and was correct, so this is not on the trial path.
+  [WL/AUTHOR]
 - Admin dashboard: a lost-connection banner. When the admin page can no longer
   reach its broker (broker down, failover, network blip), show a clear banner
   instead of silently stale data. [AUTHOR]
