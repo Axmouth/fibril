@@ -733,6 +733,15 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
 
 ## Code health and structure
 
+- Routing/pattern-subscribe parity gaps (the `client.routing()` discovery surface
+  landed on Rust, TS, and async Python): (a) the Python BLOCKING facade does not
+  yet expose `routing()` / pattern subscribe - add a blocking wrapper over the
+  async `PatternSubscription`; (b) integration tests for the cross-channel fan-in
+  exist only in Rust (wire mock); the TS/Python wire mocks do not yet speak stream
+  subscribe, and an auto-attach-on-catalogue-change test is missing everywhere
+  (the watcher rides the already-tested catalogue feed); (c) assess whether
+  pattern subscribe deserves its own docs page rather than the clients.mdx entry.
+
 - ASSESS whether the per-queue ACK WINDOW is still earning its keep. The queue
   carries an ack-window (base offset + bitset: `set_ack_window`,
   `ack_window_base`, `ack_bits_bytes`, `SetAckWindow` / `SetAckWindowFromBytes`)

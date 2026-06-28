@@ -944,6 +944,61 @@ position: `from_latest()` / `fromLatest()` (the default), `from_earliest()`,
 `from_offset(..)`, `from_last(..)`, or `from_time(..)`. Use `sub_auto_ack()` /
 `subAutoAck()` when you do not need explicit settlement.
 
+## Pattern subscribe and discovery
+
+Discovery is an opt-in surface: call `routing()` to get a routing view of the
+same connection, then `subscribe_pattern(glob)` to fan in across every work queue
+whose topic matches, or `subscribe_stream_pattern(glob)` for Plexus streams. The
+subscription keeps attaching channels that start matching later, so queues or
+streams declared after you subscribe are picked up without a reconnect. Each
+delivery is paired with the channel it came from. The glob is the same
+`*`-wildcard grammar as the header filter (no regex); `"*"` matches everything.
+Manual (`sub` / `.sub()`) and auto-ack (`sub_auto_ack` / `.subAutoAck()`)
+variants both exist, and the routing view still publishes and subscribes
+normally, so it composes with reliable publishing.
+
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
+```rust
+let mut sub = client
+    .routing()
+    .subscribe_pattern("events.*")
+    .sub()
+    .await?;
+
+while let Some((source, msg)) = sub.recv().await {
+    handle(&source.topic, msg.content()?);
+    msg.complete().await?;
+}
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+const sub = await client.routing().subscribePattern("events.*").sub();
+
+for await (const { source, message } of sub) {
+  handle(source.topic, message.content());
+  await message.complete();
+}
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+sub = await client.routing().subscribe_pattern("events.*").sub()
+
+async for item in sub:
+    handle(item.source.topic, item.message.text())
+    await item.message.complete()
+```
+
+  </TabItem>
+</Tabs>
+
 ## Shutdown
 
 <Tabs syncKey="client-language">
