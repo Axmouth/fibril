@@ -445,6 +445,8 @@ import {
   decodeTopologyUpdateBody,
   encodeTopologyUpdateAckBody,
   decodeTopologyUpdateAckBody,
+  encodeGoingAwayBody,
+  decodeGoingAwayBody,
   type DeclarePlexus,
   type SubscribeStream,
   type TopologyOk,
@@ -547,4 +549,10 @@ test("topology update push + ack bodies match shared vectors and round-trip", ()
     VECTORS.topology_update_ack,
   );
   assert.deepEqual(decodeTopologyUpdateAckBody(encodeTopologyUpdateAckBody(ack)), ack);
+});
+
+test("going away body matches shared vector and round-trips", () => {
+  const notice = { graceMs: 30000n, message: "broker restarting for upgrade" };
+  assert.equal(toHex(encodeGoingAwayBody(notice)), VECTORS.going_away);
+  assert.deepEqual(decodeGoingAwayBody(encodeGoingAwayBody(notice)), notice);
 });

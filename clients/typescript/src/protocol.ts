@@ -59,6 +59,10 @@ export enum Op {
   TopologyUpdate = 101,
   TopologyUpdateAck = 102,
 
+  // Server-initiated drain notice: the broker is going away for a planned
+  // shutdown or upgrade. The client settles in-flight work and reconnects.
+  GoingAway = 103,
+
   Error = 255,
 }
 
@@ -346,6 +350,15 @@ export interface TopologyOkMsg {
  */
 export interface TopologyUpdateAckMsg {
   generation: bigint;
+}
+
+/**
+ * Server-initiated drain notice: the broker is going away for a planned shutdown
+ * or upgrade. graceMs is how long it will hold sessions before it stops serving.
+ */
+export interface GoingAwayMsg {
+  grace_ms: bigint;
+  message: string;
 }
 
 /**

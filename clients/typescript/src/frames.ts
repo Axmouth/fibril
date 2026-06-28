@@ -35,6 +35,7 @@ import type {
   ResumeIdentity,
   SubscribeMsg,
   SubscribeOkMsg,
+  GoingAwayMsg,
   StreamTopologyEntryMsg,
   TopologyOkMsg,
   TopologyRequestMsg,
@@ -583,6 +584,10 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
     case Op.TopologyUpdateAck: {
       const w = wire.decodeTopologyUpdateAckBody(payload);
       return { generation: w.generation } satisfies TopologyUpdateAckMsg;
+    }
+    case Op.GoingAway: {
+      const w = wire.decodeGoingAwayBody(payload);
+      return { grace_ms: w.graceMs, message: w.message } satisfies GoingAwayMsg;
     }
     case Op.Redirect: {
       const w = wire.decodeRedirectBody(payload);

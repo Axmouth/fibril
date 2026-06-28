@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use fibril_protocol::v1::wire;
 use fibril_protocol::v1::{
     Ack, AdvertisedAddress, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
-    DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, Hello, HelloOk, Nack, Partition,
+    DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, GoingAway, Hello, HelloOk, Nack,
+    Partition,
     Publish, PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry, ReconcileClient,
     ReconcilePolicy, ReconcileSubscription, Redirect, ResumeIdentity, ResumeOutcome,
     StreamDurability, StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk,
@@ -591,6 +592,20 @@ fn wire_encoders_match_shared_vectors() {
         wire::encode_topology_update_ack(rid, &TopologyUpdateAck { generation: 12 })
             .unwrap()
             .payload,
+    );
+
+    check(
+        &v,
+        "going_away",
+        wire::encode_going_away(
+            rid,
+            &GoingAway {
+                grace_ms: 30_000,
+                message: "broker restarting for upgrade".into(),
+            },
+        )
+        .unwrap()
+        .payload,
     );
 
     check(

@@ -1560,6 +1560,28 @@ export function decodeTopologyUpdateAckBody(body: Uint8Array): TopologyUpdateAck
   return { generation };
 }
 
+export interface GoingAway {
+  graceMs: bigint;
+  message: string;
+}
+
+export function encodeGoingAwayBody(notice: GoingAway): Uint8Array {
+  const w = new Writer();
+  w.magic("FGA1");
+  w.u64(notice.graceMs);
+  w.str(notice.message);
+  return w.finish();
+}
+
+export function decodeGoingAwayBody(body: Uint8Array): GoingAway {
+  const r = new Reader(body);
+  r.expectMagic("FGA1");
+  const graceMs = r.u64();
+  const message = r.str();
+  r.finish();
+  return { graceMs, message };
+}
+
 export function encodeRedirectBody(redirect: Redirect): Uint8Array {
   const w = new Writer();
   w.magic("FRD1");

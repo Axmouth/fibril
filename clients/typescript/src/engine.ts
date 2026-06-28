@@ -27,6 +27,7 @@ import {
   type DeliverMsg,
   type DeliveryTag,
   type ErrorMsg,
+  type GoingAwayMsg,
   type Hello,
   type HelloOk,
   type NackMsg,
@@ -871,6 +872,16 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
             } satisfies TopologyUpdateAckMsg),
           );
         }
+        return;
+      }
+
+      case Op.GoingAway: {
+        // The broker is draining for a planned shutdown or upgrade. Decode to
+        // validate the frame; when the socket then closes, the existing
+        // reconnect path redirects to the post-drain owner. A proactive
+        // reaction (settle in-flight, reconnect early) and surfacing this to
+        // the app are a later cross-client brick.
+        decodeFrameBody<GoingAwayMsg>(frame);
         return;
       }
 
