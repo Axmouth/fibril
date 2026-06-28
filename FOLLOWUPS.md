@@ -65,14 +65,6 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   for owned partitions. Until then, declaring the channel against the new owner
   re-materializes it. Low risk in single-node / declare-before-publish flows.
 
-- Plexus stream subscriptions in the TS and Python clients still need the dynamic
-  fan-in the Rust client now has: the failover-resubscribe supervisor plus the
-  live-grow partition pickup loop (Rust shares the queue supervisor via the
-  `SupervisedReq` trait + `stream_partition_resubscribe_loop_*`). Port both when
-  doing the TS/Python stream clients. Note streams deliberately stay OUT of the
-  reconnect-reconcile registry (they own re-subscribe and resume via the durable
-  cursor) - mirror that in the other clients.
-
 - Durable stream throughput RESOLVED (was ~847/s). The earlier pipelining was
   correct but the per-channel ingest awaited the staged offset between appends
   (append_stream_records_batch), so keratin's writer never held more than one append
