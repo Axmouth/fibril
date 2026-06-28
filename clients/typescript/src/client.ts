@@ -11,6 +11,7 @@ import { deferred } from "./internal/deferred.js";
 import type { BoundedQueue } from "./internal/bounded-queue.js";
 import { Publisher } from "./publisher.js";
 import { SubscriptionBuilder, StreamSubscriptionBuilder } from "./subscription.js";
+import { RoutingClient } from "./routing.js";
 import { TopologyCache, routePartition, type Route, type RoundRobin } from "./internal/topology.js";
 import type {
   DeclarePlexus,
@@ -994,6 +995,15 @@ export class Client {
    */
   stream(topic: string): StreamSubscriptionBuilder {
     return new StreamSubscriptionBuilder(this, topic);
+  }
+
+  /**
+   * Opt in to the routing/discovery surface. Returns a {@link RoutingClient}
+   * sharing this connection; the plain client stays usable. Pattern subscribe
+   * and auto-pickup of matching channels live there, off the default surface.
+   */
+  routing(): RoutingClient {
+    return new RoutingClient(this);
   }
 
   /**

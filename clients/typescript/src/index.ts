@@ -5,7 +5,18 @@ export {
   StreamConfig,
   type ClientOptionsInit,
   type ReconnectOutcome,
+  type Catalogue,
+  type QueueInfo,
+  type StreamInfo,
 } from "./client.js";
+export {
+  RoutingClient,
+  PatternSubscribeBuilder,
+  StreamPatternSubscribeBuilder,
+  PatternSubscription,
+  type PatternSource,
+  type PatternMessage,
+} from "./routing.js";
 export {
   NewMessage,
   isReservedHeaderKey,
