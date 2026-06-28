@@ -61,6 +61,14 @@ pub trait QueueRepartitionManager: Send + Sync + 'static {
     ) -> Result<serde_json::Value, String>;
 }
 
+/// Operator-triggered drain: announce a planned restart or upgrade to connected
+/// clients (a `GoingAway` push) so they settle in-flight work and reconnect,
+/// redirecting to the post-drain owner. Returns how many clients were notified.
+#[async_trait]
+pub trait BrokerDrainController: Send + Sync + 'static {
+    async fn announce_drain(&self, grace_ms: u64, message: String) -> usize;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSettingsClusterUpdateOutcome {
     Stored(RuntimeSettingsSnapshot),
@@ -132,6 +140,8 @@ pub struct AdminServer {
     pub runtime_settings_cluster: Option<Arc<dyn RuntimeSettingsClusterStore>>,
     /// Optional Plexus stream observability + declare surface (the hosting broker).
     pub streams: Option<Arc<dyn StreamAdmin>>,
+    /// Optional drain controller for `POST /admin/api/drain`.
+    pub drain: Option<Arc<dyn BrokerDrainController>>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -170,7 +180,14 @@ impl AdminServer {
             queue_repartition: None,
             runtime_settings_cluster: None,
             streams: None,
+            drain: None,
         }
+    }
+
+    /// Attach the drain controller for `POST /admin/api/drain`.
+    pub fn with_drain(mut self, drain: Arc<dyn BrokerDrainController>) -> Self {
+        self.drain = Some(drain);
+        self
     }
 
     /// Attach the Plexus stream surface serving `GET/POST /admin/api/streams`.
@@ -304,6 +321,7 @@ impl AdminServer {
                 "/admin/api/repartition",
                 axum::routing::post(routes::repartition_queue),
             )
+            .route("/admin/api/drain", axum::routing::post(routes::drain))
             .route(
                 "/admin/api/global-dlq",
                 get(routes::global_dlq).put(routes::update_global_dlq),

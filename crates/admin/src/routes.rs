@@ -13,11 +13,11 @@ use fibril_broker::queue_engine::{
     GlobalDlqUpdateOutcome, InspectMode, MessageHeaders, MessageInspectionStatus,
     QueueInspectionState, RecoveryMismatchPolicy, RetentionConfig, StromaError,
 };
-use fibril_broker::stream::StreamDurability;
 use fibril_broker::runtime_settings::{
     RuntimeSettings, RuntimeSettingsError, RuntimeSettingsLoadIssue, RuntimeSettingsLocks,
     RuntimeSettingsSnapshot, RuntimeSettingsUpdateOutcome,
 };
+use fibril_broker::stream::StreamDurability;
 use fibril_metrics::{BrokerStatsSnapshot, StorageStatsSnapshot, SystemSnapshot, TcpStatsSnapshot};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -312,9 +312,11 @@ pub async fn create_stream(
         .await
     {
         Ok(()) => Ok(Json(serde_json::json!({ "status": "created" })).into_response()),
-        Err(StromaError::InvalidArgument(message)) => {
-            Ok(admin_error(StatusCode::BAD_REQUEST, "invalid_argument", message))
-        }
+        Err(StromaError::InvalidArgument(message)) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_argument",
+            message,
+        )),
         Err(err) => {
             tracing::error!("create stream failed: {err}");
             Ok(admin_error(
@@ -806,6 +808,49 @@ pub async fn repartition_queue(
             error,
         )),
     }
+}
+
+#[derive(Deserialize)]
+pub struct DrainRequest {
+    /// How long the broker will hold sessions before it stops serving, so
+    /// clients know their window to settle and reconnect. Defaults to 30s.
+    #[serde(default = "default_drain_grace_ms")]
+    pub grace_ms: u64,
+    /// Human-readable reason surfaced to clients and logs.
+    #[serde(default = "default_drain_message")]
+    pub message: String,
+}
+
+fn default_drain_grace_ms() -> u64 {
+    30_000
+}
+
+fn default_drain_message() -> String {
+    "broker draining for a planned restart".to_string()
+}
+
+/// POST /admin/api/drain: announce a planned restart or upgrade to connected
+/// clients so they settle in-flight work and reconnect. Does not stop the
+/// broker; the operator restarts it after the grace window.
+pub async fn drain(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<DrainRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+
+    let Some(controller) = &server.drain else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "drain_unavailable",
+            "drain is not available on this broker",
+        ));
+    };
+
+    let notified = controller
+        .announce_drain(request.grace_ms, request.message)
+        .await;
+    Ok(Json(serde_json::json!({ "notified": notified })).into_response())
 }
 
 pub async fn runtime_settings(

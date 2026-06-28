@@ -168,6 +168,29 @@ pub enum FibrilServerError {
     AdminListener(#[source] AdminServerError),
 }
 
+/// Drain controller for the admin endpoint: announces a planned restart to
+/// connected clients through the shared connection registry.
+pub struct ConnectionSettingsDrainController {
+    connection_settings: ConnectionSettings,
+}
+
+impl ConnectionSettingsDrainController {
+    pub fn new(connection_settings: ConnectionSettings) -> Self {
+        Self {
+            connection_settings,
+        }
+    }
+}
+
+#[async_trait]
+impl fibril_admin::BrokerDrainController for ConnectionSettingsDrainController {
+    async fn announce_drain(&self, grace_ms: u64, message: String) -> usize {
+        self.connection_settings
+            .announce_going_away(grace_ms, &message)
+            .await
+    }
+}
+
 /// Live-repartition trigger for the admin endpoint: decides grow vs shrink from
 /// the queue's current count and calls the matching coordination operation.
 pub struct GanglionQueueRepartitionManager {
@@ -650,7 +673,11 @@ pub fn spawn_ganglion_broker_tasks(
         },
         Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
         move || {
-            broker_heartbeat_labels(&tails_broker, labels_adoption.as_deref(), &heartbeat_advertise)
+            broker_heartbeat_labels(
+                &tails_broker,
+                labels_adoption.as_deref(),
+                &heartbeat_advertise,
+            )
         },
     );
 
@@ -1086,6 +1113,11 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
 
     // Plexus stream observability + declare surface (the hosting broker).
     let admin = admin.with_streams(broker.clone());
+
+    // Operator drain: announce a planned restart to connected clients.
+    let admin = admin.with_drain(Arc::new(ConnectionSettingsDrainController::new(
+        connection_settings.clone(),
+    )));
 
     // Per-broker exclusive-cohort view (this node's local cohort membership).
     let admin = admin.with_cohorts({
