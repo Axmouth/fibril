@@ -770,6 +770,16 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   collect_ttl_expired, mark_inflight_batch, canonical / debug_dump_queue,
   inspect_offsets. Decide per item whether the Stroma API is intended product
   surface or can go with its test.
+  - REVIEWED 2026-06-28 (keratin bb322d6). Removed the two genuinely dead chains:
+    `filter_not_enqueued` (Stroma method + handle + QueueCommand::FilterNotEnqueued
+    + state method, zero callers anywhere) and `count_inflight` (Stroma wrapper,
+    zero callers; the underlying `inflight_len` handle stays, used by has_inflight
+    and evict). Kept the rest as live or test-covered: `inspect_offsets` /
+    `inspect_messages` (admin, used by fibril), `collect_ttl_expired` (the TTL
+    worker), `dump_inflight` (via `validate`, a crash-recovery invariant test),
+    `retries` / `is_inflight` (queue-state assertions in dlq tests),
+    `canonical` / `debug_dump_queue` (snapshot round-trip assertions in replay
+    tests), and the `mark_inflight_one` / `mark_inflight_batch` test-helper block.
 
 - ACK WINDOW assessment (2026-06-28): KEEP it, it is load-bearing. In
   `QueueInternalState` (keratin stroma/core/src/state.rs) the ack state is
