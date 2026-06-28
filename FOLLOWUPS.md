@@ -780,6 +780,16 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
     `retries` / `is_inflight` (queue-state assertions in dlq tests),
     `canonical` / `debug_dump_queue` (snapshot round-trip assertions in replay
     tests), and the `mark_inflight_one` / `mark_inflight_batch` test-helper block.
+  - QUEUE-ENGINE pass 2026-06-28 (fibril 05ce6a6): swept the broker `QueueEngine`
+    + `StreamStore` traits and `StromaEngine` inherent methods. Every QueueEngine
+    trait method has a live broker caller. Removed three dead ones:
+    `StromaEngine::become_queue_owner` (the epoch-fenced
+    `become_queue_owner_with_epoch` is the live owner-activation path), the
+    singular `StreamStore::commit_stream_cursor` (superseded by the batched
+    `commit_stream_cursors` from the cursor-commit microbatcher, #83), and
+    `StromaEngine::stream_replication_next_offsets` (never invoked). Note: the
+    keratin `Stroma::commit_stream_cursor` it forwarded to stays - it is exercised
+    by keratin's own streams tests.
 
 - ACK WINDOW assessment (2026-06-28): KEEP it, it is load-bearing. In
   `QueueInternalState` (keratin stroma/core/src/state.rs) the ack state is
