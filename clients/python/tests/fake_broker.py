@@ -40,6 +40,7 @@ class FakeBroker:
     nacks: list[wire.Nack] = field(default_factory=list)
     declares: list[wire.DeclareQueue] = field(default_factory=list)
     subscribes: list[wire.Subscribe] = field(default_factory=list)
+    stream_subscribes: list[wire.SubscribeStream] = field(default_factory=list)
     reconciles: list[wire.ReconcileClient] = field(default_factory=list)
     topology_acks: list[wire.TopologyUpdateAck] = field(default_factory=list)
 
@@ -173,6 +174,38 @@ class FakeBroker:
             await self._send(writer, build_frame(Op.SUBSCRIBE_OK, rid, encode_body(Op.SUBSCRIBE_OK, ok)))
             for payload in self.deliver_on_subscribe:
                 await self.deliver(writer, sub_id, req, payload)
+            return
+
+        if op == Op.SUBSCRIBE_STREAM:
+            sreq = decode_body(Op.SUBSCRIBE_STREAM, frame.payload)
+            assert isinstance(sreq, wire.SubscribeStream)
+            self.stream_subscribes.append(sreq)
+            self._sub_id += 1
+            sub_id = self._sub_id
+            # Streams resolve through the shared SUBSCRIBE_OK reply (the engine
+            # waiter is keyed by request id, not op).
+            ok = wire.SubscribeOk(
+                sub_id=sub_id,
+                topic=sreq.topic,
+                partition=sreq.partition,
+                group=None,
+                prefetch=max(1, sreq.prefetch),
+                consumer_group=None,
+                consumer_target=None,
+                member_id=None,
+            )
+            await self._send(writer, build_frame(Op.SUBSCRIBE_OK, rid, encode_body(Op.SUBSCRIBE_OK, ok)))
+            shim = wire.Subscribe(
+                topic=sreq.topic,
+                partition=sreq.partition,
+                group=None,
+                prefetch=sreq.prefetch,
+                auto_ack=sreq.auto_ack,
+                consumer_group=None,
+                consumer_target=None,
+            )
+            for payload in self.deliver_on_subscribe:
+                await self.deliver(writer, sub_id, shim, payload)
             return
 
         if op == Op.ACK:

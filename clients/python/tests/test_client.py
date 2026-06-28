@@ -153,6 +153,47 @@ async def test_fan_in_over_two_partitions(broker: FakeBroker) -> None:
         await client.shutdown()
 
 
+# Mirrors the Rust client's stream_subscribe_sends_durable_filtered_request:
+# the stream builder carries durable name, start, filters, prefetch, ack mode.
+async def test_stream_subscribe_sends_durable_filtered_request(broker: FakeBroker) -> None:
+    client = await _connect(broker)
+    try:
+        sub = await (
+            client.stream("events")
+            .durable("analytics")
+            .from_earliest()
+            .filter("region", "eu-*")
+            .filter("kind", "order")
+            .prefetch(8)
+            .sub()
+        )
+        assert len(broker.stream_subscribes) == 1
+        req = broker.stream_subscribes[0]
+        assert req.topic == "events"
+        assert req.partition == 0
+        assert req.durable_name == "analytics"
+        assert req.start.kind == "earliest"
+        assert req.filter == [("region", "eu-*"), ("kind", "order")]
+        assert req.prefetch == 8
+        assert req.auto_ack is False
+        sub.close()
+    finally:
+        await client.shutdown()
+
+
+# Mirrors the Rust client's stream_subscribe_fans_in_over_explicit_partitions.
+async def test_stream_subscription_fans_in_over_explicit_partitions(broker: FakeBroker) -> None:
+    client = await _connect(broker)
+    try:
+        sub = await client.stream("events").partitions(3).sub_auto_ack()
+        assert {s.partition for s in broker.stream_subscribes} == {0, 1, 2}
+        assert all(s.auto_ack for s in broker.stream_subscribes)
+        assert all(s.start.kind == "latest" for s in broker.stream_subscribes)
+        sub.close()
+    finally:
+        await client.shutdown()
+
+
 async def test_keyless_publish_round_robins_partitions(broker: FakeBroker) -> None:
     broker.topology = _topology_two_partitions(broker)
     client = await _connect(broker)
