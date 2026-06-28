@@ -43,6 +43,39 @@ pub const RUNTIME_SETTINGS_ATTRIBUTE: &str = "fibril/runtime_settings";
 /// cohort.
 pub const COHORT_MEMBERSHIP_LABEL: &str = "fibril/cohort_membership";
 
+/// Heartbeat label carrying a broker's full advertise list (priority-ordered
+/// `host:port` strings) so clients learn every reachable endpoint of an owner, not
+/// just the single endpoint registered in the node table.
+pub const ADVERTISE_LABEL: &str = "fibril/advertise";
+
+/// Serialize a broker's advertise list for its heartbeat label.
+pub fn encode_advertise(addrs: &[String]) -> String {
+    serde_json::to_string(addrs).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Parse a broker's advertise label; malformed/absent -> empty (the caller falls
+/// back to the node's registered endpoint).
+pub fn decode_advertise(raw: &str) -> Vec<String> {
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
+/// A node's advertise list for client routing: the full priority-ordered list
+/// from its advertise label when present and non-empty, otherwise the single
+/// registered endpoint (empty when that is absent too).
+fn node_advertise_endpoints(node: &ganglion_core::NodeInfo) -> Vec<String> {
+    node.labels
+        .get(ADVERTISE_LABEL)
+        .map(|raw| decode_advertise(raw))
+        .filter(|list| !list.is_empty())
+        .unwrap_or_else(|| {
+            if node.endpoint.is_empty() {
+                Vec::new()
+            } else {
+                vec![node.endpoint.clone()]
+            }
+        })
+}
+
 /// Serialize a broker's local cohort membership for its heartbeat label.
 pub fn encode_cohort_membership(memberships: &[LocalCohortMembership]) -> String {
     serde_json::to_string(memberships).unwrap_or_else(|_| "[]".to_string())
@@ -511,8 +544,9 @@ pub struct ClientQueueTopology {
     pub partition: fibril_storage::Partition,
     pub group: Option<String>,
     pub owner_node_id: String,
-    /// Broker endpoint of the owner, if the node is known in the registry.
-    pub owner_endpoint: Option<String>,
+    /// Broker endpoints of the owner in priority order, empty when the node is
+    /// not in the registry. Clients try them in order.
+    pub owner_endpoints: Vec<String>,
     pub partitioning_version: u64,
     /// Total partition count of this queue `(topic, group)` — authoritative N
     /// for key routing.
@@ -527,8 +561,9 @@ pub struct ClientStreamTopology {
     pub topic: String,
     pub partition: fibril_storage::Partition,
     pub owner_node_id: String,
-    /// Broker endpoint of the owner, if the node is known in the registry.
-    pub owner_endpoint: Option<String>,
+    /// Broker endpoints of the owner in priority order, empty when the node is
+    /// not in the registry. Clients try them in order.
+    pub owner_endpoints: Vec<String>,
     pub partitioning_version: u64,
     /// Total partition count of this stream topic — authoritative N for key
     /// routing.
@@ -2181,10 +2216,12 @@ impl GanglionCoordination {
     /// live repartitioning (constant today).
     pub fn client_topology(&self) -> ClientTopology {
         let committed = self.node.committed_snapshot();
-        let endpoints: HashMap<String, String> = committed
+        // Per-node advertise list: the full priority-ordered list from the node's
+        // advertise label when present, else the single registered endpoint.
+        let endpoints: HashMap<String, Vec<String>> = committed
             .nodes
             .values()
-            .map(|node| (node.node_id.clone(), node.endpoint.clone()))
+            .map(|node| (node.node_id.clone(), node_advertise_endpoints(node)))
             .collect();
         let generation = committed.generation;
         // Authoritative partitioning (count + version) per (topic, group), read
@@ -2211,7 +2248,7 @@ impl GanglionCoordination {
                     partition: assignment.queue.partition,
                     group,
                     owner_node_id: assignment.owner.clone(),
-                    owner_endpoint: endpoints.get(&assignment.owner).cloned(),
+                    owner_endpoints: endpoints.get(&assignment.owner).cloned().unwrap_or_default(),
                     partitioning_version: part.partitioning_version,
                     partition_count: part.partition_count,
                 }
@@ -2244,7 +2281,7 @@ impl GanglionCoordination {
                     topic: assignment.stream.topic.to_string(),
                     partition: assignment.stream.partition,
                     owner_node_id: assignment.owner.clone(),
-                    owner_endpoint: endpoints.get(&assignment.owner).cloned(),
+                    owner_endpoints: endpoints.get(&assignment.owner).cloned().unwrap_or_default(),
                     partitioning_version,
                     partition_count,
                 }
@@ -2521,6 +2558,53 @@ impl Coordination for GanglionCoordination {
 
     fn watch(&self) -> CoordinationStream {
         self.tx.subscribe()
+    }
+}
+
+#[cfg(test)]
+mod advertise_tests {
+    use super::*;
+
+    fn node_with_label(endpoint: &str, advertise: Option<&str>) -> ganglion_core::NodeInfo {
+        let mut node = ganglion_core::NodeInfo::new("n1".to_string(), endpoint.to_string(), None);
+        if let Some(raw) = advertise {
+            node.labels.insert(ADVERTISE_LABEL.to_string(), raw.to_string());
+        }
+        node
+    }
+
+    #[test]
+    fn advertise_label_roundtrips() {
+        let addrs = vec!["broker-1:9876".to_string(), "public.example:9876".to_string()];
+        assert_eq!(decode_advertise(&encode_advertise(&addrs)), addrs);
+        // Malformed or empty -> empty, never a panic (advisory data).
+        assert!(decode_advertise("not json").is_empty());
+    }
+
+    #[test]
+    fn node_advertise_uses_full_label_list_in_order() {
+        let node = node_with_label(
+            "10.0.0.1:9876",
+            Some(r#"["broker-1:9876","public.example:9876"]"#),
+        );
+        assert_eq!(
+            node_advertise_endpoints(&node),
+            vec!["broker-1:9876".to_string(), "public.example:9876".to_string()]
+        );
+    }
+
+    #[test]
+    fn node_advertise_falls_back_to_registered_endpoint() {
+        // No label -> the single registered endpoint.
+        assert_eq!(
+            node_advertise_endpoints(&node_with_label("10.0.0.1:9876", None)),
+            vec!["10.0.0.1:9876".to_string()]
+        );
+        // Empty label list -> fall back too.
+        assert_eq!(
+            node_advertise_endpoints(&node_with_label("10.0.0.1:9876", Some("[]"))),
+            vec!["10.0.0.1:9876".to_string()]
+        );
     }
 }
 
@@ -2845,7 +2929,7 @@ mod tests {
         assert_eq!(queue.partition, Partition::new(0));
         assert_eq!(queue.group.as_deref(), Some("workers"));
         assert_eq!(queue.owner_node_id, "broker-a");
-        assert_eq!(queue.owner_endpoint.as_deref(), Some("127.0.0.1:9000"));
+        assert_eq!(queue.owner_endpoints, vec!["127.0.0.1:9000".to_string()]);
         assert_eq!(queue.partitioning_version, DEFAULT_PARTITIONING_VERSION);
 
         // Stale generation is rejected after consensus.
@@ -3516,7 +3600,7 @@ mod tests {
         for entry in &topology.streams {
             assert_eq!(entry.topic, "events");
             assert_eq!(entry.owner_node_id, "broker-a");
-            assert_eq!(entry.owner_endpoint.as_deref(), Some("127.0.0.1:9100"));
+            assert_eq!(entry.owner_endpoints, vec!["127.0.0.1:9100".to_string()]);
             assert_eq!(entry.partition_count, 2);
         }
 

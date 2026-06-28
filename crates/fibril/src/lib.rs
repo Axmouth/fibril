@@ -534,8 +534,18 @@ pub fn repartition_adoption_satisfied(
 pub fn broker_heartbeat_labels(
     broker: &Broker<StromaEngine>,
     topology_adoption: Option<&TopologyAdoptionTracker>,
+    advertise: &[String],
 ) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
+
+    // The broker's full advertise list, so clients learn every reachable endpoint
+    // of an owner (not just the single endpoint registered in the node table).
+    if !advertise.is_empty() {
+        labels.insert(
+            fibril_coordination_ganglion::ADVERTISE_LABEL.to_string(),
+            fibril_coordination_ganglion::encode_advertise(advertise),
+        );
+    }
     for worker in broker
         .sparse_queue_observability_report()
         .replication_followers
@@ -621,22 +631,27 @@ pub fn spawn_ganglion_broker_tasks(
 
     let tails_broker = broker.clone();
     let labels_adoption = topology_adoption.clone();
-    // Advertise the configured/derived address (a routable host:port, possibly a
-    // service name) so peers and clients can dial back even when bind is 0.0.0.0.
-    // Fall back to the bind address when nothing else is known.
-    let advertise_endpoint = config
-        .broker_advertise_addresses()
-        .into_iter()
-        .next()
+    // Advertise the configured/derived addresses (routable host:port, possibly
+    // service names) so peers and clients can dial back even when bind is 0.0.0.0.
+    // The node table holds the primary (first) endpoint; the full priority list
+    // rides a heartbeat label so clients can try them in order. Fall back to the
+    // bind address when nothing else is known.
+    let advertise_list = config.broker_advertise_addresses();
+    let advertise_primary = advertise_list
+        .first()
+        .cloned()
         .unwrap_or_else(|| config.broker.listener.bind.to_string());
+    let heartbeat_advertise = advertise_list.clone();
     let heartbeat = parts.coordination.spawn_heartbeat_with_labels(
         NodeInfo {
             node_id: config.coordination.node_id.clone(),
-            broker_addr: advertise_endpoint,
+            broker_addr: advertise_primary,
             admin_addr: Some(config.admin.listener.bind),
         },
         Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
-        move || broker_heartbeat_labels(&tails_broker, labels_adoption.as_deref()),
+        move || {
+            broker_heartbeat_labels(&tails_broker, labels_adoption.as_deref(), &heartbeat_advertise)
+        },
     );
 
     let coordination = parts.coordination.clone();
@@ -1279,10 +1294,9 @@ impl ClientTopologySource for CoordinationTopologySource {
                     partition: queue.partition,
                     group: queue.group,
                     owner_endpoints: queue
-                        .owner_endpoint
-                        .as_deref()
-                        .and_then(AdvertisedAddress::parse)
-                        .into_iter()
+                        .owner_endpoints
+                        .iter()
+                        .filter_map(|endpoint| AdvertisedAddress::parse(endpoint))
                         .collect(),
                     partitioning_version: queue.partitioning_version,
                     partition_count: queue.partition_count,
@@ -1295,10 +1309,9 @@ impl ClientTopologySource for CoordinationTopologySource {
                     topic: stream.topic,
                     partition: stream.partition,
                     owner_endpoints: stream
-                        .owner_endpoint
-                        .as_deref()
-                        .and_then(AdvertisedAddress::parse)
-                        .into_iter()
+                        .owner_endpoints
+                        .iter()
+                        .filter_map(|endpoint| AdvertisedAddress::parse(endpoint))
                         .collect(),
                     partitioning_version: stream.partitioning_version,
                     partition_count: stream.partition_count,
@@ -1323,7 +1336,9 @@ impl ClientTopologySource for CoordinationTopologySource {
             })
             .and_then(|queue| {
                 queue
-                    .owner_endpoint
+                    .owner_endpoints
+                    .into_iter()
+                    .next()
                     .map(|endpoint| (endpoint, queue.partitioning_version))
             })
     }
@@ -1335,7 +1350,9 @@ impl ClientTopologySource for CoordinationTopologySource {
             .find(|stream| stream.topic == topic && stream.partition == partition)
             .and_then(|stream| {
                 stream
-                    .owner_endpoint
+                    .owner_endpoints
+                    .into_iter()
+                    .next()
                     .map(|endpoint| (endpoint, stream.partitioning_version))
             })
     }
