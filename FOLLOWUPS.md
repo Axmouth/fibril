@@ -25,6 +25,16 @@ Tiers are grouped by concern, not strictly ordered.
   its own bottleneck, separate from the broker. See tasks #61/#62/#65 for the topic
   routing + Arc<str> interning follow-ups.
 
+- Stream (fan-out) filter performance + filtering expansion (task #129). The
+  current header filter is an AND of `header == *-glob`, evaluated on the fan-out
+  path. Two phases: (1) assess the per-record x per-subscriber cost under high
+  fan-out and optimize (precompile globs, short-circuit, skip when unfiltered,
+  evaluate once per record where the subscriber set shares a filter); (2) expand
+  the filtering vocabulary (OR groups, negation, value ranges, header-set
+  membership) while staying declarative and bounded - NOT content-routing
+  scripting, which is out of scope (see roadmap). Phase 1 gates phase 2: do not
+  add predicate power before the hot path is measured.
+
 This file tracks the replication and clustering roadmap leftovers. Non-replication
 feature ideas live in their own track, summarized at the end.
 
