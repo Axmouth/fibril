@@ -4464,7 +4464,7 @@ where
                                 // Closing the subscription channels signals the
                                 // failover supervisor, which owns re-subscribe and
                                 // at-least-once redelivery against the new owner
-                                // (see failover.rs); unsupervised subs are restored
+                                // (see failover.rs). Unsupervised subs are restored
                                 // by the reconcile-on-reconnect path.
                                 shutdown_engine.notify_waiters();
 
