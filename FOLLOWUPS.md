@@ -62,10 +62,13 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   reports a tagged Ok/Error enum per queue (keratin 9ad589c, fibril a331b35) and the
   admin route returns the error instead of swallowing it to {} (fibril 86b82dc);
   (b) ROOT CAUSE - exclude stream-kind partitions from the work-queue sweeps
-  (keratin 4994353). Remaining latent siblings (TTL-drop ~stroma.rs:2642, validate)
-  and the structural fix that makes this misrouting impossible by construction
-  (type-level WorkQueueHandle/StreamHandle projection, single map) are tracked as
-  task #99.
+  (keratin 4994353); (c) STRUCTURAL FIX (keratin 7404042, task #99): engine-specific
+  ops now live on typed WorkQueueHandle/StreamHandle projections reachable only via
+  as_work_queue()/as_stream(), so a work-queue command on a stream partition is a
+  compile error, not a runtime channel failure. The runtime kind guards in the
+  sweeps were replaced by the projection, and the two remaining latent siblings
+  (the TTL-drop sweep and validate, which iterated all partitions and only guarded
+  on role) are fixed by the same change.
 
 - Plexus stream routing after failover relies on the per-partition `.kind` marker
   being present on the new owner. The marker is a LOCAL file written at
