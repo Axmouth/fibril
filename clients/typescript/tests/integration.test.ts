@@ -24,6 +24,7 @@ import {
   type TopologyOkMsg,
 } from "../src/protocol.js";
 import { Client, ClientOptions, QueueConfig, type Catalogue } from "../src/client.js";
+import type { SubscribeStream } from "../src/wire.js";
 import { BrokenPipeError, DisconnectionError, RedirectError } from "../src/errors.js";
 import { NewMessage } from "../src/message.js";
 import { fnv1a } from "../src/internal/topology.js";
@@ -998,6 +999,109 @@ test("subscription picks up a partition added by a live grow", async () => {
     }
     assert.ok(subscribedPartitions.has(0), "subscribed partition 0");
     assert.ok(subscribedPartitions.has(1), "picked up grown partition 1");
+
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+// Mirrors the Rust client's stream_subscribe_sends_durable_filtered_request:
+// the stream builder must carry durable name, start position, header filters,
+// prefetch, and ack mode onto the SubscribeStream request.
+test("stream subscribe sends a durable filtered request", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    let streamReq: SubscribeStream | null = null;
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.SubscribeStream) {
+        streamReq = decodeFrameBody<SubscribeStream>(f);
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: 1n,
+            topic: "events",
+            group: null,
+            partition: streamReq.partition,
+            prefetch: streamReq.prefetch,
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions({ superviseSubscriptions: false }),
+    );
+    const sub = await client
+      .stream("events")
+      .durable("analytics")
+      .fromEarliest()
+      .filter("region", "eu-*")
+      .filter("kind", "order")
+      .prefetch(8)
+      .sub();
+
+    assert.ok(streamReq);
+    const req = streamReq as SubscribeStream;
+    assert.equal(req.topic, "events");
+    assert.equal(req.partition, 0);
+    assert.equal(req.durableName, "analytics");
+    assert.deepEqual(req.start, { kind: "earliest" });
+    assert.deepEqual(req.filter, [
+      ["region", "eu-*"],
+      ["kind", "order"],
+    ]);
+    assert.equal(req.prefetch, 8);
+    assert.equal(req.autoAck, false);
+
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
+// Mirrors the Rust client's stream_subscribe_fans_in_over_explicit_partitions:
+// an explicit partition count fans in with one SubscribeStream per partition.
+test("stream subscription fans in over explicit partitions", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+  try {
+    const seen: number[] = [];
+    broker.onFrame = (f, s) => {
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.SubscribeStream) {
+        const req = decodeFrameBody<SubscribeStream>(f);
+        seen.push(req.partition);
+        assert.equal(req.autoAck, true);
+        assert.deepEqual(req.start, { kind: "latest" });
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: BigInt(seen.length),
+            topic: "events",
+            group: null,
+            partition: req.partition,
+            prefetch: req.prefetch,
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(
+      `127.0.0.1:${broker.port}`,
+      new ClientOptions({ superviseSubscriptions: false }),
+    );
+    const sub = await client.stream("events").partitions(3).subAutoAck();
+
+    seen.sort((a, b) => a - b);
+    assert.deepEqual(seen, [0, 1, 2]);
 
     sub.close();
     await client.shutdown();
