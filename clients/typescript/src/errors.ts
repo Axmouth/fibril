@@ -102,7 +102,9 @@ export class RedirectError extends FibrilError {
   readonly redirect: import("./protocol.js").RedirectMsg;
   constructor(redirect: import("./protocol.js").RedirectMsg) {
     super(
-      `redirected to owner ${redirect.owner_endpoint} for ${redirect.topic}/${redirect.partition}`,
+      `redirected to owner ${redirect.owner_endpoints
+        .map((a) => `${a.host}:${a.port}`)
+        .join(", ")} for ${redirect.topic}/${redirect.partition}`,
     );
     this.redirect = redirect;
   }

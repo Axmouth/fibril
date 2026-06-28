@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { adv } from "./helpers.js";
 import assert from "node:assert/strict";
 
 import {
@@ -20,7 +21,7 @@ test("retryAdvice classifies errors intuitively", () => {
     topic: "t",
     partition: 0,
     group: null,
-    owner_endpoint: "127.0.0.1:1",
+    owner_endpoints: [adv("127.0.0.1:1")],
     partitioning_version: 0n,
   });
   // Transport, redirect, topology conflict (409), and server-transient (5xx) retry.

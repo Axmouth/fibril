@@ -296,13 +296,24 @@ export interface TopologyRequestMsg {
   group: string | null;
 }
 
+/**
+ * A broker address to advertise to clients: a connectable host:port (resolved at
+ * connect time, so host may be a service name) with optional free-form tags.
+ * Owners advertise a priority-ordered list and clients use the first reachable.
+ */
+export interface AdvertisedAddressMsg {
+  host: string;
+  port: number;
+  tags: string[];
+}
+
 /** Ownership of one queue partition, as seen by clients for routing. */
 export interface QueueTopologyEntryMsg {
   topic: string;
   partition: number;
   group: string | null;
-  // Owner broker endpoint, absent when the owner node is not in the registry.
-  owner_endpoint: string | null;
+  // Owner broker endpoints in priority order, empty when the owner is unknown.
+  owner_endpoints: AdvertisedAddressMsg[];
   partitioning_version: bigint;
   // Authoritative partition count for the queue, used for key routing.
   partition_count: number;
@@ -315,8 +326,8 @@ export interface QueueTopologyEntryMsg {
 export interface StreamTopologyEntryMsg {
   topic: string;
   partition: number;
-  // Owner broker endpoint, absent when the owner node is not in the registry.
-  owner_endpoint: string | null;
+  // Owner broker endpoints in priority order, empty when the owner is unknown.
+  owner_endpoints: AdvertisedAddressMsg[];
   partitioning_version: bigint;
   // Authoritative partition count for the stream, used for key routing.
   partition_count: number;
@@ -338,14 +349,14 @@ export interface TopologyUpdateAckMsg {
 }
 
 /**
- * Routing redirect: not an error but a target to retry against. The retry must
- * go to owner_endpoint on a separate connection, so the routing layer (not the
- * per-connection engine) acts on it.
+ * Routing redirect: not an error but a target to retry against. The retry goes
+ * to one of owner_endpoints on a separate connection, so the routing layer (not
+ * the per-connection engine) acts on it.
  */
 export interface RedirectMsg {
   topic: string;
   partition: number;
   group: string | null;
-  owner_endpoint: string;
+  owner_endpoints: AdvertisedAddressMsg[];
   partitioning_version: bigint;
 }

@@ -104,11 +104,14 @@ export class TopologyCache {
         count: Math.max(queue.partition_count, 1),
         version: queue.partitioning_version,
       });
-      // No owner endpoint means the owner node is not in the registry yet (e.g.
-      // mid-failover). Keep the count but leave ownership unresolved.
-      if (queue.owner_endpoint === null) continue;
+      // No owner endpoints means the owner node is not in the registry yet (e.g.
+      // mid-failover). Keep the count but leave ownership unresolved. The wire
+      // carries a priority-ordered list; use the first for now (connecting by
+      // name resolves service names). Trying the list in order is a later brick.
+      const queueOwner = queue.owner_endpoints[0];
+      if (queueOwner === undefined) continue;
       this.#byQueue.set(queueKey(queue.topic, queue.partition, queue.group), {
-        endpoint: queue.owner_endpoint,
+        endpoint: `${queueOwner.host}:${queueOwner.port}`,
         partitioningVersion: queue.partitioning_version,
       });
     }
@@ -121,9 +124,10 @@ export class TopologyCache {
         count: Math.max(stream.partition_count, 1),
         version: stream.partitioning_version,
       });
-      if (stream.owner_endpoint === null) continue;
+      const streamOwner = stream.owner_endpoints[0];
+      if (streamOwner === undefined) continue;
       this.#byQueue.set(queueKey(stream.topic, stream.partition, null), {
-        endpoint: stream.owner_endpoint,
+        endpoint: `${streamOwner.host}:${streamOwner.port}`,
         partitioningVersion: stream.partitioning_version,
       });
     }
@@ -131,8 +135,10 @@ export class TopologyCache {
 
   /** Point-update one partition's owner from a redirect. */
   applyRedirect(redirect: RedirectMsg): void {
+    const owner = redirect.owner_endpoints[0];
+    if (owner === undefined) return;
     this.#byQueue.set(queueKey(redirect.topic, redirect.partition, redirect.group), {
-      endpoint: redirect.owner_endpoint,
+      endpoint: `${owner.host}:${owner.port}`,
       partitioningVersion: redirect.partitioning_version,
     });
   }

@@ -1333,13 +1333,49 @@ export interface TopologyRequest {
   group: string | null;
 }
 
+/**
+ * A broker address to advertise to clients: a connectable host:port (resolved at
+ * connect time, so host may be a service name) with optional free-form tags. A
+ * partition owner advertises a priority-ordered list and clients use the first
+ * they can connect to.
+ */
+export interface AdvertisedAddress {
+  host: string;
+  port: number;
+  tags: string[];
+}
+
+function writeAdvertisedAddresses(w: Writer, addrs: AdvertisedAddress[]): void {
+  w.u32(addrs.length);
+  for (const a of addrs) {
+    w.str(a.host);
+    w.u16(a.port);
+    w.u32(a.tags.length);
+    for (const t of a.tags) w.str(t);
+  }
+}
+
+function readAdvertisedAddresses(r: Reader): AdvertisedAddress[] {
+  const count = r.u32();
+  const out: AdvertisedAddress[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const host = r.str();
+    const port = r.u16();
+    const tagCount = r.u32();
+    const tags: string[] = [];
+    for (let j = 0; j < tagCount; j += 1) tags.push(r.str());
+    out.push({ host, port, tags });
+  }
+  return out;
+}
+
 /** One queue partition's ownership as seen by clients for routing. */
 export interface QueueTopologyEntry {
   topic: string;
   partition: number;
   group: string | null;
-  // Owner broker endpoint, absent when the owner node is not in the registry.
-  ownerEndpoint: string | null;
+  // Owner broker endpoints in priority order, empty when the owner is unknown.
+  ownerEndpoints: AdvertisedAddress[];
   partitioningVersion: bigint;
   // Authoritative partition count for the queue, used for key routing.
   partitionCount: number;
@@ -1347,13 +1383,13 @@ export interface QueueTopologyEntry {
 
 /**
  * One Plexus stream partition's ownership for client-side routing. Mirrors
- * QueueTopologyEntry without a group. ownerEndpoint is null in standalone mode
+ * QueueTopologyEntry without a group. ownerEndpoints is empty in standalone mode
  * and while an owner is unknown.
  */
 export interface StreamTopologyEntry {
   topic: string;
   partition: number;
-  ownerEndpoint: string | null;
+  ownerEndpoints: AdvertisedAddress[];
   partitioningVersion: bigint;
   // Authoritative partition count for the stream, used for key routing.
   partitionCount: number;
@@ -1367,13 +1403,13 @@ export interface TopologyOk {
 
 /**
  * Routing redirect: not an error but a target to retry against. It must be
- * retried on a connection to ownerEndpoint, so the routing layer handles it.
+ * retried on a connection to an owner endpoint, so the routing layer handles it.
  */
 export interface Redirect {
   topic: string;
   partition: number;
   group: string | null;
-  ownerEndpoint: string;
+  ownerEndpoints: AdvertisedAddress[];
   partitioningVersion: bigint;
 }
 
@@ -1400,7 +1436,7 @@ export function encodeTopologyOkBody(topology: TopologyOk): Uint8Array {
   w.u32(topology.queues.length);
   for (const e of topology.queues) {
     w.queueKey(e.topic, e.partition, e.group);
-    w.optionalStr(e.ownerEndpoint);
+    writeAdvertisedAddresses(w, e.ownerEndpoints);
     w.u64(e.partitioningVersion);
     w.u32(e.partitionCount);
   }
@@ -1408,7 +1444,7 @@ export function encodeTopologyOkBody(topology: TopologyOk): Uint8Array {
   for (const s of topology.streams) {
     w.str(s.topic);
     w.u32(s.partition);
-    w.optionalStr(s.ownerEndpoint);
+    writeAdvertisedAddresses(w, s.ownerEndpoints);
     w.u64(s.partitioningVersion);
     w.u32(s.partitionCount);
   }
@@ -1427,7 +1463,7 @@ export function decodeTopologyOkBody(body: Uint8Array): TopologyOk {
       topic: key.topic,
       partition: key.partition,
       group: key.group,
-      ownerEndpoint: r.optionalStr(),
+      ownerEndpoints: readAdvertisedAddresses(r),
       partitioningVersion: r.u64(),
       partitionCount: r.u32(),
     });
@@ -1438,7 +1474,7 @@ export function decodeTopologyOkBody(body: Uint8Array): TopologyOk {
     streams.push({
       topic: r.str(),
       partition: r.u32(),
-      ownerEndpoint: r.optionalStr(),
+      ownerEndpoints: readAdvertisedAddresses(r),
       partitioningVersion: r.u64(),
       partitionCount: r.u32(),
     });
@@ -1458,7 +1494,7 @@ export function encodeTopologyUpdateBody(topology: TopologyOk): Uint8Array {
   w.u32(topology.queues.length);
   for (const e of topology.queues) {
     w.queueKey(e.topic, e.partition, e.group);
-    w.optionalStr(e.ownerEndpoint);
+    writeAdvertisedAddresses(w, e.ownerEndpoints);
     w.u64(e.partitioningVersion);
     w.u32(e.partitionCount);
   }
@@ -1466,7 +1502,7 @@ export function encodeTopologyUpdateBody(topology: TopologyOk): Uint8Array {
   for (const s of topology.streams) {
     w.str(s.topic);
     w.u32(s.partition);
-    w.optionalStr(s.ownerEndpoint);
+    writeAdvertisedAddresses(w, s.ownerEndpoints);
     w.u64(s.partitioningVersion);
     w.u32(s.partitionCount);
   }
@@ -1485,7 +1521,7 @@ export function decodeTopologyUpdateBody(body: Uint8Array): TopologyOk {
       topic: key.topic,
       partition: key.partition,
       group: key.group,
-      ownerEndpoint: r.optionalStr(),
+      ownerEndpoints: readAdvertisedAddresses(r),
       partitioningVersion: r.u64(),
       partitionCount: r.u32(),
     });
@@ -1496,7 +1532,7 @@ export function decodeTopologyUpdateBody(body: Uint8Array): TopologyOk {
     streams.push({
       topic: r.str(),
       partition: r.u32(),
-      ownerEndpoint: r.optionalStr(),
+      ownerEndpoints: readAdvertisedAddresses(r),
       partitioningVersion: r.u64(),
       partitionCount: r.u32(),
     });
@@ -1528,7 +1564,7 @@ export function encodeRedirectBody(redirect: Redirect): Uint8Array {
   const w = new Writer();
   w.magic("FRD1");
   w.queueKey(redirect.topic, redirect.partition, redirect.group);
-  w.str(redirect.ownerEndpoint);
+  writeAdvertisedAddresses(w, redirect.ownerEndpoints);
   w.u64(redirect.partitioningVersion);
   return w.finish();
 }
@@ -1541,7 +1577,7 @@ export function decodeRedirectBody(body: Uint8Array): Redirect {
     topic: key.topic,
     partition: key.partition,
     group: key.group,
-    ownerEndpoint: r.str(),
+    ownerEndpoints: readAdvertisedAddresses(r),
     partitioningVersion: r.u64(),
   };
   r.finish();

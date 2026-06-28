@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { adv } from "./helpers.js";
 import assert from "node:assert/strict";
 
 import { WireError } from "../src/errors.js";
@@ -352,7 +353,7 @@ test("topology ok body round-trips across entries", () => {
         topic: "orders",
         partition: 0,
         group: "workers",
-        ownerEndpoint: "127.0.0.1:9001",
+        ownerEndpoints: [adv("127.0.0.1:9001")],
         partitioningVersion: 3n,
         partitionCount: 4,
       },
@@ -360,7 +361,7 @@ test("topology ok body round-trips across entries", () => {
         topic: "orders",
         partition: 1,
         group: "workers",
-        ownerEndpoint: null,
+        ownerEndpoints: [],
         partitioningVersion: 3n,
         partitionCount: 4,
       },
@@ -369,7 +370,7 @@ test("topology ok body round-trips across entries", () => {
       {
         topic: "events",
         partition: 2,
-        ownerEndpoint: "10.0.0.9:7100",
+        ownerEndpoints: [adv("10.0.0.9:7100")],
         partitioningVersion: 4n,
         partitionCount: 3,
       },
@@ -386,7 +387,7 @@ test("redirect body round-trips", () => {
     topic: "orders",
     partition: 2,
     group: null,
-    ownerEndpoint: "127.0.0.1:9002",
+    ownerEndpoints: [adv("127.0.0.1:9002")],
     partitioningVersion: 5n,
   };
   assert.deepEqual(decodeRedirectBody(encodeRedirectBody(redirect)), redirect);
@@ -522,7 +523,7 @@ test("topology update push + ack bodies match shared vectors and round-trip", ()
         topic: "t",
         partition: 0,
         group: null,
-        ownerEndpoint: "127.0.0.1:7000",
+        ownerEndpoints: [adv("127.0.0.1:7000")],
         partitioningVersion: 1n,
         partitionCount: 2,
       },
@@ -531,7 +532,7 @@ test("topology update push + ack bodies match shared vectors and round-trip", ()
       {
         topic: "s",
         partition: 2,
-        ownerEndpoint: "10.0.0.9:7100",
+        ownerEndpoints: [adv("10.0.0.9:7100")],
         partitioningVersion: 4n,
         partitionCount: 3,
       },

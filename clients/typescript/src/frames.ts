@@ -143,7 +143,7 @@ function entryToWire(e: QueueTopologyEntryMsg): wire.QueueTopologyEntry {
     topic: e.topic,
     partition: e.partition,
     group: e.group,
-    ownerEndpoint: e.owner_endpoint,
+    ownerEndpoints: e.owner_endpoints,
     partitioningVersion: e.partitioning_version,
     partitionCount: e.partition_count,
   };
@@ -154,7 +154,7 @@ function entryFromWire(e: wire.QueueTopologyEntry): QueueTopologyEntryMsg {
     topic: e.topic,
     partition: e.partition,
     group: e.group,
-    owner_endpoint: e.ownerEndpoint,
+    owner_endpoints: e.ownerEndpoints,
     partitioning_version: e.partitioningVersion,
     partition_count: e.partitionCount,
   };
@@ -164,7 +164,7 @@ function streamEntryToWire(e: StreamTopologyEntryMsg): wire.StreamTopologyEntry 
   return {
     topic: e.topic,
     partition: e.partition,
-    ownerEndpoint: e.owner_endpoint,
+    ownerEndpoints: e.owner_endpoints,
     partitioningVersion: e.partitioning_version,
     partitionCount: e.partition_count,
   };
@@ -174,7 +174,7 @@ function streamEntryFromWire(e: wire.StreamTopologyEntry): StreamTopologyEntryMs
   return {
     topic: e.topic,
     partition: e.partition,
-    owner_endpoint: e.ownerEndpoint,
+    owner_endpoints: e.ownerEndpoints,
     partitioning_version: e.partitioningVersion,
     partition_count: e.partitionCount,
   };
@@ -382,7 +382,7 @@ export function encodeBody(op: Op, value: unknown): Uint8Array {
         topic: v.topic,
         partition: v.partition,
         group: v.group,
-        ownerEndpoint: v.owner_endpoint,
+        ownerEndpoints: v.owner_endpoints,
         partitioningVersion: v.partitioning_version,
       });
     }
@@ -590,7 +590,7 @@ export function decodeBody(op: Op, payload: Uint8Array): unknown {
         topic: w.topic,
         partition: w.partition,
         group: w.group,
-        owner_endpoint: w.ownerEndpoint,
+        owner_endpoints: w.ownerEndpoints,
         partitioning_version: w.partitioningVersion,
       } satisfies RedirectMsg;
     }

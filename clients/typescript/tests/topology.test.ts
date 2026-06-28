@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { adv } from "./helpers.js";
 import assert from "node:assert/strict";
 
 import {
@@ -31,7 +32,7 @@ function topology(): TopologyOkMsg {
         topic: "orders",
         partition: 0,
         group: "workers",
-        owner_endpoint: "127.0.0.1:9001",
+        owner_endpoints: [adv("127.0.0.1:9001")],
         partitioning_version: 3n,
         partition_count: 2,
       },
@@ -39,7 +40,7 @@ function topology(): TopologyOkMsg {
         topic: "orders",
         partition: 1,
         group: "workers",
-        owner_endpoint: null, // owner mid-failover: count known, owner unresolved
+        owner_endpoints: [], // owner mid-failover: count known, owner unresolved
         partitioning_version: 3n,
         partition_count: 2,
       },
@@ -47,7 +48,7 @@ function topology(): TopologyOkMsg {
         topic: "events",
         partition: 0,
         group: null,
-        owner_endpoint: "127.0.0.1:9002",
+        owner_endpoints: [adv("127.0.0.1:9002")],
         partitioning_version: 1n,
         partition_count: 1,
       },
@@ -89,14 +90,14 @@ test("replace resolves stream owners under the null group", () => {
       {
         topic: "logs",
         partition: 0,
-        owner_endpoint: "127.0.0.1:9100",
+        owner_endpoints: [adv("127.0.0.1:9100")],
         partitioning_version: 2n,
         partition_count: 2,
       },
       {
         topic: "logs",
         partition: 1,
-        owner_endpoint: null, // owner unresolved mid-failover
+        owner_endpoints: [], // owner unresolved mid-failover
         partitioning_version: 2n,
         partition_count: 2,
       },
@@ -120,7 +121,7 @@ test("null group is distinct from a same-named string group", () => {
         topic: "t",
         partition: 0,
         group: null,
-        owner_endpoint: "127.0.0.1:1",
+        owner_endpoints: [adv("127.0.0.1:1")],
         partitioning_version: 0n,
         partition_count: 1,
       },
@@ -128,7 +129,7 @@ test("null group is distinct from a same-named string group", () => {
         topic: "t",
         partition: 0,
         group: "g",
-        owner_endpoint: "127.0.0.1:2",
+        owner_endpoints: [adv("127.0.0.1:2")],
         partitioning_version: 0n,
         partition_count: 1,
       },
@@ -144,7 +145,7 @@ test("applyRedirect point-updates an owner and invalidate drops it", () => {
     topic: "orders",
     partition: 1,
     group: "workers",
-    owner_endpoint: "127.0.0.1:9009",
+    owner_endpoints: [adv("127.0.0.1:9009")],
     partitioning_version: 4n,
   });
   assert.deepEqual(cache.lookup("orders", 1, "workers"), {
