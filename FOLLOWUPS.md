@@ -733,6 +733,20 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
 
 ## Code health and structure
 
+- ASSESS whether the per-queue ACK WINDOW is still earning its keep. The queue
+  carries an ack-window (base offset + bitset: `set_ack_window`,
+  `ack_window_base`, `ack_bits_bytes`, `SetAckWindow` / `SetAckWindowFromBytes`)
+  that records out-of-order acks above a contiguous settled frontier. Question:
+  with the current work-queue model (consumed=gone, lease/ack, a settled frontier
+  that advances as a prefix), what does the window still buy beyond the frontier
+  plus the inflight set? Map every reader/writer (delivery gating, snapshot,
+  replication state-checkpoint, recovery) and decide: (a) it is load-bearing for
+  out-of-order ack tracking and stays, (b) it is redundant with the inflight set
+  + frontier and can be derived rather than stored, or (c) it can be dropped and
+  the surface (commands + client) trimmed. Either way, capture WHAT it offers so
+  the decision is on record, not folklore. Pairs with the newtypes / state-model
+  clarity goals.
+
 - Code-TODO triage (from a quick scan, ~58 in fibril crates + ~37 in keratin/stroma. Most
   are minor inline idea-markers, the full sweep is the #63 hygiene pass). The
   few worth elevating rather than leaving buried in comments:

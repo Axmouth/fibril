@@ -725,3 +725,49 @@ async fn pattern_subscription_fans_in_matching_queues() {
         "pattern should fan in only the matching queues"
     );
 }
+
+/// The auto-ack pattern variant fans in the same matching queues, yielding
+/// settled messages tagged with their source.
+#[tokio::test]
+async fn pattern_subscription_auto_ack_fans_in_matching_queues() {
+    let entry = |topic: &str| QueueTopologyEntry {
+        topic: topic.into(),
+        partition: Partition::new(0),
+        group: None,
+        owner_endpoints: vec![],
+        partitioning_version: 0,
+        partition_count: 1,
+    };
+    let mock = spawn_configurable_mock(MockConfig {
+        topology: Some(TopologyOk {
+            generation: 1,
+            queues: vec![entry("events.click"), entry("events.view"), entry("orders.new")],
+            streams: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
+
+    let mut sub = client
+        .routing()
+        .subscribe_pattern("events.*")
+        .sub_auto_ack()
+        .await
+        .unwrap();
+
+    let mut sources = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let (source, _msg) = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
+            .await
+            .expect("pattern fan-in must not hang")
+            .expect("subscription should yield a message");
+        sources.insert(source.topic);
+    }
+    assert_eq!(
+        sources,
+        std::collections::HashSet::from(["events.click".to_string(), "events.view".to_string()]),
+        "auto-ack pattern should fan in only the matching queues"
+    );
+}
