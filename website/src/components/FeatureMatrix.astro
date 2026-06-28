@@ -23,6 +23,11 @@ const features = [
     notes: "Broker path and Rust, TypeScript, and Python client methods are wired.",
   },
   {
+    feature: "Message TTL",
+    status: { kind: "ready", label: "available" },
+    notes: "Per-message or per-queue default. Expired messages drop or dead-letter.",
+  },
+  {
     feature: "Dead lettering",
     status: { kind: "ready", label: "available" },
     notes: "Global and per-queue policy are configurable. Replay tooling is still early.",
@@ -41,6 +46,16 @@ const features = [
     feature: "Message inspection",
     status: { kind: "ready", label: "available" },
     notes: "Browse active queue messages from admin tooling, with optional payload previews.",
+  },
+  {
+    feature: "Partitioned queues",
+    status: { kind: "ready", label: "available" },
+    notes: "Multiple partitions per queue, with client-side key routing and transparent fan-in.",
+  },
+  {
+    feature: "Plexus streams",
+    status: { kind: "ready", label: "available" },
+    notes: "Fan-out channel: every subscriber receives every record, with durable named cursors and durability tiers you opt into.",
   },
   {
     feature: "Partition ownership",
