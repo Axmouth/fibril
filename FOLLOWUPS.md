@@ -763,15 +763,30 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
     confirm. The byte-blob accessors (`ack_bits_bytes` /
     `SetAckWindowFromBytes`) + `ack_window_base` exist to ship that state in
     snapshots / state-checkpoints and to followers.
-  - Real follow-ups (not removal): (1) an ack farther than `ACK_WINDOW` past the
-    frontier is dropped in memory (durable in the event log, reconciled on
-    replay/snapshot), so in-memory and durable ack state can briefly diverge for
-    a far ack. Document or remove that cap. (2) Consider replacing the
-    fixed-size bitset with an unbounded `RangeSet<Offset>` of acked offsets
-    (mirroring `ready: RangeSet`): out-of-order acks are usually near-contiguous,
-    so a RangeSet is compact, drops the window cap, and could subsume
-    `ack_window_base` + `ack_bits` + the byte-blob commands behind a simpler
-    `acked` set the frontier consumes from the low end.
+  - Refined direction (2026-06-28): replace the fixed-size bitset window with an
+    unbounded `settled: RangeSet<Offset>` of terminal settlements ABOVE the
+    frontier (mirroring `ready: RangeSet`). Key points:
+    - Rename ack -> settle. `ack()` is the shared frontier-advance for ack,
+      terminal nack, and DLQ commit (it is called from nack_at and
+      dead_letter_commit, "reuse existing frontier-advance logic"), so the
+      structure already tracks all terminal settlements, not just acks. The
+      honest name is `settled` + `settled_until`.
+    - Only above the frontier. The set holds offsets settled out of order above
+      `settled_until`. The contiguous prefix IS the frontier, so `[0,
+      settled_until)` is never stored. The set carries just the near-contiguous
+      out-of-order span (about prefetch x consumers) and collapses into the
+      frontier as it advances, so it stays small.
+    - No window. A RangeSet is unbounded, so the fixed `ACK_WINDOW` cap and its
+      far-ack in-memory-drop divergence both go away (this subsumes the old
+      follow-up about documenting the cap).
+    - Shape: `advance_frontier` pops the contiguous low run from `settled` into
+      `settled_until`; `is_settled(o) = o < settled_until || settled.contains(o)`.
+    - Cost / deciding factor: this is a snapshot + replication FORMAT change. The
+      state-checkpoint and follower sync ship `ack_window_base` + `ack_bits_bytes`
+      today; they would ship the ranges instead, needing a `STROMA_VER` bump and
+      replacing the `SetAckWindow` / `SetAckWindowFromBytes` / `ack_bits_bytes` /
+      `ack_window_base` command + client surface with a `settled`-range
+      equivalent. The in-memory swap to RangeSet is the small part.
 
 - Code-TODO triage (from a quick scan, ~58 in fibril crates + ~37 in keratin/stroma. Most
   are minor inline idea-markers, the full sweep is the #63 hygiene pass). The
