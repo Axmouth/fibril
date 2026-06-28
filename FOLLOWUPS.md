@@ -695,9 +695,8 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   - BRICK 6 exclusive consumer groups: DONE. SubscriptionBuilder.consumerGroup/
     consumerTarget, plus cluster-scoped member-id mint-and-carry (server mints on
     the first exclusive subscribe, client latches and stamps every later one).
-    Exclusivity is enforced by the broker per-partition gate. STILL TODO
-    (actionable, see below): consume the AssignmentChanged push as an
-    assignment-events stream.
+    Exclusivity is enforced by the broker per-partition gate. The AssignmentChanged
+    push is consumed as an assignment-events stream (DONE, parity closed 2026-06-23).
   - BRICK 7 reliability: DONE. retryAdvice/isRetryable classification, the
     reserved-namespace header guard, and a ReliablePublisher that stamps producer
     id + monotonic seq (fibril.client.*) and retries until confirmed. At-least-once
@@ -709,21 +708,14 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
     by reusing the published fibril-server image rather than building from source.
     STILL TODO: a multi-node cluster smoke for a real cross-owner redirect (needs
     a ganglion cluster, not just one container).
-  - ACTIONABLE client gaps (server support EXISTS - verified in code 2026-06-21,
-    correcting an earlier wrong "server-gated" call):
-    - Live-grow partition pickup. The broker ships live repartition (grow by a
-      multiple, shrink by a factor) in cluster mode: `fibrilctl repartition`,
-      `/admin/api/repartition` (gated on ganglion), and broker transition
-      machinery (`repartition_transitions`, hold/release delivery during the
-      drain) in `crates/broker/src/broker.rs`. After a grow the TS consumer does
-      NOT pick up the new partitions (its fan-in set is fixed at subscribe). The
-      Rust client does, via `partition_resubscribe_loop_*`. Port that loop.
-    - Assignment-events stream. The broker DOES push `AssignmentChanged` to
-      exclusive-cohort members (`crates/protocol/src/v1/handler.rs`
-      spawn_assignment_forwarder). The TS client ignores the op. Port the Op
-      decode + an `assignmentEvents()` stream (Rust has it). Observability and
-      future client-side partition narrowing, not correctness (the per-partition
-      gate already enforces exclusivity).
+  - ACTIONABLE client gaps - now DONE (TS/Rust parity closed 2026-06-23, Python
+    followed). Both items below shipped across all clients; kept as a record:
+    - Live-grow partition pickup: the fan-in growth poll subscribes to partitions
+      added by a live grow (FEATURE_MATRIX "Failover resubscribe + live-grow pickup").
+    - Assignment-events stream: AssignmentChanged is decoded and exposed
+      (onAssignmentChange / assignment_events; FEATURE_MATRIX "Assignment events
+      stream"). Observability, not correctness (the per-partition gate enforces
+      exclusivity).
   - Effectively-once: TWO paths. (a) CLIENT-ONLY and actionable - a consumer-side
     dedup helper that skips already-seen (producer_id, seq); the headers already
     reach the consumer, so no server change is needed. (b) SERVER-GATED - broker
