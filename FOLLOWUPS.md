@@ -755,6 +755,22 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   caller now that the broker surface has narrowed - sweep for handle methods with
   zero callers and trim. The original assessment is kept below for the record.
 
+- Dead-command audit (2026-06-28, keratin 7c51a96): swept every command-wrapping
+  WorkQueueHandle method for callers across keratin + fibril. Removed the six
+  batch wrappers with ZERO callers anywhere (enqueue_many, enqueue_delayed,
+  enqueue_delayed_many, ack_many, nack_many, mark_pending_dlq_many) - the broker
+  builds those commands directly on the apply path, so the wrappers were
+  redundant. Their command variants + state methods stay (the apply path uses
+  them). The named suspects (GetLowestUnacked / GetLowestNotAcked /
+  GetNextDeliverable / GetRetries / FilterNotEnqueued) turned out LIVE - their
+  handle methods have callers. LOWER-CONFIDENCE candidates left for review (each
+  has a single keratin caller that is a test or an admin-only Stroma API the
+  broker does not exercise, so they are test-covered surface rather than clearly
+  dead): retries, filter_not_enqueued, is_inflight, dump_inflight,
+  collect_ttl_expired, mark_inflight_batch, canonical / debug_dump_queue,
+  inspect_offsets. Decide per item whether the Stroma API is intended product
+  surface or can go with its test.
+
 - ACK WINDOW assessment (2026-06-28): KEEP it, it is load-bearing. In
   `QueueInternalState` (keratin stroma/core/src/state.rs) the ack state is
   `settled_until` (the contiguous acked-prefix frontier) plus an out-of-order
