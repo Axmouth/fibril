@@ -65,4 +65,8 @@ class Op(IntEnum):
     TOPOLOGY_UPDATE = 101
     TOPOLOGY_UPDATE_ACK = 102
 
+    # Server-initiated drain notice: the broker is going away for a planned
+    # shutdown or upgrade. The client settles in-flight work and reconnects.
+    GOING_AWAY = 103
+
     ERROR = 255

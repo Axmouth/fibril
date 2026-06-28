@@ -506,6 +506,15 @@ class Engine:
                 )
             return
 
+        if op == Op.GOING_AWAY:
+            # The broker is draining for a planned shutdown or upgrade. Decode to
+            # validate the frame; when the socket then closes, the existing
+            # reconnect path redirects to the post-drain owner. A proactive
+            # reaction (settle in-flight, reconnect early) and surfacing this to
+            # the app are a later cross-client brick.
+            decode_body(Op.GOING_AWAY, frame.payload)
+            return
+
         if op == Op.PING:
             await self._send_or_die(build_frame(Op.PONG, frame.request_id, b""))
             return

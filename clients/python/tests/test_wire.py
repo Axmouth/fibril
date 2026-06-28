@@ -275,6 +275,12 @@ def _cases() -> dict[str, tuple[bytes, object]]:
             wire.encode_topology_update_ack_body(wire.TopologyUpdateAck(generation=12)),
             wire.decode_topology_update_ack_body,
         ),
+        "going_away": (
+            wire.encode_going_away_body(
+                wire.GoingAway(grace_ms=30000, message="broker restarting for upgrade")
+            ),
+            wire.decode_going_away_body,
+        ),
         "redirect": (
             wire.encode_redirect_body(wire.Redirect("t", 1, "g", [wire.AdvertisedAddress("h", 1)], 3)),
             wire.decode_redirect_body,
@@ -393,6 +399,7 @@ _ENCODERS = {
     "topology_ok": wire.encode_topology_ok_body,
     "topology_update": wire.encode_topology_update_body,
     "topology_update_ack": wire.encode_topology_update_ack_body,
+    "going_away": wire.encode_going_away_body,
     "redirect": wire.encode_redirect_body,
     "reconcile_client": wire.encode_reconcile_client_body,
     "declare_plexus": wire.encode_declare_plexus_body,

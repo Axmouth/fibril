@@ -1581,6 +1581,35 @@ def decode_topology_update_ack_body(body: bytes) -> TopologyUpdateAck:
     return TopologyUpdateAck(generation=generation)
 
 
+@dataclass
+class GoingAway:
+    """Server-initiated drain notice.
+
+    The broker is going away for a planned shutdown or upgrade. ``grace_ms`` is
+    how long it will hold sessions before it stops serving.
+    """
+
+    grace_ms: int
+    message: str
+
+
+def encode_going_away_body(notice: GoingAway) -> bytes:
+    w = Writer()
+    w.magic("FGA1")
+    w.u64(notice.grace_ms)
+    w.write_str(notice.message)
+    return w.finish()
+
+
+def decode_going_away_body(body: bytes) -> GoingAway:
+    r = Reader(body)
+    r.expect_magic("FGA1")
+    grace_ms = r.u64()
+    message = r.read_str()
+    r.finish()
+    return GoingAway(grace_ms=grace_ms, message=message)
+
+
 def encode_redirect_body(redirect: Redirect) -> bytes:
     w = Writer()
     w.magic("FRD1")
