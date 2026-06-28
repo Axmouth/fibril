@@ -12,9 +12,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use fibril_client::{Client, ClientOptions, FibrilError, NewMessage, ReconnectOutcome};
 use fibril_protocol::v1::{
     AdvertisedAddress, COMPLIANCE_STRING, Deliver, Hello, HelloOk, Op, PROTOCOL_V1, Publish,
-    PublishOk,
-    QueueTopologyEntry, ReconcileResult, Redirect, ResumeOutcome, Subscribe, SubscribeOk,
-    TopologyOk,
+    PublishOk, QueueTopologyEntry, ReconcileResult, Redirect, ResumeOutcome, Subscribe,
+    SubscribeOk, TopologyOk,
     frame::ProtoCodec,
     helper::{try_decode, try_encode},
     wire,
@@ -193,7 +192,10 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                                     topic: spread.topic.clone(),
                                     partition: Partition::new(partition),
                                     group: spread.group.clone(),
-                                    owner_endpoints: vec![AdvertisedAddress::parse(&addr.to_string()).expect("valid test owner endpoint")],
+                                    owner_endpoints: vec![
+                                        AdvertisedAddress::parse(&addr.to_string())
+                                            .expect("valid test owner endpoint"),
+                                    ],
                                     partitioning_version: spread.partitioning_version,
                                     partition_count: count,
                                 })
@@ -250,7 +252,10 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                                     topic: publish.topic,
                                     partition: Partition::new(0),
                                     group: publish.group,
-                                    owner_endpoints: vec![AdvertisedAddress::parse(&target.to_string()).expect("valid test owner endpoint")],
+                                    owner_endpoints: vec![
+                                        AdvertisedAddress::parse(&target.to_string())
+                                            .expect("valid test owner endpoint"),
+                                    ],
                                     partitioning_version: 0,
                                 };
                                 try_encode(Op::Redirect, frame.request_id, &redirect).unwrap()
@@ -260,7 +265,10 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                                     topic: publish.topic,
                                     partition: Partition::new(0),
                                     group: publish.group,
-                                    owner_endpoints: vec![AdvertisedAddress::parse(&addr.to_string()).expect("valid test owner endpoint")],
+                                    owner_endpoints: vec![
+                                        AdvertisedAddress::parse(&addr.to_string())
+                                            .expect("valid test owner endpoint"),
+                                    ],
                                     partitioning_version: 0,
                                 };
                                 try_encode(Op::Redirect, frame.request_id, &redirect).unwrap()
@@ -387,7 +395,10 @@ async fn fetch_topology_populates_cache_and_routes() {
                 topic: "jobs".into(),
                 partition: Partition::new(0),
                 group: None,
-                owner_endpoints: vec![AdvertisedAddress::parse(&owner.to_string()).expect("valid test owner endpoint")],
+                owner_endpoints: vec![
+                    AdvertisedAddress::parse(&owner.to_string())
+                        .expect("valid test owner endpoint"),
+                ],
                 partitioning_version: 0,
                 partition_count: 1,
             }],
@@ -555,12 +566,7 @@ async fn subscription_fans_in_all_partitions() {
     // transparently fans in over all partitions.
     let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
 
-    let mut sub = client
-        .subscribe("jobs")
-        .unwrap()
-        .sub()
-        .await
-        .unwrap();
+    let mut sub = client.subscribe("jobs").unwrap().sub().await.unwrap();
 
     // The mock delivers one message per partition (payload = partition).
     let mut payloads = std::collections::HashSet::new();
@@ -741,7 +747,11 @@ async fn pattern_subscription_auto_ack_fans_in_matching_queues() {
     let mock = spawn_configurable_mock(MockConfig {
         topology: Some(TopologyOk {
             generation: 1,
-            queues: vec![entry("events.click"), entry("events.view"), entry("orders.new")],
+            queues: vec![
+                entry("events.click"),
+                entry("events.view"),
+                entry("orders.new"),
+            ],
             streams: vec![],
         }),
         ..Default::default()

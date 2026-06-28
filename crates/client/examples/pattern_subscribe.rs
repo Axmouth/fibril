@@ -18,7 +18,11 @@ async fn main() -> Result<(), FibrilError> {
     println!("listening for events.* (new matching queues attach automatically)");
     while let Some((source, msg)) = sub.recv().await {
         let message = msg.complete().await?;
-        println!("{}: {}", source.topic, message.content().unwrap_or("<binary>"));
+        println!(
+            "{}: {}",
+            source.topic,
+            message.content().unwrap_or("<binary>")
+        );
     }
     Ok(())
 }

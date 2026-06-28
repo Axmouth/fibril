@@ -11,7 +11,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
 
-use fibril_protocol::v1::{ERR_INVALID, ERR_NOT_FOUND, ERR_NOT_OWNER, Partition, Subscribe, SubscribeStream};
+use fibril_protocol::v1::{
+    ERR_INVALID, ERR_NOT_FOUND, ERR_NOT_OWNER, Partition, Subscribe, SubscribeStream,
+};
 
 use crate::{
     Client, FibrilError, FibrilResult, InflightMessage, Message, subscribe_partition_auto,

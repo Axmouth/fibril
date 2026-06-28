@@ -2778,7 +2778,10 @@ impl TopologyCache {
     /// The set of endpoints that currently own at least one partition. Used to
     /// prune pooled connections to endpoints that are no longer owners.
     fn endpoints(&self) -> std::collections::HashSet<String> {
-        self.by_queue.values().map(|entry| entry.endpoint.clone()).collect()
+        self.by_queue
+            .values()
+            .map(|entry| entry.endpoint.clone())
+            .collect()
     }
 
     fn replace(&mut self, topology: TopologyOk) {
@@ -3061,8 +3064,7 @@ impl ClientShared {
     /// A pruned endpoint that is needed again is simply reconnected on demand.
     fn prune_pool_to_topology(&self) {
         let live = self.topology.load().endpoints();
-        let bootstrap: std::collections::HashSet<String> =
-            self.bootstrap.iter().cloned().collect();
+        let bootstrap: std::collections::HashSet<String> = self.bootstrap.iter().cloned().collect();
         let mut pool = self.pool.write();
         pool.retain(|addr, slot| {
             let has_subscriptions = slot
@@ -4395,6 +4397,26 @@ where
                         x if x == Op::Pong as u16 => {
                             // pass
                         }
+                        x if x == Op::GoingAway as u16 => {
+                            // The broker is draining for a planned shutdown or
+                            // upgrade. Recognize and log the notice; when the
+                            // socket then closes, the existing reconnect path
+                            // redirects to the post-drain owner via topology. A
+                            // proactive reaction (settle in-flight, reconnect
+                            // before the drop) is a later brick.
+                            let notice: GoingAway = match decode_protocol(&frame) {
+                                Ok(notice) => notice,
+                                Err(err) => {
+                                    fatal_error = Some(err);
+                                    break;
+                                }
+                            };
+                            tracing::info!(
+                                grace_ms = notice.grace_ms,
+                                "broker going away: {}",
+                                notice.message
+                            );
+                        }
                         x if x == Op::Error as u16 => {
                             let err: ErrorMsg = match decode_protocol(&frame) {
                                 Ok(err) => err,
@@ -5033,7 +5055,10 @@ mod tests {
                 StreamTopologyEntry {
                     topic: "events".into(),
                     partition: Partition::new(0),
-                    owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
+                    owner_endpoints: vec![
+                        AdvertisedAddress::parse("127.0.0.1:7000")
+                            .expect("valid test owner endpoint"),
+                    ],
                     partitioning_version: 2,
                     partition_count: 2,
                 },
@@ -5525,7 +5550,10 @@ mod tests {
                     topic: "jobs".into(),
                     partition: Partition::new(0),
                     group: None,
-                    owner_endpoints: vec![AdvertisedAddress::parse(&owner_addr.to_string()).expect("valid test owner endpoint")],
+                    owner_endpoints: vec![
+                        AdvertisedAddress::parse(&owner_addr.to_string())
+                            .expect("valid test owner endpoint"),
+                    ],
                     partitioning_version: 1,
                     partition_count: 1,
                 }],
@@ -5622,7 +5650,10 @@ mod tests {
                     topic: "jobs".into(),
                     partition: Partition::new(0),
                     group: None,
-                    owner_endpoints: vec![AdvertisedAddress::parse(&owner.to_string()).expect("valid test owner endpoint")],
+                    owner_endpoints: vec![
+                        AdvertisedAddress::parse(&owner.to_string())
+                            .expect("valid test owner endpoint"),
+                    ],
                     partitioning_version: 1,
                     partition_count: 1,
                 }],

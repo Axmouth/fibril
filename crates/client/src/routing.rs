@@ -73,7 +73,10 @@ impl RoutingClient {
     /// `pattern`. Same matching and auto-pickup behaviour as
     /// [`subscribe_pattern`](Self::subscribe_pattern), over streams instead of
     /// work queues.
-    pub fn subscribe_stream_pattern(&self, pattern: impl AsRef<str>) -> StreamPatternSubscribeBuilder {
+    pub fn subscribe_stream_pattern(
+        &self,
+        pattern: impl AsRef<str>,
+    ) -> StreamPatternSubscribeBuilder {
         StreamPatternSubscribeBuilder {
             client: self.client.clone(),
             glob: TopicGlob::new(pattern.as_ref()),
@@ -142,7 +145,9 @@ impl PatternSubscribeBuilder {
         } = self;
         let (out, rx) = merged_channel(prefetch);
         let attach: AttachFn<InflightMessage> = Arc::new(move |client, source, out| {
-            Box::pin(attach_queue_manual(client, source, prefetch, exclusive, out))
+            Box::pin(attach_queue_manual(
+                client, source, prefetch, exclusive, out,
+            ))
         });
         tokio::spawn(run_pattern(client, glob, ChannelKind::Queue, out, attach));
         Ok(PatternSubscription { rx })
@@ -525,7 +530,9 @@ async fn attach_stream_manual(
     config: StreamAttachConfig,
     out: MergedTx<InflightMessage>,
 ) -> FibrilResult<()> {
-    let sub = stream_builder(&client, &source.topic, &config)?.sub().await?;
+    let sub = stream_builder(&client, &source.topic, &config)?
+        .sub()
+        .await?;
     forward_manual(sub, source, out);
     Ok(())
 }
