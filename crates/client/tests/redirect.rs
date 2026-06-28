@@ -208,11 +208,23 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                             // Answer an empty topology by default so the client's
                             // connect-time warm completes promptly instead of
                             // waiting out its timeout.
-                            let topology = config.topology.clone().unwrap_or(TopologyOk {
+                            let mut topology = config.topology.clone().unwrap_or(TopologyOk {
                                 generation: 0,
                                 queues: vec![],
                                 streams: vec![],
                             });
+                            // Fill in unset owners with this mock so the client
+                            // routes back here, while leaving any explicitly set
+                            // owner endpoints (some tests point elsewhere) intact.
+                            let self_addr = vec![
+                                AdvertisedAddress::parse(&addr.to_string())
+                                    .expect("valid test owner endpoint"),
+                            ];
+                            for entry in &mut topology.queues {
+                                if entry.owner_endpoints.is_empty() {
+                                    entry.owner_endpoints = self_addr.clone();
+                                }
+                            }
                             try_encode(Op::TopologyOk, frame.request_id, &topology).unwrap()
                         }
                     } else if frame.opcode == Op::Publish as u16 {
@@ -658,5 +670,58 @@ async fn subscription_auto_resubscribes_to_grown_partition() {
     assert!(
         saw_partition_1,
         "consumer received a delivery from the grown partition"
+    );
+}
+
+/// A routing pattern subscription fans in across every queue whose topic matches
+/// the glob (and no others), tagging each delivery with its source channel.
+#[tokio::test]
+async fn pattern_subscription_fans_in_matching_queues() {
+    let entry = |topic: &str| QueueTopologyEntry {
+        topic: topic.into(),
+        partition: Partition::new(0),
+        group: None,
+        owner_endpoints: vec![],
+        partitioning_version: 0,
+        partition_count: 1,
+    };
+    let mock = spawn_configurable_mock(MockConfig {
+        topology: Some(TopologyOk {
+            generation: 1,
+            queues: vec![
+                entry("events.click"),
+                entry("events.view"),
+                entry("orders.new"),
+            ],
+            streams: vec![],
+        }),
+        ..Default::default()
+    })
+    .await;
+
+    // Connect warms the catalogue, so the pattern can resolve its matches without
+    // an explicit topology fetch.
+    let client = Client::connect(mock, ClientOptions::new()).await.unwrap();
+
+    let mut sub = client
+        .routing()
+        .subscribe_pattern("events.*")
+        .sub()
+        .await
+        .unwrap();
+
+    // Both events.* queues deliver; orders.new must not.
+    let mut sources = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let (source, _msg) = tokio::time::timeout(std::time::Duration::from_secs(5), sub.recv())
+            .await
+            .expect("pattern fan-in must not hang")
+            .expect("subscription should yield a message");
+        sources.insert(source.topic);
+    }
+    assert_eq!(
+        sources,
+        std::collections::HashSet::from(["events.click".to_string(), "events.view".to_string()]),
+        "pattern should fan in only the matching queues"
     );
 }

@@ -71,6 +71,9 @@ use fibril_protocol::v1::{
 mod failover;
 pub use failover::*;
 
+mod routing;
+pub use routing::*;
+
 pub use fibril_protocol::v1::ReconcilePolicy;
 // Shared header namespace constants (single source of truth in the protocol crate)
 // so the client guard and broker rejection cannot drift.
