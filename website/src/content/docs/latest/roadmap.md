@@ -13,81 +13,39 @@ check what is already wired and under what conditions.
 
 ## Recently landed
 
-- Plexus streams: a fan-out channel type alongside the work queue, where every
-  subscriber receives every matching record and position is a durable named
-  cursor rather than consume-and-delete. Per-stream durability tiers (durable,
-  speculative, ephemeral) trade delivery latency for durability, partitioning
-  spreads writes with transparent client-side fan-in, header filters narrow a
-  subscription, and acks advance the durable cursor. Wired in the broker,
-  protocol, Rust/TypeScript/Python clients, and the admin streams page. See
+Highlights only. For the full wired surface and its conditions, see
+[implemented surface](/latest/implemented-surface/).
+
+- Plexus streams: a fan-out channel type alongside the work queue, with durable
+  named cursors, per-stream durability tiers, partitioning with client-side
+  fan-in, and header filters. Durable streams are placed and owned across nodes,
+  the durable tier replicates record and cursor logs with caught-up failover, and
+  high-fan-out auto-ack coalesces cursor commits. See
   [Plexus streams](/latest/concepts/plexus-streams/).
-- Stream cluster placement and ownership: durable streams are placed across nodes
-  (spread owner-first), their config lives in coordination, and a non-owner
-  redirects publishers and subscribers to the current owner.
-- Durable stream replication, tier-gated: the durable tier replicates its record
-  and cursor logs to followers, a durable publish confirms once enough replicas
-  are durable, and a caught-up follower is promoted on owner loss. The express
-  tiers stay owner-only by design. Owner-only durable survives restart, replicated
-  durable survives node loss.
-- Stream cursor-commit microbatching: high-fan-out auto-ack coalesces cursor
-  commits per partition into one durable write and one actor message per window,
-  so durable subscriptions stay fast under many readers.
-- Live repartitioning (experimental): grow or shrink a queue's partition count in
-  coordinated mode from the admin topology page, with versioned routing and
-  drain-on-shrink.
-- A Python client landed at full feature parity with the Rust and TypeScript
-  clients, with both an async API and a thin blocking facade over the same core.
+- Wildcard subscribe / discovery routing: an opt-in client view subscribes to
+  every queue or stream matching a `*`-glob and auto-attaches new matches from a
+  live cluster catalogue. Client-side only, in all three clients.
+- Partitioned queues: multiple partitions per queue with `partition_key` stable
+  routing or round-robin spread, transparent subscription fan-in, and live grow
+  or shrink from the admin topology page.
+- Cluster coordination and replication: Ganglion-backed placement and ownership,
+  follower pull replication with checkpointing and epoch-fenced promotion, and
+  replica-durable publish confirms with `min_in_sync_replicas`.
+- Exclusive consumer groups: opt-in ordered, balanced, sticky, self-healing
+  consumption of a partitioned queue (one consumer per partition). See
+  [consumer groups](/latest/concepts/consumer-groups/).
+- Message TTL: per-message or per-queue expiry that drops through the dead-letter
+  or discard path rather than being silently consumed.
+- Reconnection grace: server-issued resume identity in the handshake, dormant
+  logical connections across a transient break, late settles after resume, and
+  conservative subscription reconciliation with an opt-in restore policy. Rust,
+  TypeScript, and Python.
+- Clients: a Python client at full parity (async plus a blocking facade) joined
+  the Rust and TypeScript clients, which track each other across the public path.
   See [client usage](/latest/clients/).
-- The TypeScript client reached parity with the Rust reference, including
-  exclusive consumer groups, the assignment-events stream, live-grow partition
-  pickup, typed wire errors, and producer-id dedup headers.
-- Message TTL: messages can expire by age, set per message with an `expiring`
-  publisher or per queue with a default TTL on declare. Expired messages drop
-  through the dead-letter or discard path rather than being silently consumed.
-  Wired in the broker and all three clients.
-- Single-node queue creation and deletion are available from the admin API and
-  dashboard, and the queues page can hide inactive queues and filter by name.
-- Partitioned queues: declare can create multiple partitions, producers can use
-  `partition_key` for stable key routing or rely on round-robin spread, and
-  subscriptions transparently fan in across known partitions.
-- Cluster coordination: Ganglion-backed coordination can register brokers and
-  queues, run the placement controller, expose topology, and drive owner and
-  follower role transitions.
-- Replication data plane: followers pull from owners, install checkpoints when
-  needed, report durable progress, and can be promoted after owner loss under
-  epoch fencing.
-- Replica-durable publish confirms: replica progress can gate confirmed publish
-  replies, with `min_in_sync_replicas` fail-fast behavior and ISR observability.
-- Exclusive consumer groups: an opt-in `.exclusive()` subscription gives ordered,
-  balanced, sticky, self-healing consumption of a partitioned queue (one consumer
-  per partition), with reconnect-safe membership and a soft per-consumer target.
-  Single-node works end to end, and a coordination-level multi-node test covers
-  cross-broker membership aggregation and rebalance. Fuller broker/client
-  scenario coverage is still growing. See [consumer groups](/latest/concepts/consumer-groups/).
-- Runtime broker settings can be read and updated through the admin surface.
-- The global DLQ target is stored as versioned Stroma state and can be edited at runtime.
-- Queue-specific retry and dead-letter policy can be declared from clients and `fibrilctl`.
-- Message inspection and DLQ replay are available from the admin API, dashboard, and CLI.
-- Sparse queues use lazy loading plus idle cleanup, with queue-state visibility in the admin dashboard and CLI.
-- Idle cleanup is guarded against racing with newly created publisher and subscriber leases.
-- Message inspection can temporarily load a queue, and idle cleanup can unload that queue again after the idle window.
-- The TypeScript demo now closes subscriptions promptly on Ctrl-C while remaining continuous by default.
-- The admin dashboard has moved to the same visual language as the public site, with Clarity removed from the vendored UI assets.
-- The TypeScript client tracks the Rust client for delayed publish, confirmed publish pipelining, content-type metadata, queue declaration, and group-default behavior.
-- Reconnection resume identity is now part of the TCP handshake, and Rust and TypeScript explicit reconnect calls send it and report whether resume was accepted.
-- Existing Rust and TypeScript publisher handles use the latest engine after explicit reconnect.
-- Rust and TypeScript clients make one conservative automatic reconnect attempt before a new operation when the previous engine is known closed.
-- The TCP handler can keep a logical connection dormant during a configured grace window, accept late settles after resume, and requeue unsettled inflight messages when grace expires.
-- Rust and TypeScript clients now send subscription metadata after a successful resume, and the broker replies with a reconciliation result.
-- Rust and TypeScript clients now keep active subscription streams alive when reconciliation confirms the subscription should be kept.
-- Reconnection reconciliation now has a conservative default plus an opt-in
-  restore-client-subscriptions policy. Server-only subscriptions are dropped,
-  metadata mismatches close client streams, and restored subscriptions can remap
-  to a fresh server subscription id.
-- Reconnect and subscription reconciliation outcomes are now visible through
-  admin overview counters, TCP metrics logs, and structured reconciliation logs.
-- The admin overview now includes compact Stroma timing and health signals, and
-  the diagnostics page exposes the broader Stroma metrics snapshot.
+- Admin and ops: single-node queue create and delete, message inspection, DLQ
+  replay, runtime broker settings, a versioned global DLQ target, and Stroma
+  timing and health signals, from the dashboard, API, and `fibrilctl`.
 
 ## Near term
 
