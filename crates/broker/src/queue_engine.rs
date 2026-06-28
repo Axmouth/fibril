@@ -179,7 +179,10 @@ pub trait QueueEngine {
 
     async fn estimate_disk_used(&self) -> Result<u64, StromaError>;
 
-    async fn list_queues(&self) -> Result<Vec<(String, Option<String>)>, StromaError>;
+    /// Every partition known on disk (topic, partition, group), materialized or
+    /// not. Includes partitions indexed at open that no command has materialized,
+    /// so a caller can reconcile on-disk state against coordination.
+    async fn list_partitions(&self) -> Result<Vec<(String, u32, Option<String>)>, StromaError>;
 
     async fn queue_stats_snapshot(&self) -> Result<QueuesStateSnapshot, StromaError>;
 
@@ -1048,12 +1051,12 @@ impl QueueEngine for StromaEngine {
         self.inner.estimate_disk_used().await
     }
 
-    async fn list_queues(&self) -> Result<Vec<(String, Option<String>)>, StromaError> {
+    async fn list_partitions(&self) -> Result<Vec<(String, u32, Option<String>)>, StromaError> {
         Ok(self
             .inner
             .list_queues()
             .into_iter()
-            .map(|(tp, _part, group)| (tp.to_string(), group.map(|s| s.to_string())))
+            .map(|(tp, part, group)| (tp.to_string(), part, group.map(|s| s.to_string())))
             .collect::<Vec<_>>())
     }
 

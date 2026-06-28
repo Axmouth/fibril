@@ -3932,6 +3932,7 @@ impl Broker<StromaEngine> {
             broker
                 .apply_assignment_snapshot_transitions(&node_id, &previous, &initial)
                 .await;
+            broker.orphaned_on_disk_partitions(&node_id, &initial).await;
             previous = initial;
 
             loop {
@@ -3984,6 +3985,7 @@ impl Broker<StromaEngine> {
                     cfg,
                 )
                 .await;
+            broker.orphaned_on_disk_partitions(&node_id, &initial).await;
             previous = initial;
 
             loop {
@@ -4196,6 +4198,58 @@ impl Broker<StromaEngine> {
                 });
         }
         previous
+    }
+
+    /// On-disk partitions the authoritative snapshot assigns to OTHER nodes -
+    /// this node holds neither owner nor follower role. They arise on a cold
+    /// restart when a partition was disowned while the node was down: the
+    /// indexer registers the on-disk log as an unmaterialized slot, but no
+    /// transition ever materializes it. Such partitions are inert cold storage.
+    /// Serving is ownership-gated (`ensure_queue_owner` runs before
+    /// `materialize_owned_queue`), so they are never served and never
+    /// materialized. They are retained rather than destroyed: a later
+    /// re-acquisition reuses the on-disk log (fast failover-back without
+    /// re-replication), and the startup snapshot can lag a reassignment about to
+    /// hand the partition back. Partitions absent from the snapshot (unknown to
+    /// coordination, including every stream partition) are left untouched - only
+    /// a partition coordination has provably handed elsewhere counts as
+    /// orphaned. Surfaces the set for operator visibility and returns it.
+    pub async fn orphaned_on_disk_partitions(
+        &self,
+        node_id: &str,
+        snapshot: &CoordinationSnapshot,
+    ) -> Vec<QueueIdentity> {
+        let on_disk = match self.engine.list_partitions().await {
+            Ok(partitions) => partitions,
+            Err(err) => {
+                tracing::warn!(
+                    "could not list on-disk partitions for orphan reconciliation: {err:?}"
+                );
+                return Vec::new();
+            }
+        };
+
+        let mut orphaned = Vec::new();
+        for (topic, partition, group) in on_disk {
+            let queue =
+                QueueIdentity::new(topic.as_str(), Partition::new(partition), group.as_deref());
+            let Some(assignment) = snapshot.assignments.get(&queue) else {
+                continue;
+            };
+            if assignment.is_owned_by(node_id) || assignment.is_followed_by(node_id) {
+                continue;
+            }
+            orphaned.push(queue);
+        }
+
+        if !orphaned.is_empty() {
+            tracing::warn!(
+                count = orphaned.len(),
+                "on-disk partitions reassigned to other nodes are retained as cold storage \
+                 (not served, not materialized); reclaim is manual for now"
+            );
+        }
+        orphaned
     }
 
     pub async fn apply_assignment_transition(

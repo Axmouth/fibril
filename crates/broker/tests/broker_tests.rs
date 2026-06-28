@@ -265,7 +265,7 @@ impl QueueEngine for FailingPublishEngine {
         Ok(0)
     }
 
-    async fn list_queues(&self) -> Result<Vec<(String, Option<String>)>, StromaError> {
+    async fn list_partitions(&self) -> Result<Vec<(String, u32, Option<String>)>, StromaError> {
         Ok(Vec::new())
     }
 
@@ -2918,6 +2918,150 @@ async fn cold_owner_materializes_at_cached_assignment_epoch() {
     assert_eq!(events.records.len(), 1);
 
     broker.shutdown().await;
+}
+
+/// Cold-restart orphan reconciliation: a partition this node was disowned of
+/// while it was down stays on disk after restart. The indexer registers it as an
+/// unmaterialized slot, but it is inert cold storage - never served, never
+/// materialized - because serving is ownership-gated. orphaned_on_disk_partitions
+/// surfaces it (coordination has provably reassigned it elsewhere) without
+/// destroying it.
+#[tokio::test]
+async fn cold_restart_disowned_partition_is_inert_cold_storage() {
+    let dir = test_dir!("broker_test");
+    let topic = "disowned-on-restart";
+
+    // First incarnation owns the partition and writes durable data.
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
+    publisher
+        .publish(
+            b"pre-downtime".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+    broker.shutdown_graceful().await;
+    drop(broker);
+
+    // Cold restart: reopen the same data dir. The indexer registers the on-disk
+    // partition as an unmaterialized slot.
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    // This node owns nothing now: coordination reassigned the partition away
+    // while it was down.
+    let broker = Broker::new_with_ownership(
+        engine,
+        BrokerConfig::default(),
+        None,
+        Arc::new(StaticQueueOwnership::new(StdHashSet::new())),
+    );
+
+    let queue = QueueIdentity::new(topic, Partition::new(0), None);
+    let snapshot = coordination_snapshot(
+        vec![PartitionAssignment::new(
+            queue.clone(),
+            "other-node",
+            Vec::new(),
+            1,
+        )],
+        1,
+    );
+
+    // Cold storage: indexed on disk but not materialized.
+    assert!(
+        !broker.engine().is_materialized(topic, 0, None),
+        "a disowned partition must stay unmaterialized after restart"
+    );
+
+    // Reconciliation flags it as provably reassigned elsewhere, leaving it intact.
+    let orphaned = broker
+        .orphaned_on_disk_partitions("this-node", &snapshot)
+        .await;
+    assert_eq!(orphaned, vec![queue]);
+
+    // Not served: an ownership-gated publish is rejected before any materialize.
+    let publish = broker.get_publisher(topic, Partition::new(0), &None).await;
+    assert!(
+        matches!(publish, Err(BrokerError::NotOwner { .. })),
+        "a disowned partition must not accept writes"
+    );
+
+    // The rejected publish did not mis-materialize the cold partition.
+    assert!(!broker.engine().is_materialized(topic, 0, None));
+
+    broker.shutdown_graceful().await;
+}
+
+/// A partition absent from the snapshot (coordination does not claim it - a
+/// stream, an in-flight declare, or a queue this node was never told about) is
+/// left untouched by orphan reconciliation: only a partition provably reassigned
+/// elsewhere counts as orphaned.
+#[tokio::test]
+async fn orphan_reconciliation_ignores_partitions_unknown_to_coordination() {
+    let dir = test_dir!("broker_test");
+    let topic = "unknown-to-coordination";
+
+    let engine = StromaEngine::open(
+        &dir.root,
+        StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+        SnapshotConfig::default(),
+    )
+    .await
+    .unwrap();
+    let broker = Broker::new(engine, BrokerConfig::default(), None);
+    let (publisher, _confirms) = broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
+    publisher
+        .publish(
+            b"data".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap()
+        .await
+        .unwrap()
+        .unwrap();
+
+    // The snapshot has no assignment for this partition at all.
+    let snapshot = coordination_snapshot(Vec::new(), 1);
+    let orphaned = broker
+        .orphaned_on_disk_partitions("this-node", &snapshot)
+        .await;
+    assert!(
+        orphaned.is_empty(),
+        "a partition coordination does not claim must not be treated as orphaned"
+    );
+
+    broker.shutdown_graceful().await;
 }
 
 /// Publishes to two partitions of the same logical queue land in independent

@@ -28,39 +28,15 @@ Tiers are grouped by concern, not strictly ordered.
 This file tracks the replication and clustering roadmap leftovers. Non-replication
 feature ideas live in their own track, summarized at the end.
 
-## RESUME HERE (post-compaction 2026-06-29)
-
-DELETE THIS WHOLE SECTION once the NEXT item below is handled - it is a transient
-cursor, not durable backlog. The durable items it references live in their proper
-sections (Performance, Code health, Testing, etc.) and stay there.
-
-Both repos are pushed and in sync with origin/main. The recent arc finished the
-settled-set line (settled RangeSet + is_settled rename + FORMAT_VERSION 4), the
-dead-surface audits (keratin handle wrappers, filter_not_enqueued/count_inflight,
-the fibril queue-engine pass), the cross-repo lowest_unacked -> lowest_unsettled
-rename, closed #52 (subsumed by #62/#91/#92), and assessed #65 (interning: skip).
-
-NEXT (user-picked): the restart-reconciliation cold-start edge case. On a cold
-broker restart `snapshot_with_cached_local_assignments` (broker.rs:4161) starts
-with an empty assignment cache, so for a partition the node was DISOWNED of while
-it was down, `plan_local_assignment_transitions` (coordination.rs:1352) computes
-(previous_role None, next_role None) -> Noop. The on-disk data for that partition
-is then left on disk, never materialized (correct - not owned) but never cleaned
-up. Decide the intended behavior (leave as cold storage vs reclaim on restart)
-and add a test. Verify it is not served and does not get mis-materialized.
-
-Verified this session (no action needed): inflight IS persisted (encode_snapshot
-writes inflight (offset, deadline) pairs at state.rs:3654, load_snapshot restores
-them, MarkInflight events replay) so leased-unacked survives crash/restart; the
-keratin head-offset discrepancy is considered resolved (user).
-
-Idea backlog mined from TODOTHOUGHTS (pick from these after the above): express
-lane / speculative delivery + deferred publisher confirm (the ghost-flag
-pattern); in-memory non-durable queues (pluggable keratin write target);
-producer dedup / max-unconfirmed-per-publisher; client embedded-retry
-(is_retryable + retry handle); documented failure semantics / operator runbook;
-crash-recover "leftover inflight without message" smell; split-brain epoch-fence
-test; multi-broker-same-storage must-fail test; #97 DST simulation.
+Idea backlog (pick from these): express lane / speculative delivery + deferred
+publisher confirm (the ghost-flag pattern); in-memory non-durable queues
+(pluggable keratin write target); producer dedup / max-unconfirmed-per-publisher;
+client embedded-retry (is_retryable + retry handle); documented failure semantics
+/ operator runbook; crash-recover "leftover inflight without message" smell;
+split-brain epoch-fence test; multi-broker-same-storage must-fail test; #97 DST
+simulation. Inflight persistence is confirmed (encode_snapshot writes inflight
+(offset, deadline) pairs, load_snapshot restores them, MarkInflight events
+replay) so leased-unacked survives crash/restart.
 
 ## Done since the inventory was last curated (2026-06-22)
 
@@ -119,6 +95,29 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   partition state, or have owner-activation/catalogue-sync open the correct engine
   for owned partitions. Until then, declaring the channel against the new owner
   re-materializes it. Low risk in single-node / declare-before-publish flows.
+
+- DECIDED 2026-06-29 (task #101): cold-restart orphaned on-disk partitions. On a
+  cold restart a partition the node was disowned of while down is indexed as an
+  unmaterialized slot but the empty assignment cache makes the planner compute
+  Noop, so the on-disk data is never materialized and never cleaned. Decision:
+  leave it as inert cold storage, do NOT auto-destroy on restart. It is already
+  safe - serving is ownership-gated (ensure_queue_owner runs before
+  materialize_owned_queue), so an orphaned partition is never served and never
+  mis-materialized (regression tests cold_restart_disowned_partition_is_inert_
+  cold_storage + orphan_reconciliation_ignores_partitions_unknown_to_coordination).
+  Retained rather than reclaimed because a later re-acquisition reuses the on-disk
+  log (fast failover-back without re-replication) and the startup snapshot can lag
+  a reassignment about to hand the partition back. `Broker::orphaned_on_disk_
+  partitions` surfaces the set (logged once at startup) for operator visibility.
+  Two follow-ups left open: (a) opt-in reclaim - an admin action or a setting-gated
+  startup purge of partitions coordination has provably reassigned elsewhere, so
+  disk does not leak forever (Kafka-style stray-log move-aside is the safer shape
+  than immediate delete); (b) a deeper hazard, separate from this item: if a node
+  RE-ACQUIRES ownership directly from cold (BecomeOwner, not via a caught-up
+  follower) it would materialize its STALE local log and could serve messages the
+  current owner accepted while it was down. Re-acquisition should catch up from the
+  authoritative owner (or epoch-fence the stale tail) before serving. Needs a test
+  and likely a become-follower-first-then-promote path on cold re-ownership.
 
 - Durable stream throughput RESOLVED (was ~847/s). The earlier pipelining was
   correct but the per-channel ingest awaited the staged offset between appends
