@@ -2,8 +2,18 @@ FROM rust:1.96-bookworm AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
+COPY scripts ./scripts
 COPY benches ./benches
 COPY crates ./crates
+
+# Build against the git-sourced Keratin and Ganglion dependencies. The committed
+# Cargo.toml carries local [patch] overrides pointing at sibling ../keratin and
+# ../ganglion checkouts for everyday development, which are not in the build
+# context. Stripping them here makes the image build self-contained, so a plain
+# `docker build .` works with no caller-side prep. The lockfile is in local-patch
+# form, so cargo re-resolves the git deps (no --locked).
+RUN scripts/stroma-source.sh git
+
 RUN cargo build --release -p fibril --bin fibril-server -p fibril-cli --bin fibrilctl \
     -p fibril-tui-example --bin fibril-tui-example
 
