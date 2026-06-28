@@ -152,16 +152,17 @@ Current limits:
   persisted runtime settings document exists yet.
 - Existing subscriptions are preserved server-side, and clients send
   subscription metadata after a successful resume.
-- Existing Rust and TypeScript publisher handles use the latest engine after
-  explicit or automatic reconnect. New subscriptions also use the latest engine.
+- Existing Rust, TypeScript, and Python publisher handles use the latest engine
+  after explicit or automatic reconnect. New subscriptions also use the latest
+  engine.
 - Active subscription streams continue when reconciliation returns `keep`.
 - Conservative reconciliation drops server-only subscriptions and closes
   client-only or mismatched subscriptions client-side.
 - The opt-in restore-client-subscriptions policy recreates client-owned
   subscriptions that are missing server-side and remaps the stream to the new
   server subscription id.
-- Rust and TypeScript clients make one automatic reconnect attempt before a new
-  operation when the old engine is already known closed.
+- Rust, TypeScript, and Python clients make one automatic reconnect attempt
+  before a new operation when the old engine is already known closed.
 - In-flight protocol requests from the old socket are not replayed.
 - Admin overview counters and TCP metrics logs expose resume, grace, and
   reconciliation outcomes since broker start.
@@ -172,8 +173,8 @@ Durable restart recovery and in-flight delivery reconstruction can come later.
 
 ## Implemented Subscription Reconciliation Metadata
 
-After a successful resume, Rust and TypeScript clients send a lightweight
-subscription reconciliation frame. This frame tells the broker which
+After a successful resume, Rust, TypeScript, and Python clients send a
+lightweight subscription reconciliation frame. This frame tells the broker which
 subscriptions the client still believes belong to the resumed logical
 connection.
 
@@ -213,8 +214,8 @@ The current policy is conservative:
 - If the server has a subscription that the client did not report, the broker
   drops it and reports `close_server_side`.
 
-Current Rust and TypeScript receive APIs do not carry a typed reconciliation
-close reason. A closed subscription stream ends normally from the application
+Current Rust, TypeScript, and Python receive APIs do not carry a typed
+reconciliation close reason. A closed subscription stream ends normally from the application
 view, so a future client-surface pass should decide whether to change the
 pre-0.1 receive API or add an explicit subscription status channel.
 
@@ -299,6 +300,31 @@ needs restart reconciliation.
 For the first implementation, keep durable restart out of scope and document
 that grace only applies while the broker process remains alive.
 
+## Planned Restart Announcement (Drain)
+
+Grace today is reactive. The broker only learns a connection is gone when the
+socket drops, then holds dormant state and waits for the client to return. A
+planned restart can be cleaner if the broker announces it ahead of time instead
+of vanishing.
+
+Before a graceful shutdown or upgrade, the broker pushes a drain notice to its
+connected clients: it is going away and will hold their sessions for a bounded
+window. A client that receives it can stop issuing new operations on that
+connection, let in-flight work settle, enter its resume path proactively rather
+than after a dropped socket, and redirect to another owner where one exists in
+cluster mode.
+
+The broker then drains: stop accepting new work, let leases settle or hand them
+off, flush durable state, and exit. On restart it comes back inside the durable
+restart startup grace window above, and the announced clients resume against
+their persisted sessions, so the restart is transparent to in-flight work.
+
+This pairs with durable restart reconciliation to make rolling upgrades a
+first-class operation: announce, drain, restart, resume, with no client-visible
+interruption beyond a brief pause. It needs a server-initiated push frame (a
+"going away" notice with a suggested grace deadline), client handling for that
+frame, and broker drain sequencing on shutdown.
+
 ## Sharding and Replication Pressure
 
 The first version should work in a single broker process, but avoid design
@@ -363,7 +389,7 @@ Broker tests:
 
 Client tests:
 
-- Rust and TypeScript clients store resume identity after connect
+- Rust, TypeScript, and Python clients store resume identity after connect
   (implemented)
 - reconnect sends resume identity when available (implemented)
 - reconnect handles rejected resume by falling back to fresh state

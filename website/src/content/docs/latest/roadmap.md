@@ -144,6 +144,11 @@ check what is already wired and under what conditions.
   only. The partition side already has its counterpart: on cold restart a
   partition reassigned away while the node was down is retained as inert on-disk
   cold storage rather than served stale or discarded.
+- Planned restart announcement (drain). Before a graceful shutdown or upgrade the
+  broker would push a "going away" notice with a grace deadline, so clients stop
+  issuing new work, settle in-flight, and enter their resume path proactively
+  instead of after a dropped socket. Combined with durable restart reconciliation
+  this turns a rolling upgrade into announce, drain, restart, resume.
 - More complete client ecosystem. The Python client (async plus a blocking
   facade) has landed. The next targets are C#, Go, and Java.
 
