@@ -15,8 +15,7 @@ use fibril_broker::{
     },
     coordination::{Coordination, NodeInfo, PartitionAssignment},
     queue_engine::{
-        Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint,
-        StromaEvent,
+        Message, OwnerReplicationBatch, OwnerReplicationRead, OwnerStateCheckpoint, StromaEvent,
     },
     replication::StreamApplyTunablesFn,
 };
@@ -1222,9 +1221,10 @@ fn stream_batch_bytes(batch: &ReplicationReadOk) -> u64 {
         ReplicationMessageRead::CheckpointRequired(_) => 0,
     };
     let events = match &batch.events {
-        ReplicationEventRead::Batch { records, .. } => {
-            records.iter().map(|record| record.payload.len() as u64).sum()
-        }
+        ReplicationEventRead::Batch { records, .. } => records
+            .iter()
+            .map(|record| record.payload.len() as u64)
+            .sum(),
         ReplicationEventRead::CheckpointRequired(_) => 0,
     };
     messages + events
@@ -1412,7 +1412,9 @@ impl FollowerStreamSink for StreamApplyAdapterSink {
                 durable_event_next: event_next,
                 bytes,
             },
-            Ok(ReplicatedStreamApply::CheckpointRequired) => FollowerApplyOutcome::CheckpointRequired,
+            Ok(ReplicatedStreamApply::CheckpointRequired) => {
+                FollowerApplyOutcome::CheckpointRequired
+            }
             Err(err) => FollowerApplyOutcome::Error(err.to_string()),
         }
     }
@@ -1436,12 +1438,8 @@ mod stream_transport_tests {
             let bytes = stream_batch_bytes(&batch);
             let (message_next, event_next) = match (&batch.messages, &batch.events) {
                 (
-                    ReplicationMessageRead::Batch {
-                        next_offset: m, ..
-                    },
-                    ReplicationEventRead::Batch {
-                        next_offset: e, ..
-                    },
+                    ReplicationMessageRead::Batch { next_offset: m, .. },
+                    ReplicationEventRead::Batch { next_offset: e, .. },
                 ) => (*m, *e),
                 _ => return FollowerApplyOutcome::CheckpointRequired,
             };

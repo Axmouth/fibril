@@ -26,18 +26,17 @@ use fibril_broker::{
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
-    AdvertisedAddress, Ack, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
-    DeclareQueueOk, Deliver,
-    ERR_CONFLICT, ERR_INVALID, ErrorMsg, HEADER_SPECULATIVE, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
-    Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient,
-    ReconcilePolicy, ReconcileResult, ReconcileSubscription, ReplicationApply, ReplicationApplyOk,
-    ReplicationCheckpointExport, ReplicationCheckpointExportOk, ReplicationCheckpointInstall,
-    ReplicationCheckpointInstallOk, ReplicationCheckpointRequired, ReplicationEventApplyBatch,
-    ReplicationEventRead, ReplicationEventRecord, ReplicationMessageApplyBatch,
-    ReplicationMessageRead, ReplicationMessageRecord, ReplicationRead, ReplicationReadOk,
-    ReplicationStateCheckpoint, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
-    StreamStart, Subscribe, SubscribeOk, SubscribeStream, TopologyOk, TopologyRequest,
-    TopologyUpdateAck,
+    Ack, AdvertisedAddress, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
+    DeclareQueueOk, Deliver, ERR_CONFLICT, ERR_INVALID, ErrorMsg, HEADER_SPECULATIVE, Hello,
+    HelloOk, Nack, Op, PROTOCOL_V1, Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry,
+    ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult, ReconcileSubscription,
+    ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
+    ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
+    ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
+    ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
+    ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
+    ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention, StreamStart, Subscribe,
+    SubscribeOk, SubscribeStream, TopologyOk, TopologyRequest, TopologyUpdateAck,
     frame::{Frame, ProtoCodec},
     handler::{
         ClientTopologySource, ConnectionSettings, DeclareCoordinator, ProtocolConnectionError,
@@ -1581,8 +1580,10 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
         None,
     )
     .await;
-    let resolver =
-        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr.to_string())]));
+    let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::from([(
+        "owner-a".to_string(),
+        addr.to_string(),
+    )]));
     let assignment = PartitionAssignment::new(
         QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
         "owner-a",
@@ -1644,8 +1645,10 @@ async fn static_protocol_owner_peer_resolver_returns_none_for_unknown_owner() {
 #[tokio::test]
 async fn static_protocol_owner_peer_resolver_reuses_peer_for_owner() {
     let addr: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
-    let resolver =
-        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr.to_string())]));
+    let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::from([(
+        "owner-a".to_string(),
+        addr.to_string(),
+    )]));
     let assignment = PartitionAssignment::new(
         QueueIdentity::new("replication.resolver.cached", Partition::new(0), None),
         "owner-a",
@@ -1878,8 +1881,11 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
     )
     .await;
     let resolver = StaticProtocolOwnerPeerResolver::with_config(
-        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("owner-a".to_string(), addr.to_string())]))
-            .with_auth("fibril", "secret"),
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+            "owner-a".to_string(),
+            addr.to_string(),
+        )]))
+        .with_auth("fibril", "secret"),
     );
     let assignment = PartitionAssignment::new(
         QueueIdentity::new(topic, Partition::new(0), None),
@@ -2527,8 +2533,10 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
         None,
     )
     .await;
-    let resolver =
-        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr.to_string())]));
+    let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::from([(
+        "owner-a".to_string(),
+        addr.to_string(),
+    )]));
     let resolver = Arc::new(resolver);
 
     let (follower_broker, _follower_dir) = open_test_broker().await;
@@ -2690,8 +2698,10 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     };
     let (addr, server_task) =
         start_checkpoint_required_owner_server(checkpoint, message_records, event_records).await;
-    let resolver =
-        StaticProtocolOwnerPeerResolver::new(HashMap::from([("owner-a".to_string(), addr.to_string())]));
+    let resolver = StaticProtocolOwnerPeerResolver::new(HashMap::from([(
+        "owner-a".to_string(),
+        addr.to_string(),
+    )]));
     let resolver = Arc::new(resolver);
 
     let (follower_broker, _follower_dir) = open_test_broker().await;
@@ -2829,8 +2839,11 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
         .await
         .unwrap();
     let resolver = Arc::new(StaticProtocolOwnerPeerResolver::with_config(
-        ProtocolOwnerPeerResolverConfig::new(HashMap::from([("owner-a".to_string(), addr.to_string())]))
-            .with_reporter("follower-a"),
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+            "owner-a".to_string(),
+            addr.to_string(),
+        )]))
+        .with_reporter("follower-a"),
     ));
     let assignment = PartitionAssignment::new(
         QueueIdentity::new(topic, Partition::new(0), group.as_deref()),
@@ -2942,7 +2955,9 @@ impl ClientTopologySource for BumpingTopology {
                 topic: "jobs".into(),
                 partition: Partition::new(0),
                 group: None,
-                owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
+                owner_endpoints: vec![
+                    AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint"),
+                ],
                 partitioning_version: generation,
                 partition_count: 1,
             }],
@@ -3062,7 +3077,9 @@ impl ClientTopologySource for QuietTopology {
                 topic: "jobs".into(),
                 partition: Partition::new(0),
                 group: None,
-                owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
+                owner_endpoints: vec![
+                    AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint"),
+                ],
                 partitioning_version: 1,
                 partition_count: 1,
             }],
@@ -3147,7 +3164,9 @@ async fn handler_answers_topology_query_from_source() {
                 topic: "orders".into(),
                 partition: Partition::new(0),
                 group: Some("workers".into()),
-                owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9000").expect("valid test owner endpoint")],
+                owner_endpoints: vec![
+                    AdvertisedAddress::parse("127.0.0.1:9000").expect("valid test owner endpoint"),
+                ],
                 partitioning_version: 0,
                 partition_count: 1,
             },
@@ -3155,7 +3174,9 @@ async fn handler_answers_topology_query_from_source() {
                 topic: "emails".into(),
                 partition: Partition::new(0),
                 group: None,
-                owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9001").expect("valid test owner endpoint")],
+                owner_endpoints: vec![
+                    AdvertisedAddress::parse("127.0.0.1:9001").expect("valid test owner endpoint"),
+                ],
                 partitioning_version: 0,
                 partition_count: 1,
             },
@@ -3221,7 +3242,10 @@ async fn handler_answers_topology_query_from_source() {
     assert_eq!(filtered.queues.len(), 1);
     assert_eq!(filtered.queues[0].topic, "orders");
     assert_eq!(
-        filtered.queues[0].owner_endpoints.first().map(|a| a.target()),
+        filtered.queues[0]
+            .owner_endpoints
+            .first()
+            .map(|a| a.target()),
         Some("127.0.0.1:9000".to_string())
     );
 
@@ -3242,7 +3266,9 @@ async fn unowned_publish_redirects_to_current_owner() {
             topic: "elsewhere".into(),
             partition: Partition::new(0),
             group: None,
-            owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9999").expect("valid test owner endpoint")],
+            owner_endpoints: vec![
+                AdvertisedAddress::parse("127.0.0.1:9999").expect("valid test owner endpoint"),
+            ],
             partitioning_version: 0,
             partition_count: 1,
         }],
@@ -3323,7 +3349,9 @@ async fn stale_partitioning_version_publish_is_fenced() {
             topic: "jobs".into(),
             partition: Partition::new(0),
             group: None,
-            owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9100").expect("valid test owner endpoint")],
+            owner_endpoints: vec![
+                AdvertisedAddress::parse("127.0.0.1:9100").expect("valid test owner endpoint"),
+            ],
             partitioning_version: 5,
             partition_count: 4,
         }],

@@ -344,7 +344,9 @@ fn owner_redirect_frame(
         topic: topic.to_string(),
         partition,
         group: group.map(str::to_string),
-        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint).into_iter().collect(),
+        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint)
+            .into_iter()
+            .collect(),
         partitioning_version,
     };
     try_encode(Op::Redirect, request_id, &redirect).ok()
@@ -366,7 +368,9 @@ fn stream_owner_redirect_frame(
         topic: topic.to_string(),
         partition,
         group: None,
-        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint).into_iter().collect(),
+        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint)
+            .into_iter()
+            .collect(),
         partitioning_version,
     };
     try_encode(Op::Redirect, request_id, &redirect).ok()
@@ -402,7 +406,9 @@ async fn fence_stale_partitioning(
         topic: topic.to_string(),
         partition,
         group: group.map(str::to_string),
-        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint).into_iter().collect(),
+        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint)
+            .into_iter()
+            .collect(),
         partitioning_version: current_version,
     };
     match try_encode(Op::Redirect, request_id, &redirect) {
@@ -1977,7 +1983,6 @@ pub enum LoopEvent {
     /// a `TopologyUpdate` to this connection.
     TopologyTick,
 }
-
 
 pub async fn handle_connection(
     socket: tokio::net::TcpStream,

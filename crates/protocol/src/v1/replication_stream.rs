@@ -194,16 +194,32 @@ fn try_fold_streamed(
     }
 
     if let (
-        ReplicationMessageRead::Batch { next_offset: an, records: ar, .. },
-        ReplicationMessageRead::Batch { next_offset: bn, records: br, .. },
+        ReplicationMessageRead::Batch {
+            next_offset: an,
+            records: ar,
+            ..
+        },
+        ReplicationMessageRead::Batch {
+            next_offset: bn,
+            records: br,
+            ..
+        },
     ) = (&mut acc.messages, next.messages)
     {
         ar.extend(br);
         *an = bn;
     }
     if let (
-        ReplicationEventRead::Batch { next_offset: an, records: ar, .. },
-        ReplicationEventRead::Batch { next_offset: bn, records: br, .. },
+        ReplicationEventRead::Batch {
+            next_offset: an,
+            records: ar,
+            ..
+        },
+        ReplicationEventRead::Batch {
+            next_offset: bn,
+            records: br,
+            ..
+        },
     ) = (&mut acc.events, next.events)
     {
         ar.extend(br);
@@ -932,7 +948,14 @@ mod tests {
         });
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (control_tx, _control_rx) = mpsc::channel(8);
-        let task = tokio::spawn(run_follower_stream_applier(sink, batch_rx, control_tx, 0, 0, fixed_tunables(0, 0, 16 * 1024 * 1024)));
+        let task = tokio::spawn(run_follower_stream_applier(
+            sink,
+            batch_rx,
+            control_tx,
+            0,
+            0,
+            fixed_tunables(0, 0, 16 * 1024 * 1024),
+        ));
 
         batch_tx.send(batch_from(40, 1)).await.unwrap();
         let exit = tokio::time::timeout(Duration::from_secs(2), task)

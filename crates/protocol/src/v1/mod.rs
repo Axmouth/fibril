@@ -119,6 +119,13 @@ pub enum Op {
     /// the broker can fence a repartition cutover on client acknowledgement.
     TopologyUpdateAck = 102,
 
+    /// Server-initiated notice that the broker is draining for a planned
+    /// shutdown or upgrade. The client stops issuing new work on this
+    /// connection, lets in-flight work settle, and reconnects (redirecting to
+    /// the current owner via topology). Fire-and-forget: no ack, the broker
+    /// drains regardless.
+    GoingAway = 103,
+
     Error = 255,
 }
 
@@ -927,6 +934,16 @@ pub struct TopologyOk {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopologyUpdateAck {
     pub generation: u64,
+}
+
+/// Server-initiated drain notice. `grace_ms` is how long the broker will keep
+/// accepting reconnects and holding sessions before it stops serving, so the
+/// client knows its window to settle in-flight work and reconnect. `message` is
+/// a human-readable reason (shutdown, upgrade) for logs and surfacing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoingAway {
+    pub grace_ms: u64,
+    pub message: String,
 }
 
 /// One Plexus stream partition's ownership, as seen by clients for routing.

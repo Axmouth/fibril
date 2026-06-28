@@ -15,13 +15,12 @@ use std::path::PathBuf;
 
 use fibril_protocol::v1::wire;
 use fibril_protocol::v1::{
-    AdvertisedAddress, Ack, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
-    DeclareQueue,
-    DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, Hello, HelloOk, Nack, Partition, Publish,
-    PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry, ReconcileClient, ReconcilePolicy,
-    ReconcileSubscription, Redirect, ResumeIdentity, ResumeOutcome, StreamDurability,
-    StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream,
-    TopologyOk, TopologyRequest, TopologyUpdateAck,
+    Ack, AdvertisedAddress, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
+    DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, Hello, HelloOk, Nack, Partition,
+    Publish, PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry, ReconcileClient,
+    ReconcilePolicy, ReconcileSubscription, Redirect, ResumeIdentity, ResumeOutcome,
+    StreamDurability, StreamRetention, StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk,
+    SubscribeStream, TopologyOk, TopologyRequest, TopologyUpdateAck,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -40,10 +39,9 @@ fn header(key: &str, value: &str) -> HashMap<String, String> {
 fn load_vectors() -> Value {
     // CARGO_MANIFEST_DIR is crates/protocol; the shared fixture is at the repo
     // root under clients/.
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../clients/wire_vectors.json");
-    let text = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../clients/wire_vectors.json");
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str(&text).expect("parse wire_vectors.json")
 }
 
@@ -75,8 +73,7 @@ fn check(vectors: &Value, name: &str, payload: bytes::Bytes) {
 /// Write the collected vectors to the shared fixture, sorted by name for a
 /// deterministic file. Called at the end of the test only under `WIRE_VECTORS_REGEN`.
 fn write_regenerated_vectors() {
-    let mut items =
-        COLLECTED.with(|c| c.borrow().clone());
+    let mut items = COLLECTED.with(|c| c.borrow().clone());
     items.sort_by(|a, b| a.0.cmp(&b.0));
     let mut map = serde_json::Map::new();
     for (name, hex) in items {
@@ -85,7 +82,11 @@ fn write_regenerated_vectors() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../clients/wire_vectors.json");
     let json = serde_json::to_string_pretty(&Value::Object(map)).expect("serialize vectors");
     std::fs::write(&path, json + "\n").unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
-    eprintln!("regenerated {} vectors at {}", path.display(), path.display());
+    eprintln!(
+        "regenerated {} vectors at {}",
+        path.display(),
+        path.display()
+    );
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -518,7 +519,10 @@ fn wire_encoders_match_shared_vectors() {
                         topic: "t".into(),
                         partition: Partition::new(0),
                         group: None,
-                        owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
+                        owner_endpoints: vec![
+                            AdvertisedAddress::parse("127.0.0.1:7000")
+                                .expect("valid test owner endpoint"),
+                        ],
                         partitioning_version: 1,
                         partition_count: 2,
                     },
@@ -534,7 +538,10 @@ fn wire_encoders_match_shared_vectors() {
                 streams: vec![StreamTopologyEntry {
                     topic: "s".into(),
                     partition: Partition::new(2),
-                    owner_endpoints: vec![AdvertisedAddress::parse("10.0.0.9:7100").expect("valid test owner endpoint")],
+                    owner_endpoints: vec![
+                        AdvertisedAddress::parse("10.0.0.9:7100")
+                            .expect("valid test owner endpoint"),
+                    ],
                     partitioning_version: 4,
                     partition_count: 3,
                 }],
@@ -555,14 +562,20 @@ fn wire_encoders_match_shared_vectors() {
                     topic: "t".into(),
                     partition: Partition::new(0),
                     group: None,
-                    owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
+                    owner_endpoints: vec![
+                        AdvertisedAddress::parse("127.0.0.1:7000")
+                            .expect("valid test owner endpoint"),
+                    ],
                     partitioning_version: 1,
                     partition_count: 2,
                 }],
                 streams: vec![StreamTopologyEntry {
                     topic: "s".into(),
                     partition: Partition::new(2),
-                    owner_endpoints: vec![AdvertisedAddress::parse("10.0.0.9:7100").expect("valid test owner endpoint")],
+                    owner_endpoints: vec![
+                        AdvertisedAddress::parse("10.0.0.9:7100")
+                            .expect("valid test owner endpoint"),
+                    ],
                     partitioning_version: 4,
                     partition_count: 3,
                 }],
@@ -589,7 +602,9 @@ fn wire_encoders_match_shared_vectors() {
                 topic: "t".into(),
                 partition: Partition::new(1),
                 group: Some("g".into()),
-                owner_endpoints: vec![AdvertisedAddress::parse("h:1").expect("valid test owner endpoint")],
+                owner_endpoints: vec![
+                    AdvertisedAddress::parse("h:1").expect("valid test owner endpoint"),
+                ],
                 partitioning_version: 3,
             },
         )

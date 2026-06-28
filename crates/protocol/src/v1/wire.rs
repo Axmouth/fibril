@@ -5,22 +5,20 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::v1::{
-    AdvertisedAddress, Ack, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
-    DeclareQueue,
-    DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
-    Partition, Publish, PublishDelayed, PublishOk, StreamDurability, StreamRetention, StreamStart,
-    SubscribeStream, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient,
-    ReconcilePolicy,
-    ReconcileResult, ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
+    Ack, AdvertisedAddress, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
+    DeclareQueue, DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, GoingAway, Hello, HelloOk, Nack,
+    Op, PROTOCOL_V1, Partition, Publish, PublishDelayed, PublishOk, QueueDlqPolicy,
+    QueueTopologyEntry, ReconcileAction, ReconcileClient, ReconcilePolicy, ReconcileResult,
+    ReconcileServer, ReconcileSubscription, ReconcileSubscriptionResult, Redirect,
     ReplicationApply, ReplicationApplyOk, ReplicationCheckpointExport,
     ReplicationCheckpointExportOk, ReplicationCheckpointInstall, ReplicationCheckpointInstallOk,
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationEventRecord, ReplicationMessageApplyBatch, ReplicationMessageRead,
     ReplicationMessageRecord, ReplicationRead, ReplicationReadOk, ReplicationStateCheckpoint,
-    ReplicationStreamEnd, ReplicationStreamProgress, ReplicationStreamReset, ReplicationStreamStart,
-    ResumeIdentity, ResumeOutcome, StreamTopologyEntry, Subscribe, SubscribeOk, TopologyOk,
-    TopologyRequest, TopologyUpdateAck,
-    frame::Frame,
+    ReplicationStreamEnd, ReplicationStreamProgress, ReplicationStreamReset,
+    ReplicationStreamStart, ResumeIdentity, ResumeOutcome, StreamDurability, StreamRetention,
+    StreamStart, StreamTopologyEntry, Subscribe, SubscribeOk, SubscribeStream, TopologyOk,
+    TopologyRequest, TopologyUpdateAck, frame::Frame,
 };
 
 pub type WireResult<T> = Result<T, WireError>;
@@ -697,10 +695,7 @@ pub fn decode_topology_update(frame: &Frame) -> WireResult<TopologyOk> {
     Ok(topology)
 }
 
-pub fn encode_topology_update_ack(
-    request_id: u64,
-    ack: &TopologyUpdateAck,
-) -> WireResult<Frame> {
+pub fn encode_topology_update_ack(request_id: u64, ack: &TopologyUpdateAck) -> WireResult<Frame> {
     let mut out = payload_builder(b"FTA1");
     out.put_u64(ack.generation);
     Ok(frame(Op::TopologyUpdateAck, request_id, out.freeze()))
@@ -713,6 +708,23 @@ pub fn decode_topology_update_ack(frame: &Frame) -> WireResult<TopologyUpdateAck
     let generation = reader.u64()?;
     reader.finish()?;
     Ok(TopologyUpdateAck { generation })
+}
+
+pub fn encode_going_away(request_id: u64, notice: &GoingAway) -> WireResult<Frame> {
+    let mut out = payload_builder(b"FGA1");
+    out.put_u64(notice.grace_ms);
+    put_str(&mut out, &notice.message)?;
+    Ok(frame(Op::GoingAway, request_id, out.freeze()))
+}
+
+pub fn decode_going_away(frame: &Frame) -> WireResult<GoingAway> {
+    expect_op(frame, Op::GoingAway)?;
+    let mut reader = Reader::new(&frame.payload);
+    reader.expect_magic(b"FGA1", "going away")?;
+    let grace_ms = reader.u64()?;
+    let message = reader.str()?.to_owned();
+    reader.finish()?;
+    Ok(GoingAway { grace_ms, message })
 }
 
 pub fn encode_redirect(request_id: u64, redirect: &Redirect) -> WireResult<Frame> {
@@ -920,7 +932,12 @@ pub fn encode_replication_stream_start(
     start: &ReplicationStreamStart,
 ) -> WireResult<Frame> {
     let mut out = payload_builder(b"FSS1");
-    put_queue_key(&mut out, &start.topic, start.partition, start.group.as_deref())?;
+    put_queue_key(
+        &mut out,
+        &start.topic,
+        start.partition,
+        start.group.as_deref(),
+    )?;
     out.put_u64(start.message_from);
     out.put_u64(start.event_from);
     out.put_u64(start.credit_bytes);
@@ -976,12 +993,14 @@ pub fn encode_replication_stream_progress(
     out.put_u64(progress.durable_message_next);
     out.put_u64(progress.durable_event_next);
     out.put_u64(progress.credit_add_bytes);
-    Ok(frame(Op::ReplicationStreamProgress, stream_id, out.freeze()))
+    Ok(frame(
+        Op::ReplicationStreamProgress,
+        stream_id,
+        out.freeze(),
+    ))
 }
 
-pub fn decode_replication_stream_progress(
-    frame: &Frame,
-) -> WireResult<ReplicationStreamProgress> {
+pub fn decode_replication_stream_progress(frame: &Frame) -> WireResult<ReplicationStreamProgress> {
     expect_op(frame, Op::ReplicationStreamProgress)?;
     let mut reader = Reader::new(&frame.payload);
     reader.expect_magic(b"FSP1", "replication stream progress")?;
@@ -2139,7 +2158,9 @@ impl<'a> Reader<'a> {
         match self.u8()? {
             0 => Ok(StreamStart::Latest),
             1 => Ok(StreamStart::Earliest),
-            2 => Ok(StreamStart::Offset { offset: self.u64()? }),
+            2 => Ok(StreamStart::Offset {
+                offset: self.u64()?,
+            }),
             3 => Ok(StreamStart::NBack { count: self.u64()? }),
             4 => Ok(StreamStart::ByTime {
                 time_ms: self.u64()?,
@@ -2695,6 +2716,17 @@ mod tests {
     }
 
     #[test]
+    fn going_away_roundtrip() {
+        let notice = GoingAway {
+            grace_ms: 30_000,
+            message: "broker restarting for upgrade".into(),
+        };
+        let frame = encode_going_away(7, &notice).unwrap();
+        assert_eq!(frame.opcode, Op::GoingAway as u16);
+        assert_eq!(decode_going_away(&frame).unwrap(), notice);
+    }
+
+    #[test]
     fn subscribe_stream_roundtrip() {
         for sub in [
             SubscribeStream {
@@ -2802,7 +2834,10 @@ mod tests {
         };
         let frame = encode_replication_stream_progress(900, &progress).unwrap();
         assert_eq!(frame.opcode, Op::ReplicationStreamProgress as u16);
-        assert_eq!(decode_replication_stream_progress(&frame).unwrap(), progress);
+        assert_eq!(
+            decode_replication_stream_progress(&frame).unwrap(),
+            progress
+        );
     }
 
     #[test]

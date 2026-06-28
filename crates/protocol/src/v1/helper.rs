@@ -121,6 +121,7 @@ pub fn try_encode<T: Serialize + Any>(op: Op, req_id: u64, msg: &T) -> ProtocolR
         Op::TopologyUpdateAck => encode_typed(msg, "TopologyUpdateAck", |msg| {
             wire::encode_topology_update_ack(req_id, msg)
         }),
+        Op::GoingAway => encode_typed(msg, "GoingAway", |msg| wire::encode_going_away(req_id, msg)),
         Op::Redirect => encode_typed(msg, "Redirect", |msg| wire::encode_redirect(req_id, msg)),
         Op::ReplicationStreamStart => encode_typed(msg, "ReplicationStreamStart", |msg| {
             wire::encode_replication_stream_start(req_id, msg)
@@ -268,6 +269,9 @@ pub fn try_decode<T: for<'de> Deserialize<'de> + Any>(frame: &Frame) -> Protocol
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::TopologyUpdateAck as u16 => wire::decode_topology_update_ack(frame)
+            .map_err(wire_decode_error)
+            .and_then(cast_decoded),
+        x if x == Op::GoingAway as u16 => wire::decode_going_away(frame)
             .map_err(wire_decode_error)
             .and_then(cast_decoded),
         x if x == Op::Redirect as u16 => wire::decode_redirect(frame)
@@ -601,7 +605,10 @@ mod tests {
                     topic: "orders".into(),
                     partition: Partition::new(0),
                     group: Some("workers".into()),
-                    owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9000").expect("valid test owner endpoint")],
+                    owner_endpoints: vec![
+                        AdvertisedAddress::parse("127.0.0.1:9000")
+                            .expect("valid test owner endpoint"),
+                    ],
                     partitioning_version: 0,
                     partition_count: 1,
                 },
@@ -617,7 +624,9 @@ mod tests {
             streams: vec![StreamTopologyEntry {
                 topic: "events".into(),
                 partition: Partition::new(0),
-                owner_endpoints: vec![AdvertisedAddress::parse("10.0.0.7:7000").expect("valid test owner endpoint")],
+                owner_endpoints: vec![
+                    AdvertisedAddress::parse("10.0.0.7:7000").expect("valid test owner endpoint"),
+                ],
                 partitioning_version: 2,
                 partition_count: 4,
             }],
@@ -634,7 +643,9 @@ mod tests {
             topic: "orders".into(),
             partition: Partition::new(2),
             group: Some("workers".into()),
-            owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9001").expect("valid test owner endpoint")],
+            owner_endpoints: vec![
+                AdvertisedAddress::parse("127.0.0.1:9001").expect("valid test owner endpoint"),
+            ],
             partitioning_version: 0,
         };
 
