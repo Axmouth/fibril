@@ -1354,12 +1354,43 @@ class TopologyRequest:
 
 
 @dataclass
+class AdvertisedAddress:
+    #: A broker address to advertise to clients: a connectable ``host:port``
+    #: (resolved at connect time, so ``host`` may be a service name) with optional
+    #: free-form ``tags``. Owners advertise a priority-ordered list and clients use
+    #: the first reachable.
+    host: str
+    port: int
+    tags: list[str] = field(default_factory=list)
+
+
+def write_advertised_addresses(w: "Writer", addrs: list[AdvertisedAddress]) -> None:
+    w.u32(len(addrs))
+    for a in addrs:
+        w.write_str(a.host)
+        w.u16(a.port)
+        w.u32(len(a.tags))
+        for tag in a.tags:
+            w.write_str(tag)
+
+
+def read_advertised_addresses(r: "Reader") -> list[AdvertisedAddress]:
+    out: list[AdvertisedAddress] = []
+    for _ in range(r.u32()):
+        host = r.read_str()
+        port = r.u16()
+        tags = [r.read_str() for _ in range(r.u32())]
+        out.append(AdvertisedAddress(host=host, port=port, tags=tags))
+    return out
+
+
+@dataclass
 class QueueTopologyEntry:
     topic: str
     partition: int
     group: Optional[str]
-    #: Owner broker endpoint, absent when the owner node is not in the registry.
-    owner_endpoint: Optional[str]
+    #: Owner broker endpoints in priority order, empty when the owner is unknown.
+    owner_endpoints: list[AdvertisedAddress]
     partitioning_version: int
     #: Authoritative partition count for the queue, used for key routing.
     partition_count: int
@@ -1368,11 +1399,11 @@ class QueueTopologyEntry:
 @dataclass
 class StreamTopologyEntry:
     #: Ownership of one Plexus stream partition, as seen by clients for routing.
-    #: Mirrors QueueTopologyEntry without a group. ``owner_endpoint`` is ``None``
+    #: Mirrors QueueTopologyEntry without a group. ``owner_endpoints`` is empty
     #: in standalone mode and while an owner is unknown.
     topic: str
     partition: int
-    owner_endpoint: Optional[str]
+    owner_endpoints: list[AdvertisedAddress]
     partitioning_version: int
     #: Authoritative partition count for the stream, used for key routing.
     partition_count: int
@@ -1401,7 +1432,8 @@ class Redirect:
     topic: str
     partition: int
     group: Optional[str]
-    owner_endpoint: str
+    #: Owner endpoints in priority order; retry against the first reachable.
+    owner_endpoints: list[AdvertisedAddress]
     partitioning_version: int
 
 
@@ -1428,14 +1460,14 @@ def encode_topology_ok_body(topology: TopologyOk) -> bytes:
     w.u32(len(topology.queues))
     for e in topology.queues:
         w.queue_key(e.topic, e.partition, e.group)
-        w.optional_str(e.owner_endpoint)
+        write_advertised_addresses(w, e.owner_endpoints)
         w.u64(e.partitioning_version)
         w.u32(e.partition_count)
     w.u32(len(topology.streams))
     for s in topology.streams:
         w.write_str(s.topic)
         w.u32(s.partition)
-        w.optional_str(s.owner_endpoint)
+        write_advertised_addresses(w, s.owner_endpoints)
         w.u64(s.partitioning_version)
         w.u32(s.partition_count)
     return w.finish()
@@ -1454,7 +1486,7 @@ def decode_topology_ok_body(body: bytes) -> TopologyOk:
                 topic=topic,
                 partition=partition,
                 group=group,
-                owner_endpoint=r.optional_str(),
+                owner_endpoints=read_advertised_addresses(r),
                 partitioning_version=r.u64(),
                 partition_count=r.u32(),
             )
@@ -1466,7 +1498,7 @@ def decode_topology_ok_body(body: bytes) -> TopologyOk:
             StreamTopologyEntry(
                 topic=r.read_str(),
                 partition=r.u32(),
-                owner_endpoint=r.optional_str(),
+                owner_endpoints=read_advertised_addresses(r),
                 partitioning_version=r.u64(),
                 partition_count=r.u32(),
             )
@@ -1487,14 +1519,14 @@ def encode_topology_update_body(topology: TopologyOk) -> bytes:
     w.u32(len(topology.queues))
     for e in topology.queues:
         w.queue_key(e.topic, e.partition, e.group)
-        w.optional_str(e.owner_endpoint)
+        write_advertised_addresses(w, e.owner_endpoints)
         w.u64(e.partitioning_version)
         w.u32(e.partition_count)
     w.u32(len(topology.streams))
     for s in topology.streams:
         w.write_str(s.topic)
         w.u32(s.partition)
-        w.optional_str(s.owner_endpoint)
+        write_advertised_addresses(w, s.owner_endpoints)
         w.u64(s.partitioning_version)
         w.u32(s.partition_count)
     return w.finish()
@@ -1513,7 +1545,7 @@ def decode_topology_update_body(body: bytes) -> TopologyOk:
                 topic=topic,
                 partition=partition,
                 group=group,
-                owner_endpoint=r.optional_str(),
+                owner_endpoints=read_advertised_addresses(r),
                 partitioning_version=r.u64(),
                 partition_count=r.u32(),
             )
@@ -1525,7 +1557,7 @@ def decode_topology_update_body(body: bytes) -> TopologyOk:
             StreamTopologyEntry(
                 topic=r.read_str(),
                 partition=r.u32(),
-                owner_endpoint=r.optional_str(),
+                owner_endpoints=read_advertised_addresses(r),
                 partitioning_version=r.u64(),
                 partition_count=r.u32(),
             )
@@ -1553,7 +1585,7 @@ def encode_redirect_body(redirect: Redirect) -> bytes:
     w = Writer()
     w.magic("FRD1")
     w.queue_key(redirect.topic, redirect.partition, redirect.group)
-    w.write_str(redirect.owner_endpoint)
+    write_advertised_addresses(w, redirect.owner_endpoints)
     w.u64(redirect.partitioning_version)
     return w.finish()
 
@@ -1566,7 +1598,7 @@ def decode_redirect_body(body: bytes) -> Redirect:
         topic=topic,
         partition=partition,
         group=group,
-        owner_endpoint=r.read_str(),
+        owner_endpoints=read_advertised_addresses(r),
         partitioning_version=r.u64(),
     )
     r.finish()

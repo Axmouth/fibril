@@ -136,25 +136,25 @@ async def test_auto_subscribe_delivers_settled(broker: FakeBroker) -> None:
 async def test_topology_fetch(broker: FakeBroker) -> None:
     broker.topology = wire.TopologyOk(
         generation=5,
-        queues=[wire.QueueTopologyEntry("jobs", 0, None, "127.0.0.1:7000", 1, 1)],
+        queues=[wire.QueueTopologyEntry("jobs", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7000)], 1, 1)],
     )
     eng = await _connect(broker)
     try:
         topo = await eng.fetch_topology("jobs")
         assert topo.generation == 5
-        assert topo.queues[0].owner_endpoint == "127.0.0.1:7000"
+        assert topo.queues[0].owner_endpoints == [wire.AdvertisedAddress("127.0.0.1", 7000)]
     finally:
         eng.shutdown()
 
 
 async def test_redirect_surfaces_typed_error(broker: FakeBroker) -> None:
-    broker.redirect_publish = wire.Redirect("jobs", 0, None, "127.0.0.1:7001", 2)
+    broker.redirect_publish = wire.Redirect("jobs", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7001)], 2)
     eng = await _connect(broker)
     try:
         msg = wire.Publish("jobs", 0, None, True, "text", {}, b"x", 0)
         with pytest.raises(RedirectError) as exc:
             await eng.publish(msg, confirm=True)
-        assert exc.value.redirect.owner_endpoint == "127.0.0.1:7001"
+        assert exc.value.redirect.owner_endpoints == [wire.AdvertisedAddress("127.0.0.1", 7001)]
     finally:
         eng.shutdown()
 

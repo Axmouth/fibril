@@ -80,9 +80,9 @@ class RedirectError(FibrilError):
     """
 
     def __init__(self, redirect: "Redirect") -> None:
+        owners = ", ".join(f"{a.host}:{a.port}" for a in redirect.owner_endpoints)
         super().__init__(
-            f"redirected to owner {redirect.owner_endpoint} for "
-            f"{redirect.topic}/{redirect.partition}"
+            f"redirected to owner {owners} for {redirect.topic}/{redirect.partition}"
         )
         self.redirect = redirect
 

@@ -87,12 +87,16 @@ class TopologyCache:
                 count=max(queue.partition_count, 1),
                 version=queue.partitioning_version,
             )
-            # No owner endpoint means the owner node is not in the registry yet
+            # No owner endpoints means the owner node is not in the registry yet
             # (e.g. mid-failover). Keep the count but leave ownership unresolved.
-            if queue.owner_endpoint is None:
+            # The wire carries a priority-ordered list; use the first for now
+            # (connecting by name resolves service names). Trying the list in
+            # order is a later brick.
+            if not queue.owner_endpoints:
                 continue
+            owner = queue.owner_endpoints[0]
             self._by_queue[(queue.topic, queue.partition, queue.group)] = OwnerEntry(
-                endpoint=queue.owner_endpoint,
+                endpoint=f"{owner.host}:{owner.port}",
                 partitioning_version=queue.partitioning_version,
             )
         # Streams have no group (keyed under group None). They carry per-partition
@@ -104,17 +108,21 @@ class TopologyCache:
                 count=max(stream.partition_count, 1),
                 version=stream.partitioning_version,
             )
-            if stream.owner_endpoint is None:
+            if not stream.owner_endpoints:
                 continue
+            owner = stream.owner_endpoints[0]
             self._by_queue[(stream.topic, stream.partition, None)] = OwnerEntry(
-                endpoint=stream.owner_endpoint,
+                endpoint=f"{owner.host}:{owner.port}",
                 partitioning_version=stream.partitioning_version,
             )
 
     def apply_redirect(self, redirect: Redirect) -> None:
         """Point-update one partition's owner from a redirect."""
+        if not redirect.owner_endpoints:
+            return
+        owner = redirect.owner_endpoints[0]
         self._by_queue[(redirect.topic, redirect.partition, redirect.group)] = OwnerEntry(
-            endpoint=redirect.owner_endpoint,
+            endpoint=f"{owner.host}:{owner.port}",
             partitioning_version=redirect.partitioning_version,
         )
 

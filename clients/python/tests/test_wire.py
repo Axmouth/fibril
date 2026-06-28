@@ -251,10 +251,10 @@ def _cases() -> dict[str, tuple[bytes, object]]:
                 wire.TopologyOk(
                     generation=12,
                     queues=[
-                        wire.QueueTopologyEntry("t", 0, None, "127.0.0.1:7000", 1, 2),
-                        wire.QueueTopologyEntry("t", 1, None, None, 1, 2),
+                        wire.QueueTopologyEntry("t", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7000)], 1, 2),
+                        wire.QueueTopologyEntry("t", 1, None, [], 1, 2),
                     ],
-                    streams=[wire.StreamTopologyEntry("s", 2, "10.0.0.9:7100", 4, 3)],
+                    streams=[wire.StreamTopologyEntry("s", 2, [wire.AdvertisedAddress("10.0.0.9", 7100)], 4, 3)],
                 )
             ),
             wire.decode_topology_ok_body,
@@ -264,9 +264,9 @@ def _cases() -> dict[str, tuple[bytes, object]]:
                 wire.TopologyOk(
                     generation=12,
                     queues=[
-                        wire.QueueTopologyEntry("t", 0, None, "127.0.0.1:7000", 1, 2),
+                        wire.QueueTopologyEntry("t", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7000)], 1, 2),
                     ],
-                    streams=[wire.StreamTopologyEntry("s", 2, "10.0.0.9:7100", 4, 3)],
+                    streams=[wire.StreamTopologyEntry("s", 2, [wire.AdvertisedAddress("10.0.0.9", 7100)], 4, 3)],
                 )
             ),
             wire.decode_topology_update_body,
@@ -276,7 +276,7 @@ def _cases() -> dict[str, tuple[bytes, object]]:
             wire.decode_topology_update_ack_body,
         ),
         "redirect": (
-            wire.encode_redirect_body(wire.Redirect("t", 1, "g", "h:1", 3)),
+            wire.encode_redirect_body(wire.Redirect("t", 1, "g", [wire.AdvertisedAddress("h", 1)], 3)),
             wire.decode_redirect_body,
         ),
         "reconcile_client": (

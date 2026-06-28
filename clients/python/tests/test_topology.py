@@ -16,9 +16,9 @@ def test_replace_resolves_stream_owners_under_none_group() -> None:
             generation=4,
             queues=[],
             streams=[
-                wire.StreamTopologyEntry("logs", 0, "127.0.0.1:9100", 2, 2),
+                wire.StreamTopologyEntry("logs", 0, [wire.AdvertisedAddress("127.0.0.1", 9100)], 2, 2),
                 # owner unresolved mid-failover: count known, owner absent
-                wire.StreamTopologyEntry("logs", 1, None, 2, 2),
+                wire.StreamTopologyEntry("logs", 1, [], 2, 2),
             ],
         )
     )
@@ -37,8 +37,8 @@ def test_stream_owner_distinct_from_same_named_queue_is_not_possible_but_keys_is
     cache.replace(
         wire.TopologyOk(
             generation=1,
-            queues=[wire.QueueTopologyEntry("orders", 0, "g", "127.0.0.1:1", 0, 1)],
-            streams=[wire.StreamTopologyEntry("logs", 0, "127.0.0.1:2", 0, 1)],
+            queues=[wire.QueueTopologyEntry("orders", 0, "g", [wire.AdvertisedAddress("127.0.0.1", 1)], 0, 1)],
+            streams=[wire.StreamTopologyEntry("logs", 0, [wire.AdvertisedAddress("127.0.0.1", 2)], 0, 1)],
         )
     )
     assert cache.lookup("orders", 0, "g") is not None

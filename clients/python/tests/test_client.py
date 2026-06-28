@@ -32,12 +32,12 @@ async def _connect(broker: FakeBroker, *, supervise: bool = False) -> Client:
 
 
 def _topology_two_partitions(broker: FakeBroker) -> wire.TopologyOk:
-    endpoint = f"{broker.host}:{broker.port}"
+    owners = [wire.AdvertisedAddress(broker.host, broker.port)]
     return wire.TopologyOk(
         generation=1,
         queues=[
-            wire.QueueTopologyEntry("jobs", 0, None, endpoint, 1, 2),
-            wire.QueueTopologyEntry("jobs", 1, None, endpoint, 1, 2),
+            wire.QueueTopologyEntry("jobs", 0, None, owners, 1, 2),
+            wire.QueueTopologyEntry("jobs", 1, None, owners, 1, 2),
         ],
     )
 
@@ -184,7 +184,11 @@ async def test_applies_pushed_topology_update_and_acks(broker: FakeBroker) -> No
     owner_endpoint = "127.0.0.1:7123"
     broker.push_topology_on_hello = wire.TopologyOk(
         generation=7,
-        queues=[wire.QueueTopologyEntry("jobs", 0, None, owner_endpoint, 1, 1)],
+        queues=[
+            wire.QueueTopologyEntry(
+                "jobs", 0, None, [wire.AdvertisedAddress("127.0.0.1", 7123)], 1, 1
+            )
+        ],
     )
     client = await _connect(broker)
     try:
@@ -212,8 +216,8 @@ async def test_applies_pushed_topology_update_and_acks(broker: FakeBroker) -> No
 async def test_catalogue_reflects_pushed_topology(broker: FakeBroker) -> None:
     broker.push_topology_on_hello = wire.TopologyOk(
         generation=7,
-        queues=[wire.QueueTopologyEntry("jobs", 0, "workers", None, 1, 3)],
-        streams=[wire.StreamTopologyEntry("events", 0, None, 1, 2)],
+        queues=[wire.QueueTopologyEntry("jobs", 0, "workers", [], 1, 3)],
+        streams=[wire.StreamTopologyEntry("events", 0, [], 1, 2)],
     )
     client = await _connect(broker)
     try:
@@ -234,7 +238,7 @@ async def test_catalogue_reflects_pushed_topology(broker: FakeBroker) -> None:
 async def test_on_catalogue_change_fires(broker: FakeBroker) -> None:
     broker.topology = wire.TopologyOk(
         generation=5,
-        queues=[wire.QueueTopologyEntry("jobs", 0, None, None, 1, 1)],
+        queues=[wire.QueueTopologyEntry("jobs", 0, None, [], 1, 1)],
     )
     client = await _connect(broker)
     try:
