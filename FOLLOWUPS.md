@@ -817,6 +817,36 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
 - Load-aware placement and routing: node and partition load scores (advisory,
   off the coordination log, hysteresis, power-of-two-choices), plus a consumer
   scheduling policy and a per-consumer override of the global partition target. [DN/MEM]
+- Leadership health transfer (working name "abdication"): let the coordination
+  (raft) leader hand off leadership when it is the bottleneck, so the control
+  plane does not run on a degraded node. NEEDS EXAMINATION, not committed. Notes:
+  - Scope: this is the CONTROLLER leader (commits placements, declares, failover
+    decisions, settings, membership), NOT the message hot path (queue/stream data
+    replication has its own caught-up-follower failover). So "cannot keep up" is
+    almost never throughput saturation, it is a degraded leader node (slow log
+    fsync, pegged CPU, noisy neighbor). The real harm is delayed failover planning
+    and repartition cutovers, the brain reacting slowly to OTHER failures. That is
+    the resilience win: do not run the brain on the sickest node.
+  - Core discriminator (makes or breaks it): leader-LOCAL slowness vs CLUSTER-WIDE
+    slowness. Transfer only helps the former. The trigger must be "I am slow AND a
+    specific follower is demonstrably healthier and caught up", not absolute commit
+    latency, or it ping-pongs between equally slow nodes.
+  - Signals to combine: openraft 0.9 self-metrics (quorum-ack / time-to-commit
+    latency, per-follower replication lag, millis_since_quorum_ack), local log
+    fsync latency, and controller-loop schedule drift (actual vs expected cadence,
+    the user's "starting updates on schedule" intuition: sustained drift, not a
+    blip).
+  - Guards (non-negotiable): use graceful leadership TRANSFER to a chosen caught-up
+    voter (openraft transfer), never a bare step-down (which risks re-electing the
+    same slow node or a lagging one, with an election gap). Never transfer to a
+    non-caught-up follower. Minimum leadership tenure, cooldown, hysteresis, a
+    global transfer rate limit, and anti-ping-pong memory. All thresholds as config
+    settings. Start ADVISORY (log "would transfer to N because X", surface health
+    scores in the admin topology panel), measure, then enable.
+  - Fit: phase-2 of the load-aware direction above (reuse the node load/health
+    scoring substrate rather than a bespoke mechanism). Gate on a feasibility check
+    of openraft 0.9's leadership-transfer API and metric access, and instrument
+    what actually causes leader slowness in practice BEFORE building the policy. [AUTHOR]
 - Live repartitioning beyond fixed-at-create: partition_count is already
   versioned and routing is version-parameterized. The hard deferred semantic is
   per-key ordering across a resize. [PLAN/MEM]
