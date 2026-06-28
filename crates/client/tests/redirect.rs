@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fibril_client::{Client, ClientOptions, FibrilError, NewMessage, ReconnectOutcome};
 use fibril_protocol::v1::{
-    COMPLIANCE_STRING, Deliver, Hello, HelloOk, Op, PROTOCOL_V1, Publish, PublishOk,
+    AdvertisedAddress, COMPLIANCE_STRING, Deliver, Hello, HelloOk, Op, PROTOCOL_V1, Publish,
+    PublishOk,
     QueueTopologyEntry, ReconcileResult, Redirect, ResumeOutcome, Subscribe, SubscribeOk,
     TopologyOk,
     frame::ProtoCodec,
@@ -192,7 +193,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                                     topic: spread.topic.clone(),
                                     partition: Partition::new(partition),
                                     group: spread.group.clone(),
-                                    owner_endpoint: Some(addr.to_string()),
+                                    owner_endpoints: vec![AdvertisedAddress::parse(&addr.to_string()).expect("valid test owner endpoint")],
                                     partitioning_version: spread.partitioning_version,
                                     partition_count: count,
                                 })
@@ -237,7 +238,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                                     topic: publish.topic,
                                     partition: Partition::new(0),
                                     group: publish.group,
-                                    owner_endpoint: target.to_string(),
+                                    owner_endpoints: vec![AdvertisedAddress::parse(&target.to_string()).expect("valid test owner endpoint")],
                                     partitioning_version: 0,
                                 };
                                 try_encode(Op::Redirect, frame.request_id, &redirect).unwrap()
@@ -247,7 +248,7 @@ async fn spawn_configurable_mock(config: MockConfig) -> SocketAddr {
                                     topic: publish.topic,
                                     partition: Partition::new(0),
                                     group: publish.group,
-                                    owner_endpoint: addr.to_string(),
+                                    owner_endpoints: vec![AdvertisedAddress::parse(&addr.to_string()).expect("valid test owner endpoint")],
                                     partitioning_version: 0,
                                 };
                                 try_encode(Op::Redirect, frame.request_id, &redirect).unwrap()
@@ -374,7 +375,7 @@ async fn fetch_topology_populates_cache_and_routes() {
                 topic: "jobs".into(),
                 partition: Partition::new(0),
                 group: None,
-                owner_endpoint: Some(owner.to_string()),
+                owner_endpoints: vec![AdvertisedAddress::parse(&owner.to_string()).expect("valid test owner endpoint")],
                 partitioning_version: 0,
                 partition_count: 1,
             }],

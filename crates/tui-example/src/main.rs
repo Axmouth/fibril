@@ -1043,10 +1043,12 @@ async fn poll_owners(
         for q in &topo.queues {
             if q.topic == args.topic
                 && q.group == args.group
-                && let (Some(ep), Some(slot)) =
-                    (q.owner_endpoint.as_ref(), owners.get_mut(q.partition.id() as usize))
+                && let (Some(ep), Some(slot)) = (
+                    q.owner_endpoints.first(),
+                    owners.get_mut(q.partition.id() as usize),
+                )
             {
-                *slot = Some(ep.clone());
+                *slot = Some(ep.target());
             }
         }
         if owners.iter().all(Option::is_some) {
@@ -1093,7 +1095,7 @@ fn cluster_from_topology(args: &Args, topology: &TopologyOk) -> Cluster {
             && q.group == args.group
             && let Some(slot) = owners.get_mut(q.partition.id() as usize)
         {
-            *slot = q.owner_endpoint.clone();
+            *slot = q.owner_endpoints.first().map(|a| a.target());
         }
     }
     build_cluster(args, &owners)

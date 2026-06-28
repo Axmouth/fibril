@@ -49,7 +49,8 @@ use fibril_protocol::v1::handler::{
     run_server as run_protocol_server,
 };
 use fibril_protocol::v1::{
-    Partition, QueueTopologyEntry, StreamRetention, StreamTopologyEntry, TopologyOk,
+    AdvertisedAddress, Partition, QueueTopologyEntry, StreamRetention, StreamTopologyEntry,
+    TopologyOk,
 };
 use fibril_util::StaticAuthHandler;
 use ganglion::{TcpRaftServer, WireFormat, WireFormatParseError, openraft::BasicNode};
@@ -1242,7 +1243,7 @@ impl ClientTopologySource for LocalTopologySource {
                 (0..partition_count).map(move |partition| StreamTopologyEntry {
                     topic: topic.clone(),
                     partition: Partition::new(partition),
-                    owner_endpoint: None,
+                    owner_endpoints: Vec::new(),
                     partitioning_version: 0,
                     partition_count,
                 })
@@ -1277,7 +1278,12 @@ impl ClientTopologySource for CoordinationTopologySource {
                     topic: queue.topic,
                     partition: queue.partition,
                     group: queue.group,
-                    owner_endpoint: queue.owner_endpoint,
+                    owner_endpoints: queue
+                        .owner_endpoint
+                        .as_deref()
+                        .and_then(AdvertisedAddress::parse)
+                        .into_iter()
+                        .collect(),
                     partitioning_version: queue.partitioning_version,
                     partition_count: queue.partition_count,
                 })
@@ -1288,7 +1294,12 @@ impl ClientTopologySource for CoordinationTopologySource {
                 .map(|stream| StreamTopologyEntry {
                     topic: stream.topic,
                     partition: stream.partition,
-                    owner_endpoint: stream.owner_endpoint,
+                    owner_endpoints: stream
+                        .owner_endpoint
+                        .as_deref()
+                        .and_then(AdvertisedAddress::parse)
+                        .into_iter()
+                        .collect(),
                     partitioning_version: stream.partitioning_version,
                     partition_count: stream.partition_count,
                 })

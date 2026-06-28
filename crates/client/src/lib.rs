@@ -56,6 +56,7 @@ use tokio_util::codec::Framed;
 use uuid::Uuid;
 
 use fibril_protocol::v1::{
+    AdvertisedAddress,
     frame::{Frame, ProtoCodec},
     handler::DEFAULT_HEARTBEAT_INTERVAL,
     helper::*,
@@ -201,7 +202,7 @@ pub enum FibrilError {
     /// The broker redirected the operation to the current owner. The client
     /// auto-follows this for confirmed publishes and subscribes; if it surfaces
     /// to the caller, topology changed mid-operation and the op is retryable.
-    #[error("redirected to owner {} for {}/{}", .0.owner_endpoint, .0.topic, .0.partition)]
+    #[error("redirected to owner {:?} for {}/{}", .0.owner_endpoints, .0.topic, .0.partition)]
     Redirect(Box<Redirect>),
     /// The connection ended before the expected protocol exchange completed.
     #[error("EOF")]
@@ -2695,6 +2696,25 @@ impl AutoAckedSubscription {
 
 // ===== Engine =================================================================
 
+/// Pick the first owner address usable by the connection pool, which is keyed by a
+/// resolved `SocketAddr`. An address that does not parse as one (a service name,
+/// say) is logged and skipped rather than silently dropped, and the next address is
+/// tried. Returns `None` when no address is usable. Connecting to service names
+/// directly by trying each in order is a later client brick.
+fn first_socket_endpoint(addrs: &[AdvertisedAddress]) -> Option<SocketAddr> {
+    for addr in addrs {
+        match addr.target().parse::<SocketAddr>() {
+            Ok(endpoint) => return Some(endpoint),
+            Err(error) => tracing::warn!(
+                endpoint = %addr.target(),
+                %error,
+                "owner endpoint is not a socket address, skipping it"
+            ),
+        }
+    }
+    None
+}
+
 /// Owner of one queue partition for client routing.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // fields consumed once routing is wired
@@ -2781,11 +2801,7 @@ impl TopologyCache {
                     version: queue.partitioning_version,
                 },
             );
-            let Some(endpoint) = queue
-                .owner_endpoint
-                .as_deref()
-                .and_then(|raw| raw.parse::<SocketAddr>().ok())
-            else {
+            let Some(endpoint) = first_socket_endpoint(&queue.owner_endpoints) else {
                 continue;
             };
             self.by_queue.insert(
@@ -2808,11 +2824,7 @@ impl TopologyCache {
                     version: stream.partitioning_version,
                 },
             );
-            let Some(endpoint) = stream
-                .owner_endpoint
-                .as_deref()
-                .and_then(|raw| raw.parse::<SocketAddr>().ok())
-            else {
+            let Some(endpoint) = first_socket_endpoint(&stream.owner_endpoints) else {
                 continue;
             };
             self.by_queue.insert(
@@ -2826,7 +2838,7 @@ impl TopologyCache {
     }
 
     fn apply_redirect(&mut self, redirect: &Redirect) {
-        if let Ok(endpoint) = redirect.owner_endpoint.parse::<SocketAddr>() {
+        if let Some(endpoint) = first_socket_endpoint(&redirect.owner_endpoints) {
             self.by_queue.insert(
                 (
                     redirect.topic.clone(),
@@ -5026,14 +5038,14 @@ mod tests {
                 StreamTopologyEntry {
                     topic: "events".into(),
                     partition: Partition::new(0),
-                    owner_endpoint: Some("127.0.0.1:7000".into()),
+                    owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
                     partitioning_version: 2,
                     partition_count: 2,
                 },
                 StreamTopologyEntry {
                     topic: "events".into(),
                     partition: Partition::new(1),
-                    owner_endpoint: None, // owner unresolved mid-failover
+                    owner_endpoints: vec![], // owner unresolved mid-failover
                     partitioning_version: 2,
                     partition_count: 2,
                 },
@@ -5518,7 +5530,7 @@ mod tests {
                     topic: "jobs".into(),
                     partition: Partition::new(0),
                     group: None,
-                    owner_endpoint: Some(owner_addr.to_string()),
+                    owner_endpoints: vec![AdvertisedAddress::parse(&owner_addr.to_string()).expect("valid test owner endpoint")],
                     partitioning_version: 1,
                     partition_count: 1,
                 }],
@@ -5615,7 +5627,7 @@ mod tests {
                     topic: "jobs".into(),
                     partition: Partition::new(0),
                     group: None,
-                    owner_endpoint: Some(owner.to_string()),
+                    owner_endpoints: vec![AdvertisedAddress::parse(&owner.to_string()).expect("valid test owner endpoint")],
                     partitioning_version: 1,
                     partition_count: 1,
                 }],
@@ -5705,14 +5717,14 @@ mod tests {
                     topic: "jobs".into(),
                     partition: Partition::new(0),
                     group: Some("workers".into()),
-                    owner_endpoint: None,
+                    owner_endpoints: vec![],
                     partitioning_version: 1,
                     partition_count: 3,
                 }],
                 streams: vec![StreamTopologyEntry {
                     topic: "events".into(),
                     partition: Partition::new(0),
-                    owner_endpoint: None,
+                    owner_endpoints: vec![],
                     partitioning_version: 1,
                     partition_count: 2,
                 }],

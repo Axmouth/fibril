@@ -26,7 +26,8 @@ use fibril_broker::{
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::{
-    Ack, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue, DeclareQueueOk, Deliver,
+    AdvertisedAddress, Ack, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
+    DeclareQueueOk, Deliver,
     ERR_CONFLICT, ERR_INVALID, ErrorMsg, HEADER_SPECULATIVE, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
     Publish, PublishDelayed, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient,
     ReconcilePolicy, ReconcileResult, ReconcileSubscription, ReplicationApply, ReplicationApplyOk,
@@ -2918,9 +2919,9 @@ impl ClientTopologySource for FixedTopology {
             .iter()
             .find(|q| q.topic == topic && q.partition == partition && q.group.as_deref() == group)
             .and_then(|q| {
-                q.owner_endpoint
-                    .clone()
-                    .map(|e| (e, q.partitioning_version))
+                q.owner_endpoints
+                    .first()
+                    .map(|e| (e.target(), q.partitioning_version))
             })
     }
 }
@@ -2941,7 +2942,7 @@ impl ClientTopologySource for BumpingTopology {
                 topic: "jobs".into(),
                 partition: Partition::new(0),
                 group: None,
-                owner_endpoint: Some("127.0.0.1:7000".into()),
+                owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
                 partitioning_version: generation,
                 partition_count: 1,
             }],
@@ -3061,7 +3062,7 @@ impl ClientTopologySource for QuietTopology {
                 topic: "jobs".into(),
                 partition: Partition::new(0),
                 group: None,
-                owner_endpoint: Some("127.0.0.1:7000".into()),
+                owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
                 partitioning_version: 1,
                 partition_count: 1,
             }],
@@ -3146,7 +3147,7 @@ async fn handler_answers_topology_query_from_source() {
                 topic: "orders".into(),
                 partition: Partition::new(0),
                 group: Some("workers".into()),
-                owner_endpoint: Some("127.0.0.1:9000".into()),
+                owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9000").expect("valid test owner endpoint")],
                 partitioning_version: 0,
                 partition_count: 1,
             },
@@ -3154,7 +3155,7 @@ async fn handler_answers_topology_query_from_source() {
                 topic: "emails".into(),
                 partition: Partition::new(0),
                 group: None,
-                owner_endpoint: Some("127.0.0.1:9001".into()),
+                owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9001").expect("valid test owner endpoint")],
                 partitioning_version: 0,
                 partition_count: 1,
             },
@@ -3220,8 +3221,8 @@ async fn handler_answers_topology_query_from_source() {
     assert_eq!(filtered.queues.len(), 1);
     assert_eq!(filtered.queues[0].topic, "orders");
     assert_eq!(
-        filtered.queues[0].owner_endpoint.as_deref(),
-        Some("127.0.0.1:9000")
+        filtered.queues[0].owner_endpoints.first().map(|a| a.target()),
+        Some("127.0.0.1:9000".to_string())
     );
 
     drop(framed);
@@ -3241,7 +3242,7 @@ async fn unowned_publish_redirects_to_current_owner() {
             topic: "elsewhere".into(),
             partition: Partition::new(0),
             group: None,
-            owner_endpoint: Some("127.0.0.1:9999".into()),
+            owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9999").expect("valid test owner endpoint")],
             partitioning_version: 0,
             partition_count: 1,
         }],
@@ -3302,7 +3303,7 @@ async fn unowned_publish_redirects_to_current_owner() {
     assert_eq!(frame.opcode, Op::Redirect as u16);
     let redirect: fibril_protocol::v1::Redirect = try_decode(&frame).unwrap();
     assert_eq!(redirect.topic, "elsewhere");
-    assert_eq!(redirect.owner_endpoint, "127.0.0.1:9999");
+    assert_eq!(redirect.owner_endpoints[0].target(), "127.0.0.1:9999");
 
     drop(framed);
     server_task.await.unwrap().unwrap();
@@ -3322,7 +3323,7 @@ async fn stale_partitioning_version_publish_is_fenced() {
             topic: "jobs".into(),
             partition: Partition::new(0),
             group: None,
-            owner_endpoint: Some("127.0.0.1:9100".into()),
+            owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9100").expect("valid test owner endpoint")],
             partitioning_version: 5,
             partition_count: 4,
         }],
@@ -3384,7 +3385,7 @@ async fn stale_partitioning_version_publish_is_fenced() {
     assert_eq!(frame.opcode, Op::Redirect as u16);
     let redirect: fibril_protocol::v1::Redirect = try_decode(&frame).unwrap();
     assert_eq!(redirect.topic, "jobs");
-    assert_eq!(redirect.owner_endpoint, "127.0.0.1:9100");
+    assert_eq!(redirect.owner_endpoints[0].target(), "127.0.0.1:9100");
     // The redirect carries the current version so the client can re-route.
     assert_eq!(redirect.partitioning_version, 5);
 

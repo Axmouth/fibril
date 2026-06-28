@@ -5,7 +5,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::v1::{
-    Ack, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
+    AdvertisedAddress, Ack, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
+    DeclareQueue,
     DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, Hello, HelloOk, Nack, Op, PROTOCOL_V1,
     Partition, Publish, PublishDelayed, PublishOk, StreamDurability, StreamRetention, StreamStart,
     SubscribeStream, QueueDlqPolicy, QueueTopologyEntry, ReconcileAction, ReconcileClient,
@@ -627,7 +628,7 @@ fn put_topology_body(out: &mut BytesMut, topology: &TopologyOk) -> WireResult<()
     for entry in &topology.streams {
         put_str(out, &entry.topic)?;
         put_partition(out, entry.partition);
-        put_optional_str(out, entry.owner_endpoint.as_deref())?;
+        put_advertised_addresses(out, &entry.owner_endpoints)?;
         out.put_u64(entry.partitioning_version);
         out.put_u32(entry.partition_count);
     }
@@ -646,13 +647,13 @@ fn read_topology_body(reader: &mut Reader) -> WireResult<TopologyOk> {
     for _ in 0..stream_count {
         let topic = reader.str()?.to_owned();
         let partition = reader.partition()?;
-        let owner_endpoint = reader.optional_str()?.map(ToOwned::to_owned);
+        let owner_endpoints = reader.advertised_addresses()?;
         let partitioning_version = reader.u64()?;
         let partition_count = reader.u32()?;
         streams.push(StreamTopologyEntry {
             topic,
             partition,
-            owner_endpoint,
+            owner_endpoints,
             partitioning_version,
             partition_count,
         });
@@ -722,7 +723,7 @@ pub fn encode_redirect(request_id: u64, redirect: &Redirect) -> WireResult<Frame
         redirect.partition,
         redirect.group.as_deref(),
     )?;
-    put_str(&mut out, &redirect.owner_endpoint)?;
+    put_advertised_addresses(&mut out, &redirect.owner_endpoints)?;
     out.put_u64(redirect.partitioning_version);
     Ok(frame(Op::Redirect, request_id, out.freeze()))
 }
@@ -736,7 +737,7 @@ pub fn decode_redirect(frame: &Frame) -> WireResult<Redirect> {
         topic,
         partition,
         group,
-        owner_endpoint: reader.str()?.to_owned(),
+        owner_endpoints: reader.advertised_addresses()?,
         partitioning_version: reader.u64()?,
     };
     reader.finish()?;
@@ -1473,9 +1474,24 @@ fn put_reconcile_subscriptions(
     Ok(())
 }
 
+/// Owner endpoints: a length-prefixed list of `host:port` plus a tag list each,
+/// in priority order. Clients try them in order and use the first that connects.
+fn put_advertised_addresses(out: &mut BytesMut, addrs: &[AdvertisedAddress]) -> WireResult<()> {
+    put_len(out, addrs.len(), "owner endpoints")?;
+    for addr in addrs {
+        put_str(out, &addr.host)?;
+        out.put_u16(addr.port);
+        put_len(out, addr.tags.len(), "endpoint tags")?;
+        for tag in &addr.tags {
+            put_str(out, tag)?;
+        }
+    }
+    Ok(())
+}
+
 fn put_topology_entry(out: &mut BytesMut, entry: &QueueTopologyEntry) -> WireResult<()> {
     put_queue_key(out, &entry.topic, entry.partition, entry.group.as_deref())?;
-    put_optional_str(out, entry.owner_endpoint.as_deref())?;
+    put_advertised_addresses(out, &entry.owner_endpoints)?;
     out.put_u64(entry.partitioning_version);
     out.put_u32(entry.partition_count);
     Ok(())
@@ -1931,13 +1947,29 @@ impl<'a> Reader<'a> {
         Ok(subs)
     }
 
+    fn advertised_addresses(&mut self) -> WireResult<Vec<AdvertisedAddress>> {
+        let count = self.u32()? as usize;
+        let mut addrs = Vec::with_capacity(count);
+        for _ in 0..count {
+            let host = self.str()?.to_owned();
+            let port = self.u16()?;
+            let tag_count = self.u32()? as usize;
+            let mut tags = Vec::with_capacity(tag_count);
+            for _ in 0..tag_count {
+                tags.push(self.str()?.to_owned());
+            }
+            addrs.push(AdvertisedAddress { host, port, tags });
+        }
+        Ok(addrs)
+    }
+
     fn topology_entry(&mut self) -> WireResult<QueueTopologyEntry> {
         let (topic, partition, group) = self.queue_key()?;
         Ok(QueueTopologyEntry {
             topic,
             partition,
             group,
-            owner_endpoint: self.optional_str()?.map(ToOwned::to_owned),
+            owner_endpoints: self.advertised_addresses()?,
             partitioning_version: self.u64()?,
             partition_count: self.u32()?,
         })
@@ -2636,14 +2668,18 @@ mod tests {
                 topic: "t".into(),
                 group: None,
                 partition: Partition::new(0),
-                owner_endpoint: Some("127.0.0.1:7000".into()),
+                owner_endpoints: vec![AdvertisedAddress {
+                    host: "127.0.0.1".into(),
+                    port: 7000,
+                    tags: vec![],
+                }],
                 partitioning_version: 1,
                 partition_count: 2,
             }],
             streams: vec![StreamTopologyEntry {
                 topic: "s".into(),
                 partition: Partition::new(1),
-                owner_endpoint: None,
+                owner_endpoints: vec![],
                 partitioning_version: 3,
                 partition_count: 4,
             }],

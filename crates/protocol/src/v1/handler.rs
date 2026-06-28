@@ -9,6 +9,7 @@ use std::{
 };
 
 use crate::v1::{
+    AdvertisedAddress,
     frame::{Frame, ProtoCodec},
     helper::{ProtocolError, error_frame, try_decode, try_encode},
     wire::{self, WireError},
@@ -343,7 +344,7 @@ fn owner_redirect_frame(
         topic: topic.to_string(),
         partition,
         group: group.map(str::to_string),
-        owner_endpoint,
+        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint).into_iter().collect(),
         partitioning_version,
     };
     try_encode(Op::Redirect, request_id, &redirect).ok()
@@ -365,7 +366,7 @@ fn stream_owner_redirect_frame(
         topic: topic.to_string(),
         partition,
         group: None,
-        owner_endpoint,
+        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint).into_iter().collect(),
         partitioning_version,
     };
     try_encode(Op::Redirect, request_id, &redirect).ok()
@@ -401,7 +402,7 @@ async fn fence_stale_partitioning(
         topic: topic.to_string(),
         partition,
         group: group.map(str::to_string),
-        owner_endpoint,
+        owner_endpoints: AdvertisedAddress::parse(&owner_endpoint).into_iter().collect(),
         partitioning_version: current_version,
     };
     match try_encode(Op::Redirect, request_id, &redirect) {

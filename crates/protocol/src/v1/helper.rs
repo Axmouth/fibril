@@ -601,7 +601,7 @@ mod tests {
                     topic: "orders".into(),
                     partition: Partition::new(0),
                     group: Some("workers".into()),
-                    owner_endpoint: Some("127.0.0.1:9000".into()),
+                    owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9000").expect("valid test owner endpoint")],
                     partitioning_version: 0,
                     partition_count: 1,
                 },
@@ -609,7 +609,7 @@ mod tests {
                     topic: "emails".into(),
                     partition: Partition::new(1),
                     group: None,
-                    owner_endpoint: None,
+                    owner_endpoints: vec![],
                     partitioning_version: 0,
                     partition_count: 1,
                 },
@@ -617,7 +617,7 @@ mod tests {
             streams: vec![StreamTopologyEntry {
                 topic: "events".into(),
                 partition: Partition::new(0),
-                owner_endpoint: Some("10.0.0.7:7000".into()),
+                owner_endpoints: vec![AdvertisedAddress::parse("10.0.0.7:7000").expect("valid test owner endpoint")],
                 partitioning_version: 2,
                 partition_count: 4,
             }],
@@ -634,7 +634,7 @@ mod tests {
             topic: "orders".into(),
             partition: Partition::new(2),
             group: Some("workers".into()),
-            owner_endpoint: "127.0.0.1:9001".into(),
+            owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:9001").expect("valid test owner endpoint")],
             partitioning_version: 0,
         };
 

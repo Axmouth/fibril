@@ -15,7 +15,8 @@ use std::path::PathBuf;
 
 use fibril_protocol::v1::wire;
 use fibril_protocol::v1::{
-    Ack, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk, DeclareQueue,
+    AdvertisedAddress, Ack, AssignmentChanged, Auth, ContentType, DeclarePlexus, DeclarePlexusOk,
+    DeclareQueue,
     DeclareQueueOk, Deliver, DeliveryTag, ErrorMsg, Hello, HelloOk, Nack, Partition, Publish,
     PublishDelayed, PublishOk, QueueDlqPolicy, QueueTopologyEntry, ReconcileClient, ReconcilePolicy,
     ReconcileSubscription, Redirect, ResumeIdentity, ResumeOutcome, StreamDurability,
@@ -517,7 +518,7 @@ fn wire_encoders_match_shared_vectors() {
                         topic: "t".into(),
                         partition: Partition::new(0),
                         group: None,
-                        owner_endpoint: Some("127.0.0.1:7000".into()),
+                        owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
                         partitioning_version: 1,
                         partition_count: 2,
                     },
@@ -525,7 +526,7 @@ fn wire_encoders_match_shared_vectors() {
                         topic: "t".into(),
                         partition: Partition::new(1),
                         group: None,
-                        owner_endpoint: None,
+                        owner_endpoints: vec![],
                         partitioning_version: 1,
                         partition_count: 2,
                     },
@@ -533,7 +534,7 @@ fn wire_encoders_match_shared_vectors() {
                 streams: vec![StreamTopologyEntry {
                     topic: "s".into(),
                     partition: Partition::new(2),
-                    owner_endpoint: Some("10.0.0.9:7100".into()),
+                    owner_endpoints: vec![AdvertisedAddress::parse("10.0.0.9:7100").expect("valid test owner endpoint")],
                     partitioning_version: 4,
                     partition_count: 3,
                 }],
@@ -554,14 +555,14 @@ fn wire_encoders_match_shared_vectors() {
                     topic: "t".into(),
                     partition: Partition::new(0),
                     group: None,
-                    owner_endpoint: Some("127.0.0.1:7000".into()),
+                    owner_endpoints: vec![AdvertisedAddress::parse("127.0.0.1:7000").expect("valid test owner endpoint")],
                     partitioning_version: 1,
                     partition_count: 2,
                 }],
                 streams: vec![StreamTopologyEntry {
                     topic: "s".into(),
                     partition: Partition::new(2),
-                    owner_endpoint: Some("10.0.0.9:7100".into()),
+                    owner_endpoints: vec![AdvertisedAddress::parse("10.0.0.9:7100").expect("valid test owner endpoint")],
                     partitioning_version: 4,
                     partition_count: 3,
                 }],
@@ -588,7 +589,7 @@ fn wire_encoders_match_shared_vectors() {
                 topic: "t".into(),
                 partition: Partition::new(1),
                 group: Some("g".into()),
-                owner_endpoint: "h:1".into(),
+                owner_endpoints: vec![AdvertisedAddress::parse("h:1").expect("valid test owner endpoint")],
                 partitioning_version: 3,
             },
         )

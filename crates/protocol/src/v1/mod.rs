@@ -851,14 +851,52 @@ pub struct TopologyRequest {
     pub group: Option<String>,
 }
 
+/// A broker address to advertise to clients and peers: a connectable `host:port`
+/// (resolved at connect time, so `host` may be a service name) with optional
+/// free-form `tags` for future selection conventions (e.g. `internal`, `public`).
+/// A partition owner advertises a priority-ordered list of these and clients use
+/// the first they can connect to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvertisedAddress {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+impl AdvertisedAddress {
+    /// Format as a connectable `host:port` target. IPv6 hosts are expected to be
+    /// already bracketed (e.g. `[::1]`).
+    pub fn target(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    /// Parse a `host:port` string into an address with no tags. The port is the
+    /// part after the last colon, so a bracketed IPv6 host stays intact. Returns
+    /// `None` if there is no port or it does not parse.
+    pub fn parse(endpoint: &str) -> Option<Self> {
+        let (host, port) = endpoint.rsplit_once(':')?;
+        if host.is_empty() {
+            return None;
+        }
+        Some(Self {
+            host: host.to_string(),
+            port: port.parse().ok()?,
+            tags: Vec::new(),
+        })
+    }
+}
+
 /// One queue partition's ownership, as seen by clients for routing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QueueTopologyEntry {
     pub topic: String,
     pub partition: Partition,
     pub group: Option<String>,
-    /// Broker endpoint of the owner, if the owner node is known in the registry.
-    pub owner_endpoint: Option<String>,
+    /// Broker endpoints of the owner in priority order, empty when the owner is
+    /// unknown (or in standalone mode). Clients try them in order.
+    #[serde(default)]
+    pub owner_endpoints: Vec<AdvertisedAddress>,
     pub partitioning_version: u64,
     /// Total partition count of this queue `(topic, group)` — authoritative N
     /// for key routing. Repeated across the queue's partition entries.
@@ -898,8 +936,10 @@ pub struct TopologyUpdateAck {
 pub struct StreamTopologyEntry {
     pub topic: String,
     pub partition: Partition,
-    /// Broker endpoint of the owner, if the owner node is known in the registry.
-    pub owner_endpoint: Option<String>,
+    /// Broker endpoints of the owner in priority order, empty when the owner is
+    /// unknown (or in standalone mode). Clients try them in order.
+    #[serde(default)]
+    pub owner_endpoints: Vec<AdvertisedAddress>,
     pub partitioning_version: u64,
     /// Total partition count of this stream topic — authoritative N for key
     /// routing. Repeated across the stream's partition entries.
@@ -916,7 +956,9 @@ pub struct Redirect {
     pub topic: String,
     pub partition: Partition,
     pub group: Option<String>,
-    pub owner_endpoint: String,
+    /// Owner endpoints in priority order; the client retries against the first it
+    /// can connect to.
+    pub owner_endpoints: Vec<AdvertisedAddress>,
     pub partitioning_version: u64,
 }
 
