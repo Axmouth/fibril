@@ -730,9 +730,14 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   - `protocol/.../handler.rs` publish drowning out delivery - LARGELY SOLVED by
     cursor-commit microbatching (#83), so the inline TODO is now a NOTE. Re-examine
     only if delivery fairness regresses under heavy publish (no action otherwise).
-  - `broker/src/broker.rs` x3 "do not keep handle (memory leak) if relevant
-    connection dies" - per-connection handles retained after the connection drops,
-    a slow leak over a long-lived broker's lifetime. Confirm and bound.
+  - `broker/src/broker.rs` x3 "do not keep handle (memory leak) ..." - INVESTIGATED,
+    NOT a genuine leak (TODOs were stale, now reworded). They are per-QUEUE tasks
+    (publisher_sink, confirm_sink, delivery_loop), not per-connection. TaskGroup
+    wraps tokio_util TaskTracker, which tracks only an in-flight count and does not
+    retain JoinHandles, so finished tasks are reaped. All three break on
+    owner_runtime_shutdown (fired by cancel_owner_runtime on demotion/eviction) and
+    the TaskGroup cancel token (broker shutdown). Residual is only an invariant:
+    every owner-runtime teardown must call cancel_owner_runtime (it does today).
   - `keratin-log/src/writer.rs` "tests showing guaranteed order" + "more tests for
     failures and edge cases (batch flush on shutdown, etc.)" - test-coverage gaps in
     the durability-critical writer, plus the noted "more pipelining" lever.

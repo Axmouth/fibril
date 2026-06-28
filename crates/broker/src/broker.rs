@@ -2047,7 +2047,8 @@ impl<
         let qs_clone = qs.clone();
         let replication_timing = self.replication_timing.clone();
         let owner_runtime_shutdown = qs.owner_runtime_shutdown.clone();
-        // TODO: do not keep handle(memory leak effective) if relevant connection dies
+        // Bounded: breaks on owner_runtime_shutdown (demotion/eviction) and the TaskGroup
+        // cancel token (broker shutdown), and TaskTracker reaps finished tasks.
         self.task_group.spawn("publisher_sink", async move {
             let _activity_lease = activity_lease;
             const MAX_BATCH: usize = 256;
@@ -2169,7 +2170,8 @@ impl<
             }
         });
 
-        // TODO: do not keep handle(memory leak effective) if relevant connection dies
+        // Bounded: breaks on owner_runtime_shutdown (demotion/eviction) and the TaskGroup
+        // cancel token (broker shutdown), and TaskTracker reaps finished tasks.
 
         self.task_group.spawn("confirm_sink_loop", async move {
             while let Some((rx_completion, reply)) = confirm_sink_rx.recv().await {
@@ -3463,7 +3465,8 @@ impl<
         let broker = self.clone();
         let metrics = self.metrics.clone();
         let owner_runtime_shutdown = qs.owner_runtime_shutdown.clone();
-        // TODO: do not keep handle(memory leak effective) if relevant connection dies
+        // Bounded: breaks on owner_runtime_shutdown (demotion/eviction) and the TaskGroup
+        // cancel token (broker shutdown), and TaskTracker reaps finished tasks.
         self.task_group.spawn("delivery_loop", async move {
             let mut last_epoch_seen = qs.current_epoch();
 
