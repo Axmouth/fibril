@@ -69,11 +69,11 @@ parallel before then:
 - More first-party clients: Go, C#, Java.
 - Observability exporters (Prometheus, OpenTelemetry).
 - Continued performance refinement (async replication fsync, staging micro-opts).
-- Optional symmetric conveniences such as wildcard publishers, if a real need
-  appears.
+- Optional symmetric conveniences such as wildcard publishers (client-side
+  fan-out to every topic matching a pattern, mirroring wildcard subscribe), if a
+  real need appears.
 
-Deliberately out of scope: transactions, content-routing scripting, and
-SQL/stream-processing. Those would be a different product.
+See [out of scope](#out-of-scope) for what stays deliberately outside the broker.
 
 ## Recently landed
 
@@ -180,3 +180,5 @@ feeds the milestones above.
 ## Out of scope
 
 Transactions are not planned. Fibril is aiming for clear durable messaging semantics, not a clone of every broker feature, and transactional publish/consume workflows are intentionally out of scope.
+
+Content-routing scripting and SQL/stream-processing are also out of scope for the broker core. Programmable routing, if ever pursued, belongs in a layer above Fibril (an external engine that drives declares and subscriptions, potentially its own runtime), not embedded in the broker hot path. Keeping that logic outside the broker preserves the simple, predictable core.
