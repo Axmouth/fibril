@@ -771,16 +771,25 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
       dead_letter_commit, "reuse existing frontier-advance logic"), so the
       structure already tracks all terminal settlements, not just acks. The
       honest name is `settled` + `settled_until`.
-    - Only above the frontier. The set holds offsets settled out of order above
-      `settled_until`. The contiguous prefix IS the frontier, so `[0,
-      settled_until)` is never stored. The set carries just the near-contiguous
-      out-of-order span (about prefetch x consumers) and collapses into the
-      frontier as it advances, so it stays small.
+    - Store the WHOLE settled set from 0, not just the part above the frontier.
+      With a RangeSet `[0, frontier)` is a single `(0, N)` entry regardless of N,
+      so including the prefix costs one range and makes the set the single source
+      of truth. (With the old bitset window the frontier HAD to be separate
+      because the window only covered a bounded span above it. The RangeSet
+      removes that constraint, so this is now a semantics call, not a cost one.)
     - No window. A RangeSet is unbounded, so the fixed `ACK_WINDOW` cap and its
       far-ack in-memory-drop divergence both go away (this subsumes the old
       follow-up about documenting the cap).
-    - Shape: `advance_frontier` pops the contiguous low run from `settled` into
-      `settled_until`; `is_settled(o) = o < settled_until || settled.contains(o)`.
+    - Shape: `is_settled(o) = settled.contains(o)`; `settled_until()` is DERIVED
+      as the end of the range covering 0 (else 0). The frontier advance is free:
+      inserting a settled offset adjacent to the `[0, frontier)` range coalesces
+      it, so the explicit `advance_frontier` slide logic disappears. No separate
+      `settled_until` field to keep in sync.
+    - Hot-path note: deriving the frontier is a first-range lookup rather than a
+      bare field read, but the range count is tiny (about out-of-order span + 1),
+      so it is cheap. If a hot path ever needs a bare read, cache the frontier as
+      a pure memo of the set (recomputed on insert), not as a second independent
+      field.
     - Cost / deciding factor: this is a snapshot + replication FORMAT change. The
       state-checkpoint and follower sync ship `ack_window_base` + `ack_bits_bytes`
       today; they would ship the ranges instead, needing a `STROMA_VER` bump and
