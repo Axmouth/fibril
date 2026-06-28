@@ -204,7 +204,7 @@ See also: [reconnects](/latest/reliability/reconnects/) and
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Resume identity handshake | Implemented | TCP protocol, Rust client, TypeScript client, Python client |
-| Reconnect grace window | Implemented | Runtime settings and TCP handler |
+| Reconnect grace window | Implemented | Runtime settings and TCP handler. On by default in the server seed (`connection.reconnect_grace_ms`, 5s); opt out with 0. Both manual and auto-ack subscriptions participate |
 | Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client, Python client |
 | Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client |
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |

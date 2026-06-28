@@ -401,12 +401,28 @@ Client tests:
 - reconnect sends resume identity when available (implemented)
 - reconnect handles rejected resume by falling back to fresh state
 
-## Open Questions
+## Resolved Policy Decisions
 
-- Should resume be opt-in per client, enabled globally, or enabled by default?
-- Should auto-ack subscriptions participate in grace, or only manual-ack
-  subscriptions?
-- Should clients automatically resubscribe when reconciliation says a
-  subscription should be recreated?
-- How long should the default grace window be?
-- Should late settles after the grace window return a specific error code?
+- Resume identity is always issued and the clients always send it on reconnect.
+  Reconnect grace (keeping the logical connection dormant) is server-controlled
+  by `connection.reconnect_grace_ms`. The broker library defaults it off (None ->
+  immediate cleanup) to stay conservative, but the `fibril-server` product seed
+  enables it by default at `DEFAULT_RECONNECT_GRACE_MS` (5s). Operators opt out
+  by setting the value to 0. So resume is enabled by default at the product level
+  and remains a single server-side knob, not a per-client one.
+- Auto-ack subscriptions participate in grace. The dormant logical connection
+  preserves all subscriptions regardless of ack mode. Auto-ack holds no inflight
+  to retain, so grace simply preserves the subscription and avoids resubscribe
+  churn on a transient blip - cheap and worth keeping uniform with manual-ack.
+- Default grace window: 5s (`DEFAULT_RECONNECT_GRACE_MS`). Long enough to cover a
+  transient network blip and the client's automatic reconnect, short enough that
+  the redelivery delay for a genuinely dead consumer stays small. At-least-once
+  holds either way - grace only delays redelivery, never drops it.
+- Automatic resubscribe on `recreate_client_side` is a separate client-surface
+  follow-up (see Remaining Reconciliation Work and task #103), not gated here.
+- Late settles after the grace window: best-effort. Once grace expires the
+  inflight is requeued, so a late ack/nack references a retired lease and is
+  applied idempotently against storage (it does not double-settle a redelivered
+  message). A dedicated rejection error code is deferred to the inflight delivery
+  reconciliation work (task #104), which is where the per-delivery lease identity
+  needed to reject precisely will live.

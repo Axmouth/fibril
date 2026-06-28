@@ -81,11 +81,13 @@ restarts, the in-memory dormant connection state is gone.
 Reconnect grace is controlled by the runtime setting
 `connection.reconnect_grace_ms`.
 
-It is disabled when unset. It can be seeded on first boot:
+It is on by default (5000 ms) in the server seed, so a transient client blip
+resumes transparently. Set it to 0 to disable, or seed a different window on
+first boot:
 
 ```toml
 [runtime_seed.connection]
-reconnect_grace_ms = 30000
+reconnect_grace_ms = 5000
 ```
 
 You can also seed it with:

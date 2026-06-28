@@ -52,8 +52,8 @@ sweep_interval_ms = 60000
 # publisher_idle_timeout_ms = 600000
 
 [runtime_seed.connection]
-# Blank or omit to disable reconnect grace.
-# reconnect_grace_ms = 30000
+# Reconnect grace is on by default (5000 ms). Set to 0 to disable it.
+# reconnect_grace_ms = 5000
 
 [runtime_seed.replication]
 confirm_timeout_ms = 5000
@@ -216,7 +216,7 @@ See [many idle queues](/latest/concepts/many-idle-queues/) for the user-facing b
 
 | TOML field | Env/CLI compatibility | Default | Meaning |
 | --- | --- | --- | --- |
-| `runtime_seed.connection.reconnect_grace_ms` | `FIBRIL_RECONNECT_GRACE_MS`, `--reconnect-grace-ms` | unset | Keeps a disconnected resumable client alive for this long before cleaning up subscriptions and requeueing unsettled messages. |
+| `runtime_seed.connection.reconnect_grace_ms` | `FIBRIL_RECONNECT_GRACE_MS`, `--reconnect-grace-ms` | `5000` | Keeps a disconnected resumable client alive for this long before cleaning up subscriptions and requeueing unsettled messages. On by default so a transient blip resumes transparently; set `0` to disable. |
 
 Reconnect grace is disabled when unset. It only helps clients that use the resume identity handshake.
 

@@ -1260,10 +1260,23 @@ impl Default for IdleQueueCleanupSettings {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+/// Default reconnect grace window for the server seed. Grace is on by default so
+/// a transient client blip resumes transparently instead of churning redelivery
+/// and resubscribe. Operators opt out by setting `reconnect_grace_ms = 0`.
+pub const DEFAULT_RECONNECT_GRACE_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ConnectionSettings {
     pub reconnect_grace_ms: Option<u64>,
+}
+
+impl Default for ConnectionSettings {
+    fn default() -> Self {
+        Self {
+            reconnect_grace_ms: Some(DEFAULT_RECONNECT_GRACE_MS),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1395,7 +1408,10 @@ mod tests {
                 nodes: None,
             }
         );
-        assert_eq!(config.runtime_seed.connection.reconnect_grace_ms, None);
+        assert_eq!(
+            config.runtime_seed.connection.reconnect_grace_ms,
+            Some(DEFAULT_RECONNECT_GRACE_MS)
+        );
         assert_eq!(
             config.idle_queue_cleanup_internal(),
             InternalIdleQueueCleanup {
