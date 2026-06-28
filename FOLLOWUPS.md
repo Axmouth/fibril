@@ -586,6 +586,14 @@ rejected). Three composable dumb-broker pieces:
   feed for tools. Build it on the same facts ONLY if/when that discovery feature is
   wanted; it is not a prerequisite for routing or cutover. (#52)
 
+  CLOSED 2026-06-28: #52 is done/dropped. The discovery layer shipped over the main
+  protocol, not as an actual stream - catalogue snapshot + change subscription (#91)
+  and pattern subscribe + auto-pickup (#92) across the Rust/TS/Python clients. A
+  literal topology Plexus stream was rejected (circular bootstrap, no per-client
+  ack, no per-connection targeting), so nothing of value remains. The only
+  untouched sliver is a catalogue feed for EXTERNAL (non-fibril-client) tools,
+  which the admin HTTP API already covers by polling.
+
   DISCOVERY LAYER 1 DONE (#91): all three clients expose a live cluster catalogue
   (declared queues + streams with partition counts) via a snapshot accessor
   (catalogue()) AND a change subscription (Rust catalogue_events() broadcast;
