@@ -28,6 +28,36 @@ Tiers are grouped by concern, not strictly ordered.
 This file tracks the replication and clustering roadmap leftovers. Non-replication
 feature ideas live in their own track, summarized at the end.
 
+## RESUME HERE (post-compaction 2026-06-29)
+
+Both repos are pushed and in sync with origin/main. The recent arc finished the
+settled-set line (settled RangeSet + is_settled rename + FORMAT_VERSION 4), the
+dead-surface audits (keratin handle wrappers, filter_not_enqueued/count_inflight,
+the fibril queue-engine pass), the cross-repo lowest_unacked -> lowest_unsettled
+rename, closed #52 (subsumed by #62/#91/#92), and assessed #65 (interning: skip).
+
+NEXT (user-picked): the restart-reconciliation cold-start edge case. On a cold
+broker restart `snapshot_with_cached_local_assignments` (broker.rs:4161) starts
+with an empty assignment cache, so for a partition the node was DISOWNED of while
+it was down, `plan_local_assignment_transitions` (coordination.rs:1352) computes
+(previous_role None, next_role None) -> Noop. The on-disk data for that partition
+is then left on disk, never materialized (correct - not owned) but never cleaned
+up. Decide the intended behavior (leave as cold storage vs reclaim on restart)
+and add a test. Verify it is not served and does not get mis-materialized.
+
+Verified this session (no action needed): inflight IS persisted (encode_snapshot
+writes inflight (offset, deadline) pairs at state.rs:3654, load_snapshot restores
+them, MarkInflight events replay) so leased-unacked survives crash/restart; the
+keratin head-offset discrepancy is considered resolved (user).
+
+Idea backlog mined from TODOTHOUGHTS (pick from these after the above): express
+lane / speculative delivery + deferred publisher confirm (the ghost-flag
+pattern); in-memory non-durable queues (pluggable keratin write target);
+producer dedup / max-unconfirmed-per-publisher; client embedded-retry
+(is_retryable + retry handle); documented failure semantics / operator runbook;
+crash-recover "leftover inflight without message" smell; split-brain epoch-fence
+test; multi-broker-same-storage must-fail test; #97 DST simulation.
+
 ## Done since the inventory was last curated (2026-06-22)
 
 The `implemented-surface.md` inventory was recurated on 2026-06-22 and now
@@ -179,6 +209,15 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   is-acked guard before requeue. [RACE Race 2]
 
 ## Performance and scale
+
+- Async fsync for replication (deferred, user-flagged 2026-06-29): the replication
+  append path for committed messages AND events is believed to still fsync
+  synchronously per batch rather than handing the fsync to keratin's fsync worker
+  stage (the way the local ephemeral sync_stream path was reworked). Verify the
+  current behavior in the follower-apply / owner-commit replication path, then
+  move the replication fsync off the hot path (async/worker-staged, responder
+  carried through) so replicated commit/event throughput is not bottlenecked on a
+  synchronous fsync per batch. Mirrors the keratin db92777 ephemeral-flush rework.
 
 - Arc<str> + soft interning for topic/group (#65): ASSESSED 2026-06-28, NOT WORTH
   IT - do not pursue the broad refactor. Findings: the per-message hot path
@@ -756,6 +795,12 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   for status. Next client: Python.
 
 ## Code health and structure
+
+- Small zero-alloc win (TODOTHOUGHTS #2): `plan_local_assignment_transitions`
+  (coordination.rs:1352) sorts keys with `a.topic.to_string()` (and group
+  `.to_string()`) in the comparator, a heap alloc per key per snapshot diff. Sort
+  by borrowed `&str` instead to keep the transition planner zero-alloc. Tiny,
+  self-contained.
 
 - Routing/pattern-subscribe parity: DONE on Rust, TS, async + blocking Python.
   Integration coverage: Rust (static queue fan-in), TS (queue fan-in AND
