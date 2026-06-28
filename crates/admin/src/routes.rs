@@ -422,16 +422,22 @@ pub async fn subscriptions(
 pub async fn queues(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
 
-    let queues = server.storage.queue_stats_snapshot().await;
+    let queues = match server.storage.queue_stats_snapshot().await {
+        Ok(queues) => queues,
+        Err(err) => {
+            tracing::error!("Error fetching queue stats: {err}");
+            return Ok(admin_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "queue_stats_failed",
+                err.to_string(),
+            ));
+        }
+    };
 
-    if let Ok(queues) = queues {
-        Ok(Json(serde_json::to_value(queues).unwrap_or_default()))
-    } else {
-        Ok(Json(serde_json::json!({})))
-    }
+    Ok(Json(serde_json::to_value(queues).unwrap_or_default()).into_response())
 }
 
 /// Build the partition debug payload for one channel kind. A stream reuses the
@@ -442,12 +448,16 @@ pub async fn queues(
 async fn partition_debug_value(
     server: &AdminServer,
     keep_streams: bool,
-) -> Result<serde_json::Value, StatusCode> {
+) -> Result<serde_json::Value, Response> {
     let snapshot = match server.storage.debug_snapshot().await {
         Ok(snapshot) => snapshot,
         Err(err) => {
             tracing::error!("Error fetching partition debug info: {err}");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            return Err(admin_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "debug_snapshot_failed",
+                err.to_string(),
+            ));
         }
     };
 
@@ -504,9 +514,12 @@ async fn partition_debug_value(
 pub async fn queues_debug(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
-    Ok(Json(partition_debug_value(&server, false).await?))
+    match partition_debug_value(&server, false).await {
+        Ok(value) => Ok(Json(value).into_response()),
+        Err(response) => Ok(response),
+    }
 }
 
 /// Stream counterpart to [`queues_debug`]: the same debug snapshot filtered to
@@ -514,9 +527,12 @@ pub async fn queues_debug(
 pub async fn streams_debug(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
-    Ok(Json(partition_debug_value(&server, true).await?))
+    match partition_debug_value(&server, true).await {
+        Ok(value) => Ok(Json(value).into_response()),
+        Err(response) => Ok(response),
+    }
 }
 
 pub async fn inspect_messages(
