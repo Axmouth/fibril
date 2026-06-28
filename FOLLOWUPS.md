@@ -181,53 +181,35 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 
 ## Operability and quality of life
 
-- Broker advertise address, separate from the bind address: today the address a
-  broker registers in the node table (and that clients are redirected to as an
-  owner endpoint) is just `config.broker.listener.bind`. In a container that is
-  `0.0.0.0:9876`, which a peer cannot dial back, so cross-broker owner routing and
-  replication only work when the bind happens to be a reachable address. Needed
-  before the Docker visualizer can route across a multi-broker cluster, and it
-  cleans up containerized replication too. The single-broker
-  `compose.viz.example.yaml` sidesteps this (owner endpoints are unknown, so the
-  visualizer talks to the one broker).
-  - Resolution order to keep the common case zero-config: explicit advertise >
-    derived from the coordination peer host (our own entry in
-    `FIBRIL_COORDINATION_PEERS`) + the broker port, in ganglion mode > the bind
-    address (standalone / fallback). The peer-derived default is deterministic at
-    startup and covers the in-network case (incl. the containerized cluster viz),
-    since repartition/replication are ganglion-only anyway.
-  - Auto-derive limits: an accepted socket's `local_addr()` resolves a 0.0.0.0
-    bind to the real interface IP, but it is unavailable until first connect, is
-    a container-internal IP rather than the stable service name, and is ambiguous
-    on multi-homed hosts - a fallback hint at best. Clients reaching the cluster
-    from OUTSIDE the network via mapped ports cannot be auto-derived (the Kafka
-    advertised.listeners multi-listener problem), so the explicit override must
-    exist.
-  - Shape: an ORDERED LIST of addresses, not a single one, in priority order.
-    The owner endpoint in the topology becomes a list, and a client tries each in
-    order and uses the first it can connect to (first-reachable-wins). This
-    subsumes the single-address case (a list of one) and serves in-network AND
-    external clients at once without the broker having to know which network the
-    caller is on: an in-network client succeeds on the service-name entry; an
-    external one fails that fast (DNS/refused) and falls through to the public
-    entry. Order most-likely first (internal/service name), public last, and give
-    the per-attempt connect a short timeout so a black-hole entry does not stall
-    the fall-through. The list holds only addresses we actually know: explicit
-    config entries (if set) plus derivable ones (coordination peer host + broker
-    port), deduped. A missing advertise setting simply contributes nothing - the
-    list is never padded with a placeholder or an unroutable bind like 0.0.0.0.
-  - Settings discipline: a startup/topology value, so it lives in the config
-    crate (`broker.listener.advertise: Vec<String>`, empty = derive +
-    `FIBRIL_BROKER_ADVERTISE` as a comma-separated list parsed there), not Stroma
-    runtime settings (changing it requires re-registering). Broker port comes from
-    the existing bind config, no magic numbers. Do NOT pre-bloat the wire/data
-    model before this is needed (it touches the protocol and the three clients);
-    ship the single derived value first and grow `owner_endpoint` to a list then.
-  - Heavier alternative if try-in-order's connect-failure latency ever bites:
+- Broker advertise address, separate from the bind address - MOSTLY DONE (#94).
+  Was: the broker registered `config.broker.listener.bind` as its endpoint, so in
+  a container (`0.0.0.0:9876`) peers/clients could not dial it back. Built:
+  `broker.listener.advertise: Vec<String>` + `FIBRIL_BROKER_ADVERTISE` (config
+  crate), with a zero-config default derived from the coordination peer host (our
+  own `FIBRIL_COORDINATION_PEERS` entry) + the broker port, falling back to the
+  bind. The node table holds the primary (first) endpoint as a connectable String
+  (service names survive - the SocketAddr parse that dropped them is gone), and the
+  full priority list rides a per-node heartbeat label (`fibril/advertise`), so
+  `owner_endpoints` is an ORDERED LIST of `AdvertisedAddress{host,port,tags}` on the
+  wire (Queue/Stream topology + Redirect). All three clients decode the list; the
+  TUI, TS, and Python clients connect by the first endpoint (by name, so service
+  names work). Containerized routing + replication now work.
+  - REMAINING (b3c): the high-level Rust client's connection pool is keyed by
+    `SocketAddr`, so it takes the first owner address that PARSES as one and
+    logs+skips a service-name address (`first_socket_endpoint`). Making it connect
+    by string and try the list in order (the real probe) is a focused
+    connection-manager refactor (pool key + `engine_slot` + bootstrap + prune +
+    `EngineSlot` connect/reconnect, ~25 `SocketAddr` sites). Until then a Rust app
+    using the high-level client against a service-name-advertising cluster routes
+    via bootstrap, not owners. The TUI/TS/Python paths already connect by name.
+  - try-in-order client behavior (all clients currently use the FIRST endpoint, not
+    a true connect-probe): give the per-attempt connect a short timeout so a
+    black-hole first entry does not stall the fall-through. Tags ride the wire
+    unused, for future selection conventions.
+  - Heavier evolution if try-in-order's connect-failure latency ever bites:
     Kafka-style named bind listeners with selection by the listener the client
-    bootstrapped through (return the advertised address for THAT listener). More
-    moving parts (multiple listeners + per-listener map); the ordered-list probe
-    is the lighter first cut. [AUTHOR]
+    bootstrapped through. More moving parts; the ordered-list probe is the lighter
+    cut and the `AdvertisedAddress{...tags}` shape is a clean stepping stone. [AUTHOR]
 - Programmatic scale up and down: join (learner to voter to rebalance) and
   drain-and-leave via fibrilctl plus the admin API, autoscaler-drivable. [PLAN]
 - Consumer assignment push and client fan-in narrowing: today a cohort client

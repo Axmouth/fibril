@@ -112,6 +112,7 @@ These fields are read on process start.
 | --- | --- | --- | --- |
 | `server.data_dir` | `FIBRIL_DATA_DIR` | `--data-dir` | `server_data` |
 | `broker.listener.bind` | `FIBRIL_BROKER_BIND` | `--broker-bind` | `0.0.0.0:9876` |
+| `broker.listener.advertise` | `FIBRIL_BROKER_ADVERTISE` | none | derived (see below) |
 | `admin.listener.bind` | `FIBRIL_ADMIN_BIND` | `--admin-bind` | `0.0.0.0:8081` |
 | `admin.auth.enabled` | `FIBRIL_ADMIN_AUTH_ENABLED` | `--admin-auth-enabled` | `false` |
 | `admin.auth.username` | `FIBRIL_ADMIN_USERNAME` | `--admin-username` | `fibril` |
@@ -129,6 +130,17 @@ These fields are read on process start.
 | `recovery.on_mismatch` | `FIBRIL_RECOVERY_ON_MISMATCH` | none | `quarantine` |
 
 Changing these generally requires restarting the server.
+
+`broker.listener.advertise` is the address (or addresses) the broker tells peers
+and clients to reach it on, separate from `bind`. This matters when `bind` is not
+itself dialable - the common case is binding `0.0.0.0` in a container, which a
+peer cannot connect back to. Give it a routable `host:port` (a service name is
+fine, it is resolved at connect time), or several comma-separated entries in
+`FIBRIL_BROKER_ADVERTISE` in priority order. When unset it is derived in
+`ganglion` mode from this node's coordination peer host plus the broker port, and
+otherwise falls back to `bind`. Standalone single-broker deployments do not need
+it (clients connect to the broker directly). Only the first entry is dialed today;
+the rest are carried for forward compatibility.
 
 `coordination.mode` is `static` for a standalone single-broker deployment (the
 default) or `ganglion` to run the embedded coordinator and form a cluster. The

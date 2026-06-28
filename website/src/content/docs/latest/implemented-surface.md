@@ -548,6 +548,7 @@ See also: [clustering](/latest/concepts/clustering/) and
 | Item | Status | Implemented surface |
 | --- | --- | --- |
 | Ganglion coordination mode | Partial | Startup config, embedded coordinator, TCP transport, broker self-registration, topology endpoint |
+| Broker advertise address | Partial | `broker.listener.advertise` / `FIBRIL_BROKER_ADVERTISE` (priority-ordered list, peer-derived default), carried to clients as `owner_endpoints`; clients dial the first entry (Rust high-level client connects to socket-address entries only) |
 | Queue catalogue and placement controller | Partial | Declared queues register partitions, controller assigns owners and followers, placement is stable and anti-churn |
 | Partition ownership gate | Partial | Broker serves only assigned owners in Ganglion mode. Standalone mode owns all queues |
 | Follower pull replication | Partial | Follower workers pull owner records over protocol, apply durably, install checkpoints when needed |
