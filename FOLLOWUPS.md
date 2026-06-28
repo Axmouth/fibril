@@ -49,6 +49,32 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 
 ## Correctness and durability
 
+- BUG (found 2026-06-28 via the cluster tryout, after the admin error-swallow fix):
+  on the bootstrap/declaring node a queue actor's command channel ends up CLOSED
+  while its handle stays in the materialized map, so anything routed through that
+  channel fails. Symptoms on the leader only (broker-2/3 clean): admin
+  /admin/api/queues 500s with "io: Status report failed: channel closed" (the
+  whole sweep aborts on one dead actor), and the expiry worker logs
+  "Expiry worker error: queue actor is gone" (broker.rs:3842) every poll, forever.
+  Repro: the one-command cluster tryout seeds queues by declaring against broker-1,
+  which materializes actors for ALL declared partitions, then the controller makes
+  it owner of most and FOLLOWER of a couple. broker-2/3 materialize their
+  partitions fresh from catalogue-sync and are fine. HYPOTHESIS (needs confirming):
+  the owner->follower demotion on the declaring node tears down the owner actor's
+  command loop but leaves the queue_handle marked materialized with a dead sender,
+  whereas a fresh follower materialization keeps a live actor. Two fixes, both
+  worth doing:
+  (a) ROBUSTNESS: get_queues_stats (keratin) and the expiry worker sweep should
+      tolerate a per-partition error - skip-and-mark that queue, not fail the whole
+      operation. A single transient dead actor must not blank the admin queues page
+      or kill the expiry pass for every other queue.
+  (b) ROOT CAUSE: do not leave a materialized handle pointing at a torn-down actor.
+      On owner->follower demotion either keep a live follower-mode actor that
+      answers status_report, or drop/replace the handle so it re-materializes
+      correctly. Confirm the exact demotion path first (instrument before patching).
+  The admin route no longer hides this (commit surfacing queue/debug errors), so it
+  is visible now, but the underlying actor-lifecycle gap remains.
+
 - Plexus stream routing after failover relies on the per-partition `.kind` marker
   being present on the new owner. The marker is a LOCAL file written at
   `create_stream` / queue `declare` time on whichever broker first declared the
