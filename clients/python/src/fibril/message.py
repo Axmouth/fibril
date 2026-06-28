@@ -10,10 +10,24 @@ from __future__ import annotations
 
 from typing import Any, Optional, Union
 
-import msgpack
-
 from .errors import DeserializationError, FibrilError, SerializationError
 from .wire import ContentType, CustomContentType
+
+
+def _load_msgpack() -> Any:
+    """Import msgpack on demand. msgpack is an optional dependency - only the
+    msgpack payload path needs it, so the client imports and runs without it and
+    only this path fails (with a clear message) when it is missing."""
+    try:
+        import msgpack  # noqa: PLC0415 (lazy: optional dependency)
+
+        return msgpack
+    except ImportError as err:
+        raise FibrilError(
+            "msgpack is not installed; install it (pip install 'fibril[msgpack]' "
+            "or pip install msgpack) to use msgpack payloads, or publish/consume "
+            "raw bytes, text, or JSON instead"
+        ) from err
 
 _MSGPACK = "application/msgpack"
 _JSON = "application/json"
@@ -76,8 +90,9 @@ class NewMessage:
 
     @staticmethod
     def msgpack(payload: Any) -> "NewMessage":
+        mp = _load_msgpack()
         try:
-            data = msgpack.packb(payload, use_bin_type=True)
+            data = mp.packb(payload, use_bin_type=True)
         except Exception as err:
             raise SerializationError(f"failed to serialize payload: {err}") from err
         return NewMessage(data, "msgpack", {})
@@ -144,8 +159,9 @@ def deserialize_by_content_type(content_type: Optional[str], payload: bytes) -> 
     """Decode payload bytes per ``content-type``. Missing/empty defaults to msgpack."""
     normalized = content_type.split(";")[0].strip() if content_type else None
     if not normalized or normalized == _MSGPACK:
+        mp = _load_msgpack()
         try:
-            return msgpack.unpackb(payload, raw=False)
+            return mp.unpackb(payload, raw=False)
         except Exception as err:
             raise DeserializationError(f"failed to deserialize payload: {err}") from err
     if normalized == _JSON:

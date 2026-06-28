@@ -12,6 +12,14 @@ npm install @fibril/client
 
 Requires Node.js >= 20.
 
+msgpack is optional. The client works with raw bytes, text, and JSON without it;
+install `@msgpack/msgpack` only if you publish or consume msgpack payloads (the
+default for plain values passed to `publish`):
+
+```bash
+npm install @msgpack/msgpack
+```
+
 ## Quick start
 
 ```ts

@@ -21,10 +21,16 @@
     "test:quiet": "tsc --noEmit && node --test --test-reporter=dot --import tsx tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
-  "dependencies": {
+  "peerDependencies": {
     "@msgpack/msgpack": "^3.0.0"
   },
+  "peerDependenciesMeta": {
+    "@msgpack/msgpack": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@msgpack/msgpack": "^3.0.0",
     "@types/node": "^20.19.39",
     "tsx": "^4.0.0",
     "typescript": "5.5"

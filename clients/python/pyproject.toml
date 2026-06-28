@@ -19,7 +19,12 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Typing :: Typed",
 ]
-dependencies = ["msgpack>=1.0"]
+# No required runtime dependencies. msgpack is optional - only the msgpack
+# payload codec needs it (raw/text/json work without it).
+dependencies = []
+
+[project.optional-dependencies]
+msgpack = ["msgpack>=1.0"]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "mypy>=1.10"]

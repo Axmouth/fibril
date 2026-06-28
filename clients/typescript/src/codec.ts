@@ -1,7 +1,32 @@
-import { encode as msgpackEncode, decode as msgpackDecode } from "@msgpack/msgpack";
+import { createRequire } from "node:module";
 import type { Op } from "./protocol.js";
 import { PROTOCOL_V1 } from "./protocol.js";
 import { encodeBody, decodeBody } from "./frames.js";
+import { FibrilError } from "./errors.js";
+
+// msgpack is an optional dependency: it is only used for the msgpack PAYLOAD codec
+// (frame bodies use the custom wire format in wire.ts, never msgpack). So the
+// client imports and runs without it and only the msgpack path fails - with a
+// clear message - when it is missing. Loaded lazily and cached on first use.
+type MsgpackModule = typeof import("@msgpack/msgpack");
+let msgpackCache: MsgpackModule | null | undefined;
+
+function loadMsgpack(): MsgpackModule {
+  if (msgpackCache === undefined) {
+    try {
+      msgpackCache = createRequire(import.meta.url)("@msgpack/msgpack") as MsgpackModule;
+    } catch {
+      msgpackCache = null;
+    }
+  }
+  if (msgpackCache === null) {
+    throw new FibrilError(
+      "msgpack is not installed; add @msgpack/msgpack to use msgpack payloads, " +
+        "or publish/consume raw bytes, text, or JSON instead",
+    );
+  }
+  return msgpackCache;
+}
 
 // Wire frame layout (big-endian):
 //   u32 payload_len
@@ -35,7 +60,7 @@ export interface Frame {
  */
 export function encodeMsgpack(value: unknown): Uint8Array {
   // useBigInt64 ensures bigint values round-trip as msgpack int64.
-  return msgpackEncode(value, { useBigInt64: true });
+  return loadMsgpack().encode(value, { useBigInt64: true });
 }
 
 /**
@@ -43,7 +68,7 @@ export function encodeMsgpack(value: unknown): Uint8Array {
  * integers (matching wire u64 fields like sub_id, offset, delivery_tag.epoch).
  */
 export function decodeMsgpack<T>(bytes: Uint8Array): T {
-  return msgpackDecode(bytes, { useBigInt64: true }) as T;
+  return loadMsgpack().decode(bytes, { useBigInt64: true }) as T;
 }
 
 /**
