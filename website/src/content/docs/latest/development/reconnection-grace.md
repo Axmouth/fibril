@@ -350,6 +350,13 @@ For the network-blip implementation, server-issued `client_id` plus resume token
 enough. Later partition-aware clients can keep one resume identity per
 connection or owner.
 
+This is now implemented. Each broker mints an `owner_id` and rejects a resume
+whose `owner_id` does not match, so one owner cannot claim another owner's
+session even if a client presents the wrong identity. The Rust, TypeScript, and
+Python clients store resume identity per connection and key their connection pool
+by endpoint, so each owner connection carries that owner's own identity and a new
+owner connection starts fresh.
+
 ## Logging
 
 Add structured logs for:
