@@ -1784,6 +1784,37 @@ impl ResumeSessionRegistry {
         }
     }
 
+    /// Push a [`GoingAway`] drain notice to every session that currently has a
+    /// live transport attached. Best-effort: dormant sessions (no socket) are
+    /// skipped, and a frame that does not fit the sink buffer is dropped rather
+    /// than blocking the drain. Returns how many notices were sent.
+    async fn broadcast_going_away(&self, grace_ms: u64, message: &str) -> usize {
+        let notice = GoingAway {
+            grace_ms,
+            message: message.to_string(),
+        };
+        let frame = match try_encode(Op::GoingAway, 0, &notice) {
+            Ok(frame) => frame,
+            Err(err) => {
+                tracing::error!("failed to encode going-away notice: {err:?}");
+                return 0;
+            }
+        };
+        // Snapshot the live sinks first so no DashMap guard is held across await.
+        let sinks: Vec<FrameSink> = self
+            .sessions
+            .iter()
+            .filter_map(|entry| entry.value().logical.transport.borrow().clone())
+            .collect();
+        let mut sent = 0;
+        for sink in sinks {
+            if sink.send(frame.clone()).await.is_ok() {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
     fn forget_if_dormant(
         &self,
         client_id: Uuid,
@@ -1858,6 +1889,16 @@ impl ConnectionSettings {
 
     pub fn runtime_snapshot(&self) -> Arc<ConnectionRuntimeSettings> {
         self.runtime.load_full()
+    }
+
+    /// Announce a planned drain to every connected client (see [`GoingAway`]).
+    /// The server calls this at the start of a graceful shutdown so clients
+    /// settle in-flight work and reconnect (redirecting to the current owner)
+    /// rather than discovering the broker gone. Returns how many were notified.
+    pub async fn announce_going_away(&self, grace_ms: u64, message: &str) -> usize {
+        self.resume_sessions
+            .broadcast_going_away(grace_ms, message)
+            .await
     }
 }
 
@@ -3924,3 +3965,31 @@ FFFFFFFFFFF           iiiiiiiibbbbbbbbbbbbbbbb    rrrrrrr           iiiiiiiillll
                                                                                     
 "#,
 ];
+
+#[cfg(test)]
+mod going_away_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn going_away_broadcasts_only_to_attached_transports() {
+        let registry = ResumeSessionRegistry::new();
+
+        // One session with a live transport, one dormant (no socket attached).
+        let live = registry.issue(ResumeOutcome::New);
+        let (tx, mut rx) = mpsc::channel::<Frame>(4);
+        live.logical.attach_transport(tx);
+        let _dormant = registry.issue(ResumeOutcome::New);
+
+        let sent = registry.broadcast_going_away(30_000, "upgrade").await;
+        assert_eq!(
+            sent, 1,
+            "only the session with a live transport is notified"
+        );
+
+        let frame = rx.recv().await.expect("a going-away frame");
+        assert_eq!(frame.opcode, Op::GoingAway as u16);
+        let notice = wire::decode_going_away(&frame).expect("decode going away");
+        assert_eq!(notice.grace_ms, 30_000);
+        assert_eq!(notice.message, "upgrade");
+    }
+}
