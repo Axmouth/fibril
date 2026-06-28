@@ -30,6 +30,10 @@ feature ideas live in their own track, summarized at the end.
 
 ## RESUME HERE (post-compaction 2026-06-29)
 
+DELETE THIS WHOLE SECTION once the NEXT item below is handled - it is a transient
+cursor, not durable backlog. The durable items it references live in their proper
+sections (Performance, Code health, Testing, etc.) and stay there.
+
 Both repos are pushed and in sync with origin/main. The recent arc finished the
 settled-set line (settled RangeSet + is_settled rename + FORMAT_VERSION 4), the
 dead-surface audits (keratin handle wrappers, filter_not_enqueued/count_inflight,
@@ -210,15 +214,6 @@ inventory as it lands (see the docs-currency directive in the Docs section).
 
 ## Performance and scale
 
-- Async fsync for replication (deferred, user-flagged 2026-06-29): the replication
-  append path for committed messages AND events is believed to still fsync
-  synchronously per batch rather than handing the fsync to keratin's fsync worker
-  stage (the way the local ephemeral sync_stream path was reworked). Verify the
-  current behavior in the follower-apply / owner-commit replication path, then
-  move the replication fsync off the hot path (async/worker-staged, responder
-  carried through) so replicated commit/event throughput is not bottlenecked on a
-  synchronous fsync per batch. Mirrors the keratin db92777 ephemeral-flush rework.
-
 - Arc<str> + soft interning for topic/group (#65): ASSESSED 2026-06-28, NOT WORTH
   IT - do not pursue the broad refactor. Findings: the per-message hot path
   already allocates the topic exactly once (publish decodes `reader.str()?
@@ -236,8 +231,14 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   ONLY the cold registry/state storage, never the message path. Verdict: skip.
 
 - Owner-side read and encode fan-out (shared tail, private catch-up) for RF >= 3. [WL]
-- Parallel-fsync, now unblocked since the recovery event-to-message verification
-  landed. [WL]
+- Parallel-fsync / async-fsync for replicated append (the top durable-replication
+  perf lever; user-reconfirmed 2026-06-29). Concrete: keratin's replicated-append
+  path (writer.rs `stage_replicated_req`) does a SYNCHRONOUS inline `log.fsync()`
+  per batch, so on disk the writer blocks on every replicated fsync. Route it
+  through the batcher + async fsync pipeline (`fsync_tx` / `drain_fsync_done`),
+  mirroring the local ephemeral sync_stream rework, so replicated commit/event
+  fsyncs coalesce off the hot path. Full analysis + bench numbers in
+  REPLICATION_WORKLOG.md (search "stage_replicated_req" / "async-fsync"). [WL]
 - Replication-lag backpressure hook in the append path (slow accept when
   followers lag). [PLAN]
 - Replication streamed decode (decode while fetching and applying), separate
