@@ -364,14 +364,6 @@ pub trait StreamStore: Send + Sync {
         max: usize,
     ) -> Result<Vec<(Offset, Vec<u8>, MessageHeaders)>, StromaError>;
 
-    async fn commit_stream_cursor(
-        &self,
-        tp: &str,
-        part: u32,
-        name: &str,
-        offset: Offset,
-    ) -> Result<(), StromaError>;
-
     /// Commit a coalesced batch of cursors in one durable record and one actor
     /// apply (see `Stroma::commit_stream_cursors`). Backs the cursor-commit
     /// microbatcher.
@@ -456,18 +448,6 @@ impl StreamStore for StromaEngine {
         max: usize,
     ) -> Result<Vec<(Offset, Vec<u8>, MessageHeaders)>, StromaError> {
         self.inner.read_stream_records(tp, part, from, max).await
-    }
-
-    async fn commit_stream_cursor(
-        &self,
-        tp: &str,
-        part: u32,
-        name: &str,
-        offset: Offset,
-    ) -> Result<(), StromaError> {
-        self.inner
-            .commit_stream_cursor(tp, part, name, offset)
-            .await
     }
 
     async fn commit_stream_cursors(
@@ -621,15 +601,6 @@ impl StromaEngine {
         Ok(())
     }
 
-    pub async fn become_queue_owner(
-        &self,
-        tp: &str,
-        part: u32,
-        group: Option<&str>,
-    ) -> Result<(), StromaError> {
-        self.inner.become_queue_owner(tp, part, group).await
-    }
-
     pub async fn apply_replicated_queue_batch(
         &self,
         tp: &str,
@@ -738,16 +709,6 @@ impl StromaEngine {
         epoch: u64,
     ) -> Result<u64, StromaError> {
         self.inner.advance_stream_epoch(tp, part, epoch).await
-    }
-
-    /// A stream follower's `(record_next, cursor_event_next)` offsets, so its
-    /// replication worker resumes at the right place.
-    pub async fn stream_replication_next_offsets(
-        &self,
-        tp: &str,
-        part: u32,
-    ) -> Result<(Offset, Offset), StromaError> {
-        self.inner.stream_replication_next_offsets(tp, part).await
     }
 
     pub async fn become_stream_follower_with_epoch(

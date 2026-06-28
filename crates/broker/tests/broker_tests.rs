@@ -95,15 +95,6 @@ impl fibril_broker::queue_engine::StreamStore for FailingPublishEngine {
     ) -> Result<Vec<(Offset, Vec<u8>, MessageHeaders)>, StromaError> {
         Err(StromaError::Unsupported("no streams in test engine".into()))
     }
-    async fn commit_stream_cursor(
-        &self,
-        _tp: &str,
-        _part: u32,
-        _name: &str,
-        _offset: Offset,
-    ) -> Result<(), StromaError> {
-        Err(StromaError::Unsupported("no streams in test engine".into()))
-    }
     async fn commit_stream_cursors(
         &self,
         _tp: &str,
