@@ -2738,7 +2738,7 @@ impl<
     /// is consumed and gone. Live repartitioning compares this to a partition's
     /// cutover boundary to tell when its pre-cutover backlog has drained (the
     /// settled offset has reached the boundary).
-    pub async fn partition_lowest_unacked_offset(
+    pub async fn partition_lowest_unsettled_offset(
         &self,
         topic: &str,
         partition: Partition,
@@ -2746,7 +2746,7 @@ impl<
     ) -> Result<Offset, BrokerError> {
         Ok(self
             .engine
-            .lowest_unacked_offset(topic, partition.id(), group)
+            .lowest_unsettled_offset(topic, partition.id(), group)
             .await?)
     }
 
@@ -2924,7 +2924,7 @@ impl<
                 );
             }
             if let Ok(settled) = self
-                .partition_lowest_unacked_offset(topic, Partition::new(r), group)
+                .partition_lowest_unsettled_offset(topic, Partition::new(r), group)
                 .await
             {
                 if settled >= boundary {

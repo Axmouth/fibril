@@ -374,7 +374,7 @@ impl QueueEngine for FailingPublishEngine {
         Ok(false)
     }
 
-    async fn lowest_unacked_offset(
+    async fn lowest_unsettled_offset(
         &self,
         _tp: &str,
         _part: u32,
@@ -654,7 +654,7 @@ async fn static_ownership_allows_owned_queue() {
 }
 
 #[tokio::test]
-async fn partition_lowest_unacked_offset_reaches_boundary_when_drained() {
+async fn partition_lowest_unsettled_offset_reaches_boundary_when_drained() {
     let mut owned = StdHashSet::new();
     owned.insert(OwnedQueue::new("drain-probe", Partition::new(0), None));
     let (broker, _dir) =
@@ -692,7 +692,7 @@ async fn partition_lowest_unacked_offset_reaches_boundary_when_drained() {
     // Nothing settled yet: the lowest unacked offset is below the boundary.
     assert!(
         broker
-            .partition_lowest_unacked_offset("drain-probe", Partition::new(0), None)
+            .partition_lowest_unsettled_offset("drain-probe", Partition::new(0), None)
             .await
             .unwrap()
             < boundary
@@ -723,7 +723,7 @@ async fn partition_lowest_unacked_offset_reaches_boundary_when_drained() {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     loop {
         let settled = broker
-            .partition_lowest_unacked_offset("drain-probe", Partition::new(0), None)
+            .partition_lowest_unsettled_offset("drain-probe", Partition::new(0), None)
             .await
             .unwrap();
         if settled >= boundary {

@@ -265,7 +265,7 @@ pub trait QueueEngine {
     /// consumed and gone. Used by live repartitioning to tell when a partition
     /// has drained its pre-cutover backlog (settled offset has reached the
     /// cutover boundary).
-    async fn lowest_unacked_offset(
+    async fn lowest_unsettled_offset(
         &self,
         tp: &str,
         part: u32,
@@ -1211,13 +1211,13 @@ impl QueueEngine for StromaEngine {
         self.inner.has_inflight(tp, part, group).await
     }
 
-    async fn lowest_unacked_offset(
+    async fn lowest_unsettled_offset(
         &self,
         tp: &str,
         part: u32,
         group: Option<&str>,
     ) -> Result<Offset, StromaError> {
-        self.inner.lowest_unacked_offset(tp, part, group).await
+        self.inner.lowest_unsettled_offset(tp, part, group).await
     }
 
     async fn current_next_offset(
