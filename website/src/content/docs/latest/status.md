@@ -22,6 +22,7 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Message inspection | Available | Browse active queue messages from admin tooling, with optional settled offsets and payload previews |
 | Partitioned queues | Available | Declared queues can have multiple partitions, with client-side key routing and transparent fan-in |
 | Plexus streams | Available | Fan-out channel type: every subscriber receives every record, durable named cursors, per-stream durability tiers, partitioning with client-side fan-in, and header filters. Rust, TypeScript, and Python clients |
+| Wildcard subscribe | Available | Opt-in `client.routing()` subscribes to every queue or stream whose topic matches a `*`-glob and auto-attaches channels that start matching later, driven by a live cluster catalogue. Client-side only. Rust, TypeScript, and Python clients |
 | Partition ownership | Experimental | Embedded coordination can assign queue ownership, fence stale owners, and redirect clients to the current owner |
 | Replication | Experimental | Follower pull replication, failover promotion, in-sync checks, and replica-durable confirms are wired on this branch |
 | Stream replication | Experimental | Durable-tier streams replicate record and cursor logs to followers with replica-durable confirms and caught-up failover, placed and owned through embedded coordination. Express tiers stay owner-only |

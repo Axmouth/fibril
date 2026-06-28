@@ -58,6 +58,11 @@ const features = [
     notes: "Fan-out channel: every subscriber receives every record, with durable named cursors and durability tiers you opt into.",
   },
   {
+    feature: "Wildcard subscribe",
+    status: { kind: "ready", label: "available" },
+    notes: "Subscribe to every queue or stream matching a wildcard, and auto-attach new ones as they appear. Client-side.",
+  },
+  {
     feature: "Partition ownership",
     status: { kind: "partial", label: "experimental" },
     notes: "Cluster nodes split a queue's active traffic by owning different partitions. Experimental.",

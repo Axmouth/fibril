@@ -118,6 +118,11 @@ inventory as it lands (see the docs-currency directive in the Docs section).
   current owner accepted while it was down. Re-acquisition should catch up from the
   authoritative owner (or epoch-fence the stale tail) before serving. Needs a test
   and likely a become-follower-first-then-promote path on cold re-ownership.
+  This cold-storage decision is the partition-side counterpart of the broader
+  vision (roadmap, longer term): durable broker restart reconciliation that
+  extends the live-process graceful reconnect across a process restart, so a
+  client within its grace window continues transparently and rolling upgrades
+  become trivial.
 
 - Durable stream throughput RESOLVED (was ~847/s). The earlier pipelining was
   correct but the per-channel ingest awaited the staged offset between appends

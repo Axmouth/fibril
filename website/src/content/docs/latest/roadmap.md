@@ -134,10 +134,16 @@ check what is already wired and under what conditions.
 
 - Hardening the experimental replication and clustering path (queues and streams)
   into production guidance and supported defaults.
-- Durable broker restart reconciliation. This would let clients reclaim
-  persisted session and inflight ownership after a broker process restart,
-  using a startup grace window before normal redelivery resumes. Current
-  reconnect grace is live-process only.
+- Durable broker restart reconciliation. This extends the live-process graceful
+  reconnect (see [reconnection grace](/latest/development/reconnection-grace/))
+  across a broker process restart. A client whose connection is still within its
+  grace window would reclaim its persisted session and inflight ownership
+  transparently, using a startup grace window before normal redelivery resumes,
+  so a restart is invisible to in-flight work rather than a disconnect. The same
+  property makes rolling upgrades trivial. Current reconnect grace is live-process
+  only. The partition side already has its counterpart: on cold restart a
+  partition reassigned away while the node was down is retained as inert on-disk
+  cold storage rather than served stale or discarded.
 - More complete client ecosystem. The Python client (async plus a blocking
   facade) has landed. The next targets are C#, Go, and Java.
 
