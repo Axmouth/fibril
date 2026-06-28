@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import Any, Callable, Coroutine, Optional, TypeVar
+from dataclasses import dataclass
+from typing import Any, Callable, Coroutine, Optional, TypeVar, Union
 
 from . import wire
 from .client import (
@@ -24,6 +25,13 @@ from .client import (
 )
 from .message import Publishable
 from .publisher import Delay, Publisher, PublishConfirmation, ReliablePublisher
+from .routing import (
+    PatternSource,
+    PatternSubscribeBuilder,
+    PatternSubscription,
+    RoutingClient,
+    StreamPatternSubscribeBuilder,
+)
 from .subscription import (
     AutoAckedSubscription,
     InflightMessage,
@@ -81,6 +89,10 @@ class BlockingClient:
 
     def stream(self, topic: str) -> "BlockingStreamSubscriptionBuilder":
         return BlockingStreamSubscriptionBuilder(self, self._client.stream(topic))
+
+    def routing(self) -> "BlockingRoutingClient":
+        """Opt in to the routing/discovery surface (synchronous facade)."""
+        return BlockingRoutingClient(self, self._client.routing())
 
     def declare_queue(self, config: QueueConfig) -> None:
         self._run(self._client.declare_queue(config))
@@ -375,3 +387,138 @@ class BlockingInflightMessage:
 
     def retry_after(self, delay: Delay) -> Message:
         return self._owner._run(self._msg.retry_after(delay))
+
+
+@dataclass
+class BlockingPatternMessage:
+    """A pattern delivery in the blocking facade: the message plus its source."""
+
+    source: PatternSource
+    #: A :class:`BlockingInflightMessage` for manual subscriptions, or a plain
+    #: :class:`Message` for auto-ack ones.
+    message: Union["BlockingInflightMessage", Message]
+
+
+class BlockingRoutingClient:
+    """Synchronous routing/discovery facade, mirroring the async
+    :class:`RoutingClient`."""
+
+    def __init__(self, owner: BlockingClient, routing: RoutingClient) -> None:
+        self._owner = owner
+        self._routing = routing
+
+    def publisher(self, topic: str) -> "BlockingPublisher":
+        return self._owner.publisher(topic)
+
+    def subscribe(self, topic: str) -> "BlockingSubscriptionBuilder":
+        return self._owner.subscribe(topic)
+
+    def stream(self, topic: str) -> "BlockingStreamSubscriptionBuilder":
+        return self._owner.stream(topic)
+
+    def subscribe_pattern(self, pattern: str) -> "BlockingPatternSubscribeBuilder":
+        return BlockingPatternSubscribeBuilder(self._owner, self._routing.subscribe_pattern(pattern))
+
+    def subscribe_stream_pattern(self, pattern: str) -> "BlockingStreamPatternSubscribeBuilder":
+        return BlockingStreamPatternSubscribeBuilder(
+            self._owner, self._routing.subscribe_stream_pattern(pattern)
+        )
+
+
+class BlockingPatternSubscribeBuilder:
+    """Synchronous work-queue pattern subscription builder."""
+
+    def __init__(self, owner: BlockingClient, builder: PatternSubscribeBuilder) -> None:
+        self._owner = owner
+        self._builder = builder
+
+    def prefetch(self, prefetch: int) -> "BlockingPatternSubscribeBuilder":
+        self._builder.prefetch(prefetch)
+        return self
+
+    def consumer_group(self, consumer_group: str) -> "BlockingPatternSubscribeBuilder":
+        self._builder.consumer_group(consumer_group)
+        return self
+
+    def sub(self) -> "BlockingPatternSubscription":
+        sub = self._owner._run(self._builder.sub())
+        return BlockingPatternSubscription(self._owner, sub, manual=True)
+
+    def sub_auto_ack(self) -> "BlockingPatternSubscription":
+        sub = self._owner._run(self._builder.sub_auto_ack())
+        return BlockingPatternSubscription(self._owner, sub, manual=False)
+
+
+class BlockingStreamPatternSubscribeBuilder:
+    """Synchronous stream pattern subscription builder."""
+
+    def __init__(self, owner: BlockingClient, builder: StreamPatternSubscribeBuilder) -> None:
+        self._owner = owner
+        self._builder = builder
+
+    def prefetch(self, prefetch: int) -> "BlockingStreamPatternSubscribeBuilder":
+        self._builder.prefetch(prefetch)
+        return self
+
+    def from_latest(self) -> "BlockingStreamPatternSubscribeBuilder":
+        self._builder.from_latest()
+        return self
+
+    def from_earliest(self) -> "BlockingStreamPatternSubscribeBuilder":
+        self._builder.from_earliest()
+        return self
+
+    def from_last(self, count: int) -> "BlockingStreamPatternSubscribeBuilder":
+        self._builder.from_last(count)
+        return self
+
+    def from_time(self, time_ms: int) -> "BlockingStreamPatternSubscribeBuilder":
+        self._builder.from_time(time_ms)
+        return self
+
+    def filter(self, header: str, pattern: str) -> "BlockingStreamPatternSubscribeBuilder":
+        self._builder.filter(header, pattern)
+        return self
+
+    def durable(self, name: str) -> "BlockingStreamPatternSubscribeBuilder":
+        self._builder.durable(name)
+        return self
+
+    def sub(self) -> "BlockingPatternSubscription":
+        sub = self._owner._run(self._builder.sub())
+        return BlockingPatternSubscription(self._owner, sub, manual=True)
+
+    def sub_auto_ack(self) -> "BlockingPatternSubscription":
+        sub = self._owner._run(self._builder.sub_auto_ack())
+        return BlockingPatternSubscription(self._owner, sub, manual=False)
+
+
+class BlockingPatternSubscription:
+    """Synchronous pattern subscription. Iterate with ``for``; each item is a
+    :class:`BlockingPatternMessage`."""
+
+    def __init__(
+        self, owner: BlockingClient, sub: PatternSubscription, manual: bool
+    ) -> None:
+        self._owner = owner
+        self._sub = sub
+        self._manual = manual
+
+    def recv(self) -> Optional[BlockingPatternMessage]:
+        item = self._owner._run(self._sub.recv())
+        if item is None:
+            return None
+        message = BlockingInflightMessage(self._owner, item.message) if self._manual else item.message
+        return BlockingPatternMessage(item.source, message)
+
+    def close(self) -> None:
+        self._owner._run(_call(self._sub.close))
+
+    def __iter__(self) -> "BlockingPatternSubscription":
+        return self
+
+    def __next__(self) -> BlockingPatternMessage:
+        item = self.recv()
+        if item is None:
+            raise StopIteration
+        return item

@@ -153,6 +153,38 @@ async def test_fan_in_over_two_partitions(broker: FakeBroker) -> None:
         await client.shutdown()
 
 
+def _topology_three_queues(broker: FakeBroker) -> wire.TopologyOk:
+    owners = [wire.AdvertisedAddress(broker.host, broker.port)]
+    return wire.TopologyOk(
+        generation=1,
+        queues=[
+            wire.QueueTopologyEntry("events.click", 0, None, owners, 1, 1),
+            wire.QueueTopologyEntry("events.view", 0, None, owners, 1, 1),
+            wire.QueueTopologyEntry("orders.new", 0, None, owners, 1, 1),
+        ],
+    )
+
+
+async def test_pattern_subscription_fans_in_matching_queues(broker: FakeBroker) -> None:
+    broker.topology = _topology_three_queues(broker)
+    broker.deliver_on_subscribe = [b"x"]
+    client = await _connect(broker)
+    try:
+        await client.fetch_topology()
+        sub = await client.routing().subscribe_pattern("events.*").sub()
+        # Both events.* queues deliver; orders.new must not.
+        sources = set()
+        for _ in range(2):
+            item = await asyncio.wait_for(sub.recv(), timeout=1)
+            assert item is not None
+            await item.message.complete()
+            sources.add(item.source.topic)
+        assert sources == {"events.click", "events.view"}
+        sub.close()
+    finally:
+        await client.shutdown()
+
+
 # Mirrors the Rust client's stream_subscribe_sends_durable_filtered_request:
 # the stream builder carries durable name, start, filters, prefetch, ack mode.
 async def test_stream_subscribe_sends_durable_filtered_request(broker: FakeBroker) -> None:

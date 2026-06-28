@@ -536,6 +536,117 @@ test("catalogue change feed reports declared queues and streams", async () => {
   }
 });
 
+test("routing pattern subscription fans in matching queues and auto-attaches new ones", async () => {
+  const broker = new FakeBroker();
+  await broker.start();
+
+  const queueEntry = (topic: string) => ({
+    topic,
+    partition: 0,
+    group: null,
+    owner_endpoints: [],
+    partitioning_version: 1n,
+    partition_count: 1,
+  });
+  const topologyOf = (generation: bigint, topics: string[]): TopologyOkMsg => ({
+    generation,
+    queues: topics.map(queueEntry),
+    streams: [],
+  });
+
+  // The set of queues the broker currently advertises; grows on auto-attach.
+  let topics = ["events.click", "events.view", "orders.new"];
+  let nextSubId = 1n;
+  let socketRef: Socket | null = null;
+
+  try {
+    broker.onFrame = (f, s) => {
+      socketRef = s;
+      if (f.opcode === Op.Hello) {
+        broker.send(s, buildFrame(Op.HelloOk, f.requestId, helloOk()));
+      } else if (f.opcode === Op.Topology) {
+        broker.send(s, buildFrame(Op.TopologyOk, f.requestId, topologyOf(1n, topics)));
+      } else if (f.opcode === Op.Subscribe) {
+        const sub = decodeFrameBody<SubscribeMsg>(f);
+        const subId = nextSubId++;
+        broker.send(
+          s,
+          buildFrame(Op.SubscribeOk, f.requestId, {
+            sub_id: subId,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            prefetch: sub.prefetch,
+          }),
+        );
+        broker.send(
+          s,
+          buildFrame(Op.Deliver, 0n, {
+            sub_id: subId,
+            topic: sub.topic,
+            group: sub.group,
+            partition: 0,
+            offset: 0n,
+            delivery_tag: { epoch: 0n },
+            published: 0n,
+            publish_received: 0n,
+            content_type: null,
+            headers: {},
+            payload: new Uint8Array([0]),
+          }),
+        );
+      }
+    };
+
+    const client = await Client.connect(`127.0.0.1:${broker.port}`, new ClientOptions());
+    // Warm the catalogue so the pattern resolves its current matches.
+    await client.fetchTopology();
+
+    const sub = await client.routing().subscribePattern("events.*").sub();
+
+    const collectSources = async (count: number): Promise<Set<string>> => {
+      const seen = new Set<string>();
+      while (seen.size < count) {
+        const item = await Promise.race([
+          sub.recv(),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+        ]);
+        if (item === null) break;
+        await item.message.complete();
+        seen.add(item.source.topic);
+      }
+      return seen;
+    };
+
+    // Static fan-in: both events.* queues deliver, orders.new does not.
+    const initial = await collectSources(2);
+    assert.deepEqual(initial, new Set(["events.click", "events.view"]));
+
+    // Auto-attach: declare a new matching queue and push a topology update. The
+    // watcher reacts to the catalogue change and attaches it.
+    topics = ["events.click", "events.view", "events.signup", "orders.new"];
+    assert.ok(socketRef);
+    broker.send(socketRef, buildFrame(Op.TopologyUpdate, 0n, topologyOf(2n, topics)));
+
+    let sawSignup = false;
+    for (let i = 0; i < 10 && !sawSignup; i++) {
+      const item = await Promise.race([
+        sub.recv(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 5_000)),
+      ]);
+      if (item === null) break;
+      await item.message.complete();
+      if (item.source.topic === "events.signup") sawSignup = true;
+    }
+    assert.ok(sawSignup, "a newly declared matching queue should auto-attach");
+
+    sub.close();
+    await client.shutdown();
+  } finally {
+    await broker.stop();
+  }
+});
+
 test("shutdown client does not auto reconnect", async () => {
   const broker = new FakeBroker();
   await broker.start();
