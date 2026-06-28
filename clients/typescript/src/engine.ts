@@ -209,6 +209,7 @@ export class Engine {
     subscriptionRegistry: SubscriptionRegistry = new Map(),
     onAssignmentChanged?: (msg: AssignmentChangedMsg) => void,
     onTopologyUpdate?: (topology: TopologyOkMsg) => bigint,
+    onGoingAway?: (notice: GoingAwayMsg) => void,
   ): Promise<Engine> {
     const reader = new FrameReader(socket);
     const iter = reader[Symbol.asyncIterator]();
@@ -316,6 +317,7 @@ export class Engine {
       shutdownMode,
       onAssignmentChanged,
       onTopologyUpdate,
+      onGoingAway,
     });
 
     return new Engine(commandQueue, socket, completed, shutdownMode, resumeIdentity, hello.resume_outcome);
@@ -397,6 +399,7 @@ interface EngineLoopArgs {
   shutdownMode: ShutdownMode;
   onAssignmentChanged?: (msg: AssignmentChangedMsg) => void;
   onTopologyUpdate?: (topology: TopologyOkMsg) => bigint;
+  onGoingAway?: (notice: GoingAwayMsg) => void;
 }
 
 async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
@@ -410,6 +413,7 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
     shutdownMode,
     onAssignmentChanged,
     onTopologyUpdate,
+    onGoingAway,
   } = args;
 
   const subs = new Map<bigint, SubState>(initialSubscriptions);
@@ -876,12 +880,17 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
       }
 
       case Op.GoingAway: {
-        // The broker is draining for a planned shutdown or upgrade. Decode to
-        // validate the frame; when the socket then closes, the existing
-        // reconnect path redirects to the post-drain owner. A proactive
-        // reaction (settle in-flight, reconnect early) and surfacing this to
-        // the app are a later cross-client brick.
-        decodeFrameBody<GoingAwayMsg>(frame);
+        // The broker is draining for a planned shutdown or upgrade. Surface it
+        // to the app so it can wind down; when the socket then closes, the
+        // existing reconnect path redirects to the post-drain owner.
+        const notice = decodeFrameBody<GoingAwayMsg>(frame);
+        if (onGoingAway) {
+          try {
+            onGoingAway(notice);
+          } catch {
+            // A listener throwing must not break frame processing.
+          }
+        }
         return;
       }
 

@@ -324,3 +324,27 @@ async def test_on_catalogue_change_fires(broker: FakeBroker) -> None:
         assert client.catalogue() == seen[0]
     finally:
         await client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_on_going_away_fires(broker: FakeBroker) -> None:
+    from fibril.codec import build_frame
+    from fibril.frames import encode_body
+    from fibril.protocol import Op
+
+    client = await _connect(broker)
+    try:
+        seen: list = []
+        client.on_going_away(seen.append)
+        notice = wire.GoingAway(grace_ms=30000, message="broker restarting for upgrade")
+        await broker.push(build_frame(Op.GOING_AWAY, 0, encode_body(Op.GOING_AWAY, notice)))
+        # Give the reader loop a tick to dispatch the pushed frame.
+        for _ in range(50):
+            if seen:
+                break
+            await asyncio.sleep(0.01)
+        assert len(seen) == 1
+        assert seen[0].grace_ms == 30000
+        assert seen[0].message == "broker restarting for upgrade"
+    finally:
+        await client.shutdown()

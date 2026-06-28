@@ -23,6 +23,7 @@ import type {
   AssignmentChangedMsg,
   AuthMsg,
   DeclareQueueMsg,
+  GoingAwayMsg,
   QueueDlqPolicy,
   ReconcilePolicy,
   RedirectMsg,
@@ -521,6 +522,7 @@ class PooledConnection {
     private readonly opts: ClientOptions,
     private readonly onAssignmentChanged?: (event: AssignmentChangedMsg) => void,
     private readonly onTopologyUpdate?: (topology: TopologyOkMsg) => bigint,
+    private readonly onGoingAway?: (notice: GoingAwayMsg) => void,
   ) {}
 
   async engineForOperation(): Promise<Engine> {
@@ -535,6 +537,7 @@ class PooledConnection {
           new Map(),
           this.onAssignmentChanged,
           this.onTopologyUpdate,
+          this.onGoingAway,
         );
         this.#engine = engine;
         return engine;
@@ -745,12 +748,26 @@ export class Client {
   // every engine (bootstrap, reconnect, pool) so the stream survives reconnects
   // and owner moves. Lossy broadcast, like the Rust client.
   readonly #assignmentListeners: Set<(event: AssignmentChangedMsg) => void>;
+  // Client-level fan-out of broker drain notices, shared across every engine so
+  // the stream survives reconnects. Lossy, like the assignment stream.
+  readonly #goingAwayListeners: Set<(notice: GoingAwayMsg) => void>;
 
   // Bound so it can be handed to every Engine.start as the assignment callback.
   readonly #emitAssignment = (event: AssignmentChangedMsg): void => {
     for (const listener of [...this.#assignmentListeners]) {
       try {
         listener(event);
+      } catch {
+        // A listener throwing must not break frame processing.
+      }
+    }
+  };
+
+  // Bound so it can be handed to every Engine.start as the drain callback.
+  readonly #emitGoingAway = (notice: GoingAwayMsg): void => {
+    for (const listener of [...this.#goingAwayListeners]) {
+      try {
+        listener(notice);
       } catch {
         // A listener throwing must not break frame processing.
       }
@@ -768,6 +785,7 @@ export class Client {
     engine: Engine,
     subscriptions: SubscriptionRegistry,
     assignmentListeners: Set<(event: AssignmentChangedMsg) => void>,
+    goingAwayListeners: Set<(notice: GoingAwayMsg) => void>,
     topology: TopologyCache,
     pool: Map<string, PooledConnection>,
     catalogue: CatalogueState,
@@ -777,6 +795,7 @@ export class Client {
     this.#engine = new EngineSlot(engine);
     this.#subscriptions = subscriptions;
     this.#assignmentListeners = assignmentListeners;
+    this.#goingAwayListeners = goingAwayListeners;
     this.#topology = topology;
     this.#pool = pool;
     this.#catalogue = catalogue;
@@ -821,6 +840,19 @@ export class Client {
   }
 
   /**
+   * Observe broker drain notices ({@link GoingAwayMsg}). The handler fires when
+   * the broker announces it is draining for a planned shutdown or upgrade, so the
+   * app can stop producing or finish in-flight work before the connection drops.
+   * Returns an unsubscribe function. The stream survives reconnects.
+   */
+  onGoingAway(handler: (notice: GoingAwayMsg) => void): () => void {
+    this.#goingAwayListeners.add(handler);
+    return () => {
+      this.#goingAwayListeners.delete(handler);
+    };
+  }
+
+  /**
    * Connect to a broker.
    *
    * The address can be `"host:port"`, `"[ipv6]:port"`, or an object with
@@ -840,6 +872,16 @@ export class Client {
       for (const listener of [...assignmentListeners]) {
         try {
           listener(event);
+        } catch {
+          // ignore listener errors
+        }
+      }
+    };
+    const goingAwayListeners = new Set<(notice: GoingAwayMsg) => void>();
+    const emitGoingAway = (notice: GoingAwayMsg): void => {
+      for (const listener of [...goingAwayListeners]) {
+        try {
+          listener(notice);
         } catch {
           // ignore listener errors
         }
@@ -867,6 +909,7 @@ export class Client {
         subscriptions,
         emitAssignment,
         onTopologyUpdate,
+        emitGoingAway,
       );
     } catch (err) {
       socket.destroy();
@@ -881,6 +924,7 @@ export class Client {
       engine,
       subscriptions,
       assignmentListeners,
+      goingAwayListeners,
       topology,
       pool,
       catalogueState,
@@ -912,6 +956,7 @@ export class Client {
         this.#subscriptions,
         this.#emitAssignment,
         this.#onTopologyUpdate,
+        this.#emitGoingAway,
       );
     } catch (err) {
       socket.destroy();
@@ -1101,6 +1146,7 @@ export class Client {
         this.#opts,
         this.#emitAssignment,
         this.#onTopologyUpdate,
+        this.#emitGoingAway,
       );
       this.#pool.set(owner.endpoint, conn);
     }

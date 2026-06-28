@@ -70,6 +70,11 @@ class FakeBroker:
         writer.write(encode_frame(frame))
         await writer.drain()
 
+    async def push(self, frame: Frame) -> None:
+        """Push an unsolicited frame to every connected client (server push)."""
+        for w in self._writers:
+            await self._send(w, frame)
+
     async def _handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:

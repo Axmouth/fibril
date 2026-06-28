@@ -102,6 +102,20 @@ pub struct AssignmentEvent {
     pub revoked: Vec<Partition>,
 }
 
+/// A push from the broker telling this client it is draining for a planned
+/// shutdown or upgrade (see [`Client::going_away_events`]). Purely informational:
+/// the app can stop producing, finish in-flight work, or alert. When the socket
+/// then closes, the client reconnects (redirecting to the post-drain owner)
+/// through its normal path regardless of whether the app reacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoingAwayNotice {
+    /// How long the broker will hold sessions before it stops serving, so the app
+    /// knows its window to wind down.
+    pub grace_ms: u64,
+    /// Human-readable reason (shutdown, upgrade).
+    pub message: String,
+}
+
 /// A declared queue as seen in the cluster [`Catalogue`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueInfo {
@@ -2062,6 +2076,7 @@ impl Client {
             cohort_member_id,
             catalogue: ArcSwap::from_pointee(Catalogue::default()),
             catalogue_tx: broadcast::channel(CATALOGUE_EVENT_CAPACITY).0,
+            going_away_tx: broadcast::channel(GOING_AWAY_EVENT_CAPACITY).0,
             me: std::sync::OnceLock::new(),
         });
         let _ = shared.me.set(Arc::downgrade(&shared));
@@ -2276,6 +2291,14 @@ impl Client {
     /// Returns a fresh receiver each call.
     pub fn catalogue_events(&self) -> broadcast::Receiver<Catalogue> {
         self.shared.catalogue_tx.subscribe()
+    }
+
+    /// Subscribe to broker drain notices ([`GoingAwayNotice`]). The broker emits
+    /// one when it is draining for a planned shutdown or upgrade, so the app can
+    /// stop producing or finish in-flight work before the connection drops. Lossy
+    /// broadcast - returns a fresh receiver each call.
+    pub fn going_away_events(&self) -> broadcast::Receiver<GoingAwayNotice> {
+        self.shared.going_away_tx.subscribe()
     }
 
     /// Gracefully shut down the client.
@@ -2881,6 +2904,9 @@ struct ClientShared {
     /// Fan-out of catalogue changes to app subscribers. Lossy broadcast (a slow
     /// consumer may miss intermediate snapshots, never the latest on resubscribe).
     catalogue_tx: broadcast::Sender<Catalogue>,
+    /// Fan-out of broker drain notices to app subscribers. Lossy broadcast,
+    /// shared across reconnects like the other event streams.
+    going_away_tx: broadcast::Sender<GoingAwayNotice>,
     /// Weak self-reference, set once right after construction. Connection reader
     /// loops hold a clone so a broker-pushed `TopologyUpdate` can be applied back
     /// into this routing cache (and the pool pruned) without a strong cycle.
@@ -2895,6 +2921,10 @@ const ASSIGNMENT_EVENT_CAPACITY: usize = 256;
 /// receiver. Catalogue changes are infrequent, and only the latest matters, so a
 /// small buffer is plenty.
 const CATALOGUE_EVENT_CAPACITY: usize = 16;
+
+/// Buffer of drain notices retained per [`Client::going_away_events`] receiver.
+/// Drain is rare and only the latest matters, so a small buffer is plenty.
+const GOING_AWAY_EVENT_CAPACITY: usize = 16;
 
 /// Wire cohort id sent for [`SubscriptionBuilder::exclusive`]. A queue has a
 /// single exclusive cohort, so the id is a fixed constant — membership is keyed
@@ -4399,11 +4429,9 @@ where
                         }
                         x if x == Op::GoingAway as u16 => {
                             // The broker is draining for a planned shutdown or
-                            // upgrade. Recognize and log the notice; when the
-                            // socket then closes, the existing reconnect path
-                            // redirects to the post-drain owner via topology. A
-                            // proactive reaction (settle in-flight, reconnect
-                            // before the drop) is a later brick.
+                            // upgrade. Surface it to the app so it can wind down,
+                            // then let the existing reconnect-on-close path
+                            // redirect to the post-drain owner via topology.
                             let notice: GoingAway = match decode_protocol(&frame) {
                                 Ok(notice) => notice,
                                 Err(err) => {
@@ -4416,6 +4444,15 @@ where
                                 "broker going away: {}",
                                 notice.message
                             );
+                            // The shared client outlives its connections; a
+                            // dropped upgrade means the client is shutting down,
+                            // so there is nothing to notify.
+                            if let Some(shared) = topology_sink.upgrade() {
+                                let _ = shared.going_away_tx.send(GoingAwayNotice {
+                                    grace_ms: notice.grace_ms,
+                                    message: notice.message,
+                                });
+                            }
                         }
                         x if x == Op::Error as u16 => {
                             let err: ErrorMsg = match decode_protocol(&frame) {
@@ -5211,6 +5248,7 @@ mod tests {
             cohort_member_id,
             catalogue: ArcSwap::from_pointee(Catalogue::default()),
             catalogue_tx: broadcast::channel(CATALOGUE_EVENT_CAPACITY).0,
+            going_away_tx: broadcast::channel(GOING_AWAY_EVENT_CAPACITY).0,
             me: std::sync::OnceLock::new(),
         });
         let _ = shared.me.set(Arc::downgrade(&shared));
@@ -6035,6 +6073,74 @@ mod tests {
         assert_eq!(event.assigned, vec![Partition::new(0), Partition::new(2)]);
         assert_eq!(event.added, vec![Partition::new(2)]);
         assert_eq!(event.revoked, vec![Partition::new(1)]);
+
+        client.shutdown().await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn going_away_push_reaches_going_away_events() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (go_tx, go_rx) = oneshot::channel::<()>();
+
+        let server = tokio::spawn(async move {
+            let (conn, _) = listener.accept().await.unwrap();
+            let mut conn = Framed::new(conn, ProtoCodec);
+            let hello = conn.next().await.unwrap().unwrap();
+            assert_eq!(hello.opcode, Op::Hello as u16);
+            conn.send(
+                try_encode(
+                    Op::HelloOk,
+                    hello.request_id,
+                    &HelloOk {
+                        protocol_version: PROTOCOL_V1,
+                        owner_id: uuid::Uuid::new_v4(),
+                        client_id: uuid::Uuid::new_v4(),
+                        resume_token: uuid::Uuid::new_v4(),
+                        resume_outcome: ResumeOutcome::New,
+                        server_name: "fake".into(),
+                        compliance: COMPLIANCE_STRING.into(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+            // Send the push only once the test is listening (broadcast delivers
+            // only to receivers that exist at send time).
+            go_rx.await.unwrap();
+            conn.send(
+                try_encode(
+                    Op::GoingAway,
+                    0,
+                    &GoingAway {
+                        grace_ms: 30_000,
+                        message: "broker restarting for upgrade".into(),
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+
+        let client = ClientOptions::new()
+            .disable_topology_warm()
+            .connect(addr)
+            .await
+            .unwrap();
+        let mut events = client.going_away_events();
+        go_tx.send(()).unwrap();
+
+        let notice = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(notice.grace_ms, 30_000);
+        assert_eq!(notice.message, "broker restarting for upgrade");
 
         client.shutdown().await;
         server.abort();

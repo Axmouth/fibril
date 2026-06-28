@@ -128,6 +128,7 @@ class Engine:
         restored: dict[int, _SubState],
         on_assignment_changed: Optional[object] = None,
         on_topology_update: Optional[object] = None,
+        on_going_away: Optional[object] = None,
     ) -> None:
         self._reader = reader
         self._writer = writer
@@ -137,6 +138,7 @@ class Engine:
         self.resume_outcome = resume_outcome
         self._on_assignment_changed = on_assignment_changed
         self._on_topology_update = on_topology_update
+        self._on_going_away = on_going_away
 
         self._subs: dict[int, _SubState] = dict(restored)
         self._waiters: dict[int, _Waiter] = {}
@@ -161,6 +163,7 @@ class Engine:
         registry: Optional[SubscriptionRegistry] = None,
         on_assignment_changed: Optional[object] = None,
         on_topology_update: Optional[object] = None,
+        on_going_away: Optional[object] = None,
     ) -> "Engine":
         registry = registry if registry is not None else {}
 
@@ -245,6 +248,7 @@ class Engine:
             restored,
             on_assignment_changed,
             on_topology_update,
+            on_going_away,
         )
 
     def shutdown(self) -> None:
@@ -507,12 +511,12 @@ class Engine:
             return
 
         if op == Op.GOING_AWAY:
-            # The broker is draining for a planned shutdown or upgrade. Decode to
-            # validate the frame; when the socket then closes, the existing
-            # reconnect path redirects to the post-drain owner. A proactive
-            # reaction (settle in-flight, reconnect early) and surfacing this to
-            # the app are a later cross-client brick.
-            decode_body(Op.GOING_AWAY, frame.payload)
+            # The broker is draining for a planned shutdown or upgrade. Surface it
+            # to the app so it can wind down; when the socket then closes, the
+            # existing reconnect path redirects to the post-drain owner.
+            notice = decode_body(Op.GOING_AWAY, frame.payload)
+            if self._on_going_away is not None:
+                self._on_going_away(notice)  # type: ignore[operator]
             return
 
         if op == Op.PING:

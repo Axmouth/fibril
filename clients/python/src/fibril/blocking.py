@@ -43,6 +43,7 @@ from .subscription import (
 
 _T = TypeVar("_T")
 AssignmentHandler = Callable[[wire.AssignmentChanged], None]
+GoingAwayHandler = Callable[[wire.GoingAway], None]
 
 
 def _start_loop() -> tuple[asyncio.AbstractEventLoop, threading.Thread]:
@@ -110,6 +111,9 @@ class BlockingClient:
 
     def on_assignment_change(self, handler: AssignmentHandler) -> Callable[[], None]:
         return self._client.on_assignment_change(handler)
+
+    def on_going_away(self, handler: GoingAwayHandler) -> Callable[[], None]:
+        return self._client.on_going_away(handler)
 
     def shutdown(self) -> None:
         try:

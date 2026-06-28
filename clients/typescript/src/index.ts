@@ -61,4 +61,5 @@ export {
   type ReconcilePolicy,
   type ResumeOutcome,
   type AssignmentChangedMsg,
+  type GoingAwayMsg,
 } from "./protocol.js";

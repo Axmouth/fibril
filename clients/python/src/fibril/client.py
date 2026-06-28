@@ -23,6 +23,7 @@ from .internal.topology import Route, RoundRobin, TopologyCache, route_partition
 
 Address = Union[str, tuple[str, int]]
 AssignmentHandler = Callable[[wire.AssignmentChanged], None]
+GoingAwayHandler = Callable[[wire.GoingAway], None]
 
 DEFAULT_CLIENT_NAME = "Fibril Python Client"
 DEFAULT_CLIENT_VERSION = "0.1.0"
@@ -247,12 +248,14 @@ class _PooledConnection:
         opts: ClientOptions,
         on_assignment: Optional[AssignmentHandler],
         on_topology_update: Optional[object] = None,
+        on_going_away: Optional[object] = None,
     ) -> None:
         self._host = host
         self._port = port
         self._opts = opts
         self._on_assignment = on_assignment
         self._on_topology_update = on_topology_update
+        self._on_going_away = on_going_away
         self._engine: Optional[Engine] = None
         self._lock = asyncio.Lock()
 
@@ -271,6 +274,7 @@ class _PooledConnection:
                     {},
                     self._on_assignment,
                     self._on_topology_update,
+                    self._on_going_away,
                 )
             except BaseException:
                 writer.close()
@@ -405,6 +409,7 @@ class Client:
         engine: Engine,
         registry: SubscriptionRegistry,
         assignment_listeners: set[AssignmentHandler],
+        going_away_listeners: set[GoingAwayHandler],
         topology: TopologyCache,
         pool: dict[str, "_PooledConnection"],
         catalogue: _CatalogueState,
@@ -414,6 +419,7 @@ class Client:
         self._engine = engine
         self._registry = registry
         self._assignment_listeners = assignment_listeners
+        self._going_away_listeners = going_away_listeners
         self._bootstrap_endpoint = _endpoint_key(*address)
         # Created in connect() before the bootstrap engine starts and shared here,
         # so a topology push the broker sends right after HELLO has somewhere to
@@ -436,11 +442,19 @@ class Client:
         addr = parse_address(address)
         registry: SubscriptionRegistry = {}
         listeners: set[AssignmentHandler] = set()
+        going_away_listeners: set[GoingAwayHandler] = set()
 
         def emit(event: wire.AssignmentChanged) -> None:
             for listener in list(listeners):
                 try:
                     listener(event)
+                except Exception:
+                    pass
+
+        def emit_going_away(notice: wire.GoingAway) -> None:
+            for listener in list(going_away_listeners):
+                try:
+                    listener(notice)
                 except Exception:
                     pass
 
@@ -459,12 +473,28 @@ class Client:
         reader, writer = await _open_connection(*addr)
         try:
             engine = await Engine.start(
-                reader, writer, opts.engine_options(), registry, emit, on_topology_update
+                reader,
+                writer,
+                opts.engine_options(),
+                registry,
+                emit,
+                on_topology_update,
+                emit_going_away,
             )
         except BaseException:
             writer.close()
             raise
-        client = cls(addr, opts, engine, registry, listeners, topology, pool, catalogue)
+        client = cls(
+            addr,
+            opts,
+            engine,
+            registry,
+            listeners,
+            going_away_listeners,
+            topology,
+            pool,
+            catalogue,
+        )
         return client
 
     def _emit_assignment(self, event: wire.AssignmentChanged) -> None:
@@ -480,6 +510,25 @@ class Client:
 
         def unsubscribe() -> None:
             self._assignment_listeners.discard(handler)
+
+        return unsubscribe
+
+    def _emit_going_away(self, notice: wire.GoingAway) -> None:
+        for listener in list(self._going_away_listeners):
+            try:
+                listener(notice)
+            except Exception:
+                pass
+
+    def on_going_away(self, handler: GoingAwayHandler) -> Callable[[], None]:
+        """Observe broker drain notices. The handler fires when the broker
+        announces it is draining for a planned shutdown or upgrade, so the app can
+        stop producing or finish in-flight work before the connection drops.
+        Returns an unsubscribe. The stream survives reconnects."""
+        self._going_away_listeners.add(handler)
+
+        def unsubscribe() -> None:
+            self._going_away_listeners.discard(handler)
 
         return unsubscribe
 
@@ -517,6 +566,7 @@ class Client:
                 self._registry,
                 self._emit_assignment,
                 self._on_topology_update,
+                self._emit_going_away,
             )
         except BaseException:
             writer.close()
@@ -687,7 +737,12 @@ class Client:
         if conn is None:
             host, port = parse_address(owner.endpoint)
             conn = _PooledConnection(
-                host, port, self._opts, self._emit_assignment, self._on_topology_update
+                host,
+                port,
+                self._opts,
+                self._emit_assignment,
+                self._on_topology_update,
+                self._emit_going_away,
             )
             self._pool[owner.endpoint] = conn
         return await conn.engine_for_operation()
