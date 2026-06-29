@@ -35,12 +35,10 @@ use fibril_broker::{
 };
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_storage::{Group, Partition, Topic};
+use fibril_util::net::{TcpListener, TcpStream};
 use fibril_util::{AuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
-use tokio::{
-    net::TcpListener,
-    sync::{Mutex, mpsc, oneshot, watch},
-};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
@@ -2026,7 +2024,7 @@ pub enum LoopEvent {
 }
 
 pub async fn handle_connection(
-    socket: tokio::net::TcpStream,
+    socket: TcpStream,
     broker: Arc<Broker<StromaEngine>>,
     tcp_stats: Arc<TcpStats>,
     connection_stats: Arc<ConnectionStats>,
