@@ -80,10 +80,22 @@ either the worker errors, drops the conn, and redials. The durable scenario now
 asserts recovery-after-heal too. (Both are named const defaults with builder
 overrides; full config-crate/runtime-settings wiring is a minor follow-up.)
 
-NEXT for #97: remaining scenarios - follower catch-up + checkpoint install (needs
-the owner to REALLY snapshot+truncate so the follower installs a checkpoint, not a
-mock - non-trivial), repartition cutover under delayed acks. With the harness
-proven across election, replication, failover,
+SCENARIO SET COMPLETE (11 green, deterministic): the 8 above plus
+follower_installs_checkpoint_after_owner_truncates (owner truncates past the
+follower start via the new StromaEngine::truncate_messages_before, follower
+installs the owner checkpoint to reach the tail) and
+repartition_cutover_waits_for_delayed_topology_ack (real client acks over the sim
+net; turmoil hold/release delays the topology exchange so the adoption fence holds
+below the new generation, then finalizes on release - note: use hold/release, NOT
+partition_oneway, for delaying a live TCP stream, since one-way drop desyncs the
+byte stream with no retransmit). #97 can be considered functionally done as an
+evaluation+harness; madsim remains the documented later escalation only if
+scheduling-order determinism is ever needed.
+
+NEXT (post-#97): wire the replication read/connect timeout slack into the config
+crate / runtime settings (currently named-const defaults with builder overrides),
+and feed the harness into the chaos/soak gate (#115) and cluster-confidence gate
+(#124). With the harness proven across election, replication, failover,
 split-brain, and lossy networks, the cluster-confidence gate (#124) has a real
 deterministic base to build on.
 

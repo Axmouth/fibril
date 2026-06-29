@@ -149,10 +149,14 @@ determinism catches - and only after weighing it against the openraft dep graph.
    a connect SYN left the worker on a dead connection until the transport itself
    broke. Both the read and connection setup are now deadline-bounded, so the
    worker drops the dead connection and redials - and the scenario asserts that
-   recovery. Still to add: follower catch-up +
-   checkpoint install (needs the owner to really snapshot and truncate, not a
-   mock), repartition cutover under delayed acks, coordination
-   under message loss.
+   recovery. A checkpoint-install scenario covers the snapshot-transfer path: the
+   owner truncates past a fresh follower's start offset, so the follower must
+   install the owner's state checkpoint (not tail-replay) to reach the tail. And a
+   repartition-cutover scenario covers the topology-adoption fence: a real client
+   acks over the simulated network, the link is held so the topology exchange is
+   delayed, the cutover fence holds (the adoption minimum stays below the new
+   generation), and on release the exchange completes and the cutover finalizes.
+   The full initial scenario set is in place.
 
 ## Relationship to other testing
 
