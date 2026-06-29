@@ -18,6 +18,12 @@ frozen and can change between minor releases. Versions move one minor at a time,
 with no vanity jumps: the number tracks the stability promise, not perceived
 completeness. Per-feature maturity lives in [project status](/latest/status/).
 
+These docs live under `/latest/` and track main. When a version is cut, the docs
+that describe exactly what that release shipped - the
+[implemented surface](/latest/implemented-surface/) inventory and
+[project status](/latest/status/) - are snapshotted under a versioned path so an
+adopter on a release sees an accurate surface while `/latest` moves ahead.
+
 1.0 is not a quality badge, it is a commitment: a stable API and wire protocol
 plus confidence in the durability and replication semantics. It ships only when
 all four of these hold.

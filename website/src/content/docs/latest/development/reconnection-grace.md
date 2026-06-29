@@ -233,6 +233,22 @@ is clearer feedback when a stream cannot be kept, and a possible automatic
 resubscribe path for safe cases where the broker says to recreate the
 subscription.
 
+Design decision (2026-06-29): both of those are facets of one model - a typed
+subscription lifecycle whose termination reason travels WITH the stream, not on a
+side channel. When a subscription ends, the receive surface itself yields the
+reason (unsubscribed, client shutdown, reconciled-closed, recreated, disconnected,
+broker error). A reason is intrinsically about that one subscription and the app
+learns the stream ended at the receive point, so an out-of-band broadcast would
+force the app to correlate `(topic, group, partition)` racily - the wrong shape.
+The high-level client auto-handles the recoverable cases (auto-reconnect,
+auto-resubscribe on recreate), so a typed termination is the escape hatch for the
+cases it cannot recover. This changes the receive surface, so it is designed once
+as part of the client API freeze rather than bolted on early: the reconcile
+close-reason and the auto-resubscribe path are variants of this single lifecycle.
+A separate ops firehose of reconcile decisions (metrics/observability) is a
+distinct concern and, if added, stays a broadcast - it is not this control-flow
+surface.
+
 Inflight delivery reconciliation is also not done yet. A future version may need
 additional frames or fields for:
 
