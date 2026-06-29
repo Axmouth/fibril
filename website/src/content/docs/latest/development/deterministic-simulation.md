@@ -132,9 +132,14 @@ determinism catches - and only after weighing it against the openraft dep graph.
    shares a single current-thread runtime across its broker and raft node, so a
    busy broker starves raft heartbeats and replication serving - the scenario
    keeps the old owner idle through catch-up and the partition for that reason,
-   and raft uses widened election timeouts. Still to add: follower catch-up +
-   checkpoint install, ISR-floor refusal under partition, repartition cutover
-   under delayed acks, coordination
+   and raft uses widened election timeouts. Two resilience scenarios are also in:
+   a follower catches up over a link that drops, repairs, and delays messages
+   throughout (the flapping-follower path), and a 3-node raft cluster elects a
+   leader and commits a replicated write under message loss, latency, and link
+   flapping (kept under the raft timers, with the current leader retrying the
+   write across the re-elections the loss induces). Both are deterministic via a
+   fixed RNG seed. Still to add: follower catch-up + checkpoint install, ISR-floor
+   refusal under partition, repartition cutover under delayed acks, coordination
    under message loss.
 
 ## Relationship to other testing
