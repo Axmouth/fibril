@@ -10,46 +10,39 @@ Source tags: `[WL]` worklog, `[PLAN]` replication planning, `[DN]` design notes,
 `[MEM]` memory, `[RACE]` race-windows, `[AUDIT]` audit board, `[AUTHOR]` author note.
 Tiers are grouped by concern, not strictly ordered.
 
-## RESUME HERE (post-compaction 2026-06-29, session 2)
+## #97 deterministic simulation - status
 
-DELETE THIS SECTION once the NEXT item is underway. Transient cursor; durable
-detail lives in the task tracker (#97-#133) and the dev notes.
+Standing rules (carry across sessions): commit per-brick to main, DO NOT PUSH
+(user pushes fibril + keratin/ganglion); terse non-conversational commits, no
+Co-Authored-By; prose directive (no semicolons in comments/docs, plain ASCII); no
+unwrap/expect outside tests; keep FOLLOWUPS + docs + surface inventory current per
+change; cross-repo changes via the ../ganglion + ../keratin sibling checkouts with
+local patch (authorized) to avoid pushing for every iteration.
 
-Both repos were in sync with origin/main at the start of this session; fibril is
-now MANY commits ahead and UNPUSHED (user pushes both repos). No keratin/ganglion
-changes were made this session (all fibril). Standing rules: commit per-brick to
-main, do not push; terse non-conversational commits, no Co-Authored-By; prose
-directive (no semicolons in comments/docs, plain ASCII); no unwrap/expect outside
-tests; keep FOLLOWUPS + docs + surface inventory current per change.
+DONE: net seam (`fibril_util::net`, tokio normally / turmoil under `simulation`),
+protocol + client crates converted and building both modes. Multi-broker turmoil
+harness in `crates/protocol/tests/simulation_tests.rs` (compiled only under
+`--features simulation`), with three deterministic tests: (1) broker runs inside a
+turmoil host (no-net smoke - construction, keratin disk I/O, publish-confirm on the
+simulated clock); (2) a follower catches up to the owner over the simulated
+network via its supervised watcher; (3) owner partitioned away -> follower promotes
+under a fenced epoch bump and serves a fresh publish, with the promoted log = the
+replicated tails + 1 (no loss). Key constraint learned + documented: turmoil gives
+each host its OWN current-thread runtime + LocalSet, so a broker must be built
+INSIDE its host closure and can only be driven from there - cross-host
+orchestration goes via the simulated network or shared atomics (the failover test
+steps the sim and injects the partition from the main thread once a shared
+caught-up flag is set). Run: `cargo test -p fibril-protocol --features simulation
+--test simulation_tests`. Dev note "Deterministic simulation testing" stages 3-4
+marked done.
 
-DONE this session: #106 drain (admin trigger + GoingAway broadcast + 3-client
-recognize), #130 drain observable event (3 clients), #107 reconnect-grace policy
-(grace ON by default 5s), #108 owner-scoped resume identity (assessed - already
-safe), #117 failure-modes + operator runbook (reliability/failure-modes), #101
-verified, #129 phase 1 (stream filter perf bench + findings), plus the README
-refresh, the versioned-milestone roadmap (0.1->0.2->1.0, four gates), task graph
-(#102-#133), and the planner zero-alloc fix. #102/#103 folded into #111 (typed
-subscription lifecycle on the receive surface, designed at the API freeze).
-
-IN PROGRESS - #97 deterministic simulation. The net-seam phase is DONE: a
-cfg-gated `fibril_util::net` (tokio normally, turmoil under the `simulation`
-feature) is validated both modes; the protocol crate (handler + replication +
-`Conn` alias) and the client crate are converted and build in both modes, each
-with a `simulation` feature forwarding to `fibril-util/simulation`. The
-compatibility gate is `cargo build -p <crate> --features simulation`. Broker has
-no direct tokio::net; fibril bootstrap has no production net; admin (axum) and the
-ganglion raft transport are deliberately left on tokio (off-path / cross-repo).
-Full plan + rationale: the deterministic-simulation dev note.
-
-NEXT for #97: build an in-process multi-broker harness (construct Broker +
-StromaEngine per turmoil host so the broker's tokio::spawn/time land on the host
-runtime - construct INSIDE the host closure, pass a tempdir path in), then the
-first scenario: 3 brokers, replicated publishes (static coordination, no
-ganglion), kill the owner under a partition, assert no loss + no split-brain
-(epoch fencing) + correct failover. Reuse the run_server / handle_connection
-setup from crates/protocol/tests/handler_tests.rs. Later: ganglion raft transport
-onto the seam (cross-repo - user authorized local sibling patching via the
-../ganglion checkout) for coordination-under-partition scenarios.
+NEXT for #97: the returning-old-owner split-brain refusal scenario - this needs
+SHARED coordination so the demoted owner learns it lost ownership, which means
+putting the ganglion raft transport on the `fibril_util::net` seam (cross-repo,
+../ganglion sibling + local patch). With that, scenarios that need real
+coordination-under-partition become possible. Then grow the set: follower
+catch-up + checkpoint install, ISR-floor refusal under partition, repartition
+cutover under delayed acks, coordination under message loss.
 
 - Stream/staging perf levers from the staging-efficiency audit. DONE: removed the
   per-publish replication-cache clone (cache removed entirely, keratin 27940f8) and

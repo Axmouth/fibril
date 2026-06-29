@@ -90,14 +90,33 @@ determinism catches - and only after weighing it against the openraft dep graph.
    Known gap for sim use: the high-level client `connect()` resolves addresses
    via std DNS, which a sim's logical hostnames do not support - in-sim producers
    either use a hostname-direct connect path or the protocol layer directly.
-3. **Stand up a multi-broker harness** in-process (shares the bootstrap-wiring
-   refactor).
-4. **First real scenario:** a 3-node cluster doing replicated publishes, then
-   kill the owner under a partition and assert no data loss, no split-brain
-   (epoch fencing rejects the stale owner), and correct failover to a caught-up
-   follower. This can use static/scripted coordination to avoid the ganglion
-   transport on the seam at first.
-5. **Grow the scenario set:** follower catch-up + checkpoint install, ISR-floor
+3. **Stand up a multi-broker harness** in-process. DONE. The harness lives in
+   `crates/protocol/tests/simulation_tests.rs` (compiled only under
+   `--features simulation`). turmoil 0.7 gives each simulated host its own
+   current-thread tokio runtime plus a LocalSet, so a `Broker` + `StromaEngine`
+   built INSIDE a host closure spawns its background tasks onto that host's
+   runtime and its timers run on the simulated clock. The corollary is that a
+   broker can only be driven from within its own host - there is no shared
+   runtime across hosts - so cross-host orchestration goes through the simulated
+   network or through plain shared memory (atomics), never by calling another
+   host's broker. A no-network smoke test (build, publish, confirm, checkpoint)
+   proves the broker cooperates with turmoil's runtime and clock before any
+   cluster scenario builds on it.
+4. **First real scenario.** DONE. Two scenarios run on the simulated network
+   with static/scripted coordination (no ganglion transport on the seam yet):
+   (a) a follower, driven only by its supervised assignment watcher, catches up
+   to the owner over the simulated network on the simulated clock; (b) once
+   caught up, the orchestrator partitions the owner away and the follower
+   promotes itself under a fenced epoch bump and serves a fresh publish - the
+   promoted log continues from exactly the replicated tails (no data loss) and
+   promotion happens only under the higher epoch (the fencing mechanism). Both
+   are deterministic (identical wall-clock across repeated runs). The stronger
+   split-brain assertion - a returning old owner being refused - needs shared
+   coordination so the old owner learns it was demoted, which means the ganglion
+   raft transport on the seam (cross-repo); that is the next scenario, not this
+   static-coordination one.
+5. **Grow the scenario set:** the returning-old-owner split-brain refusal (needs
+   ganglion on the seam), follower catch-up + checkpoint install, ISR-floor
    refusal under partition, repartition cutover under delayed acks, coordination
    under message loss.
 
