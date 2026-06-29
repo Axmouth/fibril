@@ -70,18 +70,18 @@ connected. Gotcha baked in: start_split_brain_node HARDCODES membership addrs
 a-owner/b-follower/coordinator, so any cluster test reusing it must name its turmoil
 hosts those exact names.
 
-FINDING (surfaced by the durable scenario, worth fixing): the follower replication
-read has NO client-side timeout. Under a partition that DROPS an in-flight response
-(turmoil partition, not an RST) the worker waits on a dead connection until the
-transport itself breaks, so a partitioned follower does not promptly resume after a
-heal. Fix candidate: add a read/RPC deadline to the replication client
-(open_protocol_owner_conn / the per-read await) so a dropped response is detected
-and the worker reconnects. This is also why the durable scenario asserts only the
-safety property (no false ack), not recovery-after-heal.
+FINDING (surfaced by the durable scenario) - FIXED: the follower replication client
+had NO client-side timeout, so a partition that DROPS an in-flight read response or
+a connect SYN (turmoil partition, not an RST) left the worker on a dead connection
+until the transport itself broke. Fixed in protocol replication.rs: a read waits at
+most its long-poll window + DEFAULT_READ_TIMEOUT_SLACK_MS (10s), and connection
+setup (TCP connect + HELLO/AUTH) at most DEFAULT_OWNER_CONNECT_TIMEOUT_MS (5s); on
+either the worker errors, drops the conn, and redials. The durable scenario now
+asserts recovery-after-heal too. (Both are named const defaults with builder
+overrides; full config-crate/runtime-settings wiring is a minor follow-up.)
 
-NEXT for #97: the read-timeout robustness fix above (highest value - real recovery
-gap), then remaining scenarios - follower catch-up + checkpoint install (needs the
-owner to REALLY snapshot+truncate so the follower installs a checkpoint, not a
+NEXT for #97: remaining scenarios - follower catch-up + checkpoint install (needs
+the owner to REALLY snapshot+truncate so the follower installs a checkpoint, not a
 mock - non-trivial), repartition cutover under delayed acks. With the harness
 proven across election, replication, failover,
 split-brain, and lossy networks, the cluster-confidence gate (#124) has a real

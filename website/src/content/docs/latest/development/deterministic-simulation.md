@@ -142,11 +142,14 @@ determinism catches - and only after weighing it against the openraft dep graph.
    path: a ReplicaDurable (2-node) queue confirms a publish with a healthy
    follower, but once the follower is partitioned away a publish is written
    locally yet its confirm times out - the producer gets an error, never a false
-   durability ack. That scenario also surfaced a real robustness gap (the value
-   the simulator is meant to provide): the follower replication read has no
-   client-side timeout, so a partition that drops an in-flight response leaves the
-   worker on a dead connection until the transport itself breaks, which delays
-   recovery after a heal. Tracked as a follow-up. Still to add: follower catch-up +
+   durability ack, then confirms again once the partition heals. That scenario
+   surfaced and then verified the fix for a real robustness gap (the value the
+   simulator is meant to provide): the follower replication client had no
+   client-side timeout, so a partition that dropped an in-flight read response or
+   a connect SYN left the worker on a dead connection until the transport itself
+   broke. Both the read and connection setup are now deadline-bounded, so the
+   worker drops the dead connection and redials - and the scenario asserts that
+   recovery. Still to add: follower catch-up +
    checkpoint install (needs the owner to really snapshot and truncate, not a
    mock), repartition cutover under delayed acks, coordination
    under message loss.
