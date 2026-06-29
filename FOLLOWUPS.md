@@ -59,11 +59,22 @@ so cross-host forwarding from a non-leader/non-member is NOT sim-compatible yet
 client_write_remote dialer-generic is the remaining gap if a future scenario needs
 follower-forwarded writes under sim.
 
-NEXT for #97: grow the scenario set - follower catch-up + checkpoint install,
-ISR-floor refusal under partition, repartition cutover under delayed acks,
-coordination under message loss. With 5 scenarios green (smoke, catch-up,
-static-coordination failover, raft-cluster-over-turmoil, split-brain), the
-cluster-confidence gate (#124) has a real deterministic harness to build on.
+SCENARIO SET (7 green, deterministic): smoke, static-coordination catch-up,
+static-coordination failover, raft-cluster-over-turmoil, split-brain,
+lossy-link catch-up (flapping follower), raft-cluster-converges-under-message-loss.
+The two lossy ones use turmoil fail_rate/repair_rate + latency bounds + a fixed
+rng_seed; loss/latency are kept under the raft timers (heartbeat 200ms, election
+1000-2000ms) so a majority stays connected. Gotcha baked in: start_split_brain_node
+HARDCODES membership addrs a-owner/b-follower/coordinator, so any cluster test
+reusing it must name its turmoil hosts those exact names.
+
+NEXT for #97: remaining scenarios - follower catch-up + checkpoint install (drive
+the owner to snapshot+truncate so the follower must install a checkpoint, not
+tail-replay), ISR-floor refusal under partition (durable tier + RF, assert the
+owner refuses producer acks while the follower is unreachable), repartition cutover
+under delayed acks. With the harness proven across election, replication, failover,
+split-brain, and lossy networks, the cluster-confidence gate (#124) has a real
+deterministic base to build on.
 
 - Stream/staging perf levers from the staging-efficiency audit. DONE: removed the
   per-publish replication-cache clone (cache removed entirely, keratin 27940f8) and
