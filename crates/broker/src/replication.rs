@@ -1765,7 +1765,9 @@ impl Broker<StromaEngine> {
             part: partition,
             group: group.map(str::to_string),
         };
-        self.replication_confirm_gate().await_confirm(&key, offset).await
+        self.replication_confirm_gate()
+            .await_confirm(&key, offset)
+            .await
     }
 
     /// Stream failover promotion at the follower's own tails (see the queue
@@ -2270,9 +2272,7 @@ impl Broker<StromaEngine> {
                 let partition = assignment.queue.partition;
                 let group = assignment.queue.group.clone();
                 match broker
-                    .run_follower_replication_worker_loop(
-                        assignment, resolver, kind, cfg, shutdown,
-                    )
+                    .run_follower_replication_worker_loop(assignment, resolver, kind, cfg, shutdown)
                     .await
                 {
                     Ok(outcome) => {

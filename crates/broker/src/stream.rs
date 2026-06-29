@@ -412,7 +412,11 @@ struct DurableIngest {
 /// resolves both, builds the fan-out records, and confirms once durable.
 struct DurableBatch {
     /// Per-record (headers, payload, confirm), in offset order from the base.
-    items: Vec<(MessageHeaders, Vec<u8>, oneshot::Sender<Result<Offset, StromaError>>)>,
+    items: Vec<(
+        MessageHeaders,
+        Vec<u8>,
+        oneshot::Sender<Result<Offset, StromaError>>,
+    )>,
     offset: oneshot::Receiver<Offset>,
     durable: oneshot::Receiver<Result<(), StromaError>>,
 }
@@ -1284,9 +1288,18 @@ mod channel_tests {
     #[tokio::test]
     async fn backfill_from_ring_then_live() {
         let dir = temp_dir("stream_ring");
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64, test_cfg())
-            .await
-            .unwrap();
+        let ch = StreamChannel::open(
+            engine(&dir).await,
+            "sensors",
+            0,
+            StreamDurability::Durable,
+            None,
+            64,
+            64,
+            test_cfg(),
+        )
+        .await
+        .unwrap();
         for i in 0..5u32 {
             assert_eq!(
                 ch.publish(hdr(&[]), format!("m{i}").into_bytes())
@@ -1312,9 +1325,18 @@ mod channel_tests {
     async fn backfill_reads_evicted_records_from_the_log() {
         let dir = temp_dir("stream_log");
         // ring holds only the newest 2, so older records must come from stroma
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 2, 64, test_cfg())
-            .await
-            .unwrap();
+        let ch = StreamChannel::open(
+            engine(&dir).await,
+            "sensors",
+            0,
+            StreamDurability::Durable,
+            None,
+            2,
+            64,
+            test_cfg(),
+        )
+        .await
+        .unwrap();
         for i in 0..6u32 {
             ch.publish(hdr(&[]), format!("m{i}").into_bytes())
                 .await
@@ -1331,9 +1353,18 @@ mod channel_tests {
     #[tokio::test]
     async fn durable_resume_starts_after_the_committed_cursor() {
         let dir = temp_dir("stream_durable");
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64, test_cfg())
-            .await
-            .unwrap();
+        let ch = StreamChannel::open(
+            engine(&dir).await,
+            "sensors",
+            0,
+            StreamDurability::Durable,
+            None,
+            64,
+            64,
+            test_cfg(),
+        )
+        .await
+        .unwrap();
         for i in 0..5u32 {
             ch.publish(hdr(&[]), format!("m{i}").into_bytes())
                 .await
@@ -1363,9 +1394,18 @@ mod channel_tests {
     #[tokio::test]
     async fn filter_applies_to_backfill_and_live() {
         let dir = temp_dir("stream_filter");
-        let ch = StreamChannel::open(engine(&dir).await, "sensors", 0, StreamDurability::Durable, None, 64, 64, test_cfg())
-            .await
-            .unwrap();
+        let ch = StreamChannel::open(
+            engine(&dir).await,
+            "sensors",
+            0,
+            StreamDurability::Durable,
+            None,
+            64,
+            64,
+            test_cfg(),
+        )
+        .await
+        .unwrap();
         ch.publish(hdr(&[("kind", "cow")]), b"a".to_vec())
             .await
             .unwrap();

@@ -1872,11 +1872,7 @@ impl<
     }
 
     /// Gate a stream operation on ownership, mirroring `ensure_queue_owner`.
-    pub fn ensure_stream_owner(
-        &self,
-        topic: &str,
-        partition: u32,
-    ) -> Result<(), BrokerError> {
+    pub fn ensure_stream_owner(&self, topic: &str, partition: u32) -> Result<(), BrokerError> {
         if self.owns_stream(topic, partition) {
             return Ok(());
         }

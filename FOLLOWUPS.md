@@ -811,11 +811,10 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
 
 ## Code health and structure
 
-- Small zero-alloc win (TODOTHOUGHTS #2): `plan_local_assignment_transitions`
-  (coordination.rs:1352) sorts keys with `a.topic.to_string()` (and group
-  `.to_string()`) in the comparator, a heap alloc per key per snapshot diff. Sort
-  by borrowed `&str` instead to keep the transition planner zero-alloc. Tiny,
-  self-contained.
+- DONE 2026-06-29: `plan_local_assignment_transitions` (coordination.rs) now
+  sorts keys by borrowed `&str` (topic/group `as_str()`/`as_deref()`) instead of
+  allocating a `(String, _, String)` tuple per comparison, so the transition
+  planner sort is zero-alloc.
 
 - Routing/pattern-subscribe parity: DONE on Rust, TS, async + blocking Python.
   Integration coverage: Rust (static queue fan-in), TS (queue fan-in AND

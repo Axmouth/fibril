@@ -1360,14 +1360,14 @@ pub fn plan_local_assignment_transitions(
     let mut keys: Vec<_> = keys.into_iter().collect();
     keys.sort_by(|a, b| {
         (
-            a.topic.to_string(),
+            a.topic.as_str(),
             a.partition,
-            a.group.as_deref().unwrap_or_default().to_string(),
+            a.group.as_deref().unwrap_or_default(),
         )
             .cmp(&(
-                b.topic.to_string(),
+                b.topic.as_str(),
                 b.partition,
-                b.group.as_deref().unwrap_or_default().to_string(),
+                b.group.as_deref().unwrap_or_default(),
             ))
     });
 
@@ -1468,8 +1468,7 @@ pub fn plan_local_stream_transitions(
     previous: &CoordinationSnapshot,
     next: &CoordinationSnapshot,
 ) -> Vec<LocalStreamAssignmentTransition> {
-    let mut keys: HashSet<StreamIdentity> =
-        previous.stream_assignments.keys().cloned().collect();
+    let mut keys: HashSet<StreamIdentity> = previous.stream_assignments.keys().cloned().collect();
     keys.extend(next.stream_assignments.keys().cloned());
 
     let mut keys: Vec<_> = keys.into_iter().collect();
@@ -2153,7 +2152,11 @@ mod tests {
                     .clone()
             })
             .collect();
-        assert_eq!(owners.len(), 3, "3 partitions should occupy 3 distinct nodes");
+        assert_eq!(
+            owners.len(),
+            3,
+            "3 partitions should occupy 3 distinct nodes"
+        );
     }
 
     #[test]
@@ -2227,11 +2230,16 @@ mod tests {
             "durable stream replicates to its follower count"
         );
         assert!(
-            !durable_assignment.followers.contains(&durable_assignment.owner),
+            !durable_assignment
+                .followers
+                .contains(&durable_assignment.owner),
             "the owner is never its own follower"
         );
 
-        let ephemeral_assignment = plan.assignments.get(&ephemeral).expect("ephemeral assigned");
+        let ephemeral_assignment = plan
+            .assignments
+            .get(&ephemeral)
+            .expect("ephemeral assigned");
         assert!(
             ephemeral_assignment.followers.is_empty(),
             "owner-only tiers get no followers"
@@ -2316,7 +2324,10 @@ mod tests {
         )]);
 
         let demoted = plan_local_stream_transitions("node-a", &previous, &next);
-        assert_eq!(demoted[0].intent, LocalAssignmentIntent::DemoteOwnerToFollower);
+        assert_eq!(
+            demoted[0].intent,
+            LocalAssignmentIntent::DemoteOwnerToFollower
+        );
 
         let promoted = plan_local_stream_transitions("node-b", &previous, &next);
         assert_eq!(

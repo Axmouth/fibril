@@ -18,8 +18,8 @@ use fibril_broker::{
         BrokerReplicationCatchUpProgress, BrokerReplicationCheckpointRequired, ConsumerConfig,
         FollowerReplicationWorkerConfig, FollowerReplicationWorkerLoopExit,
         FollowerReplicationWorkerState, FollowerReplicationWorkerStatus, OwnedQueue,
-        QueueEvictionAttempt, QueueEvictionSkip, ReplicationResourceKind, SettleRequest, SettleType,
-        StaticQueueOwnership,
+        QueueEvictionAttempt, QueueEvictionSkip, ReplicationResourceKind, SettleRequest,
+        SettleType, StaticQueueOwnership,
     },
     coordination::{
         CoordinationSnapshot, LocalAssignmentIntent, LocalAssignmentRole,
@@ -3539,7 +3539,9 @@ async fn stream_follower_catches_up_records_and_cursor_from_owner() {
 /// offset, then resolves.
 #[tokio::test]
 async fn durable_stream_publish_confirm_waits_for_follower_progress() {
-    use fibril_broker::broker::{OwnAllQueues, StreamOpenConfig, StreamOwnership as StreamOwnershipTrait};
+    use fibril_broker::broker::{
+        OwnAllQueues, StreamOpenConfig, StreamOwnership as StreamOwnershipTrait,
+    };
     use fibril_broker::stream::StreamDurability;
 
     #[derive(Debug)]
@@ -3607,7 +3609,14 @@ async fn durable_stream_publish_confirm_waits_for_follower_progress() {
     );
 
     // The follower reports durable progress past offset 0; the confirm resolves.
-    broker.record_follower_replication_progress("events", Partition::new(0), None, "follower-b", 1, 0);
+    broker.record_follower_replication_progress(
+        "events",
+        Partition::new(0),
+        None,
+        "follower-b",
+        1,
+        0,
+    );
     broker
         .await_replication_confirm("events", Partition::new(0), None, 0)
         .await
@@ -4788,14 +4797,13 @@ async fn follower_worker_loop_cancels_in_flight_owner_read() {
         peer.wait_for_read().await;
         shutdown.cancel();
     };
-    let loop_result =
-        follower.run_follower_replication_worker_loop(
-            assignment,
-            resolver,
-            ReplicationResourceKind::Queue,
-            cfg,
-            shutdown.clone(),
-        );
+    let loop_result = follower.run_follower_replication_worker_loop(
+        assignment,
+        resolver,
+        ReplicationResourceKind::Queue,
+        cfg,
+        shutdown.clone(),
+    );
     let (_, outcome) = tokio::time::timeout(Duration::from_secs(1), async {
         tokio::join!(canceller, loop_result)
     })
@@ -4879,14 +4887,13 @@ async fn follower_worker_loop_ticks_until_cancelled() {
         peer.wait_for_read().await;
         shutdown.cancel();
     };
-    let loop_result =
-        follower.run_follower_replication_worker_loop(
-            assignment,
-            resolver,
-            ReplicationResourceKind::Queue,
-            cfg,
-            shutdown.clone(),
-        );
+    let loop_result = follower.run_follower_replication_worker_loop(
+        assignment,
+        resolver,
+        ReplicationResourceKind::Queue,
+        cfg,
+        shutdown.clone(),
+    );
     let (_, outcome) = tokio::join!(canceller, loop_result);
 
     assert_eq!(
@@ -7749,8 +7756,24 @@ async fn stream_registry_opens_caches_routes_and_closes() {
     let (broker, _dir) = open_test_broker().await;
 
     // open is idempotent: the second call returns the same hosted channel
-    let ch1 = broker.get_or_open_stream("sensors", 0, fibril_broker::stream::StreamDurability::Durable, None).await.unwrap();
-    let ch2 = broker.get_or_open_stream("sensors", 0, fibril_broker::stream::StreamDurability::Durable, None).await.unwrap();
+    let ch1 = broker
+        .get_or_open_stream(
+            "sensors",
+            0,
+            fibril_broker::stream::StreamDurability::Durable,
+            None,
+        )
+        .await
+        .unwrap();
+    let ch2 = broker
+        .get_or_open_stream(
+            "sensors",
+            0,
+            fibril_broker::stream::StreamDurability::Durable,
+            None,
+        )
+        .await
+        .unwrap();
     assert!(Arc::ptr_eq(&ch1, &ch2));
 
     // routing predicate distinguishes hosted streams
