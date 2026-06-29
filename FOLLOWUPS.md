@@ -42,18 +42,28 @@ flake in ganglion's `learner_joins_catches_up_and_gets_promoted` (read-after-wri
 umbrella. fibril sim test binds through the `ganglion` umbrella crate, not
 ganglion-openraft directly.
 
-NEXT for #97: the returning-old-owner split-brain refusal scenario, now unblocked.
-Run two brokers each wrapping a LOCAL ganglion node in a real shared 3-node raft
-cluster over the turmoil transport (the third node coordinator-only for majority),
-partition the old owner away, let the majority reassign ownership, then heal and
-assert the returning old owner is demoted by its own watcher and refuses publishes.
-Then grow the set: follower catch-up + checkpoint install, ISR-floor refusal under
-partition, repartition cutover under delayed acks, coordination under message loss.
-Open consideration: a non-leader broker's GanglionCoordination write path forwards
-to the leader - confirm register_self/control_iteration forward cleanly over the
-sim transport (client_write_remote still dials via TokioDialer, so cross-host
-forwarding from a non-member process would need a dialer-generic variant - members
-forward internally over the RaftNetwork, which is already on the dialer).
+SPLIT-BRAIN DONE: `ganglion_returning_old_owner_is_demoted_under_simulated_partition`
+runs 3 ganglion raft nodes inside turmoil (a-owner + b-follower carry brokers,
+coordinator is raft-only for majority), partitions the old owner, the majority's
+leader-only controller reassigns under a bumped epoch, the follower promotes, and
+on heal the old owner observes its demotion and refuses publishes. Two integration
+lessons baked into the test: (1) each turmoil host shares ONE current-thread
+runtime across its broker + raft node, so a busy broker starves raft heartbeats and
+replication serving - the old owner is kept idle through catch-up + partition, and
+raft uses widened election timeouts (heartbeat 200ms, election 1000-2000ms).
+(2) The controller keeps all coordination WRITES on the leader (register +
+control_iteration only when is_leader, and only when state must change) so it never
+hits the follower-forward path - `client_write_remote` still dials via TokioDialer,
+so cross-host forwarding from a non-leader/non-member is NOT sim-compatible yet
+(members forward internally over the RaftNetwork, which is on the dialer). Making
+client_write_remote dialer-generic is the remaining gap if a future scenario needs
+follower-forwarded writes under sim.
+
+NEXT for #97: grow the scenario set - follower catch-up + checkpoint install,
+ISR-floor refusal under partition, repartition cutover under delayed acks,
+coordination under message loss. With 5 scenarios green (smoke, catch-up,
+static-coordination failover, raft-cluster-over-turmoil, split-brain), the
+cluster-confidence gate (#124) has a real deterministic harness to build on.
 
 - Stream/staging perf levers from the staging-efficiency audit. DONE: removed the
   per-publish replication-cache clone (cache removed entirely, keratin 27940f8) and

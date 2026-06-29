@@ -122,11 +122,19 @@ determinism catches - and only after weighing it against the openraft dep graph.
    the simulated network and clock - every vote, append, and commit RPC crosses
    the injected transport. This is what shared coordination under simulation
    needs, and it is deterministic across runs.
-5. **Grow the scenario set:** the returning-old-owner split-brain refusal (now
-   unblocked by 4a - run the brokers against a real shared ganglion cluster over
-   the simulator, partition the old owner, and assert it is demoted and refuses
-   on heal), follower catch-up + checkpoint install, ISR-floor refusal under
-   partition, repartition cutover under delayed acks, coordination
+5. **Grow the scenario set.** The returning-old-owner split-brain refusal is
+   DONE: three ganglion raft nodes run inside turmoil (two carry brokers, one is
+   raft-only for majority), the follower replicates, the owner is partitioned from
+   the majority, the majority's leader-only controller reassigns the queue under a
+   bumped epoch, the follower promotes, and on heal the old owner's node catches
+   up the raft log, observes the fenced reassignment, and refuses writes on its
+   existing publisher. One integration note worth carrying: each turmoil host
+   shares a single current-thread runtime across its broker and raft node, so a
+   busy broker starves raft heartbeats and replication serving - the scenario
+   keeps the old owner idle through catch-up and the partition for that reason,
+   and raft uses widened election timeouts. Still to add: follower catch-up +
+   checkpoint install, ISR-floor refusal under partition, repartition cutover
+   under delayed acks, coordination
    under message loss.
 
 ## Relationship to other testing
