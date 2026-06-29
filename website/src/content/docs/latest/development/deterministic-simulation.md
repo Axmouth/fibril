@@ -1,0 +1,96 @@
+---
+title: Deterministic simulation testing
+description: Evaluation of turmoil and madsim for testing Fibril's cluster failure paths, and the staged plan for adopting one.
+---
+
+This is a development note: the evaluation behind task #97 and the plan for
+getting deterministic simulation into the cluster test suite. It is the
+credibility gate for the 1.0 cluster-confidence milestone - the difference
+between "the cluster path passes my tests" and "I would run it across nodes."
+
+## What we want to catch
+
+The single-node path is well covered by ordinary tests. The value of simulation
+is the **cluster failure paths**, where bugs hide in rare interleavings:
+
+- replication catch-up and checkpoint install under a slow or flapping follower
+- epoch-fenced failover with no split-brain (a stale former owner must not serve)
+- replica-durable confirm timing and the in-sync floor under partitions
+- repartition cutover fencing under reordered or delayed client acks
+- coordination (raft) under partitions, message loss, and reordering
+
+These need controlled time, controlled message scheduling, and injectable network
+faults - which is what a deterministic simulator provides.
+
+## The seam question
+
+The deciding constraint is how the code reaches the network. Today Fibril calls
+`tokio::net::{TcpStream, TcpListener}` directly in roughly seven places (the
+broker connection handler, the client, follower replication, the admin server,
+the server bootstrap) plus the ganglion raft TCP transport. There is no network
+abstraction a simulator can substitute behind. That shapes the tool choice.
+
+## turmoil vs madsim
+
+**turmoil** (the tokio-rs network simulator) simulates the network between
+in-process simulated hosts: latency, partitions, message loss, and reordering,
+with deterministic time. Code under test uses `turmoil::net` instead of
+`tokio::net`. For Fibril this means introducing a small `net` seam (a cfg-swap or
+a thin type alias module) at those ~7 call sites plus the ganglion transport.
+It keeps the real tokio task scheduler, so it is not fully deterministic at the
+task-scheduling level, but it is deterministic for time and network - which is
+where the cluster bugs live. Moderate, mostly mechanical integration cost.
+
+**madsim** replaces the async runtime wholesale to get *full* determinism
+(scheduling, time, RNG, network), compiled under `--cfg madsim` with
+madsim-provided shims for tokio and friends. It is far more thorough, but every
+async dependency in the graph has to be madsim-aware or shimmed. Fibril's
+coordination is built on **openraft** plus a broad dependency graph, so a
+whole-runtime swap is a large, high-friction lift with real risk that a dep does
+not cooperate.
+
+## Recommendation
+
+Adopt **turmoil first**, as the task name implies. It targets exactly the
+network-fault cluster paths that need proving, at a moderate and mechanical
+integration cost, without betting the whole dependency graph on a runtime swap.
+Treat **madsim as a later, optional escalation** only if scheduling-order
+determinism turns out to be needed beyond what turmoil's network+time
+determinism catches - and only after weighing it against the openraft dep graph.
+
+## Prerequisites
+
+1. **A `net` seam.** Introduce a thin module (or cfg-gated type alias) over
+   `TcpStream`/`TcpListener` so simulation builds substitute `turmoil::net`. This
+   touches the ~7 tokio::net sites and the ganglion raft transport, but the
+   change is mechanical.
+2. **Multi-broker in-process bootstrap.** The simulator must stand up N brokers
+   in one process without going through `main`. This is the already-noted
+   bootstrap-wiring refactor (see the near-term roadmap) and is a hard
+   prerequisite for any multi-node simulation.
+
+## Staged plan
+
+1. **De-risk the tool.** Add turmoil as a dev dependency and a hello-world sim
+   (two hosts exchanging a frame over `turmoil::net`) to confirm it builds and
+   runs in our toolchain before touching broker code.
+2. **Land the net seam** over the tokio::net call sites and the ganglion
+   transport.
+3. **Stand up a multi-broker harness** in-process (shares the bootstrap-wiring
+   refactor).
+4. **First real scenario:** a 3-node cluster doing replicated publishes, then
+   kill the owner under a partition and assert no data loss, no split-brain
+   (epoch fencing rejects the stale owner), and correct failover to a caught-up
+   follower.
+5. **Grow the scenario set:** follower catch-up + checkpoint install, ISR-floor
+   refusal under partition, repartition cutover under delayed acks, coordination
+   under message loss.
+
+## Relationship to other testing
+
+This complements rather than replaces the existing coverage. The
+[chaos and soak suite](/latest/) (task #115) exercises real wall-clock runs;
+deterministic simulation finds the rare interleavings a soak might hit only once
+in a thousand runs, and reproduces them exactly. Loom (task #96, assessed as low
+fit) targets fine-grained atomics, a different layer again. Together they form
+the cluster-confidence gate for 1.0.
