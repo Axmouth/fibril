@@ -138,8 +138,17 @@ determinism catches - and only after weighing it against the openraft dep graph.
    leader and commits a replicated write under message loss, latency, and link
    flapping (kept under the raft timers, with the current leader retrying the
    write across the re-elections the loss induces). Both are deterministic via a
-   fixed RNG seed. Still to add: follower catch-up + checkpoint install, ISR-floor
-   refusal under partition, repartition cutover under delayed acks, coordination
+   fixed RNG seed. A durability-floor scenario covers the ISR/replica-durable
+   path: a ReplicaDurable (2-node) queue confirms a publish with a healthy
+   follower, but once the follower is partitioned away a publish is written
+   locally yet its confirm times out - the producer gets an error, never a false
+   durability ack. That scenario also surfaced a real robustness gap (the value
+   the simulator is meant to provide): the follower replication read has no
+   client-side timeout, so a partition that drops an in-flight response leaves the
+   worker on a dead connection until the transport itself breaks, which delays
+   recovery after a heal. Tracked as a follow-up. Still to add: follower catch-up +
+   checkpoint install (needs the owner to really snapshot and truncate, not a
+   mock), repartition cutover under delayed acks, coordination
    under message loss.
 
 ## Relationship to other testing
