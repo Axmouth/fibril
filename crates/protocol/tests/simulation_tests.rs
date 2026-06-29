@@ -1129,3 +1129,215 @@ fn ganglion_raft_cluster_converges_under_message_loss() {
 
     sim.run().expect("simulation runs to completion");
 }
+
+/// A replica-durable publish is never falsely acked while its replica is
+/// partitioned away.
+///
+/// The owner runs a ReplicaDurable (2-node) queue: a producer ack must wait for
+/// the follower to report durable progress past the offset. With the follower
+/// healthy and replicating over the simulated network, a publish confirms. Once
+/// the orchestrator partitions the follower away, a publish is written locally on
+/// the owner but its confirm times out - the producer gets an error, not a false
+/// durability ack. This is the durability-floor safety property under a partition,
+/// which a single node cannot exercise.
+///
+/// Recovery-after-heal is deliberately not asserted here: the follower
+/// replication read has no client-side timeout, so a partition that drops an
+/// in-flight response leaves the worker waiting on a dead connection until the
+/// transport itself breaks, which a simulated heal does not force. That gap is
+/// tracked separately as a robustness follow-up surfaced by this harness.
+#[test]
+fn durable_publish_unconfirmed_while_replica_partitioned() {
+    let topic = "sim.durable";
+
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(180))
+        .build();
+
+    let caught_up = Arc::new(AtomicBool::new(false));
+    let ready_to_partition = Arc::new(AtomicBool::new(false));
+    let partitioned = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+
+    {
+        let caught_up = caught_up.clone();
+        let ready_to_partition = ready_to_partition.clone();
+        let partitioned = partitioned.clone();
+        let done = done.clone();
+        sim.client("a-owner", async move {
+            let (engine, _dir) = open_engine("durable-owner").await;
+            let broker = Broker::new(
+                engine,
+                BrokerConfig {
+                    replication_confirm_timeout_ms: 2_000,
+                    ..test_broker_config()
+                },
+                None,
+            );
+
+            // ReplicaDurable: the owner plus one follower must be durable before a
+            // producer is acked.
+            broker.cache_queue_assignment(
+                &PartitionAssignment::new(
+                    QueueIdentity::new(topic, Partition::new(0), None),
+                    "a-owner",
+                    vec!["b-follower".to_string()],
+                    1,
+                )
+                .with_durability(ReplicationDurabilityPolicy::ReplicaDurable { nodes: 2 }),
+            );
+            broker
+                .advance_replication_epoch(topic, Partition::new(0), None, 1)
+                .await
+                .unwrap();
+
+            let (publisher, _confirms) = broker
+                .get_publisher(topic, Partition::new(0), &None)
+                .await
+                .unwrap();
+
+            let serve_broker = broker.clone();
+            tokio::spawn(run_server(
+                bind_addr(),
+                serve_broker,
+                TcpStats::new(10),
+                ConnectionStats::new(),
+                None::<StaticAuthHandler>,
+                ConnectionSettings::new(Some(60)),
+                None,
+                None,
+                None,
+            ));
+
+            // The follower replicates the empty queue and reports in.
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while !caught_up.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("follower joins before the first durable publish");
+
+            // Healthy replica: the durable confirm resolves.
+            publisher
+                .publish(
+                    b"healthy".to_vec(),
+                    unix_millis(),
+                    unix_millis(),
+                    None,
+                    Default::default(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .await
+                .unwrap()
+                .expect("durable confirm resolves with a healthy replica");
+
+            // Ask the orchestrator to partition the follower, then publish: the
+            // confirm must NOT resolve (no false durability ack).
+            ready_to_partition.store(true, Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while !partitioned.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("follower is partitioned away");
+
+            let err = publisher
+                .publish(
+                    b"during-partition".to_vec(),
+                    unix_millis(),
+                    unix_millis(),
+                    None,
+                    Default::default(),
+                    None,
+                )
+                .await
+                .unwrap()
+                .await
+                .unwrap()
+                .expect_err("durable confirm must fail while the replica is partitioned");
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("timed out") && message.contains("follower"),
+                "expected a descriptive replica-confirm timeout, got: {message}"
+            );
+
+            done.store(true, Ordering::SeqCst);
+            broker.shutdown().await;
+            Ok(())
+        });
+    }
+
+    {
+        let caught_up = caught_up.clone();
+        let done = done.clone();
+        sim.client("b-follower", async move {
+            let (engine, _dir) = open_engine("durable-follower").await;
+            let broker = Broker::new(engine, test_broker_config(), None);
+
+            let coordination = Arc::new(StaticCoordination::new(
+                "b-follower",
+                follower_snapshot(topic, 1, 1),
+            ));
+            let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
+                coordination.clone(),
+            ));
+            // Short caught-up poll so a new owner write is picked up and reported
+            // promptly, well inside the confirm timeout.
+            broker.spawn_assignment_watcher_with_follower_replication(
+                coordination.clone(),
+                resolver.clone(),
+                FollowerReplicationWorkerConfig {
+                    caught_up_poll_ms: 200,
+                    ..Default::default()
+                },
+            );
+
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    let state = broker
+                        .follower_replication_worker_snapshot(topic, Partition::new(0), None)
+                        .await;
+                    if state
+                        .as_ref()
+                        .is_some_and(|s| s.status == FollowerReplicationWorkerStatus::CaughtUp)
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("follower catches up to the empty queue");
+            caught_up.store(true, Ordering::SeqCst);
+
+            tokio::time::timeout(Duration::from_secs(180), async {
+                while !done.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .ok();
+            resolver.close_all().await;
+            broker.shutdown().await;
+            Ok(())
+        });
+    }
+
+    let mut did_partition = false;
+    loop {
+        let finished = sim.step().expect("simulation step");
+        if ready_to_partition.load(Ordering::SeqCst) && !did_partition {
+            sim.partition("a-owner", "b-follower");
+            partitioned.store(true, Ordering::SeqCst);
+            did_partition = true;
+        }
+        if finished {
+            break;
+        }
+    }
+    assert!(done.load(Ordering::SeqCst), "scenario runs to completion");
+}
