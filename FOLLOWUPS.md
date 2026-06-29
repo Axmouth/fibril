@@ -12,13 +12,6 @@ Tiers are grouped by concern, not strictly ordered.
 
 ## #97 deterministic simulation - status
 
-Standing rules (carry across sessions): commit per-brick to main, DO NOT PUSH
-(user pushes fibril + keratin/ganglion); terse non-conversational commits, no
-Co-Authored-By; prose directive (no semicolons in comments/docs, plain ASCII); no
-unwrap/expect outside tests; keep FOLLOWUPS + docs + surface inventory current per
-change; cross-repo changes via the ../ganglion + ../keratin sibling checkouts with
-local patch (authorized) to avoid pushing for every iteration.
-
 DONE: net seam (`fibril_util::net`, tokio normally / turmoil under `simulation`),
 protocol + client crates converted and building both modes. Multi-broker turmoil
 harness in `crates/protocol/tests/simulation_tests.rs` (compiled only under
