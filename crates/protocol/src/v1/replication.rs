@@ -131,6 +131,12 @@ pub struct ProtocolOwnerPeerResolverConfig {
     /// This follower's node id, stamped into replication reads so the owner
     /// can track durable progress per follower (publish-confirm policies).
     pub reporter_node_id: Option<String>,
+    /// Slack added to a read's long-poll window before the follower abandons it
+    /// and drops the connection. See [`DEFAULT_READ_TIMEOUT_SLACK_MS`].
+    pub read_timeout_slack_ms: u64,
+    /// Upper bound on establishing a connection to an owner (connect plus
+    /// handshake). See [`DEFAULT_OWNER_CONNECT_TIMEOUT_MS`].
+    pub owner_connect_timeout_ms: u64,
 }
 
 impl ProtocolOwnerPeerResolverConfig {
@@ -141,7 +147,17 @@ impl ProtocolOwnerPeerResolverConfig {
             client_name: "fibril-replication".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
             reporter_node_id: None,
+            read_timeout_slack_ms: DEFAULT_READ_TIMEOUT_SLACK_MS,
+            owner_connect_timeout_ms: DEFAULT_OWNER_CONNECT_TIMEOUT_MS,
         }
+    }
+
+    /// Set the follower read-timeout slack and owner connection-setup timeout
+    /// (both milliseconds), threaded from the broker's replication settings.
+    pub fn with_timeouts(mut self, read_timeout_slack_ms: u64, owner_connect_timeout_ms: u64) -> Self {
+        self.read_timeout_slack_ms = read_timeout_slack_ms;
+        self.owner_connect_timeout_ms = owner_connect_timeout_ms;
+        self
     }
 
     /// Stamp replication reads with this follower's identity so the owner
@@ -234,7 +250,9 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
                 self.cfg.auth.clone(),
                 self.cfg.client_name.clone(),
                 self.cfg.client_version.clone(),
-            );
+            )
+            .with_read_timeout_slack_ms(self.cfg.read_timeout_slack_ms)
+            .with_owner_connect_timeout_ms(self.cfg.owner_connect_timeout_ms);
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
             }
@@ -335,7 +353,9 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
                 self.cfg.auth.clone(),
                 self.cfg.client_name.clone(),
                 self.cfg.client_version.clone(),
-            );
+            )
+            .with_read_timeout_slack_ms(self.cfg.read_timeout_slack_ms)
+            .with_owner_connect_timeout_ms(self.cfg.owner_connect_timeout_ms);
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
             }
@@ -361,6 +381,7 @@ async fn open_protocol_owner_conn(
     auth: Option<&ProtocolOwnerPeerAuth>,
     client_name: &str,
     client_version: &str,
+    connect_timeout_ms: u64,
 ) -> Result<Conn, BrokerError> {
     // Bound connect plus handshake: a partition that drops the SYN or a handshake
     // response must not hang the follower worker on a half-open connection. On
@@ -417,14 +438,14 @@ async fn open_protocol_owner_conn(
     };
 
     match tokio::time::timeout(
-        std::time::Duration::from_millis(DEFAULT_OWNER_CONNECT_TIMEOUT_MS),
+        std::time::Duration::from_millis(connect_timeout_ms),
         setup,
     )
     .await
     {
         Ok(result) => result,
         Err(_) => Err(BrokerError::Unknown(format!(
-            "owner peer connection setup timed out after {DEFAULT_OWNER_CONNECT_TIMEOUT_MS}ms"
+            "owner peer connection setup timed out after {connect_timeout_ms}ms"
         ))),
     }
 }
@@ -436,7 +457,14 @@ pub async fn connect_protocol_owner_peer(
     client_version: &str,
 ) -> Result<ProtocolOwnerReplicationPeer, BrokerError> {
     Ok(ProtocolOwnerReplicationPeer::new(
-        open_protocol_owner_conn(addr, auth, client_name, client_version).await?,
+        open_protocol_owner_conn(
+            addr,
+            auth,
+            client_name,
+            client_version,
+            DEFAULT_OWNER_CONNECT_TIMEOUT_MS,
+        )
+        .await?,
     ))
 }
 
@@ -446,6 +474,7 @@ struct ProtocolOwnerPeerConnectConfig {
     auth: Option<ProtocolOwnerPeerAuth>,
     client_name: String,
     client_version: String,
+    connect_timeout_ms: u64,
 }
 
 impl ProtocolOwnerPeerConnectConfig {
@@ -455,6 +484,7 @@ impl ProtocolOwnerPeerConnectConfig {
             self.auth.as_ref(),
             &self.client_name,
             &self.client_version,
+            self.connect_timeout_ms,
         )
         .await
     }
@@ -550,6 +580,16 @@ impl ProtocolOwnerReplicationPeer {
         self
     }
 
+    /// Override the upper bound on establishing the connection (connect plus
+    /// handshake). See [`DEFAULT_OWNER_CONNECT_TIMEOUT_MS`]. No-op on a peer that
+    /// wraps an already-open connection (it never reconnects).
+    pub fn with_owner_connect_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        if let Some(reconnect) = self.reconnect.as_mut() {
+            reconnect.connect_timeout_ms = timeout_ms;
+        }
+        self
+    }
+
     /// Read stream partitions (send `StreamReplicationRead`) instead of queues.
     pub fn with_stream_mode(mut self) -> Self {
         self.stream_mode = true;
@@ -574,6 +614,7 @@ impl ProtocolOwnerReplicationPeer {
                 auth,
                 client_name,
                 client_version,
+                connect_timeout_ms: DEFAULT_OWNER_CONNECT_TIMEOUT_MS,
             }),
             close_token: CancellationToken::new(),
         }

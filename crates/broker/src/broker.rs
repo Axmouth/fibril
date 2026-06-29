@@ -383,6 +383,12 @@ pub struct BrokerConfig {
     pub replication_min_in_sync_replicas: usize,
     /// How recently a follower must have reported progress to count as in-sync.
     pub replication_isr_timeout_ms: u64,
+    /// Slack added to a follower read's long-poll window before the read is
+    /// abandoned and the connection dropped (a read waits `max_wait_ms + this`).
+    pub replication_read_timeout_slack_ms: u64,
+    /// Upper bound on establishing a follower-to-owner connection (TCP connect
+    /// plus the HELLO/AUTH handshake) before it is abandoned and retried.
+    pub replication_owner_connect_timeout_ms: u64,
     /// Use credit-based streaming replication on the follower instead of the
     /// pull loop. Default true (fold + failover validated); pull stays the
     /// automatic fallback on checkpoint/error.
@@ -435,6 +441,8 @@ impl Default for BrokerConfig {
             replication_max_iterations_per_tick: 8,
             replication_min_in_sync_replicas: 1,
             replication_isr_timeout_ms: 10_000,
+            replication_read_timeout_slack_ms: 10_000,
+            replication_owner_connect_timeout_ms: 5_000,
             replication_stream_enabled: true,
             replication_stream_apply_linger_us: 2_000,
             replication_stream_apply_max_merge_bytes: 16 * 1024 * 1024,

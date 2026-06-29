@@ -566,6 +566,11 @@ impl ServerConfig {
                 "runtime_seed.replication.isr_timeout_ms must be at least 1",
             ));
         }
+        if self.runtime_seed.replication.owner_connect_timeout_ms == 0 {
+            return Err(ConfigError::validation(
+                "runtime_seed.replication.owner_connect_timeout_ms must be at least 1",
+            ));
+        }
         if self.runtime_seed.partitioning.default_partition_count == 0 {
             return Err(ConfigError::validation(
                 "runtime_seed.partitioning.default_partition_count must be at least 1",
@@ -1149,6 +1154,14 @@ pub struct ReplicationSettings {
     pub max_iterations_per_tick: usize,
     pub min_in_sync_replicas: usize,
     pub isr_timeout_ms: u64,
+    /// Slack added to a follower read's long-poll window before the read is
+    /// abandoned and the connection dropped (a read waits `max_wait_ms + this`).
+    #[serde(default = "default_read_timeout_slack_ms")]
+    pub read_timeout_slack_ms: u64,
+    /// Upper bound on establishing a follower-to-owner connection (TCP connect
+    /// plus the HELLO/AUTH handshake) before it is abandoned and retried.
+    #[serde(default = "default_owner_connect_timeout_ms")]
+    pub owner_connect_timeout_ms: u64,
     /// Use credit-based streaming replication on the follower (default true after
     /// the microbatch fold + failover-under-load validation; pull stays the
     /// automatic fallback on checkpoint/error).
@@ -1175,6 +1188,14 @@ pub struct ReplicationSettings {
     /// takes effect on the next stream, not mid-stream.
     #[serde(default = "default_stream_buffer_batches")]
     pub stream_buffer_batches: usize,
+}
+
+fn default_read_timeout_slack_ms() -> u64 {
+    10_000
+}
+
+fn default_owner_connect_timeout_ms() -> u64 {
+    5_000
 }
 
 fn default_stream_apply_linger_us() -> u64 {
@@ -1208,6 +1229,8 @@ impl Default for ReplicationSettings {
             max_iterations_per_tick: 8,
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
+            read_timeout_slack_ms: default_read_timeout_slack_ms(),
+            owner_connect_timeout_ms: default_owner_connect_timeout_ms(),
             stream_enabled: default_stream_enabled(),
             stream_apply_linger_us: default_stream_apply_linger_us(),
             stream_apply_max_merge_bytes: default_stream_apply_max_merge_bytes(),

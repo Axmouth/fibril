@@ -116,6 +116,11 @@ impl RuntimeSettings {
                 "replication.isr_timeout_ms must be at least 1".into(),
             ));
         }
+        if self.replication.owner_connect_timeout_ms == 0 {
+            return Err(RuntimeSettingsError::Invalid(
+                "replication.owner_connect_timeout_ms must be at least 1".into(),
+            ));
+        }
         if self.partitioning.default_partition_count == 0 {
             return Err(RuntimeSettingsError::Invalid(
                 "partitioning.default_partition_count must be at least 1".into(),
@@ -183,6 +188,13 @@ pub struct ReplicationRuntimeSettings {
     pub min_in_sync_replicas: usize,
     /// How recently a follower must have reported to count as in-sync.
     pub isr_timeout_ms: u64,
+    /// Slack added on top of a follower read's long-poll window before the read
+    /// is abandoned and the connection dropped. Bounds how long a dropped owner
+    /// response can hang the follower (a read waits `max_wait_ms + this`).
+    pub read_timeout_slack_ms: u64,
+    /// Upper bound on establishing a follower-to-owner connection (TCP connect
+    /// plus the HELLO/AUTH handshake) before it is abandoned and retried.
+    pub owner_connect_timeout_ms: u64,
     /// Use credit-based streaming replication on the follower (default true after
     /// fold + failover validation; pull is the automatic fallback).
     pub stream_enabled: bool,
@@ -212,6 +224,8 @@ impl Default for ReplicationRuntimeSettings {
             max_iterations_per_tick: 8,
             min_in_sync_replicas: 1,
             isr_timeout_ms: 10_000,
+            read_timeout_slack_ms: 10_000,
+            owner_connect_timeout_ms: 5_000,
             stream_enabled: true,
             stream_apply_linger_us: 2_000,
             stream_apply_max_merge_bytes: 16 * 1024 * 1024,
@@ -471,6 +485,8 @@ impl BrokerConfig {
             replication_max_iterations_per_tick: settings.replication.max_iterations_per_tick,
             replication_min_in_sync_replicas: settings.replication.min_in_sync_replicas,
             replication_isr_timeout_ms: settings.replication.isr_timeout_ms,
+            replication_read_timeout_slack_ms: settings.replication.read_timeout_slack_ms,
+            replication_owner_connect_timeout_ms: settings.replication.owner_connect_timeout_ms,
             replication_stream_enabled: settings.replication.stream_enabled,
             replication_stream_apply_linger_us: settings.replication.stream_apply_linger_us,
             replication_stream_apply_max_merge_bytes: settings

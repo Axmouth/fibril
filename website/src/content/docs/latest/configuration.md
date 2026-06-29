@@ -66,6 +66,8 @@ max_bytes_per_read = 8388608
 max_iterations_per_tick = 8
 min_in_sync_replicas = 1
 isr_timeout_ms = 10000
+read_timeout_slack_ms = 10000
+owner_connect_timeout_ms = 5000
 
 [runtime_seed.partitioning]
 default_partition_count = 1
@@ -236,6 +238,8 @@ These settings apply to the experimental cluster replication path.
 | `runtime_seed.replication.max_iterations_per_tick` | `8` | Maximum pull/apply iterations a follower performs before yielding. |
 | `runtime_seed.replication.min_in_sync_replicas` | `1` | Minimum recently in-sync replicas required before accepting replica-durable publishes. `1` disables the floor. |
 | `runtime_seed.replication.isr_timeout_ms` | `10000` | How recently a follower must report durable progress to count as in sync. |
+| `runtime_seed.replication.read_timeout_slack_ms` | `10000` | Slack added to a follower read's long-poll window before the read is abandoned and the connection dropped, so a dropped owner response cannot hang the follower. A read waits `max_wait_ms + this`. |
+| `runtime_seed.replication.owner_connect_timeout_ms` | `5000` | Upper bound on a follower establishing a connection to an owner (TCP connect plus the handshake) before it is abandoned and retried. |
 | `runtime_seed.replication.stream_enabled` | `true` | Use credit-based streaming replication on followers. When disabled, followers fall back to polling pulls. |
 | `runtime_seed.replication.stream_apply_linger_us` | `2000` | Microseconds a streaming follower gathers contiguous frames before one fsynced apply. Higher trades apply latency for fsync amortization. `0` is drain-only. |
 | `runtime_seed.replication.stream_apply_max_merge_bytes` | `16777216` | Byte cap on a single coalesced streaming apply (peak memory versus fsync amortization). |

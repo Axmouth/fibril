@@ -88,6 +88,8 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
             max_iterations_per_tick: config.runtime_seed.replication.max_iterations_per_tick,
             min_in_sync_replicas: config.runtime_seed.replication.min_in_sync_replicas,
             isr_timeout_ms: config.runtime_seed.replication.isr_timeout_ms,
+            read_timeout_slack_ms: config.runtime_seed.replication.read_timeout_slack_ms,
+            owner_connect_timeout_ms: config.runtime_seed.replication.owner_connect_timeout_ms,
             stream_enabled: config.runtime_seed.replication.stream_enabled,
             stream_apply_linger_us: config.runtime_seed.replication.stream_apply_linger_us,
             stream_apply_max_merge_bytes: config
@@ -638,7 +640,11 @@ pub fn spawn_ganglion_broker_tasks(
                 std::collections::HashMap::new(),
             )
             .with_reporter(config.coordination.node_id.clone())
-            .with_auth("fibril", "fibril"),
+            .with_auth("fibril", "fibril")
+            .with_timeouts(
+                runtime.replication.read_timeout_slack_ms,
+                runtime.replication.owner_connect_timeout_ms,
+            ),
         ),
     );
     broker.spawn_assignment_watcher_with_follower_replication(
