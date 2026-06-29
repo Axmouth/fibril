@@ -18,10 +18,10 @@
 //! calling another host's broker.
 #![cfg(feature = "simulation")]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use fibril_broker::broker::{
@@ -415,4 +415,132 @@ fn owner_partition_fails_over_to_caught_up_follower() {
             break;
         }
     }
+}
+
+const RAFT_PORT: u16 = 9200;
+
+/// A [`RaftDialer`] that connects over turmoil's simulated TCP, so a ganglion
+/// raft cluster can run inside a turmoil `Sim`. ganglion takes no turmoil
+/// dependency itself - the transport is injected here, in test code, exactly the
+/// way production injects `TokioDialer`.
+#[derive(Clone, Default)]
+struct TurmoilDialer;
+
+impl ganglion::RaftDialer for TurmoilDialer {
+    type Stream = turmoil::net::TcpStream;
+
+    async fn dial(&self, addr: &str) -> std::io::Result<Self::Stream> {
+        turmoil::net::TcpStream::connect(addr).await
+    }
+}
+
+/// A 3-node ganglion raft cluster forms a leader and replicates a committed
+/// write entirely over the simulated network, on the simulated clock. This is
+/// the keystone proof for coordination-under-simulation: every vote, append, and
+/// commit RPC flows through the injected `TurmoilDialer` and ganglion's now
+/// transport-generic `serve_connection`, with no real sockets and no ganglion
+/// dependency on the simulator. It unblocks the shared-coordination scenarios
+/// (a partitioned old owner learning it was demoted) that static coordination
+/// cannot express.
+#[test]
+fn ganglion_raft_cluster_forms_and_replicates_over_simulated_network() {
+    use ganglion::openraft::BasicNode;
+    use ganglion::{
+        CoordinationSnapshot, DialerNetworkFactory, GanglionLogStore, GanglionStateMachine,
+        RaftMetadataNode, WireFormat, default_raft_config, serve_connection,
+    };
+
+    let names: [&str; 3] = ["node1", "node2", "node3"];
+    let ids: [u64; 3] = [1, 2, 3];
+
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(120))
+        .build();
+
+    // Counts nodes that have observed the replicated write. Each node waits for
+    // all three before returning, so no node tears down its listener while a
+    // peer still needs to catch up.
+    let observed = Arc::new(AtomicUsize::new(0));
+
+    for (name, id) in names.iter().zip(ids) {
+        let observed = observed.clone();
+        sim.client(*name, async move {
+            let node = Arc::new(
+                RaftMetadataNode::start_with_network(
+                    id,
+                    default_raft_config().unwrap(),
+                    DialerNetworkFactory::with_dialer(TurmoilDialer),
+                    GanglionLogStore::default(),
+                    GanglionStateMachine::default(),
+                )
+                .await
+                .expect("raft node starts"),
+            );
+
+            // Serve this node's raft RPCs over the simulated network.
+            let serve_node = node.clone();
+            tokio::spawn(async move {
+                let listener =
+                    turmoil::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, RAFT_PORT)).await?;
+                loop {
+                    let (stream, _) = listener.accept().await?;
+                    let raft = serve_node.raft().clone();
+                    tokio::spawn(serve_connection(stream, raft, WireFormat::default()));
+                }
+                #[allow(unreachable_code)]
+                Ok::<_, std::io::Error>(())
+            });
+
+            // One node bootstraps membership with every peer's simulated address.
+            // Peers whose listeners are not up yet are retried by openraft.
+            if id == 1 {
+                let mut members = BTreeMap::new();
+                for (peer, peer_id) in names.iter().zip(ids) {
+                    members.insert(peer_id, BasicNode::new(format!("{peer}:{RAFT_PORT}")));
+                }
+                node.initialize(members)
+                    .await
+                    .expect("membership initializes");
+            }
+
+            // A leader emerging at all proves vote and append RPCs crossed the
+            // simulated transport.
+            node.wait_for_any_leader(Duration::from_secs(60))
+                .await
+                .expect("a leader is elected");
+            if node.is_leader().await {
+                node.write_snapshot(CoordinationSnapshot {
+                    generation: 1,
+                    ..CoordinationSnapshot::default()
+                })
+                .await
+                .expect("leader write commits");
+            }
+
+            // Every node observes the committed write replicated to its own state
+            // machine.
+            let mut committed = node.watch_committed();
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while committed.borrow_and_update().generation < 1 {
+                    committed.changed().await.expect("committed watch open");
+                }
+            })
+            .await
+            .expect("node observes the replicated write");
+            assert!(node.committed_snapshot().generation >= 1);
+
+            observed.fetch_add(1, Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while observed.load(Ordering::SeqCst) < names.len() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("all nodes observe the replicated write");
+
+            Ok(())
+        });
+    }
+
+    sim.run().expect("simulation runs to completion");
 }
