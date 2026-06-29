@@ -21,7 +21,8 @@ use fibril_broker::{
 };
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
-use tokio::{net::TcpStream, sync::Mutex, sync::mpsc};
+use fibril_util::net::TcpStream;
+use tokio::{sync::Mutex, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::v1::{
