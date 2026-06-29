@@ -508,6 +508,22 @@ impl StromaEngine {
         self.inner.set_recovery_mismatch_policy(policy);
     }
 
+    /// Truncate the message log so offsets below `before` are no longer retained,
+    /// advancing the log head. An operational primitive (retention/cleanup); a
+    /// follower that requests an offset below the new head must install a
+    /// checkpoint rather than tail-replay.
+    pub async fn truncate_messages_before(
+        &self,
+        tp: &str,
+        part: u32,
+        group: Option<&str>,
+        before: Offset,
+    ) -> Result<u64, StromaError> {
+        self.inner
+            .truncate_messages_before(tp, part, group, before)
+            .await
+    }
+
     pub async fn global_store(&self) -> Result<Arc<GlobalStore>, StromaError> {
         self.inner.global_store().await
     }

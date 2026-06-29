@@ -1391,3 +1391,120 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
     }
     assert!(done.load(Ordering::SeqCst), "scenario runs to completion");
 }
+
+/// A follower installs a checkpoint when the owner has truncated past its
+/// starting offset, then catches up - the snapshot-transfer path, not tail
+/// replay.
+///
+/// The owner publishes six messages, then truncates the first three so the log
+/// head advances to offset 3. A fresh follower starts from offset 0, which is now
+/// below the owner's head, so the owner answers CheckpointRequired. With
+/// checkpoint install enabled the follower installs the owner's state checkpoint
+/// and resumes at the tail. Reaching CaughtUp at message_next 6 is only possible
+/// via the checkpoint install: offsets 0..3 no longer exist to tail-replay.
+#[test]
+fn follower_installs_checkpoint_after_owner_truncates() {
+    let topic = "sim.checkpoint";
+
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(120))
+        .build();
+
+    sim.host("a-owner", move || async move {
+        let (engine, _dir) = open_engine("ckpt-owner").await;
+        let broker = Broker::new(engine, test_broker_config(), None);
+
+        let (publisher, _confirms) = broker
+            .get_publisher(topic, Partition::new(0), &None)
+            .await
+            .unwrap();
+        for i in 0..6u8 {
+            let reply = publisher
+                .publish(
+                    vec![b'm', i],
+                    unix_millis(),
+                    unix_millis(),
+                    None,
+                    Default::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+            reply.await.unwrap().unwrap();
+        }
+        broker
+            .advance_replication_epoch(topic, Partition::new(0), None, 1)
+            .await
+            .unwrap();
+        // Advance the log head past offset 0 so a from-zero follower cannot
+        // tail-replay and must install a checkpoint instead.
+        broker
+            .engine()
+            .truncate_messages_before(topic, 0, None, 3)
+            .await
+            .unwrap();
+
+        run_server(
+            bind_addr(),
+            broker,
+            TcpStats::new(10),
+            ConnectionStats::new(),
+            None::<StaticAuthHandler>,
+            ConnectionSettings::new(Some(60)),
+            None,
+            None,
+            None,
+        )
+        .await
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        Ok(())
+    });
+
+    sim.client("b-follower", async move {
+        let (engine, _dir) = open_engine("ckpt-follower").await;
+        let broker = Broker::new(engine, test_broker_config(), None);
+
+        let coordination = Arc::new(StaticCoordination::new(
+            "b-follower",
+            follower_snapshot(topic, 1, 1),
+        ));
+        let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
+            coordination.clone(),
+        ));
+        broker.spawn_assignment_watcher_with_follower_replication(
+            coordination.clone(),
+            resolver.clone(),
+            FollowerReplicationWorkerConfig {
+                caught_up_poll_ms: 200,
+                allow_checkpoint_install: true,
+                ..Default::default()
+            },
+        );
+
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let state = broker
+                    .follower_replication_worker_snapshot(topic, Partition::new(0), None)
+                    .await;
+                if state.as_ref().is_some_and(|s| {
+                    s.status == FollowerReplicationWorkerStatus::CaughtUp
+                        && s.message_next_offset == 6
+                }) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("follower installs a checkpoint and catches up to the owner tail");
+
+        // Reaching the owner tail (message_next 6) is only possible via the
+        // checkpoint install: offsets 0..3 were truncated and cannot be replayed.
+
+        resolver.close_all().await;
+        broker.shutdown().await;
+        Ok(())
+    });
+
+    sim.run().expect("simulation runs to completion");
+}
