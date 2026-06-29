@@ -71,17 +71,25 @@ determinism catches - and only after weighing it against the openraft dep graph.
 
 ## Staged plan
 
-1. **De-risk the tool.** Add turmoil as a dev dependency and a hello-world sim
-   (two hosts exchanging a frame over `turmoil::net`) to confirm it builds and
-   runs in our toolchain before touching broker code.
-2. **Land the net seam** over the tokio::net call sites and the ganglion
-   transport.
+1. **De-risk the tool.** DONE - confirmed turmoil 0.7 builds and runs in our
+   toolchain.
+2. **The net seam.** DONE (foundation) - `fibril_util::net` re-exports tokio's
+   TCP types normally and turmoil's under the `simulation` feature, validated by
+   a test pair that runs the same code over a real loopback and inside a turmoil
+   Sim. Because the swap is one re-export, call sites just import from
+   `fibril_util::net` (no per-site cfg). REMAINING: convert the actual call sites
+   (broker connection handler, client, follower replication, admin, bootstrap)
+   to import from the seam, add a `simulation` feature on those crates that
+   forwards to `fibril-util/simulation`, and bring the ganglion raft transport
+   onto the seam (cross-repo; needed only for coordination scenarios, so a
+   replication-failover scenario driven by static coordination can come first).
 3. **Stand up a multi-broker harness** in-process (shares the bootstrap-wiring
    refactor).
 4. **First real scenario:** a 3-node cluster doing replicated publishes, then
    kill the owner under a partition and assert no data loss, no split-brain
    (epoch fencing rejects the stale owner), and correct failover to a caught-up
-   follower.
+   follower. This can use static/scripted coordination to avoid the ganglion
+   transport on the seam at first.
 5. **Grow the scenario set:** follower catch-up + checkpoint install, ISR-floor
    refusal under partition, repartition cutover under delayed acks, coordination
    under message loss.

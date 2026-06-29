@@ -28,9 +28,6 @@ uuid = { version = "1.19", features = ["v7"] }
 
 [dev-dependencies]
 criterion = "0.8"
-# Network-fault simulation for cluster failure-path tests (task #97). Starts as a
-# smoke test; grows into the multi-broker scenario suite once the net seam lands.
-turmoil = "0.7"
 
 [[bench]]
 name = "stream_filter"

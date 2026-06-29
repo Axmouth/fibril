@@ -6,6 +6,8 @@ use std::{
 use tracing_appender::non_blocking;
 use tracing_subscriber::{EnvFilter, Layer, layer::SubscriberExt, util::SubscriberInitExt};
 
+pub mod net;
+
 /// Milliseconds since UNIX epoch
 pub type UnixMillis = u64;
 

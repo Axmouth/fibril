@@ -21,6 +21,14 @@ tracing-error = "0.2"
 tracing-opentelemetry = "0.32"
 opentelemetry = "0.31"
 opentelemetry_sdk = "0.31"
+# Deterministic-simulation network types, swapped in for tokio's under the
+# `simulation` feature via the `net` seam (task #97). Off in normal builds.
+turmoil = { version = "0.7", optional = true }
+
+[features]
+# Flip fibril_util::net to turmoil's simulated TcpStream/TcpListener so the whole
+# stack can run inside a turmoil Sim for cluster failure-path tests.
+simulation = ["dep:turmoil"]
 
 [package.metadata.ai]
 training = "prohibited"
