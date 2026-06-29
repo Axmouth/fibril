@@ -10,6 +10,47 @@ Source tags: `[WL]` worklog, `[PLAN]` replication planning, `[DN]` design notes,
 `[MEM]` memory, `[RACE]` race-windows, `[AUDIT]` audit board, `[AUTHOR]` author note.
 Tiers are grouped by concern, not strictly ordered.
 
+## RESUME HERE (post-compaction 2026-06-29, session 2)
+
+DELETE THIS SECTION once the NEXT item is underway. Transient cursor; durable
+detail lives in the task tracker (#97-#133) and the dev notes.
+
+Both repos were in sync with origin/main at the start of this session; fibril is
+now MANY commits ahead and UNPUSHED (user pushes both repos). No keratin/ganglion
+changes were made this session (all fibril). Standing rules: commit per-brick to
+main, do not push; terse non-conversational commits, no Co-Authored-By; prose
+directive (no semicolons in comments/docs, plain ASCII); no unwrap/expect outside
+tests; keep FOLLOWUPS + docs + surface inventory current per change.
+
+DONE this session: #106 drain (admin trigger + GoingAway broadcast + 3-client
+recognize), #130 drain observable event (3 clients), #107 reconnect-grace policy
+(grace ON by default 5s), #108 owner-scoped resume identity (assessed - already
+safe), #117 failure-modes + operator runbook (reliability/failure-modes), #101
+verified, #129 phase 1 (stream filter perf bench + findings), plus the README
+refresh, the versioned-milestone roadmap (0.1->0.2->1.0, four gates), task graph
+(#102-#133), and the planner zero-alloc fix. #102/#103 folded into #111 (typed
+subscription lifecycle on the receive surface, designed at the API freeze).
+
+IN PROGRESS - #97 deterministic simulation. The net-seam phase is DONE: a
+cfg-gated `fibril_util::net` (tokio normally, turmoil under the `simulation`
+feature) is validated both modes; the protocol crate (handler + replication +
+`Conn` alias) and the client crate are converted and build in both modes, each
+with a `simulation` feature forwarding to `fibril-util/simulation`. The
+compatibility gate is `cargo build -p <crate> --features simulation`. Broker has
+no direct tokio::net; fibril bootstrap has no production net; admin (axum) and the
+ganglion raft transport are deliberately left on tokio (off-path / cross-repo).
+Full plan + rationale: the deterministic-simulation dev note.
+
+NEXT for #97: build an in-process multi-broker harness (construct Broker +
+StromaEngine per turmoil host so the broker's tokio::spawn/time land on the host
+runtime - construct INSIDE the host closure, pass a tempdir path in), then the
+first scenario: 3 brokers, replicated publishes (static coordination, no
+ganglion), kill the owner under a partition, assert no loss + no split-brain
+(epoch fencing) + correct failover. Reuse the run_server / handle_connection
+setup from crates/protocol/tests/handler_tests.rs. Later: ganglion raft transport
+onto the seam (cross-repo - user authorized local sibling patching via the
+../ganglion checkout) for coordination-under-partition scenarios.
+
 - Stream/staging perf levers from the staging-efficiency audit. DONE: removed the
   per-publish replication-cache clone (cache removed entirely, keratin 27940f8) and
   the per-record fan-out round-trip in the stream drain (fibril 115b370, +~23%
