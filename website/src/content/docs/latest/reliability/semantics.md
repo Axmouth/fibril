@@ -17,7 +17,7 @@ Commands are designed to be idempotent and replay-safe.
 
 ## Acknowledgements
 
-Acknowledgements are explicit, idempotent, and final. A bounded ACK window tracks out-of-order acknowledgements near the monotonic `settled_until` frontier without requiring unbounded memory.
+Acknowledgements are explicit, idempotent, and final. Settlements are tracked as a coalesced set of settled offset ranges, from which the monotonic `settled_until` frontier is derived, so out-of-order acknowledgements are handled without a fixed window.
 
 If a subscription is dropped with prefetched but unacknowledged messages, those messages are returned for redelivery instead of being left behind until lease expiry. This keeps unsubscribe and consumer shutdown behavior aligned with at-least-once delivery.
 

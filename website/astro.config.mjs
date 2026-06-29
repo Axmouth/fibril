@@ -40,6 +40,7 @@ export default defineConfig({
             { label: "Dead lettering", slug: "latest/reliability/dead-lettering" },
             { label: "Replication", slug: "latest/reliability/replication" },
             { label: "Recovery quarantine", slug: "latest/reliability/recovery-quarantine" },
+            { label: "Failure modes and operations", slug: "latest/reliability/failure-modes" },
             { label: "Backpressure", slug: "latest/concepts/backpressure" },
             { label: "Many idle queues", slug: "latest/concepts/many-idle-queues" },
             { label: "Benchmarks", slug: "latest/benchmarks" },
