@@ -60,6 +60,7 @@ export default defineConfig({
             { label: "Coordination internals", slug: "latest/development/coordination-internals" },
             { label: "Replication design", slug: "latest/development/replication-design" },
             { label: "Recovery quarantine internals", slug: "latest/development/recovery-internals" },
+            { label: "Deterministic simulation", slug: "latest/development/deterministic-simulation" },
             { label: "Idle queue internals", slug: "latest/development/idle-queue-internals" },
           ],
         },
