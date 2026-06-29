@@ -25,15 +25,25 @@ Tiers are grouped by concern, not strictly ordered.
   its own bottleneck, separate from the broker. See tasks #61/#62/#65 for the topic
   routing + Arc<str> interning follow-ups.
 
-- Stream (fan-out) filter performance + filtering expansion (task #129). The
-  current header filter is an AND of `header == *-glob`, evaluated on the fan-out
-  path. Two phases: (1) assess the per-record x per-subscriber cost under high
-  fan-out and optimize (precompile globs, short-circuit, skip when unfiltered,
-  evaluate once per record where the subscriber set shares a filter); (2) expand
-  the filtering vocabulary (OR groups, negation, value ranges, header-set
-  membership) while staying declarative and bounded - NOT content-routing
-  scripting, which is out of scope (see roadmap). Phase 1 gates phase 2: do not
-  add predicate power before the hot path is measured.
+- Stream (fan-out) filter performance + filtering expansion (task #129).
+  PHASE 1 ASSESSED 2026-06-29 (microbench `crates/broker/benches/stream_filter.rs`,
+  Ryzen 5950X): the common cases are already optimal - an empty/no filter
+  short-circuits at ~3ns and patterns are precompiled at subscribe time
+  (`WildcardPattern`), with an alloc-free `matches`. A filtered match costs ~22ns
+  for 1 clause and ~57ns for 3, dominated by the `HashMap<String,String>` header
+  KEY lookup (~18ns), not the wildcard match (exact 4ns / glob 7ns / multi-seg
+  21ns). The remaining lever is the redundant per-subscriber eval when many
+  subscribers SHARE one filter: it is linear, ~39ns/sub, so a single 2-clause
+  filter across 4096 subscribers is ~160us/record of filter eval. Two phase-2
+  levers, both justified by these baselines: (a) evaluate once per distinct
+  filter per record - cleanest via interning filters as `Arc` and grouping
+  subscribers by Arc identity (note: `try_send` per matched subscriber likely
+  dominates the loop, so dedup saves filter-eval, not the whole per-sub cost); (b)
+  a faster header-key lookup (the SipHash key hashing is the per-clause cost).
+  PHASE 2: expand the filtering vocabulary (OR groups, negation, value ranges,
+  header-set membership) while staying declarative and bounded - NOT
+  content-routing scripting, which is out of scope (see roadmap). The bench is the
+  regression baseline for both.
 
 This file tracks the replication and clustering roadmap leftovers. Non-replication
 feature ideas live in their own track, summarized at the end.

@@ -1174,6 +1174,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "console-subscriber",
+ "criterion",
  "crossbeam",
  "dashmap",
  "fastrand",
