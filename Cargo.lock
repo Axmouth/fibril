@@ -1190,7 +1190,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "turmoil",
  "uuid",
  "winres",
 ]
@@ -1370,6 +1369,7 @@ dependencies = [
  "tracing-error",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "turmoil",
 ]
 
 [[package]]
