@@ -216,6 +216,56 @@ fn spawn_owner_host(sim: &mut turmoil::Sim<'_>, topic: &'static str, payloads: &
     });
 }
 
+/// A follower broker on host `b-follower` that, driven only by its supervised
+/// assignment watcher and a static view pointing at the owner, replicates to
+/// caught-up over the simulated network within `deadline`. Shared by the clean
+/// and the lossy-link catch-up scenarios.
+async fn run_catch_up_follower(
+    topic: &'static str,
+    tag: &str,
+    deadline: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (engine, _dir) = open_engine(tag).await;
+    let broker = Broker::new(engine, test_broker_config(), None);
+
+    let coordination = Arc::new(StaticCoordination::new(
+        "b-follower",
+        follower_snapshot(topic, 1, 1),
+    ));
+    let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
+        coordination.clone(),
+    ));
+    broker.spawn_assignment_watcher_with_follower_replication(
+        coordination.clone(),
+        resolver.clone(),
+        FollowerReplicationWorkerConfig {
+            caught_up_poll_ms: 60_000,
+            ..Default::default()
+        },
+    );
+
+    tokio::time::timeout(deadline, async {
+        loop {
+            let state = broker
+                .follower_replication_worker_snapshot(topic, Partition::new(0), None)
+                .await;
+            if state
+                .as_ref()
+                .is_some_and(|s| s.status == FollowerReplicationWorkerStatus::CaughtUp)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("follower catches up");
+
+    resolver.close_all().await;
+    broker.shutdown().await;
+    Ok(())
+}
+
 /// A follower broker, driven only by its supervised assignment watcher, catches
 /// up to the owner over the simulated network, all on the simulated clock.
 #[test]
@@ -225,47 +275,34 @@ fn follower_catches_up_over_simulated_network() {
 
     let mut sim = turmoil::Builder::new().build();
     spawn_owner_host(&mut sim, topic, payloads);
-
     sim.client("b-follower", async move {
-        let (engine, _dir) = open_engine("follower").await;
-        let broker = Broker::new(engine, test_broker_config(), None);
+        run_catch_up_follower(topic, "follower", Duration::from_secs(30)).await
+    });
 
-        let coordination = Arc::new(StaticCoordination::new(
-            "b-follower",
-            follower_snapshot(topic, 1, 1),
-        ));
-        let resolver = Arc::new(CoordinationProtocolOwnerPeerResolver::new(
-            coordination.clone(),
-        ));
-        broker.spawn_assignment_watcher_with_follower_replication(
-            coordination.clone(),
-            resolver.clone(),
-            FollowerReplicationWorkerConfig {
-                caught_up_poll_ms: 60_000,
-                ..Default::default()
-            },
-        );
+    sim.run().expect("simulation runs to completion");
+}
 
-        tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                let state = broker
-                    .follower_replication_worker_snapshot(topic, Partition::new(0), None)
-                    .await;
-                if state
-                    .as_ref()
-                    .is_some_and(|s| s.status == FollowerReplicationWorkerStatus::CaughtUp)
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("follower catches up over the simulated network");
+/// The same catch-up, but the link between owner and follower drops, repairs, and
+/// delays messages throughout. The replication worker reconnects through the
+/// disruption and still reaches caught-up - the flapping-follower path the
+/// single-node tests cannot exercise. A fixed RNG seed keeps the fault schedule
+/// deterministic across runs.
+#[test]
+fn follower_catches_up_over_lossy_link() {
+    let topic = "sim.lossy.catchup";
+    let payloads: &[&[u8]] = &[b"first", b"second", b"third"];
 
-        resolver.close_all().await;
-        broker.shutdown().await;
-        Ok(())
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(300))
+        .min_message_latency(Duration::from_millis(10))
+        .max_message_latency(Duration::from_millis(150))
+        .fail_rate(0.03)
+        .repair_rate(0.9)
+        .rng_seed(1)
+        .build();
+    spawn_owner_host(&mut sim, topic, payloads);
+    sim.client("b-follower", async move {
+        run_catch_up_follower(topic, "lossy-follower", Duration::from_secs(180)).await
     });
 
     sim.run().expect("simulation runs to completion");
@@ -1013,4 +1050,82 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
         }
     }
     assert!(done.load(Ordering::SeqCst), "scenario runs to completion");
+}
+
+/// Raft coordination converges despite a lossy, latent, message-dropping network.
+///
+/// Three ganglion raft nodes run inside turmoil over the injected transport with
+/// message loss, link flapping, and variable latency applied to every link. The
+/// cluster must still elect a leader and commit a write that replicates to all
+/// three state machines. Whichever node currently holds leadership retries the
+/// write, so the commit survives the re-elections the loss induces. A fixed RNG
+/// seed makes the fault schedule reproducible.
+#[test]
+fn ganglion_raft_cluster_converges_under_message_loss() {
+    use ganglion::CoordinationSnapshot;
+
+    // Host names match the membership addresses baked into start_split_brain_node.
+    let names: [&str; 3] = ["a-owner", "b-follower", "coordinator"];
+    let ids: [u64; 3] = [1, 2, 3];
+
+    // Loss and latency stay well under the raft timers (heartbeat 200ms, election
+    // 1000-2000ms) so a majority can stay connected long enough to make progress -
+    // the point is resilience to a flapping network, not a total outage.
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(600))
+        .min_message_latency(Duration::from_millis(5))
+        .max_message_latency(Duration::from_millis(50))
+        .fail_rate(0.01)
+        .repair_rate(0.95)
+        .rng_seed(7)
+        .build();
+
+    let observed = Arc::new(AtomicUsize::new(0));
+
+    for (name, id) in names.iter().zip(ids) {
+        let host: &'static str = name;
+        let observed = observed.clone();
+        sim.client(host, async move {
+            let coordination = start_split_brain_node(host, id).await;
+
+            // Converge a committed write under the loss. Whoever is leader at the
+            // moment proposes it; the proposal is retried across the re-elections
+            // the loss causes, and every node breaks once it observes the commit.
+            let mut committed = coordination.consensus_node().watch_committed();
+            tokio::time::timeout(Duration::from_secs(300), async {
+                loop {
+                    if committed.borrow_and_update().generation >= 1 {
+                        break;
+                    }
+                    if coordination.consensus_node().is_leader().await {
+                        let _ = coordination
+                            .consensus_node()
+                            .write_snapshot(CoordinationSnapshot {
+                                generation: 1,
+                                ..CoordinationSnapshot::default()
+                            })
+                            .await;
+                    }
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(200), committed.changed()).await;
+                }
+            })
+            .await
+            .expect("cluster commits and replicates a write under message loss");
+            assert!(coordination.consensus_node().committed_snapshot().generation >= 1);
+
+            observed.fetch_add(1, Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(120), async {
+                while observed.load(Ordering::SeqCst) < names.len() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("all nodes observe the committed write");
+
+            Ok(())
+        });
+    }
+
+    sim.run().expect("simulation runs to completion");
 }
