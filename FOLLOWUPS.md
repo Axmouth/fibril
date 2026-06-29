@@ -92,10 +92,15 @@ byte stream with no retransmit). #97 can be considered functionally done as an
 evaluation+harness; madsim remains the documented later escalation only if
 scheduling-order determinism is ever needed.
 
-NEXT (post-#97): wire the replication read/connect timeout slack into the config
-crate / runtime settings (currently named-const defaults with builder overrides),
-and feed the harness into the chaos/soak gate (#115) and cluster-confidence gate
-(#124). With the harness proven across election, replication, failover,
+NEXT (post-#97): the read/connect timeout slack is now config-driven - DONE
+(ReplicationSettings seed + ReplicationRuntimeSettings -> BrokerConfig ->
+ProtocolOwnerPeerResolverConfig::with_timeouts -> peer; documented in
+configuration.md; protocol consts remain the defaults). Captured at peer
+construction (consistent with auth/client peer config), not per-read-live, so a
+runtime change applies when the peer is next rebuilt - acceptable for connection
+timeouts. Remaining: feed the harness into the chaos/soak gate (#115) and
+cluster-confidence gate (#124). With the harness proven across election,
+replication, failover,
 split-brain, and lossy networks, the cluster-confidence gate (#124) has a real
 deterministic base to build on.
 
