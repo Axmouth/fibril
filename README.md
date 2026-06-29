@@ -70,14 +70,36 @@ Common access patterns:
 
 ## What's here
 
-* **Basic TCP protocol implementation**
-  A simple custom protocol for communication between clients and the broker.
+* **Durable work queues** over a custom TCP protocol: publish/subscribe, explicit
+  ack/nack, leasing with redelivery, delayed publish and delayed retry, message
+  TTL, and dead-lettering with configurable policies.
 
-* **Core broker semantics**
-  Minimal support for message enqueuing, delivery, and acknowledgement. The focus is on clarity rather than completeness.
+* **Plexus streams** - a fan-out channel type alongside the work queues, where
+  every subscriber receives every record, with durable named cursors, per-stream
+  durability tiers, and header filters.
 
-* **TUI demo**
-  A terminal UI that visualizes messages moving through the system. Useful for observing behavior and debugging interactions.
+* **Partitioned queues and streams** with client-side key routing and transparent
+  fan-in, plus opt-in wildcard subscribe (subscribe to every channel matching a
+  pattern, auto-picking up new ones).
+
+* **Exclusive consumer groups** - ordered, balanced, sticky, self-healing
+  consumption of a partitioned queue.
+
+* **Experimental clustering** (Ganglion coordination): partition ownership,
+  follower replication, epoch-fenced failover, replica-durable confirms, and live
+  repartitioning.
+
+* **First-party clients** in Rust, TypeScript, and Python (async plus a blocking
+  facade), kept at parity by shared wire vectors.
+
+* **Admin dashboard** for queues, streams, topology, message inspection, DLQ
+  replay, and runtime settings.
+
+* **TUI demo** - a terminal UI that visualizes messages moving through the system.
+
+See the [project status](https://fibril.sh/latest/status/) and
+[implemented surface](https://fibril.sh/latest/implemented-surface/) for exactly
+what is wired and under what conditions.
 
 ## Related components
 
@@ -164,7 +186,8 @@ The current implementation provides a minimal but working set of broker semantic
 * **Subscribe (sub)** to topics and receive messages
 * **Topic plus optional group addressing** (partition selection is internal)
 * **Admin queue management** (create, delete single-node, hide-inactive + search)
-* **Basic Rust and TypeScript clients** for publishing and consuming
+* **Rust, TypeScript, and Python clients** for publishing and consuming (the
+  Python client has an async API plus a thin blocking facade)
 
 ### Delivery model
 
@@ -194,45 +217,41 @@ Each message offset moves through a strict state machine:
 
 * **Ready** → eligible for delivery
 * **Inflight** → leased to a consumer (with deadline)
-* **Acked** → terminal
+* **Settled** → terminal (acked, terminally nacked, or dead-lettered)
 
 Key transitions:
 
 * `Enqueue` → Ready
 * `EnqueueDelayed` → Ready after its `not_before` deadline
 * `PollReadyAndMark` / `MarkInflight` → Inflight
-* `Ack` → Acked (terminal)
+* `Ack` → Settled (terminal)
 * `Nack(requeue=true)` → Ready
 * `CollectExpired` → Inflight → Ready
 
 Key invariants:
 
-* An offset exists in at most one of `{ready, inflight, acked}`
-* ACK is final (no re-entry into delivery)
+* An offset exists in at most one of `{ready, inflight, settled}`
+* Settlement is final (no re-entry into delivery)
 * Delivery eligibility is determined solely by **ready**
 * All operations are idempotent and replay-safe
 
-### Ordering and acknowledgement tracking
+### Ordering and settlement tracking
 
-* **Monotonic ACK frontier (`settled_until`)**
+* **Coalesced settled-range set**
 
-  * Tracks the lowest non-acked offset
-  * Advances only when contiguous ACKs are present
+  * Settlements (ack, terminal nack, dead-letter) are recorded as a set of
+    settled offset ranges, coalesced as they fill in.
+  * Out-of-order settlements are handled without a fixed window: a gap is just a
+    range that has not closed yet.
 
-* **Bounded ACK window**
+* **Monotonic settled frontier (`settled_until`)**
 
-  * Fixed-size bitset (`ACK_WINDOW`) for out-of-order ACKs
+  * Derived from the range set: the end of the contiguous run of settled offsets
+    from 0.
+  * Offsets below it are settled and gone; it advances as gaps close.
 
-  *Note:*
-  ACKs may arrive out of order. Instead of tracking all pending ACKs, a fixed-size window is maintained starting at `ack_window_base` (typically aligned with `settled_until`).
-
-  * Offsets **below `settled_until`** are implicitly considered ACKed
-  * Offsets within `[ack_window_base, ack_window_base + ACK_WINDOW)` are tracked in the bitset
-  * ACKs beyond the window are accepted but not fully materialized in memory
-
-  The ACK frontier (`settled_until`) advances only when contiguous ACKs are observed. As it advances, the window slides forward and old bits are cleared.
-
-  This keeps memory bounded while still allowing efficient out-of-order ACK handling near the frontier.
+This keeps memory proportional to the number of open gaps (usually tiny) rather
+than a fixed window, and the frontier is always exact.
 
 ### Leasing and retries
 
@@ -324,8 +343,10 @@ Performance characteristics are expected to evolve significantly as the system m
   Building client libraries in various languages to make it easier to interact with the broker and test its
   features in real applications.
 
-  Rust client is currently in decent shape, and the TypeScript client covers the same core publish/subscribe surface including delayed publish.
-  Considered languages: Typescript, Python, C#
+  The Rust, TypeScript, and Python clients are at parity across the core surface
+  (publish/subscribe, settlement, delayed publish, TTL, streams, partitioning,
+  consumer groups, wildcard subscribe), kept honest by shared wire vectors.
+  Next considered languages: Go, C#, Java.
 
 * **Admin interface**
 
@@ -367,7 +388,11 @@ Performance characteristics are expected to evolve significantly as the system m
 
 * **Transition from primitive types to newtype wrappers**
 
-  To improve type safety and code clarity, consider introducing newtype wrappers around primitive types like `u64` for offsets, `String` for topic names, etc. This can help prevent mix-ups and make the code more self-documenting.
+  To improve type safety and code clarity, introduce newtype wrappers around
+  primitive types like `u64` for offsets, `String` for topic names, etc.
+
+  Update: Partition, Offset, and Epoch are newtypes today. The remaining
+  Topic/Group newtype + `Arc<str>` pass is folded into the pre-1.0 API freeze.
 
 ## Potential areas to explore:
 
@@ -377,7 +402,9 @@ Performance characteristics are expected to evolve significantly as the system m
 
 * **Message Expiration and TTL**
 
-  Support for expiring messages after a certain time, and handling of expired messages.
+  ~~Support for expiring messages after a certain time, and handling of expired messages.~~
+
+  Update: Message TTL is implemented (per-message `ttl_ms` and per-queue default); expired messages drop or dead-letter.
 
 * **Expiration and cleanup of queues and other resources**
 
@@ -389,7 +416,11 @@ Performance characteristics are expected to evolve significantly as the system m
 
 * **Clustering and distributed coordination**
 
-  Exploring how multiple broker instances can work together, share state, and provide high availability.
+  Update: An experimental cluster path exists (Ganglion coordination): partition
+  ownership, follower replication, epoch-fenced failover, replica-durable
+  confirms, and live repartitioning. It needs more failure testing before it is
+  production-grade high availability, but multiple brokers can share state and
+  fail over today.
 
 * **Direct delivery/Express lane/Speculative Egress**
 
