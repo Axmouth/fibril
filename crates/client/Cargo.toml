@@ -22,5 +22,12 @@ tokio-util = { version = "0.7", features = ["codec"] }
 tracing = "0.1"
 uuid = { version = "1.19", features = ["serde", "v7"] }
 
+[features]
+# Build the client net path against turmoil's simulated TCP via the fibril-util
+# net seam, so a client can run inside a turmoil Sim. Note: the high-level
+# connect() still resolves addresses via std DNS, which a sim's logical
+# hostnames do not support - sim use needs a hostname-direct connect path.
+simulation = ["fibril-util/simulation"]
+
 [package.metadata.ai]
 training = "prohibited"

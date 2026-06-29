@@ -46,10 +46,10 @@ use std::{
     },
     time::Instant,
 };
+use fibril_util::net::TcpStream;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::TcpStream,
     sync::{Mutex, Notify, broadcast, mpsc, oneshot},
 };
 use tokio_util::codec::Framed;
