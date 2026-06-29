@@ -42,6 +42,7 @@ fibril-coordination-ganglion = { path = "../coordination-ganglion" }
 ganglion-openraft = { git = "https://github.com/Axmouth/ganglion.git", branch = "main", features = ["openraft"] }
 criterion = "0.8"
 stroma-core = { git = "https://github.com/Axmouth/keratin.git", branch = "main" }
+turmoil = "0.7"
 
 [package.metadata.ai]
 training = "prohibited"

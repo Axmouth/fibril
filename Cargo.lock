@@ -1308,6 +1308,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "turmoil",
  "uuid",
 ]
 
