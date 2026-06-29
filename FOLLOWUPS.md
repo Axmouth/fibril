@@ -25,17 +25,35 @@ each host its OWN current-thread runtime + LocalSet, so a broker must be built
 INSIDE its host closure and can only be driven from there - cross-host
 orchestration goes via the simulated network or shared atomics (the failover test
 steps the sim and injects the partition from the main thread once a shared
-caught-up flag is set). Run: `cargo test -p fibril-protocol --features simulation
---test simulation_tests`. Dev note "Deterministic simulation testing" stages 3-4
+caught-up flag is set). A fourth test stands up a 3-node ganglion raft cluster
+inside turmoil (leader election + replicated committed write over the simulated
+network). Run: `cargo test -p fibril-protocol --features simulation --test
+simulation_tests`. Dev note "Deterministic simulation testing" stages 3, 4, 4a
 marked done.
 
-NEXT for #97: the returning-old-owner split-brain refusal scenario - this needs
-SHARED coordination so the demoted owner learns it lost ownership, which means
-putting the ganglion raft transport on the `fibril_util::net` seam (cross-repo,
-../ganglion sibling + local patch). With that, scenarios that need real
-coordination-under-partition become possible. Then grow the set: follower
-catch-up + checkpoint install, ISR-floor refusal under partition, repartition
-cutover under delayed acks, coordination under message loss.
+CROSS-REPO DONE (ganglion, committed, UNPUSHED): the raft TCP transport is now
+injectable over a `RaftDialer` (TokioDialer = production, TcpNetworkFactory /
+TcpRaftConnection kept as aliases so callers are unchanged); `serve_connection` +
+frame codec are generic over the stream and `serve_connection` is pub - so a
+caller runs its own accept loop over any transport. ganglion takes NO turmoil dep:
+the TurmoilDialer lives in fibril test code. Also fixed a pre-existing timing-race
+flake in ganglion's `learner_joins_catches_up_and_gets_promoted` (read-after-write
++ stale-leader-id), and re-exported `CoordinationSnapshot` from the ganglion
+umbrella. fibril sim test binds through the `ganglion` umbrella crate, not
+ganglion-openraft directly.
+
+NEXT for #97: the returning-old-owner split-brain refusal scenario, now unblocked.
+Run two brokers each wrapping a LOCAL ganglion node in a real shared 3-node raft
+cluster over the turmoil transport (the third node coordinator-only for majority),
+partition the old owner away, let the majority reassign ownership, then heal and
+assert the returning old owner is demoted by its own watcher and refuses publishes.
+Then grow the set: follower catch-up + checkpoint install, ISR-floor refusal under
+partition, repartition cutover under delayed acks, coordination under message loss.
+Open consideration: a non-leader broker's GanglionCoordination write path forwards
+to the leader - confirm register_self/control_iteration forward cleanly over the
+sim transport (client_write_remote still dials via TokioDialer, so cross-host
+forwarding from a non-member process would need a dialer-generic variant - members
+forward internally over the RaftNetwork, which is already on the dialer).
 
 - Stream/staging perf levers from the staging-efficiency audit. DONE: removed the
   per-publish replication-cache clone (cache removed entirely, keratin 27940f8) and
