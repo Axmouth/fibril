@@ -82,14 +82,16 @@ determinism catches - and only after weighing it against the openraft dep graph.
    the `Conn` alias) and the client crate, each with a `simulation` feature
    forwarding to `fibril-util/simulation`. The broker crate has no direct
    `tokio::net` (its net lives in the protocol crate). The fibril bootstrap has no
-   production `tokio::net` of its own (it uses the converted `run_server`). Left
-   on tokio deliberately: the admin server (axum's `serve` needs a real tokio
-   listener and admin is off the replication/coordination path), and the ganglion
-   raft transport (cross-repo; needed only for coordination scenarios, so a
-   replication-failover scenario driven by static coordination comes first).
-   Known gap for sim use: the high-level client `connect()` resolves addresses
-   via std DNS, which a sim's logical hostnames do not support - in-sim producers
-   either use a hostname-direct connect path or the protocol layer directly.
+   production `tokio::net` of its own (it uses the converted `run_server`). The
+   ganglion raft transport is handled differently (see stage 4a below): instead of
+   a cfg seam, its network factory and peer connection were made generic over a
+   `RaftDialer`, so a simulated transport is injected the way production injects
+   the tokio one - ganglion takes no turmoil dependency. Left on tokio
+   deliberately: only the admin server (axum's `serve` needs a real tokio listener
+   and admin is off the replication/coordination path). Known gap for sim use: the
+   high-level client `connect()` resolves addresses via std DNS, which a sim's
+   logical hostnames do not support - in-sim producers either use a
+   hostname-direct connect path or the protocol layer directly.
 3. **Stand up a multi-broker harness** in-process. DONE. The harness lives in
    `crates/protocol/tests/simulation_tests.rs` (compiled only under
    `--features simulation`). turmoil 0.7 gives each simulated host its own
@@ -110,14 +112,21 @@ determinism catches - and only after weighing it against the openraft dep graph.
    promotes itself under a fenced epoch bump and serves a fresh publish - the
    promoted log continues from exactly the replicated tails (no data loss) and
    promotion happens only under the higher epoch (the fencing mechanism). Both
-   are deterministic (identical wall-clock across repeated runs). The stronger
-   split-brain assertion - a returning old owner being refused - needs shared
-   coordination so the old owner learns it was demoted, which means the ganglion
-   raft transport on the seam (cross-repo); that is the next scenario, not this
-   static-coordination one.
-5. **Grow the scenario set:** the returning-old-owner split-brain refusal (needs
-   ganglion on the seam), follower catch-up + checkpoint install, ISR-floor
-   refusal under partition, repartition cutover under delayed acks, coordination
+   are deterministic (identical wall-clock across repeated runs).
+4a. **Ganglion raft over the simulator.** DONE. ganglion's raft network factory
+   and peer connection are now generic over a `RaftDialer`, and `serve_connection`
+   plus the frame codec are generic over the stream, so a turmoil transport is
+   injected from fibril test code (a `TurmoilDialer`) with no ganglion dependency
+   on the simulator. A test stands up a 3-node ganglion raft cluster inside a
+   turmoil Sim, elects a leader, and replicates a committed write entirely over
+   the simulated network and clock - every vote, append, and commit RPC crosses
+   the injected transport. This is what shared coordination under simulation
+   needs, and it is deterministic across runs.
+5. **Grow the scenario set:** the returning-old-owner split-brain refusal (now
+   unblocked by 4a - run the brokers against a real shared ganglion cluster over
+   the simulator, partition the old owner, and assert it is demoted and refuses
+   on heal), follower catch-up + checkpoint install, ISR-floor refusal under
+   partition, repartition cutover under delayed acks, coordination
    under message loss.
 
 ## Relationship to other testing
