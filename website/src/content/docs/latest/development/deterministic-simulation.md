@@ -73,16 +73,23 @@ determinism catches - and only after weighing it against the openraft dep graph.
 
 1. **De-risk the tool.** DONE - confirmed turmoil 0.7 builds and runs in our
    toolchain.
-2. **The net seam.** DONE (foundation) - `fibril_util::net` re-exports tokio's
-   TCP types normally and turmoil's under the `simulation` feature, validated by
-   a test pair that runs the same code over a real loopback and inside a turmoil
-   Sim. Because the swap is one re-export, call sites just import from
-   `fibril_util::net` (no per-site cfg). REMAINING: convert the actual call sites
-   (broker connection handler, client, follower replication, admin, bootstrap)
-   to import from the seam, add a `simulation` feature on those crates that
-   forwards to `fibril-util/simulation`, and bring the ganglion raft transport
-   onto the seam (cross-repo; needed only for coordination scenarios, so a
-   replication-failover scenario driven by static coordination can come first).
+2. **The net seam.** DONE for the data path. `fibril_util::net` re-exports
+   tokio's TCP types normally and turmoil's under the `simulation` feature,
+   validated by a test pair that runs the same code over a real loopback and
+   inside a turmoil Sim. Because the swap is one re-export, call sites just import
+   from `fibril_util::net` (no per-site cfg). Converted and verified in both build
+   modes: the protocol crate (broker connection handler, follower replication,
+   the `Conn` alias) and the client crate, each with a `simulation` feature
+   forwarding to `fibril-util/simulation`. The broker crate has no direct
+   `tokio::net` (its net lives in the protocol crate). The fibril bootstrap has no
+   production `tokio::net` of its own (it uses the converted `run_server`). Left
+   on tokio deliberately: the admin server (axum's `serve` needs a real tokio
+   listener and admin is off the replication/coordination path), and the ganglion
+   raft transport (cross-repo; needed only for coordination scenarios, so a
+   replication-failover scenario driven by static coordination comes first).
+   Known gap for sim use: the high-level client `connect()` resolves addresses
+   via std DNS, which a sim's logical hostnames do not support - in-sim producers
+   either use a hostname-direct connect path or the protocol layer directly.
 3. **Stand up a multi-broker harness** in-process (shares the bootstrap-wiring
    refactor).
 4. **First real scenario:** a 3-node cluster doing replicated publishes, then
