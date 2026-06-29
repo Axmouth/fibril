@@ -362,54 +362,71 @@ async fn open_protocol_owner_conn(
     client_name: &str,
     client_version: &str,
 ) -> Result<Conn, BrokerError> {
-    let stream = TcpStream::connect(addr.as_str())
-        .await
-        .map_err(|err| BrokerError::Unknown(format!("owner peer connect failed: {err}")))?;
-    let mut conn = tokio_util::codec::Framed::new(stream, ProtoCodec);
+    // Bound connect plus handshake: a partition that drops the SYN or a handshake
+    // response must not hang the follower worker on a half-open connection. On
+    // timeout the worker errors out and retries, redialing once the link is back.
+    let setup = async {
+        let stream = TcpStream::connect(addr.as_str())
+            .await
+            .map_err(|err| BrokerError::Unknown(format!("owner peer connect failed: {err}")))?;
+        let mut conn = tokio_util::codec::Framed::new(stream, ProtoCodec);
 
-    let request_id = 1;
-    conn.send(
-        try_encode(
-            Op::Hello,
-            request_id,
-            &Hello {
-                client_name: client_name.to_string(),
-                client_version: client_version.to_string(),
-                protocol_version: PROTOCOL_V1,
-                resume: None,
-            },
-        )
-        .map_err(protocol_error)?,
-    )
-    .await
-    .map_err(|err| BrokerError::Unknown(format!("owner peer hello send failed: {err}")))?;
-
-    let _: HelloOk = recv_response(&mut conn, request_id, Op::HelloOk)
-        .await
-        .map_err(|err| BrokerError::Unknown(err.to_string()))?;
-
-    if let Some(auth) = auth {
-        let request_id = 2;
+        let request_id = 1;
         conn.send(
             try_encode(
-                Op::Auth,
+                Op::Hello,
                 request_id,
-                &Auth {
-                    username: auth.username.clone(),
-                    password: auth.password.clone(),
+                &Hello {
+                    client_name: client_name.to_string(),
+                    client_version: client_version.to_string(),
+                    protocol_version: PROTOCOL_V1,
+                    resume: None,
                 },
             )
             .map_err(protocol_error)?,
         )
         .await
-        .map_err(|err| BrokerError::Unknown(format!("owner peer auth send failed: {err}")))?;
+        .map_err(|err| BrokerError::Unknown(format!("owner peer hello send failed: {err}")))?;
 
-        let _: () = recv_response(&mut conn, request_id, Op::AuthOk)
+        let _: HelloOk = recv_response(&mut conn, request_id, Op::HelloOk)
             .await
             .map_err(|err| BrokerError::Unknown(err.to_string()))?;
-    }
 
-    Ok(conn)
+        if let Some(auth) = auth {
+            let request_id = 2;
+            conn.send(
+                try_encode(
+                    Op::Auth,
+                    request_id,
+                    &Auth {
+                        username: auth.username.clone(),
+                        password: auth.password.clone(),
+                    },
+                )
+                .map_err(protocol_error)?,
+            )
+            .await
+            .map_err(|err| BrokerError::Unknown(format!("owner peer auth send failed: {err}")))?;
+
+            let _: () = recv_response(&mut conn, request_id, Op::AuthOk)
+                .await
+                .map_err(|err| BrokerError::Unknown(err.to_string()))?;
+        }
+
+        Ok::<Conn, BrokerError>(conn)
+    };
+
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(DEFAULT_OWNER_CONNECT_TIMEOUT_MS),
+        setup,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(BrokerError::Unknown(format!(
+            "owner peer connection setup timed out after {DEFAULT_OWNER_CONNECT_TIMEOUT_MS}ms"
+        ))),
+    }
 }
 
 pub async fn connect_protocol_owner_peer(
@@ -447,6 +464,8 @@ impl ProtocolOwnerPeerConnectConfig {
 pub enum ProtocolReplicationRequestError {
     #[error("connection closed while waiting for response")]
     ConnectionClosed,
+    #[error("timed out after {0}ms waiting for the owner's response")]
+    ReadTimeout(u64),
     #[error("failed to read response frame: {0}")]
     Read(String),
     #[error("failed to encode heartbeat response: {0}")]
@@ -474,6 +493,19 @@ impl ProtocolReplicationRequestError {
 /// This is the transport adapter for the broker's follower worker boundary. It
 /// owns one already-handshaken protocol connection to an owner and serializes
 /// requests on that connection.
+/// Slack added on top of a read's long-poll window before the follower gives up
+/// on the owner's response and drops the connection. A read long-polls for
+/// `max_wait_ms`, so the deadline is `max_wait_ms + slack`; the slack covers round
+/// trip and owner processing. Without a deadline a partition that drops the
+/// in-flight response would leave the worker waiting on a dead connection until
+/// the transport itself broke, which can take a very long time.
+pub const DEFAULT_READ_TIMEOUT_SLACK_MS: u64 = 10_000;
+
+/// Upper bound on establishing a replication connection (TCP connect plus the
+/// HELLO/AUTH handshake). A partition that drops the SYN or a handshake response
+/// must not hang the follower worker on a half-open connection.
+pub const DEFAULT_OWNER_CONNECT_TIMEOUT_MS: u64 = 5_000;
+
 pub struct ProtocolOwnerReplicationPeer {
     conn: Mutex<Option<Conn>>,
     request_lock: Mutex<()>,
@@ -486,6 +518,9 @@ pub struct ProtocolOwnerReplicationPeer {
     /// `StreamReplicationRead` and expects `StreamReplicationReadOk`. The body is
     /// identical to the queue read; only the op differs.
     stream_mode: bool,
+    /// Added to a read's `max_wait_ms` to bound how long the follower waits for
+    /// the owner's response before treating the connection as dead.
+    read_timeout_slack_ms: u64,
 }
 
 impl ProtocolOwnerReplicationPeer {
@@ -498,12 +533,20 @@ impl ProtocolOwnerReplicationPeer {
             close_token: CancellationToken::new(),
             reporter_node_id: None,
             stream_mode: false,
+            read_timeout_slack_ms: DEFAULT_READ_TIMEOUT_SLACK_MS,
         }
     }
 
     /// Stamp replication reads with this follower's identity.
     pub fn with_reporter(mut self, node_id: impl Into<String>) -> Self {
         self.reporter_node_id = Some(node_id.into());
+        self
+    }
+
+    /// Override the slack added to a read's long-poll window before the follower
+    /// gives up on the owner's response. See [`DEFAULT_READ_TIMEOUT_SLACK_MS`].
+    pub fn with_read_timeout_slack_ms(mut self, slack_ms: u64) -> Self {
+        self.read_timeout_slack_ms = slack_ms;
         self
     }
 
@@ -525,6 +568,7 @@ impl ProtocolOwnerReplicationPeer {
             next_request_id: AtomicU64::new(20_000),
             reporter_node_id: None,
             stream_mode: false,
+            read_timeout_slack_ms: DEFAULT_READ_TIMEOUT_SLACK_MS,
             reconnect: Some(ProtocolOwnerPeerConnectConfig {
                 addr,
                 auth,
@@ -641,10 +685,18 @@ impl BrokerOwnerReplicationPeer for ProtocolOwnerReplicationPeer {
                     recv_replication_read_ok_response(&mut conn, request_id).await
                 }
             };
+            // Bound the wait: the owner long-polls up to `max_wait_ms`, so anything
+            // past that plus slack means the response was lost (for example a
+            // partition that dropped it). Give up and drop the connection so the
+            // worker reconnects instead of hanging on a dead socket.
+            let read_deadline_ms = max_wait_ms as u64 + self.read_timeout_slack_ms;
             let read: ReplicationReadOk = match tokio::select! {
                 biased;
                 _ = self.close_token.cancelled() => {
                     Err(ProtocolReplicationRequestError::ConnectionClosed)
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(read_deadline_ms)) => {
+                    Err(ProtocolReplicationRequestError::ReadTimeout(read_deadline_ms))
                 }
                 response = recv => {
                     response

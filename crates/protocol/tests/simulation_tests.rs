@@ -1141,11 +1141,11 @@ fn ganglion_raft_cluster_converges_under_message_loss() {
 /// durability ack. This is the durability-floor safety property under a partition,
 /// which a single node cannot exercise.
 ///
-/// Recovery-after-heal is deliberately not asserted here: the follower
-/// replication read has no client-side timeout, so a partition that drops an
-/// in-flight response leaves the worker waiting on a dead connection until the
-/// transport itself breaks, which a simulated heal does not force. That gap is
-/// tracked separately as a robustness follow-up surfaced by this harness.
+/// After the partition heals the follower reconnects and a later publish confirms
+/// again. That recovery exercises the replication read deadline: a dropped
+/// in-flight response no longer hangs the worker on a dead connection (it bounds
+/// the wait at the long-poll window plus slack, drops the connection, and
+/// redials) - the gap this very harness first surfaced.
 #[test]
 fn durable_publish_unconfirmed_while_replica_partitioned() {
     let topic = "sim.durable";
@@ -1157,12 +1157,16 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
     let caught_up = Arc::new(AtomicBool::new(false));
     let ready_to_partition = Arc::new(AtomicBool::new(false));
     let partitioned = Arc::new(AtomicBool::new(false));
+    let ready_to_heal = Arc::new(AtomicBool::new(false));
+    let healed = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
 
     {
         let caught_up = caught_up.clone();
         let ready_to_partition = ready_to_partition.clone();
         let partitioned = partitioned.clone();
+        let ready_to_heal = ready_to_heal.clone();
+        let healed = healed.clone();
         let done = done.clone();
         sim.client("a-owner", async move {
             let (engine, _dir) = open_engine("durable-owner").await;
@@ -1265,6 +1269,43 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
                 "expected a descriptive replica-confirm timeout, got: {message}"
             );
 
+            // Heal the partition: the follower's read deadline trips, it drops the
+            // dead connection and reconnects, catches up, and a later publish
+            // confirms again.
+            ready_to_heal.store(true, Ordering::SeqCst);
+            tokio::time::timeout(Duration::from_secs(60), async {
+                while !healed.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("partition heals");
+
+            tokio::time::timeout(Duration::from_secs(120), async {
+                loop {
+                    let confirmed = publisher
+                        .publish(
+                            b"after-heal".to_vec(),
+                            unix_millis(),
+                            unix_millis(),
+                            None,
+                            Default::default(),
+                            None,
+                        )
+                        .await
+                        .unwrap()
+                        .await
+                        .unwrap()
+                        .is_ok();
+                    if confirmed {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            })
+            .await
+            .expect("durable confirm resolves again after the replica reconnects");
+
             done.store(true, Ordering::SeqCst);
             broker.shutdown().await;
             Ok(())
@@ -1292,6 +1333,9 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
                 resolver.clone(),
                 FollowerReplicationWorkerConfig {
                     caught_up_poll_ms: 200,
+                    // After a partition the follower can fall behind the owner's
+                    // retained log and need a checkpoint to resume.
+                    allow_checkpoint_install: true,
                     ..Default::default()
                 },
             );
@@ -1328,12 +1372,18 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
     }
 
     let mut did_partition = false;
+    let mut did_heal = false;
     loop {
         let finished = sim.step().expect("simulation step");
         if ready_to_partition.load(Ordering::SeqCst) && !did_partition {
             sim.partition("a-owner", "b-follower");
             partitioned.store(true, Ordering::SeqCst);
             did_partition = true;
+        }
+        if ready_to_heal.load(Ordering::SeqCst) && !did_heal {
+            sim.repair("a-owner", "b-follower");
+            healed.store(true, Ordering::SeqCst);
+            did_heal = true;
         }
         if finished {
             break;
