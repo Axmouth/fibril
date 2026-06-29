@@ -21,7 +21,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use fibril_broker::broker::{
@@ -36,11 +36,22 @@ use fibril_broker::coordination::{
 use fibril_broker::queue_engine::StromaEngine;
 use fibril_coordination_ganglion::GanglionCoordination;
 use fibril_metrics::{ConnectionStats, TcpStats};
-use fibril_protocol::v1::handler::{ConnectionSettings, run_server};
+use fibril_protocol::v1::frame::ProtoCodec;
+use fibril_protocol::v1::handler::{
+    ClientTopologySource, ConnectionSettings, TopologyAdoptionTracker, handle_connection, run_server,
+};
+use fibril_protocol::v1::helper::{try_decode, try_encode};
 use fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver;
+use fibril_protocol::v1::{
+    AdvertisedAddress, Hello, HelloOk, Op, PROTOCOL_V1, QueueTopologyEntry, TopologyOk,
+    TopologyUpdateAck,
+};
 use fibril_storage::Partition;
 use fibril_util::{StaticAuthHandler, unix_millis};
+use futures::{SinkExt, StreamExt};
+use std::time::Instant;
 use stroma_core::{KeratinConfig, SnapshotConfig, StromaKeratinConfig, TempDir};
+use tokio_util::codec::Framed;
 use uuid::Uuid;
 
 /// Build a fresh on-disk StromaEngine in a unique temp directory. The directory
@@ -1507,4 +1518,224 @@ fn follower_installs_checkpoint_after_owner_truncates() {
     });
 
     sim.run().expect("simulation runs to completion");
+}
+
+const TOPO_PORT: u16 = 9300;
+
+/// A topology source whose generation can be bumped at runtime. The routing
+/// content tracks the generation (partitioning_version), so a bump is a real
+/// content change the broker pushes a TopologyUpdate for - standing in for a
+/// repartition cutover.
+struct CutoverTopology {
+    generation: Arc<AtomicU64>,
+}
+
+impl ClientTopologySource for CutoverTopology {
+    fn topology(&self) -> TopologyOk {
+        let generation = self.generation.load(Ordering::SeqCst);
+        TopologyOk {
+            generation,
+            queues: vec![QueueTopologyEntry {
+                topic: "jobs".into(),
+                partition: Partition::new(0),
+                group: None,
+                owner_endpoints: vec![
+                    AdvertisedAddress::parse("10.0.0.9:7000").expect("valid owner endpoint"),
+                ],
+                partitioning_version: generation,
+                partition_count: generation as u32,
+            }],
+            streams: Vec::new(),
+        }
+    }
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+    fn owner_endpoint(
+        &self,
+        _topic: &str,
+        _partition: Partition,
+        _group: Option<&str>,
+    ) -> Option<(String, u64)> {
+        None
+    }
+}
+
+/// A repartition cutover does not finalize while the client's topology ack is
+/// delayed, and finalizes once it arrives.
+///
+/// The broker fences a cutover on the minimum topology generation acked across
+/// its connections. Here the client's ack path to the broker is one-way
+/// partitioned: the broker still pushes the new topology and the client keeps
+/// re-acking, but the acks are dropped, so the broker's adoption minimum must
+/// stay below the new generation (the fence holds, no premature cutover). When
+/// the path is repaired a re-ack lands and the adoption minimum advances to the
+/// new generation (the cutover finalizes). turmoil makes the delayed-ack window
+/// deterministic - a partitioned ack path the in-process tests cannot model.
+#[test]
+fn repartition_cutover_waits_for_delayed_topology_ack() {
+    let generation = Arc::new(AtomicU64::new(1));
+    let tracker = Arc::new(TopologyAdoptionTracker::new());
+
+    let mut sim = turmoil::Builder::new()
+        .simulation_duration(Duration::from_secs(120))
+        .tick_duration(Duration::from_millis(10))
+        .build();
+
+    let client_ready = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+
+    {
+        let generation = generation.clone();
+        let tracker = tracker.clone();
+        sim.host("topo-broker", move || {
+            let generation = generation.clone();
+            let tracker = tracker.clone();
+            async move {
+                let (engine, _dir) = open_engine("cutover-broker").await;
+                let broker = Broker::new(engine, test_broker_config(), None);
+                let source = Arc::new(CutoverTopology { generation });
+
+                let listener =
+                    turmoil::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, TOPO_PORT)).await?;
+                let (server, peer) = listener.accept().await?;
+                let connection_stats = ConnectionStats::new();
+                let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+                handle_connection(
+                    server,
+                    broker,
+                    TcpStats::new(10),
+                    connection_stats,
+                    conn_id,
+                    None::<StaticAuthHandler>,
+                    ConnectionSettings::new(Some(60)),
+                    Some(source as Arc<dyn ClientTopologySource>),
+                    None,
+                    Some(tracker),
+                )
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+                Ok(())
+            }
+        });
+    }
+
+    {
+        let client_ready = client_ready.clone();
+        let done = done.clone();
+        sim.client("topo-client", async move {
+            let stream = turmoil::net::TcpStream::connect(("topo-broker", TOPO_PORT)).await?;
+            let mut framed = Framed::new(stream, ProtoCodec);
+
+            framed
+                .send(
+                    try_encode(
+                        Op::Hello,
+                        1,
+                        &Hello {
+                            client_name: "cutover-client".into(),
+                            client_version: "0".into(),
+                            protocol_version: PROTOCOL_V1,
+                            resume: None,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await?;
+            loop {
+                let frame = framed.next().await.expect("hello response")?;
+                if frame.opcode == Op::HelloOk as u16 {
+                    let _: HelloOk = try_decode(&frame).unwrap();
+                    break;
+                }
+            }
+            client_ready.store(true, Ordering::SeqCst);
+
+            let (mut sink, mut source) = framed.split();
+            let seen = Arc::new(AtomicU64::new(0));
+            let reader_seen = seen.clone();
+            tokio::spawn(async move {
+                while let Some(Ok(frame)) = source.next().await {
+                    if frame.opcode == Op::TopologyUpdate as u16 {
+                        if let Ok(topo) = try_decode::<TopologyOk>(&frame) {
+                            reader_seen.store(topo.generation, Ordering::SeqCst);
+                        }
+                    }
+                }
+            });
+
+            // Re-ack the latest seen generation until the test is done. While the
+            // ack path is partitioned these sends are dropped; one lands once it
+            // is repaired.
+            while !done.load(Ordering::SeqCst) {
+                let generation = seen.load(Ordering::SeqCst);
+                if generation > 0 {
+                    let _ = sink
+                        .send(
+                            try_encode(
+                                Op::TopologyUpdateAck,
+                                7,
+                                &TopologyUpdateAck { generation },
+                            )
+                            .unwrap(),
+                        )
+                        .await;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Ok(())
+        });
+    }
+
+    // Orchestrator: once the client is connected, cut its ack path and bump the
+    // generation. Hold long enough for several dropped re-acks, assert the fence
+    // held (adoption never reached the new generation), then repair and assert it
+    // finalizes.
+    let mut phase = 0u8;
+    let mut hold = 0u32;
+    loop {
+        let finished = sim.step().expect("simulation step");
+        match phase {
+            // Freeze the client<->broker link (messages are queued in order, not
+            // dropped), then bump the generation. The broker's push and the
+            // client's ack are both delayed in flight.
+            0 if client_ready.load(Ordering::SeqCst) => {
+                sim.hold("topo-client", "topo-broker");
+                generation.store(2, Ordering::SeqCst);
+                phase = 1;
+                hold = 0;
+            }
+            // While the link is held the topology exchange cannot complete, so the
+            // adoption minimum must stay below the new generation - the cutover
+            // fence holds. Hold past the 1s topology-tick so the new push is
+            // generated (and queued) before release.
+            1 => {
+                assert_ne!(
+                    tracker.min_acked_generation(),
+                    Some(2),
+                    "cutover fence must hold while the topology exchange is delayed"
+                );
+                hold += 1;
+                if hold >= 200 {
+                    sim.release("topo-client", "topo-broker");
+                    phase = 2;
+                }
+            }
+            // Released: the queued push reaches the client, it acks, and the
+            // adoption minimum advances - the cutover finalizes.
+            2 if tracker.min_acked_generation() == Some(2) => {
+                done.store(true, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+        if done.load(Ordering::SeqCst) || finished {
+            break;
+        }
+    }
+    assert_eq!(
+        tracker.min_acked_generation(),
+        Some(2),
+        "cutover finalizes once the delayed topology exchange completes"
+    );
+    assert!(done.load(Ordering::SeqCst), "scenario runs to completion");
 }
