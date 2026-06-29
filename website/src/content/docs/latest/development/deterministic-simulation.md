@@ -105,7 +105,7 @@ determinism catches - and only after weighing it against the openraft dep graph.
 4. **First real scenario.** DONE. Two scenarios run on the simulated network
    with static/scripted coordination (no ganglion transport on the seam yet):
    (a) a follower, driven only by its supervised assignment watcher, catches up
-   to the owner over the simulated network on the simulated clock; (b) once
+   to the owner over the simulated network on the simulated clock. (b) Once
    caught up, the orchestrator partitions the owner away and the follower
    promotes itself under a fenced epoch bump and serves a fresh publish - the
    promoted log continues from exactly the replicated tails (no data loss) and

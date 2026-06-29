@@ -73,7 +73,7 @@ fn test_broker_config() -> BrokerConfig {
 
 /// Smoke test: the broker actually runs inside a turmoil host - construction,
 /// background tasks, keratin disk I/O, and a publish whose confirm resolves on
-/// the simulated clock. No network is involved; this isolates the question of
+/// the simulated clock. No network is involved, which isolates the question of
 /// whether the broker cooperates with turmoil's per-host current-thread runtime
 /// and simulated time before any cluster scenario builds on it.
 #[test]
