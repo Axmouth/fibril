@@ -160,9 +160,13 @@ determinism catches - and only after weighing it against the openraft dep graph.
 
 ## Relationship to other testing
 
-This complements rather than replaces the existing coverage. The
-[chaos and soak suite](/latest/) (task #115) exercises real wall-clock runs;
-deterministic simulation finds the rare interleavings a soak might hit only once
-in a thousand runs, and reproduces them exactly. Loom (task #96, assessed as low
-fit) targets fine-grained atomics, a different layer again. Together they form
-the cluster-confidence gate for 1.0.
+This complements rather than replaces the existing coverage. The chaos and soak
+suite (task #115, in `crates/broker/tests/soak.rs`) exercises a real broker over
+real wall-clock time with real fsync: crash recovery from disk across restart
+cycles, and sustained concurrent load with no loss or duplication. It is CI-small
+by default and scales into a long soak via `FIBRIL_SOAK_*` environment variables.
+Deterministic simulation instead finds the rare interleavings a soak might hit
+only once in a thousand runs, and reproduces them exactly. Loom (task #96,
+assessed as low fit) targets fine-grained atomics, a different layer again.
+Together with a real multi-node run (task #116) they form the cluster-confidence
+gate for 1.0.

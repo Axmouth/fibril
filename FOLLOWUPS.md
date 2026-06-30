@@ -98,9 +98,21 @@ ProtocolOwnerPeerResolverConfig::with_timeouts -> peer; documented in
 configuration.md; protocol consts remain the defaults). Captured at peer
 construction (consistent with auth/client peer config), not per-read-live, so a
 runtime change applies when the peer is next rebuilt - acceptable for connection
-timeouts. Remaining: feed the harness into the chaos/soak gate (#115) and
-cluster-confidence gate (#124). With the harness proven across election,
-replication, failover,
+timeouts.
+
+CHAOS/SOAK (#115) DONE (first suite): crates/broker/tests/soak.rs - real broker,
+real wall-clock, real fsync. (1) durable_crash_recovery_soak restarts the engine
+from disk across cycles, asserts every confirmed message survives + delivered
+exactly once + strictly increasing offsets + settled (acked) messages never
+redelivered after restart. (2) concurrent_load_no_loss_soak runs N producers +
+a consumer for a wall-clock window, asserts every confirmed publish consumed
+exactly once (no dup offsets). CI-small defaults; FIBRIL_SOAK_CYCLES/BATCH/SECS/
+PRODUCERS scale to a real soak. Cluster-confidence gate (#124) now has DST (done)
++ chaos/soak (seeded); only the real multi-node deployment run (#116) remains.
+Next soak growth: a multi-broker chaos variant (kill owner under load, assert
+failover + no loss) once #116's real multi-node harness exists.
+
+With the DST harness proven across election, replication, failover,
 split-brain, and lossy networks, the cluster-confidence gate (#124) has a real
 deterministic base to build on.
 
