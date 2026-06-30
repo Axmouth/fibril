@@ -1,6 +1,6 @@
 [package]
 name = "fibril-coordination-ganglion"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "Spike: ganglion raft-backed implementation of fibril's Coordination trait"
 

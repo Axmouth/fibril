@@ -1,6 +1,6 @@
 [package]
 name = "fibril-common"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 # Dependency-light home for value types that originate at the fibril (broker)

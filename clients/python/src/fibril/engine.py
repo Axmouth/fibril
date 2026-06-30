@@ -45,7 +45,7 @@ class EngineOptions:
     """Connection-level settings the engine needs to open and run a session."""
 
     client_name: str = "fibril-python"
-    client_version: str = "0.1.0"
+    client_version: str = "0.2.0"
     auth: Optional[wire.Auth] = None
     resume_identity: Optional[wire.ResumeIdentity] = None
     reconnect_reconcile_policy: wire.ReconcilePolicy = "restore_client_subscriptions"

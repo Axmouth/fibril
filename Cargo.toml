@@ -18,6 +18,12 @@ members = [
 
 resolver = "3"
 
+# All crates in this repo share one version and move in lockstep, inheriting it
+# via `version.workspace = true`. Ganglion and Keratin are separate repos that
+# carry their own version lines.
+[workspace.package]
+version = "0.2.0"
+
 [workspace.metadata.sovereignty]
 ai-training = "prohibited"
 policy-url = "https://github.com/axmouth/fibril/blob/main/AI_POLICY.md"

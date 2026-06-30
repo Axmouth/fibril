@@ -26,7 +26,7 @@ AssignmentHandler = Callable[[wire.AssignmentChanged], None]
 GoingAwayHandler = Callable[[wire.GoingAway], None]
 
 DEFAULT_CLIENT_NAME = "Fibril Python Client"
-DEFAULT_CLIENT_VERSION = "0.1.0"
+DEFAULT_CLIENT_VERSION = "0.2.0"
 
 
 def normalize_group(group: Optional[str]) -> Optional[str]:

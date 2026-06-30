@@ -1080,7 +1080,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
 name = "fibril"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-admin"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "askama",
  "async-trait",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-benches"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1167,7 +1167,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-broker"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "dashmap",
@@ -1233,14 +1233,14 @@ dependencies = [
 
 [[package]]
 name = "fibril-common"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "fibril-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "clap",
  "serde",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-coordination-ganglion"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fibril-broker",
  "fibril-storage",
@@ -1264,7 +1264,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-metrics"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1334,7 +1334,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-tui-example"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "fibril-util"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "console-subscriber",
