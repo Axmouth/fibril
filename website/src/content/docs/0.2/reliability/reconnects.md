@@ -1,0 +1,121 @@
+---
+title: Reconnects
+description: What reconnect grace does and what clients can rely on today.
+---
+
+Reconnect grace is for short network breaks where the broker process is still
+running and the client can reconnect with the same resume identity.
+
+When grace is enabled, a disconnected client is not cleaned up immediately. The
+broker keeps the logical connection dormant for the configured window. If the
+client reconnects with the resume identity before the window expires, the broker
+reattaches the socket to that logical connection.
+
+## What It Helps With
+
+Reconnect grace can preserve server-side subscriptions long enough for late
+settle requests to arrive after a brief TCP break.
+
+For example:
+
+1. A client receives a message.
+2. The socket breaks before the client sends `ack`.
+3. The client reconnects before grace expires.
+4. The client sends the `ack` against the resumed logical connection.
+
+In that case, the broker can accept the settlement instead of immediately
+returning the message for redelivery.
+
+## What It Does Not Do Yet
+
+Current Rust and TypeScript clients store resume identity and use it for
+explicit `reconnect()`. They also make one conservative automatic reconnect
+attempt before a new publish, subscribe, or declare operation when the previous
+engine is already known to be closed.
+
+Publisher handles created from a client use the latest connection engine after
+explicit or automatic reconnect. New subscriptions created after reconnect also
+use the latest engine.
+
+After a successful resume, Rust and TypeScript clients send the broker the
+subscription metadata they still believe is active. The broker compares it with
+the server-side logical connection and replies with a reconciliation result.
+When the broker reports that a subscription should be kept, the client routes
+new deliveries for that subscription back into the existing subscription stream.
+If the broker keeps the subscription with a different server subscription id,
+the clients remap the existing stream to that id.
+
+The default reconciliation policy is conservative:
+
+- Subscriptions present on both sides with matching topic, group, partition,
+  prefetch, and ack mode are kept.
+- Subscriptions reported by the client but missing on the server are closed on
+  the client.
+- Subscriptions with conflicting metadata are closed on the client.
+- Subscriptions present on the server but missing from the client are dropped by
+  the broker, because no client stream is listening for them.
+
+Both clients also expose an opt-in restore policy. With that policy, a
+client-owned subscription that is missing server-side is recreated by the
+broker, and the existing client stream continues with the broker's new
+subscription id. Metadata mismatches are still treated as unsafe.
+
+The clients do not replay operations that were already in flight when the socket
+failed. This avoids silently duplicating confirmed publishes whose frame may
+have reached the broker before the confirmation was lost.
+
+If resume is not accepted, or the broker reports that the client and server
+disagree about a subscription, treat that stream as unsafe and recreate the
+subscription at the application level.
+
+Today, Rust and TypeScript subscription receive APIs report a closed
+subscription as end-of-stream: Rust returns `None`, and TypeScript returns
+`null` or ends async iteration. They do not yet attach a specific
+reconciliation-close reason to that stream.
+
+Reconnect grace is also not durable restart recovery. If the broker process
+restarts, the in-memory dormant connection state is gone.
+
+## Configuration
+
+Reconnect grace is controlled by the runtime setting
+`connection.reconnect_grace_ms`.
+
+It is on by default (5000 ms) in the server seed, so a transient client blip
+resumes transparently. Set it to 0 to disable, or seed a different window on
+first boot:
+
+```toml
+[runtime_seed.connection]
+reconnect_grace_ms = 5000
+```
+
+You can also seed it with:
+
+- `FIBRIL_RECONNECT_GRACE_MS`
+- `--reconnect-grace-ms`
+
+After runtime settings exist, edit the value from the admin settings page or
+the runtime settings API.
+
+## Current Client Signal
+
+Rust and TypeScript explicit reconnect calls return the broker handshake
+outcome. Use it to tell whether the broker actually resumed the previous
+logical connection or started a fresh one.
+
+If the outcome is not `resumed`, treat old subscriptions and unsettled local
+work as unsafe to continue without a fresh application-level decision.
+
+Automatic reconnect can be disabled in both clients. The default is intentionally
+small: one attempt before a new operation, not an unbounded background loop.
+
+## Operator Visibility
+
+The admin overview page exposes reconnect and subscription reconciliation
+counters since broker start. Use them to tell whether clients are resuming,
+being rejected, entering grace, expiring grace, keeping subscriptions, restoring
+subscriptions, or having subscriptions closed during reconciliation.
+
+The TCP metrics log also includes the same totals. Reconciliation completion is
+logged with the client id, connection id, policy, and per-action counts.
