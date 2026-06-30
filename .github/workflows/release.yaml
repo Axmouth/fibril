@@ -1,0 +1,72 @@
+# Release workflow: on a v<version> tag, build and push version-tagged server
+# images and cut a GitHub release. The tag is created by scripts/release.sh
+# (locally) and pushed by a maintainer; this workflow turns it into artifacts.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  server-image:
+    name: Versioned server image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Derive version tags
+        id: ver
+        run: |
+          ref="${GITHUB_REF_NAME}"          # e.g. v0.2.0
+          version="${ref#v}"                # 0.2.0
+          minor="${version%.*}"             # 0.2
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "minor=$minor" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build server Docker image
+        run: docker build -f Dockerfile --build-arg VCS_REF="$GITHUB_SHA" -t fibril-server:rel .
+
+      - name: Tag and push version-tagged images
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fibril-server"
+          v="${{ steps.ver.outputs.version }}"
+          m="${{ steps.ver.outputs.minor }}"
+          for t in "$v" "$m" latest; do
+            docker tag fibril-server:rel "$image:$t"
+            docker push "$image:$t"
+          done
+
+  github-release:
+    name: GitHub release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Extract changelog section for this version
+        id: notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\["v"\\]" {grab=1; next}
+            grab && /^## \[/ {exit}
+            grab {print}
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No CHANGELOG entry for $version" > release-notes.md
+          fi
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "fibril ${{ github.ref_name }}"
+          body_path: release-notes.md

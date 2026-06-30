@@ -38,32 +38,44 @@ all four of these hold.
    with a failure-semantics runbook, so restarts and upgrades are first-class.
 4. Security baseline. TLS in transit and auth/authz beyond the static handler.
 
-### 0.1 (current)
+### 0.1
 
 Durable single-node queues and Plexus streams, the Rust, TypeScript, and Python
 clients, the admin dashboard, and an experimental cluster path (coordination,
 replication, failover, live repartitioning). Single-node features are Available,
 the cluster path is Experimental, and the API and wire protocol may still change.
 
-### 0.2 (next)
+### 0.2 (current)
 
-Operational ergonomics and reconnect polish:
+Cluster confidence and operational hardening - **gate 1 (cluster confidence) is
+met**:
 
-- Graceful drain announcement so a planned restart or upgrade is transparent to
-  in-flight work (gate 3).
-- Reconnect reconciliation polish: a typed subscription-close reason,
-  auto-resubscribe for safe recreate cases, and resolved grace-policy defaults.
+- Deterministic simulation testing (turmoil): a multi-broker harness covering
+  election, replication, failover, split-brain, lossy networks, durability floor,
+  checkpoint install, and repartition cutover.
+- A chaos and soak suite (crash recovery and sustained-load no-loss) and a real
+  multi-node failover validation run.
+- Graceful drain announcement so a planned restart is transparent to in-flight
+  work (gate 3), resolved reconnect grace-policy defaults, and configurable
+  replication read/connect timeouts.
+- The versioning and release process itself: a shared repo version, a changelog,
+  per-repo release scripts with an overlord, and version-tagged images.
+
+The cluster path stays labeled Experimental until the remaining gates land.
+
+### 0.3 (next)
+
+Reconnect reconciliation polish and the start of the freeze:
+
+- A typed subscription-close reason and auto-resubscribe for safe recreate cases.
+- Durable restart reconciliation finishing the operational lifecycle (gate 3).
 - Start the freeze work: the Offset/Topic newtype plus `Arc<str>` pass (gate 2).
 
 ### Toward 1.0 (later 0.x minors)
 
 Each subsequent minor knocks off part of a gate, incrementally:
 
-- Durable restart reconciliation and a failure-semantics runbook finish the
-  operational lifecycle (gate 3).
 - TLS and authz land the security baseline (gate 4).
-- Deterministic simulation, a chaos and soak suite, and a real multi-node run
-  build cluster confidence (gate 1).
 - The wire protocol is versioned with a back-compat policy and the client APIs
   are frozen (gate 2).
 
