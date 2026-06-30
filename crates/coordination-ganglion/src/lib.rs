@@ -6,7 +6,7 @@
 //! `watch::Receiver<CoordinationSnapshot>` fibril consumes. Reads are sync
 //! (trait-compatible); proposals are async and leader-only, matching the
 //! controller-loop model. See the coordination internals dev note:
-//! https://fibril.sh/latest/development/coordination-internals/
+//! https://fibril.sh/development/coordination-internals/
 
 use std::{collections::HashMap, time::Duration};
 
@@ -2321,7 +2321,7 @@ impl GanglionCoordination {
     /// One embedded-controller iteration, gated on raft leadership.
     ///
     /// Implements the controller-loop shape (see the coordination internals dev
-    /// note, https://fibril.sh/latest/development/coordination-internals/):
+    /// note, https://fibril.sh/development/coordination-internals/):
     /// read committed state, run the pure placement planner over the given
     /// live-node set, stamp fencing epochs (owner change bumps, follower churn
     /// holds), and propose through a guarded CAS write — retrying when another

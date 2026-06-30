@@ -7,7 +7,7 @@
 [![TypeScript client CI](https://github.com/Axmouth/fibril/actions/workflows/typescript-client-ci.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/typescript-client-ci.yaml)
 [![Deploy website](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml/badge.svg)](https://github.com/Axmouth/fibril/actions/workflows/deploy-website.yaml)
 
-[Docs](https://fibril.sh/latest/) · [Run Fibril](https://fibril.sh/latest/deployment/source/)
+[Docs](https://fibril.sh/) · [Run Fibril](https://fibril.sh/deployment/source/)
 
 <img src="./bannerlogo.png" width="600" alt="Fibril Logo">
 
@@ -97,8 +97,8 @@ Common access patterns:
 
 * **TUI demo** - a terminal UI that visualizes messages moving through the system.
 
-See the [project status](https://fibril.sh/latest/status/) and
-[implemented surface](https://fibril.sh/latest/implemented-surface/) for exactly
+See the [project status](https://fibril.sh/status/) and
+[implemented surface](https://fibril.sh/implemented-surface/) for exactly
 what is wired and under what conditions.
 
 ## Related components
