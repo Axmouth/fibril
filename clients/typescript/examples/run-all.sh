@@ -15,6 +15,11 @@ REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 PORT="${FIBRIL_PORT:-9876}"
 ADDR="${FIBRIL_ADDR:-127.0.0.1:$PORT}"
 
+# The examples import the published package surface (@fibril/client, which
+# resolves to dist/index.js), so compile the client before running them.
+echo "building @fibril/client..."
+(cd "$CLIENT_DIR" && npm run --silent build)
+
 if [[ "${FIBRIL_EXTERNAL_BROKER:-0}" != "1" ]]; then
   SERVER="$REPO_ROOT/target/debug/fibril-server"
   if [[ ! -x "$SERVER" ]]; then
@@ -33,6 +38,14 @@ if [[ "${FIBRIL_EXTERNAL_BROKER:-0}" != "1" ]]; then
     grep -qiE "uptime|tcp" "$DATA_DIR/server.log" 2>/dev/null && break
     sleep 0.3
   done
+  # Fail loudly if the broker died (for example the port was already taken by
+  # another broker) rather than silently running the examples against whatever
+  # else is listening on the port.
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "broker did not start (is port $PORT already in use?); server log:" >&2
+    cat "$DATA_DIR/server.log" >&2
+    exit 1
+  fi
 fi
 
 failures=0
