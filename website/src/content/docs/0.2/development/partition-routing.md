@@ -1,6 +1,8 @@
 ---
 title: Partition routing
-description: Development policy for keeping partition selection internal until sharding is designed.
+description: Development policy for keeping partition selection internal until
+  sharding is designed.
+slug: 0.2/development/partition-routing
 ---
 
 This is a development note. User-facing docs should describe queues by topic and optional group unless partition ownership becomes a real operator concern.
@@ -21,8 +23,8 @@ Keeping partition internal lets the implementation evolve from today's default p
 
 ## Implementation Guidance
 
-- Admin UI and client docs should avoid partition fields.
-- Admin API request bodies can omit partition where possible.
-- API responses may include partition while internal storage keys still expose it.
-- Tests can use partition `0` when exercising current storage behavior, but should not describe it as an operator choice.
-- If a future feature needs explicit partition targeting, document it as a specialized routing mode rather than the default queue model.
+* Admin UI and client docs should avoid partition fields.
+* Admin API request bodies can omit partition where possible.
+* API responses may include partition while internal storage keys still expose it.
+* Tests can use partition `0` when exercising current storage behavior, but should not describe it as an operator choice.
+* If a future feature needs explicit partition targeting, document it as a specialized routing mode rather than the default queue model.

@@ -1,11 +1,13 @@
 ---
 title: Coordination internals
-description: Development notes on cohort assignment, generation fencing, placement, and why load data is never authority.
+description: Development notes on cohort assignment, generation fencing,
+  placement, and why load data is never authority.
+slug: 0.2/development/coordination-internals
 ---
 
 This is a development note. User-facing behavior lives in
-[clustering](/latest/concepts/clustering/) and
-[consumer groups](/latest/concepts/consumer-groups/). This page records how the
+[clustering](/0.2/concepts/clustering/) and
+[consumer groups](/0.2/concepts/consumer-groups/). This page records how the
 coordinator stays simple and still safe.
 
 ## The gate is the correctness backstop, the plan is advisory
@@ -27,13 +29,13 @@ and everything advisory falls back to them.
 The published assignment document carries a `generation`, bumped only when the
 assignment content actually changes, so re-publishing a stable plan is a no-op.
 
-- Per-cohort, not one shared counter. Each cohort document is its own
+* Per-cohort, not one shared counter. Each cohort document is its own
   authoritative version. A single cluster-wide counter would force re-stamping
   every cohort whenever any one changed, for no correctness gain.
-- Durable in the document, not an in-memory counter. The generation is read back
+* Durable in the document, not an in-memory counter. The generation is read back
   from the committed attribute before each publish, so it stays monotonic across a
   controller leader change.
-- Owners fence stale plans. An owner ignores any plan older than the one it holds,
+* Owners fence stale plans. An owner ignores any plan older than the one it holds,
   so a late or out-of-order slice never overwrites a newer one. An equal
   generation is still re-resolved, because local subscriptions may have changed
   since the last apply.
@@ -57,11 +59,11 @@ a queue's partitions) rather than packing partitions onto one broker.
 
 Two load signals are kept separate and advisory:
 
-- Node load (how good a broker is as an owner/follower candidate) belongs on the
+* Node load (how good a broker is as an owner/follower candidate) belongs on the
   coordination heartbeat path as a compact report, not as high-frequency durable
   state. The controller writes durable assignment decisions, not every transient
   sample.
-- Partition load (which partition keyless traffic should prefer) is a routing
+* Partition load (which partition keyless traffic should prefer) is a routing
   hint, partition-aware at the metrics surface.
 
 Both are future direction beyond the current spread-first placement. The
@@ -80,5 +82,5 @@ id. The per-partition gate still keeps delivery correct in the meantime.
 
 ## See also
 
-- [Clustering](/latest/concepts/clustering/) and [consumer groups](/latest/concepts/consumer-groups/) for the user-facing model.
-- [Replication design](/latest/development/replication-design/) for the durability side of coordination.
+* [Clustering](/0.2/concepts/clustering/) and [consumer groups](/0.2/concepts/consumer-groups/) for the user-facing model.
+* [Replication design](/0.2/development/replication-design/) for the durability side of coordination.

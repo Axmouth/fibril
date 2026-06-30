@@ -1,6 +1,7 @@
 ---
 title: Reconnects
 description: What reconnect grace does and what clients can rely on today.
+slug: 0.2/reliability/reconnects
 ---
 
 Reconnect grace is for short network breaks where the broker process is still
@@ -47,12 +48,12 @@ the clients remap the existing stream to that id.
 
 The default reconciliation policy is conservative:
 
-- Subscriptions present on both sides with matching topic, group, partition,
+* Subscriptions present on both sides with matching topic, group, partition,
   prefetch, and ack mode are kept.
-- Subscriptions reported by the client but missing on the server are closed on
+* Subscriptions reported by the client but missing on the server are closed on
   the client.
-- Subscriptions with conflicting metadata are closed on the client.
-- Subscriptions present on the server but missing from the client are dropped by
+* Subscriptions with conflicting metadata are closed on the client.
+* Subscriptions present on the server but missing from the client are dropped by
   the broker, because no client stream is listening for them.
 
 Both clients also expose an opt-in restore policy. With that policy, a
@@ -92,8 +93,8 @@ reconnect_grace_ms = 5000
 
 You can also seed it with:
 
-- `FIBRIL_RECONNECT_GRACE_MS`
-- `--reconnect-grace-ms`
+* `FIBRIL_RECONNECT_GRACE_MS`
+* `--reconnect-grace-ms`
 
 After runtime settings exist, edit the value from the admin settings page or
 the runtime settings API.

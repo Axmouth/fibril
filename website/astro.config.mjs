@@ -1,9 +1,18 @@
 import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
+import starlightVersions from "starlight-versions";
 import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   site: "https://fibril.sh",
+  // The unversioned docs at the site root are the current version (labeled
+  // "Latest" in the version picker). Released versions are archived under their
+  // own slug (e.g. /0.2/) by starlight-versions. These redirects keep the older
+  // /latest/* URLs working after current docs moved to the root.
+  redirects: {
+    "/latest": "/",
+    "/latest/[...slug]": "/[...slug]",
+  },
   integrations: [
     starlight({
       title: "Fibril",
@@ -16,53 +25,57 @@ export default defineConfig({
       social: [
         { icon: "github", label: "GitHub", href: "https://github.com/Axmouth/fibril" },
       ],
+      plugins: [
+        starlightVersions({
+          versions: [{ slug: "0.2" }],
+        }),
+      ],
       sidebar: [
         {
           label: "Start Here",
           items: [
-            { label: "Overview", slug: "latest" },
-            { label: "Quickstart", slug: "latest/quickstart" },
-            { label: "Client usage", slug: "latest/clients" },
-            { label: "Configuration", slug: "latest/configuration" },
-            { label: "Project status", slug: "latest/status" },
-            { label: "Implemented surface", slug: "latest/implemented-surface" },
+            { label: "Quickstart", slug: "quickstart" },
+            { label: "Client usage", slug: "clients" },
+            { label: "Configuration", slug: "configuration" },
+            { label: "Project status", slug: "status" },
+            { label: "Implemented surface", slug: "implemented-surface" },
           ],
         },
         {
           label: "Concepts",
           items: [
-            { label: "Core model", slug: "latest/concepts/core-model" },
-            { label: "Plexus streams", slug: "latest/concepts/plexus-streams" },
-            { label: "Consumer groups", slug: "latest/concepts/consumer-groups" },
-            { label: "Clustering and coordination", slug: "latest/concepts/clustering" },
-            { label: "Reliability semantics", slug: "latest/reliability/semantics" },
-            { label: "Retries and delays", slug: "latest/reliability/retries-delays" },
-            { label: "Dead lettering", slug: "latest/reliability/dead-lettering" },
-            { label: "Replication", slug: "latest/reliability/replication" },
-            { label: "Recovery quarantine", slug: "latest/reliability/recovery-quarantine" },
-            { label: "Failure modes and operations", slug: "latest/reliability/failure-modes" },
-            { label: "Backpressure", slug: "latest/concepts/backpressure" },
-            { label: "Many idle queues", slug: "latest/concepts/many-idle-queues" },
-            { label: "Benchmarks", slug: "latest/benchmarks" },
-            { label: "Roadmap", slug: "latest/roadmap" },
-            { label: "Deployment", slug: "latest/deployment/source" },
+            { label: "Core model", slug: "concepts/core-model" },
+            { label: "Plexus streams", slug: "concepts/plexus-streams" },
+            { label: "Consumer groups", slug: "concepts/consumer-groups" },
+            { label: "Clustering and coordination", slug: "concepts/clustering" },
+            { label: "Reliability semantics", slug: "reliability/semantics" },
+            { label: "Retries and delays", slug: "reliability/retries-delays" },
+            { label: "Dead lettering", slug: "reliability/dead-lettering" },
+            { label: "Replication", slug: "reliability/replication" },
+            { label: "Recovery quarantine", slug: "reliability/recovery-quarantine" },
+            { label: "Failure modes and operations", slug: "reliability/failure-modes" },
+            { label: "Backpressure", slug: "concepts/backpressure" },
+            { label: "Many idle queues", slug: "concepts/many-idle-queues" },
+            { label: "Benchmarks", slug: "benchmarks" },
+            { label: "Roadmap", slug: "roadmap" },
+            { label: "Deployment", slug: "deployment/source" },
           ],
         },
         {
           label: "Development Notes",
           items: [
-            { label: "Documentation style", slug: "latest/development/docs-writing" },
-            { label: "Configuration policy", slug: "latest/development/config-policy" },
-            { label: "Configuration design", slug: "latest/development/config-design" },
-            { label: "Metadata policy", slug: "latest/development/metadata-policy" },
-            { label: "Partition routing", slug: "latest/development/partition-routing" },
-            { label: "Live routing and cutover", slug: "latest/development/live-routing-and-cutover" },
-            { label: "Coordination internals", slug: "latest/development/coordination-internals" },
-            { label: "Replication design", slug: "latest/development/replication-design" },
-            { label: "Recovery quarantine internals", slug: "latest/development/recovery-internals" },
-            { label: "Deterministic simulation", slug: "latest/development/deterministic-simulation" },
-            { label: "Versioning and releasing", slug: "latest/development/releasing" },
-            { label: "Idle queue internals", slug: "latest/development/idle-queue-internals" },
+            { label: "Documentation style", slug: "development/docs-writing" },
+            { label: "Configuration policy", slug: "development/config-policy" },
+            { label: "Configuration design", slug: "development/config-design" },
+            { label: "Metadata policy", slug: "development/metadata-policy" },
+            { label: "Partition routing", slug: "development/partition-routing" },
+            { label: "Live routing and cutover", slug: "development/live-routing-and-cutover" },
+            { label: "Coordination internals", slug: "development/coordination-internals" },
+            { label: "Replication design", slug: "development/replication-design" },
+            { label: "Recovery quarantine internals", slug: "development/recovery-internals" },
+            { label: "Deterministic simulation", slug: "development/deterministic-simulation" },
+            { label: "Versioning and releasing", slug: "development/releasing" },
+            { label: "Idle queue internals", slug: "development/idle-queue-internals" },
           ],
         },
       ],

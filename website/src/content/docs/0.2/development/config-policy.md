@@ -1,6 +1,8 @@
 ---
 title: Configuration policy
-description: Proposed direction for Fibril startup config, runtime settings, and persisted global state.
+description: Proposed direction for Fibril startup config, runtime settings, and
+  persisted global state.
+slug: 0.2/development/config-policy
 ---
 
 This is a development note. It describes how Fibril should decide where a setting belongs before adding more one-off environment variables.
@@ -21,12 +23,12 @@ Bootstrap settings are required before the broker can open or accept traffic.
 
 Examples:
 
-- data directory
-- TCP bind address
-- admin bind address
-- storage/log implementation choice
-- TLS and listener setup
-- initial admin authentication source
+* data directory
+* TCP bind address
+* admin bind address
+* storage/log implementation choice
+* TLS and listener setup
+* initial admin authentication source
 
 These should come from a config file, environment variables, or CLI flags. They should not be edited through persisted runtime state while the process is running.
 
@@ -38,12 +40,12 @@ Runtime defaults affect behavior but can reasonably change while the broker is a
 
 Examples:
 
-- default inflight lease duration
-- expiry polling defaults
-- idle queue cleanup timeout
-- idle queue cleanup sweep interval
-- publisher idle expiry
-- future queue declaration defaults
+* default inflight lease duration
+* expiry polling defaults
+* idle queue cleanup timeout
+* idle queue cleanup sweep interval
+* publisher idle expiry
+* future queue declaration defaults
 
 These are candidates for persisted global state. The admin UI can edit them, and the broker can apply them without restart where the implementation supports it.
 
@@ -59,10 +61,10 @@ Queue settings apply to one queue or queue group.
 
 Examples:
 
-- per-queue retry policy
-- per-queue dead-letter policy
-- per-queue retention-like policy, if added
-- per-queue delivery or expiry settings, if added
+* per-queue retry policy
+* per-queue dead-letter policy
+* per-queue retention-like policy, if added
+* per-queue delivery or expiry settings, if added
 
 Queue settings should be changed through explicit queue commands, such as declaration/update commands, not by editing global config.
 
@@ -80,9 +82,9 @@ Queue settings are owned by queue state.
 
 This keeps operator expectations simple:
 
-- startup config decides how the process starts
-- global state decides live broker defaults
-- queue state decides queue-specific behavior
+* startup config decides how the process starts
+* global state decides live broker defaults
+* queue state decides queue-specific behavior
 
 ## First-Boot Defaults
 
@@ -116,11 +118,11 @@ Persisted global state should have its own event log and snapshot, separate from
 
 Useful properties:
 
-- append-only changes
-- snapshot and replay like queue state
-- explicit versioning
-- audit-friendly history for admin changes
-- atomic updates for related settings
+* append-only changes
+* snapshot and replay like queue state
+* explicit versioning
+* audit-friendly history for admin changes
+* atomic updates for related settings
 
 Runtime settings should be grouped where atomic updates matter. For example, idle queue cleanup settings are related and should be updated together:
 
@@ -137,9 +139,9 @@ idle_queue_cleanup = {
 
 Prefer user-facing names in docs and admin UI:
 
-- "idle queue cleanup"
-- "idle timeout"
-- "publisher idle expiry"
+* "idle queue cleanup"
+* "idle timeout"
+* "publisher idle expiry"
 
 Use implementation names only in internal APIs or development notes.
 

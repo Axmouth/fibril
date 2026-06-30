@@ -31,7 +31,7 @@ When recovery finds the first bad record, it acts according to the
 | `ignore` | Automatically truncate the log to the last valid record and continue. |
 
 A quarantined partition is surfaced clearly: a banner in the [admin
-dashboard](/latest/admin-dashboard/), the `/readyz` health endpoint, and a
+dashboard](/admin-dashboard/), the `/readyz` health endpoint, and a
 `recovery.quarantined` metric.
 
 ## Repair
@@ -67,6 +67,6 @@ silently drop a state transition, so recovery stops there instead.
 
 ## See also
 
-- [Reliability semantics](/latest/reliability/semantics/) for the durability model.
-- [Replication](/latest/reliability/replication/) for how followers re-fetch a repaired suffix.
-- [Configuration](/latest/configuration/) for the `recovery.on_mismatch` setting.
+- [Reliability semantics](/reliability/semantics/) for the durability model.
+- [Replication](/reliability/replication/) for how followers re-fetch a repaired suffix.
+- [Configuration](/configuration/) for the `recovery.on_mismatch` setting.

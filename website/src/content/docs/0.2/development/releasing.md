@@ -1,6 +1,8 @@
 ---
 title: Versioning and releasing
-description: How the Fibril repo group is versioned, how a release is cut, and how versioned artifacts are produced.
+description: How the Fibril repo group is versioned, how a release is cut, and
+  how versioned artifacts are produced.
+slug: 0.2/development/releasing
 ---
 
 This is a development note: the versioning model and the release process.
@@ -10,14 +12,14 @@ This is a development note: the versioning model and the release process.
 Fibril spans more than one repository, and each repository carries its own
 version line:
 
-- **Fibril** (this repo: broker, clients, CLI, admin) - one version shared across
+* **Fibril** (this repo: broker, clients, CLI, admin) - one version shared across
   all its crates via `[workspace.package]`, so they always move in lockstep.
-- **Stroma** - the durable queue/stream substrate. It tends to move closely with
+* **Stroma** - the durable queue/stream substrate. It tends to move closely with
   Fibril (most changes touch both), so its version usually tracks Fibril's even
   though it is its own line. It currently lives inside the Keratin repo and will
   split into its own repo.
-- **Keratin** - the append-only log under Stroma. Its own version and cadence.
-- **Ganglion** - the coordination/raft layer. Its own version and cadence.
+* **Keratin** - the append-only log under Stroma. Its own version and cadence.
+* **Ganglion** - the coordination/raft layer. Its own version and cadence.
 
 SemVer applies to each. Pre-1.0, a minor version may still change the API and
 wire protocol; 1.0 is the commitment to stability (see the roadmap's 1.0 gates).

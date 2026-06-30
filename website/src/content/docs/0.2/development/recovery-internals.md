@@ -1,10 +1,12 @@
 ---
 title: Recovery quarantine internals
-description: Development notes on why a damaged queue log is repaired by truncate-to-valid, and where the consistency check belongs.
+description: Development notes on why a damaged queue log is repaired by
+  truncate-to-valid, and where the consistency check belongs.
+slug: 0.2/development/recovery-internals
 ---
 
 This is a development note. User-facing behavior lives in
-[recovery quarantine](/latest/reliability/recovery-quarantine/). This page
+[recovery quarantine](/0.2/reliability/recovery-quarantine/). This page
 records the reasoning behind the design.
 
 The planning requirement was explicit: on recovery, verify that event references
@@ -70,5 +72,5 @@ would make `refuse` a literal refuse-to-start.
 
 ## See also
 
-- [Recovery quarantine](/latest/reliability/recovery-quarantine/) for the operator view.
-- [Replication design](/latest/development/replication-design/) for the ordering invariants this builds on.
+* [Recovery quarantine](/0.2/reliability/recovery-quarantine/) for the operator view.
+* [Replication design](/0.2/development/replication-design/) for the ordering invariants this builds on.

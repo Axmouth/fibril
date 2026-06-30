@@ -80,7 +80,7 @@ publisher_idle_timeout_ms = 600000
 
 These values seed persisted runtime settings on first boot. After runtime settings exist, operators should edit them through the admin settings page or runtime settings API unless the setting group is locked by startup config.
 
-For the full config reference, see [configuration](/latest/configuration/).
+For the full config reference, see [configuration](/configuration/).
 
 ## Operator Guidance
 
@@ -116,4 +116,4 @@ Not covered by this feature:
 - dead-letter policy
 - exact cleanup timing guarantees
 
-For implementation details, see [idle queue internals](/latest/development/idle-queue-internals/).
+For implementation details, see [idle queue internals](/development/idle-queue-internals/).

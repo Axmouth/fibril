@@ -24,8 +24,8 @@ Status meanings:
 
 ## Queue Identity
 
-See also: [core model](/latest/concepts/core-model/) and
-[partition routing](/latest/development/partition-routing/).
+See also: [core model](/concepts/core-model/) and
+[partition routing](/development/partition-routing/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -52,8 +52,8 @@ Conditions and limits:
 
 ## Durable Queue State
 
-See also: [reliability semantics](/latest/reliability/semantics/) and
-[many idle queues](/latest/concepts/many-idle-queues/).
+See also: [reliability semantics](/reliability/semantics/) and
+[many idle queues](/concepts/many-idle-queues/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -76,7 +76,7 @@ Conditions and limits:
 
 ## Recovery Quarantine
 
-See also: [recovery quarantine](/latest/reliability/recovery-quarantine/).
+See also: [recovery quarantine](/reliability/recovery-quarantine/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -98,8 +98,8 @@ Conditions and limits:
 
 ## Publish
 
-See also: [client usage](/latest/clients/) and
-[retries and delays](/latest/reliability/retries-delays/).
+See also: [client usage](/clients/) and
+[retries and delays](/reliability/retries-delays/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -136,8 +136,8 @@ Conditions and limits:
 
 ## Subscribe and Delivery
 
-See also: [backpressure](/latest/concepts/backpressure/) and
-[client usage](/latest/clients/).
+See also: [backpressure](/concepts/backpressure/) and
+[client usage](/clients/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -151,7 +151,7 @@ See also: [backpressure](/latest/concepts/backpressure/) and
 | Cross-broker cohort coordination | Partial | Member identity + controller (aggregate→plan→publish) + owner apply all wired in cluster bootstrap, coordination-level multi-node rebalance test exists, fuller broker/client scenarios are still growing |
 | Partition fan-in | Implemented | Both clients subscribe to all known partitions, merge deliveries while keeping per-partition settlement routing, and pick up partitions added by a live grow |
 
-See [consumer groups](/latest/concepts/consumer-groups/) for the user-facing model.
+See [consumer groups](/concepts/consumer-groups/) for the user-facing model.
 
 Conditions and limits:
 
@@ -168,8 +168,8 @@ Conditions and limits:
 
 ## Plexus Streams
 
-See also: [Plexus streams](/latest/concepts/plexus-streams/) and
-[client usage](/latest/clients/).
+See also: [Plexus streams](/concepts/plexus-streams/) and
+[client usage](/clients/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -198,8 +198,8 @@ Conditions and limits:
 
 ## Reconnects
 
-See also: [reconnects](/latest/reliability/reconnects/) and
-[reconnection grace internals](/latest/development/reconnection-grace/).
+See also: [reconnects](/reliability/reconnects/) and
+[reconnection grace internals](/development/reconnection-grace/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -227,9 +227,9 @@ Conditions and limits:
 
 ## Settlement, Retry, and Leasing
 
-See also: [core model](/latest/concepts/core-model/),
-[reliability semantics](/latest/reliability/semantics/), and
-[retries and delays](/latest/reliability/retries-delays/).
+See also: [core model](/concepts/core-model/),
+[reliability semantics](/reliability/semantics/), and
+[retries and delays](/reliability/retries-delays/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -250,8 +250,8 @@ Conditions and limits:
 
 ## Dead Lettering
 
-See also: [dead lettering](/latest/reliability/dead-lettering/) and
-[metadata policy](/latest/development/metadata-policy/).
+See also: [dead lettering](/reliability/dead-lettering/) and
+[metadata policy](/development/metadata-policy/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -275,8 +275,8 @@ Conditions and limits:
 
 ## Message Inspection
 
-See also: [admin dashboard](/latest/admin-dashboard/) and
-[dead lettering](/latest/reliability/dead-lettering/).
+See also: [admin dashboard](/admin-dashboard/) and
+[dead lettering](/reliability/dead-lettering/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -302,8 +302,8 @@ Conditions and limits:
 
 ## Sparse Queues and Idle Cleanup
 
-See also: [many idle queues](/latest/concepts/many-idle-queues/) and
-[idle queue internals](/latest/development/idle-queue-internals/).
+See also: [many idle queues](/concepts/many-idle-queues/) and
+[idle queue internals](/development/idle-queue-internals/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -367,9 +367,9 @@ Developer-facing note:
 
 ## Runtime Settings and Startup Config
 
-See also: [configuration](/latest/configuration/),
-[configuration policy](/latest/development/config-policy/), and
-[configuration design](/latest/development/config-design/).
+See also: [configuration](/configuration/),
+[configuration policy](/development/config-policy/), and
+[configuration design](/development/config-design/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -394,7 +394,7 @@ Conditions and limits:
 
 ## Admin Surface
 
-See also: [admin dashboard](/latest/admin-dashboard/).
+See also: [admin dashboard](/admin-dashboard/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -425,8 +425,8 @@ Conditions and limits:
 
 ## CLI Surface
 
-See also: [source deployment](/latest/deployment/source/) and
-[dead lettering](/latest/reliability/dead-lettering/).
+See also: [source deployment](/deployment/source/) and
+[dead lettering](/reliability/dead-lettering/).
 
 | Item | Status | Implemented command |
 | --- | --- | --- |
@@ -446,9 +446,9 @@ Conditions and limits:
 
 ## Client Surface
 
-See also: [client usage](/latest/clients/),
-[quickstart](/latest/quickstart/), and
-[reconnection grace](/latest/development/reconnection-grace/).
+See also: [client usage](/clients/),
+[quickstart](/quickstart/), and
+[reconnection grace](/development/reconnection-grace/).
 
 Server-side reconnect grace for inflight settles is implemented in the TCP
 handler when `connection.reconnect_grace_ms` is configured. Clients now attempt
@@ -508,7 +508,7 @@ Conditions and limits:
 
 ## Benchmarks and Operational Scripts
 
-See also: [benchmarks](/latest/benchmarks/).
+See also: [benchmarks](/benchmarks/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -526,7 +526,7 @@ Conditions and limits:
 
 ## Deployment Surface
 
-See also: [source deployment](/latest/deployment/source/).
+See also: [source deployment](/deployment/source/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -544,8 +544,8 @@ Conditions and limits:
 
 ## Experimental Cluster and Replication Surface
 
-See also: [clustering](/latest/concepts/clustering/) and
-[replication](/latest/reliability/replication/).
+See also: [clustering](/concepts/clustering/) and
+[replication](/reliability/replication/).
 
 | Item | Status | Implemented surface |
 | --- | --- | --- |
@@ -563,7 +563,7 @@ See also: [clustering](/latest/concepts/clustering/) and
 | Live repartitioning | Partial | Grow or shrink a queue's partition count in Ganglion mode (versioned routing, in-flight transition serialization, drain-and-retire on shrink); admin control + API |
 | Topology visibility | Partial | Admin API/page (with repartition + coordination-membership controls) and `fibrilctl topology`. Cross-broker lag aggregation is pending |
 | Live topology push | Partial | Broker pushes a `TopologyUpdate` to each connection when that connection's routing content changes (not on every coordination metadata bump); the Rust, TypeScript, and Python clients apply it to their routing cache and ack the generation |
-| Repartition cutover fencing | Partial | The controller fences a repartition's finalize (retiring shrunk-away partitions and clearing the marker) on cluster-wide client adoption of the new routing, derived from topology acks, bounded by `repartition_adoption_timeout_ms`. Publish version-fencing remains the correctness backstop. See [live routing and cutover](/latest/development/live-routing-and-cutover/) |
+| Repartition cutover fencing | Partial | The controller fences a repartition's finalize (retiring shrunk-away partitions and clearing the marker) on cluster-wide client adoption of the new routing, derived from topology acks, bounded by `repartition_adoption_timeout_ms`. Publish version-fencing remains the correctness backstop. See [live routing and cutover](/development/live-routing-and-cutover/) |
 | Cohort visibility (admin) | Partial | Per-broker exclusive-cohort membership on the subscriptions page and `/admin/api/cohorts`; cluster-wide cohort assignment is broker-local, not centrally committed |
 | Multi-node cohort coordinator test | Partial | Coordination-level e2e covers cross-broker membership aggregation and rebalance. Full broker/client scenario coverage is still growing |
 

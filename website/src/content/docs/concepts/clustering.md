@@ -19,7 +19,7 @@ when a broker fails.
 - **Coordinated (Ganglion mode).** Each broker runs an embedded coordinator and
   they form one consensus group. A controller assigns ownership, and clients are
   routed to the current owner of each partition. Enable it with `[coordination]
-  mode = "ganglion"` (see [configuration](/latest/configuration/)).
+  mode = "ganglion"` (see [configuration](/configuration/)).
 
 The embedded coordinator currently uses the Raft consensus protocol under the
 hood. You do not configure Raft directly beyond its timings: Fibril's surface
@@ -151,7 +151,7 @@ first run builds the broker and CLI, so it takes longer than later runs.
   topology and retry. This is transparent in the Rust client.
 
 Ownership, followers, and epochs are visible per partition on the admin
-[topology page](/latest/admin-dashboard/) and through `fibrilctl topology`.
+[topology page](/admin-dashboard/) and through `fibrilctl topology`.
 
 ## Operator actions
 
@@ -188,7 +188,7 @@ changes affect availability.
 
 ## See also
 
-- [Replication](/latest/reliability/replication/) for follower catch-up and replica-durable confirms.
-- [Recovery quarantine](/latest/reliability/recovery-quarantine/) for damaged-log handling on restart.
-- [Partitioned queues](/latest/concepts/consumer-groups/) and [partition routing](/latest/development/partition-routing/) for how clients address partitions.
-- [Configuration](/latest/configuration/) for coordination settings.
+- [Replication](/reliability/replication/) for follower catch-up and replica-durable confirms.
+- [Recovery quarantine](/reliability/recovery-quarantine/) for damaged-log handling on restart.
+- [Partitioned queues](/concepts/consumer-groups/) and [partition routing](/development/partition-routing/) for how clients address partitions.
+- [Configuration](/configuration/) for coordination settings.

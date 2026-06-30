@@ -13,15 +13,11 @@ const checks = [
     ],
   },
   {
-    path: "latest/index.html",
-    includes: ["<title>Fibril documentation | Fibril</title>"],
-  },
-  {
-    path: "latest/status/index.html",
+    path: "status/index.html",
     includes: ["<title>Project status | Fibril</title>", "Explicit settlement", "Dead lettering"],
   },
   {
-    path: "latest/implemented-surface/index.html",
+    path: "implemented-surface/index.html",
     includes: [
       "<title>Implemented surface | Fibril</title>",
       "reverse roadmap",
@@ -29,16 +25,26 @@ const checks = [
     ],
   },
   {
-    path: "latest/reliability/retries-delays/index.html",
+    path: "reliability/retries-delays/index.html",
     includes: ["<title>Retries and delays | Fibril</title>", "retry_after"],
   },
   {
-    path: "latest/reliability/dead-lettering/index.html",
+    path: "reliability/dead-lettering/index.html",
     includes: ["<title>Dead Lettering | Fibril</title>", "global dead-letter queue target"],
   },
   {
-    path: "latest/concepts/backpressure/index.html",
+    path: "concepts/backpressure/index.html",
     includes: ["<title>Backpressure | Fibril</title>", "prefetch"],
+  },
+  // The frozen 0.2 snapshot proves versioning is wired: the overview page exists
+  // under the version slug and its intra-doc links are rewritten to /0.2/.
+  {
+    path: "0.2/index.html",
+    includes: ["<title>Fibril documentation | Fibril</title>", "/0.2/quickstart/"],
+  },
+  {
+    path: "0.2/status/index.html",
+    includes: ["<title>Project status | Fibril</title>"],
   },
   {
     path: "sitemap-index.xml",

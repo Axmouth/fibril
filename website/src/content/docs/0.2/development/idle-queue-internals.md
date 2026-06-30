@@ -1,14 +1,15 @@
 ---
 title: Idle queue internals
 description: Implementation notes for lazy loading and idle queue cleanup.
+slug: 0.2/development/idle-queue-internals
 ---
 
-This is a development note. The user-facing behavior is described in [many idle queues](/latest/concepts/many-idle-queues/).
+This is a development note. The user-facing behavior is described in [many idle queues](/0.2/concepts/many-idle-queues/).
 
 The feature has two layers:
 
-- storage materialization: the Stroma queue handle, queue actor, open logs, snapshot task, and recovered queue state
-- broker tracking: lightweight per-queue loop state, activity counters, delivery tags, and publisher/subscriber leases
+* storage materialization: the Stroma queue handle, queue actor, open logs, snapshot task, and recovered queue state
+* broker tracking: lightweight per-queue loop state, activity counters, delivery tags, and publisher/subscriber leases
 
 Current cleanup mainly targets storage materialization. An idle queue can stop having a live Stroma handle while the broker still remembers small in-process bookkeeping for that topic and group.
 

@@ -6,7 +6,7 @@ description: A candid feature matrix for the current Fibril implementation.
 Fibril is pre-alpha infrastructure. This table distinguishes the working baseline from active design and wiring work.
 
 For a more detailed checklist of what is wired and what conditions apply, see
-[implemented surface](/latest/implemented-surface/).
+[implemented surface](/implemented-surface/).
 
 | Feature | Status | Notes |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ For a more detailed checklist of what is wired and what conditions apply, see
 
 Informal internal measurements on a Ryzen 5950X system have observed roughly `250k+` messages/sec ingress and egress with 1KB payloads on the durable path. Plexus stream fan-out reaches roughly `1.5M` delivered records/sec across sixteen readers on a single partition, and one partition fans out to hundreds of readers when delivery throughput is not the bottleneck.
 
-These numbers are architecture sanity checks, not a rigorous benchmark suite. Hardware, durability settings, batching, queue depth, workload, and storage behavior all matter. See [benchmarks](/latest/benchmarks/) for the fuller queue and stream tables.
+These numbers are architecture sanity checks, not a rigorous benchmark suite. Hardware, durability settings, batching, queue depth, workload, and storage behavior all matter. See [benchmarks](/benchmarks/) for the fuller queue and stream tables.
 
 ## What can move now
 

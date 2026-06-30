@@ -28,6 +28,6 @@ Use the docs sections deliberately:
 - `development` is the right place for implementation mechanisms, tradeoff
   records, and future design policies.
 
-Keep the [roadmap](/latest/roadmap/) current as work lands. It should be the
+Keep the [roadmap](/roadmap/) current as work lands. It should be the
 short checkpoint for what changed recently and what remains pending, even when
 the detailed docs for a feature live elsewhere.

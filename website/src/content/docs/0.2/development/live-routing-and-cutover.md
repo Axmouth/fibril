@@ -1,6 +1,8 @@
 ---
 title: Live routing and repartition cutover
-description: How clients learn current routing, how the broker pushes topology changes, and how a repartition cutover is fenced on client adoption.
+description: How clients learn current routing, how the broker pushes topology
+  changes, and how a repartition cutover is fenced on client adoption.
+slug: 0.2/development/live-routing-and-cutover
 ---
 
 This is a development note. It records how routing stays current on clients and how
@@ -53,9 +55,9 @@ a live repartition is finalized safely, plus the assumptions each step relies on
 
 There are two independent counters, and conflating them is the easy mistake:
 
-- **Topology generation** is the coordination committed-snapshot generation. It is
+* **Topology generation** is the coordination committed-snapshot generation. It is
   what `TopologyOk.generation` carries and what a client acks.
-- **Partitioning version** is per `(topic, group)` and is what publishes are
+* **Partitioning version** is per `(topic, group)` and is what publishes are
   fenced on.
 
 A repartition tracks the partitioning version, but a client acks the topology
@@ -87,40 +89,40 @@ drain-complete, bounded by `coordination.ganglion.repartition_adoption_timeout_m
 
 ## Assumptions and invariants
 
-- **Adoption fencing is a refinement, not correctness.** Step 2 (version-fencing +
+* **Adoption fencing is a refinement, not correctness.** Step 2 (version-fencing +
   redirects) is what guarantees per-key ordering through a cutover. The adoption
   gate only reduces misroute churn and lets a shrink retire partitions cleanly
   once clients have stopped routing to them. Because of this it is safe to bound
   the wait with a timeout.
-- **Only push-capable connections count.** A connection appears in the adoption
+* **Only push-capable connections count.** A connection appears in the adoption
   tracker only after it acks at least once. A silent or pre-push client never
   drags the cluster minimum down; it is covered by the version-fence and the
   timeout. A connection's entry is dropped when it closes.
-- **Only live nodes count.** `global_topology_adoption` reads adoption labels from
+* **Only live nodes count.** `global_topology_adoption` reads adoption labels from
   nodes whose heartbeat is within the liveness TTL. A dead node's adoption label is
   frozen at its last value and represents departed clients (the clients connected
   to it are gone), so counting it would wrongly pin the cluster minimum down and
   stall every cutover on the timeout. Live nodes self-heal: each heartbeat replaces
   a node's whole label set, so a live node that loses all its clients drops its
   adoption label on its next beat.
-- **No adoption signal means "not adopted yet."** If no connection anywhere has
+* **No adoption signal means "not adopted yet."** If no connection anywhere has
   acked, `global_topology_adoption()` is `None` and the gate leans entirely on the
   timeout.
-- **New and reconnecting clients converge for free.** They fetch the current
+* **New and reconnecting clients converge for free.** They fetch the current
   topology on connect, so they already reflect the latest generation and count as
   adopted.
-- **The push lands race-free.** Clients create their routing cache (and catalogue
+* **The push lands race-free.** Clients create their routing cache (and catalogue
   state) before the bootstrap connection starts, so a push the broker sends right
   after HELLO has somewhere to land. Wiring the apply target after construction
   would let the first push be acked without being applied (a false ack).
-- **The push triggers on content, not the generation.** The generation advances on
+* **The push triggers on content, not the generation.** The generation advances on
   any committed metadata change cluster-wide (other topics, markers, runtime
   settings, unrelated failovers), not just this client's routing - and not on
   label-only updates like heartbeats, which the state machine absorbs without
   bumping it. Triggering on the routing *content* (queues + streams) pushes only
   when this client's routing actually changed. The pushed frame still carries the
   live generation for the client to ack.
-- **The adoption gate is stamped eagerly, at the cutover.** Because pushes are
+* **The adoption gate is stamped eagerly, at the cutover.** Because pushes are
   content-gated, a connection stops re-acking once the cutover settles (no further
   content change for that queue), even though unrelated cluster activity keeps
   bumping the generation. So the marker's `adoption_generation` is captured at the

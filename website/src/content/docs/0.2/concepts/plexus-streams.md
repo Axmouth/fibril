@@ -1,6 +1,7 @@
 ---
 title: Plexus streams
 description: Fan-out stream channels where every consumer sees every record.
+slug: 0.2/concepts/plexus-streams
 ---
 
 A **Plexus stream** is a channel type beside the work queue. Where a queue
@@ -15,13 +16,13 @@ tail, or anything where many independent readers each need the full sequence.
 
 A stream subscription tracks position with a **cursor**. There are two modes:
 
-- **Durable (recommended).** Give the subscription a name. The broker remembers
+* **Durable (recommended).** Give the subscription a name. The broker remembers
   the cursor for that name, advances it as you ack, and resumes it after a
   restart or reconnect, anywhere in the cluster. No offset bookkeeping on your
   side. A fresh name starts at the earliest retained record so it cannot silently
   miss data. Different names are independent fan-out consumers, each tracking its
   own position. The same name is single-active (last commit wins).
-- **Ephemeral.** No name. You choose a start position and the broker keeps no
+* **Ephemeral.** No name. You choose a start position and the broker keeps no
   state for you, so you are at the mercy of retention. Good for a live tail or an
   ad-hoc replay.
 
@@ -66,15 +67,15 @@ forever.
 Each stream picks a durability tier at declare time. They trade latency for
 durability:
 
-- **durable** (default) — persist and fsync (and replicate when configured)
+* **durable** (default) — persist and fsync (and replicate when configured)
   before delivering and confirming the producer. Survives power loss. Highest
   latency.
-- **speculative** — deliver the instant the offset is assigned, persist (fsync)
+* **speculative** — deliver the instant the offset is assigned, persist (fsync)
   in the background, and defer the producer confirm until the record is durable.
   Readers see it sooner, the producer still gets a real durability confirmation.
   Speculative deliveries carry a `fibril.speculative` header so a consumer knows
   the record may not be durable yet.
-- **ephemeral** — deliver at staging and confirm immediately, persisting without
+* **ephemeral** — deliver at staging and confirm immediately, persisting without
   an fsync (the record goes to the OS but is not flushed to disk). Lowest
   latency, weakest guarantee: a process crash is survivable, a power loss can
   drop the newest ephemeral records.
@@ -87,11 +88,11 @@ tier.
 A durability tier and replication are different guarantees, and it is worth being
 precise about which you have:
 
-- **Durable, not replicated** (a single owner) survives a process restart or power
+* **Durable, not replicated** (a single owner) survives a process restart or power
   loss — the records are on the owner's disk — but it does **not** survive losing
   that node. While the owner is down the partition is unavailable, and if its disk
   is lost the records are gone.
-- **Durable and replicated** (the durable tier with a replication factor of one or
+* **Durable and replicated** (the durable tier with a replication factor of one or
   more) survives node loss: the owner replicates its record and cursor logs to that
   many followers, a durable publish confirms only once the replicas have it, and a
   caught-up follower is promoted on failover. This is the high-availability
@@ -100,7 +101,7 @@ precise about which you have:
 Replication is the durable tier only. The express tiers (speculative, ephemeral)
 are always owner-only — replication would contradict their latency-first intent.
 Set the cluster default replica count with the controller's
-`stream_replication_factor` (see [Configuration](/latest/configuration/)); the
+`stream_replication_factor` (see [Configuration](/0.2/configuration/)); the
 default of one keeps a durable stream available across a single node loss. A
 single stream can override it at declare time with the replication-factor builder
 (`replication_factor` in Rust and Python, `replicationFactor` in TypeScript), so
@@ -121,5 +122,5 @@ simply re-delivers a bounded window. Publishing to a stream uses the ordinary
 publish path; the broker routes by channel kind, so the same producer works for
 queues and streams.
 
-See [Client usage](/latest/clients/) for the stream API in Rust, TypeScript, and
+See [Client usage](/0.2/clients/) for the stream API in Rust, TypeScript, and
 Python.

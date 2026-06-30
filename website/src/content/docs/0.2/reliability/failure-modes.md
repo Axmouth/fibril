@@ -1,14 +1,16 @@
 ---
 title: Failure modes and operations
-description: What survives which failure per durability tier, and the operator runbook for restarts, failover, repartition, and recovery.
+description: What survives which failure per durability tier, and the operator
+  runbook for restarts, failover, repartition, and recovery.
+slug: 0.2/reliability/failure-modes
 ---
 
 This page is the operator-facing view of what happens when things go wrong: what
 survives which failure, and what to do about it. It synthesizes the
-[reliability semantics](/latest/reliability/semantics/),
-[replication](/latest/reliability/replication/),
-[recovery quarantine](/latest/reliability/recovery-quarantine/), and
-[reconnects](/latest/reliability/reconnects/) pages into one incident-time
+[reliability semantics](/0.2/reliability/semantics/),
+[replication](/0.2/reliability/replication/),
+[recovery quarantine](/0.2/reliability/recovery-quarantine/), and
+[reconnects](/0.2/reliability/reconnects/) pages into one incident-time
 reference.
 
 Failure semantics are version-specific. This page describes the current release;
@@ -25,9 +27,9 @@ dead-lettered). Fibril does not claim exactly-once.
 
 Two distinct failures matter, and they are not the same:
 
-- **Process restart** - the broker process stops and starts again on the same
+* **Process restart** - the broker process stops and starts again on the same
   machine, with its data directory intact.
-- **Node loss** - the machine (or its disk) is gone, so the local data is not
+* **Node loss** - the machine (or its disk) is gone, so the local data is not
   coming back.
 
 | Tier | Survives process restart | Survives node loss | Notes |
@@ -41,15 +43,15 @@ Two distinct failures matter, and they are not the same:
 
 Cross-cutting guarantees that hold across a restart or a clean failover:
 
-- **No split-brain.** Ownership changes bump a fencing **epoch**. A stale former
+* **No split-brain.** Ownership changes bump a fencing **epoch**. A stale former
   owner cannot keep serving or replicating: its writes and replication carrying
   an old epoch are rejected at the storage layer.
-- **Per-partition ordering** is preserved; there is no global order across
+* **Per-partition ordering** is preserved; there is no global order across
   partitions.
-- **Leased-but-unacked work survives a crash.** Inflight (offset, deadline) pairs
+* **Leased-but-unacked work survives a crash.** Inflight (offset, deadline) pairs
   are persisted, so a message that was leased to a consumer but not yet acked is
   not lost across a broker restart - it becomes deliverable again.
-- **Streams resume from the durable cursor**, not a client-held offset, so a
+* **Streams resume from the durable cursor**, not a client-held offset, so a
   reconnecting or failed-over reader continues where its committed cursor left
   off.
 
@@ -77,11 +79,11 @@ restart.
 Failover is automatic when coordination is enabled and the partition has
 followers:
 
-- The controller reassigns the partition, bumps the epoch, and promotes a
+* The controller reassigns the partition, bumps the epoch, and promotes a
   caught-up follower at its local durable tail.
-- Producers and consumers are redirected to the new owner by the topology the
+* Producers and consumers are redirected to the new owner by the topology the
   broker pushes; the high-level clients re-resolve and reconnect.
-- Check the [admin queues page](/latest/admin-dashboard/) for owner and in-sync
+* Check the [admin queues page](/0.2/admin-dashboard/) for owner and in-sync
   replica status.
 
 A `local_durable` single-owner partition has no follower to promote, so it is
@@ -105,7 +107,7 @@ process). It isolates the partition per the `recovery.on_mismatch` policy and
 surfaces a quarantine banner. Repair truncates the partition to its last valid
 point via `POST /admin/api/quarantine/repair`; a follower then re-fetches the
 dropped suffix on its next catch-up. See
-[recovery quarantine](/latest/reliability/recovery-quarantine/).
+[recovery quarantine](/0.2/reliability/recovery-quarantine/).
 
 ### On-disk data for a partition this node no longer owns
 
@@ -132,12 +134,12 @@ immediately on disconnect.
 
 ## See also
 
-- [Reliability semantics](/latest/reliability/semantics/) - the formal delivery
+* [Reliability semantics](/0.2/reliability/semantics/) - the formal delivery
   and durability guarantees.
-- [Replication](/latest/reliability/replication/) - durability levels, in-sync
+* [Replication](/0.2/reliability/replication/) - durability levels, in-sync
   replicas, and failover.
-- [Recovery quarantine](/latest/reliability/recovery-quarantine/) - damaged-log
+* [Recovery quarantine](/0.2/reliability/recovery-quarantine/) - damaged-log
   handling.
-- [Reconnects](/latest/reliability/reconnects/) - reconnect grace and resume.
-- [Configuration](/latest/configuration/) - the durability, replication, and
+* [Reconnects](/0.2/reliability/reconnects/) - reconnect grace and resume.
+* [Configuration](/0.2/configuration/) - the durability, replication, and
   connection settings referenced here.

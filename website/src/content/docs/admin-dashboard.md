@@ -58,14 +58,14 @@ When this broker is replicating queues from their owners, the page also shows a
 follower-replication section: which partitions this broker follows, each
 follower's status (caught up, pending retry, or checkpoint required), how far it
 has pulled, and when it last made progress. See
-[replication](/latest/reliability/replication/).
+[replication](/reliability/replication/).
 
 The message inspection link starts near the queue's settled offset by default so
 you do not begin at offset `0` on large queues unless you choose to.
 
 ## Streams
 
-The streams page lists the [Plexus](/latest/concepts/plexus-streams/) stream
+The streams page lists the [Plexus](/concepts/plexus-streams/) stream
 channels this broker is currently hosting, grouped by topic. Each partition row
 shows its head and tail offsets and how many records are retained, and the topic
 heading shows the declared durability tier and retention bound.
@@ -126,7 +126,7 @@ restart.
 ## Subscriptions and Cohorts
 
 The subscriptions page lists active subscriptions. When exclusive consumer groups
-([cohorts](/latest/concepts/consumer-groups/)) are in use, it also shows this
+([cohorts](/concepts/consumer-groups/)) are in use, it also shows this
 broker's view of each cohort: the topic, group, and the members with their
 per-consumer targets. Cohort assignment is broker-local runtime state, so this is
 a per-node view rather than a single cluster-wide table.
@@ -136,7 +136,7 @@ a per-node view rather than a single cluster-wide table.
 When the broker runs in coordinated (Ganglion) mode, the topology page shows the
 cluster: registered brokers, per-partition ownership with fencing epochs and
 followers, and the consensus block (leader and voters). See
-[clustering](/latest/concepts/clustering/).
+[clustering](/concepts/clustering/).
 
 The page also exposes two operator actions, each with a confirmation:
 
@@ -154,4 +154,4 @@ whether any partition is quarantined after a failed recovery.
 If a partition was quarantined because its log failed recovery verification, a
 banner appears across the dashboard. From the banner you can repair the affected
 partition, which truncates its log to the last valid record and clears the
-quarantine. See [recovery quarantine](/latest/reliability/recovery-quarantine/).
+quarantine. See [recovery quarantine](/reliability/recovery-quarantine/).

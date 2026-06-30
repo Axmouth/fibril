@@ -5,10 +5,10 @@ description: What survives which failure per durability tier, and the operator r
 
 This page is the operator-facing view of what happens when things go wrong: what
 survives which failure, and what to do about it. It synthesizes the
-[reliability semantics](/latest/reliability/semantics/),
-[replication](/latest/reliability/replication/),
-[recovery quarantine](/latest/reliability/recovery-quarantine/), and
-[reconnects](/latest/reliability/reconnects/) pages into one incident-time
+[reliability semantics](/reliability/semantics/),
+[replication](/reliability/replication/),
+[recovery quarantine](/reliability/recovery-quarantine/), and
+[reconnects](/reliability/reconnects/) pages into one incident-time
 reference.
 
 Failure semantics are version-specific. This page describes the current release;
@@ -81,7 +81,7 @@ followers:
   caught-up follower at its local durable tail.
 - Producers and consumers are redirected to the new owner by the topology the
   broker pushes; the high-level clients re-resolve and reconnect.
-- Check the [admin queues page](/latest/admin-dashboard/) for owner and in-sync
+- Check the [admin queues page](/admin-dashboard/) for owner and in-sync
   replica status.
 
 A `local_durable` single-owner partition has no follower to promote, so it is
@@ -105,7 +105,7 @@ process). It isolates the partition per the `recovery.on_mismatch` policy and
 surfaces a quarantine banner. Repair truncates the partition to its last valid
 point via `POST /admin/api/quarantine/repair`; a follower then re-fetches the
 dropped suffix on its next catch-up. See
-[recovery quarantine](/latest/reliability/recovery-quarantine/).
+[recovery quarantine](/reliability/recovery-quarantine/).
 
 ### On-disk data for a partition this node no longer owns
 
@@ -132,12 +132,12 @@ immediately on disconnect.
 
 ## See also
 
-- [Reliability semantics](/latest/reliability/semantics/) - the formal delivery
+- [Reliability semantics](/reliability/semantics/) - the formal delivery
   and durability guarantees.
-- [Replication](/latest/reliability/replication/) - durability levels, in-sync
+- [Replication](/reliability/replication/) - durability levels, in-sync
   replicas, and failover.
-- [Recovery quarantine](/latest/reliability/recovery-quarantine/) - damaged-log
+- [Recovery quarantine](/reliability/recovery-quarantine/) - damaged-log
   handling.
-- [Reconnects](/latest/reliability/reconnects/) - reconnect grace and resume.
-- [Configuration](/latest/configuration/) - the durability, replication, and
+- [Reconnects](/reliability/reconnects/) - reconnect grace and resume.
+- [Configuration](/configuration/) - the durability, replication, and
   connection settings referenced here.

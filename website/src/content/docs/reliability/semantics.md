@@ -21,7 +21,7 @@ Acknowledgements are explicit, idempotent, and final. Settlements are tracked as
 
 If a subscription is dropped with prefetched but unacknowledged messages, those messages are returned for redelivery instead of being left behind until lease expiry. This keeps unsubscribe and consumer shutdown behavior aligned with at-least-once delivery.
 
-Short socket breaks can be handled with [reconnect grace](/latest/reliability/reconnects/) when it is configured and the client reconnects with a valid resume identity before the grace window expires.
+Short socket breaks can be handled with [reconnect grace](/reliability/reconnects/) when it is configured and the client reconnects with a valid resume identity before the grace window expires.
 
 ## Retries
 

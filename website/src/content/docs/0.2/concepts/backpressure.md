@@ -1,6 +1,7 @@
 ---
 title: Backpressure
 description: Pull-based delivery and prefetch limits in Fibril.
+slug: 0.2/concepts/backpressure
 ---
 
 Fibril’s current backpressure model is intentionally plain: consumers pull work and each subscription has a prefetch limit.

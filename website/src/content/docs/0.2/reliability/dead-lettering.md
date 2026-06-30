@@ -1,6 +1,7 @@
 ---
 title: Dead Lettering
 description: Configure where failed messages should go.
+slug: 0.2/reliability/dead-lettering
 ---
 
 Dead lettering gives failed messages somewhere explicit to go after retry handling is exhausted. It is useful when you want to inspect, replay, or separately process messages that could not be handled normally.
@@ -9,16 +10,16 @@ Dead lettering gives failed messages somewhere explicit to go after retry handli
 
 Fibril currently exposes two dead-lettering controls:
 
-- a global dead-letter queue target, configured by operators through the admin UI/API or `fibrilctl`
-- a per-queue policy for what should happen after retries are exhausted, declared by applications through the client, `fibrilctl`, or the admin API
+* a global dead-letter queue target, configured by operators through the admin UI/API or `fibrilctl`
+* a per-queue policy for what should happen after retries are exhausted, declared by applications through the client, `fibrilctl`, or the admin API
 
 The global target is the fallback destination for queues configured to use the global DLQ policy. It is a live storage-owned runtime setting: it is persisted, survives restart, and is not controlled by the startup TOML/env/CLI config.
 
 Per-queue policy can:
 
-- discard failed messages
-- send failed messages to the global DLQ target
-- send failed messages to a custom queue-specific DLQ target
+* discard failed messages
+* send failed messages to the global DLQ target
+* send failed messages to a custom queue-specific DLQ target
 
 You can also set the queue retry limit when declaring the queue policy. Leave it blank in the admin UI when you only want to change the DLQ routing policy and keep the queue's current retry setting.
 
@@ -157,10 +158,10 @@ GET /admin/api/messages?topic=orders.created&from=0&limit=50
 
 Useful query flags:
 
-- `include_settled=true` also returns persisted records that are no longer active
-- `include_payload=true` includes base64 payload previews
-- `payload_limit_bytes=4096` caps each payload preview
-- `status=ready,pending_dlq` filters returned rows by status
+* `include_settled=true` also returns persisted records that are no longer active
+* `include_payload=true` includes base64 payload previews
+* `payload_limit_bytes=4096` caps each payload preview
+* `status=ready,pending_dlq` filters returned rows by status
 
 Message inspection reads persisted message data and queue state. Use it for
 debugging and operations, not as a live polling view.
@@ -236,7 +237,7 @@ Discard after retries are exhausted:
 
 Topics and groups use the same validation rules as normal Fibril topics and groups.
 
-Partitioning is currently an internal detail for dead-letter configuration. Admin API responses may include `part`, but request bodies can omit it. Once queue sharding is available, Fibril should choose an available partition for DLQ routing rather than asking operators to pick one here. See [partition routing](/latest/development/partition-routing/) for the development policy.
+Partitioning is currently an internal detail for dead-letter configuration. Admin API responses may include `part`, but request bodies can omit it. Once queue sharding is available, Fibril should choose an available partition for DLQ routing rather than asking operators to pick one here. See [partition routing](/0.2/development/partition-routing/) for the development policy.
 
 ## Metadata on DLQ Messages
 
@@ -263,5 +264,5 @@ Dead-letter routing is usable, but some surrounding workflow is still intentiona
 
 Still in progress:
 
-- richer replay workflows, such as bulk replay filters and explicit delete/ack controls
-- broader end-to-end coverage around replay and inspection workflows
+* richer replay workflows, such as bulk replay filters and explicit delete/ack controls
+* broader end-to-end coverage around replay and inspection workflows

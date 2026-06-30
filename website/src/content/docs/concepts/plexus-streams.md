@@ -100,7 +100,7 @@ precise about which you have:
 Replication is the durable tier only. The express tiers (speculative, ephemeral)
 are always owner-only — replication would contradict their latency-first intent.
 Set the cluster default replica count with the controller's
-`stream_replication_factor` (see [Configuration](/latest/configuration/)); the
+`stream_replication_factor` (see [Configuration](/configuration/)); the
 default of one keeps a durable stream available across a single node loss. A
 single stream can override it at declare time with the replication-factor builder
 (`replication_factor` in Rust and Python, `replicationFactor` in TypeScript), so
@@ -121,5 +121,5 @@ simply re-delivers a bounded window. Publishing to a stream uses the ordinary
 publish path; the broker routes by channel kind, so the same producer works for
 queues and streams.
 
-See [Client usage](/latest/clients/) for the stream API in Rust, TypeScript, and
+See [Client usage](/clients/) for the stream API in Rust, TypeScript, and
 Python.

@@ -1,6 +1,7 @@
 ---
 title: Core model
 description: How messages move through a Fibril queue.
+slug: 0.2/concepts/core-model
 ---
 
 Fibril uses a strict queue state machine. Each offset exists in at most one of three states:

@@ -1,6 +1,8 @@
 ---
 title: Many idle queues
-description: Running sparse workloads where many durable queues exist but only a few are active at once.
+description: Running sparse workloads where many durable queues exist but only a
+  few are active at once.
+slug: 0.2/concepts/many-idle-queues
 ---
 
 Some systems naturally create a lot of queues: per-customer work streams, per-tenant routing, scheduled jobs, rarely used webhooks, or low-traffic integrations.
@@ -13,8 +15,8 @@ Without lazy loading and idle cleanup, every queue that has ever been touched ca
 
 Fibril addresses this in two steps:
 
-- Queues are loaded lazily. Existing queues on disk do not need to be loaded into memory at startup.
-- Queues can be unloaded from memory after they have been unused for long enough.
+* Queues are loaded lazily. Existing queues on disk do not need to be loaded into memory at startup.
+* Queues can be unloaded from memory after they have been unused for long enough.
 
 Unloading is not deletion. Messages, queue state, snapshots, and logs stay on disk.
 
@@ -22,18 +24,18 @@ Unloading is not deletion. Messages, queue state, snapshots, and logs stay on di
 
 A queue is loaded into memory when the broker needs to operate on it. Common examples:
 
-- a publisher writes to the queue
-- a subscriber subscribes to the queue
-- an admin or broker operation needs the queue state
-- delayed or delivery work touches the queue
+* a publisher writes to the queue
+* a subscriber subscribes to the queue
+* an admin or broker operation needs the queue state
+* delayed or delivery work touches the queue
 
 Publisher and subscriber creation load the queue before returning a usable handle. This means the admin queues page should not normally show active publishers or subscribers for a queue that is still only on disk.
 
 A queue may not be in memory when:
 
-- the broker has just started and the queue only exists on disk
-- the queue was previously active, then became idle and was unloaded
-- no current broker operation needs that queue
+* the broker has just started and the queue only exists on disk
+* the queue was previously active, then became idle and was unloaded
+* no current broker operation needs that queue
 
 If the queue is used again, Fibril reloads it from durable state and continues from there.
 
@@ -41,10 +43,10 @@ If the queue is used again, Fibril reloads it from durable state and continues f
 
 A queue becomes eligible for idle cleanup only after all of these are true:
 
-- no active subscribers remain for the queue
-- no active publishers remain for the queue
-- no messages are currently leased to consumers
-- the configured idle window has elapsed
+* no active subscribers remain for the queue
+* no active publishers remain for the queue
+* no messages are currently leased to consumers
+* the configured idle window has elapsed
 
 Subscribers stop keeping a queue active when they unsubscribe or their connection closes.
 
@@ -80,7 +82,7 @@ publisher_idle_timeout_ms = 600000
 
 These values seed persisted runtime settings on first boot. After runtime settings exist, operators should edit them through the admin settings page or runtime settings API unless the setting group is locked by startup config.
 
-For the full config reference, see [configuration](/latest/configuration/).
+For the full config reference, see [configuration](/0.2/configuration/).
 
 ## Operator Guidance
 
@@ -103,17 +105,17 @@ The tradeoff is that the first operation on a cold queue may pay the cost of loa
 
 Available now:
 
-- lazy loading for durable queues
-- configurable idle queue unloading
-- configurable publisher idle expiry
-- live runtime updates through the admin settings page and API
+* lazy loading for durable queues
+* configurable idle queue unloading
+* configurable publisher idle expiry
+* live runtime updates through the admin settings page and API
 
 Not covered by this feature:
 
-- deleting queues
-- expiring messages by age
-- changing message retention
-- dead-letter policy
-- exact cleanup timing guarantees
+* deleting queues
+* expiring messages by age
+* changing message retention
+* dead-letter policy
+* exact cleanup timing guarantees
 
-For implementation details, see [idle queue internals](/latest/development/idle-queue-internals/).
+For implementation details, see [idle queue internals](/0.2/development/idle-queue-internals/).

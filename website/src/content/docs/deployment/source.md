@@ -89,7 +89,7 @@ compiled defaults < TOML config file < environment variables < CLI arguments
 ```
 
 For the complete field reference, environment variables, CLI flags, runtime
-seed behavior, and runtime locks, see [configuration](/latest/configuration/).
+seed behavior, and runtime locks, see [configuration](/configuration/).
 
 For sparse workloads, enable publisher idle expiry alongside queue cleanup;
 otherwise a long-lived connection that published to a queue can keep that queue

@@ -4,7 +4,7 @@ description: Development notes on Fibril's follower-pull replication, durability
 ---
 
 This is a development note. User-facing behavior lives in
-[replication](/latest/reliability/replication/). This page records the internal
+[replication](/reliability/replication/). This page records the internal
 invariants and why they were chosen.
 
 ## Follower progress is local-append progress
@@ -92,6 +92,6 @@ failover-safety ordering is untouched: only fetching is overlapped.
 
 ## See also
 
-- [Replication](/latest/reliability/replication/) for the user-facing model.
-- [Clustering](/latest/concepts/clustering/) for ownership and failover.
-- [Recovery quarantine](/latest/reliability/recovery-quarantine/) for damaged-log handling.
+- [Replication](/reliability/replication/) for the user-facing model.
+- [Clustering](/concepts/clustering/) for ownership and failover.
+- [Recovery quarantine](/reliability/recovery-quarantine/) for damaged-log handling.

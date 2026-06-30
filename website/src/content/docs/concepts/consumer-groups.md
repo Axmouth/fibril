@@ -48,7 +48,7 @@ publisher
     .await?;
 ```
 
-See [partition routing](/latest/development/partition-routing/) for how keys map
+See [partition routing](/development/partition-routing/) for how keys map
 to partitions.
 
 ## When it applies
@@ -57,7 +57,7 @@ to partitions.
   only one ordered stream, so one member consumes it and the others stand by
   (hot standbys for failover) — this is the classic "single active consumer"
   pattern. Declare more partitions to consume in parallel; see
-  [configuration](/latest/configuration/).
+  [configuration](/configuration/).
 - **One cohort per queue.** A queue `(topic, group)` has a single exclusive
   group. Subscribing with a conflicting second group id on the same queue is
   rejected. Use a separate `group` namespace for an unrelated workload.
@@ -80,4 +80,4 @@ to partitions.
   rule is always enforced).
 
 Exclusive consumer groups are a recent addition; see the
-[roadmap](/latest/roadmap/) for current status.
+[roadmap](/roadmap/) for current status.

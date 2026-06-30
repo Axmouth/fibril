@@ -1,6 +1,7 @@
 ---
 title: Optimization log
 description: Benchmark-first notes for low-level Fibril performance work.
+slug: 0.2/development/optimization-log
 ---
 
 This page tracks low-level optimization ideas before they become code changes.
@@ -15,13 +16,13 @@ cost model and a benchmark that can prove the result.
 
 Fibril already has useful end-to-end benchmarks:
 
-- `scripts/bench-steady-c.sh` measures controlled-rate publish and delivery,
+* `scripts/bench-steady-c.sh` measures controlled-rate publish and delivery,
   latency percentiles, missing messages, publish errors, confirmation errors,
   server RSS, and queue snapshots.
-- `scripts/bench-matrix.sh` runs repeatable steady-state scenarios and writes
+* `scripts/bench-matrix.sh` runs repeatable steady-state scenarios and writes
   one results file plus one log file per case.
-- `scripts/bench-e2e-c.sh` measures burst-style ingress and egress saturation.
-- `scripts/bench-results-table.sh` turns steady benchmark result files into a
+* `scripts/bench-e2e-c.sh` measures burst-style ingress and egress saturation.
+* `scripts/bench-results-table.sh` turns steady benchmark result files into a
   Markdown table.
 
 The current microbenchmark surface is still small, but
@@ -34,14 +35,14 @@ end-to-end benchmark case that isolates the expected effect.
 
 Before changing a low-level path, record:
 
-- Git commit and whether the Stroma source is local or git-sourced.
-- Rust version and build mode.
-- Machine, CPU governor if known, disk type, and `ulimit -n`.
-- Benchmark command, full environment variables, and output directory.
-- Median result across at least three runs when the run is short enough.
-- p50, p95, p99, max latency, missing messages, errors, server RSS avg and
+* Git commit and whether the Stroma source is local or git-sourced.
+* Rust version and build mode.
+* Machine, CPU governor if known, disk type, and `ulimit -n`.
+* Benchmark command, full environment variables, and output directory.
+* Median result across at least three runs when the run is short enough.
+* p50, p95, p99, max latency, missing messages, errors, server RSS avg and
   peak, and queue end state.
-- Runtime warnings and errors from the benchmark log.
+* Runtime warnings and errors from the benchmark log.
 
 Use the same machine, same data directory class, same payload size, same
 durability settings, same client count, same prefetch, and same benchmark
@@ -83,17 +84,17 @@ many scenarios once. A one-run improvement is a clue, not a conclusion.
 
 Use these as defaults unless the experiment says otherwise:
 
-- A change aimed at throughput should improve measured throughput or the
+* A change aimed at throughput should improve measured throughput or the
   latency knee by at least 10% without increasing p95 or p99 latency in the
   normal-load cases.
-- A change aimed at latency should improve p95 or p99 by at least 10% without
+* A change aimed at latency should improve p95 or p99 by at least 10% without
   lowering sustainable throughput.
-- A change aimed at memory should reduce server RSS peak or steady RSS by at
+* A change aimed at memory should reduce server RSS peak or steady RSS by at
   least 10% without adding missing messages, errors, or a clear latency
   regression.
-- A change that adds hot-path instrumentation must show that the instrumentation
+* A change that adds hot-path instrumentation must show that the instrumentation
   overhead is small enough to keep enabled.
-- A change that moves bottlenecks between CPU, storage, and memory must say
+* A change that moves bottlenecks between CPU, storage, and memory must say
   which bottleneck moved and why.
 
 Small cleanups can still land without a visible benchmark win, but they should
@@ -153,10 +154,10 @@ which should be preserved unless a benchmark proves otherwise.
 
 Benchmark needed: a properly wired Criterion bench for encode/decode with:
 
-- 1KB payload, no headers.
-- 1KB payload, content type only.
-- 1KB payload, several user headers.
-- 64KB payload, no headers.
+* 1KB payload, no headers.
+* 1KB payload, content type only.
+* 1KB payload, several user headers.
+* 64KB payload, no headers.
 
 Then run `baseline` to confirm the microbench result matters end to end.
 
@@ -300,58 +301,58 @@ Add entries here when an optimization is actually tried.
 
 ## Lessons so far
 
-- End-to-end benchmarks are good enough to catch large regressions, but they do
+* End-to-end benchmarks are good enough to catch large regressions, but they do
   not isolate small serialization or allocation changes.
-- Low-rate steady runs are as important as saturation runs because batching can
+* Low-rate steady runs are as important as saturation runs because batching can
   improve peak throughput while making normal latency worse.
-- Reducing obvious per-message metric work did not improve the measured
+* Reducing obvious per-message metric work did not improve the measured
   high-rate TCP path in the first trial. Scheduler behavior and delivery-loop
   wake timing need more precise measurement before changing this path.
-- For 1KB publish frames, MessagePack encode/decode is measurable but not large
+* For 1KB publish frames, MessagePack encode/decode is measurable but not large
   enough by itself to explain the current backlog knee.
-- For internal replication reads, MessagePack was the wrong shape. The biggest
+* For internal replication reads, MessagePack was the wrong shape. The biggest
   replicated-throughput win so far came from replacing the hot
   `ReplicationReadOk` response with a raw, easy-to-parse binary frame carrying
   fixed metadata, raw message header/payload bytes, raw event bytes, and explicit
   offsets. That removed a large nested decode/re-encode cost from follower
   catch-up.
-- Record-count limits are not enough for replication batches. Payload size can
+* Record-count limits are not enough for replication batches. Payload size can
   dominate, so byte caps must be part of the protocol and must rewrite progress
   metadata to the actual returned frontier.
-- The publish sink benefits from a much shorter coalescing window than the
+* The publish sink benefits from a much shorter coalescing window than the
   original 1ms. Removing the wait entirely lost useful batching around the
   350k-400k/s knee. Measuring the window from the previous flush gives sparse
   traffic immediate sends while preserving useful batching under load.
-- Large payload results are hardware-specific on the current SATA SSD machine.
+* Large payload results are hardware-specific on the current SATA SSD machine.
   They are still useful for detecting memory and storage-regression direction.
-- For replica-durable runs, publish-to-deliver latency can be misleading by
+* For replica-durable runs, publish-to-deliver latency can be misleading by
   itself. The current 50k/s tuned run shows most latency before server receive,
   while server-receive-to-deliver remains much lower. Keep reporting both.
-- The first broker timing metrics show that replica-durable confirm latency is
+* The first broker timing metrics show that replica-durable confirm latency is
   not automatically the same thing as post-local-append follower wait. In the
   50k/s window-1024 run, owner `replica_confirm_wait` averaged about 0.033ms
   while client-observed confirmation p50 was about 204ms. The next useful split
   is local append completion latency versus client/window backlog and follower
   tick/apply work.
-- Replica-durable replication is now usable enough to benchmark seriously, but
+* Replica-durable replication is now usable enough to benchmark seriously, but
   it is not a finished performance story. Current runs prove correctness and
   useful throughput, while the latency caveat is still real: higher throughput
   currently depends on enough outstanding confirms, and that backlog becomes
   visible client latency.
-- Compared with mature replicated queues and logs, the main open performance
+* Compared with mature replicated queues and logs, the main open performance
   questions are architectural rather than micro-optimizations: committed
   visibility watermarking, long-poll or push-hinted follower replication,
   cheaper watermark-based confirmation, better separation of payload transfer
   from event/progress movement, whole-frame versus streaming decode, and raw
   Keratin range replication that avoids decode/re-encode work where safe.
-- Local multi-node benchmarks are useful stress tests, but they are not a full
+* Local multi-node benchmarks are useful stress tests, but they are not a full
   deployment model. They share CPU, page cache, and one drive, while also hiding
   real network cost.
-- The next narrow measurement should split local append completion, confirm sink
+* The next narrow measurement should split local append completion, confirm sink
   backlog, replica-gate wait, and follower apply/tick time before making more
   protocol or scheduling changes.
-- Temporary timing probes are acceptable during an audit, but they should not
+* Temporary timing probes are acceptable during an audit, but they should not
   remain as ad hoc logs. Promote useful signals to cheap aggregated metrics or
   sampled diagnostics, then remove the raw per-frame logging.
-- Operator metrics should stay cheap and useful. Percentile-heavy measurement
+* Operator metrics should stay cheap and useful. Percentile-heavy measurement
   belongs in benchmark tools unless there is a clear production need.

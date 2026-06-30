@@ -3,7 +3,7 @@ title: Configuration design
 description: Planned implementation shape for startup config and persisted runtime settings.
 ---
 
-This is a design reference for Fibril configuration. It builds on the [configuration policy](/latest/development/config-policy/) and tracks both implemented pieces and planned follow-up work.
+This is a design reference for Fibril configuration. It builds on the [configuration policy](/development/config-policy/) and tracks both implemented pieces and planned follow-up work.
 
 ## Goals
 

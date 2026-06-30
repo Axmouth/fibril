@@ -1,6 +1,8 @@
 ---
 title: Deterministic simulation testing
-description: Evaluation of turmoil and madsim for testing Fibril's cluster failure paths, and the staged plan for adopting one.
+description: Evaluation of turmoil and madsim for testing Fibril's cluster
+  failure paths, and the staged plan for adopting one.
+slug: 0.2/development/deterministic-simulation
 ---
 
 This is a development note: the evaluation behind task #97 and the plan for
@@ -13,11 +15,11 @@ between "the cluster path passes my tests" and "I would run it across nodes."
 The single-node path is well covered by ordinary tests. The value of simulation
 is the **cluster failure paths**, where bugs hide in rare interleavings:
 
-- replication catch-up and checkpoint install under a slow or flapping follower
-- epoch-fenced failover with no split-brain (a stale former owner must not serve)
-- replica-durable confirm timing and the in-sync floor under partitions
-- repartition cutover fencing under reordered or delayed client acks
-- coordination (raft) under partitions, message loss, and reordering
+* replication catch-up and checkpoint install under a slow or flapping follower
+* epoch-fenced failover with no split-brain (a stale former owner must not serve)
+* replica-durable confirm timing and the in-sync floor under partitions
+* repartition cutover fencing under reordered or delayed client acks
+* coordination (raft) under partitions, message loss, and reordering
 
 These need controlled time, controlled message scheduling, and injectable network
 faults - which is what a deterministic simulator provides.
@@ -113,7 +115,7 @@ determinism catches - and only after weighing it against the openraft dep graph.
    promoted log continues from exactly the replicated tails (no data loss) and
    promotion happens only under the higher epoch (the fencing mechanism). Both
    are deterministic (identical wall-clock across repeated runs).
-4a. **Ganglion raft over the simulator.** DONE. ganglion's raft network factory
+   4a. **Ganglion raft over the simulator.** DONE. ganglion's raft network factory
    and peer connection are now generic over a `RaftDialer`, and `serve_connection`
    plus the frame codec are generic over the stream, so a turmoil transport is
    injected from fibril test code (a `TurmoilDialer`) with no ganglion dependency

@@ -1,6 +1,7 @@
 ---
 title: Running Fibril
 description: Current options for running the pre-alpha Fibril broker.
+slug: 0.2/deployment/source
 ---
 
 Fibril does not have a stable packaged release yet. For now, treat deployments
@@ -16,10 +17,10 @@ controls.
 
 The current server binary:
 
-- listens for broker TCP traffic on `0.0.0.0:9876`
-- serves the early admin interface on `0.0.0.0:8081`
-- stores durable state under `server_data/`
-- uses development authentication defaults in the server binary
+* listens for broker TCP traffic on `0.0.0.0:9876`
+* serves the early admin interface on `0.0.0.0:8081`
+* stores durable state under `server_data/`
+* uses development authentication defaults in the server binary
 
 These defaults are expected to change as configuration and packaging mature.
 
@@ -42,8 +43,8 @@ The `main` tag is a moving pre-release image. CI also publishes immutable
 
 The image exposes:
 
-- `9876` for broker TCP traffic
-- `8081` for the admin surface
+* `9876` for broker TCP traffic
+* `8081` for the admin surface
 
 Persistent data lives under `/app/server_data` in the container.
 
@@ -89,7 +90,7 @@ compiled defaults < TOML config file < environment variables < CLI arguments
 ```
 
 For the complete field reference, environment variables, CLI flags, runtime
-seed behavior, and runtime locks, see [configuration](/latest/configuration/).
+seed behavior, and runtime locks, see [configuration](/0.2/configuration/).
 
 For sparse workloads, enable publisher idle expiry alongside queue cleanup;
 otherwise a long-lived connection that published to a queue can keep that queue

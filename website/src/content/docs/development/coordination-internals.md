@@ -4,8 +4,8 @@ description: Development notes on cohort assignment, generation fencing, placeme
 ---
 
 This is a development note. User-facing behavior lives in
-[clustering](/latest/concepts/clustering/) and
-[consumer groups](/latest/concepts/consumer-groups/). This page records how the
+[clustering](/concepts/clustering/) and
+[consumer groups](/concepts/consumer-groups/). This page records how the
 coordinator stays simple and still safe.
 
 ## The gate is the correctness backstop, the plan is advisory
@@ -80,5 +80,5 @@ id. The per-partition gate still keeps delivery correct in the meantime.
 
 ## See also
 
-- [Clustering](/latest/concepts/clustering/) and [consumer groups](/latest/concepts/consumer-groups/) for the user-facing model.
-- [Replication design](/latest/development/replication-design/) for the durability side of coordination.
+- [Clustering](/concepts/clustering/) and [consumer groups](/concepts/consumer-groups/) for the user-facing model.
+- [Replication design](/development/replication-design/) for the durability side of coordination.

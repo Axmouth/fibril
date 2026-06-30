@@ -63,14 +63,32 @@ if [[ "$mode" == "release" ]]; then
   set_versions
 fi
 
-# Snapshot the docs: freeze /latest under /<minor> so an adopter on this release
-# sees the surface as it shipped while /latest moves ahead.
-docs_latest="website/src/content/docs/latest"
-docs_snapshot="website/src/content/docs/$minor"
-if [[ -d "$docs_latest" ]]; then
-  rm -rf "$docs_snapshot"
-  cp -r "$docs_latest" "$docs_snapshot"
-  echo "release: snapshotted docs $docs_latest -> $docs_snapshot"
+# Snapshot the docs: the current docs live unversioned at the site root and are
+# frozen under /<minor> so an adopter on this release sees the surface as it
+# shipped while the root moves ahead. The starlight-versions plugin does the
+# archiving (and rewrites intra-doc links to the versioned path) when it sees a
+# version slug in astro.config.mjs that has no folder yet, so the release step is
+# to register the slug and run a site build to generate the folder.
+docs_root="website/src/content/docs"
+astro_config="website/astro.config.mjs"
+if [[ -d "$docs_root" && -f "$astro_config" ]]; then
+  if [[ -d "$docs_root/$minor" ]]; then
+    echo "release: docs version $minor already snapshotted, skipping"
+  elif ! grep -q "slug: \"$minor\"" "$astro_config"; then
+    # Register the new version at the front of the versions array (newest first).
+    sed -i "s/versions: \[/versions: [{ slug: \"$minor\" }, /" "$astro_config"
+    echo "release: registered docs version $minor in $astro_config"
+  fi
+  if [[ ! -d "$docs_root/$minor" ]]; then
+    if command -v npm >/dev/null 2>&1; then
+      echo "release: generating docs snapshot /$minor via site build"
+      npm --prefix website run build >/dev/null
+      echo "release: snapshotted docs root -> $docs_root/$minor"
+    else
+      echo "release: npm not found - run 'npm --prefix website run build' to" \
+        "generate the /$minor docs snapshot before tagging" >&2
+    fi
+  fi
 fi
 
 echo "release: checking the workspace builds at $version"

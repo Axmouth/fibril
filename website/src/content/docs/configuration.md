@@ -147,8 +147,8 @@ the rest are carried for forward compatibility.
 `coordination.mode` is `static` for a standalone single-broker deployment (the
 default) or `ganglion` to run the embedded coordinator and form a cluster. The
 `coordination.ganglion.*` settings only apply in `ganglion` mode. See
-[clustering](/latest/concepts/clustering/) and
-[replication](/latest/reliability/replication/).
+[clustering](/concepts/clustering/) and
+[replication](/reliability/replication/).
 
 `coordination.ganglion.target_followers` is the desired follower count per queue
 partition. `coordination.ganglion.stream_replication_factor` is the equivalent for
@@ -156,7 +156,7 @@ DURABLE Plexus stream partitions — tuned separately so stream and queue fault
 tolerance can differ; only the durable tier replicates, the express tiers stay
 owner-only. A value of one keeps a durable stream available across a single node
 loss; zero makes durable streams owner-only (durable on disk, not HA). See
-[Plexus streams](/latest/concepts/plexus-streams/).
+[Plexus streams](/concepts/plexus-streams/).
 `coordination.ganglion.assignment_durability` is the default durability
 policy for new assignments (`local_durable`, `replica_accepted`, `replica_durable`,
 or `majority_durable`).
@@ -164,7 +164,7 @@ or `majority_durable`).
 `recovery.on_mismatch` controls what happens when recovery finds a damaged queue
 log: `quarantine` (default) isolates the partition, `refuse` reports not ready,
 and `ignore` truncates to the last valid record. See
-[recovery quarantine](/latest/reliability/recovery-quarantine/).
+[recovery quarantine](/reliability/recovery-quarantine/).
 
 `admin.auth.enabled = true` requires both `admin.auth.username` and `admin.auth.password`.
 The admin password is intentionally not shown in the dashboard startup summary.
@@ -184,7 +184,7 @@ transition marker) waits for clients to adopt the new routing once the backlog
 has drained. Adoption is observed from client topology acks. The timeout keeps a
 silent or stuck client from stalling a cutover forever; publish version-fencing
 is the correctness backstop regardless. See
-[live routing and cutover](/latest/development/live-routing-and-cutover/).
+[live routing and cutover](/development/live-routing-and-cutover/).
 
 ## Runtime Seeds
 
@@ -212,7 +212,7 @@ After runtime settings exist, the persisted values own these settings. You can e
 
 For sparse workloads, enable publisher idle expiry alongside queue cleanup. Without it, a long-lived connection that published to a queue can keep that queue active until the connection closes.
 
-See [many idle queues](/latest/concepts/many-idle-queues/) for the user-facing behavior.
+See [many idle queues](/concepts/many-idle-queues/) for the user-facing behavior.
 
 ### Connections
 
@@ -312,7 +312,7 @@ This setting:
 - uses `expected_version` and returns `409 Conflict` if another update wins
 - is not seeded or overridden by TOML, environment variables, or CLI flags
 
-See [dead lettering](/latest/reliability/dead-lettering/) for the setting
+See [dead lettering](/reliability/dead-lettering/) for the setting
 shape and current limitations.
 
 ## Validation

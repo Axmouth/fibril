@@ -1,6 +1,7 @@
 ---
 title: Benchmarks
 description: Early performance observations for Fibril.
+slug: 0.2/benchmarks
 ---
 
 Current benchmark numbers are informal architecture checks, not claims of production capacity.
@@ -22,20 +23,20 @@ Memory usage during these runs ranged from a few hundred MB at lower load to rou
 
 These numbers are useful mostly as a sanity check:
 
-- the durable path is not obviously too slow
-- batching and the queue execution model are promising
-- memory behavior still needs tuning
-- larger payloads will shift bottlenecks toward memory, copying, storage, and network I/O
+* the durable path is not obviously too slow
+* batching and the queue execution model are promising
+* memory behavior still needs tuning
+* larger payloads will shift bottlenecks toward memory, copying, storage, and network I/O
 
 ## Missing benchmark work
 
 The project still needs:
 
-- broader payload-size sweeps across more hardware
-- durability-setting comparisons
-- richer latency histograms and structured output
-- restart/replay timing
-- multi-consumer fairness and backpressure scenarios
+* broader payload-size sweeps across more hardware
+* durability-setting comparisons
+* richer latency histograms and structured output
+* restart/replay timing
+* multi-consumer fairness and backpressure scenarios
 
 ## Current TCP benchmark
 
@@ -330,14 +331,14 @@ publish to delivery:
 
 The tiers separate as designed:
 
-- `durable` waits for the fsync before it delivers and confirms, so its delivery
+* `durable` waits for the fsync before it delivers and confirms, so its delivery
   latency is the fsync latency. Strictest guarantee, highest and most predictable
   latency.
-- `speculative` delivers as soon as the record is staged and defers the producer
+* `speculative` delivers as soon as the record is staged and defers the producer
   confirm until it is durable. Delivery is near-instant while the confirm reflects
   real durability, and records carry a `fibril.speculative` header so a consumer
   knows they may still be rolled back.
-- `ephemeral` delivers and confirms at staging and persists in the background.
+* `ephemeral` delivers and confirms at staging and persists in the background.
   Lowest latency on every axis and the lightest on memory. It keeps a tight tail
   on a real disk because a background flush drains dirty pages on keratin's fsync
   worker stage rather than letting them pile up until the kernel throttles the

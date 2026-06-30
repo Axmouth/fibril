@@ -1,17 +1,18 @@
 ---
 title: Configuration design
 description: Planned implementation shape for startup config and persisted runtime settings.
+slug: 0.2/development/config-design
 ---
 
-This is a design reference for Fibril configuration. It builds on the [configuration policy](/latest/development/config-policy/) and tracks both implemented pieces and planned follow-up work.
+This is a design reference for Fibril configuration. It builds on the [configuration policy](/0.2/development/config-policy/) and tracks both implemented pieces and planned follow-up work.
 
 ## Goals
 
 Fibril should have an operations model that is easy to predict:
 
-- startup config decides how the process starts
-- persisted runtime settings decide live broker defaults
-- queue settings decide queue-specific behavior
+* startup config decides how the process starts
+* persisted runtime settings decide live broker defaults
+* queue settings decide queue-specific behavior
 
 The implementation should avoid hidden precedence, runtime env-var surprises, and higher-level broker concepts leaking into lower-level storage code.
 
@@ -31,13 +32,13 @@ This precedence applies to bootstrap settings and first-boot runtime seeds. It d
 
 Examples of bootstrap settings:
 
-- data directory
-- broker TCP bind address
-- admin bind address
-- admin auth bootstrap
-- config file path
-- storage/log implementation options
-- TLS/listener setup, when added
+* data directory
+* broker TCP bind address
+* admin bind address
+* admin auth bootstrap
+* config file path
+* storage/log implementation options
+* TLS/listener setup, when added
 
 ## Config Crate
 
@@ -45,13 +46,13 @@ Fibril has a dedicated `fibril-config` crate.
 
 Responsibilities:
 
-- define the server config model
-- load TOML
-- apply env overrides
-- apply CLI overrides
-- validate values
-- expose source metadata for diagnostics and admin display
-- produce a finished config object for `crates/fibril/bin/server.rs`
+* define the server config model
+* load TOML
+* apply env overrides
+* apply CLI overrides
+* validate values
+* expose source metadata for diagnostics and admin display
+* produce a finished config object for `crates/fibril/bin/server.rs`
 
 The server binary should not keep hand-parsing env vars.
 
@@ -95,11 +96,11 @@ Runtime settings should be persisted through a durable global store and exposed 
 
 Examples:
 
-- idle queue cleanup behavior
-- default inflight lease duration
-- expiry polling defaults
-- future global dead-letter defaults
-- future defaults for newly declared queues
+* idle queue cleanup behavior
+* default inflight lease duration
+* expiry polling defaults
+* future global dead-letter defaults
+* future defaults for newly declared queues
 
 Runtime defaults should be grouped where atomic updates matter. Idle queue cleanup is one group:
 
@@ -165,10 +166,10 @@ Global store values should not use JSON.
 
 Use MessagePack for now:
 
-- compact enough
-- schema-friendly through Serde
-- already aligned with Fibril's internal encoding direction
-- not on a hot path
+* compact enough
+* schema-friendly through Serde
+* already aligned with Fibril's internal encoding direction
+* not on a hot path
 
 Stroma stores bytes. Broker/admin code owns serialization and validation for Fibril runtime settings.
 
@@ -257,11 +258,11 @@ Request:
 
 Outcomes:
 
-- `200 OK`: update stored and response contains the new effective settings.
-- `400 Bad Request`: validation failed or the request tried to change a locked setting group.
-- `409 Conflict`: `expected_version` is stale and the response contains the current effective settings.
-- `404 Not Found`: runtime settings are unavailable for this admin server instance.
-- `500 Internal Server Error`: storage, encoding, or unexpected update failure.
+* `200 OK`: update stored and response contains the new effective settings.
+* `400 Bad Request`: validation failed or the request tried to change a locked setting group.
+* `409 Conflict`: `expected_version` is stale and the response contains the current effective settings.
+* `404 Not Found`: runtime settings are unavailable for this admin server instance.
+* `500 Internal Server Error`: storage, encoding, or unexpected update failure.
 
 The API currently accepts and returns the whole settings document. That keeps atomicity clear and avoids partial merge rules until the admin UI has a more deliberate editing model.
 
@@ -317,10 +318,10 @@ Runtime locks are bootstrap-owned and should be visible.
 
 If a setting group is locked:
 
-- admin UI shows it as locked
-- admin API rejects mutation with a clear error
-- persisted runtime state still stores the current value
-- config management can intentionally own that value
+* admin UI shows it as locked
+* admin API rejects mutation with a clear error
+* persisted runtime state still stores the current value
+* config management can intentionally own that value
 
 Do not make ordinary env vars hidden runtime overrides.
 
@@ -328,18 +329,18 @@ Do not make ordinary env vars hidden runtime overrides.
 
 Done:
 
-- `fibril-config` typed startup config with TOML, env overlay, CLI overlay, validation, and tests
-- `server.rs` loads a finished config object
-- Stroma `GlobalStore` with opaque byte values, versions, CAS, watch support, and tests
-- broker runtime settings model with MessagePack encoding
-- first-boot seeding into global state
-- boot-owned runtime locks
-- manager-level compare-and-swap update with conflict reporting
-- admin JSON API for reading runtime settings
-- admin JSON API for updating runtime settings with expected-version conflict handling
-- first admin UI for viewing/updating runtime settings, locked fields, and conflicts
-- live broker runtime config snapshots with settings-change wakeups
-- live publisher idle expiry updates for existing TCP connections
+* `fibril-config` typed startup config with TOML, env overlay, CLI overlay, validation, and tests
+* `server.rs` loads a finished config object
+* Stroma `GlobalStore` with opaque byte values, versions, CAS, watch support, and tests
+* broker runtime settings model with MessagePack encoding
+* first-boot seeding into global state
+* boot-owned runtime locks
+* manager-level compare-and-swap update with conflict reporting
+* admin JSON API for reading runtime settings
+* admin JSON API for updating runtime settings with expected-version conflict handling
+* first admin UI for viewing/updating runtime settings, locked fields, and conflicts
+* live broker runtime config snapshots with settings-change wakeups
+* live publisher idle expiry updates for existing TCP connections
 
 Useful follow-up work:
 
@@ -348,6 +349,6 @@ Useful follow-up work:
 
 ## Open Questions
 
-- Whether the global store belongs directly in Stroma core or in an adjacent Stroma metadata module.
-- Whether a global store snapshot format should be shared with queue snapshots or kept fully separate.
-- Exact admin auth model for mutation once read-only admin access exists.
+* Whether the global store belongs directly in Stroma core or in an adjacent Stroma metadata module.
+* Whether a global store snapshot format should be shared with queue snapshots or kept fully separate.
+* Exact admin auth model for mutation once read-only admin access exists.

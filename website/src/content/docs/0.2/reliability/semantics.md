@@ -1,6 +1,7 @@
 ---
 title: Reliability semantics
 description: The current durability and delivery guarantees in Fibril.
+slug: 0.2/reliability/semantics
 ---
 
 Fibril currently targets best-effort at-least-once delivery.
@@ -9,9 +10,9 @@ Fibril currently targets best-effort at-least-once delivery.
 
 Fibril stores message payloads and queue state durably. Recovery is based on:
 
-- persisted message records
-- persisted queue-state records
-- snapshots and replay
+* persisted message records
+* persisted queue-state records
+* snapshots and replay
 
 Commands are designed to be idempotent and replay-safe.
 
@@ -21,7 +22,7 @@ Acknowledgements are explicit, idempotent, and final. Settlements are tracked as
 
 If a subscription is dropped with prefetched but unacknowledged messages, those messages are returned for redelivery instead of being left behind until lease expiry. This keeps unsubscribe and consumer shutdown behavior aligned with at-least-once delivery.
 
-Short socket breaks can be handled with [reconnect grace](/latest/reliability/reconnects/) when it is configured and the client reconnects with a valid resume identity before the grace window expires.
+Short socket breaks can be handled with [reconnect grace](/0.2/reliability/reconnects/) when it is configured and the client reconnects with a valid resume identity before the grace window expires.
 
 ## Retries
 

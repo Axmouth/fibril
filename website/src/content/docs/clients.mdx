@@ -29,7 +29,7 @@ facade (`fibril.blocking.BlockingClient`) over the same async core.
 - **Python**: Python 3.11 or newer. The only runtime dependency is the PyPI
   `msgpack` package, installed automatically with the client.
 
-For reconnect behavior and current limits, see [reconnects](/latest/reliability/reconnects/).
+For reconnect behavior and current limits, see [reconnects](/reliability/reconnects/).
 
 ## Connect
 
@@ -92,7 +92,7 @@ operation if the previous engine is already closed. Disable that with
 TypeScript. After a successful resume, the clients send their known subscription
 metadata to the broker and read the reconciliation result. Subscriptions that the
 broker confirms with `keep` continue on the existing stream. This does not replay
-in-flight publish operations. See [reconnects](/latest/reliability/reconnects/)
+in-flight publish operations. See [reconnects](/reliability/reconnects/)
 for the current limits.
 
 The default reconciliation policy is conservative. Rust can opt into restoring
@@ -453,7 +453,7 @@ publisher.publish(NewMessage.raw(bytes([1, 2, 3])))
   </TabItem>
 </Tabs>
 
-Fibril reserves `fibril.*` and `stroma.*` headers for system metadata. User code should not set headers with those prefixes. See [metadata policy](/latest/development/metadata-policy/) for the development note.
+Fibril reserves `fibril.*` and `stroma.*` headers for system metadata. User code should not set headers with those prefixes. See [metadata policy](/development/metadata-policy/) for the development note.
 
 ## Manual Acknowledgements
 
@@ -840,7 +840,7 @@ for msg in sub:
 
 ## Plexus streams (fan-out)
 
-A [Plexus stream](/latest/concepts/plexus-streams/) delivers every record to
+A [Plexus stream](/concepts/plexus-streams/) delivers every record to
 every consumer. Declare it with `declare_plexus`, publish with the ordinary
 publisher (the broker routes by channel kind), and consume with `stream(...)`.
 Name the subscription to get a durable cursor that resumes after a restart and

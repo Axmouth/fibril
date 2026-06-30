@@ -1,6 +1,8 @@
 ---
 title: Clustering and coordination
-description: How Fibril assigns partition ownership across brokers, fences stale owners, and moves ownership on failure.
+description: How Fibril assigns partition ownership across brokers, fences stale
+  owners, and moves ownership on failure.
+slug: 0.2/concepts/clustering
 ---
 
 A single broker is simple: it owns every queue and answers every request. To
@@ -13,13 +15,13 @@ when a broker fails.
 
 ## Two modes
 
-- **Standalone (default, `coordination.mode = "static"`).** One broker owns all
+* **Standalone (default, `coordination.mode = "static"`).** One broker owns all
   queues. There is no coordination, no ownership negotiation, and no replication.
   This is the simplest deployment and needs no cluster configuration.
-- **Coordinated (Ganglion mode).** Each broker runs an embedded coordinator and
+* **Coordinated (Ganglion mode).** Each broker runs an embedded coordinator and
   they form one consensus group. A controller assigns ownership, and clients are
   routed to the current owner of each partition. Enable it with `[coordination]
-  mode = "ganglion"` (see [configuration](/latest/configuration/)).
+  mode = "ganglion"` (see [configuration](/0.2/configuration/)).
 
 The embedded coordinator currently uses the Raft consensus protocol under the
 hood. You do not configure Raft directly beyond its timings: Fibril's surface
@@ -104,13 +106,13 @@ Press Ctrl-C to stop every broker it started and clean up.
 
 A few variations are worth trying:
 
-- `--staggered` starts the nodes one at a time, so you can watch the cluster form
+* `--staggered` starts the nodes one at a time, so you can watch the cluster form
   (no quorum, then an election, then the remaining members join).
-- `--failover-verify` runs a confirmed producer and consumer against a survivor,
+* `--failover-verify` runs a confirmed producer and consumer against a survivor,
   kills the partition owner mid-load, and checks that no confirmed message is lost.
-- `--repartition-smoke` grows and then shrinks a queue's partition count under
+* `--repartition-smoke` grows and then shrinks a queue's partition count under
   live traffic.
-- `--viz` starts a single standalone broker and drops you into a live terminal
+* `--viz` starts a single standalone broker and drops you into a live terminal
   visualizer of real wire traffic and partition routing (publishes, confirms,
   deliveries, pings, errors as moving dots across partition lanes, with a metrics
   HUD). Interactive keys steer it live: `Tab` to focus a client, `space` to
@@ -135,60 +137,60 @@ first run builds the broker and CLI, so it takes longer than later runs.
 
 ## What Fibril does in coordinated mode
 
-- **Brokers register themselves.** Each broker publishes itself into a shared
+* **Brokers register themselves.** Each broker publishes itself into a shared
   node table and keeps a heartbeat fresh. A broker whose heartbeat goes stale
   stops counting as live.
-- **A controller assigns ownership.** The consensus leader acts as the
+* **A controller assigns ownership.** The consensus leader acts as the
   controller. It assigns every partition an **owner** and, when followers are
   configured, a follower set, and it spreads a queue's partitions across distinct
   nodes before reusing a node.
-- **Fencing epochs prevent split-brain.** Each assignment carries an epoch.
+* **Fencing epochs prevent split-brain.** Each assignment carries an epoch.
   Whenever ownership moves, the epoch is bumped. A broker that believes it is
   still the owner cannot keep serving once the epoch has advanced: writes and
   replication carrying a stale epoch are rejected.
-- **Clients follow ownership.** A producer or consumer that contacts a
+* **Clients follow ownership.** A producer or consumer that contacts a
   non-owner is redirected to the current owner, and clients refresh their
   topology and retry. This is transparent in the Rust client.
 
 Ownership, followers, and epochs are visible per partition on the admin
-[topology page](/latest/admin-dashboard/) and through `fibrilctl topology`.
+[topology page](/0.2/admin-dashboard/) and through `fibrilctl topology`.
 
 ## Operator actions
 
 In coordinated mode the topology page and admin API expose cluster operations:
 
-- **Repartition** a queue (grow or shrink its partition count).
-- **Add or remove a consensus voting member** to change the coordination quorum.
+* **Repartition** a queue (grow or shrink its partition count).
+* **Add or remove a consensus voting member** to change the coordination quorum.
 
 Change voting membership deliberately and one member at a time, since quorum
 changes affect availability.
 
 ## Activation and conditions
 
-- Standalone mode needs no coordination configuration and keeps single-node
+* Standalone mode needs no coordination configuration and keeps single-node
   behavior.
-- Coordinated mode is enabled per node with `[coordination] mode = "ganglion"`
+* Coordinated mode is enabled per node with `[coordination] mode = "ganglion"`
   and its `[coordination.ganglion]` settings (consensus timings, follower target,
   assignment durability).
-- The intended shape for large clusters is a small voting set with many brokers
+* The intended shape for large clusters is a small voting set with many brokers
   participating as registered coordination clients, not every broker becoming a
   voter.
-- Ownership assignment and failover are gated by epochs plus each broker's local
+* Ownership assignment and failover are gated by epochs plus each broker's local
   promotion checks, so a returning stale owner is demoted rather than allowed to
   double-serve.
 
 ## Tradeoffs and limits
 
-- Clustering is experimental and needs more failure testing before it is
+* Clustering is experimental and needs more failure testing before it is
   production-ready high availability.
-- Cross-broker aggregation of replication lag and in-sync state into one cluster
+* Cross-broker aggregation of replication lag and in-sync state into one cluster
   view is still pending.
-- Coordination outages do not take the broker down: assignment work retries, and
+* Coordination outages do not take the broker down: assignment work retries, and
   brokers keep serving what they already own.
 
 ## See also
 
-- [Replication](/latest/reliability/replication/) for follower catch-up and replica-durable confirms.
-- [Recovery quarantine](/latest/reliability/recovery-quarantine/) for damaged-log handling on restart.
-- [Partitioned queues](/latest/concepts/consumer-groups/) and [partition routing](/latest/development/partition-routing/) for how clients address partitions.
-- [Configuration](/latest/configuration/) for coordination settings.
+* [Replication](/0.2/reliability/replication/) for follower catch-up and replica-durable confirms.
+* [Recovery quarantine](/0.2/reliability/recovery-quarantine/) for damaged-log handling on restart.
+* [Partitioned queues](/0.2/concepts/consumer-groups/) and [partition routing](/0.2/development/partition-routing/) for how clients address partitions.
+* [Configuration](/0.2/configuration/) for coordination settings.

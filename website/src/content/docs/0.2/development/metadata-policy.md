@@ -1,6 +1,7 @@
 ---
 title: Metadata policy
 description: Development policy for reserved metadata namespaces and message headers.
+slug: 0.2/development/metadata-policy
 ---
 
 This is a development note. User-facing client docs should simply say which header prefixes are reserved and what application code should avoid.
@@ -9,8 +10,8 @@ This is a development note. User-facing client docs should simply say which head
 
 Fibril reserves these message header prefixes:
 
-- `fibril.*` for broker and protocol metadata
-- `stroma.*` for storage and queue-state metadata
+* `fibril.*` for broker and protocol metadata
+* `stroma.*` for storage and queue-state metadata
 
 Clients may receive and display these headers, but user code should not set them. The broker rejects published messages that include reserved headers so system metadata cannot be spoofed by application payloads.
 
@@ -20,16 +21,16 @@ Headers are for sparse metadata: values that are useful on some messages, but sh
 
 Examples that fit:
 
-- user trace ids
-- application content hints that are not already represented by a protocol field
-- uncommon system annotations that are not part of the hot path
+* user trace ids
+* application content hints that are not already represented by a protocol field
+* uncommon system annotations that are not part of the hot path
 
 Examples that should stay out of the user header map:
 
-- always-present broker metadata such as published timestamps
-- retry counts when the common case is zero
-- content type, which has a compact protocol/storage representation
-- fields that are better represented positionally in the wire/storage format
+* always-present broker metadata such as published timestamps
+* retry counts when the common case is zero
+* content type, which has a compact protocol/storage representation
+* fields that are better represented positionally in the wire/storage format
 
 ## Content Type
 
@@ -44,12 +45,12 @@ namespace when Stroma copies a message into a DLQ target.
 
 Current fields:
 
-- `stroma.dlq.source_topic`
-- `stroma.dlq.source_group`, only when the source queue has a group
-- `stroma.dlq.source_offset`
-- `stroma.dlq.retry_count`
-- `stroma.dlq.reason`
-- `stroma.dlq.dead_lettered_at_ms`
+* `stroma.dlq.source_topic`
+* `stroma.dlq.source_group`, only when the source queue has a group
+* `stroma.dlq.source_offset`
+* `stroma.dlq.retry_count`
+* `stroma.dlq.reason`
+* `stroma.dlq.dead_lettered_at_ms`
 
 These are sparse system annotations: normal messages do not pay for them, but
 DLQ messages carry enough context for inspection and future replay tooling.

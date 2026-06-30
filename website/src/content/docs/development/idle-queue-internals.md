@@ -3,7 +3,7 @@ title: Idle queue internals
 description: Implementation notes for lazy loading and idle queue cleanup.
 ---
 
-This is a development note. The user-facing behavior is described in [many idle queues](/latest/concepts/many-idle-queues/).
+This is a development note. The user-facing behavior is described in [many idle queues](/concepts/many-idle-queues/).
 
 The feature has two layers:
 

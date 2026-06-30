@@ -1,10 +1,12 @@
 ---
 title: Replication design
-description: Development notes on Fibril's follower-pull replication, durability invariants, and the streaming catch-up model.
+description: Development notes on Fibril's follower-pull replication, durability
+  invariants, and the streaming catch-up model.
+slug: 0.2/development/replication-design
 ---
 
 This is a development note. User-facing behavior lives in
-[replication](/latest/reliability/replication/). This page records the internal
+[replication](/0.2/reliability/replication/). This page records the internal
 invariants and why they were chosen.
 
 ## Follower progress is local-append progress
@@ -92,6 +94,6 @@ failover-safety ordering is untouched: only fetching is overlapped.
 
 ## See also
 
-- [Replication](/latest/reliability/replication/) for the user-facing model.
-- [Clustering](/latest/concepts/clustering/) for ownership and failover.
-- [Recovery quarantine](/latest/reliability/recovery-quarantine/) for damaged-log handling.
+* [Replication](/0.2/reliability/replication/) for the user-facing model.
+* [Clustering](/0.2/concepts/clustering/) for ownership and failover.
+* [Recovery quarantine](/0.2/reliability/recovery-quarantine/) for damaged-log handling.

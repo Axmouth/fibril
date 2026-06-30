@@ -8,7 +8,7 @@ landed recently and what is still pending. The near-term focus is making the
 existing semantics complete, observable, and usable before adding larger
 distributed-system features.
 
-For the reverse view, use [implemented surface](/latest/implemented-surface/) to
+For the reverse view, use [implemented surface](/implemented-surface/) to
 check what is already wired and under what conditions.
 
 ## Releases and the path to 1.0
@@ -16,13 +16,15 @@ check what is already wired and under what conditions.
 Fibril follows SemVer. While on 0.x the public API and wire protocol are not
 frozen and can change between minor releases. Versions move one minor at a time,
 with no vanity jumps: the number tracks the stability promise, not perceived
-completeness. Per-feature maturity lives in [project status](/latest/status/).
+completeness. Per-feature maturity lives in [project status](/status/).
 
-These docs live under `/latest/` and track main. When a version is cut, the docs
-that describe exactly what that release shipped - the
-[implemented surface](/latest/implemented-surface/) inventory and
-[project status](/latest/status/) - are snapshotted under a versioned path so an
-adopter on a release sees an accurate surface while `/latest` moves ahead.
+These docs live at the site root and track main. When a version is cut the whole
+documentation set is frozen under a versioned path (for example `/0.2/`), so an
+adopter on a release reads the surface, the
+[implemented surface](/implemented-surface/) inventory, and the
+[project status](/status/) exactly as that release shipped them while the root
+moves ahead. A version picker switches between the current docs and any frozen
+release.
 
 1.0 is not a quality badge, it is a commitment: a stable API and wire protocol
 plus confidence in the durability and replication semantics. It ships only when
@@ -96,14 +98,14 @@ See [out of scope](#out-of-scope) for what stays deliberately outside the broker
 ## Recently landed
 
 Highlights only. For the full wired surface and its conditions, see
-[implemented surface](/latest/implemented-surface/).
+[implemented surface](/implemented-surface/).
 
 - Plexus streams: a fan-out channel type alongside the work queue, with durable
   named cursors, per-stream durability tiers, partitioning with client-side
   fan-in, and header filters. Durable streams are placed and owned across nodes,
   the durable tier replicates record and cursor logs with caught-up failover, and
   high-fan-out auto-ack coalesces cursor commits. See
-  [Plexus streams](/latest/concepts/plexus-streams/).
+  [Plexus streams](/concepts/plexus-streams/).
 - Wildcard subscribe / discovery routing: an opt-in client view subscribes to
   every queue or stream matching a `*`-glob and auto-attaches new matches from a
   live cluster catalogue. Client-side only, in all three clients.
@@ -115,7 +117,7 @@ Highlights only. For the full wired surface and its conditions, see
   replica-durable publish confirms with `min_in_sync_replicas`.
 - Exclusive consumer groups: opt-in ordered, balanced, sticky, self-healing
   consumption of a partitioned queue (one consumer per partition). See
-  [consumer groups](/latest/concepts/consumer-groups/).
+  [consumer groups](/concepts/consumer-groups/).
 - Message TTL: per-message or per-queue expiry that drops through the dead-letter
   or discard path rather than being silently consumed.
 - Reconnection grace: server-issued resume identity in the handshake, dormant
@@ -124,7 +126,7 @@ Highlights only. For the full wired surface and its conditions, see
   TypeScript, and Python.
 - Clients: a Python client at full parity (async plus a blocking facade) joined
   the Rust and TypeScript clients, which track each other across the public path.
-  See [client usage](/latest/clients/).
+  See [client usage](/clients/).
 - Admin and ops: single-node queue create and delete, message inspection, DLQ
   replay, runtime broker settings, a versioned global DLQ target, and Stroma
   timing and health signals, from the dashboard, API, and `fibrilctl`.
@@ -169,7 +171,7 @@ feeds the milestones above.
 - Add more production deployment guidance for the broker itself.
 - Improve admin interface observability.
 - Produce repeatable benchmark reports and keep the
-  [optimization log](/latest/development/optimization-log/) current as
+  [optimization log](/development/optimization-log/) current as
   low-level performance work is investigated.
 - Tighten memory behavior under large queue depth, high inflight load, and many idle queues.
 
@@ -178,7 +180,7 @@ feeds the milestones above.
 - Hardening the experimental replication and clustering path (queues and streams)
   into production guidance and supported defaults.
 - Durable broker restart reconciliation. This extends the live-process graceful
-  reconnect (see [reconnection grace](/latest/development/reconnection-grace/))
+  reconnect (see [reconnection grace](/development/reconnection-grace/))
   across a broker process restart. A client whose connection is still within its
   grace window would reclaim its persisted session and inflight ownership
   transparently, using a startup grace window before normal redelivery resumes,

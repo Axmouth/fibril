@@ -1,13 +1,14 @@
 ---
 title: Retries and delays
 description: Current retry, lease-expiry, and delayed-delivery behavior in Fibril.
+slug: 0.2/reliability/retries-delays
 ---
 
 Fibril separates three related behaviors:
 
-- immediate retry after a consumer rejects work
-- redelivery after a lease expires
-- delayed delivery or delayed retry after a specific timestamp
+* immediate retry after a consumer rejects work
+* redelivery after a lease expires
+* delayed delivery or delayed retry after a specific timestamp
 
 ## Immediate retry
 

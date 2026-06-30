@@ -4,7 +4,7 @@ description: Development notes on why a damaged queue log is repaired by truncat
 ---
 
 This is a development note. User-facing behavior lives in
-[recovery quarantine](/latest/reliability/recovery-quarantine/). This page
+[recovery quarantine](/reliability/recovery-quarantine/). This page
 records the reasoning behind the design.
 
 The planning requirement was explicit: on recovery, verify that event references
@@ -70,5 +70,5 @@ would make `refuse` a literal refuse-to-start.
 
 ## See also
 
-- [Recovery quarantine](/latest/reliability/recovery-quarantine/) for the operator view.
-- [Replication design](/latest/development/replication-design/) for the ordering invariants this builds on.
+- [Recovery quarantine](/reliability/recovery-quarantine/) for the operator view.
+- [Replication design](/development/replication-design/) for the ordering invariants this builds on.

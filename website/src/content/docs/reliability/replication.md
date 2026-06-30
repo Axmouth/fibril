@@ -11,7 +11,7 @@ Replication keeps copies of a partition on other brokers so a partition can
 survive and keep serving when its owner fails.
 
 This is experimental and only active in [Ganglion coordination
-mode](/latest/concepts/clustering/). Standalone brokers own every queue and do
+mode](/concepts/clustering/). Standalone brokers own every queue and do
 not replicate.
 
 ## What Fibril does
@@ -37,7 +37,7 @@ partition has one **owner** and one or more **followers**:
 
 The assignment durability policy decides what a confirmed publish waits for. It
 is set per cluster through `coordination.ganglion.assignment_durability` (see
-[configuration](/latest/configuration/)):
+[configuration](/configuration/)):
 
 | Mode | A confirmed publish returns once... |
 | --- | --- |
@@ -63,7 +63,7 @@ replica-durable acceptance:
 
 The follower read budget and poll intervals
 (`runtime_seed.replication.*`) tune catch-up throughput versus idle confirm
-latency. See the [configuration](/latest/configuration/) replication settings.
+latency. See the [configuration](/configuration/) replication settings.
 
 ## Activation and conditions
 
@@ -86,11 +86,11 @@ latency. See the [configuration](/latest/configuration/) replication settings.
   as production-ready high availability.
 - Cross-broker replication-lag aggregation into a single cluster view is still
   pending. A broker's own follower workers and their progress are visible on the
-  [admin queues page](/latest/admin-dashboard/).
+  [admin queues page](/admin-dashboard/).
 
 ## See also
 
-- [Clustering](/latest/concepts/clustering/) for ownership, epochs, and coordination modes.
-- [Recovery quarantine](/latest/reliability/recovery-quarantine/) for how a node handles a damaged log on restart.
-- [Configuration](/latest/configuration/) for the replication and durability settings.
-- [Project status](/latest/status/) and [implemented surface](/latest/implemented-surface/) for what is wired.
+- [Clustering](/concepts/clustering/) for ownership, epochs, and coordination modes.
+- [Recovery quarantine](/reliability/recovery-quarantine/) for how a node handles a damaged log on restart.
+- [Configuration](/configuration/) for the replication and durability settings.
+- [Project status](/status/) and [implemented surface](/implemented-surface/) for what is wired.

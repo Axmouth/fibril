@@ -1,6 +1,8 @@
 ---
 title: Recovery quarantine
-description: How Fibril detects and isolates a damaged queue log on restart instead of corrupting state or crashing the broker.
+description: How Fibril detects and isolates a damaged queue log on restart
+  instead of corrupting state or crashing the broker.
+slug: 0.2/reliability/recovery-quarantine
 ---
 
 When a broker restarts, it replays each queue's durable event log to rebuild
@@ -15,10 +17,10 @@ affected partition so the rest of the broker stays up.
 
 During recovery, Fibril verifies the event log before trusting it:
 
-- **Reference check.** Every replayed event references a message offset. Recovery
+* **Reference check.** Every replayed event references a message offset. Recovery
   checks that offset against the message log's durable tail. A reference past the
   durable tail is a dangling forward reference.
-- **Decode check.** Every event record must decode (including its CRC). A record
+* **Decode check.** Every event record must decode (including its CRC). A record
   that fails to decode is treated as corruption.
 
 When recovery finds the first bad record, it acts according to the
@@ -31,7 +33,7 @@ When recovery finds the first bad record, it acts according to the
 | `ignore` | Automatically truncate the log to the last valid record and continue. |
 
 A quarantined partition is surfaced clearly: a banner in the [admin
-dashboard](/latest/admin-dashboard/), the `/readyz` health endpoint, and a
+dashboard](/0.2/admin-dashboard/), the `/readyz` health endpoint, and a
 `recovery.quarantined` metric.
 
 ## Repair
@@ -57,16 +59,16 @@ silently drop a state transition, so recovery stops there instead.
 
 ## Conditions and limits
 
-- The default `quarantine` keeps the broker available: one bad partition does not
+* The default `quarantine` keeps the broker available: one bad partition does not
   take down the others.
-- `ignore` discards the bad suffix automatically. Use it only when losing the
+* `ignore` discards the bad suffix automatically. Use it only when losing the
   unrecoverable tail without an operator step is acceptable.
-- `refuse` is evaluated lazily today: a mismatch is detected when the partition
+* `refuse` is evaluated lazily today: a mismatch is detected when the partition
   is first used after restart rather than eagerly at boot. An eager whole-disk
   recovery at boot is a tracked follow-up.
 
 ## See also
 
-- [Reliability semantics](/latest/reliability/semantics/) for the durability model.
-- [Replication](/latest/reliability/replication/) for how followers re-fetch a repaired suffix.
-- [Configuration](/latest/configuration/) for the `recovery.on_mismatch` setting.
+* [Reliability semantics](/0.2/reliability/semantics/) for the durability model.
+* [Replication](/0.2/reliability/replication/) for how followers re-fetch a repaired suffix.
+* [Configuration](/0.2/configuration/) for the `recovery.on_mismatch` setting.

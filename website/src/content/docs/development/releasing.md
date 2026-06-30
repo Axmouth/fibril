@@ -38,9 +38,12 @@ scripts/release.sh 0.3.0       # bump everywhere, snapshot docs, commit, tag v0.
    `## [<version>]` section - the release must be described before it is cut.
 2. **Bump.** It sets the single repo version everywhere (the workspace version
    and the TypeScript/Python client manifests and their default client version).
-3. **Docs snapshot.** It freezes `docs/latest` under `docs/<minor>` (for example
-   `docs/0.2`), so an adopter on a release reads the surface as it shipped while
-   `/latest` keeps moving.
+3. **Docs snapshot.** The current docs live unversioned at the site root. The
+   release registers the new minor with the `starlight-versions` plugin and runs
+   a site build, which freezes the whole documentation set under `docs/<minor>`
+   (for example `docs/0.2`) and rewrites its intra-doc links to that versioned
+   path. An adopter on a release reads the docs as they shipped, with a version
+   picker to switch, while the root keeps moving.
 4. **Build gate.** `cargo check --workspace` must pass at the new version.
 5. **Tag.** It commits the bump and creates an annotated `v<version>` tag whose
    body is the changelog section. It does not push - pushing the tag is the

@@ -1,6 +1,7 @@
 ---
 title: Reconnection grace
 description: Development plan for client reconnection and inflight reconciliation.
+slug: 0.2/development/reconnection-grace
 ---
 
 This is a development note. User-facing behavior should be documented separately
@@ -20,13 +21,13 @@ state.
 
 The desired behavior is:
 
-- client gets a server-issued identity
-- client reconnects with that identity after a transient break
-- broker can recognize the returning client
-- late settle requests from the old connection can be accepted during a short
+* client gets a server-issued identity
+* client reconnects with that identity after a transient break
+* broker can recognize the returning client
+* late settle requests from the old connection can be accepted during a short
   grace window
-- delivery resumes cleanly after reconciliation
-- logs make it clear whether a client resumed, missed the grace window, or was
+* delivery resumes cleanly after reconciliation
+* logs make it clear whether a client resumed, missed the grace window, or was
   treated as a fresh connection
 
 ## First Principles
@@ -48,38 +49,38 @@ again through the normal paths.
 
 Protocol:
 
-- HELLO carries client name, client version, protocol version, and optionally a
+* HELLO carries client name, client version, protocol version, and optionally a
   previously issued resume identity.
-- HELLO OK returns protocol version, a server-issued `client_id`, resume token,
+* HELLO OK returns protocol version, a server-issued `client_id`, resume token,
   owner id, and a resume outcome.
-- The protocol has a subscription reconciliation metadata frame and result
+* The protocol has a subscription reconciliation metadata frame and result
   frame.
 
 Broker:
 
-- consumer handles contain `client_id`, `sub_id`, topic, group, and partition.
-- inflight broker deliveries are tracked by delivery tag and include queue key,
+* consumer handles contain `client_id`, `sub_id`, topic, group, and partition.
+* inflight broker deliveries are tracked by delivery tag and include queue key,
   offset, and consumer id.
-- unsubscribe removes the consumer and requeues matching inflight offsets.
-- `next_sub_id` is process-local and starts from `1`.
-- reconnect grace can keep a logical connection dormant instead of immediately
+* unsubscribe removes the consumer and requeues matching inflight offsets.
+* `next_sub_id` is process-local and starts from `1`.
+* reconnect grace can keep a logical connection dormant instead of immediately
   unsubscribing it.
-- after a successful resume, the broker can compare client-reported
+* after a successful resume, the broker can compare client-reported
   subscription metadata with the dormant logical connection.
 
 Storage:
 
-- Stroma owns queue state and durable inflight state.
-- It does not currently persist client id or subscription id ownership for
+* Stroma owns queue state and durable inflight state.
+* It does not currently persist client id or subscription id ownership for
   inflight messages in a way that can rebuild broker connection state after
   process restart.
 
 Future topology:
 
-- Fibril is not currently sharded or replicated.
-- The design should still leave room for clients to hold multiple connections
+* Fibril is not currently sharded or replicated.
+* The design should still leave room for clients to hold multiple connections
   to different partition owners later.
-- Resume identity should be scoped so one partition owner cannot accidentally
+* Resume identity should be scoped so one partition owner cannot accidentally
   claim another owner's live connection state.
 
 ## Implemented Resume Identity
@@ -97,10 +98,10 @@ kept in broker memory. Later it can become persisted or signed if needed.
 
 Current outcomes:
 
-- `new`
-- `resumed`
-- `resume_not_found`
-- `resume_rejected`
+* `new`
+* `resumed`
+* `resume_not_found`
+* `resume_rejected`
 
 This work item does not move deliveries yet. It establishes the wire shape, server
 identity registry, client API storage of the resume identity, and logs.
@@ -127,11 +128,11 @@ is enabled for the TCP handler.
 On eligible disconnect, instead of immediately requeueing all inflight messages,
 the broker keeps a short-lived logical connection:
 
-- `client_id`
-- resume token
-- subscriptions that were active
-- broker delivery tags still associated with those subscriptions
-- a replaceable transport sink for the currently attached socket
+* `client_id`
+* resume token
+* subscriptions that were active
+* broker delivery tags still associated with those subscriptions
+* a replaceable transport sink for the currently attached socket
 
 During the grace window, the old subscription state stays alive. Late
 settlements using existing delivery tags work after a successful resume. If the
@@ -146,27 +147,27 @@ leftovers.
 
 Current limits:
 
-- Reconnect grace is controlled by the live runtime setting
+* Reconnect grace is controlled by the live runtime setting
   `connection.reconnect_grace_ms`.
-- The setting is seeded by `runtime_seed.connection.reconnect_grace_ms` when no
+* The setting is seeded by `runtime_seed.connection.reconnect_grace_ms` when no
   persisted runtime settings document exists yet.
-- Existing subscriptions are preserved server-side, and clients send
+* Existing subscriptions are preserved server-side, and clients send
   subscription metadata after a successful resume.
-- Existing Rust, TypeScript, and Python publisher handles use the latest engine
+* Existing Rust, TypeScript, and Python publisher handles use the latest engine
   after explicit or automatic reconnect. New subscriptions also use the latest
   engine.
-- Active subscription streams continue when reconciliation returns `keep`.
-- Conservative reconciliation drops server-only subscriptions and closes
+* Active subscription streams continue when reconciliation returns `keep`.
+* Conservative reconciliation drops server-only subscriptions and closes
   client-only or mismatched subscriptions client-side.
-- The opt-in restore-client-subscriptions policy recreates client-owned
+* The opt-in restore-client-subscriptions policy recreates client-owned
   subscriptions that are missing server-side and remaps the stream to the new
   server subscription id.
-- Rust, TypeScript, and Python clients make one automatic reconnect attempt
+* Rust, TypeScript, and Python clients make one automatic reconnect attempt
   before a new operation when the old engine is already known closed.
-- In-flight protocol requests from the old socket are not replayed.
-- Admin overview counters and TCP metrics logs expose resume, grace, and
+* In-flight protocol requests from the old socket are not replayed.
+* Admin overview counters and TCP metrics logs expose resume, grace, and
   reconciliation outcomes since broker start.
-- Reconciliation completion logs include client id, connection id, policy, and
+* Reconciliation completion logs include client id, connection id, policy, and
   action counts.
 
 Durable restart recovery and in-flight delivery reconstruction can come later.
@@ -180,20 +181,20 @@ connection.
 
 The current client frame includes:
 
-- reconciliation policy
-- topic
-- group
-- sub id
-- partition
-- auto-ack mode
-- prefetch
+* reconciliation policy
+* topic
+* group
+* sub id
+* partition
+* auto-ack mode
+* prefetch
 
 The broker replies with one result per subscription:
 
-- `keep`
-- `close_client_side`
-- `close_server_side`
-- `recreate_client_side`
+* `keep`
+* `close_client_side`
+* `close_server_side`
+* `recreate_client_side`
 
 The result also carries the client and server view that caused the decision, plus
 a short reason string. The broker currently uses this to report matched,
@@ -204,14 +205,14 @@ receiver.
 
 The current policy is conservative:
 
-- If both sides have matching topic, group, partition, auto-ack mode, and
+* If both sides have matching topic, group, partition, auto-ack mode, and
   prefetch, the result says to keep it. If only the server subscription id
   changed, clients remap to the server id.
-- If the client reports a subscription the server no longer has, the result
+* If the client reports a subscription the server no longer has, the result
   says to close it client-side.
-- If both sides disagree on topic, group, partition, auto-ack mode, or prefetch,
+* If both sides disagree on topic, group, partition, auto-ack mode, or prefetch,
   the result says to close it client-side.
-- If the server has a subscription that the client did not report, the broker
+* If the server has a subscription that the client did not report, the broker
   drops it and reports `close_server_side`.
 
 Current Rust, TypeScript, and Python receive APIs do not carry a typed
@@ -252,11 +253,11 @@ surface.
 Inflight delivery reconciliation is also not done yet. A future version may need
 additional frames or fields for:
 
-- delivery tag
-- offset
-- local processing status
-- local settle status
-- lease deadline
+* delivery tag
+* offset
+* local processing status
+* local settle status
+* lease deadline
 
 If a server-to-client reconciliation view is added later, keep it separate from
 the client-to-server frame so each direction has a clear owner and result.
@@ -275,19 +276,19 @@ startup behavior.
 To support it properly, storage likely needs to persist enough ownership
 metadata to recover client, subscription, and inflight relationships:
 
-- client id
-- resume token or another proof that the reconnecting client owns that session
-- subscription id or a stable subscription identity
-- delivery tag or durable delivery sequence
-- queue key and offset
-- lease deadline
-- ack mode and prefetch
+* client id
+* resume token or another proof that the reconnecting client owns that session
+* subscription id or a stable subscription identity
+* delivery tag or durable delivery sequence
+* queue key and offset
+* lease deadline
+* ack mode and prefetch
 
 There are two viable subscription-id directions:
 
-- Persist subscription ids and initialize `next_sub_id` above the maximum
+* Persist subscription ids and initialize `next_sub_id` above the maximum
   recovered id.
-- Treat subscription ids as process-local and use reconciliation to remap
+* Treat subscription ids as process-local and use reconciliation to remap
   client streams to fresh server ids after recovery.
 
 The second direction is simpler and matches the current remap behavior. It
@@ -348,19 +349,19 @@ choices that make sharding awkward.
 
 Design guardrails:
 
-- Do not make one `client_id` mean "this broker owns all state for this client".
-- Do not put all client inflight state behind one global client record that
+* Do not make one `client_id` mean "this broker owns all state for this client".
+* Do not put all client inflight state behind one global client record that
   would later need cross-node locking.
-- Keep dormant state keyed by owner scope plus client identity.
-- Keep queue and partition identity in reconciliation data, even while
+* Keep dormant state keyed by owner scope plus client identity.
+* Keep queue and partition identity in reconciliation data, even while
   partition is still internally `0`.
-- Avoid protocol fields that assume a client has only one broker connection.
+* Avoid protocol fields that assume a client has only one broker connection.
 
 If partitions later have owners, a client may hold multiple connections at once,
 one per owner. A resume identity should therefore be either:
 
-- scoped to one broker or partition owner, or
-- globally unique plus paired with the expected owner or partition set
+* scoped to one broker or partition owner, or
+* globally unique plus paired with the expected owner or partition set
 
 For the network-blip implementation, server-issued `client_id` plus resume token is
 enough. Later partition-aware clients can keep one resume identity per
@@ -377,17 +378,17 @@ owner connection starts fresh.
 
 Add structured logs for:
 
-- new client identity issued
-- resume accepted
-- resume rejected with reason
-- reconciliation result counts by action
-- client entered grace window
-- grace expired
-- late settle accepted during grace
-- late settle rejected with reason
-- inflight messages requeued after grace
-- future durable restart grace started and ended
-- future durable restart inflight work reclaimed or released
+* new client identity issued
+* resume accepted
+* resume rejected with reason
+* reconciliation result counts by action
+* client entered grace window
+* grace expired
+* late settle accepted during grace
+* late settle rejected with reason
+* inflight messages requeued after grace
+* future durable restart grace started and ended
+* future durable restart inflight work reclaimed or released
 
 These logs should include client id, connection id, and counts. Avoid logging
 payloads.
@@ -396,47 +397,47 @@ payloads.
 
 Protocol tests:
 
-- HELLO without resume returns a new identity
-- HELLO with valid resume returns resumed
-- HELLO with unknown or expired resume returns a clear outcome
+* HELLO without resume returns a new identity
+* HELLO with valid resume returns resumed
+* HELLO with unknown or expired resume returns a clear outcome
 
 Broker tests:
 
-- disconnect without grace still requeues
-- disconnect with grace keeps inflight without immediate requeue
+* disconnect without grace still requeues
+* disconnect with grace keeps inflight without immediate requeue
   (implemented)
-- dormant consumers are skipped by delivery
-- late settle after resume during grace is accepted (implemented)
-- grace expiry requeues remaining inflight messages (implemented)
-- reconnect after expiry is treated as fresh
+* dormant consumers are skipped by delivery
+* late settle after resume during grace is accepted (implemented)
+* grace expiry requeues remaining inflight messages (implemented)
+* reconnect after expiry is treated as fresh
 
 Client tests:
 
-- Rust, TypeScript, and Python clients store resume identity after connect
+* Rust, TypeScript, and Python clients store resume identity after connect
   (implemented)
-- reconnect sends resume identity when available (implemented)
-- reconnect handles rejected resume by falling back to fresh state
+* reconnect sends resume identity when available (implemented)
+* reconnect handles rejected resume by falling back to fresh state
 
 ## Resolved Policy Decisions
 
-- Resume identity is always issued and the clients always send it on reconnect.
+* Resume identity is always issued and the clients always send it on reconnect.
   Reconnect grace (keeping the logical connection dormant) is server-controlled
   by `connection.reconnect_grace_ms`. The broker library defaults it off (None ->
   immediate cleanup) to stay conservative, but the `fibril-server` product seed
   enables it by default at `DEFAULT_RECONNECT_GRACE_MS` (5s). Operators opt out
   by setting the value to 0. So resume is enabled by default at the product level
   and remains a single server-side knob, not a per-client one.
-- Auto-ack subscriptions participate in grace. The dormant logical connection
+* Auto-ack subscriptions participate in grace. The dormant logical connection
   preserves all subscriptions regardless of ack mode. Auto-ack holds no inflight
   to retain, so grace simply preserves the subscription and avoids resubscribe
   churn on a transient blip - cheap and worth keeping uniform with manual-ack.
-- Default grace window: 5s (`DEFAULT_RECONNECT_GRACE_MS`). Long enough to cover a
+* Default grace window: 5s (`DEFAULT_RECONNECT_GRACE_MS`). Long enough to cover a
   transient network blip and the client's automatic reconnect, short enough that
   the redelivery delay for a genuinely dead consumer stays small. At-least-once
   holds either way - grace only delays redelivery, never drops it.
-- Automatic resubscribe on `recreate_client_side` is a separate client-surface
+* Automatic resubscribe on `recreate_client_side` is a separate client-surface
   follow-up (see Remaining Reconciliation Work and task #103), not gated here.
-- Late settles after the grace window: best-effort. Once grace expires the
+* Late settles after the grace window: best-effort. Once grace expires the
   inflight is requeued, so a late ack/nack references a retired lease and is
   applied idempotently against storage (it does not double-settle a redelivered
   message). A dedicated rejection error code is deferred to the inflight delivery
