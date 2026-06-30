@@ -168,5 +168,13 @@ by default and scales into a long soak via `FIBRIL_SOAK_*` environment variables
 Deterministic simulation instead finds the rare interleavings a soak might hit
 only once in a thousand runs, and reproduces them exactly. Loom (task #96,
 assessed as low fit) targets fine-grained atomics, a different layer again.
-Together with a real multi-node run (task #116) they form the cluster-confidence
-gate for 1.0.
+
+The third leg is a real multi-node run on separate OS processes (task #116):
+`scripts/cluster-tryout.sh` stands up N real `fibril-server` processes forming one
+Ganglion raft cluster over real TCP. Its `--failover-verify` mode runs an
+identity-tagged producer/consumer through public client routing, kills the
+partition owner mid-run, and asserts every confirmed id is still delivered after
+failover (zero loss, no phantoms); `--chaos` repeats mixed faults (pause/resume,
+kill/rejoin) under sustained load and asserts zero loss plus reconvergence. Both
+pass. Together - deterministic simulation, the soak suite, and this real
+multi-node run - they form the cluster-confidence gate for 1.0.

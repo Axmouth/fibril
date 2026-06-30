@@ -107,10 +107,23 @@ exactly once + strictly increasing offsets + settled (acked) messages never
 redelivered after restart. (2) concurrent_load_no_loss_soak runs N producers +
 a consumer for a wall-clock window, asserts every confirmed publish consumed
 exactly once (no dup offsets). CI-small defaults; FIBRIL_SOAK_CYCLES/BATCH/SECS/
-PRODUCERS scale to a real soak. Cluster-confidence gate (#124) now has DST (done)
-+ chaos/soak (seeded); only the real multi-node deployment run (#116) remains.
-Next soak growth: a multi-broker chaos variant (kill owner under load, assert
-failover + no loss) once #116's real multi-node harness exists.
+PRODUCERS scale to a real soak.
+
+REAL MULTI-NODE RUN (#116) DONE - and it already existed: scripts/cluster-tryout.sh
+stands up N real fibril-server PROCESSES forming one Ganglion raft cluster over
+real TCP. `--failover-verify` runs an identity-tagged producer/consumer through
+public client routing, kills the partition owner mid-run, and asserts every
+confirmed id survives failover (zero loss, no phantoms); `--chaos` repeats mixed
+faults (pause/resume, kill/rejoin) under sustained load and asserts zero loss +
+reconvergence. Both executed green (3-node, failover-verify 3000 msgs @3000/s
+zero-loss; chaos 2 rounds zero-loss + reconverged). Lesson: this harness predated
+my work - reuse it, do NOT add a new cluster script (a redundant cluster_validation.sh
+was written then deleted). The dedicated verifier bin is fibril-benches::failover_verify.
+
+CLUSTER-CONFIDENCE GATE (#124) - all three legs now hold: deterministic simulation
+(11 turmoil scenarios), chaos/soak suite (#115), and a real multi-node run (#116
+via cluster-tryout). The multi-broker chaos-under-load variant the soak-growth note
+wanted is exactly cluster-tryout --chaos, so that follow-up is satisfied too.
 
 With the DST harness proven across election, replication, failover,
 split-brain, and lossy networks, the cluster-confidence gate (#124) has a real
