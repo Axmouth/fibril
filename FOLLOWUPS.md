@@ -64,6 +64,14 @@ baseline (#127); 0.3 work = #102/#103/#105/#109.
   message. Immediate release-and-requeue on send failure would tighten
   recovery (the release_inflight_batch engine path already exists).
 
+- Adaptive tunables direction (2026-07-03): prefer deriving operating points
+  from measured behavior within configured bounds. Candidates in value order:
+  keratin adaptive fsync floor (with the dev-only latency injection flag),
+  coalesce windows keyed to measured round-trip plus a startup timer-floor
+  probe, and an adaptive spawn_blocking offload threshold for replication
+  encode/decode. Guardrails: hysteresis, bounded ranges with a pin override,
+  derived values visible in the debug surface, bench/DST validation.
+
 Consolidated open items, extracted before the replication-effort working docs
 were archived so nothing is lost. Full detail and rationale live in
 `archive/replication-sharding-plan/` (the worklog, replication planning, and
