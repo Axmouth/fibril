@@ -47,6 +47,17 @@ baseline (#127); 0.3 work = #102/#103/#105/#109.
 
 ---
 
+## Test and expiry notes (2026-07-03)
+
+- delayed_publish_over_tcp_waits_until_not_before flaked once under a parallel
+  full-suite run (passes solo and in 3 repeat full runs). Timing-sensitive
+  deadline assertion, same class as the fixed follower-loop cancel race. Worth
+  a determinism pass if it recurs in CI.
+- Mass-expiry cost: the expiry worker now resolves expired offsets to delivery
+  tags with one scan of the inflight records per pass. If a mass consumer
+  die-off with a very large inflight set ever shows up as a pause, the lever
+  is engine-side batching of the requeue appends, not parallelizing the scan.
+
 Consolidated open items, extracted before the replication-effort working docs
 were archived so nothing is lost. Full detail and rationale live in
 `archive/replication-sharding-plan/` (the worklog, replication planning, and

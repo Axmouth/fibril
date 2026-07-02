@@ -887,22 +887,31 @@ impl LogicalConnection {
     }
 }
 
+/// Send a frame to the connection's current transport. `cached_tx` avoids a
+/// watch borrow and sink clone per frame and is refreshed only when the cached
+/// sink dies or the transport is swapped on reconnect.
 async fn send_to_current_transport(
     transport_rx: &mut watch::Receiver<Option<FrameSink>>,
+    cached_tx: &mut Option<FrameSink>,
     mut frame: Frame,
 ) -> Result<(), ()> {
     loop {
-        let current_tx = transport_rx.borrow().clone();
-        if let Some(tx) = current_tx {
-            match tx.send(frame).await {
+        if cached_tx.is_none() {
+            *cached_tx = transport_rx.borrow_and_update().clone();
+        }
+        match cached_tx.as_ref() {
+            Some(tx) => match tx.send(frame).await {
                 Ok(()) => return Ok(()),
                 Err(err) => {
                     frame = err.0;
+                    *cached_tx = None;
+                    if !transport_rx.has_changed().map_err(|_| ())? {
+                        transport_rx.changed().await.map_err(|_| ())?;
+                    }
                 }
-            }
+            },
+            None => transport_rx.changed().await.map_err(|_| ())?,
         }
-
-        transport_rx.changed().await.map_err(|_| ())?;
     }
 }
 
@@ -1013,6 +1022,7 @@ fn spawn_assignment_forwarder(
 ) -> tokio::task::JoinHandle<()> {
     let mut transport_rx = logical.transport.subscribe();
     tokio::spawn(async move {
+        let mut cached_tx = None;
         while let Some(update) = updates.recv().await {
             let msg = AssignmentChanged {
                 topic: update.topic,
@@ -1031,7 +1041,7 @@ fn spawn_assignment_forwarder(
                     break;
                 }
             };
-            if send_to_current_transport(&mut transport_rx, frame)
+            if send_to_current_transport(&mut transport_rx, &mut cached_tx, frame)
                 .await
                 .is_err()
             {
@@ -1204,6 +1214,7 @@ async fn install_subscription(
     let auto_ack = args.auto_ack;
     let handle = tokio::spawn(async move {
         let mut rx = messages;
+        let mut cached_tx = None;
 
         while let Some(msg) = rx.recv().await {
             let delivery_tag = msg.delivery_tag;
@@ -1237,7 +1248,7 @@ async fn install_subscription(
                     break;
                 }
             };
-            if send_to_current_transport(&mut transport_rx, frame)
+            if send_to_current_transport(&mut transport_rx, &mut cached_tx, frame)
                 .await
                 .is_err()
             {
@@ -1362,6 +1373,7 @@ async fn install_stream_subscription(
     let durable_name = sub.durable_name.clone();
     let settle_channel = channel.clone();
     let delivery = tokio::spawn(async move {
+        let mut cached_tx = None;
         while let Some(record) = sink_rx.recv().await {
             let deliver = Deliver {
                 sub_id,
@@ -1386,7 +1398,7 @@ async fn install_stream_subscription(
                     break;
                 }
             };
-            if send_to_current_transport(&mut transport_rx, frame)
+            if send_to_current_transport(&mut transport_rx, &mut cached_tx, frame)
                 .await
                 .is_err()
             {
@@ -3521,73 +3533,76 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                // Stream fast-path: a stream takes the fan-out path instead of the
-                // queue lease/poll publisher. A stream is recognized either by an
-                // already-open local channel (standalone / hot owner) or by a
-                // coordination declaration (cluster, including an owner that has
-                // not opened it yet). A non-owner is redirected to the owner.
-                if broker.is_stream(&pubreq.topic, pubreq.partition.id())
-                    || broker.stream_declared_in_coordination(&pubreq.topic)
-                {
-                    if broker
-                        .ensure_stream_owner(&pubreq.topic, pubreq.partition.id())
-                        .is_err()
-                    {
-                        if let Some(frame) = stream_owner_redirect_frame(
-                            &topology_source,
-                            frame.request_id,
-                            &pubreq.topic,
-                            pubreq.partition,
-                        ) {
-                            let _ = frame_tx_low_prio.send(frame).await;
-                        } else {
-                            send_error_response_and_count(
-                                &frame_tx_low_prio,
-                                &metrics,
-                                frame.request_id,
-                                ERR_NOT_OWNER,
-                                "not the owner of this stream partition",
-                            )
-                            .await;
-                        }
-                        continue;
-                    }
-                    if let Some(channel) = broker
-                        .route_stream(&pubreq.topic, pubreq.partition.id())
-                        .await
-                    {
-                        handle_stream_publish(
-                            &broker,
-                            &channel,
-                            &frame_tx_low_prio,
-                            frame.request_id,
-                            pubreq.payload,
-                            pubreq.published,
-                            pubreq.require_confirm,
-                            content_type,
-                            headers,
-                            publish_received,
-                        )
-                        .await?;
-                        continue;
-                    }
-                    // Owner but the channel could not be opened (e.g. storage
-                    // error): surface a server error rather than misrouting to the
-                    // queue path.
-                    send_error_response_and_count(
-                        &frame_tx_low_prio,
-                        &metrics,
-                        frame.request_id,
-                        500,
-                        "stream partition could not be opened",
-                    )
-                    .await;
-                    continue;
-                }
-
                 let key = (pubreq.topic.clone(), pubreq.partition, pubreq.group.clone());
                 let now_ms = unix_millis();
+                // A cached publisher means the topic is a queue, so the steady
+                // state skips the stream lookups entirely. The stream checks run
+                // only on a cache miss, before a queue publisher is created.
                 if !publishers.contains_key(&key) {
+                    // Stream fast-path: a stream takes the fan-out path instead
+                    // of the queue lease/poll publisher. A stream is recognized
+                    // either by an already-open local channel (standalone / hot
+                    // owner) or by a coordination declaration (cluster,
+                    // including an owner that has not opened it yet). A
+                    // non-owner is redirected to the owner.
+                    if broker.is_stream(&pubreq.topic, pubreq.partition.id())
+                        || broker.stream_declared_in_coordination(&pubreq.topic)
+                    {
+                        if broker
+                            .ensure_stream_owner(&pubreq.topic, pubreq.partition.id())
+                            .is_err()
+                        {
+                            if let Some(frame) = stream_owner_redirect_frame(
+                                &topology_source,
+                                frame.request_id,
+                                &pubreq.topic,
+                                pubreq.partition,
+                            ) {
+                                let _ = frame_tx_low_prio.send(frame).await;
+                            } else {
+                                send_error_response_and_count(
+                                    &frame_tx_low_prio,
+                                    &metrics,
+                                    frame.request_id,
+                                    ERR_NOT_OWNER,
+                                    "not the owner of this stream partition",
+                                )
+                                .await;
+                            }
+                            continue;
+                        }
+                        if let Some(channel) = broker
+                            .route_stream(&pubreq.topic, pubreq.partition.id())
+                            .await
+                        {
+                            handle_stream_publish(
+                                &broker,
+                                &channel,
+                                &frame_tx_low_prio,
+                                frame.request_id,
+                                pubreq.payload,
+                                pubreq.published,
+                                pubreq.require_confirm,
+                                content_type,
+                                headers,
+                                publish_received,
+                            )
+                            .await?;
+                            continue;
+                        }
+                        // Owner but the channel could not be opened (e.g. storage
+                        // error): surface a server error rather than misrouting
+                        // to the queue path.
+                        send_error_response_and_count(
+                            &frame_tx_low_prio,
+                            &metrics,
+                            frame.request_id,
+                            500,
+                            "stream partition could not be opened",
+                        )
+                        .await;
+                        continue;
+                    }
                     let pubh = match broker
                         .get_publisher(&pubreq.topic, pubreq.partition, &pubreq.group)
                         .await

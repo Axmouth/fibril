@@ -1375,7 +1375,6 @@ pub struct Broker<
     /// from the lease/poll `queues` loop.
     streams: DashMap<QueueKey, Arc<crate::stream::StreamChannel>>,
     records_by_tags: DashMap<DeliveryTag, TagRecord>,
-    tags_by_key_offset: DashMap<(QueueKey, Offset), DeliveryTag>,
     queue_eviction_observations: DashMap<QueueKey, QueueEvictionObservation>,
     pub(crate) follower_replication_workers:
         DashMap<crate::coordination::QueueIdentity, Arc<FollowerReplicationWorkerRuntime>>,
@@ -1581,7 +1580,6 @@ impl<
             queues: DashMap::new(),
             streams: DashMap::new(),
             records_by_tags: DashMap::new(),
-            tags_by_key_offset: DashMap::new(),
             queue_eviction_observations: DashMap::new(),
             follower_replication_workers: DashMap::new(),
             replication_progress: Arc::new(DashMap::new()),
@@ -2240,7 +2238,6 @@ impl<
         let mut offsets = Vec::with_capacity(stale_tags.len());
         for (tag, offset) in stale_tags {
             self.records_by_tags.remove(&tag);
-            self.tags_by_key_offset.remove(&(key.clone(), offset));
             offsets.push(offset);
         }
 
@@ -3172,7 +3169,6 @@ impl<
         let mut offsets = Vec::with_capacity(tagged_tags.len());
         for (tag, offset) in tagged_tags {
             self.records_by_tags.remove(&tag);
-            self.tags_by_key_offset.remove(&(key.clone(), offset));
             offsets.push(offset);
         }
 
@@ -3312,9 +3308,6 @@ impl<
                 tracing::warn!("Settle for unknown tag {:?}", req.delivery_tag);
                 continue;
             };
-            self.tags_by_key_offset
-                .remove(&(tag_rec.key.clone(), tag_rec.offset));
-
             if tag_rec.consumer_id != consumer.sub_id {
                 tracing::warn!("Settle from wrong consumer");
                 continue;
@@ -3640,10 +3633,6 @@ impl<
                                 consumer_id: c.sub_id,
                             },
                         );
-                        broker
-                            .tags_by_key_offset
-                            .insert((key.clone(), d.offset), tag);
-
                         c.inc_inflight();
 
                         let msg = DeliverableMessage {
@@ -3883,18 +3872,34 @@ impl<
                     metrics.expired_many(expired.len() as u64);
                 }
 
-                // TODO: windowed iterator and spawn more at a time? perhaps parallelism / 2
+                // One scan of the inflight tag records resolves every expired
+                // (queue, offset) to its delivery tag. Tags are only tracked
+                // forward, so this cold path pays the reverse lookup instead of
+                // the delivery path maintaining a second map per message.
+                let mut expired_by_key: HashMap<QueueKey, HashSet<Offset>> = HashMap::new();
                 for (tp, part, group, offset) in expired.iter().cloned() {
-                    let key = QueueKey { tp, part: Partition::new(part), group };
-
-                    // find the tag for this offset
-                    let tag = broker
-                        .tags_by_key_offset
-                        .remove(&(key.clone(), offset))
-                        .map(|kv| kv.1);
-
-                    if let Some(tag) = tag
-                        && let Some((_, rec)) = broker.records_by_tags.remove(&tag)
+                    expired_by_key
+                        .entry(QueueKey {
+                            tp,
+                            part: Partition::new(part),
+                            group,
+                        })
+                        .or_default()
+                        .insert(offset);
+                }
+                let stale_tags: Vec<DeliveryTag> = broker
+                    .records_by_tags
+                    .iter()
+                    .filter(|entry| {
+                        let rec = entry.value();
+                        expired_by_key
+                            .get(&rec.key)
+                            .is_some_and(|offs| offs.contains(&rec.offset))
+                    })
+                    .map(|entry| *entry.key())
+                    .collect();
+                for tag in stale_tags {
+                    if let Some((_, rec)) = broker.records_by_tags.remove(&tag)
                         && let Some(qs) = broker.queues.get(&rec.key)
                     {
                         if let Some(consumer) = qs.consumers.get(&rec.consumer_id) {
