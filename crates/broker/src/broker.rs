@@ -568,6 +568,9 @@ impl ConsumerState {
     fn dec_inflight(&self) {
         self.inflight.fetch_sub(1, Ordering::AcqRel);
     }
+    fn dec_inflight_many(&self, n: usize) {
+        self.inflight.fetch_sub(n, Ordering::AcqRel);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3352,11 +3355,28 @@ impl<
             }
         }
 
+        // Release consumer flow-control credit at settle accept rather than in
+        // the durable completion. Waiting for the ack fsync would cap a
+        // prefetch-bound consumer at prefetch / group-commit-latency for no
+        // safety gain: an un-fsynced settle lost in a crash only means the
+        // message is redelivered, which at-least-once already allows. There is
+        // no double delivery from the early wake either, because a settled
+        // offset stays marked inflight in the engine until the settle event
+        // applies, so a poll cannot re-lease it. The durable completion below
+        // still drives the settle-drain gate, metrics, and follower wakes.
+        let settled = acks_by_queue.values().map(Vec::len).sum::<usize>()
+            + nacks_by_queue.values().map(Vec::len).sum::<usize>();
+        if settled > 0 {
+            consumer.dec_inflight_many(settled);
+        }
+
         // Issue one engine call per (queue, kind) group
         for (key, offsets) in acks_by_queue {
             let count = offsets.len();
-            let consumer_clone = consumer.clone();
             let qs = self.queues.get(&key).map(|e| e.value().clone());
+            if let Some(qs) = &qs {
+                qs.wake();
+            }
             let pending_settles = self.pending_settles.clone();
             let settle_drained = self.settle_drained.clone();
             let metrics = self.metrics.clone();
@@ -3364,9 +3384,6 @@ impl<
 
             let done = move |ok: bool| {
                 if ok {
-                    for _ in 0..count {
-                        consumer_clone.dec_inflight();
-                    }
                     if let Some(m) = metrics {
                         m.acked_many(count as u64);
                     }
@@ -3404,17 +3421,16 @@ impl<
 
         for (key, items) in nacks_by_queue {
             let count = items.len();
-            let consumer_clone = consumer.clone();
             let qs = self.queues.get(&key).map(|e| e.value().clone());
+            if let Some(qs) = &qs {
+                qs.wake();
+            }
             let pending_settles = self.pending_settles.clone();
             let settle_drained = self.settle_drained.clone();
             let replication_timing = self.replication_timing.clone();
 
             let done = move |ok: bool| {
                 if ok {
-                    for _ in 0..count {
-                        consumer_clone.dec_inflight();
-                    }
                     if let Some(qs) = &qs {
                         replication_timing.record_replication_wake();
                         qs.wake_with_replication();
