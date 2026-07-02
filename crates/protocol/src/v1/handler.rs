@@ -304,6 +304,41 @@ async fn send_error_response(
     Ok(())
 }
 
+/// Queue a batch of settle requests with one permit reservation instead of one
+/// awaited send per request. Falls back to per-request sends when the batch is
+/// larger than the channel capacity (a frame carrying more tags than the
+/// subscription can have inflight).
+async fn send_settle_batch(
+    state_settler: &mpsc::Sender<SettleRequest>,
+    pending_settles: &Arc<AtomicUsize>,
+    reqs: Vec<SettleRequest>,
+) {
+    let n = reqs.len();
+    if n == 0 {
+        return;
+    }
+    pending_settles.fetch_add(n, Ordering::AcqRel);
+    match state_settler.reserve_many(n).await {
+        Ok(permits) => {
+            for (permit, req) in permits.zip(reqs) {
+                permit.send(req);
+            }
+        }
+        Err(_) => {
+            let mut sent = 0;
+            for req in reqs {
+                if state_settler.send(req).await.is_err() {
+                    break;
+                }
+                sent += 1;
+            }
+            if sent < n {
+                pending_settles.fetch_sub(n - sent, Ordering::AcqRel);
+            }
+        }
+    }
+}
+
 async fn send_error_response_and_count(
     tx: &mpsc::Sender<Frame>,
     metrics: &TcpStats,
@@ -3360,17 +3395,29 @@ pub async fn handle_connection(
                 let ack: Ack =
                     decode_wire_or_400!(frame, frame_tx_high_prio, metrics, wire::decode_ack);
 
-                let key: SubKey = (ack.topic.clone(), ack.partition, ack.group.clone());
-
-                // Stream ack: the delivery tag is the record offset, so settling
-                // commits the durable cursor to the highest acked offset (+1). An
-                // ephemeral or auto-ack stream sub treats the ack as a no-op.
-                let stream_settle = {
+                // One lock scope resolves both routes. Stream ack: the delivery
+                // tag is the record offset, so settling commits the durable
+                // cursor to the highest acked offset (+1). An ephemeral or
+                // auto-ack stream sub treats the ack as a no-op.
+                let (stream_settle, queue_settle) = {
                     let state = logical.state.lock().await;
-                    state
-                        .stream_subs
-                        .get(&(ack.topic.clone(), ack.partition))
-                        .map(|sub| (sub.channel.clone(), sub.durable_name.clone(), sub.auto_ack))
+                    if let Some(sub) = state.stream_subs.get(&(ack.topic.clone(), ack.partition))
+                    {
+                        (
+                            Some((sub.channel.clone(), sub.durable_name.clone(), sub.auto_ack)),
+                            None,
+                        )
+                    } else {
+                        let key: SubKey = (ack.topic.clone(), ack.partition, ack.group.clone());
+                        (
+                            None,
+                            state.subs.get(&key).and_then(|sub| {
+                                (!sub.auto_ack).then(|| {
+                                    (sub.state_settler.clone(), sub.pending_settles.clone())
+                                })
+                            }),
+                        )
+                    }
                 };
                 if let Some((channel, durable_name, auto_ack)) = stream_settle {
                     if !auto_ack {
@@ -3385,27 +3432,16 @@ pub async fn handle_connection(
                     continue;
                 }
 
-                let settle_target = {
-                    let state = logical.state.lock().await;
-                    state.subs.get(&key).and_then(|sub| {
-                        (!sub.auto_ack)
-                            .then(|| (sub.state_settler.clone(), sub.pending_settles.clone()))
-                    })
-                };
-
-                if let Some((state_settler, pending_settles)) = settle_target {
-                    // tokio::spawn(async move {
-                    for tag in ack.tags {
-                        let req = SettleRequest {
+                if let Some((state_settler, pending_settles)) = queue_settle {
+                    let reqs = ack
+                        .tags
+                        .into_iter()
+                        .map(|tag| SettleRequest {
                             delivery_tag: tag,
                             settle_type: SettleType::Ack,
-                        };
-                        pending_settles.fetch_add(1, Ordering::AcqRel);
-                        let _ = state_settler.send(req).await.inspect_err(|_| {
-                            pending_settles.fetch_sub(1, Ordering::AcqRel);
-                        });
-                    }
-                    // });
+                        })
+                        .collect();
+                    send_settle_batch(&state_settler, &pending_settles, reqs).await;
                 }
                 // Unknown subscription: ignore (idempotent)
             }
@@ -3438,21 +3474,18 @@ pub async fn handle_connection(
                 };
 
                 if let Some((state_settler, pending_settles)) = settle_target {
-                    // tokio::spawn(async move {
-                    for tag in nack.tags {
-                        let req = SettleRequest {
+                    let reqs = nack
+                        .tags
+                        .into_iter()
+                        .map(|tag| SettleRequest {
                             delivery_tag: tag,
                             settle_type: SettleType::Nack {
                                 requeue: Some(nack.requeue),
                                 not_before: nack.not_before,
                             },
-                        };
-                        pending_settles.fetch_add(1, Ordering::AcqRel);
-                        let _ = state_settler.send(req).await.inspect_err(|_| {
-                            pending_settles.fetch_sub(1, Ordering::AcqRel);
-                        });
-                    }
-                    // });
+                        })
+                        .collect();
+                    send_settle_batch(&state_settler, &pending_settles, reqs).await;
                 }
                 // Unknown subscription: ignore (idempotent)
             }

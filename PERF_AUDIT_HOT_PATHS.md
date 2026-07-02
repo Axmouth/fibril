@@ -79,7 +79,7 @@ per message (~2194). Offsets are monotonic per partition, so waiting once on
 the batch's max offset would collapse N gate waits into 1. Only engages in
 replica-durable mode.
 
-### A3. Per-connection writer ticks every 2ms even when idle. OPEN
+### A3. Per-connection writer ticks every 2ms even when idle. DONE (29cba0d)
 
 Where: `crates/protocol/src/v1/handler.rs` writer task, `ticker` at ~2162,
 select arm at ~2224.
@@ -101,7 +101,7 @@ bench smoke to confirm flush latency is unchanged.
 
 ## B. Work done N times that could be done once
 
-### B1. Delivery pump clones owned data per message. OPEN
+### B1. Delivery pump clones owned data per message. DONE (3179dae)
 
 Where: `crates/protocol/src/v1/handler.rs` ~1174-1191.
 
@@ -138,7 +138,7 @@ holds key, offset, and consumer per tag, so the reverse lookup is a filter).
 Impact: one sharded-map insert plus remove (with key clones) removed per
 message lifecycle, paid for by O(inflight) scans on rare paths.
 
-### B4. Delivery loop per-message overhead. OPEN
+### B4. Delivery loop per-message overhead. DONE (3179dae)
 
 Where: `crates/broker/src/broker.rs` ~3612-3691.
 
@@ -199,6 +199,37 @@ msgpack encode into the frame, and the framed write buffer. `Bytes` or
 that is a protocol and type change. Pair it with the optimization log's
 "protocol encode and header layout" experiment and the existing encode
 microbench.
+
+## Windows performance notes (clues, not yet measured)
+
+The user observed markedly worse performance on Windows 11 than Linux. Several
+hot-path mechanisms found in this audit are plausibly the cause, because they
+lean on facilities that behave very differently there:
+
+1. Sub-millisecond timers. The publisher sink coalesce window is 250us and the
+   settle coalesce window is 500us, driven by `tokio::time::timeout_at`.
+   Windows timer granularity is far coarser than Linux (default interrupt
+   period ~15.6ms, and tokio does not call `timeBeginPeriod`), so a 250us
+   window can oversleep by milliseconds. Under load the count and byte
+   thresholds flush first, which hides it, but mid-load latency would inflate
+   badly. The 2ms connection writer ticker (now gated by A3) had the same
+   shape. If Windows matters, consider flushing on thresholds plus a yield
+   instead of sub-ms sleeps, or measuring the real timer floor at startup.
+2. fsync cost. The whole durable pipeline paces on keratin group-commit
+   fsyncs. `FlushFileBuffers` on NTFS is typically much slower than Linux
+   fsync, so the ~10ms publish-to-deliver floor seen on Linux would stretch,
+   and the A1-style coupling (now removed) would have hurt proportionally
+   more.
+3. Defender real-time scanning. If the data directory is not excluded,
+   every segment write and rename pays a scan. This alone can explain a
+   "several times worse" report and is a docs-worthy deployment note.
+4. IOCP vs epoll wakeup cost. mio's Windows backend has historically higher
+   per-wakeup overhead, which multiplies the per-message wakeup patterns this
+   audit is removing (per-message notify, per-publish channel hops).
+
+None of this is measured on Windows yet. First steps if it becomes a target:
+run bench-matrix on the same hardware dual-booted, check the timer floor, and
+test with a Defender exclusion on the data dir.
 
 ## Positive findings (already the right shape, leave alone)
 
