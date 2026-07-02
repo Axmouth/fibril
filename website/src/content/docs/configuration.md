@@ -32,8 +32,9 @@ username = "fibril"
 [storage.keratin]
 fsync_interval_ms = 5
 # Floor between storage commits while the fsync worker is idle. 0 self-clocks
-# group commit on fsync completions. Raise on storage where a high fsync rate
-# is expensive.
+# group commit on fsync completions, the best setting for fast storage (NVMe,
+# tmpfs). On slow-fsync storage such as SATA SSDs a floor around the fsync
+# interval (5) gives the drive breathing room between write barriers.
 min_fsync_interval_ms = 0
 
 [storage.keratin.message_log]
