@@ -71,6 +71,10 @@ baseline (#127); 0.3 work = #102/#103/#105/#109.
   probe, and an adaptive spawn_blocking offload threshold for replication
   encode/decode. Guardrails: hysteresis, bounded ranges with a pin override,
   derived values visible in the debug surface, bench/DST validation.
+  Window budget rule: a coalesce window should stay at or under about 10
+  percent of expected overall latency (20 percent as the stretch bound).
+  First review candidate: the 500us settle coalesce window is now 12-25
+  percent of the improved 2-4ms delivery p50.
 
 Consolidated open items, extracted before the replication-effort working docs
 were archived so nothing is lost. Full detail and rationale live in
