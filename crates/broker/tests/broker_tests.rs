@@ -4532,6 +4532,7 @@ struct CountingEmptyOwnerPeer {
     reads: AtomicUsize,
     last_max_wait_ms: AtomicU64,
     read_notify: Notify,
+    complete_reads_limit: usize,
 }
 
 impl CountingEmptyOwnerPeer {
@@ -4540,6 +4541,17 @@ impl CountingEmptyOwnerPeer {
             reads: AtomicUsize::new(0),
             last_max_wait_ms: AtomicU64::new(0),
             read_notify: Notify::new(),
+            complete_reads_limit: usize::MAX,
+        }
+    }
+
+    /// Completes only the first read. Later reads pend forever, uncounted, so
+    /// a test that cancels after the first read can never race the loop into
+    /// finishing another tick first. The cancel always lands mid-read.
+    fn completing_only_first_read() -> Self {
+        Self {
+            complete_reads_limit: 1,
+            ..Self::new()
         }
     }
 
@@ -4563,6 +4575,9 @@ impl BrokerOwnerReplicationPeer for CountingEmptyOwnerPeer {
         _max_bytes: usize,
         max_wait_ms: u64,
     ) -> BoxFuture<'a, Result<BrokerOwnerReplicationRecords, BrokerError>> {
+        if self.reads.load(Ordering::Acquire) >= self.complete_reads_limit {
+            return Box::pin(std::future::pending());
+        }
         self.reads.fetch_add(1, Ordering::AcqRel);
         self.last_max_wait_ms.store(max_wait_ms, Ordering::Release);
         self.read_notify.notify_waiters();
@@ -4875,7 +4890,7 @@ async fn follower_worker_loop_ticks_until_cancelled() {
         .await
         .unwrap();
 
-    let peer = Arc::new(CountingEmptyOwnerPeer::new());
+    let peer = Arc::new(CountingEmptyOwnerPeer::completing_only_first_read());
     let resolver = Arc::new(StaticOwnerPeerResolver::new(peer.clone()));
     let shutdown = CancellationToken::new();
     let cfg = FollowerReplicationWorkerConfig {
