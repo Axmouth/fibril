@@ -18,6 +18,11 @@ worth a fresh pass.
 
 ## Checklist
 
+- [ ] Hot-path performance (delivery, ack, publish)
+  - Status: Addressing
+  - Detail: [PERF_AUDIT_HOT_PATHS.md](PERF_AUDIT_HOT_PATHS.md)
+  - Next: A1/A2 with before/after benchmarks, A3 free win + regression, then
+    the B groups; C items only with dedicated benchmarks.
 - [x] Runtime settings through Ganglion
   - Status: Addressed
   - Detail: [RUNTIME_SETTINGS_GANGLION_AUDIT.md](archive/replication-sharding-plan/RUNTIME_SETTINGS_GANGLION_AUDIT.md)
