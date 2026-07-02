@@ -3602,6 +3602,7 @@ impl<
                     qs.wake_replication_followers();
 
                     let mut delivered = 0;
+                    let mut sent = 0u64;
                     let mut rr = qs.rr.fetch_add(1, Ordering::Relaxed) as usize;
                     let mut redelivered = 0;
                     for d in deliverables {
@@ -3621,12 +3622,14 @@ impl<
                                 break;
                             }
                         }
+                        // No self-wake on the capacity break: the settle path
+                        // wakes this loop when credit returns.
                         let Some(c) = picked else {
-                            qs.wake();
                             break;
                         };
 
-                        let epoch = broker.next_tag_epoch.fetch_add(1, Ordering::SeqCst);
+                        // A unique-id counter needs no cross-variable ordering.
+                        let epoch = broker.next_tag_epoch.fetch_add(1, Ordering::Relaxed);
                         let tag = DeliveryTag { epoch };
 
                         broker.records_by_tags.insert(
@@ -3669,13 +3672,9 @@ impl<
                             //          but you could also immediately decrement inflight and requeue here.
                             qs.consumers.remove(&c.sub_id);
                         } else {
-                            if let Some(metrics) = &broker.metrics {
-                                metrics.delivered();
-                            }
-                            qs.activity.touch();
+                            sent += 1;
                             progressed = true;
                         }
-                        qs.wake();
 
                         delivered += 1;
 
@@ -3683,6 +3682,13 @@ impl<
                         if delivered % 1024 == 0 {
                             // tokio::task::yield_now().await;
                         }
+                    }
+
+                    if sent > 0 {
+                        if let Some(metrics) = &broker.metrics {
+                            metrics.delivered_many(sent);
+                        }
+                        qs.activity.touch();
                     }
 
                     if redelivered > 0

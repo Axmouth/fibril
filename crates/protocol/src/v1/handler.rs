@@ -1171,23 +1171,25 @@ async fn install_subscription(
         let mut rx = messages;
 
         while let Some(msg) = rx.recv().await {
-            let mut headers = msg.message.headers.clone();
-            if msg.message.retried > 0 {
-                headers.insert("fibril.retries".into(), msg.message.retried.to_string());
+            let delivery_tag = msg.delivery_tag;
+            let message = msg.message;
+            let mut headers = message.headers;
+            if message.retried > 0 {
+                headers.insert("fibril.retries".into(), message.retried.to_string());
             }
 
             let deliver = Deliver {
                 sub_id,
-                topic: msg.message.topic.clone(),
-                group: msg.group.clone(),
-                partition: msg.message.partition,
-                offset: msg.message.offset,
-                delivery_tag: msg.delivery_tag,
-                published: msg.message.published,
-                publish_received: msg.message.publish_received,
-                content_type: to_protocol_content_type(msg.message.content_type),
+                topic: message.topic,
+                group: msg.group,
+                partition: message.partition,
+                offset: message.offset,
+                delivery_tag,
+                published: message.published,
+                publish_received: message.publish_received,
+                content_type: to_protocol_content_type(message.content_type),
                 headers,
-                payload: msg.message.payload.clone(),
+                payload: message.payload,
             };
 
             tracing::debug!("Sending Deliver");
@@ -1214,7 +1216,7 @@ async fn install_subscription(
                 let _ = settler
                     .send(SettleRequest {
                         settle_type: SettleType::Ack,
-                        delivery_tag: msg.delivery_tag,
+                        delivery_tag,
                     })
                     .await
                     .inspect_err(|_| {

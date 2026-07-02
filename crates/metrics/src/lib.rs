@@ -471,6 +471,11 @@ impl BrokerStats {
     }
 
     #[inline]
+    pub fn delivered_many(&self, delivered: u64) {
+        self.delivered.incr_many(delivered);
+    }
+
+    #[inline]
     pub fn acked(&self) {
         self.acked.incr();
     }
