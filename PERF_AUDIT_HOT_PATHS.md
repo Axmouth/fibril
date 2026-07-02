@@ -203,14 +203,15 @@ immediate-requeue idea).
 
 ### C2. Payload copy count end to end. DROPPED (assessed low yield)
 
-A payload is copied on delivery by the stroma read, the msgpack encode into
-the frame, and the framed write buffer (B1 removed the broker-side clone).
-The encode microbench puts 1KB encode plus decode at ~6.3-6.7us while a 1KB
-memcpy is on the order of 0.1us, so serialization dominates and a `Bytes`
-conversion across storage, stroma, and the protocol would save a small slice
-of an already-small cost. The high-yield variant is out-of-band payload
-framing, which is a wire-format change and belongs with the protocol
-versioning and freeze work (#110), not a hot-path patch.
+A payload is copied on delivery by the stroma read, the wire encode into the
+frame buffer, and the framed write buffer (B1 removed the broker-side clone).
+The wire codec is already hand-rolled positional binary (no serde framework on
+the frame path), and the encode microbench on the current codec puts 1KB
+publish encode at ~0.8us and decode at ~0.11us, so the whole codec cost is
+under 1us per message. A `Bytes` conversion across storage, stroma, and the
+protocol, or out-of-band payload framing, would each save only a slice of
+that. Not worth the churn now. If it is ever revisited, it belongs with the
+protocol versioning and freeze work (#110).
 
 ## Windows performance notes (clues, not yet measured)
 
