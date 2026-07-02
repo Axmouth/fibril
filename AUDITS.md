@@ -21,8 +21,9 @@ worth a fresh pass.
 - [ ] Hot-path performance (delivery, ack, publish)
   - Status: Addressing
   - Detail: [PERF_AUDIT_HOT_PATHS.md](PERF_AUDIT_HOT_PATHS.md)
-  - Next: A1/A2 with before/after benchmarks, A3 free win + regression, then
-    the B groups; C items only with dedicated benchmarks.
+  - Next: C candidates (delivery-hop batching, payload copy count) and the
+    serial replica-confirm gate wait, each with dedicated benchmarks. A and B
+    findings are landed and measured.
 - [x] Runtime settings through Ganglion
   - Status: Addressed
   - Detail: [RUNTIME_SETTINGS_GANGLION_AUDIT.md](archive/replication-sharding-plan/RUNTIME_SETTINGS_GANGLION_AUDIT.md)

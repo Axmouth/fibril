@@ -112,7 +112,7 @@ into the `Deliver` instead. Impact: removes one full payload copy plus several
 allocations per delivered message, likely the best cheap win for 1KB-plus
 payload delivery throughput.
 
-### B2. Ack frame handling locks twice and sends per tag. OPEN
+### B2. Ack frame handling locks twice and sends per tag. DONE (150a65a)
 
 Where: `crates/protocol/src/v1/handler.rs` Op::Ack arm ~3351-3402 (the Nack
 arm mirrors it).
@@ -126,7 +126,7 @@ the settle loop already consumes batches). Impact: removes an async-mutex
 acquisition and N-1 channel ops per batch ack, which matters for clients that
 ack in windows.
 
-### B3. Reverse tag map maintained hot, read cold. OPEN
+### B3. Reverse tag map maintained hot, read cold. DONE (b7ef762)
 
 Where: `crates/broker/src/broker.rs` `tags_by_key_offset` (1389), with an
 insert per delivery (~3646) and a remove per settle (~3333). Its only readers
@@ -157,7 +157,7 @@ Where: `crates/broker/src/broker.rs` ~3612-3691.
 Impact: shaves several atomics plus a clock read per message. Shows up at the
 throughput-1k knee, not at low rate.
 
-### B5. Publish arm checks streams before the publisher cache. OPEN
+### B5. Publish arm checks streams before the publisher cache. DONE (b7ef762)
 
 Where: `crates/protocol/src/v1/handler.rs` ~3489-3548, and `is_stream`
 (`crates/broker/src/broker.rs:1750`) which allocates a `String` per call to
@@ -172,7 +172,7 @@ raw-entry or borrowed lookup avoids. Impact: turns the steady-state publish
 dispatch into one local map hit and removes 2-3 allocations plus 2 shared-map
 reads per publish.
 
-### B6. `send_to_current_transport` re-borrows per frame. OPEN
+### B6. `send_to_current_transport` re-borrows per frame. DONE (b7ef762)
 
 Where: `crates/protocol/src/v1/handler.rs` ~855-870.
 
@@ -202,7 +202,7 @@ microbench.
 
 ## Windows performance notes (clues, not yet measured)
 
-The user observed markedly worse performance on Windows 11 than Linux. Several
+Markedly worse performance was observed on Windows 11 than on Linux. Several
 hot-path mechanisms found in this audit are plausibly the cause, because they
 lean on facilities that behave very differently there:
 
@@ -213,7 +213,7 @@ lean on facilities that behave very differently there:
    window can oversleep by milliseconds. Under load the count and byte
    thresholds flush first, which hides it, but mid-load latency would inflate
    badly. The 2ms connection writer ticker (now gated by A3) had the same
-   shape. If Windows matters, consider flushing on thresholds plus a yield
+   shape. If Windows matters, options are flushing on thresholds plus a yield
    instead of sub-ms sleeps, or measuring the real timer floor at startup.
 2. fsync cost. The whole durable pipeline paces on keratin group-commit
    fsyncs. `FlushFileBuffers` on NTFS is typically much slower than Linux
@@ -248,7 +248,7 @@ test with a Defender exclusion on the data dir.
 - Publisher handles are cached per connection keyed by (topic, partition,
   group), so there is no shared-lock lookup per publish after the first.
 
-## Execution order (agreed with the user, 2026-07-03)
+## Execution order (decided 2026-07-03)
 
 1. A1 and A2 with before and after benchmarks each (baseline plus confirmed
    scenarios, and a low-prefetch confirmed run for A1's mechanism).
@@ -259,4 +259,4 @@ test with a Defender exclusion on the data dir.
    group 3 is B3, B5, and B6 (maps plus the publish arm).
 4. C1 and C2 only with dedicated benchmarks, separately.
 5. Knee check: run throughput-1k (250k to 500k) before vs after the batch to
-   see whether the latency knee moved (user request, 2026-07-03).
+   see whether the latency knee moved.
