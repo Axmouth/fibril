@@ -2221,7 +2221,12 @@ pub async fn handle_connection(
                     }
                 }
 
-                _ = ticker.tick() => {
+                // The tick only exists to flush a sub-window tail of buffered
+                // frames, so it stays disabled while nothing is buffered and an
+                // idle connection costs no periodic wakeups. When the arm
+                // re-enables after a quiet stretch the first tick fires
+                // immediately, which just runs the flush check below.
+                _ = ticker.tick(), if non_flushed_messages > 0 => {
                     // pass
                 }
 
