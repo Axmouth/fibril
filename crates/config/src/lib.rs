@@ -93,6 +93,9 @@ struct CliArgs {
     keratin_fsync_interval_ms: Option<u64>,
 
     #[arg(long)]
+    keratin_min_fsync_interval_ms: Option<u64>,
+
+    #[arg(long)]
     keratin_batch_linger_ms: Option<u64>,
 
     #[arg(long)]
@@ -375,6 +378,10 @@ impl ServerConfig {
             self.storage.keratin.fsync_interval_ms =
                 parse_env("FIBRIL_KERATIN_FSYNC_INTERVAL_MS", &value)?;
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS")? {
+            self.storage.keratin.min_fsync_interval_ms =
+                parse_env("FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_BATCH_LINGER_MS")? {
             self.storage.keratin.batch_linger_ms =
                 parse_env("FIBRIL_KERATIN_BATCH_LINGER_MS", &value)?;
@@ -457,6 +464,9 @@ impl ServerConfig {
         }
         if let Some(fsync_interval_ms) = args.keratin_fsync_interval_ms {
             self.storage.keratin.fsync_interval_ms = fsync_interval_ms;
+        }
+        if let Some(min_fsync_interval_ms) = args.keratin_min_fsync_interval_ms {
+            self.storage.keratin.min_fsync_interval_ms = min_fsync_interval_ms;
         }
         if let Some(batch_linger_ms) = args.keratin_batch_linger_ms {
             self.storage.keratin.batch_linger_ms = batch_linger_ms;
@@ -987,6 +997,11 @@ pub struct StorageSection {
 #[serde(default)]
 pub struct KeratinStorageSection {
     pub fsync_interval_ms: u64,
+    /// Floor between commits while the fsync worker is idle. 0 self-clocks
+    /// group commit on fsync completions. Raise on storage where a high fsync
+    /// rate is expensive.
+    #[serde(default)]
+    pub min_fsync_interval_ms: u64,
     #[serde(default = "default_batch_linger_ms")]
     pub batch_linger_ms: u64,
     #[serde(default = "default_message_log_section")]
@@ -1015,6 +1030,7 @@ impl Default for KeratinStorageSection {
     fn default() -> Self {
         Self {
             fsync_interval_ms: 5,
+            min_fsync_interval_ms: 0,
             batch_linger_ms: default_batch_linger_ms(),
             message_log: default_message_log_section(),
             event_log: default_event_log_section(),

@@ -21,11 +21,11 @@ worth a fresh pass.
 - [ ] Hot-path performance (delivery, ack, publish)
   - Status: Addressing
   - Detail: [PERF_AUDIT_HOT_PATHS.md](PERF_AUDIT_HOT_PATHS.md)
-  - Next: keratin-side findings (see PERFORMANCE_NOTES.md in the keratin
-    repo, 2026-07-03 section): self-clocking group commit is the headline,
-    then the reader fd cache and poll fast paths. Fibril-side A, B, and C1
-    findings are landed and measured, C2 was assessed low yield, and the
-    serial replica-confirm gate wait remains for cluster benchmarks.
+  - Next: remaining keratin findings (reader fd cache, poll retries fast
+    path, apply-completion clone) and the serial replica-confirm gate wait
+    for cluster benchmarks. Fibril A, B, and C1 plus keratin K1
+    (self-clocking group commit) are landed and measured, C2 was assessed
+    low yield.
 - [x] Runtime settings through Ganglion
   - Status: Addressed
   - Detail: [RUNTIME_SETTINGS_GANGLION_AUDIT.md](archive/replication-sharding-plan/RUNTIME_SETTINGS_GANGLION_AUDIT.md)

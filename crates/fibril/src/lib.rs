@@ -950,12 +950,14 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     let keratin_default = KeratinConfig::default();
     let keratin_message_cfg = KeratinConfig {
         fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
+        min_fsync_interval_ms: config.storage.keratin.min_fsync_interval_ms,
         batch_linger_ms: config.storage.keratin.batch_linger_ms,
         segment_max_bytes: config.storage.keratin.message_log.segment_max_bytes,
         ..keratin_default
     };
     let keratin_event_cfg = KeratinConfig {
         fsync_interval_ms: config.storage.keratin.fsync_interval_ms,
+        min_fsync_interval_ms: config.storage.keratin.min_fsync_interval_ms,
         batch_linger_ms: config.storage.keratin.batch_linger_ms,
         segment_max_bytes: config.storage.keratin.event_log.segment_max_bytes,
         flush_target_bytes: keratin_default.flush_target_bytes / 8,

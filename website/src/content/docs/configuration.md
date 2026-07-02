@@ -31,6 +31,10 @@ username = "fibril"
 
 [storage.keratin]
 fsync_interval_ms = 5
+# Floor between storage commits while the fsync worker is idle. 0 self-clocks
+# group commit on fsync completions. Raise on storage where a high fsync rate
+# is expensive.
+min_fsync_interval_ms = 0
 
 [storage.keratin.message_log]
 segment_max_bytes = 268435456
@@ -120,6 +124,7 @@ These fields are read on process start.
 | `admin.auth.username` | `FIBRIL_ADMIN_USERNAME` | `--admin-username` | `fibril` |
 | `admin.auth.password` | `FIBRIL_ADMIN_PASSWORD` | `--admin-password` | unset |
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
+| `storage.keratin.min_fsync_interval_ms` | `FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS` | `--keratin-min-fsync-interval-ms` | `0` |
 | `storage.keratin.message_log.segment_max_bytes` | `FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES` | `--keratin-message-log-segment-max-bytes` | `268435456` |
 | `storage.keratin.event_log.segment_max_bytes` | `FIBRIL_KERATIN_EVENT_LOG_SEGMENT_MAX_BYTES` | `--keratin-event-log-segment-max-bytes` | `33554432` |
 | `coordination.mode` | `FIBRIL_COORDINATION_MODE` | none | `static` |
