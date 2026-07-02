@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -163,7 +163,8 @@ pub struct ConsumerHandle {
     pub group: Option<Box<str>>,
     pub topic: Box<str>,
     pub partition: Partition,
-    pub messages: mpsc::Receiver<DeliverableMessage>,
+    pub messages: mpsc::Receiver<Vec<DeliverableMessage>>,
+    pub buffered: VecDeque<DeliverableMessage>,
     pub settler: mpsc::Sender<SettleRequest>,
     pub pending_settles: Arc<AtomicUsize>,
     pub activity_lease: ConsumerLease,
@@ -187,11 +188,16 @@ impl ConsumerHandle {
     }
 
     pub async fn recv(&mut self) -> Option<DeliverableMessage> {
-        self.messages.recv().await
+        loop {
+            if let Some(msg) = self.buffered.pop_front() {
+                return Some(msg);
+            }
+            self.buffered.extend(self.messages.recv().await?);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.messages.is_empty()
+        self.buffered.is_empty() && self.messages.is_empty()
     }
 }
 
@@ -552,7 +558,7 @@ type ConsumerId = u64;
 #[derive(Debug)]
 struct ConsumerState {
     sub_id: ConsumerId,
-    tx: mpsc::Sender<DeliverableMessage>,
+    tx: mpsc::Sender<Vec<DeliverableMessage>>,
     // flow control
     prefetch: AtomicUsize,
     inflight: AtomicUsize,
@@ -2570,7 +2576,7 @@ impl<
 
         let prefetch = cfg.prefetch.max(1);
 
-        let (msg_tx, msg_rx) = mpsc::channel::<DeliverableMessage>(prefetch * 4);
+        let (msg_tx, msg_rx) = mpsc::channel::<Vec<DeliverableMessage>>(4);
         let (settle_tx, settle_rx) = mpsc::channel::<SettleRequest>(prefetch * 8);
 
         let consumer = Arc::new(ConsumerState {
@@ -2649,6 +2655,7 @@ impl<
             topic: tp.into(),
             partition: part,
             messages: msg_rx,
+            buffered: VecDeque::new(),
             settler: settle_tx,
             pending_settles: self.pending_settles.clone(),
             activity_lease,
@@ -3594,10 +3601,16 @@ impl<
                     broker.replication_timing.record_replication_wake();
                     qs.wake_replication_followers();
 
-                    let mut delivered = 0;
                     let mut sent = 0u64;
                     let mut rr = qs.rr.fetch_add(1, Ordering::Relaxed) as usize;
                     let mut redelivered = 0;
+                    // One channel send per consumer per poll batch instead of
+                    // one per message. Round-robin assignment stays per message
+                    // for fairness, only the dispatch is batched.
+                    let mut batches: HashMap<
+                        ConsumerId,
+                        (Arc<ConsumerState>, Vec<DeliverableMessage>),
+                    > = HashMap::new();
                     for d in deliverables {
                         // Shrink hold: never deliver at or above the boundary.
                         // Deliverables are earliest-first, so the rest are too.
@@ -3656,20 +3669,22 @@ impl<
                             redelivered += 1;
                         }
 
-                        if c.tx.send(msg).await.is_err() {
-                            // TODO: Currently handled by expiry (since we keep inflight until completion),
-                            //          but you could also immediately decrement inflight and requeue here.
+                        batches
+                            .entry(c.sub_id)
+                            .or_insert_with(|| (c, Vec::new()))
+                            .1
+                            .push(msg);
+                    }
+
+                    for (_, (c, batch)) in batches {
+                        let n = batch.len() as u64;
+                        if c.tx.send(batch).await.is_err() {
+                            // The batch stays inflight until expiry redelivers
+                            // it, same as a failed single send before batching.
                             qs.consumers.remove(&c.sub_id);
                         } else {
-                            sent += 1;
+                            sent += n;
                             progressed = true;
-                        }
-
-                        delivered += 1;
-
-                        // TODO: eval
-                        if delivered % 1024 == 0 {
-                            // tokio::task::yield_now().await;
                         }
                     }
 

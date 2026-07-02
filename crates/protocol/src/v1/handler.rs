@@ -1216,58 +1216,63 @@ async fn install_subscription(
         let mut rx = messages;
         let mut cached_tx = None;
 
-        while let Some(msg) = rx.recv().await {
-            let delivery_tag = msg.delivery_tag;
-            let message = msg.message;
-            let mut headers = message.headers;
-            if message.retried > 0 {
-                headers.insert("fibril.retries".into(), message.retried.to_string());
-            }
-
-            let deliver = Deliver {
-                sub_id,
-                topic: message.topic,
-                group: msg.group,
-                partition: message.partition,
-                offset: message.offset,
-                delivery_tag,
-                published: message.published,
-                publish_received: message.publish_received,
-                content_type: to_protocol_content_type(message.content_type),
-                headers,
-                payload: message.payload,
-            };
-
-            tracing::debug!("Sending Deliver");
-
-            let frame = match wire::encode_deliver(req_id_gen_clone.next_id(), &deliver) {
-                Ok(frame) => frame,
-                Err(err) => {
-                    tracing::error!("Failed to encode Deliver frame: {err}");
-                    metrics.error();
-                    break;
+        'pump: while let Some(batch) = rx.recv().await {
+            let mut auto_ack_tags = Vec::new();
+            for msg in batch {
+                let delivery_tag = msg.delivery_tag;
+                let message = msg.message;
+                let mut headers = message.headers;
+                if message.retried > 0 {
+                    headers.insert("fibril.retries".into(), message.retried.to_string());
                 }
-            };
-            if send_to_current_transport(&mut transport_rx, &mut cached_tx, frame)
-                .await
-                .is_err()
-            {
-                tracing::warn!("Failed to send deliver frame to active transport");
-                metrics.error();
-                break;
+
+                let deliver = Deliver {
+                    sub_id,
+                    topic: message.topic,
+                    group: msg.group,
+                    partition: message.partition,
+                    offset: message.offset,
+                    delivery_tag,
+                    published: message.published,
+                    publish_received: message.publish_received,
+                    content_type: to_protocol_content_type(message.content_type),
+                    headers,
+                    payload: message.payload,
+                };
+
+                tracing::debug!("Sending Deliver");
+
+                let frame = match wire::encode_deliver(req_id_gen_clone.next_id(), &deliver) {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        tracing::error!("Failed to encode Deliver frame: {err}");
+                        metrics.error();
+                        break 'pump;
+                    }
+                };
+                if send_to_current_transport(&mut transport_rx, &mut cached_tx, frame)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Failed to send deliver frame to active transport");
+                    metrics.error();
+                    break 'pump;
+                }
+
+                if auto_ack {
+                    auto_ack_tags.push(delivery_tag);
+                }
             }
 
-            if auto_ack {
-                pending_settles_clone.fetch_add(1, Ordering::AcqRel);
-                let _ = settler
-                    .send(SettleRequest {
+            if !auto_ack_tags.is_empty() {
+                let reqs = auto_ack_tags
+                    .into_iter()
+                    .map(|delivery_tag| SettleRequest {
                         settle_type: SettleType::Ack,
                         delivery_tag,
                     })
-                    .await
-                    .inspect_err(|_| {
-                        pending_settles_clone.fetch_sub(1, Ordering::AcqRel);
-                    });
+                    .collect();
+                send_settle_batch(&settler, &pending_settles_clone, reqs).await;
             }
         }
     });

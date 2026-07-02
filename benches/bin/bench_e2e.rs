@@ -229,7 +229,7 @@ async fn consumer_task(
         });
     }
 
-    while let Some(msg) = consumer.messages.recv().await {
+    while let Some(msg) = consumer.recv().await {
         let c = metrics.consumed.fetch_add(1, Ordering::SeqCst) + 1;
         if c == total {
             mark_done_once(&metrics.consume_done_at, metrics.start);
