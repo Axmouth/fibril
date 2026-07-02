@@ -127,9 +127,9 @@ batch, the loop no longer notifies itself per message, and the reverse
 tag-lookup map is gone from the delivery and settle paths. Measured effect on
 the standard scenarios was neutral and the 1KB latency knee did not move
 (still between 350k/s and 400k/s), so the knee is set elsewhere, most likely
-the engine pipeline or the per-message channel hop. The remaining candidate
-from the audit is batching the broker-to-pump delivery hop (a `Vec` per
-consumer per poll batch).
+the engine pipeline or the per-message channel hop. The broker-to-pump hop was then batched (a `Vec` per consumer per
+poll batch) and turned out to be the knee itself, moving saturation onset
+from 350-400k/s to 500-600k/s.
 
 ### Publish sink batch shape
 
@@ -307,6 +307,7 @@ Add entries here when an optimization is actually tried.
 | 2026-07-03 | df89e33 | Release consumer credit at settle accept instead of after the settle fsync | Remove the ack group-commit latency from the consumer flow-control cycle | `confirmed` at 50k/150k with PREFETCH=64 and default 16384, 3 runs each side | At prefetch 64 and 150k/s, publish-to-deliver collapsed from p50 ~800ms / p99 ~1290ms to p50 10ms / p99 14ms, matching the prefetch-16k profile. Default-prefetch runs unchanged | Keep. The credit-bound regime is gone and at-least-once semantics are unchanged |
 | 2026-07-03 | 86fdbe7 | Remove the per-publish ConfirmStream offset send and drain tasks | Remove one channel hop and task wakeup per confirmed publish plus a bounded-channel stall hazard | `baseline` plus `confirmed` at 50k/150k, 3 runs each side | Latency-neutral, all percentiles within run noise | Keep as overhead and hazard removal, not claimed as a latency win |
 | 2026-07-03 | 3179dae, 150a65a, b7ef762 | Delivery pump field moves, per-batch delivery bookkeeping, batched ack settle path, reverse tag map removal, publish-arm cache-first ordering, cached transport sink | Cut per-message allocations, atomics, map ops, and channel awaits on the delivery and settle paths | `baseline`, `confirmed`, `throughput-1k` (250k-500k), 2 runs per step | Sub-knee scenarios neutral, and the 1KB knee did not move (still between 350k/s and 400k/s). This supersedes the reverted 2026-06-08 metrics-batching trial: bundled with the payload move and wake-path changes it showed no 350k/s regression | Keep. The knee is set elsewhere, most likely the engine pipeline or the per-message broker-to-pump channel hop |
+| 2026-07-03 | 9d1efb9 | Batch the broker-to-pump delivery hop (one Vec per consumer per poll batch) | Amortize the per-message channel send and task wakeup on the delivery path | `baseline`, `confirmed`, `throughput-1k`, low-prefetch confirmed, plus 600k/700k rate probes | This hop was the knee. 400k/s went from p50 ~750ms to 16ms and 500k/s from p50 ~2.4s to 26-27ms at full rate with zero missing. Saturation onset moved from 350-400k/s to 500-600k/s and high-rate RSS roughly halved. Sub-knee and low-prefetch unchanged | Keep. The next ceiling sits past 500k/s, most likely serialization or the engine pipeline |
 | 2026-06-16 | investigation | Add broker replication timing metrics to the cluster tryout output | Separate client-observed confirm latency from owner replica-gate wait, owner read cost, follower owner-read wait, follower apply cost, and whole follower tick time | 3-node Ganglion tryout, `replica_durable:2`, 1 KiB payload, 50k/s publish-only target, confirm window 1024, 4096 messages/events per read, 16 MiB/read | Actual rate was about 49k/s with confirm p50/p95/p99/max = 204/243/244/246ms. Owner `replica_confirm_wait` averaged about 0.033ms over 144k samples, while owner reads averaged about 1ms, follower owner-read await averaged about 6.3ms, follower apply averaged about 19.2ms, and whole follower ticks averaged about 552ms | Keep the metrics. This run says the visible latency is not mostly waiting after local append for follower progress. Next isolate local append completion latency and follower tick batching before changing durability semantics or poll cadence |
 
 ## Lessons so far

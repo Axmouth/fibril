@@ -58,6 +58,12 @@ baseline (#127); 0.3 work = #102/#103/#105/#109.
   die-off with a very large inflight set ever shows up as a pause, the lever
   is engine-side batching of the requeue appends, not parallelizing the scan.
 
+- Dead-consumer delivery recovery: a failed delivery send removes the consumer
+  and leaves the messages inflight until TTL expiry redelivers them. With
+  per-consumer batch dispatch the blast radius is a whole poll batch, not one
+  message. Immediate release-and-requeue on send failure would tighten
+  recovery (the release_inflight_batch engine path already exists).
+
 Consolidated open items, extracted before the replication-effort working docs
 were archived so nothing is lost. Full detail and rationale live in
 `archive/replication-sharding-plan/` (the worklog, replication planning, and

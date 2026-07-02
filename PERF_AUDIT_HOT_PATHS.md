@@ -182,23 +182,35 @@ on send failure or `changed()`. Impact: micro, but free.
 
 ## C. Larger design candidates (measure before committing to)
 
-### C1. Micro-batch the broker to pump delivery hop. OPEN
+### C1. Micro-batch the broker to pump delivery hop. DONE (9d1efb9)
 
-Delivery sends one `DeliverableMessage` per `mpsc` send per message
-(broker.rs ~3672). Batching a `Vec` per consumer per poll batch amortizes the
-channel and task wakeups (same shape as the stream cursor microbatch, #83).
-This is the optimization log's "delivery loop allocation and scanning"
-candidate. Needs care with fairness and the per-consumer credit checks.
+Delivery sent one `DeliverableMessage` per `mpsc` send per message. It now
+accumulates one `Vec` per consumer per poll batch and sends it in one channel
+op, with round-robin assignment still per message for fairness.
+`ConsumerHandle::recv` buffers a received batch, so the per-message consumer
+contract is unchanged, and the connection pump settles auto-ack tags once per
+batch.
 
-### C2. Payload copy count end to end. OPEN
+Measured (2 runs plus rate probes, 1KB): this hop was the latency knee. At
+400k/s, publish-to-deliver went from p50 ~750ms to p50 16ms / p99 21ms. At
+500k/s, from p50 ~2.4s to p50 26ms / p99 44-70ms at full target rate with
+zero missing. Saturation onset moved from between 350k and 400k to between
+500k and 600k (a 600k target sustains ~576k actual with backlog). Sub-knee
+scenarios and the low-prefetch profile are unchanged, and high-rate RSS
+roughly halved. Behavior note: a dead consumer now strands a whole batch
+until TTL expiry instead of one message (tracked in FOLLOWUPS with the
+immediate-requeue idea).
 
-A payload is copied about 3 times on delivery: the stroma read into
-`StoredMessage(Vec<u8>)`, the clone into `Deliver` (B1 removes this one), the
-msgpack encode into the frame, and the framed write buffer. `Bytes` or
-`Arc<[u8]>` end to end, or out-of-band payload framing, would cut more, but
-that is a protocol and type change. Pair it with the optimization log's
-"protocol encode and header layout" experiment and the existing encode
-microbench.
+### C2. Payload copy count end to end. DROPPED (assessed low yield)
+
+A payload is copied on delivery by the stroma read, the msgpack encode into
+the frame, and the framed write buffer (B1 removed the broker-side clone).
+The encode microbench puts 1KB encode plus decode at ~6.3-6.7us while a 1KB
+memcpy is on the order of 0.1us, so serialization dominates and a `Bytes`
+conversion across storage, stroma, and the protocol would save a small slice
+of an already-small cost. The high-yield variant is out-of-band payload
+framing, which is a wire-format change and belongs with the protocol
+versioning and freeze work (#110), not a hot-path patch.
 
 ## Windows performance notes (clues, not yet measured)
 
