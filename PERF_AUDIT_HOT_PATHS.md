@@ -47,10 +47,11 @@ freed credit only lets other ready messages flow. The old code also never
 released credit on a failed append, so a consumer leaked a credit slot on
 failure. Early release fixes that too.
 
-Impact estimate: the largest structural latency lever found. Biggest effect at
-low prefetch (credit-bound consumers). At prefetch 16k the standard bench may
-show little, so the measurement includes a PREFETCH=64 confirmed run to
-demonstrate the mechanism.
+Measured (3 runs each side, 1KB, confirmed): at PREFETCH=64 and 150k/s the
+publish-to-deliver latency collapsed from p50 ~800ms / p95 ~1250ms / p99
+~1290ms to p50 10ms / p95 13ms / p99 14ms, the same profile as prefetch 16k.
+The credit-bound regime is gone. Standard prefetch-16k runs are unchanged
+(no regression), and the target rate held on both sides.
 
 ### A2. Publish confirm path pays for a channel nobody reads. DONE (86fdbe7)
 
