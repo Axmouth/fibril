@@ -58,7 +58,7 @@ async fn open_broker_at(dir: &std::path::Path) -> Arc<Broker<StromaEngine>> {
 }
 
 async fn publish_durable(broker: &Arc<Broker<StromaEngine>>, topic: &str, payload: Vec<u8>) -> u64 {
-    let (publisher, _confirms) = broker
+    let publisher = broker
         .get_publisher(topic, Partition::new(0), &None)
         .await
         .expect("publisher");
@@ -181,7 +181,7 @@ async fn concurrent_load_no_loss_soak() {
     for _ in 0..producers {
         let broker = broker.clone();
         tasks.push(tokio::spawn(async move {
-            let (publisher, _confirms) = broker
+            let publisher = broker
                 .get_publisher(topic, Partition::new(0), &None)
                 .await
                 .expect("publisher");

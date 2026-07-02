@@ -132,7 +132,7 @@ impl TestState {
             .get(broker)
             .ok_or_else(|| BrokerError::Unknown(format!("broker {broker} not started")))?;
 
-        let (pubh, _) = broker
+        let pubh = broker
             .get_publisher(topic, Partition::ZERO, &group.map(|s| s.into()))
             .await?;
 
@@ -163,7 +163,7 @@ impl TestState {
             .get(broker)
             .ok_or_else(|| BrokerError::Unknown(format!("broker {broker} not started")))?;
 
-        let (pubh, _) = broker
+        let pubh = broker
             .get_publisher(topic, Partition::ZERO, &group.map(|s| s.into()))
             .await?;
 

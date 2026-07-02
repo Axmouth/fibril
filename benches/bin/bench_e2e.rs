@@ -147,22 +147,28 @@ async fn producer_task(
     inflight_limit: usize,
     metrics: Arc<BenchMetrics>,
 ) {
-    let (publisher, mut confirm_stream) = broker
+    let publisher = broker
         .get_publisher(&topic, Partition::ZERO, &None)
         .await
         .unwrap();
 
+    // Confirm accounting rides the per-publish confirm receivers: a single task
+    // awaits them in publish order (completions are ordered per partition).
+    let (recv_tx, mut recv_rx) = tokio::sync::mpsc::unbounded_channel();
     let metrics_clone = metrics.clone();
-
-    tokio::spawn(async move {
-        while confirm_stream.recv().await.is_some() {
-            metrics_clone.confirmed.fetch_add(1, Ordering::SeqCst);
+    let confirm_task = tokio::spawn(async move {
+        while let Some(recv) = recv_rx.recv().await {
+            match recv.await {
+                Ok(Ok(_offset)) => {
+                    metrics_clone.confirmed.fetch_add(1, Ordering::SeqCst);
+                }
+                other => tracing::error!("Error receiving publish confirm: {other:?}"),
+            }
             metrics_clone.inflight.fetch_sub(1, Ordering::SeqCst);
         }
     });
 
     let mut msg_id;
-    let mut recvs = vec![];
     loop {
         while metrics.inflight.load(Ordering::SeqCst) >= inflight_limit {
             tokio::task::yield_now().await;
@@ -180,9 +186,7 @@ async fn producer_task(
             .publish(payload, published, published, None, HashMap::new(), None)
             .await
             .unwrap();
-        recvs.push(recv);
-        // broker.publish(&topic, None, &payload).await.unwrap();
-        // prod_id_tx.send((msg_id, producer_id)).unwrap();
+        let _ = recv_tx.send(recv);
 
         metrics.inflight.fetch_add(1, Ordering::SeqCst);
         metrics.published.fetch_add(1, Ordering::SeqCst);
@@ -192,11 +196,8 @@ async fn producer_task(
         mark_done_once(&metrics.publish_done_at, metrics.start);
     }
 
-    for recv in recvs {
-        if let Err(e) = recv.await {
-            tracing::error!("Error receiving publish confirm: {e:?}");
-        }
-    }
+    drop(recv_tx);
+    let _ = confirm_task.await;
 }
 
 #[must_use]

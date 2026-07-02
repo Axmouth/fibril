@@ -1556,7 +1556,7 @@ async fn static_protocol_owner_peer_resolver_reads_from_owner_node() {
     let topic = "replication.resolver.read";
     let group = Some("workers".to_string());
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker
+    let publisher = owner_broker
         .get_publisher(topic, Partition::new(0), &group)
         .await
         .unwrap();
@@ -1856,7 +1856,7 @@ async fn coordination_protocol_owner_peer_resolver_uses_assignment_owner_after_m
 async fn static_protocol_owner_peer_resolver_can_authenticate() {
     let topic = "replication.resolver.auth";
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker
+    let publisher = owner_broker
         .get_publisher(topic, Partition::new(0), &None)
         .await
         .unwrap();
@@ -1943,7 +1943,7 @@ async fn ganglion_coordination_drives_supervised_follower_replication() {
 
     // Owner broker with data, serving the replication protocol on a real port.
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker
+    let publisher = owner_broker
         .get_publisher(topic, Partition::new(0), &None)
         .await
         .unwrap();
@@ -2126,7 +2126,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
 
     // Owner broker with two committed messages, serving replication over TCP.
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker
+    let publisher = owner_broker
         .get_publisher(topic, Partition::new(0), &None)
         .await
         .unwrap();
@@ -2274,7 +2274,7 @@ async fn ganglion_owner_death_fails_over_to_caught_up_follower() {
                 Partition::new(0),
                 None,
             ) {
-                if let Ok((publisher, _confirms)) = follower_broker
+                if let Ok(publisher) = follower_broker
                     .get_publisher(topic, Partition::new(0), &None)
                     .await
                 {
@@ -2347,7 +2347,7 @@ async fn ganglion_returning_old_owner_is_demoted_and_refuses_publishes() {
     let coordination = Arc::new(GanglionCoordination::new("a-owner", raft_node));
 
     let (owner_broker, _owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker
+    let publisher = owner_broker
         .get_publisher(topic, Partition::new(0), &None)
         .await
         .unwrap();
@@ -2503,7 +2503,7 @@ async fn follower_worker_loop_catches_up_over_static_protocol_resolver() {
     let topic = "replication.resolver.loop";
     let group = Some("workers".to_string());
     let (owner_broker, owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker
+    let publisher = owner_broker
         .get_publisher(topic, Partition::new(0), &group)
         .await
         .unwrap();
@@ -2623,7 +2623,7 @@ async fn follower_worker_loop_installs_checkpoint_over_static_protocol_resolver(
     let topic = "replication.resolver.checkpoint";
     let group = Some("workers".to_string());
     let (owner_broker, _owner_dir) = open_test_broker().await;
-    let (publisher, _confirms) = owner_broker
+    let publisher = owner_broker
         .get_publisher(topic, Partition::new(0), &group)
         .await
         .unwrap();
@@ -2867,7 +2867,7 @@ async fn replica_durable_confirm_resolves_over_wire_from_follower_progress() {
     );
 
     let publish_and_check = async {
-        let (publisher, _confirms) = owner_broker
+        let publisher = owner_broker
             .get_publisher(topic, Partition::new(0), &group)
             .await
             .unwrap();

@@ -100,7 +100,7 @@ fn broker_runs_inside_turmoil_host() {
         let (engine, _dir) = open_engine("smoke").await;
         let broker = Broker::new(engine, test_broker_config(), None);
 
-        let (publisher, _confirms) = broker
+        let publisher = broker
             .get_publisher(topic, Partition::new(0), &None)
             .await
             .unwrap();
@@ -187,7 +187,7 @@ fn spawn_owner_host(sim: &mut turmoil::Sim<'_>, topic: &'static str, payloads: &
         let (engine, _dir) = open_engine("owner").await;
         let broker = Broker::new(engine, test_broker_config(), None);
 
-        let (publisher, _confirms) = broker
+        let publisher = broker
             .get_publisher(topic, Partition::new(0), &None)
             .await
             .unwrap();
@@ -413,7 +413,7 @@ fn owner_partition_fails_over_to_caught_up_follower() {
         // owner, proven by a successful new publish.
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                if let Ok((publisher, _confirms)) =
+                if let Ok(publisher) =
                     broker.get_publisher(topic, Partition::new(0), &None).await
                 {
                     if let Ok(reply) = publisher
@@ -788,7 +788,7 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
             let (engine, _dir) = open_engine("sb-owner").await;
             let broker = Broker::new(engine, test_broker_config(), None);
 
-            let (publisher, _confirms) = broker
+            let publisher = broker
                 .get_publisher(topic, Partition::new(0), &None)
                 .await
                 .unwrap();
@@ -972,7 +972,7 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
                         Partition::new(0),
                         None,
                     ) {
-                        if let Ok((publisher, _confirms)) = broker
+                        if let Ok(publisher) = broker
                             .get_publisher(topic, Partition::new(0), &None)
                             .await
                         {
@@ -1206,7 +1206,7 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
                 .await
                 .unwrap();
 
-            let (publisher, _confirms) = broker
+            let publisher = broker
                 .get_publisher(topic, Partition::new(0), &None)
                 .await
                 .unwrap();
@@ -1425,7 +1425,7 @@ fn follower_installs_checkpoint_after_owner_truncates() {
         let (engine, _dir) = open_engine("ckpt-owner").await;
         let broker = Broker::new(engine, test_broker_config(), None);
 
-        let (publisher, _confirms) = broker
+        let publisher = broker
             .get_publisher(topic, Partition::new(0), &None)
             .await
             .unwrap();

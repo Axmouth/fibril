@@ -348,20 +348,6 @@ impl PublisherHandle {
     }
 }
 
-pub struct ConfirmStream {
-    rx: mpsc::Receiver<Offset>,
-}
-
-impl ConfirmStream {
-    pub async fn recv(&mut self) -> Option<Offset> {
-        self.rx.recv().await
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.rx.is_empty()
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct BrokerConfig {
     pub inflight_ttl_ms: u64,
@@ -1985,10 +1971,9 @@ impl<
         topic: &str,
         partition: Partition,
         group: &Option<Group>,
-    ) -> Result<(PublisherHandle, ConfirmStream), BrokerError> {
+    ) -> Result<PublisherHandle, BrokerError> {
         // TODO: make configurable?
         let (tx, mut rx) = mpsc::channel::<PublishRequest>(16384);
-        let (confirm_tx, confirm_rx) = mpsc::channel::<Offset>(16384);
 
         let engine = self.engine.clone();
         let shutdown = self.shutdown_publishers.clone();
@@ -2183,9 +2168,6 @@ impl<
                 match rx_completion.await {
                     Ok(Ok(append)) => {
                         let offset = append.base_offset;
-                        if let Err(e) = confirm_tx.send(offset).await {
-                            tracing::error!("Failed to send confirm offset: {e:?}");
-                        }
                         replication_timing.record_replication_wake();
                         qs_clone.wake_with_replication();
                         // Local durability first, then the assignment's
@@ -2221,10 +2203,7 @@ impl<
             }
         });
 
-        Ok((
-            PublisherHandle { publisher: tx },
-            ConfirmStream { rx: confirm_rx },
-        ))
+        Ok(PublisherHandle { publisher: tx })
     }
 
     pub(crate) async fn queue(&self, key: &QueueKey) -> Arc<QueueLoopState> {
