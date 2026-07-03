@@ -84,6 +84,13 @@ baseline (#127); 0.3 work = #102/#103/#105/#109.
   possible on crash, producer confirms unaffected), design it together with
   the API freeze (#111) and mirror the existing stream speculative tier.
 
+- benchmarks.md overhaul once the perf arc settles: replace the informal
+  250k+ figures with the measured post-audit numbers (paced 500k/s at 1KB
+  with p50 under 10ms on fast storage, knee 500-600k), a storage-class table
+  (tmpfs/NVMe-class vs SATA vs slow-VPS with the fsync floors), the zero-loss
+  saturation results, and the honest cluster replica-durable state. Method
+  notes: bench-matrix scenarios, run counts, drive-variance caveat.
+
 Consolidated open items, extracted before the replication-effort working docs
 were archived so nothing is lost. Full detail and rationale live in
 `archive/replication-sharding-plan/` (the worklog, replication planning, and
