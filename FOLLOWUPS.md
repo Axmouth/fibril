@@ -1,14 +1,10 @@
 # Follow-ups and pending work
 
-## RESUME HERE: TLS in transit (gate 4, #113) - 2026-07-04
+## TLS in transit (gate 4, #113) - design brief (2026-07-04)
 
-Transient cursor for the next arc. Delete once implementation is underway.
-State at handover: v0.2.0 shipped (tag fce3ccb, images + GitHub release
-published, site deployed), all three repos pushed and CI green, stream
-audits and their follow-ups closed, changelog policy consolidated. Fibril
-3ab1a52+, keratin 401484b, ganglion 3fa57f4 at cutover.
+The next arc. Decisions below are settled; implementation has not started.
 
-Decided cert model (user-approved 2026-07-04):
+Decided cert model:
 - Never ship certs. Shipped default certs are the default-password
   vulnerability class.
 - Primary mode: operator-supplied PEMs (tls.cert_path, tls.key_path,
@@ -57,9 +53,6 @@ same change, settings discipline for every knob):
    reverse-proxy stance - decide during brick 1, do not leave undecided.
 7. Later bricks, not this arc: inter-broker replication and ganglion raft
    TLS, mTLS client auth (#114), cert rotation.
-
-Push cadence: pushes were user-approved through the 0.2.0 arc. Confirm
-before the first push of this arc.
 
 
 ## Stream audits (2026-07-03, both done)
