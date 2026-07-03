@@ -1,4 +1,11 @@
-import { connect as netConnect, type Socket } from "node:net";
+import { connect as netConnect, isIP, type Socket } from "node:net";
+import {
+  connect as tlsConnect,
+  type DetailedPeerCertificate,
+  type TLSSocket,
+} from "node:tls";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   Engine,
   type InternalDelivered,
@@ -6,7 +13,15 @@ import {
   type SubscribeResult,
   type SubscriptionRegistry,
 } from "./engine.js";
-import { BrokenPipeError, DisconnectionError, FibrilError } from "./errors.js";
+import {
+  BrokenPipeError,
+  DisconnectionError,
+  FibrilError,
+  TlsCertificateUntrustedError,
+  TlsConfigError,
+  TlsHandshakeError,
+  TlsNotSupportedByBrokerError,
+} from "./errors.js";
 import { deferred } from "./internal/deferred.js";
 import type { BoundedQueue } from "./internal/bounded-queue.js";
 import { Publisher } from "./publisher.js";
@@ -46,6 +61,32 @@ function normalizeGroup(group: string | null): string | null {
 }
 
 /**
+ * TLS options for connecting to a TLS-enabled broker.
+ *
+ * Trust resolution order: `caFingerprint` pin if set, else `caPath` roots,
+ * else the OS trust store (for brokers with publicly issued certificates).
+ */
+export interface TlsOptions {
+  /**
+   * PEM file with the CA certificate(s) to trust, e.g. the broker's
+   * generated `<data_dir>/tls/ca.pem`.
+   */
+  caPath?: string;
+  /**
+   * SHA-256 fingerprint of the broker CA (or server) certificate, as
+   * printed in the broker startup log. Hex digits, colons optional.
+   * Pinning replaces chain-of-trust verification, the handshake still
+   * proves possession of the certificate key.
+   */
+  caFingerprint?: string;
+  /**
+   * Name verified against the certificate (and sent as SNI). Defaults to
+   * the host part of the connect address.
+   */
+  serverName?: string;
+}
+
+/**
  * Options used during client startup and protocol handshake.
  *
  * @example
@@ -58,6 +99,8 @@ function normalizeGroup(group: string | null): string | null {
 export interface ClientOptionsInit {
   /** Name sent to the broker during handshake. */
   clientName?: string;
+  /** TLS options. Absent connects plaintext. */
+  tls?: TlsOptions;
   /** Version sent to the broker during handshake. */
   clientVersion?: string;
   /** Optional username/password authentication. */
@@ -112,8 +155,10 @@ export class ClientOptions {
   readonly topologyRefreshCooldownMs: number;
   readonly superviseSubscriptions: boolean;
   readonly subscriptionSuperviseIntervalMs: number;
+  readonly tls: TlsOptions | undefined;
 
   constructor(init: ClientOptionsInit = {}) {
+    this.tls = init.tls;
     this.clientName = init.clientName ?? DEFAULT_CLIENT_NAME;
     this.clientVersion = init.clientVersion ?? DEFAULT_CLIENT_VERSION;
     this.auth = init.auth;
@@ -143,6 +188,7 @@ export class ClientOptions {
       topologyRefreshCooldownMs: this.topologyRefreshCooldownMs,
       superviseSubscriptions: this.superviseSubscriptions,
       subscriptionSuperviseIntervalMs: this.subscriptionSuperviseIntervalMs,
+      tls: this.tls,
       ...overrides,
     });
   }
@@ -152,6 +198,40 @@ export class ClientOptions {
    */
   withAuth(username: string, password: string): ClientOptions {
     return this.#copy({ auth: { username, password } });
+  }
+
+  /**
+   * Return a copy with TLS enabled using the OS trust store, for brokers
+   * with publicly issued certificates.
+   */
+  withTls(): ClientOptions {
+    return this.#copy({ tls: { ...(this.tls ?? {}) } });
+  }
+
+  /**
+   * Return a copy with TLS enabled, trusting the CA certificate(s) in a PEM
+   * file, e.g. the broker's generated `<data_dir>/tls/ca.pem`.
+   */
+  withTlsCaPath(caPath: string): ClientOptions {
+    return this.#copy({ tls: { ...(this.tls ?? {}), caPath } });
+  }
+
+  /**
+   * Return a copy with TLS enabled, pinning the broker certificate by the
+   * SHA-256 fingerprint printed in the broker startup log (colons optional).
+   * Pinning replaces chain-of-trust verification.
+   */
+  withTlsCaFingerprint(caFingerprint: string): ClientOptions {
+    return this.#copy({ tls: { ...(this.tls ?? {}), caFingerprint } });
+  }
+
+  /**
+   * Return a copy with TLS enabled and an explicit certificate name to
+   * verify (and send as SNI), when the connect address is not the name on
+   * the certificate.
+   */
+  withTlsServerName(serverName: string): ClientOptions {
+    return this.#copy({ tls: { ...(this.tls ?? {}), serverName } });
   }
 
   /**
@@ -465,7 +545,8 @@ function endpointKey(host: string, port: number): string {
   return `${host}:${port}`;
 }
 
-function openSocket(host: string, port: number): Promise<Socket> {
+function openSocket(host: string, port: number, tls?: TlsOptions): Promise<Socket> {
+  if (tls) return openTlsSocket(host, port, tls);
   return new Promise<Socket>((resolve, reject) => {
     const socket = netConnect({ host, port });
     let settled = false;
@@ -485,6 +566,130 @@ function openSocket(host: string, port: number): Promise<Socket> {
           `Failed to connect to ${host}:${port}: ${err.message}`,
         ),
       );
+    });
+  });
+}
+
+function normalizeFingerprint(raw: string): string {
+  const hex = raw.replace(/[:\s]/g, "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hex)) {
+    throw new TlsConfigError(
+      "tls caFingerprint must be 64 hex digits (SHA-256, colons optional)",
+    );
+  }
+  return hex;
+}
+
+/**
+ * Whether any certificate in the presented chain matches the pinned SHA-256
+ * fingerprint. Walks issuerCertificate links, which end in a self-referential
+ * root.
+ */
+function chainMatchesPin(socket: TLSSocket, pin: string): boolean {
+  let cert: DetailedPeerCertificate | null = socket.getPeerCertificate(true);
+  const seen = new Set<string>();
+  while (cert && cert.raw) {
+    const fingerprint = createHash("sha256").update(cert.raw).digest("hex");
+    if (fingerprint === pin) return true;
+    if (seen.has(fingerprint)) break;
+    seen.add(fingerprint);
+    cert = cert.issuerCertificate ?? null;
+  }
+  return false;
+}
+
+// Node OpenSSL verification codes that mean the certificate could not be
+// trusted, as opposed to a transport-level handshake failure.
+const CERT_ERROR_CODES = new Set([
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "CERT_UNTRUSTED",
+  "CERT_SIGNATURE_FAILURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+
+/**
+ * Sort a failed TLS handshake into the taxonomy: an early end of the
+ * connection is almost always a plaintext broker (the plaintext listener
+ * closes on sighting a ClientHello), certificate failures are trust
+ * configuration, everything else stays a generic handshake error.
+ */
+function classifyTlsError(
+  err: NodeJS.ErrnoException,
+  host: string,
+  port: number,
+): FibrilError {
+  const code = err.code ?? "";
+  if (
+    code === "ECONNRESET" ||
+    /disconnected before secure TLS connection/i.test(err.message)
+  ) {
+    return new TlsNotSupportedByBrokerError(`${host}:${port}`);
+  }
+  if (CERT_ERROR_CODES.has(code)) {
+    return new TlsCertificateUntrustedError(err.message);
+  }
+  return new TlsHandshakeError(`TLS handshake failed: ${err.message}`);
+}
+
+function openTlsSocket(host: string, port: number, tls: TlsOptions): Promise<Socket> {
+  let ca: Buffer | undefined;
+  if (tls.caPath !== undefined) {
+    try {
+      ca = readFileSync(tls.caPath);
+    } catch (err) {
+      return Promise.reject(
+        new TlsConfigError(
+          `failed to read tls caPath ${tls.caPath}: ${(err as Error).message}`,
+        ),
+      );
+    }
+  }
+  let pin: string | undefined;
+  if (tls.caFingerprint !== undefined) {
+    try {
+      pin = normalizeFingerprint(tls.caFingerprint);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+  const servername = tls.serverName ?? (isIP(host) ? undefined : host);
+  return new Promise<Socket>((resolve, reject) => {
+    const socket = tlsConnect({
+      host,
+      port,
+      ca,
+      servername,
+      // A pin replaces chain-of-trust verification; the match happens on
+      // secureConnect below. The handshake still proves key possession.
+      rejectUnauthorized: pin === undefined,
+      ...(pin !== undefined ? { checkServerIdentity: () => undefined } : {}),
+    });
+    let settled = false;
+    socket.once("secureConnect", () => {
+      if (settled) return;
+      settled = true;
+      if (pin !== undefined && !chainMatchesPin(socket, pin)) {
+        socket.destroy();
+        reject(
+          new TlsCertificateUntrustedError(
+            "no certificate in the presented chain matches the pinned fingerprint",
+          ),
+        );
+        return;
+      }
+      socket.setNoDelay(true);
+      resolve(socket);
+    });
+    socket.once("error", (err) => {
+      if (settled) return;
+      settled = true;
+      reject(classifyTlsError(err, host, port));
     });
   });
 }
@@ -529,7 +734,7 @@ class PooledConnection {
     if (this.#engine && !this.#engine.isClosed()) return this.#engine;
     if (this.#connecting) return this.#connecting;
     this.#connecting = (async () => {
-      const socket = await openSocket(this.host, this.port);
+      const socket = await openSocket(this.host, this.port, this.opts.tls);
       try {
         const engine = await Engine.start(
           socket,
@@ -863,7 +1068,7 @@ export class Client {
     opts: ClientOptions = new ClientOptions(),
   ): Promise<Client> {
     const addr = parseAddress(address);
-    const socket = await openSocket(addr.host, addr.port);
+    const socket = await openSocket(addr.host, addr.port, opts.tls);
     const subscriptions: SubscriptionRegistry = new Map();
     // The listener set is shared with the Client instance (and so with every
     // engine it later creates), so the bootstrap engine routes into the same set.
@@ -947,7 +1152,7 @@ export class Client {
 
   async #reconnectOnce(): Promise<ReconnectOutcome> {
     const oldEngine = this.#engine.current();
-    const socket = await openSocket(this.#address.host, this.#address.port);
+    const socket = await openSocket(this.#address.host, this.#address.port, this.#opts.tls);
     let engine: Engine;
     try {
       engine = await Engine.start(

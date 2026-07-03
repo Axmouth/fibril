@@ -9,9 +9,11 @@ import {
   BrokenPipeError,
   DisconnectionError,
   EofError,
+  ERR_TLS_REQUIRED,
   FibrilError,
   RedirectError,
   ServerError,
+  TlsRequiredByBrokerError,
   UnexpectedError,
 } from "./errors.js";
 import {
@@ -228,6 +230,14 @@ export class Engine {
     const helloFrame = await nextFrameOrEof(iter);
     if (helloFrame.opcode === Op.HelloErr) {
       const err = decodeFrameBody<ErrorMsg>(helloFrame);
+      throw new ServerError(err.code, err.message);
+    }
+    // A TLS listener answers a plaintext HELLO with a plaintext error frame
+    // carrying ERR_TLS_REQUIRED, so the mismatch surfaces as its own typed
+    // error rather than a generic failure.
+    if (helloFrame.opcode === Op.Error) {
+      const err = decodeFrameBody<ErrorMsg>(helloFrame);
+      if (err.code === ERR_TLS_REQUIRED) throw new TlsRequiredByBrokerError();
       throw new ServerError(err.code, err.message);
     }
     if (helloFrame.opcode !== Op.HelloOk) {

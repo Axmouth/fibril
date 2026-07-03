@@ -128,6 +128,73 @@ export class UnexpectedError extends FibrilError {
 }
 
 /**
+ * Broker error code for a plaintext connection to a TLS listener. The broker
+ * replies with this before closing, so the mismatch is definitive.
+ */
+export const ERR_TLS_REQUIRED = 426;
+
+/**
+ * The broker requires TLS but this client connected plaintext. Reported by
+ * the broker itself, so it is definitive rather than inferred.
+ */
+export class TlsRequiredByBrokerError extends FibrilError {
+  override readonly name = "TlsRequiredByBrokerError";
+  constructor() {
+    super(
+      "the broker requires TLS. Enable client TLS: withTlsCaPath(...) or " +
+        "withTlsCaFingerprint(...) to trust self-signed broker material, or " +
+        "bare withTls() for a publicly issued certificate",
+    );
+  }
+}
+
+/**
+ * TLS is enabled but the handshake ended before completing, which usually
+ * means the broker listener speaks plaintext.
+ */
+export class TlsNotSupportedByBrokerError extends FibrilError {
+  override readonly name = "TlsNotSupportedByBrokerError";
+  constructor(address: string) {
+    super(
+      `TLS handshake with ${address} ended early, the broker listener is ` +
+        "probably plaintext. Disable TLS in the client options, or set " +
+        "tls.enabled = true on the broker",
+    );
+  }
+}
+
+/**
+ * The broker certificate failed verification. A trust configuration problem,
+ * distinct from a transport mismatch.
+ */
+export class TlsCertificateUntrustedError extends FibrilError {
+  override readonly name = "TlsCertificateUntrustedError";
+  constructor(detail: string) {
+    super(
+      `broker certificate verification failed: ${detail}. Trust the broker ` +
+        "CA via withTlsCaPath(...) (generated deployments write " +
+        "<data_dir>/tls/ca.pem) or pin withTlsCaFingerprint(...) from the " +
+        "broker startup log",
+    );
+  }
+}
+
+/**
+ * Client-side TLS configuration problem: unreadable caPath, malformed
+ * fingerprint, or an invalid server name.
+ */
+export class TlsConfigError extends FibrilError {
+  override readonly name = "TlsConfigError";
+}
+
+/**
+ * Any other TLS handshake failure.
+ */
+export class TlsHandshakeError extends FibrilError {
+  override readonly name = "TlsHandshakeError";
+}
+
+/**
  * Whether an error is a transient transport failure: a connect or severed
  * connection. Narrow on purpose - this is the subset the client retries
  * automatically against a refreshed owner during a failover.

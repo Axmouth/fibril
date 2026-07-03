@@ -9,6 +9,7 @@ rather than getting a wrong value, which makes a missing handler obvious.
 from __future__ import annotations
 
 import asyncio
+import ssl
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -44,6 +45,9 @@ class FakeBroker:
     reconciles: list[wire.ReconcileClient] = field(default_factory=list)
     topology_acks: list[wire.TopologyUpdateAck] = field(default_factory=list)
 
+    # When set, the broker serves TLS with this server-side context.
+    ssl_context: Optional[ssl.SSLContext] = None
+
     host: str = field(init=False, default="127.0.0.1")
     port: int = field(init=False, default=0)
     _server: Optional[asyncio.AbstractServer] = field(init=False, default=None)
@@ -53,7 +57,9 @@ class FakeBroker:
     _writers: list[asyncio.StreamWriter] = field(init=False, default_factory=list)
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._handle, self.host, 0)
+        self._server = await asyncio.start_server(
+            self._handle, self.host, 0, ssl=self.ssl_context
+        )
         self.port = self._server.sockets[0].getsockname()[1]
 
     async def stop(self) -> None:

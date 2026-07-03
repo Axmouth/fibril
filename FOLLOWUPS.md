@@ -86,8 +86,15 @@ same change, settings discipline for every knob):
    a real TLS broker. Gotcha recorded: run_server_from_config always
    requires broker auth (fibril/fibril static handler), unauthenticated
    test clients get dropped after HELLO.
-4. TS client (node tls) and Python client (ssl), same option names and the
-   same solid error. Wire vectors are unaffected (TLS sits below framing).
+4. DONE (2026-07-04). TS client (node:tls at the one openSocket factory,
+   TLSSocket extends Socket so the engine is untouched) and Python client
+   (ssl context in _open_connection), same option names and the same
+   five-error taxonomy, all mapped from each platform's native errors. Pin
+   verification walks the presented chain (TS via issuerCertificate links,
+   Python via get_unverified_chain on 3.13+ with a documented leaf-only
+   fallback below that). Tests mint throwaway certs with the openssl
+   binary at run time, so no certificate material is committed. Wire
+   vectors unaffected (TLS sits below framing).
 5. fibrilctl cert generate + the admin board setup screen and loud-guide
    errors.
 6. Admin server HTTPS: decided in brick 1. The admin server serves HTTPS

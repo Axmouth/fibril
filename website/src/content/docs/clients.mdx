@@ -116,6 +116,9 @@ them:
 - bare `tls()` uses the OS trust store, for brokers with publicly issued
   certificates.
 
+<Tabs syncKey="client-language">
+  <TabItem label="Rust">
+
 ```rust
 use fibril_client::ClientOptions;
 
@@ -126,15 +129,46 @@ let client = ClientOptions::new()
     .await?;
 ```
 
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```ts
+import { ClientOptions } from "@fibril/client";
+
+const client = await new ClientOptions()
+  .withAuth("fibril", "fibril")
+  .withTlsCaPath("/var/lib/fibril/tls/ca.pem")
+  .connect("broker.internal:9876");
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```python
+from fibril import ClientOptions
+
+client = await (
+    ClientOptions()
+    .with_auth("fibril", "fibril")
+    .with_tls_ca_path("/var/lib/fibril/tls/ca.pem")
+    .connect("broker.internal:9876")
+)
+```
+
+  </TabItem>
+</Tabs>
+
 Misconfiguration surfaces as distinct typed errors because the fixes differ:
 `TlsRequiredByBroker` (the broker reported that this plaintext client must
 enable TLS), `TlsNotSupportedByBroker` (the handshake ended early, the broker
 listener is probably plaintext), `TlsCertificateUntrusted` (trust
-configuration: fix `tls_ca_path` or the fingerprint), and `TlsConfig` for
-client-side option problems. None of them are retried automatically.
+configuration: fix the CA path or the fingerprint), and `TlsConfig` for
+client-side option problems. The TypeScript and Python names are
+`TlsRequiredByBrokerError` and so on. None of them are retried automatically.
 
-TypeScript and Python TLS options are in progress and will use the same names
-and error taxonomy.
+One Python caveat: the fingerprint pin checks the whole presented chain from
+Python 3.13, while older Pythons only expose the leaf certificate, so pin the
+server certificate there or use `with_tls_ca_path`.
 
 ## Reconnect Policy
 

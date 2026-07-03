@@ -21,12 +21,14 @@ from typing import Optional
 from . import wire
 from .codec import Frame, build_frame, encode_frame, read_frame
 from .errors import (
+    ERR_TLS_REQUIRED,
     BrokenPipeError,
     DisconnectionError,
     EofError,
     FibrilError,
     RedirectError,
     ServerError,
+    TlsRequiredByBrokerError,
     UnexpectedError,
 )
 from .frames import decode_body, encode_body
@@ -182,6 +184,15 @@ class Engine:
         if hello_frame.opcode == Op.HELLO_ERR:
             err = decode_body(Op.HELLO_ERR, hello_frame.payload)
             assert isinstance(err, wire.ErrorMsg)
+            raise ServerError(err.code, err.message)
+        # A TLS listener answers a plaintext HELLO with a plaintext error
+        # frame carrying ERR_TLS_REQUIRED, so the mismatch surfaces as its
+        # own typed error rather than a generic failure.
+        if hello_frame.opcode == Op.ERROR:
+            err = decode_body(Op.ERROR, hello_frame.payload)
+            assert isinstance(err, wire.ErrorMsg)
+            if err.code == ERR_TLS_REQUIRED:
+                raise TlsRequiredByBrokerError()
             raise ServerError(err.code, err.message)
         if hello_frame.opcode != Op.HELLO_OK:
             raise UnexpectedError(f"unexpected opcode {hello_frame.opcode} during HELLO")

@@ -98,6 +98,65 @@ class UnexpectedError(FibrilError):
     """Catch-all for protocol violations or unexpected states."""
 
 
+#: Broker error code for a plaintext connection to a TLS listener. The broker
+#: replies with this before closing, so the mismatch is definitive.
+ERR_TLS_REQUIRED = 426
+
+
+class TlsRequiredByBrokerError(FibrilError):
+    """The broker requires TLS but this client connected plaintext.
+
+    Reported by the broker itself, so it is definitive rather than inferred.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the broker requires TLS. Enable client TLS: with_tls_ca_path(...) or "
+            "with_tls_ca_fingerprint(...) to trust self-signed broker material, or "
+            "bare with_tls() for a publicly issued certificate"
+        )
+
+
+class TlsNotSupportedByBrokerError(FibrilError):
+    """TLS is enabled but the handshake ended before completing.
+
+    That usually means the broker listener speaks plaintext.
+    """
+
+    def __init__(self, address: str) -> None:
+        super().__init__(
+            f"TLS handshake with {address} ended early, the broker listener is "
+            "probably plaintext. Disable TLS in the client options, or set "
+            "tls.enabled = true on the broker"
+        )
+
+
+class TlsCertificateUntrustedError(FibrilError):
+    """The broker certificate failed verification.
+
+    A trust configuration problem, distinct from a transport mismatch.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(
+            f"broker certificate verification failed: {detail}. Trust the broker "
+            "CA via with_tls_ca_path(...) (generated deployments write "
+            "<data_dir>/tls/ca.pem) or pin with_tls_ca_fingerprint(...) from the "
+            "broker startup log"
+        )
+
+
+class TlsConfigError(FibrilError):
+    """Client-side TLS configuration problem.
+
+    An unreadable ca_path, malformed fingerprint, or invalid server name.
+    """
+
+
+class TlsHandshakeError(FibrilError):
+    """Any other TLS handshake failure."""
+
+
 def is_transient_error(err: BaseException) -> bool:
     """Whether an error is a transient transport failure (connect or severed).
 

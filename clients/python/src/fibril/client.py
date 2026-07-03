@@ -10,14 +10,24 @@ calls them without an intermediate command channel.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import socket as _socket
+import ssl
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import Callable, Optional, Union
 
 from . import wire
 from .engine import Engine, EngineOptions, SubscribeResult, SubscriptionRegistry
-from .errors import BrokenPipeError, DisconnectionError, FibrilError
+from .errors import (
+    BrokenPipeError,
+    DisconnectionError,
+    FibrilError,
+    TlsCertificateUntrustedError,
+    TlsConfigError,
+    TlsHandshakeError,
+    TlsNotSupportedByBrokerError,
+)
 from .internal.bounded_queue import BoundedQueue
 from .internal.topology import Route, RoundRobin, TopologyCache, route_partition
 
@@ -37,6 +47,30 @@ def normalize_group(group: Optional[str]) -> Optional[str]:
 
 
 @dataclass
+class TlsOptions:
+    """TLS options for connecting to a TLS-enabled broker.
+
+    Trust resolution order: ``ca_fingerprint`` pin if set, else ``ca_path``
+    roots, else the OS trust store (for brokers with publicly issued
+    certificates).
+    """
+
+    #: PEM file with the CA certificate(s) to trust, e.g. the broker's
+    #: generated ``<data_dir>/tls/ca.pem``.
+    ca_path: Optional[str] = None
+    #: SHA-256 fingerprint of the broker CA (or server) certificate, as
+    #: printed in the broker startup log. Hex digits, colons optional.
+    #: Pinning replaces chain-of-trust verification, the handshake still
+    #: proves possession of the certificate key. On Python older than 3.13
+    #: only the leaf certificate is visible to the pin check, so pin the
+    #: server certificate there or use ``ca_path``.
+    ca_fingerprint: Optional[str] = None
+    #: Name verified against the certificate (and sent as SNI). Defaults to
+    #: the host part of the connect address.
+    server_name: Optional[str] = None
+
+
+@dataclass
 class ClientOptions:
     """Connection and routing settings. Use ``with_*`` for copies with overrides."""
 
@@ -52,9 +86,31 @@ class ClientOptions:
     topology_refresh_cooldown_ms: int = 1_000
     supervise_subscriptions: bool = True
     subscription_supervise_interval_ms: int = 1_000
+    tls: Optional[TlsOptions] = None
 
     def with_auth(self, username: str, password: str) -> "ClientOptions":
         return replace(self, auth=wire.Auth(username=username, password=password))
+
+    def with_tls(self) -> "ClientOptions":
+        """TLS with the OS trust store, for publicly issued broker certificates."""
+        return replace(self, tls=self.tls or TlsOptions())
+
+    def with_tls_ca_path(self, ca_path: str) -> "ClientOptions":
+        """TLS trusting the CA certificate(s) in a PEM file, e.g. the broker's
+        generated ``<data_dir>/tls/ca.pem``."""
+        return replace(self, tls=replace(self.tls or TlsOptions(), ca_path=str(ca_path)))
+
+    def with_tls_ca_fingerprint(self, ca_fingerprint: str) -> "ClientOptions":
+        """TLS pinning the broker certificate by the SHA-256 fingerprint printed
+        in the broker startup log (colons optional)."""
+        return replace(
+            self, tls=replace(self.tls or TlsOptions(), ca_fingerprint=ca_fingerprint)
+        )
+
+    def with_tls_server_name(self, server_name: str) -> "ClientOptions":
+        """TLS with an explicit certificate name to verify (and send as SNI),
+        when the connect address is not the name on the certificate."""
+        return replace(self, tls=replace(self.tls or TlsOptions(), server_name=server_name))
 
     def with_heartbeat_interval(self, seconds: float) -> "ClientOptions":
         return replace(self, heartbeat_interval_seconds=seconds)
@@ -224,13 +280,88 @@ def _endpoint_key(host: str, port: int) -> str:
     return f"{host}:{port}"
 
 
+def _normalize_fingerprint(raw: str) -> bytes:
+    hex_digits = "".join(ch for ch in raw if ch not in ": ").lower()
+    if len(hex_digits) != 64 or any(c not in "0123456789abcdef" for c in hex_digits):
+        raise TlsConfigError(
+            "tls ca_fingerprint must be 64 hex digits (SHA-256, colons optional)"
+        )
+    return bytes.fromhex(hex_digits)
+
+
+def _build_ssl_context(tls: TlsOptions) -> ssl.SSLContext:
+    if tls.ca_fingerprint is not None:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        # The pin replaces chain-of-trust verification; the match happens
+        # after the handshake, which still proves key possession.
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        return context
+    if tls.ca_path is not None:
+        try:
+            return ssl.create_default_context(cafile=tls.ca_path)
+        except (OSError, ssl.SSLError) as err:
+            raise TlsConfigError(f"failed to load tls ca_path {tls.ca_path}: {err}") from err
+    return ssl.create_default_context()
+
+
+def _chain_matches_pin(ssl_object: ssl.SSLObject, pin: bytes) -> bool:
+    # get_unverified_chain (Python 3.13+) exposes the whole presented chain
+    # so a CA pin can match. Older Pythons expose only the leaf certificate.
+    certs: list[bytes] = []
+    chain_getter = getattr(ssl_object, "get_unverified_chain", None)
+    if chain_getter is not None:
+        try:
+            for cert in chain_getter() or []:
+                certs.append(ssl.PEM_cert_to_DER_cert(cert.public_bytes()))
+        except ssl.SSLError:
+            certs = []
+    if not certs:
+        leaf = ssl_object.getpeercert(binary_form=True)
+        if leaf:
+            certs.append(leaf)
+    return any(hashlib.sha256(der).digest() == pin for der in certs)
+
+
 async def _open_connection(
-    host: str, port: int
+    host: str, port: int, tls: Optional[TlsOptions] = None
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    try:
-        reader, writer = await asyncio.open_connection(host, port)
-    except (ConnectionError, OSError) as err:
-        raise DisconnectionError(f"failed to connect to {host}:{port}: {err}") from err
+    if tls is None:
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+        except (ConnectionError, OSError) as err:
+            raise DisconnectionError(f"failed to connect to {host}:{port}: {err}") from err
+    else:
+        context = _build_ssl_context(tls)
+        pin = (
+            _normalize_fingerprint(tls.ca_fingerprint)
+            if tls.ca_fingerprint is not None
+            else None
+        )
+        server_hostname = tls.server_name or host
+        try:
+            reader, writer = await asyncio.open_connection(
+                host, port, ssl=context, server_hostname=server_hostname
+            )
+        except ssl.SSLCertVerificationError as err:
+            raise TlsCertificateUntrustedError(str(err)) from err
+        except ssl.SSLEOFError as err:
+            # The handshake ended abruptly: almost always a plaintext broker
+            # closing on sighting the ClientHello.
+            raise TlsNotSupportedByBrokerError(f"{host}:{port}") from err
+        except ssl.SSLError as err:
+            raise TlsHandshakeError(f"TLS handshake failed: {err}") from err
+        except ConnectionResetError as err:
+            raise TlsNotSupportedByBrokerError(f"{host}:{port}") from err
+        except (ConnectionError, OSError) as err:
+            raise DisconnectionError(f"failed to connect to {host}:{port}: {err}") from err
+        if pin is not None:
+            ssl_object = writer.get_extra_info("ssl_object")
+            if ssl_object is None or not _chain_matches_pin(ssl_object, pin):
+                writer.close()
+                raise TlsCertificateUntrustedError(
+                    "no certificate in the presented chain matches the pinned fingerprint"
+                )
     sock = writer.get_extra_info("socket")
     if sock is not None:
         # Disable Nagle for low latency on small frames, like the reference clients.
@@ -265,7 +396,7 @@ class _PooledConnection:
         async with self._lock:
             if self._engine is not None and not self._engine.is_closed():
                 return self._engine
-            reader, writer = await _open_connection(self._host, self._port)
+            reader, writer = await _open_connection(self._host, self._port, self._opts.tls)
             try:
                 engine = await Engine.start(
                     reader,
@@ -470,7 +601,7 @@ class Client:
             _refresh_catalogue(t, catalogue)
             return generation
 
-        reader, writer = await _open_connection(*addr)
+        reader, writer = await _open_connection(*addr, tls=opts.tls)
         try:
             engine = await Engine.start(
                 reader,
@@ -557,7 +688,7 @@ class Client:
 
     async def _reconnect_once(self) -> ReconnectOutcome:
         old = self._engine
-        reader, writer = await _open_connection(*self._address)
+        reader, writer = await _open_connection(*self._address, tls=self._opts.tls)
         try:
             engine = await Engine.start(
                 reader,

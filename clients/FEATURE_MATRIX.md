@@ -27,6 +27,8 @@ Superscript numbers refer to the Notes under the tables.
 | Custom binary wire format (v1) | done | done | done <sup>6</sup> |
 | Handshake + compliance marker | done | done | done |
 | Username/password auth | done | done | done |
+| TLS connect (OS roots / CA file / fingerprint pin) | done | done | done <sup>12</sup> |
+| Typed TLS error taxonomy (426 mismatch / trust / config) | done | done | done |
 | Heartbeat ping/pong + timeout | done | done | done |
 | Typed wire parse errors | done | done <sup>1</sup> | done <sup>1</sup> |
 
@@ -172,6 +174,9 @@ the same durable name tracks an independent cursor per partition.
     carry a server-owned `fibril.speculative` header). Ephemeral delivers at
     staging, confirms immediately, and persists without an fsync (AfterWrite). All
     tiers stay log-backed, so cursors and replay work on each.
+12. The Python fingerprint pin checks the whole presented chain on Python 3.13
+    and later. Older Pythons only expose the leaf certificate to the check, so
+    pin the server certificate there or trust the CA via ``ca_path``.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.

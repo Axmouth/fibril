@@ -553,7 +553,7 @@ See also: [configuration](/configuration/) for the `tls` section fields.
 | Operator-supplied PEM material | Implemented | `tls.cert_path` + `tls.key_path` |
 | Per-deployment generated material | Implemented | `tls.auto_self_signed`: CA + server cert under `<data_dir>/tls`, CA SHA-256 fingerprint printed at startup |
 | TLS/plaintext mismatch detection | Implemented | Both directions named at accept. A plaintext client on a TLS listener receives an error frame (code 426) instead of a bare close |
-| Client TLS options | Partial | Rust implemented: `tls()` (OS roots), `tls_ca_path`, `tls_ca_fingerprint` pin, `tls_server_name`, typed error taxonomy (426 mismatch vs certificate trust vs config). TypeScript and Python in progress |
+| Client TLS options | Implemented | Rust, TypeScript, and Python: OS-roots default, CA file, SHA-256 fingerprint pin, server-name override, and the shared typed error taxonomy (426 mismatch vs certificate trust vs config). Python chain pinning needs 3.13, older Pythons pin the leaf |
 | Admin dashboard HTTPS | Pending | Decided: served from the same `tls` material, `tls.admin_enabled = false` opts out. Wiring is in progress |
 | mTLS client auth | Planned | Reserved config surface, not wired |
 | Inter-broker replication TLS | Planned | Client-facing listeners first |
