@@ -227,11 +227,9 @@ struct StreamSubState {
     /// `None` for an ephemeral subscription (acks are no-ops).
     durable_name: Option<String>,
     channel: Arc<StreamChannel>,
-    /// Fan-out registration id, for unsubscribe on cleanup.
-    fanout_sub_id: u64,
     auto_ack: bool,
-    /// The backfill+live driver task and the delivery task; both aborted on
-    /// cleanup.
+    /// The recovering backfill+live driver task and the delivery task; both
+    /// aborted on cleanup (the driver detaches itself from the fan-out).
     tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -1354,18 +1352,17 @@ async fn install_stream_subscription(
     let filter = (!sub.filter.is_empty())
         .then(|| StreamFilter::from_pairs(sub.filter.iter().map(|(k, v)| (k.clone(), v.clone()))));
 
-    let subscription = channel
-        .subscribe(start, filter)
-        .await
-        .map_err(|err| (500, format!("stream subscribe failed: {err}")))?;
-    let fanout_sub_id = subscription.id();
-
     let sub_id = req_id_gen.next_id();
     let (sink_tx, mut sink_rx) =
         mpsc::channel::<Arc<StreamRecord>>(STREAM_DELIVERY_CHANNEL_CAPACITY);
 
-    // Driver: backfill (durable log then ring) and then live records into the sink.
-    let driver = tokio::spawn(subscription.run(sink_tx));
+    // Driver: backfill (durable log then ring) then live records into the sink,
+    // re-attaching from its watermark after a lag eviction so delivery stays
+    // contiguous per subscriber.
+    let driver = tokio::spawn({
+        let channel = channel.clone();
+        async move { channel.run_subscription(start, filter, sink_tx).await }
+    });
 
     // Delivery: records -> Deliver frames on the current transport. The stream
     // delivery tag is the record offset, so an ack settles the cursor by offset.
@@ -1426,7 +1423,6 @@ async fn install_stream_subscription(
         StreamSubState {
             durable_name: sub.durable_name,
             channel,
-            fanout_sub_id,
             auto_ack: sub.auto_ack,
             tasks: vec![driver, delivery],
         },
@@ -1444,12 +1440,12 @@ async fn install_stream_subscription(
     })
 }
 
-/// Tear down a stream subscription's tasks and detach it from the fan-out channel.
+/// Tear down a stream subscription's tasks. Aborting the driver runs its
+/// unsubscribe guard, which detaches the current fan-out registration.
 async fn teardown_stream_sub(sub: StreamSubState) {
     for task in &sub.tasks {
         task.abort();
     }
-    sub.channel.unsubscribe(sub.fanout_sub_id).await;
 }
 
 /// Persist a record to a stream and fan it out, then confirm the producer (when
@@ -3418,8 +3414,7 @@ pub async fn handle_connection(
                 // auto-ack stream sub treats the ack as a no-op.
                 let (stream_settle, queue_settle) = {
                     let state = logical.state.lock().await;
-                    if let Some(sub) = state.stream_subs.get(&(ack.topic.clone(), ack.partition))
-                    {
+                    if let Some(sub) = state.stream_subs.get(&(ack.topic.clone(), ack.partition)) {
                         (
                             Some((sub.channel.clone(), sub.durable_name.clone(), sub.auto_ack)),
                             None,

@@ -188,10 +188,6 @@ impl StreamRecord {
 struct Subscriber {
     tx: mpsc::Sender<Arc<StreamRecord>>,
     filter: Option<StreamFilter>,
-    /// Set when a live send was dropped because the consumer's channel was full.
-    /// At-least-once safe: a durable consumer re-reads the gap from its cursor on
-    /// reconnect. Surfaced so the broker can flag the consumer as lagging.
-    lagged: bool,
 }
 
 /// The plan a new subscriber must follow to catch up to the live tail, returned
@@ -218,6 +214,11 @@ pub struct StreamFanout {
     next: Offset,
     subscribers: HashMap<u64, Subscriber>,
     next_sub_id: u64,
+    /// Times a subscriber was evicted from the live set because its channel was
+    /// full. Eviction keeps per-subscriber delivery contiguous: instead of
+    /// dropping arbitrary records into a hole, the whole undelivered suffix is
+    /// left for the subscription driver to re-read from its watermark.
+    lag_evictions: u64,
 }
 
 impl StreamFanout {
@@ -230,6 +231,7 @@ impl StreamFanout {
             next,
             subscribers: HashMap::new(),
             next_sub_id: 0,
+            lag_evictions: 0,
         }
     }
 
@@ -251,9 +253,11 @@ impl StreamFanout {
     /// Publish a record to the ring and multicast it to every matching live
     /// subscriber. The record's offset must be the current tail (records are
     /// appended in order); the tail advances past it. A subscriber whose channel
-    /// is full is marked lagging and the record is dropped to it (it will re-read
-    /// from its durable cursor), and a subscriber whose channel has closed is
-    /// dropped from the registry.
+    /// is full is EVICTED from the live set rather than skipped: skipping would
+    /// punch a silent hole mid-stream, while eviction leaves a contiguous
+    /// undelivered suffix that the subscription driver re-reads from its
+    /// watermark (ring first, log if older) before re-attaching. A subscriber
+    /// whose channel has closed is dropped from the registry.
     pub fn publish(&mut self, record: StreamRecord) -> Arc<StreamRecord> {
         let record = Arc::new(record);
         self.ring.push_back(record.clone());
@@ -262,6 +266,7 @@ impl StreamFanout {
         }
         self.next = record.offset + 1;
 
+        let mut evictions = 0;
         self.subscribers.retain(|_, sub| {
             let matched = sub
                 .filter
@@ -274,12 +279,13 @@ impl StreamFanout {
             match sub.tx.try_send(record.clone()) {
                 Ok(()) => true,
                 Err(mpsc::error::TrySendError::Full(_)) => {
-                    sub.lagged = true;
-                    true
+                    evictions += 1;
+                    false
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => false,
             }
         });
+        self.lag_evictions += evictions;
 
         record
     }
@@ -302,7 +308,6 @@ impl StreamFanout {
             Subscriber {
                 tx,
                 filter: filter.clone(),
-                lagged: false,
             },
         );
 
@@ -339,9 +344,9 @@ impl StreamFanout {
         self.subscribers.remove(&id);
     }
 
-    /// Whether a subscriber has been marked lagging (a live send was dropped).
-    pub fn is_lagged(&self, id: u64) -> Option<bool> {
-        self.subscribers.get(&id).map(|s| s.lagged)
+    /// Total live-set evictions caused by full subscriber channels.
+    pub fn lag_evictions(&self) -> u64 {
+        self.lag_evictions
     }
 }
 
@@ -1010,6 +1015,72 @@ impl StreamChannel {
     pub async fn unsubscribe(&self, id: u64) {
         let _ = self.cmd_tx.send(FanoutCmd::Unsubscribe { id }).await;
     }
+
+    /// Drive a subscription with lag recovery until the sink closes or the
+    /// channel shuts down. Delivery is contiguous per subscriber on every tier:
+    /// when the fan-out evicts a slow subscriber (its live buffer overflowed),
+    /// this loop re-attaches from the delivery watermark and replays the missed
+    /// suffix from the ring or the log before rejoining the live tail, so a
+    /// lagging consumer falls behind instead of silently losing records. A
+    /// watermark that retention has already overtaken resumes at the oldest
+    /// retained record (the resolve clamp). Auto-ack stays safe by construction:
+    /// the cursor can only advance along what was actually delivered.
+    pub async fn run_subscription(
+        &self,
+        start: SubscribeStart,
+        filter: Option<StreamFilter>,
+        sink: mpsc::Sender<Arc<StreamRecord>>,
+    ) {
+        let mut watermark: Option<Offset> = None;
+        loop {
+            let attach_start = match watermark {
+                Some(w) => SubscribeStart::Offset(w + 1),
+                None => start.clone(),
+            };
+            let sub = match self.subscribe(attach_start, filter.clone()).await {
+                Ok(sub) => sub,
+                Err(_) => return,
+            };
+            // Detach from the live set even if the driving task is aborted
+            // mid-leg, so no dead registry entry lingers until the next publish.
+            let guard = UnsubscribeGuard {
+                cmd_tx: self.cmd_tx.clone(),
+                id: sub.id(),
+            };
+            let end = sub.run_leg(&sink, &mut watermark).await;
+            drop(guard);
+            match end {
+                LegEnd::SinkClosed => return,
+                // Lag eviction (or an actor restart): re-attach from the
+                // watermark. If the whole channel is gone the next subscribe
+                // errors and the loop exits above.
+                LegEnd::LiveEnded => continue,
+            }
+        }
+    }
+}
+
+/// Best-effort live-set detach on drop. `try_send` because Drop cannot await;
+/// a full command channel only delays cleanup until the subscriber's closed
+/// receiver is noticed on the next publish.
+struct UnsubscribeGuard {
+    cmd_tx: mpsc::Sender<FanoutCmd>,
+    id: u64,
+}
+
+impl Drop for UnsubscribeGuard {
+    fn drop(&mut self) {
+        let _ = self.cmd_tx.try_send(FanoutCmd::Unsubscribe { id: self.id });
+    }
+}
+
+/// Why one attach leg of a subscription ended.
+enum LegEnd {
+    /// The consumer side is gone; the subscription is over.
+    SinkClosed,
+    /// The live channel ended (lag eviction or actor teardown); the driver may
+    /// re-attach from its watermark.
+    LiveEnded,
 }
 
 /// A registered subscription plus what the broker needs to deliver it. `run`
@@ -1037,8 +1108,22 @@ impl StreamSubscription {
 
     /// Deliver backfill then live records to `sink` until the sink closes or the
     /// live channel ends. Order is strictly by offset: durable-log backfill (read
-    /// in batches), then the ring backfill, then the live tail.
-    pub async fn run(mut self, sink: mpsc::Sender<Arc<StreamRecord>>) {
+    /// in batches), then the ring backfill, then the live tail. A single attach
+    /// leg with no lag recovery; the broker delivery path drives
+    /// [`StreamChannel::run_subscription`] instead.
+    pub async fn run(self, sink: mpsc::Sender<Arc<StreamRecord>>) {
+        let mut watermark = None;
+        let _ = self.run_leg(&sink, &mut watermark).await;
+    }
+
+    /// One attach leg. `watermark` tracks the highest offset the subscriber has
+    /// been handed (delivered, or scanned-and-filtered during log backfill), so
+    /// a recovery re-attach resumes exactly after it.
+    async fn run_leg(
+        mut self,
+        sink: &mpsc::Sender<Arc<StreamRecord>>,
+        watermark: &mut Option<Offset>,
+    ) -> LegEnd {
         let mut from = self.inner.log_backfill.start;
         let to = self.inner.log_backfill.end;
         while from < to {
@@ -1049,7 +1134,9 @@ impl StreamSubscription {
                 .await
             {
                 Ok(records) => records,
-                Err(_) => return,
+                // A read failure ends the leg; the driver retries from the
+                // watermark on the next attach.
+                Err(_) => return LegEnd::LiveEnded,
             };
             if records.is_empty() {
                 break;
@@ -1061,22 +1148,30 @@ impl StreamSubscription {
                 from = offset + 1;
                 let record = StreamRecord::from_stored(offset, payload, headers);
                 if self.keep(&record) && sink.send(Arc::new(record)).await.is_err() {
-                    return;
+                    return LegEnd::SinkClosed;
                 }
+                // Filtered records advance the watermark too: they are handled,
+                // and re-scanning them on recovery would only repeat the filter.
+                *watermark = Some(offset);
             }
         }
 
         for record in std::mem::take(&mut self.inner.ring_backfill) {
+            let offset = record.offset;
             if sink.send(record).await.is_err() {
-                return;
+                return LegEnd::SinkClosed;
             }
+            *watermark = Some(offset);
         }
 
         while let Some(record) = self.inner.receiver.recv().await {
+            let offset = record.offset;
             if sink.send(record).await.is_err() {
-                return;
+                return LegEnd::SinkClosed;
             }
+            *watermark = Some(offset);
         }
+        LegEnd::LiveEnded
     }
 }
 
@@ -1194,27 +1289,30 @@ mod tests {
     }
 
     #[test]
-    fn full_channel_marks_lagging_not_blocked() {
+    fn full_channel_evicts_subscriber_not_blocked() {
         let mut fo = StreamFanout::new(64, 0);
-        let sub = fo.subscribe(0, None, 1);
-        // channel capacity 1: first send fits, the rest overflow
+        let mut sub = fo.subscribe(0, None, 1);
+        // channel capacity 1: the first send fits, the second overflow evicts
+        // the subscriber so the undelivered records stay a contiguous suffix
         for i in 0..5 {
             fo.publish(rec(i, &[]));
         }
-        assert_eq!(fo.is_lagged(sub.id), Some(true));
-        // hold sub so the receiver is not dropped before this assertion
-        drop(sub);
+        assert_eq!(fo.subscriber_count(), 0);
+        assert_eq!(fo.lag_evictions(), 1);
+        // the record that fit is still readable, nothing after it arrived
+        assert_eq!(sub.receiver.try_recv().unwrap().offset, 0);
+        assert!(sub.receiver.try_recv().is_err());
     }
 
     #[test]
     fn closed_receiver_drops_subscriber() {
         let mut fo = StreamFanout::new(8, 0);
         let sub = fo.subscribe(0, None, 16);
-        let id = sub.id;
         drop(sub); // receiver gone
         fo.publish(rec(0, &[]));
         assert_eq!(fo.subscriber_count(), 0);
-        assert_eq!(fo.is_lagged(id), None);
+        // a closed receiver is a departure, not a lag eviction
+        assert_eq!(fo.lag_evictions(), 0);
     }
 
     #[test]
@@ -1347,6 +1445,67 @@ mod channel_tests {
         let (tx, mut rx) = mpsc::channel(64);
         let driver = tokio::spawn(sub.run(tx));
         assert_eq!(collect(&mut rx, 6).await, vec![0, 1, 2, 3, 4, 5]);
+        driver.abort();
+    }
+
+    #[tokio::test]
+    async fn lagged_subscriber_recovers_the_full_suffix_in_order() {
+        let dir = temp_dir("stream_lag_recovery");
+        // live channel capacity 1 and a ring smaller than the burst, so a
+        // stalled consumer is evicted and recovery must read the log, the
+        // ring, and rejoin live
+        let ch = Arc::new(
+            StreamChannel::open(
+                engine(&dir).await,
+                "sensors",
+                0,
+                StreamDurability::Durable,
+                None,
+                8,
+                1,
+                test_cfg(),
+            )
+            .await
+            .unwrap(),
+        );
+
+        let (tx, mut rx) = mpsc::channel(1);
+        let driver = tokio::spawn({
+            let ch = ch.clone();
+            async move {
+                ch.run_subscription(SubscribeStart::Earliest, None, tx)
+                    .await
+            }
+        });
+
+        // The consumer stalls (rx is not drained), so the sink and the live
+        // buffer fill and the fan-out evicts the subscriber mid-burst.
+        for i in 0..50u32 {
+            ch.publish(hdr(&[]), format!("m{i}").into_bytes())
+                .await
+                .unwrap();
+        }
+
+        // Draining now must yield every record exactly once, in order: the
+        // driver replays the missed suffix from log and ring, then goes live.
+        let mut got: Vec<Offset> = Vec::new();
+        while got.len() < 50 {
+            let record = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("recovery stalled")
+                .expect("driver ended early");
+            got.push(record.offset);
+        }
+        assert_eq!(got, (0..50).collect::<Vec<Offset>>());
+
+        // Live delivery works after recovery.
+        ch.publish(hdr(&[]), b"live".to_vec()).await.unwrap();
+        let record = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("live record after recovery stalled")
+            .expect("driver ended early");
+        assert_eq!(record.offset, 50);
+
         driver.abort();
     }
 

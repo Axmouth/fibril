@@ -61,6 +61,16 @@ combination). Retention wins over a slow cursor: a consumer that lags past
 the retained window is clamped forward and flagged rather than holding storage
 forever.
 
+## Slow consumers
+
+Delivery is contiguous per subscriber on every tier. A consumer that cannot
+keep up with the live feed falls behind instead of losing records: the broker
+detaches it from live fan-out, replays the missed suffix in order from the
+in-memory ring (or the log when older), and rejoins it to the live tail once
+caught up. Records are never skipped mid-stream, so an auto-ack cursor can
+only advance along what was actually delivered. The one way a lagging
+consumer loses records is retention overtaking its position, as above.
+
 ## Durability tiers
 
 Each stream picks a durability tier at declare time. They trade latency for

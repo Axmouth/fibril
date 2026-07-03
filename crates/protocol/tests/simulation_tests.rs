@@ -38,7 +38,8 @@ use fibril_coordination_ganglion::GanglionCoordination;
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_protocol::v1::frame::ProtoCodec;
 use fibril_protocol::v1::handler::{
-    ClientTopologySource, ConnectionSettings, TopologyAdoptionTracker, handle_connection, run_server,
+    ClientTopologySource, ConnectionSettings, TopologyAdoptionTracker, handle_connection,
+    run_server,
 };
 use fibril_protocol::v1::helper::{try_decode, try_encode};
 use fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver;
@@ -162,7 +163,10 @@ fn follower_snapshot(topic: &str, epoch: u64, generation: u64) -> CoordinationSn
     nodes.insert("a-owner".to_string(), node("a-owner", owner_addr()));
     nodes.insert(
         "b-follower".to_string(),
-        node("b-follower", SocketAddr::new(turmoil::lookup("b-follower"), OWNER_PORT)),
+        node(
+            "b-follower",
+            SocketAddr::new(turmoil::lookup("b-follower"), OWNER_PORT),
+        ),
     );
     let assignment = PartitionAssignment::new(
         queue.clone(),
@@ -413,9 +417,7 @@ fn owner_partition_fails_over_to_caught_up_follower() {
         // owner, proven by a successful new publish.
         tokio::time::timeout(Duration::from_secs(30), async {
             loop {
-                if let Ok(publisher) =
-                    broker.get_publisher(topic, Partition::new(0), &None).await
-                {
+                if let Ok(publisher) = broker.get_publisher(topic, Partition::new(0), &None).await {
                     if let Ok(reply) = publisher
                         .publish(
                             b"post-failover".to_vec(),
@@ -611,7 +613,10 @@ fn split_brain_node_info(name: &str) -> NodeInfo {
 /// is partitioned away, which is what moves ownership to the follower.
 fn split_brain_live(owner_partitioned: bool) -> HashMap<String, NodeInfo> {
     let mut live = HashMap::new();
-    live.insert("b-follower".to_string(), split_brain_node_info("b-follower"));
+    live.insert(
+        "b-follower".to_string(),
+        split_brain_node_info("b-follower"),
+    );
     if !owner_partitioned {
         live.insert("a-owner".to_string(), split_brain_node_info("a-owner"));
     }
@@ -655,11 +660,14 @@ async fn start_split_brain_node(name: &'static str, id: u64) -> Arc<GanglionCoor
 
     let raft = node.raft().clone();
     tokio::spawn(async move {
-        let listener =
-            turmoil::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, RAFT_PORT)).await?;
+        let listener = turmoil::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, RAFT_PORT)).await?;
         loop {
             let (stream, _) = listener.accept().await?;
-            tokio::spawn(serve_connection(stream, raft.clone(), WireFormat::default()));
+            tokio::spawn(serve_connection(
+                stream,
+                raft.clone(),
+                WireFormat::default(),
+            ));
         }
         #[allow(unreachable_code)]
         Ok::<_, std::io::Error>(())
@@ -972,9 +980,8 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
                         Partition::new(0),
                         None,
                     ) {
-                        if let Ok(publisher) = broker
-                            .get_publisher(topic, Partition::new(0), &None)
-                            .await
+                        if let Ok(publisher) =
+                            broker.get_publisher(topic, Partition::new(0), &None).await
                         {
                             if let Ok(reply) = publisher
                                 .publish(
@@ -1123,7 +1130,13 @@ fn ganglion_raft_cluster_converges_under_message_loss() {
             })
             .await
             .expect("cluster commits and replicates a write under message loss");
-            assert!(coordination.consensus_node().committed_snapshot().generation >= 1);
+            assert!(
+                coordination
+                    .consensus_node()
+                    .committed_snapshot()
+                    .generation
+                    >= 1
+            );
 
             observed.fetch_add(1, Ordering::SeqCst);
             tokio::time::timeout(Duration::from_secs(120), async {
@@ -1672,12 +1685,8 @@ fn repartition_cutover_waits_for_delayed_topology_ack() {
                 if generation > 0 {
                     let _ = sink
                         .send(
-                            try_encode(
-                                Op::TopologyUpdateAck,
-                                7,
-                                &TopologyUpdateAck { generation },
-                            )
-                            .unwrap(),
+                            try_encode(Op::TopologyUpdateAck, 7, &TopologyUpdateAck { generation })
+                                .unwrap(),
                         )
                         .await;
                 }

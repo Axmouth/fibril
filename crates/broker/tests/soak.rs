@@ -63,7 +63,14 @@ async fn publish_durable(broker: &Arc<Broker<StromaEngine>>, topic: &str, payloa
         .await
         .expect("publisher");
     publisher
-        .publish(payload, unix_millis(), unix_millis(), None, Default::default(), None)
+        .publish(
+            payload,
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
         .await
         .expect("publish accepted")
         .await
@@ -118,7 +125,13 @@ async fn durable_crash_recovery_soak() {
         // each, and verify the payload sequence numbers are exactly the expected
         // contiguous range (no loss, no duplication).
         let mut sub = broker
-            .subscribe(topic, Partition::new(0), None, Uuid::now_v7(), ConsumerConfig { prefetch: 64 })
+            .subscribe(
+                topic,
+                Partition::new(0),
+                None,
+                Uuid::now_v7(),
+                ConsumerConfig { prefetch: 64 },
+            )
             .await
             .expect("subscribe");
         let expect_this_cycle = produced - consumed;
@@ -128,7 +141,10 @@ async fn durable_crash_recovery_soak() {
                 .expect("delivery within deadline")
                 .expect("queue still open");
             let seq = u64::from_le_bytes(msg.message.payload[..8].try_into().unwrap());
-            assert_eq!(seq, consumed, "messages delivered in produced order with no gaps");
+            assert_eq!(
+                seq, consumed,
+                "messages delivered in produced order with no gaps"
+            );
             sub.settle(SettleRequest {
                 settle_type: SettleType::Ack,
                 delivery_tag: msg.delivery_tag,
@@ -144,7 +160,13 @@ async fn durable_crash_recovery_soak() {
         broker.shutdown().await;
         let broker = open_broker_at(&dir.root).await;
         let mut sub = broker
-            .subscribe(topic, Partition::new(0), None, Uuid::now_v7(), ConsumerConfig { prefetch: 8 })
+            .subscribe(
+                topic,
+                Partition::new(0),
+                None,
+                Uuid::now_v7(),
+                ConsumerConfig { prefetch: 8 },
+            )
             .await
             .expect("subscribe after restart");
         let redelivered = tokio::time::timeout(Duration::from_millis(300), sub.recv()).await;
@@ -156,8 +178,15 @@ async fn durable_crash_recovery_soak() {
         broker.shutdown().await;
     }
 
-    assert_eq!(produced, consumed, "every produced message was consumed once");
-    assert_eq!(produced as usize, cycles * batch, "soak produced the expected total");
+    assert_eq!(
+        produced, consumed,
+        "every produced message was consumed once"
+    );
+    assert_eq!(
+        produced as usize,
+        cycles * batch,
+        "soak produced the expected total"
+    );
     drop(dir);
 }
 
@@ -217,7 +246,13 @@ async fn concurrent_load_no_loss_soak() {
 
     // Drain and ack everything; each confirmed publish is delivered exactly once.
     let mut sub = broker
-        .subscribe(topic, Partition::new(0), None, Uuid::now_v7(), ConsumerConfig { prefetch: 128 })
+        .subscribe(
+            topic,
+            Partition::new(0),
+            None,
+            Uuid::now_v7(),
+            ConsumerConfig { prefetch: 128 },
+        )
         .await
         .expect("subscribe");
     let mut consumed: u64 = 0;
@@ -240,7 +275,10 @@ async fn concurrent_load_no_loss_soak() {
         .expect("ack");
         consumed += 1;
     }
-    assert_eq!(produced, consumed, "every confirmed publish was consumed exactly once");
+    assert_eq!(
+        produced, consumed,
+        "every confirmed publish was consumed exactly once"
+    );
 
     drop(sub);
     broker.shutdown().await;

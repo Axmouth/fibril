@@ -1,7 +1,7 @@
+use fibril_util::net::TcpStream;
 use serde::{Deserialize, Serialize};
 use std::any::{Any, TypeId};
 use thiserror::Error;
-use fibril_util::net::TcpStream;
 use tokio_util::codec::Framed;
 
 use crate::v1::{

@@ -19,9 +19,9 @@ use fibril_broker::{
     },
     replication::StreamApplyTunablesFn,
 };
+use fibril_util::net::TcpStream;
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
-use fibril_util::net::TcpStream;
 use tokio::{sync::Mutex, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -154,7 +154,11 @@ impl ProtocolOwnerPeerResolverConfig {
 
     /// Set the follower read-timeout slack and owner connection-setup timeout
     /// (both milliseconds), threaded from the broker's replication settings.
-    pub fn with_timeouts(mut self, read_timeout_slack_ms: u64, owner_connect_timeout_ms: u64) -> Self {
+    pub fn with_timeouts(
+        mut self,
+        read_timeout_slack_ms: u64,
+        owner_connect_timeout_ms: u64,
+    ) -> Self {
         self.read_timeout_slack_ms = read_timeout_slack_ms;
         self.owner_connect_timeout_ms = owner_connect_timeout_ms;
         self
@@ -437,12 +441,7 @@ async fn open_protocol_owner_conn(
         Ok::<Conn, BrokerError>(conn)
     };
 
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(connect_timeout_ms),
-        setup,
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_millis(connect_timeout_ms), setup).await {
         Ok(result) => result,
         Err(_) => Err(BrokerError::Unknown(format!(
             "owner peer connection setup timed out after {connect_timeout_ms}ms"

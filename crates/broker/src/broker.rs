@@ -1357,8 +1357,9 @@ impl std::fmt::Display for WakeReason {
 // TODO(settings): lift to BrokerConfig once it moves to a builder (so adding a
 // field does not churn every exhaustive literal).
 const STREAM_RING_CAPACITY: usize = 4096;
-/// Per-subscriber live delivery buffer. When full, the subscriber is flagged
-/// lagging and re-reads the gap from its durable cursor.
+/// Per-subscriber live delivery buffer. When full, the subscriber is evicted
+/// from the live set and its driver replays the missed suffix from the ring or
+/// the log before re-attaching, so delivery stays contiguous per subscriber.
 const STREAM_LIVE_CHANNEL_CAPACITY: usize = 1024;
 
 pub struct Broker<
