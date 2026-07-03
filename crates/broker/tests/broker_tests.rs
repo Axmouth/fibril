@@ -7806,8 +7806,12 @@ async fn stream_registry_opens_caches_routes_and_closes() {
     let sub = ch1.subscribe(SubscribeStart::Earliest, None).await.unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     let driver = tokio::spawn(sub.run(tx));
-    assert_eq!(rx.recv().await.unwrap().offset, 0);
-    assert_eq!(rx.recv().await.unwrap().offset, 1);
+    let mut offsets = Vec::new();
+    while offsets.len() < 2 {
+        let batch = rx.recv().await.unwrap();
+        offsets.extend(batch.iter().map(|r| r.offset));
+    }
+    assert_eq!(offsets, vec![0, 1]);
     driver.abort();
 
     // closing drops the hosted channel (durable data stays in stroma)

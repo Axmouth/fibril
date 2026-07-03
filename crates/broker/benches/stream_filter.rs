@@ -41,7 +41,8 @@ fn bench_filter(c: &mut Criterion) {
     let headers = headers();
     let empty = StreamFilter::new();
     let single = StreamFilter::from_pairs([("region", "eu-*")]);
-    let multi = StreamFilter::from_pairs([("region", "eu-*"), ("tier", "gold"), ("type", "order.*")]);
+    let multi =
+        StreamFilter::from_pairs([("region", "eu-*"), ("tier", "gold"), ("type", "order.*")]);
     let miss = StreamFilter::from_pairs([("region", "us-*")]);
 
     c.bench_function("filter_empty", |b| {

@@ -47,8 +47,9 @@ type StreamSubKey = (Topic, Partition); // streams have no group
 type FrameSink = mpsc::Sender<Frame>;
 
 /// Buffer between a stream subscription's backfill+live driver and the per-client
-/// delivery task that turns records into `Deliver` frames.
-const STREAM_DELIVERY_CHANNEL_CAPACITY: usize = 1024;
+/// delivery task that turns records into `Deliver` frames. Counted in batches,
+/// since the whole stream delivery chain moves record batches.
+const STREAM_DELIVERY_CHANNEL_CAPACITY: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolServerError {
@@ -1362,7 +1363,7 @@ async fn install_stream_subscription(
 
     let sub_id = req_id_gen.next_id();
     let (sink_tx, mut sink_rx) =
-        mpsc::channel::<Arc<StreamRecord>>(STREAM_DELIVERY_CHANNEL_CAPACITY);
+        mpsc::channel::<Vec<Arc<StreamRecord>>>(STREAM_DELIVERY_CHANNEL_CAPACITY);
 
     // Driver: backfill (durable log then ring) and then live records into the sink.
     let driver = tokio::spawn(subscription.run(sink_tx));
@@ -1379,42 +1380,48 @@ async fn install_stream_subscription(
     let settle_channel = channel.clone();
     let delivery = tokio::spawn(async move {
         let mut cached_tx = None;
-        while let Some(record) = sink_rx.recv().await {
-            let deliver = Deliver {
-                sub_id,
-                topic: topic.clone(),
-                group: None,
-                partition,
-                offset: record.offset,
-                delivery_tag: DeliveryTag {
-                    epoch: record.offset,
-                },
-                published: record.published,
-                publish_received: record.publish_received,
-                content_type: record.content_type.clone().map(ContentType::from_header),
-                headers: record.headers.clone(),
-                payload: record.payload.to_vec(),
-            };
-            let frame = match wire::encode_deliver(req_id_gen_clone.next_id(), &deliver) {
-                Ok(frame) => frame,
-                Err(err) => {
-                    tracing::error!("Failed to encode stream Deliver frame: {err}");
+        'pump: while let Some(batch) = sink_rx.recv().await {
+            for record in &batch {
+                let deliver = Deliver {
+                    sub_id,
+                    topic: topic.clone(),
+                    group: None,
+                    partition,
+                    offset: record.offset,
+                    delivery_tag: DeliveryTag {
+                        epoch: record.offset,
+                    },
+                    published: record.published,
+                    publish_received: record.publish_received,
+                    content_type: record.content_type.clone().map(ContentType::from_header),
+                    headers: record.headers.clone(),
+                    payload: record.payload.to_vec(),
+                };
+                let frame = match wire::encode_deliver(req_id_gen_clone.next_id(), &deliver) {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        tracing::error!("Failed to encode stream Deliver frame: {err}");
+                        metrics.error();
+                        break 'pump;
+                    }
+                };
+                if send_to_current_transport(&mut transport_rx, &mut cached_tx, frame)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Failed to send stream deliver frame to active transport");
                     metrics.error();
-                    break;
+                    break 'pump;
                 }
-            };
-            if send_to_current_transport(&mut transport_rx, &mut cached_tx, frame)
-                .await
-                .is_err()
-            {
-                tracing::warn!("Failed to send stream deliver frame to active transport");
-                metrics.error();
-                break;
             }
             if auto_ack {
                 if let Some(name) = &durable_name {
-                    if let Err(err) = settle_channel.settle(name, record.offset).await {
-                        tracing::warn!("stream auto-ack settle failed: {err}");
+                    // The durable cursor is a high-water mark, so one settle at
+                    // the batch's last offset covers the whole delivered batch.
+                    if let Some(last) = batch.last() {
+                        if let Err(err) = settle_channel.settle(name, last.offset).await {
+                            tracing::warn!("stream auto-ack settle failed: {err}");
+                        }
                     }
                 }
             }
@@ -3418,8 +3425,7 @@ pub async fn handle_connection(
                 // auto-ack stream sub treats the ack as a no-op.
                 let (stream_settle, queue_settle) = {
                     let state = logical.state.lock().await;
-                    if let Some(sub) = state.stream_subs.get(&(ack.topic.clone(), ack.partition))
-                    {
+                    if let Some(sub) = state.stream_subs.get(&(ack.topic.clone(), ack.partition)) {
                         (
                             Some((sub.channel.clone(), sub.durable_name.clone(), sub.auto_ack)),
                             None,

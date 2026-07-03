@@ -186,7 +186,7 @@ impl StreamRecord {
 }
 
 struct Subscriber {
-    tx: mpsc::Sender<Arc<StreamRecord>>,
+    tx: mpsc::Sender<Vec<Arc<StreamRecord>>>,
     filter: Option<StreamFilter>,
     /// Set when a live send was dropped because the consumer's channel was full.
     /// At-least-once safe: a durable consumer re-reads the gap from its cursor on
@@ -198,8 +198,10 @@ struct Subscriber {
 /// by [`StreamFanout::subscribe`].
 pub struct Subscription {
     pub id: u64,
-    /// Live records from the tail onward (already filtered).
-    pub receiver: mpsc::Receiver<Arc<StreamRecord>>,
+    /// Live record batches from the tail onward (already filtered). Every hop of
+    /// the delivery chain moves batches so per-record dispatch cost amortizes,
+    /// the same shape as the queue delivery hop.
+    pub receiver: mpsc::Receiver<Vec<Arc<StreamRecord>>>,
     /// Recent records the ring served directly (already filtered), ordered by
     /// offset and all below the live tail. Send these after the log backfill.
     pub ring_backfill: Vec<Arc<StreamRecord>>,
@@ -248,30 +250,45 @@ impl StreamFanout {
         self.subscribers.len()
     }
 
-    /// Publish a record to the ring and multicast it to every matching live
-    /// subscriber. The record's offset must be the current tail (records are
-    /// appended in order); the tail advances past it. A subscriber whose channel
-    /// is full is marked lagging and the record is dropped to it (it will re-read
-    /// from its durable cursor), and a subscriber whose channel has closed is
-    /// dropped from the registry.
-    pub fn publish(&mut self, record: StreamRecord) -> Arc<StreamRecord> {
-        let record = Arc::new(record);
-        self.ring.push_back(record.clone());
+    /// Publish one record. Test convenience over [`Self::publish_batch`].
+    #[cfg(test)]
+    pub fn publish(&mut self, record: StreamRecord) {
+        self.publish_batch(vec![record]);
+    }
+
+    /// Publish a batch of records to the ring and multicast it to every matching
+    /// live subscriber as ONE channel send, so the per-send cost (wakeup included)
+    /// is paid per batch per subscriber instead of per record per subscriber. The
+    /// batch is in offset order starting at the current tail; the tail advances
+    /// past it. A subscriber whose channel is full is marked lagging and the batch
+    /// is dropped to it (it will re-read from its durable cursor), and a
+    /// subscriber whose channel has closed is dropped from the registry.
+    pub fn publish_batch(&mut self, records: Vec<StreamRecord>) {
+        let Some(last) = records.last() else {
+            return;
+        };
+        self.next = last.offset + 1;
+        let records: Vec<Arc<StreamRecord>> = records.into_iter().map(Arc::new).collect();
+        for record in &records {
+            self.ring.push_back(record.clone());
+        }
         while self.ring.len() > self.capacity {
             self.ring.pop_front();
         }
-        self.next = record.offset + 1;
 
         self.subscribers.retain(|_, sub| {
-            let matched = sub
-                .filter
-                .as_ref()
-                .map(|f| f.matches(&record.headers))
-                .unwrap_or(true);
-            if !matched {
+            let batch: Vec<Arc<StreamRecord>> = match sub.filter.as_ref() {
+                None => records.clone(),
+                Some(f) => records
+                    .iter()
+                    .filter(|r| f.matches(&r.headers))
+                    .cloned()
+                    .collect(),
+            };
+            if batch.is_empty() {
                 return true;
             }
-            match sub.tx.try_send(record.clone()) {
+            match sub.tx.try_send(batch) {
                 Ok(()) => true,
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     sub.lagged = true;
@@ -280,14 +297,13 @@ impl StreamFanout {
                 Err(mpsc::error::TrySendError::Closed(_)) => false,
             }
         });
-
-        record
     }
 
     /// Register a live subscriber attached at the current tail and return its
     /// catch-up plan. `start` is the resolved absolute offset (the broker resolves
     /// latest/earliest/N-back/by-time/durable-resume to an offset first), clamped
-    /// here to at most the tail. `channel_capacity` bounds the live buffer.
+    /// here to at most the tail. `channel_capacity` bounds the live buffer in
+    /// batches.
     pub fn subscribe(
         &mut self,
         start: Offset,
@@ -369,11 +385,11 @@ pub enum SubscribeStart {
 const BACKFILL_BATCH: usize = 256;
 
 enum FanoutCmd {
-    Publish {
-        record: StreamRecord,
-        /// Optional ack, fired once the record is multicast. The drain leaves this
+    PublishBatch {
+        records: Vec<StreamRecord>,
+        /// Optional ack, fired once the batch is multicast. The drain leaves this
         /// `None` and relies on the command channel's FIFO order to keep delivery in
-        /// offset order, so it never round-trips the actor per record. Set by the
+        /// offset order, so it never round-trips the actor per batch. Set by the
         /// simple `publish` path that wants to await the multicast.
         resp: Option<oneshot::Sender<()>>,
     },
@@ -612,8 +628,8 @@ impl StreamChannel {
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    FanoutCmd::Publish { record, resp } => {
-                        fanout.publish(record);
+                    FanoutCmd::PublishBatch { records, resp } => {
+                        fanout.publish_batch(records);
                         if let Some(resp) = resp {
                             let _ = resp.send(());
                         }
@@ -741,17 +757,24 @@ impl StreamChannel {
                     // Fan out only once the batch is durable, in offset order.
                     match durable.await {
                         Ok(Ok(())) => {
+                            let mut records = Vec::with_capacity(items.len());
+                            let mut confirms = Vec::with_capacity(items.len());
                             for (i, (headers, payload, confirm)) in items.into_iter().enumerate() {
-                                let record =
-                                    StreamRecord::from_stored(base + i as u64, payload, headers);
-                                let off = record.offset;
-                                // Hand the record to the fan-out actor in offset order;
-                                // its FIFO command channel preserves that order, so no
-                                // per-record round-trip is needed. The confirm only
-                                // needs durability (already reached), not the multicast.
-                                let _ = drain_cmd_tx
-                                    .send(FanoutCmd::Publish { record, resp: None })
-                                    .await;
+                                let off = base + i as u64;
+                                records.push(StreamRecord::from_stored(off, payload, headers));
+                                confirms.push((off, confirm));
+                            }
+                            // Hand the whole batch to the fan-out actor as one
+                            // command; its FIFO channel preserves offset order, so
+                            // no round-trip is needed. The confirms only need
+                            // durability (already reached), not the multicast.
+                            let _ = drain_cmd_tx
+                                .send(FanoutCmd::PublishBatch {
+                                    records,
+                                    resp: None,
+                                })
+                                .await;
+                            for (off, confirm) in confirms {
                                 let _ = confirm.send(Ok(off));
                             }
                         }
@@ -767,22 +790,29 @@ impl StreamChannel {
 
                 // Express (speculative, ephemeral): deliver at stage, in offset order.
                 let ephemeral = drain_durability == StreamDurability::Ephemeral;
+                let mut records = Vec::with_capacity(items.len());
                 let mut pending = Vec::with_capacity(items.len());
+                let mut confirmed_now = Vec::with_capacity(items.len());
                 for (i, (headers, payload, confirm)) in items.into_iter().enumerate() {
-                    let record = StreamRecord::from_stored(base + i as u64, payload, headers);
-                    let off = record.offset;
-                    // Deliver in offset order via the FIFO command channel, no
-                    // per-record round-trip.
-                    let _ = drain_cmd_tx
-                        .send(FanoutCmd::Publish { record, resp: None })
-                        .await;
+                    let off = base + i as u64;
+                    records.push(StreamRecord::from_stored(off, payload, headers));
                     if ephemeral {
-                        // Confirm now (weakest guarantee).
-                        let _ = confirm.send(Ok(off));
+                        confirmed_now.push((off, confirm));
                     } else {
                         // Speculative: defer the confirm until the record is durable.
                         pending.push((off, confirm));
                     }
+                }
+                // One batch command delivers in offset order via the FIFO channel.
+                let _ = drain_cmd_tx
+                    .send(FanoutCmd::PublishBatch {
+                        records,
+                        resp: None,
+                    })
+                    .await;
+                for (off, confirm) in confirmed_now {
+                    // Confirm at stage (weakest guarantee).
+                    let _ = confirm.send(Ok(off));
                 }
                 // Resolve durability off the critical path so the next batch delivers
                 // without waiting for this batch's flush.
@@ -896,8 +926,8 @@ impl StreamChannel {
         let record = StreamRecord::from_stored(offset, payload, headers);
         let (resp, rx) = oneshot::channel();
         self.cmd_tx
-            .send(FanoutCmd::Publish {
-                record,
+            .send(FanoutCmd::PublishBatch {
+                records: vec![record],
                 resp: Some(resp),
             })
             .await
@@ -1035,10 +1065,11 @@ impl StreamSubscription {
             .unwrap_or(true)
     }
 
-    /// Deliver backfill then live records to `sink` until the sink closes or the
-    /// live channel ends. Order is strictly by offset: durable-log backfill (read
-    /// in batches), then the ring backfill, then the live tail.
-    pub async fn run(mut self, sink: mpsc::Sender<Arc<StreamRecord>>) {
+    /// Deliver backfill then live record batches to `sink` until the sink closes
+    /// or the live channel ends. Order is strictly by offset: durable-log backfill
+    /// (one batch per log read), then the ring backfill, then the live tail. Every
+    /// send moves a batch so the per-send cost amortizes across records.
+    pub async fn run(mut self, sink: mpsc::Sender<Vec<Arc<StreamRecord>>>) {
         let mut from = self.inner.log_backfill.start;
         let to = self.inner.log_backfill.end;
         while from < to {
@@ -1054,26 +1085,29 @@ impl StreamSubscription {
             if records.is_empty() {
                 break;
             }
+            let mut batch = Vec::with_capacity(records.len());
             for (offset, payload, headers) in records {
                 if offset >= to {
                     break;
                 }
                 from = offset + 1;
                 let record = StreamRecord::from_stored(offset, payload, headers);
-                if self.keep(&record) && sink.send(Arc::new(record)).await.is_err() {
-                    return;
+                if self.keep(&record) {
+                    batch.push(Arc::new(record));
                 }
             }
-        }
-
-        for record in std::mem::take(&mut self.inner.ring_backfill) {
-            if sink.send(record).await.is_err() {
+            if !batch.is_empty() && sink.send(batch).await.is_err() {
                 return;
             }
         }
 
-        while let Some(record) = self.inner.receiver.recv().await {
-            if sink.send(record).await.is_err() {
+        let ring_backfill = std::mem::take(&mut self.inner.ring_backfill);
+        if !ring_backfill.is_empty() && sink.send(ring_backfill).await.is_err() {
+            return;
+        }
+
+        while let Some(batch) = self.inner.receiver.recv().await {
+            if sink.send(batch).await.is_err() {
                 return;
             }
         }
@@ -1137,20 +1171,25 @@ mod tests {
         assert_eq!(sub.log_backfill, 0..0);
 
         fo.publish(rec(0, &[]));
-        fo.publish(rec(1, &[]));
+        fo.publish_batch(vec![rec(1, &[]), rec(2, &[])]);
 
-        assert_eq!(sub.receiver.try_recv().unwrap().offset, 0);
-        assert_eq!(sub.receiver.try_recv().unwrap().offset, 1);
+        assert_eq!(sub.receiver.try_recv().unwrap()[0].offset, 0);
+        let batch = sub.receiver.try_recv().unwrap();
+        let offs: Vec<Offset> = batch.iter().map(|r| r.offset).collect();
+        assert_eq!(offs, vec![1, 2]);
     }
 
     #[test]
     fn live_delivery_respects_filter() {
         let mut fo = StreamFanout::new(8, 0);
         let mut sub = fo.subscribe(0, Some(StreamFilter::from_pairs([("kind", "pig")])), 16);
-        fo.publish(rec(0, &[("kind", "cow")]));
-        fo.publish(rec(1, &[("kind", "pig")]));
-        // only the matching record arrives
-        assert_eq!(sub.receiver.try_recv().unwrap().offset, 1);
+        // one batch: the cow is filtered out of it, only the pig arrives
+        fo.publish_batch(vec![rec(0, &[("kind", "cow")]), rec(1, &[("kind", "pig")])]);
+        let batch = sub.receiver.try_recv().unwrap();
+        let offs: Vec<Offset> = batch.iter().map(|r| r.offset).collect();
+        assert_eq!(offs, vec![1]);
+        // an all-filtered batch is not sent at all
+        fo.publish(rec(2, &[("kind", "cow")]));
         assert!(sub.receiver.try_recv().is_err());
     }
 
@@ -1197,7 +1236,7 @@ mod tests {
     fn full_channel_marks_lagging_not_blocked() {
         let mut fo = StreamFanout::new(64, 0);
         let sub = fo.subscribe(0, None, 1);
-        // channel capacity 1: first send fits, the rest overflow
+        // channel capacity 1 batch: the first fits, the rest overflow
         for i in 0..5 {
             fo.publish(rec(i, &[]));
         }
@@ -1277,10 +1316,11 @@ mod channel_tests {
         }
     }
 
-    async fn collect(rx: &mut mpsc::Receiver<Arc<StreamRecord>>, n: usize) -> Vec<Offset> {
+    async fn collect(rx: &mut mpsc::Receiver<Vec<Arc<StreamRecord>>>, n: usize) -> Vec<Offset> {
         let mut out = Vec::new();
-        for _ in 0..n {
-            out.push(rx.recv().await.expect("record").offset);
+        while out.len() < n {
+            let batch = rx.recv().await.expect("record batch");
+            out.extend(batch.iter().map(|r| r.offset));
         }
         out
     }
@@ -1316,7 +1356,7 @@ mod channel_tests {
         assert_eq!(collect(&mut rx, 5).await, vec![0, 1, 2, 3, 4]);
         // a new publish flows through live
         ch.publish(hdr(&[]), b"m5".to_vec()).await.unwrap();
-        assert_eq!(rx.recv().await.unwrap().offset, 5);
+        assert_eq!(rx.recv().await.unwrap()[0].offset, 5);
 
         driver.abort();
     }
@@ -1424,7 +1464,7 @@ mod channel_tests {
         let driver = tokio::spawn(sub.run(tx));
 
         // backfill: only offset 1 (pig) survives the filter
-        assert_eq!(rx.recv().await.unwrap().offset, 1);
+        assert_eq!(rx.recv().await.unwrap()[0].offset, 1);
         // live: cow dropped, pig delivered
         ch.publish(hdr(&[("kind", "cow")]), b"c".to_vec())
             .await
@@ -1432,7 +1472,7 @@ mod channel_tests {
         ch.publish(hdr(&[("kind", "pig")]), b"d".to_vec())
             .await
             .unwrap();
-        assert_eq!(rx.recv().await.unwrap().offset, 3);
+        assert_eq!(rx.recv().await.unwrap()[0].offset, 3);
 
         driver.abort();
     }

@@ -1357,9 +1357,10 @@ impl std::fmt::Display for WakeReason {
 // TODO(settings): lift to BrokerConfig once it moves to a builder (so adding a
 // field does not churn every exhaustive literal).
 const STREAM_RING_CAPACITY: usize = 4096;
-/// Per-subscriber live delivery buffer. When full, the subscriber is flagged
-/// lagging and re-reads the gap from its durable cursor.
-const STREAM_LIVE_CHANNEL_CAPACITY: usize = 1024;
+/// Per-subscriber live delivery buffer, counted in batches (the fan-out chain
+/// moves record batches, one per ingest drain batch). When full, the subscriber
+/// is flagged lagging and re-reads the gap from its durable cursor.
+const STREAM_LIVE_CHANNEL_CAPACITY: usize = 16;
 
 pub struct Broker<
     E: QueueEngine + crate::queue_engine::StreamStore + std::fmt::Debug + Send + Sync + 'static,
