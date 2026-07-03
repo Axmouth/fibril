@@ -155,9 +155,12 @@ async fn durable_crash_recovery_soak() {
         }
         drop(sub);
 
-        // The acks are durable: restart and confirm none of the consumed
-        // messages are redelivered (settled state survived).
-        broker.shutdown().await;
+        // The acks are durable once drained: settle() only enqueues, so use the
+        // graceful shutdown (which waits out pending settles) before asserting
+        // that no consumed message is redelivered. A plain shutdown can cancel
+        // the settle loop with acks still buffered, and redelivering those is
+        // correct at-least-once behavior, not what this assertion tests.
+        broker.shutdown_graceful().await;
         let broker = open_broker_at(&dir.root).await;
         let mut sub = broker
             .subscribe(
