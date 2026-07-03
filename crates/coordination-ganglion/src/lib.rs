@@ -3579,7 +3579,7 @@ mod tests {
             .await
             .expect("register node for placement");
         let live = provider.live_nodes(Duration::from_secs(30));
-        provider
+        let committed = provider
             .control_iteration(
                 &DeterministicPartitionPlacement,
                 &provider.registered_queues(),
@@ -3596,15 +3596,28 @@ mod tests {
             .expect("leader runs it");
 
         // Both stream partitions are owned by the only live broker, kept in the
-        // stream map (never the queue map).
-        let snapshot = provider.snapshot();
-        assert!(snapshot.assignments.is_empty(), "no queue assignments");
+        // stream map (never the queue map). Assert on the snapshot the write
+        // returned, then wait for the watch view to catch up before checking
+        // the watch-derived surfaces (the watch applies asynchronously).
+        assert!(committed.assignments.is_empty(), "no queue assignments");
         for partition in 0..2 {
-            let assigned = snapshot
+            let assigned = committed
                 .stream_assignment_for("events", Partition::new(partition))
                 .expect("stream assigned");
             assert_eq!(assigned.owner, "broker-a");
         }
+        let mut watch = provider.watch();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while watch
+                .borrow_and_update()
+                .stream_assignment_for("events", Partition::new(0))
+                .is_none()
+            {
+                watch.changed().await.expect("watch open");
+            }
+        })
+        .await
+        .expect("watch view caught up with the committed assignments");
 
         // The client topology carries the owner endpoint and authoritative count.
         let topology = provider.client_topology();
