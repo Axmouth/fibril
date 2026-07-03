@@ -1,51 +1,25 @@
 # Follow-ups and pending work
 
-## RESUME HERE (post-compaction 2026-06-30)
 
-DELETE once underway. Transient cursor; durable detail in the task tracker + memory
-([[release-process]], [[versioning-and-dst]]). Standing rules: commit per-brick to
-main, DO NOT PUSH (user pushes fibril + ganglion + keratin); terse non-conversational
-commits, no Co-Authored-By; comments self-contained (no convo refs, no semicolons,
-plain ASCII); no unwrap/expect outside tests; keep docs + surface inventory current;
-cross-repo via ../ganglion + ../keratin sibling local patch (authorized).
+## Release state (2026-07-03)
 
-DONE THIS SESSION (all committed UNPUSHED except the working-tree handoff edits):
-- #97 DST harness COMPLETE: 11 turmoil scenarios in crates/protocol/tests/simulation_tests.rs
-  (run: `cargo test -p fibril-protocol --features simulation --test simulation_tests`).
-  Cross-repo: ganglion raft transport made injectable over a RaftDialer (committed in
-  ../ganglion, UNPUSHED), + fixed a pre-existing ganglion flaky test, + CoordinationSnapshot
-  re-export.
-- Replication client read + connect timeouts (real fix the durable scenario surfaced),
-  now config-driven (replication.read_timeout_slack_ms / owner_connect_timeout_ms).
-- #115 chaos/soak suite: crates/broker/tests/soak.rs (FIBRIL_SOAK_* knobs).
-- #116 real multi-node run: it ALREADY existed - scripts/cluster-tryout.sh --failover-verify
-  and --chaos, both run green. DO NOT write a new cluster script.
-- #124 cluster-confidence gate MET (DST + soak + multi-node).
-- 0.2 RELEASE PROCESS (this last chunk): shared [workspace.package] version, all crates +
-  TS/Python clients bumped to 0.2.0; CHANGELOG.md; scripts/release.sh (per-repo template,
-  changelog-gate + bump + docs /latest->/0.2 snapshot + cargo-check + annotated tag, no push)
-  + scripts/release-all.sh overlord + .github/workflows/release.yaml (v* tag -> GHCR
-  :version/:minor/:latest + GitHub release); development/releasing.md;
-  roadmap now 0.2=current(gate1 met)/0.3=reconnect-polish+freeze.
-  A LOCAL annotated tag v0.2.0 EXISTS, UNPUSHED - pushing it triggers the release workflow.
-  NOTE: the v0.2.0 tag predates the docs-versioning rework below, so its tree still has the
-  old naive /0.2 mirror. If re-cutting matters, delete the local tag and re-run release.sh.
-- #133 DOCS VERSIONING DONE: replaced the naive cp -r snapshot with the starlight-versions
-  plugin (full-site, working-tree). Current docs moved from /latest/ to the SITE ROOT;
-  released versions frozen under /<minor> (e.g. /0.2/) with auto link-rewrite + a version
-  picker; redirects /latest/* -> /*. The marketing homepage (src/pages/index.astro) stays at
-  / and IS the docs landing (current root index.md dropped as redundant; /0.2 keeps its
-  overview); marketing CTAs now point at /quickstart etc. release.sh docs step rewritten to
-  register the minor in astro.config + run the site build (plugin generates the folder).
-  smoke-dist.mjs updated to root paths + a /0.2 snapshot assertion. `npm run verify` green.
+- v0.2.0 is tagged locally at the docs-versioning rework commit (re-cut after
+  the starlight-versions migration, the earlier naive-mirror note is
+  obsolete). Publishing is: push all three repos plus
+  `git push origin v0.2.0`, which triggers the release workflow.
+- Cross-repo: ganglion and keratin still need their own release.sh, CHANGELOG,
+  and version model so the overlord drives them.
 
-NEXT: (a) push (user) - branch + `git push origin v0.2.0` to actually cut 0.2 (see tag note
-above re re-cutting after the docs rework); (b) cross-repo: give ../ganglion and ../keratin
-their own scripts/release.sh + CHANGELOG + version model so the overlord drives them;
-(c) remaining 1.0 gates: API/wire freeze (#125), operational lifecycle (#126), security
-baseline (#127); 0.3 work = #102/#103/#105/#109.
+## Site and docs polish (2026-07-03)
 
----
+- Custom 404 page styled with the site instead of the default nginx one.
+- Landing page: show the current version instead of the static pre-alpha tag,
+  parametrized from the workspace version at build time if possible.
+- The current docs at the site root have no overview page since the marketing
+  page became the docs landing, so the version picker on the /0.2 overview
+  has no same-page target on latest. Add a root-docs overview at a slug such
+  as /overview (the root path itself is shadowed by the marketing page) or
+  give the picker a fallback, and revisit the sidebar entry.
 
 ## Test and expiry notes (2026-07-03)
 
@@ -83,6 +57,8 @@ baseline (#127); 0.3 work = #102/#103/#105/#109.
   opt-in tier (deliver from staged state before the enqueue fsync, ghosts
   possible on crash, producer confirms unaffected), design it together with
   the API freeze (#111) and mirror the existing stream speculative tier.
+  The roadmap's async replication fsync idea belongs to the same family and
+  pairs with the replica-durable re-bench.
 
 - benchmarks.md overhaul once the perf arc settles: replace the informal
   250k+ figures with the measured post-audit numbers (paced 500k/s at 1KB
