@@ -33,6 +33,15 @@ worth a fresh pass.
   - Next: per-record per-subscriber sink dispatch is the same batch-factor-1
     shape that was the queue delivery knee. Establish a stream bench baseline
     first, then audit publish, fan-out, cursor, and durable-tier paths.
+- [ ] Stream operational parity with queues
+  - Status: Pending
+  - Detail: not started. Initial probe: no eviction, idle, or activity
+    references touch streams in the broker, so idle stream channels likely
+    stay resident forever while queues evict.
+  - Next: sweep the queue lifecycle machinery (idle eviction, activity
+    leases, drain coverage, reconnect grace, recovery quarantine, cold-start
+    reconciliation, runtime settings, admin surface) and table which pieces
+    streams need, which they have, and which are not applicable by design.
 - [x] Runtime settings through Ganglion
   - Status: Addressed
   - Detail: [RUNTIME_SETTINGS_GANGLION_AUDIT.md](archive/replication-sharding-plan/RUNTIME_SETTINGS_GANGLION_AUDIT.md)
