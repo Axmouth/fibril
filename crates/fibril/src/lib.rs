@@ -55,9 +55,9 @@ use fibril_protocol::v1::{
 use fibril_util::StaticAuthHandler;
 use ganglion::{TcpRaftServer, WireFormat, WireFormatParseError, openraft::BasicNode};
 
-pub mod tls;
+pub use fibril_tls as tls;
 
-use tls::{TlsMaterialSource, TlsSetupError};
+use fibril_tls::{TlsMaterialSource, TlsSetupError};
 
 /// Map the startup config's runtime-seed section into the broker's
 /// `RuntimeSettings` (the initial cluster document before replicated overrides).
@@ -1101,12 +1101,45 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         })
     };
 
+    let server_tls = tls::build_server_tls(
+        &config.tls.mode().map_err(FibrilServerError::TlsConfig)?,
+        &config.server.data_dir,
+        &tls::san_hosts_from_advertise(&config.broker_advertise_addresses()),
+    )?;
+    match &server_tls {
+        Some(tls::ServerTls {
+            source:
+                TlsMaterialSource::Generated {
+                    dir,
+                    ca_fingerprint,
+                },
+            ..
+        }) => {
+            tracing::info!(
+                "TLS enabled with per-deployment generated material at {}. CA SHA-256 \
+                 fingerprint: {ca_fingerprint}. Clients trust {}/ca.pem or pin the \
+                 fingerprint",
+                dir.display(),
+                dir.display()
+            );
+        }
+        Some(_) => tracing::info!("TLS enabled with operator-supplied certificate"),
+        None => {}
+    }
+    let admin_tls_config = if config.tls.admin_tls() {
+        server_tls.as_ref().map(|tls| tls.server_config.clone())
+    } else {
+        None
+    };
+    let tls_acceptor = server_tls.map(|tls| tls.acceptor);
+
     let admin = AdminServer::new(
         metrics.clone(),
         stroma_metrics,
         AdminConfig {
             bind: config.admin.listener.bind.to_string(),
             auth: admin_auth_handler,
+            tls: admin_tls_config,
         },
         Some(StartupConfigSummary {
             data_dir: config.server.data_dir.display().to_string(),
@@ -1197,42 +1230,6 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         },
         Duration::from_secs(10),
     );
-
-    let server_tls = tls::build_server_tls(
-        &config.tls.mode().map_err(FibrilServerError::TlsConfig)?,
-        &config.server.data_dir,
-        &tls::san_hosts_from_advertise(&config.broker_advertise_addresses()),
-    )?;
-    match &server_tls {
-        Some(tls::ServerTls {
-            source:
-                TlsMaterialSource::Generated {
-                    dir,
-                    ca_fingerprint,
-                },
-            ..
-        }) => {
-            tracing::info!(
-                "TLS enabled with per-deployment generated material at {}. CA SHA-256 \
-                 fingerprint: {ca_fingerprint}. Clients trust {}/ca.pem or pin the \
-                 fingerprint",
-                dir.display(),
-                dir.display()
-            );
-        }
-        Some(_) => tracing::info!("TLS enabled with operator-supplied certificate"),
-        None => {}
-    }
-    if config.tls.admin_tls() {
-        // Admin HTTPS is decided but not wired yet: same material, admin
-        // listener, tracked with the dashboard setup work.
-        tracing::warn!(
-            "tls.enabled covers the admin dashboard by design, but admin HTTPS is not \
-             served yet in this build: the dashboard remains plain HTTP. Set \
-             tls.admin_enabled = false to silence this until it lands"
-        );
-    }
-    let tls_acceptor = server_tls.map(|tls| tls.acceptor);
 
     let broker_server_fut = async move {
         run_protocol_server(

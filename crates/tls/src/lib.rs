@@ -57,8 +57,11 @@ pub enum TlsSetupError {
 }
 
 /// The acceptor plus where its material came from, for startup reporting.
+/// `server_config` is shared so the admin HTTP server can serve HTTPS from
+/// the same material.
 pub struct ServerTls {
     pub acceptor: TlsAcceptor,
+    pub server_config: Arc<RustlsServerConfig>,
     pub source: TlsMaterialSource,
 }
 
@@ -86,8 +89,10 @@ pub fn build_server_tls(
         } => {
             let certs = load_certs(cert_path)?;
             let key = load_key(key_path)?;
+            let server_config = server_config_from(certs, key)?;
             Ok(Some(ServerTls {
-                acceptor: acceptor_from(certs, key)?,
+                acceptor: TlsAcceptor::from(server_config.clone()),
+                server_config,
                 source: TlsMaterialSource::Provided,
             }))
         }
@@ -101,8 +106,10 @@ pub fn build_server_tls(
             certs.extend(load_certs(&files.ca_pem)?);
             let key = load_key(&files.server_key)?;
             let ca_fingerprint = ca_fingerprint(&files.ca_pem)?;
+            let server_config = server_config_from(certs, key)?;
             Ok(Some(ServerTls {
-                acceptor: acceptor_from(certs, key)?,
+                acceptor: TlsAcceptor::from(server_config.clone()),
+                server_config,
                 source: TlsMaterialSource::Generated {
                     dir,
                     ca_fingerprint,
@@ -266,16 +273,16 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsSetupError> {
         })
 }
 
-fn acceptor_from(
+fn server_config_from(
     certs: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
-) -> Result<TlsAcceptor, TlsSetupError> {
+) -> Result<Arc<RustlsServerConfig>, TlsSetupError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = RustlsServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
-    Ok(TlsAcceptor::from(Arc::new(config)))
+    Ok(Arc::new(config))
 }
 
 #[cfg(test)]

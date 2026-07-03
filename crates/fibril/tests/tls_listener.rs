@@ -32,25 +32,42 @@ fn free_loopback_addr() -> std::net::SocketAddr {
     listener.local_addr().expect("local addr")
 }
 
-async fn boot_server(
-    tag: &str,
-    tls_auto: bool,
-) -> (std::net::SocketAddr, PathBuf, tokio::task::JoinHandle<()>) {
+struct BootedServer {
+    broker_addr: std::net::SocketAddr,
+    admin_addr: std::net::SocketAddr,
+    data_dir: PathBuf,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+async fn boot_server(tag: &str, tls_auto: bool) -> BootedServer {
+    boot_server_with(tag, |config| {
+        config.tls.enabled = tls_auto;
+        config.tls.auto_self_signed = tls_auto;
+    })
+    .await
+}
+
+async fn boot_server_with(tag: &str, configure: impl FnOnce(&mut ServerConfig)) -> BootedServer {
     let root = temp_root(tag);
     let mut config = ServerConfig::default();
     config.server.data_dir = root.join("data");
     config.broker.listener.bind = free_loopback_addr();
     config.admin.listener.bind = free_loopback_addr();
-    config.tls.enabled = tls_auto;
-    config.tls.auto_self_signed = tls_auto;
-    let addr = config.broker.listener.bind;
+    configure(&mut config);
+    let broker_addr = config.broker.listener.bind;
+    let admin_addr = config.admin.listener.bind;
     let data_dir = config.server.data_dir.clone();
     let handle = tokio::spawn(async move {
         let _ = run_server_from_config(config).await;
     });
     for _ in 0..400 {
-        if TcpStream::connect(addr).await.is_ok() {
-            return (addr, data_dir, handle);
+        if TcpStream::connect(broker_addr).await.is_ok() {
+            return BootedServer {
+                broker_addr,
+                admin_addr,
+                data_dir,
+                handle,
+            };
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -120,7 +137,9 @@ async fn write_all<S: AsyncWrite + Unpin>(stream: &mut S, bytes: &[u8]) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tls_listener_serves_hello_over_generated_material() {
-    let (addr, data_dir, server) = boot_server("hello", true).await;
+    let server = boot_server("hello", true).await;
+    let (addr, data_dir) = (server.broker_addr, server.data_dir.clone());
+    let server = server.handle;
     let ca_pem = data_dir.join("tls").join("ca.pem");
     assert!(ca_pem.exists(), "generated CA missing at {ca_pem:?}");
 
@@ -141,7 +160,8 @@ async fn tls_listener_serves_hello_over_generated_material() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plaintext_client_on_tls_listener_gets_a_definitive_error() {
-    let (addr, _data_dir, server) = boot_server("plain-on-tls", true).await;
+    let booted = boot_server("plain-on-tls", true).await;
+    let (addr, server) = (booted.broker_addr, booted.handle);
 
     let mut stream = TcpStream::connect(addr).await.expect("tcp connect");
     write_all(&mut stream, &hello_frame(9)).await;
@@ -166,7 +186,8 @@ async fn plaintext_client_on_tls_listener_gets_a_definitive_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tls_client_on_plaintext_listener_fails_fast_not_hangs() {
-    let (addr, _data_dir, server) = boot_server("tls-on-plain", false).await;
+    let booted = boot_server("tls-on-plain", false).await;
+    let (addr, server) = (booted.broker_addr, booted.handle);
 
     let connector = tls_connector(None);
     let tcp = TcpStream::connect(addr).await.expect("tcp connect");
@@ -179,4 +200,60 @@ async fn tls_client_on_plaintext_listener_fails_fast_not_hangs() {
     }
 
     server.abort();
+}
+
+/// Minimal HTTPS GET over an established TLS stream, returning the status line.
+async fn https_get_status_line<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+) -> String {
+    write_all(
+        stream,
+        b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let mut buf = [0u8; 512];
+    let n = stream.read(&mut buf).await.expect("http response bytes");
+    String::from_utf8_lossy(&buf[..n])
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_dashboard_serves_https_from_the_same_material() {
+    let booted = boot_server("admin-https", true).await;
+    let ca_pem = booted.data_dir.join("tls").join("ca.pem");
+
+    let connector = tls_connector(Some(&ca_pem));
+    let tcp = TcpStream::connect(booted.admin_addr)
+        .await
+        .expect("tcp connect");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let mut stream = connector
+        .connect(name, tcp)
+        .await
+        .expect("admin tls handshake");
+    let status = https_get_status_line(&mut stream).await;
+    assert!(status.starts_with("HTTP/1.1"), "{status}");
+
+    booted.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_enabled_false_keeps_the_dashboard_on_plain_http() {
+    let booted = boot_server_with("admin-optout", |config| {
+        config.tls.enabled = true;
+        config.tls.auto_self_signed = true;
+        config.tls.admin_enabled = Some(false);
+    })
+    .await;
+
+    let mut stream = TcpStream::connect(booted.admin_addr)
+        .await
+        .expect("tcp connect");
+    let status = https_get_status_line(&mut stream).await;
+    assert!(status.starts_with("HTTP/1.1"), "{status}");
+
+    booted.handle.abort();
 }

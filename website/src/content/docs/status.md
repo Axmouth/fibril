@@ -28,7 +28,7 @@ For a more detailed checklist of what is wired and what conditions apply, see
 | Stream replication | Experimental | Durable-tier streams replicate record and cursor logs to followers with replica-durable confirms and caught-up failover, placed and owned through embedded coordination. Express tiers stay owner-only |
 | Live repartitioning | Experimental | Grow or shrink a queue's partition count in coordinated mode, from the admin topology page |
 | Recovery quarantine | Available | A damaged queue log is detected on recovery and isolated per the `recovery.on_mismatch` policy, with operator repair |
-| TLS in transit | Partial | The broker listener serves TLS from operator PEMs or generated per-deployment material, TLS/plaintext mismatches are named in both directions, and all three clients connect with CA-file, fingerprint-pin, or OS-roots trust. Admin dashboard HTTPS and the dashboard setup flow are in progress |
+| TLS in transit | Partial | The broker listener serves TLS from operator PEMs or generated per-deployment material, TLS/plaintext mismatches are named in both directions, and all three clients connect with CA-file, fingerprint-pin, or OS-roots trust. The admin dashboard serves HTTPS from the same material and `fibrilctl cert` generates material ahead of first boot. The dashboard-driven setup flow is in progress |
 | Exclusive consumer groups | Partial | Rust, TypeScript, and Python client opt-in for one active consumer per partition, with sticky assignment and cross-broker coordinator wiring |
 | Transactions | Out of scope | Not planned. Transactional publish/consume workflows are intentionally excluded |
 

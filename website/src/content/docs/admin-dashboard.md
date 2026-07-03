@@ -13,6 +13,11 @@ The dashboard is not meant to be a high-frequency monitoring feed. Use it to
 answer specific operational questions, then rely on metrics and logs for
 continuous monitoring.
 
+When broker TLS is enabled (`tls.enabled = true`) the dashboard serves HTTPS
+from the same certificate material. Set `tls.admin_enabled = false` to keep it
+on plain HTTP behind a reverse proxy that terminates TLS. See
+[configuration](/configuration/) for the `tls` section.
+
 ## Overview And Diagnostics
 
 The overview page is intentionally curated. It shows broker throughput, process

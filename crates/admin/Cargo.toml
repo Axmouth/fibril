@@ -12,11 +12,13 @@ fibril-util = { path = "../util" }
 askama = { version = "0.15" }
 async-trait = "0.1"
 axum = "0.8"
+axum-server = { version = "0.7", default-features = false, features = ["tls-rustls-no-provider"] }
 base64 = "0.22"
 dashmap = "6.0"
 fastrand = "2"
 futures = "0.3"
 http = "1.4"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 mime_guess = "2.0"
 opentelemetry = "0.31"
 opentelemetry_sdk = "0.31"

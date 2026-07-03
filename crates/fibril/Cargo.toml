@@ -14,6 +14,7 @@ fibril-config = { path = "../config" }
 fibril-protocol = { path = "../protocol" }
 fibril-storage = { path = "../storage" }
 fibril-metrics = { path = "../metrics" }
+fibril-tls = { path = "../tls" }
 fibril-util = { path = "../util" }
 fibril-coordination-ganglion = { path = "../coordination-ganglion" }
 ganglion = { git = "https://github.com/Axmouth/ganglion.git", branch = "main" }
@@ -22,18 +23,18 @@ async-trait = "0.1"
 fastrand = "2"
 futures = "0.3"
 mimalloc = { version = "0.1" }
-rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
-rustls-pemfile = "2"
 serde_json = "1.0"
-sha2 = "0.10"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 tracing = { version = "0.1", features = ["release_max_level_info"] }
 tracing-error = "0.2"
 tracing-opentelemetry = "0.32"
 opentelemetry = "0.31"
 opentelemetry_sdk = "0.31"
+
+[dev-dependencies]
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 
 [package.metadata.ai]
 training = "prohibited"

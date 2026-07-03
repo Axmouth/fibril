@@ -95,14 +95,20 @@ same change, settings discipline for every knob):
    fallback below that). Tests mint throwaway certs with the openssl
    binary at run time, so no certificate material is committed. Wire
    vectors unaffected (TLS sits below framing).
-5. fibrilctl cert generate + the admin board setup screen and loud-guide
-   errors.
-6. Admin server HTTPS: decided in brick 1. The admin server serves HTTPS
-   from the same tls section material when enabled, with
-   tls.admin_enabled = false as the reverse-proxy opt-out. The dashboard
-   carries basic-auth credentials, so it is covered by default rather than
-   left plaintext next to an encrypted data plane. Implementation lands in
-   this brick.
+5. PARTLY DONE (2026-07-04): fibrilctl cert generate (creates or reuses
+   the per-deployment material, prints the fingerprint, the config
+   snippet, and client trust hints, extra SANs via --san) and fibrilctl
+   cert fingerprint landed. The TLS material module moved to its own
+   crates/tls (fibril-tls) so the CLI does not pull the server crate;
+   fibril re-exports it as fibril::tls. REMAINING: the first-boot setup
+   mode + dashboard-driven few-clicks setup + TLS status/guide display on
+   the board (the design is in the setup UX bullet above).
+6. DONE (2026-07-04). Admin server HTTPS: the dashboard serves HTTPS via
+   axum-server (tls-rustls-no-provider) from the shared ServerTls
+   rustls config, tls.admin_enabled = false keeps it plain HTTP for
+   reverse-proxy setups. The dashboard carries basic-auth credentials, so
+   it is covered by default rather than left plaintext next to an
+   encrypted data plane. Integration tested in both modes.
 7. Later bricks, not this arc: inter-broker replication and ganglion raft
    TLS, mTLS client auth (#114), cert rotation.
 

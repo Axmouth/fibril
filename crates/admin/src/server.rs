@@ -90,6 +90,9 @@ pub struct AdminConfig {
     // TODO: better type, parse earlier
     pub bind: String,
     pub auth: Option<StaticAuthHandler>,
+    /// When set, the dashboard serves HTTPS with this rustls config (the
+    /// same material as the broker listener).
+    pub tls: Option<std::sync::Arc<tokio_rustls::rustls::ServerConfig>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -242,6 +245,18 @@ impl AdminServer {
         let state = Arc::new(self);
 
         let app = Self::router(state.clone());
+
+        if let Some(tls) = state.config.tls.clone() {
+            let addr = resolve_bind_addr(&state.config.bind)?;
+            let rustls_config = axum_server::tls_rustls::RustlsConfig::from_config(tls);
+            print_admin_banner(&state.config.bind, state.config.auth.is_some());
+            tracing::info!("listening on {} (HTTPS)", state.config.bind);
+            axum_server::bind_rustls(addr, rustls_config)
+                .serve(app.into_make_service())
+                .await
+                .map_err(AdminServerError::Serve)?;
+            return Ok(());
+        }
 
         let listener = TcpListener::bind(&state.config.bind)
             .await
@@ -628,6 +643,25 @@ struct NotFound {
     auth_enabled: bool,
 }
 
+/// Resolve the configured bind string to a socket address for the HTTPS
+/// server (the plain path binds the string directly).
+fn resolve_bind_addr(bind: &str) -> Result<std::net::SocketAddr, AdminServerError> {
+    use std::net::ToSocketAddrs;
+    bind.to_socket_addrs()
+        .map_err(|source| AdminServerError::Bind {
+            bind: bind.to_string(),
+            source,
+        })?
+        .next()
+        .ok_or_else(|| AdminServerError::Bind {
+            bind: bind.to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                "bind resolved to no addresses",
+            ),
+        })
+}
+
 pub fn print_admin_banner(bind: &str, auth: bool) {
     let auth = if auth { "enabled " } else { "disabled" };
 
@@ -718,6 +752,7 @@ mod tests {
             AdminConfig {
                 bind: "127.0.0.1:0".into(),
                 auth,
+                tls: None,
             },
             Some(StartupConfigSummary {
                 data_dir: root.display().to_string(),
@@ -2253,6 +2288,7 @@ mod tests {
             AdminConfig {
                 bind: "127.0.0.1:0".into(),
                 auth: None,
+                tls: None,
             },
             None,
             Arc::new(engine),
@@ -2378,6 +2414,7 @@ mod tests {
             AdminConfig {
                 bind: "127.0.0.1:0".into(),
                 auth: None,
+                tls: None,
             },
             None,
             Arc::new(engine.clone()),

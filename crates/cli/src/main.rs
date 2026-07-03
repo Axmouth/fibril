@@ -49,6 +49,40 @@ enum Command {
         #[command(subcommand)]
         command: AdminCommand,
     },
+    /// TLS certificate operations.
+    Cert {
+        #[command(subcommand)]
+        command: CertCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CertCommand {
+    /// Generate per-deployment TLS material (CA + server certificate) under
+    /// <data_dir>/tls, the same material tls.auto_self_signed generates on
+    /// first boot. Existing complete material is kept as is.
+    Generate(CertGenerateArgs),
+    /// Print the SHA-256 fingerprint of the first certificate in a PEM file.
+    Fingerprint(CertFingerprintArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct CertGenerateArgs {
+    /// Data directory to generate under (material goes to <data_dir>/tls).
+    /// Defaults to the configured server.data_dir.
+    #[arg(long)]
+    data_dir: Option<std::path::PathBuf>,
+
+    /// Extra subject alternative name (hostname or IP) for the server
+    /// certificate, on top of the localhost set. Repeatable.
+    #[arg(long = "san")]
+    sans: Vec<String>,
+}
+
+#[derive(Debug, clap::Args)]
+struct CertFingerprintArgs {
+    /// PEM file holding the certificate (e.g. <data_dir>/tls/ca.pem).
+    path: std::path::PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -325,6 +359,40 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
             client.shutdown().await;
         }
+        Command::Cert { command } => match command {
+            CertCommand::Generate(args) => {
+                let data_dir = args.data_dir.unwrap_or(config.server.data_dir);
+                let tls = fibril_tls::build_server_tls(
+                    &fibril_config::TlsMode::AutoSelfSigned,
+                    &data_dir,
+                    &args.sans,
+                )?
+                .context("auto_self_signed mode always yields material")?;
+                let fibril_tls::TlsMaterialSource::Generated {
+                    dir,
+                    ca_fingerprint,
+                } = tls.source
+                else {
+                    anyhow::bail!("generation unexpectedly reported operator-supplied material");
+                };
+                println!("TLS material ready under {}", dir.display());
+                println!("  ca.pem / ca.key / server.pem / server.key (keys are 0600)");
+                println!("CA SHA-256 fingerprint: {ca_fingerprint}");
+                println!();
+                println!("Broker config to serve it:");
+                println!("  [tls]");
+                println!("  enabled = true");
+                println!("  auto_self_signed = true");
+                println!();
+                println!(
+                    "Clients trust {}/ca.pem or pin the fingerprint above.",
+                    dir.display()
+                );
+            }
+            CertCommand::Fingerprint(args) => {
+                println!("{}", fibril_tls::ca_fingerprint(&args.path)?);
+            }
+        },
         Command::Admin { command } => {
             let admin_addr = cli
                 .admin
