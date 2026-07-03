@@ -7,6 +7,24 @@ import FeatureMatrix from "../components/FeatureMatrix.astro";
 import QueueAnimation from "../components/QueueAnimation.astro";
 
 const github = "https://github.com/Axmouth/fibril";
+
+// The released version, read from the workspace manifest at build time so the
+// badge never drifts from what release.sh cut. Builds run from the website
+// directory, so the parent path serves local and CI builds and the local copy
+// is what the site Dockerfile stages in.
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
+const manifestCandidates = [
+  resolve(process.cwd(), "../Cargo.toml"),
+  resolve(process.cwd(), "Cargo.toml"),
+];
+const manifestPath = manifestCandidates.find((path) => existsSync(path));
+const versionMatch = manifestPath
+  ? readFileSync(manifestPath, "utf-8")
+      .split("[workspace.package]")[1]
+      ?.match(/version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"/)
+  : null;
+const version = versionMatch ? `v${versionMatch[1]}` : "0.x";
 ---
 
 <BaseLayout
@@ -24,7 +42,7 @@ const github = "https://github.com/Axmouth/fibril";
         <a href="/concepts/core-model/">Concepts</a>
         <a href="#benchmarks">Benchmarks</a>
         <a href={github}>GitHub</a>
-        <span class="release-tag">pre-alpha</span>
+        <span class="release-tag">{version}</span>
         <button class="theme-toggle" type="button" data-theme-toggle aria-label="Use light theme"></button>
       </div>
     </nav>
@@ -89,7 +107,7 @@ const github = "https://github.com/Axmouth/fibril";
 
   <footer class="site-footer">
     <div class="shell footer-inner">
-      <span>Fibril is pre-alpha infrastructure.</span>
+      <span>Fibril is early-stage ({version}) infrastructure.</span>
       <div><a href="/quickstart/">Docs</a><a href={github}>Source</a></div>
     </div>
   </footer>

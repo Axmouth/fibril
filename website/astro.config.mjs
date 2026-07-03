@@ -34,6 +34,7 @@ export default defineConfig({
         {
           label: "Start Here",
           items: [
+            { label: "Overview", slug: "overview" },
             { label: "Quickstart", slug: "quickstart" },
             { label: "Client usage", slug: "clients" },
             { label: "Configuration", slug: "configuration" },

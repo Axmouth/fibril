@@ -10,7 +10,18 @@ const checks = [
       "<title>Fibril | Durable messaging without broker ceremony</title>",
       "Useful messaging without broker ceremony.",
       "queue lifecycle",
+      // The release badge renders a real version from the workspace manifest,
+      // never the 0.x fallback.
+      'release-tag">v',
     ],
+  },
+  {
+    path: "overview/index.html",
+    includes: ["<title>Fibril documentation | Fibril</title>", "/quickstart/"],
+  },
+  {
+    path: "404.html",
+    includes: ["<title>Page not found | Fibril</title>", "Useful places to land"],
   },
   {
     path: "status/index.html",

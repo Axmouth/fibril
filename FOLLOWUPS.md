@@ -31,16 +31,16 @@ events and policies).
 - Cross-repo: ganglion and keratin still need their own release.sh, CHANGELOG,
   and version model so the overlord drives them.
 
-## Site and docs polish (2026-07-03)
+## Site and docs polish (2026-07-03, all landed)
 
-- Custom 404 page styled with the site instead of the default nginx one.
-- Landing page: show the current version instead of the static pre-alpha tag,
-  parametrized from the workspace version at build time if possible.
-- The current docs at the site root have no overview page since the marketing
-  page became the docs landing, so the version picker on the /0.2 overview
-  has no same-page target on latest. Add a root-docs overview at a slug such
-  as /overview (the root path itself is shadowed by the marketing page) or
-  give the picker a fallback, and revisit the sidebar entry.
+- Custom 404: a styled docs 404 page plus an nginx error_page directive in
+  the site container (the default nginx page came from the missing
+  directive, not a missing file).
+- Landing version badge and footer read the workspace manifest version at
+  build time (the Dockerfile stages Cargo.toml into the site build).
+- Root docs overview lives at /overview with a Start Here sidebar entry, so
+  latest has a docs landing next to the marketing page. The dist smoke test
+  covers all three.
 
 ## Test and expiry notes (2026-07-03)
 

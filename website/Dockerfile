@@ -5,6 +5,7 @@ ENV ASTRO_TELEMETRY_DISABLED=1
 COPY website/package.json website/package-lock.json ./
 RUN npm ci
 COPY website ./
+COPY Cargo.toml ./Cargo.toml
 RUN npm run build
 
 FROM nginx:1.28-alpine
