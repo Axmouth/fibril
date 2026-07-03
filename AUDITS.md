@@ -26,17 +26,17 @@ worth a fresh pass.
     for cluster benchmarks. Fibril A, B, and C1 plus keratin K1
     (self-clocking group commit) are landed and measured, C2 was assessed
     low yield.
-- [ ] Plexus stream hot-path performance
-  - Status: Audited
-  - Detail: S section of [PERF_AUDIT_HOT_PATHS.md](PERF_AUDIT_HOT_PATHS.md),
-    with the baseline matrix and knee-attribution probes. Headline: fan-out
-    capacity is subscriber-count sensitive (8 subscribers sustain 1.6M/s, 16
-    collapse to ~750k/s goodput on the same aggregate) and the collapse is
-    structural (no CPU saturated), the batch-factor-1 shape again.
-  - Next: SF1 (batch the fan-out delivery chain end to end, the C1 analog)
-    on a branch with boundary-point before/after, then SF2-SF4 copy and
-    spawn removals. Tiers are equal at baseline, so storage is not on the
-    stream critical path.
+- [x] Plexus stream hot-path performance
+  - Status: Addressed (no server-side knee found)
+  - Detail: S section of [PERF_AUDIT_HOT_PATHS.md](PERF_AUDIT_HOT_PATHS.md).
+    Headline: the apparent r16/r32 collapse was the single bench client
+    process. Split across processes the server fans out 3.2M records/s (1KB,
+    32 subscribers) at p50 1ms on ~7 cores, tiers indistinguishable. SF1
+    (chain batching) was implemented, measured neutral-to-slightly-negative,
+    and parked on branch perf-stream-batching. SF2-SF4 stay as deprioritized
+    efficiency notes.
+  - Next: the correctness spin-offs live elsewhere: lagged gap-skip (P3) and
+    the concurrent-declare race in the task tracker.
 - [ ] Stream operational parity with queues
   - Status: Audited
   - Detail: [STREAM_PARITY_AUDIT.md](STREAM_PARITY_AUDIT.md). Five gaps

@@ -250,59 +250,58 @@ count.
 | r8 at 200k/s | 1.6M/s | 1.6M/s | 1ms |
 | r4 at 400k/s | 1.6M/s offered | 1.42M/s (publish-side cap ~356k/s) | 3ms |
 
-Three conclusions. First, the ceiling is not an aggregate-records limit: 8
-subscribers sustain 1.6M/s cleanly while 16 subscribers collapse on the same
-aggregate. Second, past the knee this is congestion collapse, not a plateau:
-16 subscribers deliver 960k/s cleanly at 60k/s offered but only 745k/s at
-100k/s offered, and collapse goodput sits at ~750k/s regardless of how far
-past the knee the load goes (r32 offered 3.1M/s also lands there). Third, the
-collapse is not compute-bound: during a collapsed r16 run the server uses
-~3.1 cores with no single thread above ~22% and the bench client ~12 cores
-with no thread above ~40% (32-core box). The limit is per-record wakeup and
-queueing structure, the batch-factor-1 shape the queue path had before its
-delivery hop was batched, amplified here because every per-record cost is
-paid once per subscriber. The queue path degrades gracefully past its knee
-because backlog self-batches at every hop. The stream path has no batched
-hop, so backlog only deepens queues and adds wakeups.
+The collapse initially read as a server-side batch-factor-1 knee (16
+subscribers collapse on an aggregate that 8 sustain, goodput degrades past
+the knee, no CPU saturated on either side). That attribution was WRONG, and
+the correction is the section's main lesson.
 
-Caveat: the collapsed runs also show high bench-client CPU per record, so
-client-side attribution is not fully excluded. The before/after for SF1 must
-re-check the healthy-vs-collapsed boundary rather than trust absolute rates.
+### Attribution correction (split-client runs)
+
+The mixed-mode bench runs all readers in ONE client process. A subscribe-only
+bench mode was added so readers can run in separate OS processes next to a
+publish-only process. Same server, same offered load:
+
+| Run | One client process | Readers split across processes |
+| --- | --- | --- |
+| 16 readers at 100k/s | 745k/s, p50 521ms | 1.60M/s, p50 1ms (2 processes) |
+| 32 readers at 100k/s | 760k/s, p50 1001ms | 3.20M/s, p50 1ms (4 processes) |
+
+The knee was the bench client process, not the server. The server fans out
+3.2M records/s (1KB, 32 subscribers) at p50 1ms using ~7 cores, roughly 2us
+of server CPU per delivered record, with no sign of strain. The true server
+ceiling was not reached before client-side limits. Single-process collapse
+goodput (~750k/s) is a property of the client runtime under many
+subscriptions, worth remembering when reading any mixed-mode fan-out number.
 
 ### Findings
 
-- SF1 (the knee): batch the fan-out delivery chain end to end. Today every
-  hop moves one record: the drain sends one `FanoutCmd::Publish` per record,
-  the fan-out actor does one `try_send` per record per subscriber, `sub.run`
-  forwards one record per send into the sink channel, and the delivery task
-  encodes and sends one frame per `recv`. Change the chain to carry
-  `Vec<Arc<StreamRecord>>` batches: a `PublishBatch` actor command per drain
-  batch, one `try_send` of the matching slice per subscriber, `recv_many` in
-  the forwarding and delivery tasks, and one settle per delivered batch
-  (the cursor is a high-water mark, so a batch settles with its max offset).
-  Mirrors the C1 queue fix that moved the queue knee from 350-400k/s to
-  500-600k/s. Expected to raise fan-out capacity at high subscriber counts
-  and flatten the congestion collapse into the queue path's graceful shape.
-  Status: OPEN.
+- SF1: batch the fan-out delivery chain end to end (the C1 analog: a
+  `PublishBatch` actor command per drain batch, one `try_send` of the
+  filtered batch per subscriber, batched backfill and forwarding, one
+  high-water settle per batch). Implemented on branch `perf-stream-batching`
+  and measured: no throughput or latency change at any boundary point, and
+  slightly higher server CPU on the 3.2M/s split run (147 vs 132 CPU
+  seconds), because at these publish rates the ingest coalescer rarely forms
+  multi-record batches, so the chain carried batches of one and paid the Vec
+  per hop. The server was never the constraint. Branch parked unmerged; the
+  subscribe-only bench mode was cherry-picked to main. Revisit only if a
+  real workload shows the fan-out actor or delivery tasks saturating.
+  Status: DROPPED (measured no effect).
 - SF2: per-subscriber Deliver construction copies. The delivery task builds
   each frame with `record.headers.clone()` (HashMap) plus
   `record.payload.to_vec()` (full byte copy) before `encode_deliver` copies
   the bytes again into the frame buffer, so every record byte is copied
   twice per subscriber and every header map is cloned per subscriber. An
   encode path that writes straight from `&[u8]` and borrowed headers removes
-  one copy and the clone. Status: OPEN.
+  one copy and the clone. Pure CPU-efficiency work now (~2us per delivered
+  record total), not a knee. Status: OPEN, deprioritized.
 - SF3: ingest-side per-record clone. The ingest task keeps `items` for the
   drain while handing `append_records` to keratin, paying
   `req.headers.clone()` plus `req.payload.clone()` (full byte copy) per
-  record. The append only serializes into its own buffers, so a borrowed or
-  shared-buffer append signature removes the copy. Per record once, not per
-  subscriber, so lower yield than SF2. Status: OPEN.
+  record. Per record once, not per subscriber. Status: OPEN, deprioritized.
 - SF4: confirmed stream publish spawns a task per publish
-  (`handle_stream_publish` spawns to await the confirm plus replication
-  gate). At 100k/s confirmed that is 100k spawns/s. The queue path routes
-  confirms through a per-connection pump instead. Only bites with
-  `require_confirm`, and the baseline shows confirm p50 3ms regardless, so
-  this is a cost sink not a latency knee. Status: OPEN, low priority.
+  (`handle_stream_publish`). Confirm p50 is 3ms regardless, a cost sink not
+  a knee. Status: OPEN, low priority.
 - SF5: lagged-subscriber drops are a correctness hole, not just a perf note.
   `Subscriber.lagged` is set when a full live channel drops a record, on the
   stated assumption that a durable consumer re-reads the gap from its cursor
@@ -310,18 +309,13 @@ re-check the healthy-vs-collapsed boundary rather than trust absolute rates.
   every later record it does deliver, advancing the durable cursor past the
   dropped gap. A lagging connected subscriber silently loses records on
   every tier. Needs a design fix (lagged subscriber re-enters catch-up mode
-  from its last contiguous offset instead of staying live), tracked as its
-  own task, not a bench experiment. Found by this audit but owned by the
+  from its last contiguous offset instead of staying live). Owned by the
   parity/correctness track. Status: OPEN (task filed).
-
-### Stream execution order
-
-1. SF1 on a branch with before/after at the boundary points (r8 at 200k,
-   r16 at 60k/100k, r32 at 20k plus one far-past-knee point per tier).
-2. SF2 folded into the same branch if the encode seam makes it natural,
-   otherwise separate.
-3. SF3 and SF4 after, each with a targeted run.
-4. SF5 is design work, sequenced with the parity audit follow-ups.
+- SF6 (found by the split-run harness): concurrent identical stream declares
+  race to a 500 `declare plexus failed` instead of converging idempotently.
+  Three of four processes declaring the same stream config at the same
+  moment failed. Queue-side declare should be checked for the same race.
+  Correctness/robustness, not perf. Status: OPEN (task filed).
 
 ## Windows performance notes (clues, not yet measured)
 

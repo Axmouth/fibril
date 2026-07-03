@@ -1,11 +1,14 @@
 # Follow-ups and pending work
 
 
-## Stream audits (2026-07-03, both recorded)
+## Stream audits (2026-07-03, both done)
 
-Findings live in the S section of PERF_AUDIT_HOT_PATHS.md (perf, SF1-SF5)
-and STREAM_PARITY_AUDIT.md (parity, P1-P5), tasks #142-#146 filed. Active
-work: SF1 delivery-chain batching on a branch, P3 lag gap-skip design.
+Findings live in the S section of PERF_AUDIT_HOT_PATHS.md (perf, SF1-SF6)
+and STREAM_PARITY_AUDIT.md (parity, P1-P5). Perf outcome: no server-side
+knee (3.2M records/s fan-out at p50 1ms once the bench client was split
+across processes), SF1 chain batching measured neutral and parked on branch
+perf-stream-batching. Open work is the correctness/parity track: P3 lag
+gap-skip, the concurrent-declare 500 race, P1 eviction, P2 metrics, P4/P5.
 
 ## Release state (2026-07-03)
 
