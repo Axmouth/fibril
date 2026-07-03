@@ -26,6 +26,13 @@ worth a fresh pass.
     for cluster benchmarks. Fibril A, B, and C1 plus keratin K1
     (self-clocking group commit) are landed and measured, C2 was assessed
     low yield.
+- [ ] Plexus stream hot-path performance
+  - Status: Pending
+  - Detail: not started, hypotheses pre-registered in the task tracker and
+    PERF_AUDIT_HOT_PATHS.md carries the method
+  - Next: per-record per-subscriber sink dispatch is the same batch-factor-1
+    shape that was the queue delivery knee. Establish a stream bench baseline
+    first, then audit publish, fan-out, cursor, and durable-tier paths.
 - [x] Runtime settings through Ganglion
   - Status: Addressed
   - Detail: [RUNTIME_SETTINGS_GANGLION_AUDIT.md](archive/replication-sharding-plan/RUNTIME_SETTINGS_GANGLION_AUDIT.md)
