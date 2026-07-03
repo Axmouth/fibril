@@ -58,7 +58,10 @@
   possible on crash, producer confirms unaffected), design it together with
   the API freeze (#111) and mirror the existing stream speculative tier.
   The roadmap's async replication fsync idea belongs to the same family and
-  pairs with the replica-durable re-bench.
+  pairs with the replica-durable re-bench. Re-bench done 2026-07-03: 100k/s
+  held at RF 2 with deliver p50 8ms, the June 45k/s-at-204ms verdict is
+  obsolete. Remaining: a confirmed-publish cluster run and the rare ~175ms
+  follower-apply stalls behind the p99 tail.
 
 - benchmarks.md overhaul once the perf arc settles: replace the informal
   250k+ figures with the measured post-audit numbers (paced 500k/s at 1KB
