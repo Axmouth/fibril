@@ -1,5 +1,57 @@
 # Follow-ups and pending work
 
+## RESUME HERE: TLS in transit (gate 4, #113) - 2026-07-04
+
+Transient cursor for the next arc. Delete once implementation is underway.
+State at handover: v0.2.0 shipped (tag fce3ccb, images + GitHub release
+published, site deployed), all three repos pushed and CI green, stream
+audits and their follow-ups closed, changelog policy consolidated. Fibril
+3ab1a52+, keratin 401484b, ganglion 3fa57f4 at cutover.
+
+Decided cert model (user-approved 2026-07-04):
+- Never ship certs. Shipped default certs are the default-password
+  vulnerability class.
+- Primary mode: operator-supplied PEMs (tls.cert_path, tls.key_path,
+  optional client CA path reserved for mTLS under #114 later).
+- Just-works mode: opt-in per-deployment generation via rcgen, the
+  Elasticsearch 8 pattern - generate a CA + server cert into the data dir on
+  first boot when enabled, print the CA fingerprint for clients to pin.
+  Clients gain ca_path and fingerprint-pin options. Docs honesty: a
+  self-signed cert the client does not verify defeats passive snooping only.
+- Setup UX is a hard requirement, both paths easy: at most one "choose auto
+  or supply" decision surface (admin board setup screen), a fibrilctl cert
+  command, and tryout/demo scripts staying one command via the auto path.
+- Misconfiguration is loud and guided on BOTH sides: server logs a mini
+  guide (admin board link, fibrilctl command, the concrete steps) when TLS
+  is attempted but unconfigured, and the client surfaces a SOLID TYPED ERROR
+  from connect (not a log line) carrying the same guidance.
+
+Implementation bricks, in order (commit per brick, docs-currency in the
+same change, settings discipline for every knob):
+1. Config surface: tls section in the config crate (enabled, cert/key
+   paths, auto_self_signed), fibril.example.toml + configuration.md rows.
+   TLS material is startup config; note cert reload/rotation as a follow-up
+   item, not this arc.
+2. Broker protocol listener over rustls at the transport seam. The
+   fibril_util::net seam (tokio normally, turmoil under the simulation
+   feature) must keep compiling both ways - the TLS acceptor wraps the
+   accepted stream, so the seam likely needs a unified stream type or a
+   generic. Check how Framed composes over the wrapped stream in
+   crates/protocol/src/v1/handler.rs (listener + accept, ProtocolServerError).
+3. Rust client: TLS connect with ca_path / fingerprint pin / system roots,
+   plus the typed misconfiguration error.
+4. TS client (node tls) and Python client (ssl), same option names and the
+   same solid error. Wire vectors are unaffected (TLS sits below framing).
+5. fibrilctl cert generate + the admin board setup screen and loud-guide
+   errors.
+6. Admin server HTTPS: decide same-config TLS on axum or document a
+   reverse-proxy stance - decide during brick 1, do not leave undecided.
+7. Later bricks, not this arc: inter-broker replication and ganglion raft
+   TLS, mTLS client auth (#114), cert rotation.
+
+Push cadence: pushes were user-approved through the 0.2.0 arc. Confirm
+before the first push of this arc.
+
 
 ## Stream audits (2026-07-03, both done)
 
