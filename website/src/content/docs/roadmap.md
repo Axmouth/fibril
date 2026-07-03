@@ -97,12 +97,12 @@ See [out of scope](#out-of-scope) for what stays deliberately outside the broker
 
 ## Release history
 
-Shipped changes are recorded once, in the repo changelog
+Shipped changes are recorded in the repo changelog
 ([CHANGELOG.md](https://github.com/Axmouth/fibril/blob/main/CHANGELOG.md)),
 which is also the body of each
-[GitHub release](https://github.com/Axmouth/fibril/releases). This page stays
-forward-looking. For the full wired surface and its conditions, see
-[implemented surface](/implemented-surface/).
+[GitHub release](https://github.com/Axmouth/fibril/releases). This page
+covers direction, not history. For the full wired surface and its
+conditions, see [implemented surface](/implemented-surface/).
 
 ## Near term
 

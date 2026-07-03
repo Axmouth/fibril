@@ -6,25 +6,24 @@ Keratin track their own changelogs in their own repos.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project follows [Semantic Versioning](https://semver.org/). Pre-1.0, minor
-versions may still change the API and wire protocol; 1.0 commits to stability.
+versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ## [Unreleased]
 
 ## [0.2.0] - 2026-07-03
 
-The first tagged release. The baseline it ships: durable single-node work
-queues and Plexus fan-out streams, partitioned queues with client-side
-fan-in, exclusive consumer groups, message TTL and dead lettering, Rust,
-TypeScript, and Python clients at parity, an admin dashboard and `fibrilctl`,
-and an experimental cluster path (placement, replication, failover, live
-repartitioning). The sections below record what this release hardened and
-added on top of that baseline; the full wired surface and its conditions
-live in the implemented-surface page of the docs.
+The first tagged release. The baseline: durable single-node work queues and
+Plexus fan-out streams, partitioned queues with client-side fan-in, exclusive
+consumer groups, message TTL and dead lettering, Rust, TypeScript, and Python
+clients at parity, an admin dashboard and `fibrilctl`, and an experimental
+cluster path (placement, replication, failover, live repartitioning). The
+entries below cover what 0.2.0 hardened and added on top of that baseline.
+The full wired surface and its conditions are documented in the
+implemented-surface page of the docs.
 
-The release theme is cluster confidence and operational hardening. The
-cluster path is still labeled experimental, but it is now proven by a
-deterministic simulation suite, a chaos/soak suite, and a real multi-node
-failover run.
+This release focuses on cluster confidence and operational hardening. The
+cluster path remains experimental, now backed by a deterministic simulation
+suite, a chaos/soak suite, and a real multi-node failover run.
 
 ### Added
 
