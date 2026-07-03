@@ -20,10 +20,14 @@ events and policies).
 
 ## Release state (2026-07-03)
 
-- v0.2.0 is tagged locally at the docs-versioning rework commit (re-cut after
-  the starlight-versions migration, the earlier naive-mirror note is
-  obsolete). Publishing is: push all three repos plus
-  `git push origin v0.2.0`, which triggers the release workflow.
+- v0.2.0 was re-cut on branch `recut-0.2.0` to include the whole perf
+  campaign and the stream correctness fixes (the lag gap-skip was silent
+  data loss, not worth shipping around). The /0.2 docs snapshot was
+  regenerated from the current docs (including a restored /0.2 overview
+  page, which the dist smoke checks) and the 0.2.0 changelog section was
+  extended and re-dated. Publishing is: merge the branch to main
+  (fast-forward), push all three repos plus `git push origin v0.2.0`.
+  Reverting instead is: delete the branch, retag 0315a3a.
 - Cross-repo: ganglion and keratin still need their own release.sh, CHANGELOG,
   and version model so the overlord drives them.
 
