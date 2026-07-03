@@ -12,7 +12,7 @@ PERF_AUDIT_HOT_PATHS.md.
 | --- | --- | --- | --- |
 | Idle eviction | `QueueActivity` leases, eviction worker, `queue_idle_evict_after_ms` | none: every opened channel plus its 4-5 tasks and ring stays resident forever | GAP (P1) |
 | Broker traffic metrics | `published_many` / `delivered_many` / `redelivered_many` into `BrokerStats` | stream publish and fan-out delivery never touch `BrokerStats` | GAP (P2) |
-| Lag safety under overload | credit-based backpressure, no loss | full live channel drops the record and only flags `lagged`, auto-ack then advances the cursor past the gap | GAP (P3, correctness) |
+| Lag safety under overload | credit-based backpressure, no loss | fixed: eviction plus watermark re-attach keeps delivery contiguous, auto-ack can only settle delivered records | FIXED (P3, 168b44d) |
 | Graceful shutdown | waits for pending settles to drain | `flush_cursor_commits` exists but no shutdown path calls it, pending cursor window can be lost on planned restart | GAP (P4, small) |
 | Lag observability | n/a (credit model) | `lagged` flag is set but never read outside tests, not surfaced in streams_debug | GAP (P5, small) |
 | Reconnect grace (transport swap) | delivery re-targets the live transport | same, `send_to_current_transport` with the transport watch | OK |
@@ -52,7 +52,7 @@ from a stream-only workload. Fix is counter calls at the ingest drain
 (published) and the delivery task (delivered), batched amounts where SF1
 lands batches.
 
-### P3: lagged subscriber gap-skip (correctness)
+### P3: lagged subscriber gap-skip (correctness) - FIXED (168b44d)
 
 When a subscriber's live channel is full the fan-out drops the record for
 that subscriber and sets `lagged`, on the argument that a durable consumer
@@ -62,13 +62,14 @@ later records), and auto-ack settles each later delivered record, advancing
 the durable cursor past the dropped offsets. Result: a connected subscriber
 that briefly lags silently loses records, on every tier, durable included.
 
-Direction: a lagged subscriber should re-enter catch-up mode from its last
-contiguous offset (the `sub.run` driver already knows how to serve log plus
-ring backfill before going live) instead of staying naively live. Auto-ack
-must not advance the cursor across an undelivered gap, which falls out
-naturally if delivery always goes contiguous-per-subscriber. Needs a small
-design pass, then implementation with a regression test that forces a full
-live channel.
+Fixed as designed: the fan-out evicts a slow subscriber (contiguous
+undelivered suffix instead of holes) and the subscription driver re-attaches
+from its delivery watermark, replaying the suffix from ring or log before
+rejoining live. Regression test forces a full live channel and asserts
+exactly-once in-order recovery. Client lag notification events and the
+skip-to-latest / close policies are deferred to the typed
+subscription-lifecycle surface. A `lag_evictions` counter now exists on the
+fan-out for P5 to surface.
 
 ### P4: shutdown does not flush pending cursor commits
 
@@ -87,6 +88,5 @@ queue backlog.
 
 ## Suggested order
 
-P3 first (correctness, interacts with SF1 batching since both touch the
-delivery chain), then P1 and P2 as independent bricks, then P4 and P5 as
-small follow-ups.
+P3 first (correctness) - done. Then P1 and P2 as independent bricks, then P4
+and P5 as small follow-ups.
