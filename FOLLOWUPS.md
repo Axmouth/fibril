@@ -89,7 +89,10 @@ baseline (#127); 0.3 work = #102/#103/#105/#109.
   with p50 under 10ms on fast storage, knee 500-600k), a storage-class table
   (tmpfs/NVMe-class vs SATA vs slow-VPS with the fsync floors), the zero-loss
   saturation results, and the honest cluster replica-durable state. Method
-  notes: bench-matrix scenarios, run counts, drive-variance caveat.
+  notes: bench-matrix scenarios, run counts, drive-variance caveat. Include
+  the RSS story prominently: 40-50MiB serving 50k/s and 60-90MiB at
+  150-250k/s is an understated strength against JVM-class brokers at
+  moderate loads, which are the common case.
 
 Consolidated open items, extracted before the replication-effort working docs
 were archived so nothing is lost. Full detail and rationale live in
