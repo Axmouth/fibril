@@ -4,10 +4,6 @@
       "label": "Start Here",
       "items": [
         {
-          "label": "Overview",
-          "link": "/"
-        },
-        {
           "label": "Quickstart",
           "slug": "quickstart"
         },
