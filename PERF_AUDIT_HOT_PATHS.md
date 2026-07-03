@@ -213,6 +213,116 @@ protocol, or out-of-band payload framing, would each save only a slice of
 that. Not worth the churn now. If it is ever revisited, it belongs with the
 protocol versioning and freeze work (#110).
 
+## S. Plexus stream fan-out (audit 2026-07-03)
+
+Scope: the stream publish-to-fanout-to-deliver path in
+`crates/broker/src/stream.rs` and the stream sections of
+`crates/protocol/src/v1/handler.rs`. Bench harness: `scripts/bench-stream.sh`
+(tier x fan-out matrix, tmpfs, 1KB records, 4 writers, prefetch 16384).
+
+### Baseline (tmpfs, rate 100k/s, 12s measured)
+
+| Run | Publish rate | Deliver rate (all) | Per reader | p50 pub->deliver |
+| --- | --- | --- | --- | --- |
+| durable r1 | 100k/s | 100k/s | 100k/s | 1ms |
+| durable r8 | 100k/s | 800k/s | 100k/s | 1ms |
+| durable r32 | 96k/s | 759k/s | 24k/s | 1011ms |
+| ephemeral r1 | 100k/s | 100k/s | 100k/s | 1ms |
+| ephemeral r8 | 100k/s | 800k/s | 100k/s | 1ms |
+| ephemeral r32 | 97k/s | 769k/s | 24k/s | 1001ms |
+| speculative r8 | 100k/s | 800k/s | 100k/s | 1ms |
+| durable r8 + durable cursors | 100k/s | 800k/s | 100k/s | 1ms |
+| durable r8 confirmed | 100k/s | 800k/s | 100k/s | 1ms (confirm p50 3ms) |
+
+Tier makes no measurable difference anywhere, including durable auto-ack
+cursors (the cursor microbatcher works) and confirmed publish (confirm p50
+3ms rides the keratin self-clocking commit). The entire story is fan-out
+count.
+
+### Knee attribution probes (ephemeral tier)
+
+| Run | Offered aggregate | Delivered | p50 |
+| --- | --- | --- | --- |
+| r32 at 20k/s | 640k/s | 640k/s | 2ms |
+| r16 at 40k/s | 640k/s | 640k/s | 1ms |
+| r16 at 60k/s | 960k/s | 960k/s | 1ms |
+| r16 at 100k/s | 1.6M/s | 745k/s | 521ms |
+| r8 at 200k/s | 1.6M/s | 1.6M/s | 1ms |
+| r4 at 400k/s | 1.6M/s offered | 1.42M/s (publish-side cap ~356k/s) | 3ms |
+
+Three conclusions. First, the ceiling is not an aggregate-records limit: 8
+subscribers sustain 1.6M/s cleanly while 16 subscribers collapse on the same
+aggregate. Second, past the knee this is congestion collapse, not a plateau:
+16 subscribers deliver 960k/s cleanly at 60k/s offered but only 745k/s at
+100k/s offered, and collapse goodput sits at ~750k/s regardless of how far
+past the knee the load goes (r32 offered 3.1M/s also lands there). Third, the
+collapse is not compute-bound: during a collapsed r16 run the server uses
+~3.1 cores with no single thread above ~22% and the bench client ~12 cores
+with no thread above ~40% (32-core box). The limit is per-record wakeup and
+queueing structure, the batch-factor-1 shape the queue path had before its
+delivery hop was batched, amplified here because every per-record cost is
+paid once per subscriber. The queue path degrades gracefully past its knee
+because backlog self-batches at every hop. The stream path has no batched
+hop, so backlog only deepens queues and adds wakeups.
+
+Caveat: the collapsed runs also show high bench-client CPU per record, so
+client-side attribution is not fully excluded. The before/after for SF1 must
+re-check the healthy-vs-collapsed boundary rather than trust absolute rates.
+
+### Findings
+
+- SF1 (the knee): batch the fan-out delivery chain end to end. Today every
+  hop moves one record: the drain sends one `FanoutCmd::Publish` per record,
+  the fan-out actor does one `try_send` per record per subscriber, `sub.run`
+  forwards one record per send into the sink channel, and the delivery task
+  encodes and sends one frame per `recv`. Change the chain to carry
+  `Vec<Arc<StreamRecord>>` batches: a `PublishBatch` actor command per drain
+  batch, one `try_send` of the matching slice per subscriber, `recv_many` in
+  the forwarding and delivery tasks, and one settle per delivered batch
+  (the cursor is a high-water mark, so a batch settles with its max offset).
+  Mirrors the C1 queue fix that moved the queue knee from 350-400k/s to
+  500-600k/s. Expected to raise fan-out capacity at high subscriber counts
+  and flatten the congestion collapse into the queue path's graceful shape.
+  Status: OPEN.
+- SF2: per-subscriber Deliver construction copies. The delivery task builds
+  each frame with `record.headers.clone()` (HashMap) plus
+  `record.payload.to_vec()` (full byte copy) before `encode_deliver` copies
+  the bytes again into the frame buffer, so every record byte is copied
+  twice per subscriber and every header map is cloned per subscriber. An
+  encode path that writes straight from `&[u8]` and borrowed headers removes
+  one copy and the clone. Status: OPEN.
+- SF3: ingest-side per-record clone. The ingest task keeps `items` for the
+  drain while handing `append_records` to keratin, paying
+  `req.headers.clone()` plus `req.payload.clone()` (full byte copy) per
+  record. The append only serializes into its own buffers, so a borrowed or
+  shared-buffer append signature removes the copy. Per record once, not per
+  subscriber, so lower yield than SF2. Status: OPEN.
+- SF4: confirmed stream publish spawns a task per publish
+  (`handle_stream_publish` spawns to await the confirm plus replication
+  gate). At 100k/s confirmed that is 100k spawns/s. The queue path routes
+  confirms through a per-connection pump instead. Only bites with
+  `require_confirm`, and the baseline shows confirm p50 3ms regardless, so
+  this is a cost sink not a latency knee. Status: OPEN, low priority.
+- SF5: lagged-subscriber drops are a correctness hole, not just a perf note.
+  `Subscriber.lagged` is set when a full live channel drops a record, on the
+  stated assumption that a durable consumer re-reads the gap from its cursor
+  on reconnect. Nothing forces that reconnect, and worse, auto-ack settles
+  every later record it does deliver, advancing the durable cursor past the
+  dropped gap. A lagging connected subscriber silently loses records on
+  every tier. Needs a design fix (lagged subscriber re-enters catch-up mode
+  from its last contiguous offset instead of staying live), tracked as its
+  own task, not a bench experiment. Found by this audit but owned by the
+  parity/correctness track. Status: OPEN (task filed).
+
+### Stream execution order
+
+1. SF1 on a branch with before/after at the boundary points (r8 at 200k,
+   r16 at 60k/100k, r32 at 20k plus one far-past-knee point per tier).
+2. SF2 folded into the same branch if the encode seam makes it natural,
+   otherwise separate.
+3. SF3 and SF4 after, each with a targeted run.
+4. SF5 is design work, sequenced with the parity audit follow-ups.
+
 ## Windows performance notes (clues, not yet measured)
 
 Markedly worse performance was observed on Windows 11 than on Linux. Several

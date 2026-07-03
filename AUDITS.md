@@ -27,21 +27,24 @@ worth a fresh pass.
     (self-clocking group commit) are landed and measured, C2 was assessed
     low yield.
 - [ ] Plexus stream hot-path performance
-  - Status: Pending
-  - Detail: not started, hypotheses pre-registered in the task tracker and
-    PERF_AUDIT_HOT_PATHS.md carries the method
-  - Next: per-record per-subscriber sink dispatch is the same batch-factor-1
-    shape that was the queue delivery knee. Establish a stream bench baseline
-    first, then audit publish, fan-out, cursor, and durable-tier paths.
+  - Status: Audited
+  - Detail: S section of [PERF_AUDIT_HOT_PATHS.md](PERF_AUDIT_HOT_PATHS.md),
+    with the baseline matrix and knee-attribution probes. Headline: fan-out
+    capacity is subscriber-count sensitive (8 subscribers sustain 1.6M/s, 16
+    collapse to ~750k/s goodput on the same aggregate) and the collapse is
+    structural (no CPU saturated), the batch-factor-1 shape again.
+  - Next: SF1 (batch the fan-out delivery chain end to end, the C1 analog)
+    on a branch with boundary-point before/after, then SF2-SF4 copy and
+    spawn removals. Tiers are equal at baseline, so storage is not on the
+    stream critical path.
 - [ ] Stream operational parity with queues
-  - Status: Pending
-  - Detail: not started. Initial probe: no eviction, idle, or activity
-    references touch streams in the broker, so idle stream channels likely
-    stay resident forever while queues evict.
-  - Next: sweep the queue lifecycle machinery (idle eviction, activity
-    leases, drain coverage, reconnect grace, recovery quarantine, cold-start
-    reconciliation, runtime settings, admin surface) and table which pieces
-    streams need, which they have, and which are not applicable by design.
+  - Status: Audited
+  - Detail: [STREAM_PARITY_AUDIT.md](STREAM_PARITY_AUDIT.md). Five gaps
+    (idle eviction, broker traffic metrics, lagged gap-skip correctness,
+    shutdown cursor flush, lag observability), the rest shared, covered by
+    design, or not applicable.
+  - Next: P3 lag gap-skip first (correctness, coordinates with SF1), then
+    P1 eviction and P2 metrics as independent bricks, P4/P5 small.
 - [x] Runtime settings through Ganglion
   - Status: Addressed
   - Detail: [RUNTIME_SETTINGS_GANGLION_AUDIT.md](archive/replication-sharding-plan/RUNTIME_SETTINGS_GANGLION_AUDIT.md)

@@ -1,46 +1,11 @@
 # Follow-ups and pending work
 
 
-## RESUME HERE: stream audits (2026-07-04)
+## Stream audits (2026-07-03, both recorded)
 
-Transient cursor for tasks #140 (stream hot-path perf audit) and #141 (stream
-operational parity audit). Delete once both are underway. Durable context:
-PERF_AUDIT_HOT_PATHS.md (method, acceptance rules), ADAPTIVE_TUNABLES.md
-(congestion model, window budget rule), AUDITS.md entries, keratin
-PERFORMANCE_NOTES.md. Heads at cutover: fibril fa66e5b, keratin 7639a25,
-all unpushed as usual.
-
-Perf audit (#140) runway:
-- Bench FIRST: scripts/bench-stream.sh is the existing harness (the old
-  .bench-data run names were dur-*/eph-* tiers by r1-r32 fan-out, results
-  archived at ~/fibril-bench-results-archive.tar.gz). Establish a fresh
-  baseline per tier and fan-out before touching code. Bench env: override
-  BROKER_ADDR/ADMIN_ADDR and FIBRIL_BROKER_BIND/FIBRIL_ADMIN_BIND to
-  127.0.0.1:19876/18081, needs sandbox off, /tmp is tmpfs, SATA drive
-  variance is 2-3x so interleave any disk A/B.
-- Key code: crates/broker/src/stream.rs (fan-out actor + ring), handler.rs
-  stream sink pump (the spawned task reading sink_rx near the
-  send_to_current_transport caller, cached_tx already applied),
-  stroma/core/src/stream_state.rs, cursor microbatch settings
-  (replication_stream_apply_linger_us family).
-- Pre-registered hypotheses: per-record per-subscriber sink dispatch is the
-  batch-factor-1 shape that was the queue delivery knee, and fan-out N
-  multiplies every per-record cost so budgets shrink by N. K1 self-clocking
-  already helps the durable tier fsync legs. Cursor commits are microbatched
-  (#83), verify rather than rediscover. Auto-ack stream settles and the
-  speculative tier paths are worth a per-record cost look.
-- Follow the discipline: sensitivity probe before any controller, record
-  every experiment in the optimization log, per-brick commits, no push.
-
-Parity audit (#141) runway:
-- Initial confirmed signal: no eviction, idle, or activity references touch
-  streams in broker.rs, so idle stream channels likely stay resident forever
-  while queues evict. Sweep checklist lives in the task and AUDITS.md entry
-  (activity leases, drain coverage, reconnect grace for stream subs,
-  recovery quarantine, cold-start reconciliation like #101, runtime
-  settings, admin surface). DLQ, TTL, settle drain are N/A by design.
-- Output shape: parity table in an audit doc at repo root, gaps become
-  tasks, AUDITS.md status updated.
+Findings live in the S section of PERF_AUDIT_HOT_PATHS.md (perf, SF1-SF5)
+and STREAM_PARITY_AUDIT.md (parity, P1-P5), tasks #142-#146 filed. Active
+work: SF1 delivery-chain batching on a branch, P3 lag gap-skip design.
 
 ## Release state (2026-07-03)
 
