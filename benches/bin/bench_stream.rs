@@ -49,6 +49,12 @@ enum BenchMode {
     Mixed,
     /// Publish only (isolate publish/confirm throughput).
     PublishOnly,
+    /// Consume only, expecting a concurrent publish-only process on the same
+    /// topic. Lets readers run in separate OS processes so a fan-out measurement
+    /// is not limited by one client process. Readers run for the warmup plus
+    /// duration window (plus drain) and count the measured records the publisher
+    /// marks, so rates and latencies line up with the publisher's window.
+    SubscribeOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -156,8 +162,10 @@ fn is_measured_payload(payload: &[u8]) -> bool {
 async fn main() {
     fibril_util::init_tracing();
     let args = Args::parse();
-    assert!(args.writers > 0, "writers must be > 0");
-    if args.mode == BenchMode::Mixed {
+    if args.mode != BenchMode::SubscribeOnly {
+        assert!(args.writers > 0, "writers must be > 0");
+    }
+    if args.mode != BenchMode::PublishOnly {
         assert!(args.readers > 0, "readers must be > 0");
     }
 
@@ -220,19 +228,29 @@ async fn main() {
     // Give subscriptions a moment to attach before publishing.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let writer_stats = run_rate_limited_writers(
-        address,
-        args.topic.clone(),
-        args.writers,
-        args.rate_per_sec,
-        args.size.max(1),
-        args.confirmed,
-        args.confirm_window,
-        measure_start,
-        measure_end,
-        measured_sent_total.clone(),
-    )
-    .await;
+    let writer_stats = if args.mode == BenchMode::SubscribeOnly {
+        // No local writers: hold the readers open across the concurrent
+        // publisher's window (they never see a local "all sent" count), then
+        // let the drain timeout end them.
+        measured_sent_total.store(u64::MAX, Ordering::Release);
+        let hold = Duration::from_secs(args.warmup_secs + args.duration_secs + 2);
+        tokio::time::sleep(hold).await;
+        WriterStats::default()
+    } else {
+        run_rate_limited_writers(
+            address,
+            args.topic.clone(),
+            args.writers,
+            args.rate_per_sec,
+            args.size.max(1),
+            args.confirmed,
+            args.confirm_window,
+            measure_start,
+            measure_end,
+            measured_sent_total.clone(),
+        )
+        .await
+    };
     writers_done.store(true, Ordering::Release);
 
     let mut reader_stats = ReaderStats::default();
