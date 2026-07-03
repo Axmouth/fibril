@@ -19,8 +19,8 @@ or declined), ADAPTIVE (runtime-derived), N/A (assessed, no action needed).
 
 | Site | Where | Current | Should key off | Budget share now | Ease | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| Settle coalesce window | broker.rs spawn_settle_loop | 500us, 64 items | observed delivery p50 | 12-25 percent, over budget | trivial | OPEN |
-| Publisher sink window | broker.rs publisher_sink | 250us, 256 items | observed confirm p50 | 6-12 percent, at budget | trivial | OPEN |
+| Settle coalesce window | broker.rs spawn_settle_loop | 100us, 64 items | probed 500us vs 100us: identical everywhere, the window is not on the measured critical path at standard prefetch (confirms ride the publish pipeline, credit release decoupled from delivery) | none measurable | trivial | PROBED, controller declined |
+| Publisher sink window | broker.rs publisher_sink | 250us, 256 items | observed confirm p50, though the settle probe suggests low sensitivity here too | 6-12 percent, at budget | trivial | OPEN, deprioritized |
 | Connection writer flush | handler.rs writer task | 32 frames high-prio, 128/1MB/5ms | frame arrival rate | load-gated, sparse flushes immediately | easy | N/A for now |
 | Keratin batch linger | keratin config.rs, writer.rs | adaptive 0-5ms by batch fill | already adaptive | load-gated | done | ADAPTIVE |
 | Keratin fsync idle floor | keratin writer.rs commit_when_idle | 0 (self-clock) | EMA of fsync duration | n/a, cadence policy | moderate | OPEN |

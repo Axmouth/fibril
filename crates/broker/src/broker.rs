@@ -3246,7 +3246,9 @@ impl<
         let broker = self.clone();
         self.task_group.spawn("settle_loop", async move {
             const MAX_BATCH: usize = 64;
-            const COALESCE_WINDOW: Duration = Duration::from_micros(500);
+            // Sized to stay a small fraction of end-to-end delivery latency so
+            // settle batching never dominates the budget.
+            const COALESCE_WINDOW: Duration = Duration::from_micros(100);
             const SMALL_BATCH: usize = 8;
 
             loop {
