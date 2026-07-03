@@ -28,8 +28,13 @@ events and policies).
   extended and re-dated. Publishing is: merge the branch to main
   (fast-forward), push all three repos plus `git push origin v0.2.0`.
   Reverting instead is: delete the branch, retag 0315a3a.
-- Cross-repo: ganglion and keratin still need their own release.sh, CHANGELOG,
-  and version model so the overlord drives them.
+- Cross-repo: ganglion and keratin have changelogs now (Unreleased-only, no
+  tags yet) but still need their own release.sh and version model so the
+  overlord drives them.
+- Changelog policy: CHANGELOG.md is the single history record (also each
+  GitHub release body). The roadmap stays forward-looking and the
+  implemented-surface page stays the what-exists inventory. No parallel
+  recently-landed lists.
 
 ## Site and docs polish (2026-07-03, all landed)
 
