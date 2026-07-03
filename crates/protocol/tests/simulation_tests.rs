@@ -216,6 +216,7 @@ fn spawn_owner_host(sim: &mut turmoil::Sim<'_>, topic: &'static str, payloads: &
 
         run_server(
             bind_addr(),
+            None,
             broker,
             TcpStats::new(10),
             ConnectionStats::new(),
@@ -816,6 +817,7 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
             let serve_broker = broker.clone();
             tokio::spawn(run_server(
                 bind_addr(),
+                None,
                 serve_broker,
                 TcpStats::new(10),
                 ConnectionStats::new(),
@@ -924,6 +926,7 @@ fn ganglion_returning_old_owner_is_demoted_under_simulated_partition() {
             let serve_broker = broker.clone();
             tokio::spawn(run_server(
                 bind_addr(),
+                None,
                 serve_broker,
                 TcpStats::new(10),
                 ConnectionStats::new(),
@@ -1227,6 +1230,7 @@ fn durable_publish_unconfirmed_while_replica_partitioned() {
             let serve_broker = broker.clone();
             tokio::spawn(run_server(
                 bind_addr(),
+                None,
                 serve_broker,
                 TcpStats::new(10),
                 ConnectionStats::new(),
@@ -1470,6 +1474,7 @@ fn follower_installs_checkpoint_after_owner_truncates() {
 
         run_server(
             bind_addr(),
+            None,
             broker,
             TcpStats::new(10),
             ConnectionStats::new(),
@@ -1616,6 +1621,7 @@ fn repartition_cutover_waits_for_delayed_topology_ack() {
                 let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
                 handle_connection(
                     server,
+                    Some(peer),
                     broker,
                     TcpStats::new(10),
                     connection_stats,

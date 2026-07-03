@@ -39,26 +39,44 @@ Decided cert model:
 - Misconfiguration is loud and guided on BOTH sides: server logs a mini
   guide (admin board link, fibrilctl command, the concrete steps), and the
   client surfaces a SOLID TYPED ERROR from connect (not a log line)
-  carrying the same guidance. Mechanism for making mismatches obvious in
-  both directions: a TLS ClientHello has a recognizable byte prefix and
-  plaintext frames carry the FDL1 magic, so a plaintext listener can detect
-  and name an attempted-TLS client and a TLS listener can detect and name
-  an attempted-plaintext client.
+  carrying the same guidance. Mechanism (as built in brick 2): the frame
+  header has NO magic (the per-message FHL1-style magics sit inside the
+  payload), so the accept path sniffs the first bytes of every connection.
+  A TLS ClientHello starts 0x16 0x03 and a plaintext first frame starts
+  with two zero length bytes. Without the sniff a ClientHello read by the
+  plaintext codec parses as a ~369MB frame length and hangs silently. A
+  TLS listener that sniffs a plaintext frame replies with a plaintext
+  error frame, code 426 ERR_TLS_REQUIRED, echoing the sniffed HELLO's
+  request id so even pre-TLS clients surface it through their pending
+  request instead of a bare disconnect. The reverse direction (TLS client
+  on a plaintext listener) closes fast and has no in-band channel, so the
+  client types it from the handshake-EOF heuristic as a probable cause.
+- Client error taxonomy (brick 3, user-directed): keep "TLS is not set up
+  or mismatched" SEPARATE from other TLS errors. Three classes with
+  different fixes: transport mismatch (426 definitive, or handshake-EOF
+  probable - fix is config on one side), certificate verification
+  (untrusted CA, name mismatch, expired - fix is ca_path or fingerprint
+  pin), and other handshake/IO errors. Never collapse them into one
+  variant.
 
 Implementation bricks, in order (commit per brick, docs-currency in the
 same change, settings discipline for every knob):
-1. Config surface: tls section in the config crate (enabled, cert/key
-   paths, auto_self_signed), fibril.example.toml + configuration.md rows.
-   TLS material is startup config; note cert reload/rotation as a follow-up
-   item, not this arc.
-2. Broker protocol listener over rustls at the transport seam. The
-   fibril_util::net seam (tokio normally, turmoil under the simulation
-   feature) must keep compiling both ways - the TLS acceptor wraps the
-   accepted stream, so the seam likely needs a unified stream type or a
-   generic. Check how Framed composes over the wrapped stream in
-   crates/protocol/src/v1/handler.rs (listener + accept, ProtocolServerError).
+1. DONE (2026-07-04). Config surface: tls section (enabled, cert/key
+   paths, auto_self_signed, admin_enabled override), guided validation,
+   env overrides, example TOML + configuration.md + TlsMode accessor.
+   Cert reload/rotation stays a follow-up, not this arc.
+2. DONE (2026-07-04). Broker listener over rustls: handle_connection is
+   generic over the stream so TLS composes above the fibril_util::net
+   seam with no per-site cfg (simulation still compiles and passes).
+   fibril_util::sniff holds the first-bytes classifier + PrefixedStream
+   replay. fibril::tls builds the acceptor (BYO PEMs or rcgen generation
+   under <data_dir>/tls with 0600 keys, SANs = localhost set + advertise
+   hosts, CA fingerprint logged each boot, partial material refused).
+   Integration tests cover the TLS HELLO round trip, the 426 reply, and
+   fast-fail on the reverse mismatch.
 3. Rust client: TLS connect with ca_path / fingerprint pin / system roots,
-   plus the typed misconfiguration error.
+   plus the typed misconfiguration error per the taxonomy above (426
+   mismatch vs certificate verification vs other).
 4. TS client (node tls) and Python client (ssl), same option names and the
    same solid error. Wire vectors are unaffected (TLS sits below framing).
 5. fibrilctl cert generate + the admin board setup screen and loud-guide

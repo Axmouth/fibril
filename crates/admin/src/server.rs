@@ -826,6 +826,7 @@ mod tests {
 
         let server_task = tokio::spawn(handle_connection(
             server,
+            Some(peer),
             broker,
             tcp_stats,
             connection_stats,

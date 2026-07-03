@@ -36,9 +36,14 @@ use fibril_broker::{
 use fibril_metrics::{ConnectionStats, TcpStats};
 use fibril_storage::{Group, Partition, Topic};
 use fibril_util::net::{TcpListener, TcpStream};
+use fibril_util::sniff::{
+    PrefixedStream, looks_like_plaintext_frame, looks_like_tls_client_hello, sniff_first_bytes,
+};
 use fibril_util::{AuthHandler, unix_millis};
 use futures::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Mutex, mpsc, oneshot, watch};
+use tokio_rustls::TlsAcceptor;
 use tokio_util::codec::Framed;
 use uuid::Uuid;
 
@@ -84,6 +89,8 @@ pub enum ProtocolConnectionError {
     ComplianceMarkerMismatch,
     #[error("connection task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
+    #[error("TLS handshake failed: {0}")]
+    TlsHandshake(#[source] std::io::Error),
 }
 
 impl From<mpsc::error::SendError<Frame>> for ProtocolConnectionError {
@@ -2004,6 +2011,7 @@ impl ReqIdGenerator {
 
 pub async fn run_server(
     addr: SocketAddr,
+    tls: Option<TlsAcceptor>,
     broker: Arc<Broker<StromaEngine>>,
     tcp_stats: Arc<TcpStats>,
     connection_stats: Arc<ConnectionStats>,
@@ -2016,7 +2024,7 @@ pub async fn run_server(
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|source| ProtocolServerError::Bind { addr, source })?;
-    print_banner(&addr);
+    print_banner(&addr, tls.is_some());
 
     loop {
         let (socket, peer) = listener
@@ -2031,6 +2039,7 @@ pub async fn run_server(
         let broker = broker.clone();
 
         let auth = auth.clone();
+        let tls = tls.clone();
         let tcp_stats = tcp_stats.clone();
         let connection_stats = connection_stats.clone();
         let connection_settings = connection_settings.clone();
@@ -2039,8 +2048,10 @@ pub async fn run_server(
         let topology_adoption = topology_adoption.clone();
         tokio::spawn(async move {
             tracing::info!("Connection {conn_id} opening..");
-            if let Err(e) = handle_connection(
+            if let Err(e) = serve_connection(
                 socket,
+                tls,
+                peer,
                 broker,
                 tcp_stats.clone(),
                 connection_stats.clone(),
@@ -2068,6 +2079,154 @@ pub async fn run_server(
     }
 }
 
+/// Bounds how long an accepted socket may sit silent before its first bytes.
+/// A connection that sends nothing within this window is dropped.
+const TRANSPORT_SNIFF_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+
+/// Sniff a fresh connection's first two bytes to pick the transport and name
+/// a TLS/plaintext mismatch in either direction, then run the protocol over
+/// the matching stream. Without the sniff, both mismatch directions fail
+/// unusably: the plaintext codec reads a ClientHello's leading bytes as a
+/// huge frame length and waits forever, and a TLS acceptor turns a plaintext
+/// frame into an opaque handshake error.
+#[allow(clippy::too_many_arguments)]
+async fn serve_connection(
+    mut socket: TcpStream,
+    tls: Option<TlsAcceptor>,
+    peer: SocketAddr,
+    broker: Arc<Broker<StromaEngine>>,
+    tcp_stats: Arc<TcpStats>,
+    connection_stats: Arc<ConnectionStats>,
+    conn_id: Uuid,
+    auth: Option<impl AuthHandler + Send + Sync + 'static>,
+    connection_settings: ConnectionSettings,
+    topology_source: Option<Arc<dyn ClientTopologySource>>,
+    declare_coordinator: Option<Arc<dyn DeclareCoordinator>>,
+    topology_adoption: Option<Arc<TopologyAdoptionTracker>>,
+) -> Result<(), ProtocolConnectionError> {
+    // Both transports send well over a frame header's worth of bytes in
+    // their first flight (a plaintext frame header is exactly 20 bytes and a
+    // ClientHello is far larger), so sniffing the full header is safe and
+    // lets the TLS-required reply echo the HELLO's request id.
+    let sniffed = tokio::time::timeout(
+        TRANSPORT_SNIFF_TIMEOUT,
+        sniff_first_bytes::<_, 20>(&mut socket),
+    )
+    .await;
+    let (len, prefix) = match sniffed {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(source)) => return Err(ProtocolConnectionError::Io(source)),
+        Err(_) => {
+            tracing::debug!("conn {peer} sent no bytes within the sniff window, closing");
+            return Ok(());
+        }
+    };
+    if len < 2 {
+        tracing::debug!("conn {peer} closed before sending a transport prefix");
+        return Ok(());
+    }
+    let prefix = &prefix[..len];
+    let mut stream = PrefixedStream::new(prefix.to_vec(), socket);
+
+    match tls {
+        Some(acceptor) => {
+            if !looks_like_tls_client_hello(prefix) {
+                if looks_like_plaintext_frame(prefix) {
+                    tracing::warn!(
+                        "rejected plaintext connection from {peer}: this broker listener \
+                         requires TLS. Fix on the client: enable TLS and trust the broker \
+                         certificate (a CA file or fingerprint pin for self-signed \
+                         material). If TLS was enabled on the broker by mistake, set \
+                         tls.enabled = false and restart. See \
+                         https://fibril.sh/configuration/"
+                    );
+                    send_tls_required_error(&mut stream, prefix).await;
+                } else {
+                    tracing::warn!(
+                        "conn {peer} sent neither a TLS handshake nor a protocol frame, closing"
+                    );
+                }
+                return Ok(());
+            }
+            let tls_stream = acceptor
+                .accept(stream)
+                .await
+                .map_err(ProtocolConnectionError::TlsHandshake)?;
+            handle_connection(
+                tls_stream,
+                Some(peer),
+                broker,
+                tcp_stats,
+                connection_stats,
+                conn_id,
+                auth,
+                connection_settings,
+                topology_source,
+                declare_coordinator,
+                topology_adoption,
+            )
+            .await
+        }
+        None => {
+            if looks_like_tls_client_hello(prefix) {
+                tracing::warn!(
+                    "rejected TLS connection attempt from {peer}: this broker listener is \
+                     plaintext. Fix on the broker: set tls.enabled = true with \
+                     tls.cert_path and tls.key_path, or tls.auto_self_signed = true. Or \
+                     disable TLS in the client if plaintext is intended. See \
+                     https://fibril.sh/configuration/"
+                );
+                return Ok(());
+            }
+            handle_connection(
+                stream,
+                Some(peer),
+                broker,
+                tcp_stats,
+                connection_stats,
+                conn_id,
+                auth,
+                connection_settings,
+                topology_source,
+                declare_coordinator,
+                topology_adoption,
+            )
+            .await
+        }
+    }
+}
+
+/// Best-effort plaintext `ERR_TLS_REQUIRED` reply on a TLS listener that
+/// sniffed a plaintext frame. Echoing the sniffed header's request id routes
+/// the error through the client's pending HELLO, so even clients without
+/// TLS-aware error handling report a readable cause instead of a bare
+/// disconnect.
+async fn send_tls_required_error<S>(stream: &mut S, sniffed_header: &[u8])
+where
+    S: tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    use tokio_util::codec::Encoder;
+
+    let request_id = match sniffed_header.get(12..20) {
+        Some(bytes) => u64::from_be_bytes(bytes.try_into().unwrap_or_default()),
+        None => 0,
+    };
+    let Ok(frame) = error_frame(
+        request_id,
+        crate::v1::ERR_TLS_REQUIRED,
+        "this broker requires TLS: enable TLS in the client and trust the broker \
+         certificate (a CA file or fingerprint pin for self-signed material)",
+    ) else {
+        return;
+    };
+    let mut buf = bytes::BytesMut::new();
+    if ProtoCodec.encode(frame, &mut buf).is_ok() {
+        let _ = stream.write_all(&buf).await;
+        let _ = stream.shutdown().await;
+    }
+}
+
 pub const DEFAULT_HEARTBEAT_INTERVAL: u64 = 5; // seconds
 
 pub enum LoopEvent {
@@ -2080,8 +2239,10 @@ pub enum LoopEvent {
     TopologyTick,
 }
 
-pub async fn handle_connection(
-    socket: TcpStream,
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_connection<S>(
+    socket: S,
+    peer_addr: Option<SocketAddr>,
     broker: Arc<Broker<StromaEngine>>,
     tcp_stats: Arc<TcpStats>,
     connection_stats: Arc<ConnectionStats>,
@@ -2091,7 +2252,10 @@ pub async fn handle_connection(
     topology_source: Option<Arc<dyn ClientTopologySource>>,
     declare_coordinator: Option<Arc<dyn DeclareCoordinator>>,
     topology_adoption: Option<Arc<TopologyAdoptionTracker>>,
-) -> Result<(), ProtocolConnectionError> {
+) -> Result<(), ProtocolConnectionError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let heartbeat_interval = connection_settings
         .heartbeat_interval
         .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
@@ -2117,7 +2281,6 @@ pub async fn handle_connection(
     let mut last_pushed_topology = topology_source.as_ref().map(|s| s.topology());
     heartbeat.tick().await; // consume first tick
     // ---- Framed socket -----------------------------------------------------
-    let peer_addr = socket.peer_addr().ok();
     let framed = Framed::with_capacity(socket, ProtoCodec, 128 * 1024);
     let (mut writer, mut reader) = framed.split();
 
@@ -3902,13 +4065,14 @@ pub async fn handle_connection(
     Ok(())
 }
 
-pub fn print_banner(bind: &SocketAddr) {
+pub fn print_banner(bind: &SocketAddr, tls: bool) {
     let ts = Instant::now().elapsed().as_nanos();
     let idx = (ts % (ASCII_ARTS.len() as u128)) as usize;
 
     let art = ASCII_ARTS[idx];
+    let transport = if tls { "TLS" } else { "plaintext" };
 
-    tracing::info!("\n{art}\nListening on {bind}\n");
+    tracing::info!("\n{art}\nListening on {bind} ({transport})\n");
 }
 
 const ASCII_ARTS: &[&str] = &[

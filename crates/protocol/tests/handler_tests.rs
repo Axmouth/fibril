@@ -149,6 +149,7 @@ async fn open_protocol_connection_for_broker(
 
     let server_task = tokio::spawn(handle_connection(
         server,
+        Some(peer),
         broker.clone(),
         tcp_stats,
         connection_stats,
@@ -185,6 +186,7 @@ async fn start_protocol_listener_for_broker(
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         handle_connection(
             server,
+            Some(peer),
             server_broker,
             tcp_stats,
             connection_stats,
@@ -2996,6 +2998,7 @@ async fn broker_pushes_topology_update_on_generation_change() {
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         handle_connection(
             server,
+            Some(peer),
             broker,
             tcp_stats,
             connection_stats,
@@ -3115,6 +3118,7 @@ async fn broker_does_not_push_topology_when_content_unchanged() {
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         handle_connection(
             server,
+            Some(peer),
             broker,
             tcp_stats,
             connection_stats,
@@ -3194,6 +3198,7 @@ async fn handler_answers_topology_query_from_source() {
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         handle_connection(
             server,
+            Some(peer),
             broker,
             tcp_stats,
             connection_stats,
@@ -3284,6 +3289,7 @@ async fn unowned_publish_redirects_to_current_owner() {
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         handle_connection(
             server,
+            Some(peer),
             broker,
             tcp_stats,
             connection_stats,
@@ -3367,6 +3373,7 @@ async fn stale_partitioning_version_publish_is_fenced() {
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         handle_connection(
             server,
+            Some(peer),
             broker,
             tcp_stats,
             connection_stats,
@@ -3531,6 +3538,7 @@ async fn start_multi_connection_listener(
                 let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
                 let _ = handle_connection(
                     server,
+                    Some(peer),
                     broker,
                     tcp_stats,
                     connection_stats,
@@ -4223,6 +4231,7 @@ async fn declare_uses_coordinator_effective_count() {
         let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
         handle_connection(
             server,
+            Some(peer),
             broker,
             tcp_stats,
             connection_stats,
@@ -5538,6 +5547,7 @@ async fn start_fanout_broker() -> (std::net::SocketAddr, Arc<Broker<StromaEngine
                 let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
                 let _ = handle_connection(
                     server,
+                    Some(peer),
                     broker,
                     tcp_stats,
                     connection_stats,

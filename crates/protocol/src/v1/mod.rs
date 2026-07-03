@@ -814,6 +814,12 @@ pub const ERR_INVALID: u16 = 400;
 /// deleted). Distinct from a transient owner transition: the client fails fast
 /// instead of retrying it across the publish budget.
 pub const ERR_NOT_FOUND: u16 = 404;
+/// The listener requires TLS and the client connected plaintext. Sent as a
+/// plaintext error frame (echoing the HELLO request id) before the server
+/// closes, so the client fails with a definitive "enable TLS" error instead
+/// of an unexplained disconnect. Distinct from certificate trust failures,
+/// which surface through the TLS handshake itself.
+pub const ERR_TLS_REQUIRED: u16 = 426;
 
 // ----- Header namespaces (shared by broker rejection + client guard) ---------
 

@@ -542,6 +542,28 @@ Conditions and limits:
 - Persistent broker data should be mounted under the configured data directory.
 - Admin auth should be enabled outside local protected environments.
 
+## Transport Security
+
+See also: [configuration](/configuration/) for the `tls` section fields.
+
+| Item | Status | Implemented surface |
+| --- | --- | --- |
+| TLS startup config (`tls` section) | Implemented | Config crate with env overrides and guided validation errors |
+| Broker listener TLS | Implemented | rustls acceptor on the protocol listener |
+| Operator-supplied PEM material | Implemented | `tls.cert_path` + `tls.key_path` |
+| Per-deployment generated material | Implemented | `tls.auto_self_signed`: CA + server cert under `<data_dir>/tls`, CA SHA-256 fingerprint printed at startup |
+| TLS/plaintext mismatch detection | Implemented | Both directions named at accept. A plaintext client on a TLS listener receives an error frame (code 426) instead of a bare close |
+| Client TLS options | Pending | Rust, TypeScript, and Python client support is in progress |
+| Admin dashboard HTTPS | Pending | Decided: served from the same `tls` material, `tls.admin_enabled = false` opts out. Wiring is in progress |
+| mTLS client auth | Planned | Reserved config surface, not wired |
+| Inter-broker replication TLS | Planned | Client-facing listeners first |
+
+Conditions and limits:
+
+- Certificate material is read once at startup, so replacing it requires a restart. Live reload and rotation are planned.
+- Generated self-signed material that a client does not verify defeats passive snooping only. Clients should trust the generated `ca.pem` or pin the printed fingerprint.
+- Fibril never ships certificates.
+
 ## Experimental Cluster and Replication Surface
 
 See also: [clustering](/concepts/clustering/) and
@@ -594,7 +616,7 @@ Conditions and limits:
 | Queue expiration (auto-delete idle queue) | Planned | Distinct from message TTL; needs global/coordinated idle tracking |
 | Log retention by age (truncate old messages) | Planned or undecided | Not currently exposed as a user feature |
 | Message purge (empty a queue) | Planned | Re-scoped: needs a replicated reset, not in-memory only |
-| Python client | Planned | Future client priority, including a blocking client |
-| C# client | Planned | Future client priority after Python |
-| Go client | Planned | Future client priority after C# |
-| Java client | Planned | Future client priority after Go |
+| Python client | Implemented | Full parity, async plus a blocking facade; see Client Surface |
+| Go client | Planned | Next client priority |
+| C# client | Planned | Future client priority |
+| Java client | Planned | Future client priority |

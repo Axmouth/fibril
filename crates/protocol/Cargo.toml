@@ -28,6 +28,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
 tokio = { version = "1", features = ["full"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 tracing = { version = "0.1", features = ["release_max_level_info"] }
 uuid = { version = "1.19", features = ["serde", "v4", "v7"] }

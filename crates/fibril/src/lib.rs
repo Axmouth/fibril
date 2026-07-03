@@ -35,8 +35,8 @@ use fibril_broker::{
     },
 };
 use fibril_config::{
-    CoordinationMode, GanglionAssignmentDurabilityMode, GanglionAssignmentDurabilitySection,
-    RecoveryMismatchMode, ServerConfig,
+    ConfigError, CoordinationMode, GanglionAssignmentDurabilityMode,
+    GanglionAssignmentDurabilitySection, RecoveryMismatchMode, ServerConfig,
 };
 use fibril_coordination_ganglion::{
     ClientTopology, ClusterRuntimeSettingsUpdateOutcome, ControllerStatus, ForwardedWritePolicy,
@@ -54,6 +54,10 @@ use fibril_protocol::v1::{
 };
 use fibril_util::StaticAuthHandler;
 use ganglion::{TcpRaftServer, WireFormat, WireFormatParseError, openraft::BasicNode};
+
+pub mod tls;
+
+use tls::{TlsMaterialSource, TlsSetupError};
 
 /// Map the startup config's runtime-seed section into the broker's
 /// `RuntimeSettings` (the initial cluster document before replicated overrides).
@@ -169,6 +173,10 @@ pub enum FibrilServerError {
     BrokerListener(#[source] ProtocolServerError),
     #[error("admin listener failed: {0}")]
     AdminListener(#[source] AdminServerError),
+    #[error("tls configuration: {0}")]
+    TlsConfig(#[source] ConfigError),
+    #[error(transparent)]
+    TlsSetup(#[from] TlsSetupError),
 }
 
 /// Drain controller for the admin endpoint: announces a planned restart to
@@ -1190,9 +1198,46 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         Duration::from_secs(10),
     );
 
+    let server_tls = tls::build_server_tls(
+        &config.tls.mode().map_err(FibrilServerError::TlsConfig)?,
+        &config.server.data_dir,
+        &tls::san_hosts_from_advertise(&config.broker_advertise_addresses()),
+    )?;
+    match &server_tls {
+        Some(tls::ServerTls {
+            source:
+                TlsMaterialSource::Generated {
+                    dir,
+                    ca_fingerprint,
+                },
+            ..
+        }) => {
+            tracing::info!(
+                "TLS enabled with per-deployment generated material at {}. CA SHA-256 \
+                 fingerprint: {ca_fingerprint}. Clients trust {}/ca.pem or pin the \
+                 fingerprint",
+                dir.display(),
+                dir.display()
+            );
+        }
+        Some(_) => tracing::info!("TLS enabled with operator-supplied certificate"),
+        None => {}
+    }
+    if config.tls.admin_tls() {
+        // Admin HTTPS is decided but not wired yet: same material, admin
+        // listener, tracked with the dashboard setup work.
+        tracing::warn!(
+            "tls.enabled covers the admin dashboard by design, but admin HTTPS is not \
+             served yet in this build: the dashboard remains plain HTTP. Set \
+             tls.admin_enabled = false to silence this until it lands"
+        );
+    }
+    let tls_acceptor = server_tls.map(|tls| tls.acceptor);
+
     let broker_server_fut = async move {
         run_protocol_server(
             config.broker.listener.bind,
+            tls_acceptor,
             broker.clone(),
             tcp_metrics,
             connection_metrics,
