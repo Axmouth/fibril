@@ -7814,3 +7814,112 @@ async fn stream_registry_opens_caches_routes_and_closes() {
     broker.close_stream("sensors", 0);
     assert!(!broker.is_stream("sensors", 0));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_fanout_stress_10k() {
+    stream_fanout_stress(10_000, 6).await;
+}
+
+// Only on `--release` builds
+#[cfg(not(debug_assertions))]
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_fanout_stress_100k() {
+    stream_fanout_stress(100_000, 8).await;
+}
+
+#[cfg(not(debug_assertions))]
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_fanout_stress_1m() {
+    stream_fanout_stress(1_000_000, 4).await;
+}
+
+/// Stream counterpart of `stress_single_consumer`: publish `total` records
+/// through the pipelined path and fan them out to a mix of subscribers, then
+/// verify every subscriber saw exactly its expected records in offset order.
+/// Every second subscriber filters to half the records and every third is a
+/// slow consumer (tiny buffer plus periodic stalls), so the publisher outruns
+/// them and the lag eviction plus watermark re-attach recovery path is
+/// exercised continuously, not just the happy live path.
+async fn stream_fanout_stress(total: usize, subscribers: usize) {
+    use fibril_broker::stream::{StreamFilter, SubscribeStart};
+
+    let (broker, _dir) = open_test_broker().await;
+    let ch = broker
+        .get_or_open_stream(
+            "plexus-stress",
+            0,
+            fibril_broker::stream::StreamDurability::Durable,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let mut drivers = Vec::new();
+    let mut collectors = Vec::new();
+    for i in 0..subscribers {
+        let filtered = i % 2 == 1;
+        let slow = i % 3 == 2;
+        let filter = filtered.then(|| StreamFilter::from_pairs([("half", "a")]));
+        let expected_len = if filtered { total.div_ceil(2) } else { total };
+        let (tx, mut rx) = tokio::sync::mpsc::channel(if slow { 1 } else { 64 });
+        drivers.push(tokio::spawn({
+            let ch = ch.clone();
+            async move {
+                ch.run_subscription(SubscribeStart::Earliest, filter, tx)
+                    .await
+            }
+        }));
+        collectors.push(tokio::spawn(async move {
+            let mut got: Vec<Offset> = Vec::with_capacity(expected_len);
+            while got.len() < expected_len {
+                match rx.recv().await {
+                    Some(record) => got.push(record.offset),
+                    None => break,
+                }
+                if slow && got.len() % 256 == 0 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+            got
+        }));
+    }
+
+    let mut last_confirm = None;
+    for i in 0..total {
+        let mut extra = HashMap::new();
+        extra.insert(
+            "half".to_string(),
+            if i % 2 == 0 { "a" } else { "b" }.to_string(),
+        );
+        let headers = MessageHeaders {
+            published: 0,
+            publish_received: 0,
+            content_type: None,
+            extra,
+        };
+        let confirm = ch
+            .publish_pipelined(headers, format!("r{i}").into_bytes())
+            .await
+            .unwrap();
+        last_confirm = Some(confirm);
+    }
+    // The pipeline is FIFO, so the last confirm covers the whole burst.
+    last_confirm.unwrap().await.unwrap().unwrap();
+
+    for (i, collector) in collectors.into_iter().enumerate() {
+        let got = tokio::time::timeout(Duration::from_secs(120), collector)
+            .await
+            .unwrap_or_else(|_| panic!("subscriber {i} did not finish"))
+            .unwrap();
+        let filtered = i % 2 == 1;
+        let expected: Vec<Offset> = if filtered {
+            (0..total as u64).step_by(2).collect()
+        } else {
+            (0..total as u64).collect()
+        };
+        assert_eq!(got, expected, "subscriber {i} sequence mismatch");
+    }
+    for driver in drivers {
+        driver.abort();
+    }
+}

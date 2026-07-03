@@ -8,8 +8,11 @@ and STREAM_PARITY_AUDIT.md (parity, P1-P5). Perf outcome: no server-side
 knee (3.2M records/s fan-out at p50 1ms once the bench client was split
 across processes), SF1 chain batching measured neutral and parked on branch
 perf-stream-batching. P3 lag gap-skip is FIXED (168b44d, contiguous
-delivery with watermark re-attach). Open: the concurrent-declare 500 race,
-P1 eviction, P2 metrics, P4/P5.
+delivery with watermark re-attach). The concurrent-declare 500 race is FIXED
+(keratin 32f5962, shared temp file in the kind marker write). A parametrized
+stream fan-out stress suite now mirrors the queue stress conventions (10k
+always, 100k/1M release-only, slow consumers and filters mixed in). Open: P1
+eviction, P2 metrics, P4/P5.
 
 ## Release state (2026-07-03)
 

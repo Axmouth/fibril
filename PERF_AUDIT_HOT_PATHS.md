@@ -314,8 +314,12 @@ subscriptions, worth remembering when reading any mixed-mode fan-out number.
 - SF6 (found by the split-run harness): concurrent identical stream declares
   race to a 500 `declare plexus failed` instead of converging idempotently.
   Three of four processes declaring the same stream config at the same
-  moment failed. Queue-side declare should be checked for the same race.
-  Correctness/robustness, not perf. Status: OPEN (task filed).
+  moment failed. Root cause was a shared temp file in the stroma partition
+  kind marker write (the first rename consumed it). Fixed in keratin with a
+  unique temp name per writer plus an idempotent short-circuit, with a
+  barrier-aligned concurrent regression test. Queue declares never write
+  markers, so the queue path was not exposed. Status: DONE (keratin
+  32f5962).
 
 ## Windows performance notes (clues, not yet measured)
 
