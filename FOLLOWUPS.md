@@ -30,7 +30,10 @@ events and policies).
   Reverting instead is: delete the branch, retag 0315a3a.
 - Cross-repo: ganglion and keratin have changelogs now (Unreleased-only, no
   tags yet) but still need their own release.sh and version model so the
-  overlord drives them.
+  overlord drives them. When each cuts its first tag, write a first-release
+  baseline paragraph like fibril's 0.2.0 entry, mining
+  archive/replication-sharding-plan/ (the worklog there tracks far more than
+  replication) for what accumulated in each repo.
 - Changelog policy: CHANGELOG.md is the single history record (also each
   GitHub release body). The roadmap stays forward-looking and the
   implemented-surface page stays the what-exists inventory. No parallel
