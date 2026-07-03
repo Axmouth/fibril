@@ -29,6 +29,17 @@ enabled = false
 username = "fibril"
 # password = "change-me"
 
+[tls]
+enabled = false
+# Supply your own PEM files:
+# cert_path = "/etc/fibril/tls/server.pem"
+# key_path = "/etc/fibril/tls/server.key"
+# Or generate per-deployment material under <data_dir>/tls on first boot:
+# auto_self_signed = true
+# The admin dashboard serves HTTPS from the same material when TLS is
+# enabled. Opt it out when a reverse proxy terminates TLS for the dashboard:
+# admin_enabled = false
+
 [storage.keratin]
 fsync_interval_ms = 5
 # Floor between storage commits while the fsync worker is idle. 0 self-clocks
@@ -124,6 +135,11 @@ These fields are read on process start.
 | `admin.auth.enabled` | `FIBRIL_ADMIN_AUTH_ENABLED` | `--admin-auth-enabled` | `false` |
 | `admin.auth.username` | `FIBRIL_ADMIN_USERNAME` | `--admin-username` | `fibril` |
 | `admin.auth.password` | `FIBRIL_ADMIN_PASSWORD` | `--admin-password` | unset |
+| `tls.enabled` | `FIBRIL_TLS_ENABLED` | none | `false` |
+| `tls.cert_path` | `FIBRIL_TLS_CERT_PATH` | none | unset |
+| `tls.key_path` | `FIBRIL_TLS_KEY_PATH` | none | unset |
+| `tls.auto_self_signed` | `FIBRIL_TLS_AUTO_SELF_SIGNED` | none | `false` |
+| `tls.admin_enabled` | `FIBRIL_TLS_ADMIN_ENABLED` | none | follows `tls.enabled` |
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.min_fsync_interval_ms` | `FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS` | `--keratin-min-fsync-interval-ms` | `0` |
 | `storage.keratin.message_log.segment_max_bytes` | `FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES` | `--keratin-message-log-segment-max-bytes` | `268435456` |
@@ -174,6 +190,17 @@ and `ignore` truncates to the last valid record. See
 
 `admin.auth.enabled = true` requires both `admin.auth.username` and `admin.auth.password`.
 The admin password is intentionally not shown in the dashboard startup summary.
+
+`tls.enabled = true` serves TLS on the broker listener and the admin dashboard
+from one certificate. Supply PEM files with `tls.cert_path` and `tls.key_path`,
+or set `tls.auto_self_signed = true` to generate a per-deployment CA and server
+certificate under `<data_dir>/tls` on first boot. The CA fingerprint is printed
+at startup so clients can pin or trust it - self-signed material a client does
+not verify defeats passive snooping only. Fibril never ships certificates.
+`tls.admin_enabled = false` keeps the dashboard on plain HTTP for deployments
+where a reverse proxy terminates TLS in front of it. Certificate material is
+read once at startup, so replacing it requires a restart (live reload and
+rotation are planned).
 
 `storage.keratin.message_log.segment_max_bytes` and `storage.keratin.event_log.segment_max_bytes` are rollover thresholds. A segment rolls after an append crosses the configured size, so an individual segment can be slightly larger than this value.
 
@@ -327,6 +354,8 @@ Current validation rules:
 
 - `server.data_dir` must not be empty
 - when `admin.auth.enabled = true`, `admin.auth.username` and `admin.auth.password` must both be set
+- when `tls.enabled = true`, exactly one certificate source must be configured: both `tls.cert_path` and `tls.key_path`, or `tls.auto_self_signed = true`
+- `tls.admin_enabled = true` requires `tls.enabled = true`
 - `storage.keratin.fsync_interval_ms` must be at least `1`
 - `storage.keratin.message_log.segment_max_bytes` must be at least `1`
 - `storage.keratin.event_log.segment_max_bytes` must be at least `1`

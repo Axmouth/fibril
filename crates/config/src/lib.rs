@@ -123,6 +123,7 @@ pub struct ServerConfig {
     pub server: ServerSection,
     pub broker: BrokerSection,
     pub admin: AdminSection,
+    pub tls: TlsSection,
     pub storage: StorageSection,
     pub runtime_seed: RuntimeSeedSection,
     pub runtime_locks: RuntimeLocksSection,
@@ -136,6 +137,7 @@ impl Default for ServerConfig {
             server: ServerSection::default(),
             broker: BrokerSection::default(),
             admin: AdminSection::default(),
+            tls: TlsSection::default(),
             storage: StorageSection::default(),
             runtime_seed: RuntimeSeedSection::default(),
             runtime_locks: RuntimeLocksSection::default(),
@@ -374,6 +376,21 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_PASSWORD")? {
             self.admin.auth.password = Some(value);
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_TLS_ENABLED")? {
+            self.tls.enabled = parse_env("FIBRIL_TLS_ENABLED", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_TLS_CERT_PATH")? {
+            self.tls.cert_path = Some(PathBuf::from(value));
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_TLS_KEY_PATH")? {
+            self.tls.key_path = Some(PathBuf::from(value));
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_TLS_AUTO_SELF_SIGNED")? {
+            self.tls.auto_self_signed = parse_env("FIBRIL_TLS_AUTO_SELF_SIGNED", &value)?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_TLS_ADMIN_ENABLED")? {
+            self.tls.admin_enabled = Some(parse_env("FIBRIL_TLS_ADMIN_ENABLED", &value)?);
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_FSYNC_INTERVAL_MS")? {
             self.storage.keratin.fsync_interval_ms =
                 parse_env("FIBRIL_KERATIN_FSYNC_INTERVAL_MS", &value)?;
@@ -518,6 +535,13 @@ impl ServerConfig {
                     "admin.auth.password must be set when admin auth is enabled",
                 ));
             }
+        }
+        self.tls.mode()?;
+        if self.tls.admin_enabled == Some(true) && !self.tls.enabled {
+            return Err(ConfigError::validation(
+                "tls.admin_enabled = true requires tls.enabled = true. The admin \
+                 listener serves TLS from the same tls section material",
+            ));
         }
         if self.runtime_seed.delivery.expiry_batch_max == 0 {
             return Err(ConfigError::validation(
@@ -761,6 +785,85 @@ impl Default for AdminAuthSection {
             username: "fibril".into(),
             password: None,
         }
+    }
+}
+
+/// TLS for the client-facing listeners. Startup config: material is loaded
+/// once at boot, and certificate reload or rotation is a planned follow-up.
+/// When enabled, the broker listener and the admin server both serve TLS
+/// from the same material unless `admin_enabled` opts the admin listener
+/// out (for deployments where a reverse proxy terminates TLS in front of
+/// the dashboard while the broker speaks TLS directly).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct TlsSection {
+    pub enabled: bool,
+    /// PEM certificate chain, leaf first. Set together with `key_path`.
+    pub cert_path: Option<PathBuf>,
+    /// PEM private key for the certificate.
+    pub key_path: Option<PathBuf>,
+    /// Generate a per-deployment CA and server certificate under
+    /// `<server.data_dir>/tls` on first boot instead of supplying PEMs. The
+    /// CA fingerprint is printed at startup so clients can pin or trust it.
+    /// Unverified self-signed material defeats passive snooping only.
+    pub auto_self_signed: bool,
+    /// TLS on the admin listener. Unset follows `enabled`.
+    pub admin_enabled: Option<bool>,
+}
+
+/// The certificate source resolved from a validated [`TlsSection`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TlsMode {
+    Disabled,
+    /// Operator-supplied PEM files.
+    Provided {
+        cert_path: PathBuf,
+        key_path: PathBuf,
+    },
+    /// Per-deployment generated material under the data dir.
+    AutoSelfSigned,
+}
+
+impl TlsSection {
+    /// Resolve the certificate source. When disabled, staged paths are
+    /// ignored so material can be configured ahead of turning TLS on.
+    pub fn mode(&self) -> ConfigResult<TlsMode> {
+        if !self.enabled {
+            return Ok(TlsMode::Disabled);
+        }
+        if self.auto_self_signed {
+            if self.cert_path.is_some() || self.key_path.is_some() {
+                return Err(ConfigError::validation(
+                    "tls.auto_self_signed = true conflicts with tls.cert_path and \
+                     tls.key_path. Remove the paths to generate per-deployment \
+                     material, or drop auto_self_signed to use the supplied files",
+                ));
+            }
+            return Ok(TlsMode::AutoSelfSigned);
+        }
+        match (self.cert_path.clone(), self.key_path.clone()) {
+            (Some(cert_path), Some(key_path)) => Ok(TlsMode::Provided {
+                cert_path,
+                key_path,
+            }),
+            (None, None) => Err(ConfigError::validation(
+                "tls.enabled = true but no certificate source is configured. \
+                 Either set tls.cert_path and tls.key_path to your PEM files, or \
+                 set tls.auto_self_signed = true to generate per-deployment \
+                 material under <data_dir>/tls on first boot. See \
+                 https://fibril.sh/configuration/ for both paths",
+            )),
+            _ => Err(ConfigError::validation(
+                "tls.cert_path and tls.key_path must both be set to serve TLS \
+                 from supplied PEM files",
+            )),
+        }
+    }
+
+    /// Whether the admin server serves HTTPS. Follows `enabled` unless
+    /// `admin_enabled` overrides it.
+    pub fn admin_tls(&self) -> bool {
+        self.enabled && self.admin_enabled.unwrap_or(true)
     }
 }
 
@@ -1414,6 +1517,9 @@ mod tests {
         assert!(!config.admin.auth.enabled);
         assert_eq!(config.admin.auth.username, "fibril");
         assert_eq!(config.admin.auth.password, None);
+        assert_eq!(config.tls, TlsSection::default());
+        assert_eq!(config.tls.mode().unwrap(), TlsMode::Disabled);
+        assert!(!config.tls.admin_tls());
         assert_eq!(config.storage.keratin.fsync_interval_ms, 5);
         assert_eq!(
             config.storage.keratin.message_log.segment_max_bytes,
@@ -1929,6 +2035,140 @@ mod tests {
             err.to_string()
                 .contains("storage.keratin.event_log.segment_max_bytes")
         );
+    }
+
+    #[test]
+    fn tls_provided_paths_resolve_and_cover_admin_by_default() {
+        let config = ServerConfig::from_toml_str(
+            r#"
+            [tls]
+            enabled = true
+            cert_path = "/etc/fibril/tls/server.pem"
+            key_path = "/etc/fibril/tls/server.key"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.tls.mode().unwrap(),
+            TlsMode::Provided {
+                cert_path: PathBuf::from("/etc/fibril/tls/server.pem"),
+                key_path: PathBuf::from("/etc/fibril/tls/server.key"),
+            }
+        );
+        assert!(config.tls.admin_tls());
+    }
+
+    #[test]
+    fn tls_admin_override_opts_the_admin_listener_out() {
+        let config = ServerConfig::from_toml_str(
+            r#"
+            [tls]
+            enabled = true
+            auto_self_signed = true
+            admin_enabled = false
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.tls.mode().unwrap(), TlsMode::AutoSelfSigned);
+        assert!(!config.tls.admin_tls());
+    }
+
+    #[test]
+    fn tls_enabled_without_a_source_names_both_fixes() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [tls]
+            enabled = true
+            "#,
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("tls.cert_path and tls.key_path"));
+        assert!(message.contains("tls.auto_self_signed"));
+    }
+
+    #[test]
+    fn tls_rejects_auto_self_signed_combined_with_paths() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [tls]
+            enabled = true
+            auto_self_signed = true
+            cert_path = "/etc/fibril/tls/server.pem"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("conflicts"));
+    }
+
+    #[test]
+    fn tls_rejects_a_lone_cert_or_key_path() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [tls]
+            enabled = true
+            cert_path = "/etc/fibril/tls/server.pem"
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("must both be set"));
+    }
+
+    #[test]
+    fn tls_rejects_admin_enabled_without_tls_enabled() {
+        let err = ServerConfig::from_toml_str(
+            r#"
+            [tls]
+            admin_enabled = true
+            "#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("tls.enabled = true"));
+    }
+
+    #[test]
+    fn tls_disabled_ignores_staged_material() {
+        let config = ServerConfig::from_toml_str(
+            r#"
+            [tls]
+            enabled = false
+            cert_path = "/etc/fibril/tls/server.pem"
+            key_path = "/etc/fibril/tls/server.key"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.tls.mode().unwrap(), TlsMode::Disabled);
+        assert!(!config.tls.admin_tls());
+    }
+
+    #[test]
+    fn tls_env_overrides_apply() {
+        let mut config = ServerConfig::default();
+        config
+            .apply_env_from(|name| match name {
+                "FIBRIL_TLS_ENABLED" => Some(Ok("true".to_string())),
+                "FIBRIL_TLS_CERT_PATH" => Some(Ok("/env/server.pem".to_string())),
+                "FIBRIL_TLS_KEY_PATH" => Some(Ok("/env/server.key".to_string())),
+                "FIBRIL_TLS_ADMIN_ENABLED" => Some(Ok("false".to_string())),
+                _ => None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            config.tls.mode().unwrap(),
+            TlsMode::Provided {
+                cert_path: PathBuf::from("/env/server.pem"),
+                key_path: PathBuf::from("/env/server.key"),
+            }
+        );
+        assert!(!config.tls.admin_tls());
     }
 
     #[test]

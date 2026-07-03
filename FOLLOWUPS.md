@@ -16,12 +16,26 @@ Decided cert model:
   self-signed cert the client does not verify defeats passive snooping only.
 - Setup UX, both paths easy: a fibrilctl cert command and tryout/demo
   scripts staying one command via the auto path. The admin board shows TLS
-  setup status plus the guide as the floor. An APPLYING setup screen
-  ("choose auto or supply" that writes the choice) is a stretch goal with
-  two assessed cruxes to resolve first: the board must be reachable before
-  TLS is configured (degraded TLS-pending boot mode, admin on localhost
-  plaintext), and the board would gain the new capability of writing
-  startup config rather than runtime settings.
+  setup status plus the guide as the floor. Target by end of arc: the whole
+  TLS setup drivable from the dashboard in a few clicks, BYO or auto. The
+  two cruxes noted at design time now have assessed directions:
+  - Board reachability before TLS exists: a first-boot setup mode. When an
+    external opt-in (config or env) is set and no completed-setup marker is
+    recorded, the server starts only the admin listener (localhost-bound by
+    default) and the broker listener stays down until setup completes.
+    Completion records the marker, clearing it re-arms setup on the next
+    boot. Precedent: MinIO, Grafana first login, Portainer. Stronger than a
+    degraded plaintext-pending boot because no broker traffic can precede
+    the choice, and the external opt-in keeps automated env/config
+    deployments from ever blocking on a wizard. The marker is node-local
+    data-dir state, not the cluster-replicated settings document, because
+    TLS material is per-node.
+  - Board writing startup config: setup writes a dashboard-owned config
+    overlay in the data dir that boot layers below explicit file/env
+    config. Explicit config wins and the board shows the group as
+    config-managed in that case. BYO cert/key upload happens only in setup
+    mode over the localhost-bound listener. Applying should re-arm the
+    listeners in-process rather than demand a manual process restart.
 - Misconfiguration is loud and guided on BOTH sides: server logs a mini
   guide (admin board link, fibrilctl command, the concrete steps), and the
   client surfaces a SOLID TYPED ERROR from connect (not a log line)
@@ -49,8 +63,12 @@ same change, settings discipline for every knob):
    same solid error. Wire vectors are unaffected (TLS sits below framing).
 5. fibrilctl cert generate + the admin board setup screen and loud-guide
    errors.
-6. Admin server HTTPS: decide same-config TLS on axum or document a
-   reverse-proxy stance - decide during brick 1, do not leave undecided.
+6. Admin server HTTPS: decided in brick 1. The admin server serves HTTPS
+   from the same tls section material when enabled, with
+   tls.admin_enabled = false as the reverse-proxy opt-out. The dashboard
+   carries basic-auth credentials, so it is covered by default rather than
+   left plaintext next to an encrypted data plane. Implementation lands in
+   this brick.
 7. Later bricks, not this arc: inter-broker replication and ganglion raft
    TLS, mTLS client auth (#114), cert rotation.
 

@@ -12,6 +12,17 @@ enabled = false
 username = "fibril"
 # password = "change-me"
 
+[tls]
+enabled = false
+# Supply your own PEM files:
+# cert_path = "/etc/fibril/tls/server.pem"
+# key_path = "/etc/fibril/tls/server.key"
+# Or generate per-deployment material under <data_dir>/tls on first boot:
+# auto_self_signed = true
+# The admin dashboard serves HTTPS from the same material when TLS is
+# enabled. Opt it out when a reverse proxy terminates TLS for the dashboard:
+# admin_enabled = false
+
 [storage.keratin]
 fsync_interval_ms = 5
 # Floor between storage commits while the fsync worker is idle. 0 self-clocks
