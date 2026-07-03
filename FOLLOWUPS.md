@@ -47,7 +47,13 @@ events and policies).
 - delayed_publish_over_tcp_waits_until_not_before flaked once under a parallel
   full-suite run (passes solo and in 3 repeat full runs). Timing-sensitive
   deadline assertion, same class as the fixed follower-loop cancel race. Worth
-  a determinism pass if it recurs in CI.
+  a determinism pass if it recurs in CI. Two relatives were fixed after the
+  0.2.0 push surfaced them on the slow CI runners: the stream catalogue
+  placement test read the watch view before the async apply landed (now
+  asserts on the returned snapshot and waits on the watch), and the crash
+  recovery soak asserted ack durability after a plain shutdown that never
+  drains settles (now uses the graceful shutdown). Reproduce this class
+  locally with taskset 2-cpu pinning before patching.
 - Mass-expiry cost: the expiry worker now resolves expired offsets to delivery
   tags with one scan of the inflight records per pass. If a mass consumer
   die-off with a very large inflight set ever shows up as a pause, the lever
