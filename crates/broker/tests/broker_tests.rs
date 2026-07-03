@@ -7815,6 +7815,67 @@ async fn stream_registry_opens_caches_routes_and_closes() {
     assert!(!broker.is_stream("sensors", 0));
 }
 
+#[tokio::test]
+async fn idle_stream_channel_evicts_and_rematerializes() {
+    use fibril_broker::stream::SubscribeStart;
+
+    let (broker, _dir) = open_test_broker_with_cfg(BrokerConfig {
+        stream_idle_evict_after_ms: Some(100),
+        stream_idle_sweep_interval_ms: 25,
+        ..Default::default()
+    })
+    .await;
+    let ch = broker
+        .get_or_open_stream(
+            "sensors",
+            0,
+            fibril_broker::stream::StreamDurability::Durable,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let headers = MessageHeaders {
+        published: 0,
+        publish_received: 0,
+        content_type: None,
+        extra: Default::default(),
+    };
+    ch.publish(headers.clone(), b"a".to_vec()).await.unwrap();
+
+    // A live subscription pins the channel past the idle window.
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let driver = tokio::spawn({
+        let ch = ch.clone();
+        async move {
+            ch.run_subscription(SubscribeStart::Earliest, None, tx)
+                .await
+        }
+    });
+    assert_eq!(rx.recv().await.unwrap().offset, 0);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(broker.is_stream("sensors", 0));
+
+    // Without the subscription the sweep evicts once the window passes.
+    driver.abort();
+    drop(rx);
+    drop(ch);
+    let mut evicted = false;
+    for _ in 0..40 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if !broker.is_stream("sensors", 0) {
+            evicted = true;
+            break;
+        }
+    }
+    assert!(evicted, "idle stream channel was not evicted");
+
+    // Rematerialization preserves the durable log.
+    let ch = broker.route_stream("sensors", 0).await.unwrap();
+    assert_eq!(ch.head_tail().await.unwrap(), (0, 1));
+    assert_eq!(ch.publish(headers, b"b".to_vec()).await.unwrap(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn stream_fanout_stress_10k() {
     stream_fanout_stress(10_000, 6).await;

@@ -56,6 +56,15 @@ pub struct StreamRuntimeSettings {
     /// Cap on distinct cursors flushed in one commit batch; reaching it flushes
     /// immediately without waiting out the window.
     pub cursor_commit_max_batch: usize,
+    /// Enable evicting idle stream channels from memory (the idle queue
+    /// cleanup analog). Durable data stays in storage and the channel
+    /// rematerializes on next use.
+    pub idle_evict_enabled: bool,
+    /// How long a channel must sit with no live subscriptions and no use
+    /// before the sweep may evict it.
+    pub idle_evict_after_ms: u64,
+    /// Sweep cadence for the stream idle eviction worker.
+    pub idle_sweep_interval_ms: u64,
 }
 
 impl Default for StreamRuntimeSettings {
@@ -63,6 +72,9 @@ impl Default for StreamRuntimeSettings {
         Self {
             cursor_commit_window_us: 100,
             cursor_commit_max_batch: 1024,
+            idle_evict_enabled: false,
+            idle_evict_after_ms: 600_000,
+            idle_sweep_interval_ms: 60_000,
         }
     }
 }
@@ -496,6 +508,11 @@ impl BrokerConfig {
             default_partition_count: settings.partitioning.default_partition_count,
             stream_cursor_commit_window_us: settings.stream.cursor_commit_window_us,
             stream_cursor_commit_max_batch: settings.stream.cursor_commit_max_batch,
+            stream_idle_evict_after_ms: settings
+                .stream
+                .idle_evict_enabled
+                .then_some(settings.stream.idle_evict_after_ms),
+            stream_idle_sweep_interval_ms: settings.stream.idle_sweep_interval_ms,
             default_consumer_target: settings.consumer_groups.default_target_per_consumer,
         }
     }

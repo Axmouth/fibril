@@ -362,6 +362,11 @@ pub struct BrokerConfig {
     pub delivery_poll_max_ms: u64,
     pub queue_idle_evict_after_ms: Option<u64>,
     pub queue_idle_sweep_interval_ms: u64,
+    /// Evict an idle stream channel (no live subscriptions, no recent use)
+    /// after this long. `None` disables, the queue eviction analog. Durable
+    /// data stays in stroma and `route_stream` rematerializes on next use.
+    pub stream_idle_evict_after_ms: Option<u64>,
+    pub stream_idle_sweep_interval_ms: u64,
     pub replication_confirm_timeout_ms: u64,
     pub replication_caught_up_poll_ms: u64,
     pub replication_retry_poll_ms: u64,
@@ -420,6 +425,8 @@ impl Default for BrokerConfig {
             delivery_poll_max_ms: 500,
             queue_idle_evict_after_ms: None,
             queue_idle_sweep_interval_ms: 60_000,
+            stream_idle_evict_after_ms: None,
+            stream_idle_sweep_interval_ms: 60_000,
             replication_confirm_timeout_ms: 5_000,
             replication_caught_up_poll_ms: 1_000,
             replication_retry_poll_ms: 100,
@@ -1471,6 +1478,11 @@ pub struct StreamStatsEntry {
     pub max_age_ms: Option<u64>,
     pub max_bytes: Option<u64>,
     pub max_records: Option<u64>,
+    /// Live subscription drivers currently attached.
+    pub live_subscriptions: usize,
+    /// Times a subscriber overflowed its live buffer and went through lag
+    /// recovery (the stream analog of a growing queue backlog).
+    pub lag_evictions: u64,
 }
 
 /// The stream observability and declare surface the admin server needs, kept as a
@@ -1608,12 +1620,20 @@ impl<
         // expiry worker: keeps Stroma turning inflight -> ready again
         Self::spawn_expiry_worker(this.clone());
         Self::spawn_queue_eviction_worker(this.clone());
+        Self::spawn_stream_eviction_worker(this.clone());
 
         this
     }
 
     pub fn engine(&self) -> E {
         (*self.engine).clone()
+    }
+
+    /// Broker traffic counters, when metrics are enabled. Stream publish and
+    /// delivery paths count through this so stream-only workloads show up in
+    /// the same rates as queues.
+    pub fn broker_metrics(&self) -> Option<&Arc<BrokerStats>> {
+        self.metrics.as_ref()
     }
 
     pub fn stroma_metrics(&self) -> Arc<StromaMetrics> {
@@ -1692,6 +1712,7 @@ impl<
         for ch in channels {
             let (head, tail) = ch.head_tail().await.unwrap_or((0, 0));
             let retention = ch.retention();
+            let (_, live_subscriptions) = ch.idle_snapshot();
             out.push(StreamStatsEntry {
                 topic: ch.topic().to_string(),
                 partition: ch.partition(),
@@ -1701,6 +1722,8 @@ impl<
                 max_age_ms: retention.and_then(|r| r.max_age_ms),
                 max_bytes: retention.and_then(|r| r.max_bytes),
                 max_records: retention.and_then(|r| r.max_records),
+                live_subscriptions,
+                lag_evictions: ch.lag_evictions(),
             });
         }
         out.sort_by(|a, b| a.topic.cmp(&b.topic).then(a.partition.cmp(&b.partition)));
@@ -1954,6 +1977,20 @@ impl<
         }
 
         tracing::debug!("All pending settles drained, proceeding with shutdown");
+
+        // Stream analog of the settle drain: make pending cursor advances
+        // durable so a planned restart loses no committed consumer progress.
+        let channels: Vec<Arc<StreamChannel>> =
+            self.streams.iter().map(|e| e.value().clone()).collect();
+        for ch in channels {
+            if let Err(err) = ch.flush_cursor_commits().await {
+                tracing::warn!(
+                    topic = ch.topic(),
+                    partition = ch.partition(),
+                    "stream cursor flush on shutdown failed: {err}"
+                );
+            }
+        }
 
         // Now stop tasks
         self.task_group.shutdown().await;
@@ -3786,6 +3823,77 @@ impl<
                     }
                 }
             });
+    }
+
+    /// Sweep idle stream channels out of memory, the stream analog of the queue
+    /// eviction worker. A channel is idle when it has no live subscription
+    /// drivers and no recent use. Dropping it cascades teardown (the cursor
+    /// committer flushes pending commits on close) and durable data stays in
+    /// stroma, so `route_stream` rematerializes it on next use. A publish
+    /// racing the sweep through an already-resolved channel handle still lands
+    /// durably in the log, and any future subscriber reads it from there, so
+    /// the race loses nothing.
+    fn spawn_stream_eviction_worker(broker: Arc<Self>) {
+        let broker_clone = broker.clone();
+        broker_clone
+            .task_group
+            .spawn("stream_eviction_worker", async move {
+                loop {
+                    let cfg = broker.config_snapshot();
+                    let Some(_) = cfg.stream_idle_evict_after_ms else {
+                        tokio::select! {
+                            biased;
+                            _ = broker.shutdown_queue_eviction.cancelled() => break,
+                            _ = broker.settings_changed.notified() => continue,
+                        }
+                    };
+                    let interval_ms = cfg.stream_idle_sweep_interval_ms.max(1);
+                    tokio::select! {
+                        biased;
+                        _ = broker.shutdown_queue_eviction.cancelled() => break,
+                        _ = broker.settings_changed.notified() => continue,
+                        _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
+                    }
+                    let Some(idle_for_ms) = broker.config_snapshot().stream_idle_evict_after_ms
+                    else {
+                        continue;
+                    };
+                    let now = unix_millis();
+                    let evicted = broker.evict_idle_streams(now, idle_for_ms);
+                    if evicted > 0 {
+                        tracing::debug!(
+                            "Stream eviction worker dropped {evicted} idle stream channels"
+                        );
+                    }
+                }
+            });
+    }
+
+    /// Remove and drop every stream channel idle for at least `idle_for_ms`
+    /// with no live subscriptions. Returns how many were evicted.
+    fn evict_idle_streams(&self, now: u64, idle_for_ms: u64) -> usize {
+        let candidates: Vec<QueueKey> = self
+            .streams
+            .iter()
+            .filter(|entry| {
+                let (last_used, subs) = entry.value().idle_snapshot();
+                subs == 0 && now.saturating_sub(last_used) >= idle_for_ms
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+        let mut evicted = 0;
+        for key in candidates {
+            // Re-check under the map entry so a subscriber or publish that
+            // arrived since the scan keeps the channel.
+            let removed = self.streams.remove_if(&key, |_, ch| {
+                let (last_used, subs) = ch.idle_snapshot();
+                subs == 0 && now.saturating_sub(last_used) >= idle_for_ms
+            });
+            if removed.is_some() {
+                evicted += 1;
+            }
+        }
+        evicted
     }
 
     fn spawn_expiry_worker(broker: Arc<Self>) {

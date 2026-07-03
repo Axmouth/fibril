@@ -70,6 +70,13 @@ in-memory ring (or the log when older), and rejoins it to the live tail once
 caught up. Records are never skipped mid-stream, so an auto-ack cursor can
 only advance along what was actually delivered. The one way a lagging
 consumer loses records is retention overtaking its position, as above.
+The admin streams page shows per-partition live subscription counts and how
+often a subscriber went through lag recovery.
+
+An idle stream channel (no live subscriptions, no recent publish) can be
+evicted from memory like an idle queue, controlled by the `stream` runtime
+settings (disabled by default). Durable data is untouched and the channel
+reopens transparently on next use.
 
 ## Durability tiers
 

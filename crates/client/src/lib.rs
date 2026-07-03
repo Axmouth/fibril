@@ -31,6 +31,7 @@
 
 use arc_swap::ArcSwap;
 use fibril_storage::{DeliveryTag, Partition};
+use fibril_util::net::TcpStream;
 use fibril_util::{UnixMillis, unix_millis};
 use futures::{SinkExt, StreamExt};
 use serde::{Serialize, de::DeserializeOwned};
@@ -46,7 +47,6 @@ use std::{
     },
     time::Instant,
 };
-use fibril_util::net::TcpStream;
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},

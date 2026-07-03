@@ -307,9 +307,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
     match cli.command {
         Command::Queue { command } => {
-            let broker_addr = cli.broker.clone().unwrap_or_else(|| {
-                connect_addr_for_bind(config.broker.listener.bind).to_string()
-            });
+            let broker_addr = cli
+                .broker
+                .clone()
+                .unwrap_or_else(|| connect_addr_for_bind(config.broker.listener.bind).to_string());
             let client = ClientOptions::new()
                 .auth(cli.username, cli.password)
                 .connect(broker_addr.clone())

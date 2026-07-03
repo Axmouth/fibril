@@ -107,8 +107,9 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
                 .consumer_groups
                 .default_target_per_consumer,
         },
-        // Cursor-commit microbatch knobs are runtime-tunable via the cluster
-        // settings document; the static seed uses the defaults.
+        // Stream knobs (cursor-commit microbatch, idle eviction) are
+        // runtime-tunable via the cluster settings document; the static seed
+        // uses the defaults.
         stream: StreamRuntimeSettings::default(),
     }
 }

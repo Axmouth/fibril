@@ -1085,7 +1085,11 @@ pub fn derive_advertise_from_peers(
     broker_port: u16,
 ) -> Option<String> {
     let entry = peers.get(&raft_node_id.to_string())?;
-    let host = entry.rsplit_once(':').map(|(h, _)| h).unwrap_or(entry).trim();
+    let host = entry
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(entry)
+        .trim();
     if host.is_empty() {
         return None;
     }

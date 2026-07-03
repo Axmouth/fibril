@@ -11,8 +11,12 @@ perf-stream-batching. P3 lag gap-skip is FIXED (168b44d, contiguous
 delivery with watermark re-attach). The concurrent-declare 500 race is FIXED
 (keratin 32f5962, shared temp file in the kind marker write). A parametrized
 stream fan-out stress suite now mirrors the queue stress conventions (10k
-always, 100k/1M release-only, slow consumers and filters mixed in). Open: P1
-eviction, P2 metrics, P4/P5.
+always, 100k/1M release-only, slow consumers and filters mixed in). P1, P2,
+P4, and P5 are all closed: idle eviction via the stream runtime settings plus
+an ephemeral flush dirty-gate, stream traffic in BrokerStats, shutdown cursor
+flush, and lag observability in stream stats and the admin page. Remaining
+stream deferrals live with the typed subscription-lifecycle surface (lag
+events and policies).
 
 ## Release state (2026-07-03)
 

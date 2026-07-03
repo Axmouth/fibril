@@ -20,8 +20,7 @@ use std::time::Duration;
 
 use fibril_broker::coordination::{
     Coordination, DeterministicPartitionPlacement, DeterministicStreamPlacement, NodeInfo,
-    QueueIdentity,
-    ReplicationDurabilityPolicy,
+    QueueIdentity, ReplicationDurabilityPolicy,
 };
 use fibril_broker::Partition;
 use fibril_coordination_ganglion::GanglionCoordination;

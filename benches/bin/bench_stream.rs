@@ -199,7 +199,9 @@ async fn main() {
             .connect(address)
             .await
             .unwrap();
-        let mut config = StreamConfig::new(&args.topic).unwrap().partitions(args.partitions);
+        let mut config = StreamConfig::new(&args.topic)
+            .unwrap()
+            .partitions(args.partitions);
         config = match args.durability {
             Durability::Durable => config.durable(),
             Durability::Speculative => config.speculative(),

@@ -37,14 +37,14 @@ worth a fresh pass.
     efficiency notes.
   - Next: the correctness spin-offs live elsewhere: lagged gap-skip (P3) and
     the concurrent-declare race in the task tracker.
-- [ ] Stream operational parity with queues
-  - Status: Audited
-  - Detail: [STREAM_PARITY_AUDIT.md](STREAM_PARITY_AUDIT.md). Five gaps
-    (idle eviction, broker traffic metrics, lagged gap-skip correctness,
-    shutdown cursor flush, lag observability), the rest shared, covered by
-    design, or not applicable.
-  - Next: P3 lag gap-skip first (correctness, coordinates with SF1), then
-    P1 eviction and P2 metrics as independent bricks, P4/P5 small.
+- [x] Stream operational parity with queues
+  - Status: Addressed
+  - Detail: [STREAM_PARITY_AUDIT.md](STREAM_PARITY_AUDIT.md). All five gaps
+    closed: lag gap-skip contiguity fix, idle eviction with an ephemeral
+    flush dirty-gate, stream traffic in BrokerStats, shutdown cursor flush,
+    and lag observability on the admin streams page.
+  - Next: lag notification client events and lag policies ride the typed
+    subscription-lifecycle surface (API freeze family).
 - [x] Runtime settings through Ganglion
   - Status: Addressed
   - Detail: [RUNTIME_SETTINGS_GANGLION_AUDIT.md](archive/replication-sharding-plan/RUNTIME_SETTINGS_GANGLION_AUDIT.md)

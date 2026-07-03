@@ -455,6 +455,17 @@ pub struct StreamChannel {
     /// worker so the writer never hits the kernel writeback cliff). Aborted on drop.
     /// `None` for other tiers, which fsync via their own durability handling.
     flush_task: Option<tokio::task::JoinHandle<()>>,
+    /// Wall-clock ms of the last external use (publish, subscribe, settle).
+    /// Feeds the broker's idle eviction sweep together with
+    /// `active_subscriptions`.
+    last_used_ms: std::sync::atomic::AtomicU64,
+    /// Live subscription drivers currently attached. A driver holds this for its
+    /// whole lifetime (across lag re-attaches), so eviction never tears down a
+    /// channel someone is reading.
+    active_subscriptions: std::sync::atomic::AtomicUsize,
+    /// Live-set evictions caused by full subscriber channels, mirrored out of
+    /// the fan-out actor for observability.
+    lag_evictions: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Drop for StreamChannel {
@@ -614,11 +625,15 @@ impl StreamChannel {
 
         let (cmd_tx, mut cmd_rx) = mpsc::channel(256);
         let mut fanout = StreamFanout::new(ring_capacity, tail);
+        let lag_evictions = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let lag_mirror = lag_evictions.clone();
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     FanoutCmd::Publish { record, resp } => {
                         fanout.publish(record);
+                        lag_mirror
+                            .store(fanout.lag_evictions(), std::sync::atomic::Ordering::Relaxed);
                         if let Some(resp) = resp {
                             let _ = resp.send(());
                         }
@@ -658,11 +673,14 @@ impl StreamChannel {
             _ => KDurability::AfterFsync,
         };
 
+        let flush_dirty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         // Opportunistically coalesce whatever is already queued into one append (no
         // timed wait): fewer appends mean less work, and keratin coalesces the rest.
         const MAX_BATCH: usize = 256;
         let ingest_engine = engine.clone();
         let ingest_tp = tp_arc.clone();
+        let ingest_dirty = flush_dirty.clone();
         tokio::spawn(async move {
             while let Some(first) = durable_ingest_rx.recv().await {
                 let mut batch = vec![first];
@@ -693,6 +711,7 @@ impl StreamChannel {
                     .await;
                 match enqueued {
                     Ok(enqueued) => {
+                        ingest_dirty.store(true, std::sync::atomic::Ordering::Release);
                         if durable_batch_tx
                             .send(DurableBatch {
                                 items,
@@ -818,11 +837,18 @@ impl StreamChannel {
         let flush_task = if durability == StreamDurability::Ephemeral {
             let flush_engine = engine.clone();
             let flush_tp = tp_arc.clone();
+            let flush_gate = flush_dirty.clone();
             Some(tokio::spawn(async move {
                 let mut tick = tokio::time::interval(EPHEMERAL_FLUSH_INTERVAL);
                 tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tick.tick().await;
+                    // Only sync when something was appended since the last
+                    // flush, so an idle channel costs a bare tick, not an
+                    // engine round-trip per tick.
+                    if !flush_gate.swap(false, std::sync::atomic::Ordering::AcqRel) {
+                        continue;
+                    }
                     if flush_engine.sync_stream(&flush_tp, part).await.is_err() {
                         break;
                     }
@@ -858,7 +884,32 @@ impl StreamChannel {
             durable_ingest_tx,
             cursor_commit_tx,
             flush_task,
+            last_used_ms: std::sync::atomic::AtomicU64::new(fibril_util::unix_millis()),
+            active_subscriptions: std::sync::atomic::AtomicUsize::new(0),
+            lag_evictions,
         })
+    }
+
+    fn touch(&self) {
+        self.last_used_ms.store(
+            fibril_util::unix_millis(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// `(last_used_ms, active_subscriptions)` for the idle eviction sweep.
+    pub fn idle_snapshot(&self) -> (u64, usize) {
+        (
+            self.last_used_ms.load(std::sync::atomic::Ordering::Relaxed),
+            self.active_subscriptions
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Live-set evictions caused by full subscriber channels (lag signal).
+    pub fn lag_evictions(&self) -> u64 {
+        self.lag_evictions
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The channel topic.
@@ -894,6 +945,7 @@ impl StreamChannel {
         headers: MessageHeaders,
         payload: Vec<u8>,
     ) -> Result<Offset, StromaError> {
+        self.touch();
         let offset = self
             .engine
             .append_stream_record(&self.tp, self.part, &headers, payload.clone())
@@ -923,6 +975,7 @@ impl StreamChannel {
         headers: MessageHeaders,
         payload: Vec<u8>,
     ) -> Result<oneshot::Receiver<Result<Offset, StromaError>>, StromaError> {
+        self.touch();
         let (confirm_tx, confirm_rx) = oneshot::channel();
         self.durable_ingest_tx
             .send(DurableIngest {
@@ -991,6 +1044,7 @@ impl StreamChannel {
     /// append per record. At-least-once is preserved: a crash before the next flush
     /// just re-delivers a bounded window, since the cursor only moves forward.
     pub async fn settle(&self, name: &str, offset: Offset) -> Result<(), StromaError> {
+        self.touch();
         self.cursor_commit_tx
             .send(CursorCommitMsg::Settle {
                 name: name.to_string(),
@@ -1031,6 +1085,12 @@ impl StreamChannel {
         filter: Option<StreamFilter>,
         sink: mpsc::Sender<Arc<StreamRecord>>,
     ) {
+        self.touch();
+        self.active_subscriptions
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let _active = ActiveSubscriptionGuard {
+            counter: &self.active_subscriptions,
+        };
         let mut watermark: Option<Offset> = None;
         loop {
             let attach_start = match watermark {
@@ -1057,6 +1117,19 @@ impl StreamChannel {
                 LegEnd::LiveEnded => continue,
             }
         }
+    }
+}
+
+/// Decrements the channel's active-subscription count when the driver ends,
+/// including on task abort.
+struct ActiveSubscriptionGuard<'a> {
+    counter: &'a std::sync::atomic::AtomicUsize,
+}
+
+impl Drop for ActiveSubscriptionGuard<'_> {
+    fn drop(&mut self) {
+        self.counter
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 

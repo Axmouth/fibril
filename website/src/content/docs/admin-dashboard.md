@@ -67,8 +67,10 @@ you do not begin at offset `0` on large queues unless you choose to.
 
 The streams page lists the [Plexus](/concepts/plexus-streams/) stream
 channels this broker is currently hosting, grouped by topic. Each partition row
-shows its head and tail offsets and how many records are retained, and the topic
-heading shows the declared durability tier and retention bound.
+shows its head and tail offsets, how many records are retained, its live
+subscription count, and how often a subscriber overflowed its live buffer and
+went through lag recovery. The topic heading shows the declared durability
+tier and retention bound.
 
 You can **create a stream** from the page: a topic, a partition count, a
 durability tier, and optional retention bounds (records, bytes, or age). A topic

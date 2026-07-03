@@ -1369,6 +1369,7 @@ async fn install_stream_subscription(
     let mut transport_rx = logical.transport.subscribe();
     let req_id_gen_clone = req_id_gen.clone();
     let metrics = metrics.clone();
+    let broker_stats = broker.broker_metrics().cloned();
     let topic = sub.topic.clone();
     let partition = sub.partition;
     let auto_ack = sub.auto_ack;
@@ -1407,6 +1408,9 @@ async fn install_stream_subscription(
                 tracing::warn!("Failed to send stream deliver frame to active transport");
                 metrics.error();
                 break;
+            }
+            if let Some(stats) = &broker_stats {
+                stats.delivered();
             }
             if auto_ack {
                 if let Some(name) = &durable_name {
@@ -1481,6 +1485,9 @@ async fn handle_stream_publish(
     // the same regardless of tier.
     match channel.publish_pipelined(msg_headers, payload).await {
         Ok(confirm_rx) => {
+            if let Some(stats) = broker.broker_metrics() {
+                stats.published();
+            }
             if require_confirm {
                 let tx = tx.clone();
                 let broker = broker.clone();

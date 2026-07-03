@@ -17,8 +17,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use clap::Parser;
@@ -181,9 +181,8 @@ async fn main() -> anyhow::Result<()> {
         if covered {
             break;
         }
-        let idle = Duration::from_millis(
-            unix_millis().saturating_sub(last_rx_ms.load(Ordering::Acquire)),
-        );
+        let idle =
+            Duration::from_millis(unix_millis().saturating_sub(last_rx_ms.load(Ordering::Acquire)));
         if idle >= drain_idle {
             break;
         }
@@ -201,12 +200,19 @@ async fn main() -> anyhow::Result<()> {
         .copied()
         .collect();
     let phantom: Vec<u64> = received_keys.difference(&attempted).copied().collect();
-    let duplicates: u64 = received.values().filter(|&&c| c > 1).map(|&c| (c - 1) as u64).sum();
+    let duplicates: u64 = received
+        .values()
+        .filter(|&&c| c > 1)
+        .map(|&c| (c - 1) as u64)
+        .sum();
     let unconfirmed_delivered = received_keys.difference(&confirmed_snapshot).count();
 
     println!("=== identity failover verification ===");
     println!("attempted:            {}", attempted.len());
-    println!("send_failures:        {}", send_failures.load(Ordering::Relaxed));
+    println!(
+        "send_failures:        {}",
+        send_failures.load(Ordering::Relaxed)
+    );
     println!("confirmed (durable):  {}", confirmed_snapshot.len());
     println!("received unique ids:  {}", received_keys.len());
     println!("duplicate deliveries: {duplicates}");
@@ -230,5 +236,9 @@ async fn main() -> anyhow::Result<()> {
             "FAIL - durability/correctness violated"
         }
     );
-    if verdict { Ok(()) } else { std::process::exit(1) }
+    if verdict {
+        Ok(())
+    } else {
+        std::process::exit(1)
+    }
 }

@@ -10,11 +10,11 @@ PERF_AUDIT_HOT_PATHS.md.
 
 | Area | Queues | Streams | Verdict |
 | --- | --- | --- | --- |
-| Idle eviction | `QueueActivity` leases, eviction worker, `queue_idle_evict_after_ms` | none: every opened channel plus its 4-5 tasks and ring stays resident forever | GAP (P1) |
-| Broker traffic metrics | `published_many` / `delivered_many` / `redelivered_many` into `BrokerStats` | stream publish and fan-out delivery never touch `BrokerStats` | GAP (P2) |
+| Idle eviction | `QueueActivity` leases, eviction worker, `queue_idle_evict_after_ms` | fixed: activity signal plus sweep worker via the `stream` runtime settings, plus a dirty-gate on the ephemeral flush ticker | FIXED (P1) |
+| Broker traffic metrics | `published_many` / `delivered_many` / `redelivered_many` into `BrokerStats` | fixed: publish and delivery paths count into `BrokerStats` | FIXED (P2) |
 | Lag safety under overload | credit-based backpressure, no loss | fixed: eviction plus watermark re-attach keeps delivery contiguous, auto-ack can only settle delivered records | FIXED (P3, 168b44d) |
-| Graceful shutdown | waits for pending settles to drain | `flush_cursor_commits` exists but no shutdown path calls it, pending cursor window can be lost on planned restart | GAP (P4, small) |
-| Lag observability | n/a (credit model) | `lagged` flag is set but never read outside tests, not surfaced in streams_debug | GAP (P5, small) |
+| Graceful shutdown | waits for pending settles to drain | fixed: graceful shutdown flushes pending cursor commits per channel | FIXED (P4) |
+| Lag observability | n/a (credit model) | fixed: per-partition live subscription count and lag recovery counter in stream stats and the admin streams page | FIXED (P5) |
 | Reconnect grace (transport swap) | delivery re-targets the live transport | same, `send_to_current_transport` with the transport watch | OK |
 | Resubscribe across full reconnect | broker-side reconcile registry | client-side by design: fan-in supervisor plus durable-cursor resume, deliberately not in the reconcile registry | OK by design |
 | Cold start and failover reconciliation | #101 machinery | `apply_stream_assignment_transition`, lazy materialization from coordination config, promote-to-local-tail | OK |
@@ -88,5 +88,6 @@ queue backlog.
 
 ## Suggested order
 
-P3 first (correctness) - done. Then P1 and P2 as independent bricks, then P4
-and P5 as small follow-ups.
+All five gaps are closed: P3 (168b44d), then P1, P2, P4, and P5 in one parity
+pass. The lag notification client events and lag policies remain deferred to
+the typed subscription-lifecycle surface.

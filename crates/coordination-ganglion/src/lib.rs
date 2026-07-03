@@ -11,17 +11,17 @@
 use std::{collections::HashMap, time::Duration};
 
 use fibril_broker::coordination::{
-    ClusterCohortController, CohortPlan, ConsumerGroupKey, Coordination, CoordinationSnapshot,
-    CoordinationStream, DeterministicStreamPlacement, GlobalCohortMembership,
-    LocalCohortMembership, NodeInfo, PartitionAssignment, PartitionPlacementError,
-    PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity, ReplicationDurabilityPolicy,
-    StreamAssignment, StreamIdentity, StreamPlacementInput, StreamPlacementPolicy,
-    aggregate_cohort_membership,
+    aggregate_cohort_membership, ClusterCohortController, CohortPlan, ConsumerGroupKey,
+    Coordination, CoordinationSnapshot, CoordinationStream, DeterministicStreamPlacement,
+    GlobalCohortMembership, LocalCohortMembership, NodeInfo, PartitionAssignment,
+    PartitionPlacementError, PartitionPlacementInput, PartitionPlacementPolicy, QueueIdentity,
+    ReplicationDurabilityPolicy, StreamAssignment, StreamIdentity, StreamPlacementInput,
+    StreamPlacementPolicy,
 };
 use fibril_storage::Partition;
 use ganglion_openraft::{
-    MetadataRaftCommand, MetadataRaftResponse, MetadataRejection, OpenraftAdapterError,
-    RaftMetadataNode, RemoteWriteError, WireFormat, client_write_remote_with_hint,
+    client_write_remote_with_hint, MetadataRaftCommand, MetadataRaftResponse, MetadataRejection,
+    OpenraftAdapterError, RaftMetadataNode, RemoteWriteError, WireFormat,
 };
 use tokio::sync::watch;
 
@@ -2248,7 +2248,10 @@ impl GanglionCoordination {
                     partition: assignment.queue.partition,
                     group,
                     owner_node_id: assignment.owner.clone(),
-                    owner_endpoints: endpoints.get(&assignment.owner).cloned().unwrap_or_default(),
+                    owner_endpoints: endpoints
+                        .get(&assignment.owner)
+                        .cloned()
+                        .unwrap_or_default(),
                     partitioning_version: part.partitioning_version,
                     partition_count: part.partition_count,
                 }
@@ -2281,7 +2284,10 @@ impl GanglionCoordination {
                     topic: assignment.stream.topic.to_string(),
                     partition: assignment.stream.partition,
                     owner_node_id: assignment.owner.clone(),
-                    owner_endpoints: endpoints.get(&assignment.owner).cloned().unwrap_or_default(),
+                    owner_endpoints: endpoints
+                        .get(&assignment.owner)
+                        .cloned()
+                        .unwrap_or_default(),
                     partitioning_version,
                     partition_count,
                 }
@@ -2568,14 +2574,18 @@ mod advertise_tests {
     fn node_with_label(endpoint: &str, advertise: Option<&str>) -> ganglion_core::NodeInfo {
         let mut node = ganglion_core::NodeInfo::new("n1".to_string(), endpoint.to_string(), None);
         if let Some(raw) = advertise {
-            node.labels.insert(ADVERTISE_LABEL.to_string(), raw.to_string());
+            node.labels
+                .insert(ADVERTISE_LABEL.to_string(), raw.to_string());
         }
         node
     }
 
     #[test]
     fn advertise_label_roundtrips() {
-        let addrs = vec!["broker-1:9876".to_string(), "public.example:9876".to_string()];
+        let addrs = vec![
+            "broker-1:9876".to_string(),
+            "public.example:9876".to_string(),
+        ];
         assert_eq!(decode_advertise(&encode_advertise(&addrs)), addrs);
         // Malformed or empty -> empty, never a panic (advisory data).
         assert!(decode_advertise("not json").is_empty());
@@ -2589,7 +2599,10 @@ mod advertise_tests {
         );
         assert_eq!(
             node_advertise_endpoints(&node),
-            vec!["broker-1:9876".to_string(), "public.example:9876".to_string()]
+            vec![
+                "broker-1:9876".to_string(),
+                "public.example:9876".to_string()
+            ]
         );
     }
 
@@ -2810,7 +2823,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use ganglion_openraft::{InProcessRouter, default_raft_config};
+    use ganglion_openraft::{default_raft_config, InProcessRouter};
 
     fn unique_dir(tag: &str) -> std::path::PathBuf {
         let nanos = std::time::SystemTime::now()

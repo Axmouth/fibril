@@ -18,7 +18,7 @@ use crossterm::{
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 use fibril_protocol::v1::{
-    Ack, AssignmentChanged, Auth, DeclareQueue, DeliveryTag, Deliver, ErrorMsg, Hello, Nack, Op,
+    Ack, AssignmentChanged, Auth, DeclareQueue, Deliver, DeliveryTag, ErrorMsg, Hello, Nack, Op,
     PROTOCOL_V1, Partition, Pong, Publish, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
     TopologyUpdateAck,
     frame::{Frame, ProtoCodec},
@@ -39,7 +39,10 @@ use tokio_util::codec::Framed;
 
 /// Live visualizer of real Fibril traffic and partition routing.
 #[derive(Debug, Clone, Parser)]
-#[command(name = "fibril-tui", about = "Live Fibril traffic + partition visualizer")]
+#[command(
+    name = "fibril-tui",
+    about = "Live Fibril traffic + partition visualizer"
+)]
 struct Args {
     /// Broker address to connect to.
     #[arg(long, default_value = "127.0.0.1:9876")]
@@ -185,7 +188,9 @@ impl Control {
     }
 
     fn is_alive(&self, client: usize) -> bool {
-        self.alive.get(client).is_none_or(|a| a.load(Ordering::Relaxed))
+        self.alive
+            .get(client)
+            .is_none_or(|a| a.load(Ordering::Relaxed))
     }
 
     fn set_alive(&self, client: usize, alive: bool) {
@@ -405,7 +410,12 @@ fn compute_layout(area: Rect, clients: usize, partitions: u32) -> Layout {
     Layout {
         client_boxes: lay(clients, client_x),
         lane_boxes: lay(partitions as usize, lane_x),
-        hud: Rect::new(area.x + 1, area.y + area.height.saturating_sub(hud_h), area.width.saturating_sub(2), hud_h),
+        hud: Rect::new(
+            area.x + 1,
+            area.y + area.height.saturating_sub(hud_h),
+            area.width.saturating_sub(2),
+            hud_h,
+        ),
     }
 }
 
@@ -514,8 +524,14 @@ fn draw_ui(f: &mut ratatui::Frame, app: &App) {
 
 fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let m = &app.metrics;
-    let p50 = m.percentile(50.0).map(|v| format!("{v}ms")).unwrap_or_else(|| "-".into());
-    let p99 = m.percentile(99.0).map(|v| format!("{v}ms")).unwrap_or_else(|| "-".into());
+    let p50 = m
+        .percentile(50.0)
+        .map(|v| format!("{v}ms"))
+        .unwrap_or_else(|| "-".into());
+    let p99 = m
+        .percentile(99.0)
+        .map(|v| format!("{v}ms"))
+        .unwrap_or_else(|| "-".into());
     let lines = vec![
         Line::from(vec![
             Span::styled("fibril viz  ", Style::default().fg(Color::Cyan)),
@@ -525,7 +541,11 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 app.clients,
                 app.broker_count,
                 app.partitions,
-                if app.repartitioning { " (repartitioning...)" } else { "" },
+                if app.repartitioning {
+                    " (repartitioning...)"
+                } else {
+                    ""
+                },
                 app.topic,
                 match &app.cohort {
                     Some(g) => format!("  cohort {g}"),
@@ -535,7 +555,13 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ]),
         Line::from(format!(
             "published {} ({:.0}/s)   confirmed {} ({:.0}/s)   delivered {} ({:.0}/s)   errors {}",
-            m.published, m.pub_rate, m.confirmed, m.confirm_rate, m.delivered, m.deliver_rate, m.errors
+            m.published,
+            m.pub_rate,
+            m.confirmed,
+            m.confirm_rate,
+            m.delivered,
+            m.deliver_rate,
+            m.errors
         )),
         Line::from(format!(
             "in-flight (animating) {}   publish->deliver p50 {}  p99 {}",
@@ -547,7 +573,11 @@ fn draw_hud(f: &mut ratatui::Frame, app: &App, area: Rect) {
             "rate {:.0}/s   confirm {}   routing {}   focus client {}   paused {}/{}",
             app.control.rate_per_sec(),
             if app.control.confirm() { "on" } else { "off" },
-            if app.control.keyed() { "keyed" } else { "round-robin" },
+            if app.control.keyed() {
+                "keyed"
+            } else {
+                "round-robin"
+            },
             app.focus,
             app.control.paused_count(),
             app.clients,
@@ -607,7 +637,10 @@ fn handle_event(app: &mut App, ev: VisualEvent) {
 
     // Frames with no partition (setup, confirm, ping, pong) animate to and from
     // the first lane, which reads as the broker hub.
-    let lane = ev.partition.unwrap_or(0).min(app.partitions.saturating_sub(1));
+    let lane = ev
+        .partition
+        .unwrap_or(0)
+        .min(app.partitions.saturating_sub(1));
     let (from, to) = if ev.to_broker {
         (Endpoint::Client(ev.client), Endpoint::Lane(lane))
     } else {
@@ -840,7 +873,8 @@ async fn expect(conn: &mut Conn, op: Op) -> anyhow::Result<()> {
             return Ok(());
         }
         if frame.opcode == Op::Ping as u16 {
-            conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
+            conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?)
+                .await?;
             continue;
         }
         if frame.opcode == Op::Error as u16
@@ -848,7 +882,12 @@ async fn expect(conn: &mut Conn, op: Op) -> anyhow::Result<()> {
             || frame.opcode == Op::AuthErr as u16
         {
             let err: ErrorMsg = try_decode(&frame)?;
-            anyhow::bail!("server error {} waiting for {:?}: {}", err.code, op, err.message);
+            anyhow::bail!(
+                "server error {} waiting for {:?}: {}",
+                err.code,
+                op,
+                err.message
+            );
         }
     }
     anyhow::bail!("connection closed waiting for {op:?}")
@@ -858,13 +897,15 @@ async fn expect(conn: &mut Conn, op: Op) -> anyhow::Result<()> {
 /// the caller can read the server-minted cohort member id to reuse on the rest of
 /// an exclusive member's subscribes.
 async fn subscribe(conn: &mut Conn, sub: &Subscribe) -> anyhow::Result<SubscribeOk> {
-    conn.send(try_encode(Op::Subscribe, next_req_id(), sub)?).await?;
+    conn.send(try_encode(Op::Subscribe, next_req_id(), sub)?)
+        .await?;
     while let Some(frame) = conn.next().await {
         let frame = frame?;
         match frame.opcode {
             x if x == Op::SubscribeOk as u16 => return Ok(try_decode(&frame)?),
             x if x == Op::Ping as u16 => {
-                conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
+                conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?)
+                    .await?;
             }
             x if x == Op::Error as u16 || x == Op::SubscribeErr as u16 => {
                 let err: ErrorMsg = try_decode(&frame)?;
@@ -973,7 +1014,8 @@ async fn recv_topology(conn: &mut Conn) -> anyhow::Result<TopologyOk> {
             return Ok(try_decode(&frame)?);
         }
         if frame.opcode == Op::Ping as u16 {
-            conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?).await?;
+            conn.send(try_encode(Op::Pong, frame.request_id, &Pong)?)
+                .await?;
         }
     }
     anyhow::bail!("connection closed waiting for topology")
@@ -1013,7 +1055,8 @@ async fn discover(args: &Args, vis: &mpsc::Sender<VisualEvent>) -> anyhow::Resul
     );
     expect(&mut conn, Op::DeclareQueueOk).await?;
 
-    let (owners, generation) = poll_owners(&mut conn, args, args.partitions.max(1) as usize).await?;
+    let (owners, generation) =
+        poll_owners(&mut conn, args, args.partitions.max(1) as usize).await?;
     Ok((build_cluster(args, &owners), generation))
 }
 

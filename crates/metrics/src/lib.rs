@@ -1251,7 +1251,12 @@ struct ConnectionState {
 }
 
 impl ConnectionState {
-    pub fn new(conn_id: ConnId, peer: SocketAddr, connected_at: Instant, authenticated: bool) -> Self {
+    pub fn new(
+        conn_id: ConnId,
+        peer: SocketAddr,
+        connected_at: Instant,
+        authenticated: bool,
+    ) -> Self {
         Self {
             conn_id,
             peer,

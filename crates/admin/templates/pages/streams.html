@@ -128,6 +128,8 @@ async function refresh() {
               <td class="text-right">${hasStats ? entry.tail : "-"}</td>
               <td class="text-right">${depth != null ? depth : "-"}</td>
               <td class="text-right">${entry.applied_upto != null ? entry.applied_upto : "-"}</td>
+              <td class="text-right">${entry.live_subscriptions != null ? entry.live_subscriptions : "-"}</td>
+              <td class="text-right">${entry.lag_evictions != null ? entry.lag_evictions : "-"}</td>
             </tr>`;
         }).join("");
         return `
@@ -142,6 +144,8 @@ async function refresh() {
                 <th class="text-right">Tail</th>
                 <th class="text-right">Retained</th>
                 <th class="text-right">Applied</th>
+                <th class="text-right">Subs</th>
+                <th class="text-right">Lag recoveries</th>
               </tr>
               ${rows}
             </table>
