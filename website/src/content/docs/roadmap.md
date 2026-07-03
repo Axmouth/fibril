@@ -95,41 +95,14 @@ parallel before then:
 
 See [out of scope](#out-of-scope) for what stays deliberately outside the broker.
 
-## Recently landed
+## Release history
 
-Highlights only. For the full wired surface and its conditions, see
+Shipped changes are recorded once, in the repo changelog
+([CHANGELOG.md](https://github.com/Axmouth/fibril/blob/main/CHANGELOG.md)),
+which is also the body of each
+[GitHub release](https://github.com/Axmouth/fibril/releases). This page stays
+forward-looking. For the full wired surface and its conditions, see
 [implemented surface](/implemented-surface/).
-
-- Plexus streams: a fan-out channel type alongside the work queue, with durable
-  named cursors, per-stream durability tiers, partitioning with client-side
-  fan-in, and header filters. Durable streams are placed and owned across nodes,
-  the durable tier replicates record and cursor logs with caught-up failover, and
-  high-fan-out auto-ack coalesces cursor commits. See
-  [Plexus streams](/concepts/plexus-streams/).
-- Wildcard subscribe / discovery routing: an opt-in client view subscribes to
-  every queue or stream matching a `*`-glob and auto-attaches new matches from a
-  live cluster catalogue. Client-side only, in all three clients.
-- Partitioned queues: multiple partitions per queue with `partition_key` stable
-  routing or round-robin spread, transparent subscription fan-in, and live grow
-  or shrink from the admin topology page.
-- Cluster coordination and replication: Ganglion-backed placement and ownership,
-  follower pull replication with checkpointing and epoch-fenced promotion, and
-  replica-durable publish confirms with `min_in_sync_replicas`.
-- Exclusive consumer groups: opt-in ordered, balanced, sticky, self-healing
-  consumption of a partitioned queue (one consumer per partition). See
-  [consumer groups](/concepts/consumer-groups/).
-- Message TTL: per-message or per-queue expiry that drops through the dead-letter
-  or discard path rather than being silently consumed.
-- Reconnection grace: server-issued resume identity in the handshake, dormant
-  logical connections across a transient break, late settles after resume, and
-  conservative subscription reconciliation with an opt-in restore policy. Rust,
-  TypeScript, and Python.
-- Clients: a Python client at full parity (async plus a blocking facade) joined
-  the Rust and TypeScript clients, which track each other across the public path.
-  See [client usage](/clients/).
-- Admin and ops: single-node queue create and delete, message inspection, DLQ
-  replay, runtime broker settings, a versioned global DLQ target, and Stroma
-  timing and health signals, from the dashboard, API, and `fibrilctl`.
 
 ## Near term
 
