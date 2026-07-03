@@ -7,8 +7,15 @@ percent of expected overall latency, 20 percent as the stretch bound).
 Current reference numbers: end-to-end publish-to-deliver p50 is 2-4ms and
 durable confirm p50 is 4-5ms on fast storage (1KB, single node).
 
-Status: OPEN (not started), TUNED (constant adjusted per the budget rule),
-ADAPTIVE (derives from measurement), N/A (assessed, no action needed).
+The goal state for sensitive dials is ADAPTIVE: the value derives at RUNTIME
+from a measured signal, held in an atomic read at use-time and written by a
+slow observer task with hysteresis and clamps, with config providing bounds
+and a pin override. A static constant change is only a sensitivity probe: if
+moving the constant moves nothing, the dial is insensitive and gets a plain
+constant with no controller.
+
+Status: OPEN (not started), PROBED (sensitivity measured, controller pending
+or declined), ADAPTIVE (runtime-derived), N/A (assessed, no action needed).
 
 | Site | Where | Current | Should key off | Budget share now | Ease | Status |
 | --- | --- | --- | --- | --- | --- | --- |
