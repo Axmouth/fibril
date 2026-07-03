@@ -81,6 +81,20 @@ gap-skip, the concurrent-declare 500 race, P1 eviction, P2 metrics, P4/P5.
   the RSS story prominently: 40-50MiB serving 50k/s and 60-90MiB at
   150-250k/s is an understated strength against JVM-class brokers at
   moderate loads, which are the common case.
+  User-centric scenarios measured 2026-07-03 (tmpfs, 32-core box), publish
+  alongside the saturation numbers since most deployments live here: idle
+  broker 0.0% CPU / 20MiB RSS, 4 durable stream readers at 100/s confirmed
+  = sub-ms p50 delivery and confirm at ~3% of one core / 29MiB, 100 fan-out
+  readers at 1k/s publish (100k del/s) = p50 4ms at ~0.6 core / 57MiB,
+  confirmed work queue at 1k-10k/s = p50 3-4ms confirm / ~28MiB. One wart:
+  an idle EPHEMERAL stream costs ~1.1% of a core (the 5ms flush ticker runs
+  with nothing dirty), evidence attached to the stream idle-eviction task.
+  Stream fan-out headline: 3.2M records/s (1KB, 32 readers) at p50 1ms.
+  Comparables policy: loopback plus tmpfs numbers are not comparable to
+  vendor benchmarks on real networks and disks (3.2M x 1KB is ~26Gbit/s,
+  past a 10GbE NIC), so publish reproducible method + machine + caveats and
+  avoid competitive claims until a same-box head-to-head harness exists
+  (nats bench, kafka-producer-perf-test, RabbitMQ PerfTest as candidates).
 
 Consolidated open items, extracted before the replication-effort working docs
 were archived so nothing is lost. Full detail and rationale live in
