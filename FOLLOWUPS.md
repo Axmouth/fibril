@@ -76,6 +76,14 @@ baseline (#127); 0.3 work = #102/#103/#105/#109.
   First review candidate: the 500us settle coalesce window is now 12-25
   percent of the improved 2-4ms delivery p50.
 
+- Slow-storage levers (2026-07-03, from the SATA bracket data): (1) assess
+  merging the msg-log and event-log durability legs into one commit, two
+  barriers per confirm become one with no semantic change, the strongest
+  slow-drive win on merit; (2) speculative queue delivery as a per-queue
+  opt-in tier (deliver from staged state before the enqueue fsync, ghosts
+  possible on crash, producer confirms unaffected), design it together with
+  the API freeze (#111) and mirror the existing stream speculative tier.
+
 Consolidated open items, extracted before the replication-effort working docs
 were archived so nothing is lost. Full detail and rationale live in
 `archive/replication-sharding-plan/` (the worklog, replication planning, and
