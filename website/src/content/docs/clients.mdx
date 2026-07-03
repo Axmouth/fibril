@@ -102,6 +102,40 @@ TypeScript can do the same with
 `withReconnectReconcilePolicy("restore_client_subscriptions")`, and Python with
 `ClientOptions(reconnect_reconcile_policy="restore_client_subscriptions")`.
 
+## TLS
+
+When the broker serves TLS (`tls.enabled = true` in the broker config), enable
+TLS in the client options. Three trust paths, in the order the client resolves
+them:
+
+- `tls_ca_fingerprint(...)` pins the SHA-256 fingerprint printed in the broker
+  startup log. No files needed, survives leaf certificate rotation under the
+  same CA.
+- `tls_ca_path(...)` trusts the CA certificate(s) in a PEM file, e.g. the
+  broker's generated `<data_dir>/tls/ca.pem` or an internal CA.
+- bare `tls()` uses the OS trust store, for brokers with publicly issued
+  certificates.
+
+```rust
+use fibril_client::ClientOptions;
+
+let client = ClientOptions::new()
+    .auth("fibril", "fibril")
+    .tls_ca_path("/var/lib/fibril/tls/ca.pem")
+    .connect("broker.internal:9876")
+    .await?;
+```
+
+Misconfiguration surfaces as distinct typed errors because the fixes differ:
+`TlsRequiredByBroker` (the broker reported that this plaintext client must
+enable TLS), `TlsNotSupportedByBroker` (the handshake ended early, the broker
+listener is probably plaintext), `TlsCertificateUntrusted` (trust
+configuration: fix `tls_ca_path` or the fingerprint), and `TlsConfig` for
+client-side option problems. None of them are retried automatically.
+
+TypeScript and Python TLS options are in progress and will use the same names
+and error taxonomy.
+
 ## Reconnect Policy
 
 The conservative default is the safest operational behavior. It keeps matching

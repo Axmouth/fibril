@@ -95,7 +95,10 @@ pub fn build_server_tls(
             let dir = data_dir.join(GENERATED_TLS_DIR);
             ensure_generated_material(&dir, extra_sans)?;
             let files = GeneratedFiles::new(&dir);
-            let certs = load_certs(&files.server_pem)?;
+            // Serve leaf + CA so a client pinning the CA fingerprint can
+            // match it against the presented chain.
+            let mut certs = load_certs(&files.server_pem)?;
+            certs.extend(load_certs(&files.ca_pem)?);
             let key = load_key(&files.server_key)?;
             let ca_fingerprint = ca_fingerprint(&files.ca_pem)?;
             Ok(Some(ServerTls {

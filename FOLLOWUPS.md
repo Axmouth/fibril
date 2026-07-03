@@ -74,9 +74,18 @@ same change, settings discipline for every knob):
    hosts, CA fingerprint logged each boot, partial material refused).
    Integration tests cover the TLS HELLO round trip, the 426 reply, and
    fast-fail on the reverse mismatch.
-3. Rust client: TLS connect with ca_path / fingerprint pin / system roots,
-   plus the typed misconfiguration error per the taxonomy above (426
-   mismatch vs certificate verification vs other).
+3. DONE (2026-07-04). Rust client: ClientOptions tls() / tls_ca_path /
+   tls_ca_fingerprint / tls_server_name over a MaybeTlsStream at the two
+   stream-construction sites (the engine was already generic). Typed
+   errors per the taxonomy: TlsRequiredByBroker (426, definitive),
+   TlsNotSupportedByBroker (handshake EOF, probable),
+   TlsCertificateUntrusted, TlsConfig, TlsHandshake - all DoNotRetry.
+   Fingerprint pin verifies any cert in the presented chain (the broker's
+   generated mode serves leaf + CA for this) while still verifying
+   handshake signatures. Integration tests run the whole taxonomy against
+   a real TLS broker. Gotcha recorded: run_server_from_config always
+   requires broker auth (fibril/fibril static handler), unauthenticated
+   test clients get dropped after HELLO.
 4. TS client (node tls) and Python client (ssl), same option names and the
    same solid error. Wire vectors are unaffected (TLS sits below framing).
 5. fibrilctl cert generate + the admin board setup screen and loud-guide

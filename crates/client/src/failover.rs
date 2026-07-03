@@ -113,6 +113,14 @@ impl FibrilError {
             | FibrilError::SerializationFailure { .. }
             | FibrilError::InvalidName { .. }
             | FibrilError::Unexpected { .. } => RetryAdvice::DoNotRetry,
+            // TLS mismatches and trust failures are configuration problems on
+            // one side or the other. Retrying with the same options cannot
+            // succeed and would spam the broker with doomed handshakes.
+            FibrilError::TlsRequiredByBroker
+            | FibrilError::TlsNotSupportedByBroker { .. }
+            | FibrilError::TlsCertificateUntrusted { .. }
+            | FibrilError::TlsConfig { .. }
+            | FibrilError::TlsHandshake { .. } => RetryAdvice::DoNotRetry,
         }
     }
 

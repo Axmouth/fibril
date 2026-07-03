@@ -31,7 +31,6 @@
 
 use arc_swap::ArcSwap;
 use fibril_storage::{DeliveryTag, Partition};
-use fibril_util::net::TcpStream;
 use fibril_util::{UnixMillis, unix_millis};
 use futures::{SinkExt, StreamExt};
 use serde::{Serialize, de::DeserializeOwned};
@@ -73,6 +72,10 @@ pub use failover::*;
 
 mod routing;
 pub use routing::*;
+
+mod tls;
+pub use tls::TlsClientOptions;
+use tls::establish_stream;
 
 pub use fibril_protocol::v1::ReconcilePolicy;
 // Shared header namespace constants (single source of truth in the protocol crate)
@@ -224,6 +227,37 @@ pub enum FibrilError {
     /// The connection ended before the expected protocol exchange completed.
     #[error("EOF")]
     Eof,
+    /// The broker requires TLS but this client connected plaintext. Reported
+    /// by the broker itself, so it is definitive rather than inferred.
+    #[error(
+        "the broker requires TLS. Enable client TLS: ClientOptions::new().tls() with \
+         .tls_ca_path(...) or .tls_ca_fingerprint(...) to trust self-signed broker \
+         material, or bare .tls() for a publicly issued certificate"
+    )]
+    TlsRequiredByBroker,
+    /// TLS is enabled but the handshake ended before completing, which
+    /// usually means the broker listener speaks plaintext.
+    #[error(
+        "TLS handshake with {address} ended early, the broker listener is probably \
+         plaintext. Disable TLS in the client options, or set tls.enabled = true on \
+         the broker"
+    )]
+    TlsNotSupportedByBroker { address: String },
+    /// The broker certificate failed verification. A trust configuration
+    /// problem, distinct from a transport mismatch.
+    #[error(
+        "broker certificate verification failed: {msg}. Trust the broker CA via \
+         .tls_ca_path(...) (generated deployments write <data_dir>/tls/ca.pem) or pin \
+         .tls_ca_fingerprint(...) from the broker startup log"
+    )]
+    TlsCertificateUntrusted { msg: String },
+    /// Client-side TLS configuration problem: unreadable ca_path, malformed
+    /// fingerprint, or an invalid server name.
+    #[error("invalid TLS configuration: {msg}")]
+    TlsConfig { msg: String },
+    /// Any other TLS handshake failure.
+    #[error("TLS handshake failed: {msg}")]
+    TlsHandshake { msg: String },
     /// A protocol invariant or internal state expectation was violated.
     #[error("Unexpected error: {msg}")]
     Unexpected { msg: String },
@@ -3220,14 +3254,7 @@ impl EngineSlot {
         topology_sink: std::sync::Weak<ClientShared>,
     ) -> FibrilResult<Self> {
         let subscriptions = Arc::new(RwLock::new(HashMap::new()));
-        let stream = TcpStream::connect(address.as_str())
-            .await
-            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
-        stream
-            .set_nodelay(true)
-            .map_err(|e| FibrilError::Disconnection {
-                msg: format!("failed to set TCP_NODELAY: {e}"),
-            })?;
+        let stream = establish_stream(address.as_str(), opts.tls.as_ref()).await?;
         let framed = Framed::new(stream, ProtoCodec);
         let engine = start_engine(
             framed,
@@ -3266,16 +3293,7 @@ impl EngineSlot {
         let old_engine = self.current();
         let mut opts = self.opts.clone();
         opts.resume_identity = Some(old_engine.resume_identity.clone());
-        let stream = TcpStream::connect(self.address.as_str())
-            .await
-            .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
-
-        stream
-            .set_nodelay(true)
-            .map_err(|e| FibrilError::Disconnection {
-                msg: format!("failed to set TCP_NODELAY: {e}"),
-            })?;
-
+        let stream = establish_stream(self.address.as_str(), opts.tls.as_ref()).await?;
         let framed = Framed::new(stream, ProtoCodec);
         let new_engine = start_engine(
             framed,
@@ -3644,6 +3662,19 @@ where
         }
         x if x == Op::HelloErr as u16 => {
             let e: ErrorMsg = decode_protocol(&frame)?;
+            return Err(FibrilError::Failure {
+                code: e.code,
+                msg: e.message,
+            });
+        }
+        // A TLS listener answers a plaintext HELLO with a plaintext error
+        // frame carrying ERR_TLS_REQUIRED, so the mismatch surfaces as its
+        // own typed error rather than a generic failure.
+        x if x == Op::Error as u16 => {
+            let e: ErrorMsg = decode_protocol(&frame)?;
+            if e.code == ERR_TLS_REQUIRED {
+                return Err(FibrilError::TlsRequiredByBroker);
+            }
             return Err(FibrilError::Failure {
                 code: e.code,
                 msg: e.message,
@@ -4887,6 +4918,9 @@ pub struct ClientOptions {
     /// reassignment window and then succeeds against the new owner instead of
     /// erroring. `0` disables the retry (fail fast on the first transport error).
     pub publish_timeout_ms: u64,
+    /// TLS options. `None` (default) connects plaintext. Applies to every
+    /// connection the client opens, including reconnects and owner redirects.
+    pub tls: Option<TlsClientOptions>,
 }
 
 impl ClientOptions {
@@ -4907,7 +4941,44 @@ impl ClientOptions {
             topology_warm_timeout_ms: Some(5_000),
             partition_resubscribe_interval_ms: Some(5_000),
             publish_timeout_ms: 30_000,
+            tls: None,
         }
+    }
+
+    /// Return a copy with TLS enabled using the OS trust store, for brokers
+    /// with publicly issued certificates.
+    pub fn tls(mut self) -> Self {
+        self.tls = Some(self.tls.take().unwrap_or_default());
+        self
+    }
+
+    /// Return a copy with TLS enabled, trusting the CA certificate(s) in a
+    /// PEM file, e.g. the broker's generated `<data_dir>/tls/ca.pem`.
+    pub fn tls_ca_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        let mut tls = self.tls.take().unwrap_or_default();
+        tls.ca_path = Some(path.into());
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Return a copy with TLS enabled, pinning the broker certificate by the
+    /// SHA-256 fingerprint printed in the broker startup log (colons
+    /// optional). Pinning replaces chain-of-trust verification.
+    pub fn tls_ca_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        let mut tls = self.tls.take().unwrap_or_default();
+        tls.ca_fingerprint = Some(fingerprint.into());
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Return a copy with TLS enabled and an explicit certificate name to
+    /// verify (and send as SNI), when the connect address is not the name on
+    /// the certificate.
+    pub fn tls_server_name(mut self, name: impl Into<String>) -> Self {
+        let mut tls = self.tls.take().unwrap_or_default();
+        tls.server_name = Some(name.into());
+        self.tls = Some(tls);
+        self
     }
 
     /// Return a copy with a custom confirmed-publish failover retry budget (ms).
