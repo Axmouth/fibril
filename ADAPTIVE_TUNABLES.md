@@ -59,3 +59,18 @@ the publish sink cap is count-only (256) while publish batches carry
 payloads: at 1MB payloads that is a 256MB staged burst into one engine call.
 Add a byte budget alongside the count cap (a few MB), the same fix the
 replication read path needed when count limits allowed giant responses.
+
+## Actor-side bottleneck hunt (2026-07-03 probe result)
+
+A mid-run snapshot of the per-command metrics at a 500k/s offered rate showed
+every per-kind total and lane dispatch counter at zero with the queue live:
+the hot operations do not pass through the metered priority lanes, which
+carry control commands only. Two consequences. First, the dispatch congestion
+model above applies to the lanes but the true serial point for hot ops is
+whatever synchronization the queue handle methods use, which is not yet
+instrumented. Second, the bottleneck hunt needs a step zero: trace the hot-op
+path from the engine seam through the queue handle into state, identify the
+serialization primitive, and add a lightweight timing counter there before
+drawing conclusions. Until then the 500-600k knee remains unattributed
+between the publish staging pipeline, the hot-op serial point, and the bench
+client itself.
