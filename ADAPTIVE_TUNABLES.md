@@ -34,3 +34,20 @@ Experiments land with before/after numbers in the optimization log. The
 guardrails for anything promoted to ADAPTIVE: hysteresis on slow signals,
 bounded ranges with a config pin override, and the derived value visible in
 the debug surface.
+
+## Dispatch congestion model
+
+Microbatching has two separate jobs. Under load, batches form from backlog
+(the drain loop fills toward MAX_BATCH with no waiting), so the max batch
+size is what guards actor dispatch congestion. The coalesce window only
+pre-forms batches at low load, where congestion does not exist, so windows
+trade latency and nothing else.
+
+Rough sizing arithmetic: a queue actor is serial with a measured command cost
+around 0.3-5us, so its ceiling is roughly 200k-1M commands per second per
+queue. A path dispatching per item (batch factor 1) congests at a few hundred
+thousand messages per second, which matches where the pre-batching delivery
+knee sat (350-400k/s). With batch factor B the threshold scales to about
+B x 200k-1M/s, so B of 8 or more pushes actor dispatch past every other
+limit. Current settle (64) and publish (256) max batches have three orders of
+magnitude of headroom at 150k/s.
