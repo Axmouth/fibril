@@ -51,3 +51,11 @@ knee sat (350-400k/s). With batch factor B the threshold scales to about
 B x 200k-1M/s, so B of 8 or more pushes actor dispatch past every other
 limit. Current settle (64) and publish (256) max batches have three orders of
 magnitude of headroom at 150k/s.
+
+Cap sizing notes: raising the settle max batch has no measurable upside while
+actor dispatch holds ~1000x headroom, and backlog already self-sizes batches
+below the cap, so caps stay static safety bounds. The actionable gap is that
+the publish sink cap is count-only (256) while publish batches carry
+payloads: at 1MB payloads that is a 256MB staged burst into one engine call.
+Add a byte budget alongside the count cap (a few MB), the same fix the
+replication read path needed when count limits allowed giant responses.
