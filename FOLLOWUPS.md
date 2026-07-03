@@ -18,13 +18,22 @@ Decided cert model (user-approved 2026-07-04):
   first boot when enabled, print the CA fingerprint for clients to pin.
   Clients gain ca_path and fingerprint-pin options. Docs honesty: a
   self-signed cert the client does not verify defeats passive snooping only.
-- Setup UX is a hard requirement, both paths easy: at most one "choose auto
-  or supply" decision surface (admin board setup screen), a fibrilctl cert
-  command, and tryout/demo scripts staying one command via the auto path.
+- Setup UX, both paths easy: a fibrilctl cert command and tryout/demo
+  scripts staying one command via the auto path. The admin board shows TLS
+  setup status plus the guide as the floor. An APPLYING setup screen
+  ("choose auto or supply" that writes the choice) is a stretch goal with
+  two assessed cruxes to resolve first: the board must be reachable before
+  TLS is configured (degraded TLS-pending boot mode, admin on localhost
+  plaintext), and the board would gain the new capability of writing
+  startup config rather than runtime settings.
 - Misconfiguration is loud and guided on BOTH sides: server logs a mini
-  guide (admin board link, fibrilctl command, the concrete steps) when TLS
-  is attempted but unconfigured, and the client surfaces a SOLID TYPED ERROR
-  from connect (not a log line) carrying the same guidance.
+  guide (admin board link, fibrilctl command, the concrete steps), and the
+  client surfaces a SOLID TYPED ERROR from connect (not a log line)
+  carrying the same guidance. Mechanism for making mismatches obvious in
+  both directions: a TLS ClientHello has a recognizable byte prefix and
+  plaintext frames carry the FDL1 magic, so a plaintext listener can detect
+  and name an attempted-TLS client and a TLS listener can detect and name
+  an attempted-plaintext client.
 
 Implementation bricks, in order (commit per brick, docs-currency in the
 same change, settings discipline for every knob):
