@@ -53,14 +53,20 @@ export default defineConfig({
             { label: "Retries and delays", slug: "reliability/retries-delays" },
             { label: "Dead lettering", slug: "reliability/dead-lettering" },
             { label: "Replication", slug: "reliability/replication" },
-            { label: "Recovery quarantine", slug: "reliability/recovery-quarantine" },
-            { label: "Failure modes and operations", slug: "reliability/failure-modes" },
             { label: "Backpressure", slug: "concepts/backpressure" },
             { label: "Many idle queues", slug: "concepts/many-idle-queues" },
             { label: "Benchmarks", slug: "benchmarks" },
             { label: "Roadmap", slug: "roadmap" },
+          ],
+        },
+        {
+          label: "Operations",
+          items: [
             { label: "Deployment", slug: "deployment/source" },
             { label: "Setting up a cluster", slug: "deployment/cluster" },
+            { label: "Admin dashboard", slug: "admin-dashboard" },
+            { label: "Failure modes and operations", slug: "reliability/failure-modes" },
+            { label: "Recovery quarantine", slug: "reliability/recovery-quarantine" },
           ],
         },
         {
