@@ -128,16 +128,35 @@ consumer: msg.ack()  --[settle oneshot]--> ack task
 
 ## Candidate optimizations (ranked, not yet done)
 
-- **Engine per-frame CPU (Path A ceiling).** The engine is the ~1-core
-  bottleneck. Cut copies: carry the payload as `Bytes`/`Arc<[u8]>` so encode and
-  feed share the buffer instead of copying twice; avoid the per-frame frame-buffer
-  allocation. This is the lever for the ~180k publish ceiling.
-- **Non-blocking delivery (Path B head-of-line).** Do not `await` the sub
-  channel send in the engine. Options: `try_send` with an explicit
-  lag/backpressure signal, or a dedicated per-subscription forward task so a slow
-  consumer cannot stall the engine. Increasing the channel only defers the stall.
+- **Split the engine into read-half and write-half tasks (the ~180k lever).**
+  One task does read (`framed.next` + dispatch) AND write (encode + feed +
+  flush), so the socket write does NOT interleave with the rest and the client
+  runs at ~1 core (writer blocked, engine the bottleneck). Splitting outbound
+  (drain cmd_rx -> encode -> write) from inbound (read -> dispatch) into two
+  tasks lets writing overlap reading and uses a second core - the structural
+  path toward 200-300k. Shared state (`waiters`, `subs`) has to be divided or
+  shared cheaply; this is the biggest change but the real throughput win.
+- **Copies / memory.** `Frame.payload` is ALREADY `Bytes` (cheap clone), so the
+  frame itself is not re-copied. Two payload copies remain: `put_bytes` in
+  `encode_publish` (payload -> frame-body buffer) and `dst.extend_from_slice` in
+  `ProtoCodec::encode` (frame body -> Framed write buffer, frame.rs:69).
+  Eliminating them fully needs vectored writes (write header + payload `Bytes`
+  separately instead of concatenating), which means bypassing the `Framed`
+  Encoder - INTRUSIVE for only ~4% CPU, but it also lowers transient memory, so
+  worth it only if the write-half rework touches this path anyway. Memory note:
+  the raised backpressure boundary lets the write buffer reach ~128KB per active
+  connection (the code flushes at 128 frames; the 1MB is a cap rarely hit) vs
+  the old 8KB - a deliberate throughput/memory trade, modest per connection but
+  it scales with connection count.
+- **Non-blocking delivery (Path B) is robustness, not throughput.** The sub
+  channel is sized to the broker credit window (prefetch * partitions) and the
+  broker gates on inflight < prefetch, so it does not fill in the happy path.
+  `try_send` (fail-fast on the impossible overflow) removes the latent
+  head-of-line risk at zero happy-path cost. Prefetch is fixed at subscribe, so
+  the bound is static - no dynamic resize.
 - **Drop the per-delivery spawn (Path B).** Handle settle inline or via one
-  long-lived ack-forwarder task per subscription instead of a spawn per message.
+  long-lived ack-forwarder task per subscription instead of a spawn per message
+  (memory + per-message task churn).
 - **Increasing the cmd channel (8192) will NOT help** the publish ceiling - the
   engine is CPU-bound, not channel-capacity-bound.
 
