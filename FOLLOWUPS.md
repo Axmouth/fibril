@@ -41,14 +41,29 @@ Bricks, in order:
    runtime-settings path.
 2. Broker AUTH verifies against the store, loopback-only default
    credentials, loud guides on rejection and on plaintext+auth.
-3. Cluster secret: config surface (path-based), fibrilctl secret generate,
-   node-principal authentication on replication and coordination
-   connections.
+3. Cluster secret: config cluster.secret_path + FIBRIL_CLUSTER_SECRET env
+   (container lanes: mounted secret file or env one-liner), with
+   <data_dir>/cluster.secret as the convention location that fibrilctl
+   secret generate and setup mode write. Explicit config/env wins over the
+   convention file. generate writes 0600 and keeps the value out of
+   scrollback unless --show. Node-principal authentication on replication
+   and coordination connections.
 4. User management: fibrilctl user add/remove/passwd + a dashboard page.
    Decide here whether admin.auth folds into the same store (a role flag)
    or stays separate.
-5. Setup-mode credentials step + docs currency.
-6. Client polish: typed auth errors where they are still generic.
+5. Setup-mode additions: set-admin-credentials step and an optional
+   cluster-secret card (password-type field, generate here or paste the
+   first node's secret). Fully provisioned config/env auto-completes setup
+   and boots through, which is the unattended lane.
+6. Cluster setup guide in the docs: secret generation and distribution,
+   TLS across nodes, peers and bootstrap, seeded credentials, verification
+   via fibrilctl admin topology, plus the no-intervention variant for
+   automation and autoscaling.
+7. Client polish: typed auth errors where they are still generic.
+
+Post-arc examination item: tenancy. Fibril groups are already namespace
+prefixes, which is a natural hook if multi-tenant isolation ever becomes
+meaningful. Assess after the arc, not designed now.
 
 MILESTONE: cut v0.3.0 when bricks 1-5 land. Theme: security (TLS in
 transit + real authentication). Do NOT hold the cut for #153, mTLS,
