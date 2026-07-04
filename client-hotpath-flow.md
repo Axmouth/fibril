@@ -107,12 +107,19 @@ consumer: msg.ack()  --[settle oneshot]--> ack task
 
 ### Blocking / serializing spots on Path B
 
-1. **tx.send(msg).await blocks the engine** (:4145 manual, :4207 auto). The
-   engine awaits pushing each delivered message into the per-subscription
-   channel. A slow consumer that fills its channel STALLS THE ENTIRE ENGINE -
-   head-of-line blocking for every other subscription, all publish confirms, and
-   all outbound publishes on that connection. The channel is ~16k deep so it
-   only bites a sustained-slow consumer, but the await is unconditional.
+1. **tx.send(msg).await on the engine is a LATENT head-of-line risk, not a
+   steady-state stall** (:4145 manual, :4207 auto). The engine awaits pushing
+   each delivered message into the per-subscription channel, so IF that channel
+   fills it stalls the entire engine (every other subscription, all confirms,
+   all outbound publishes) and TCP-backpressures the whole connection. BUT the
+   channel is sized `prefetch * partitions` and the broker gates delivery on
+   `inflight < prefetch` (broker.rs:576), so it only ever has the credit window
+   in flight - the channel always has room and the send does NOT block in the
+   happy path. The real per-subscription backpressure is the broker credit
+   window, not this channel filling. So this is a robustness edge (fires only if
+   credit exceeds channel capacity, a burst outruns sizing, or a bug), worth a
+   `try_send` that fails fast on a genuine violation rather than silently
+   stalling - but it is NOT a throughput bottleneck.
 2. **tokio::spawn per delivered message (manual ack).** One task allocation +
    schedule per message just to await the settle oneshot and forward an Ack
    command. Per-message task churn on the delivery hot path.
