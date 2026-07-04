@@ -584,6 +584,19 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_TLS_PEER_CA_PATH")? {
             self.tls.peer_ca_path = Some(PathBuf::from(value));
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_TLS_CLIENT_AUTH")? {
+            self.tls.client_auth =
+                value
+                    .parse()
+                    .map_err(|message: String| ConfigError::EnvParse {
+                        name: "FIBRIL_TLS_CLIENT_AUTH".into(),
+                        value: value.clone(),
+                        message,
+                    })?;
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_TLS_CLIENT_CA_PATH")? {
+            self.tls.client_ca_path = Some(PathBuf::from(value));
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_FSYNC_INTERVAL_MS")? {
             self.storage.keratin.fsync_interval_ms =
                 parse_env("FIBRIL_KERATIN_FSYNC_INTERVAL_MS", &value)?;
@@ -1023,6 +1036,39 @@ pub struct TlsSection {
     /// PEM file with the CA that peer server certificates chain to. Unset
     /// falls back to `<data_dir>/tls/ca.pem` when present, then OS roots.
     pub peer_ca_path: Option<PathBuf>,
+    /// Client-certificate policy on the TLS listeners: `off` (no client
+    /// certs), `request` (a presented certificate is verified and its
+    /// identity can authenticate, certless clients still connect and
+    /// password-auth), or `require` (the handshake rejects certless
+    /// clients).
+    pub client_auth: ClientAuthMode,
+    /// PEM file with the CA that client certificates chain to. Unset falls
+    /// back to the generated `<data_dir>/tls/ca.pem`.
+    pub client_ca_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientAuthMode {
+    #[default]
+    Off,
+    Request,
+    Require,
+}
+
+impl std::str::FromStr for ClientAuthMode {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "off" => Ok(Self::Off),
+            "request" => Ok(Self::Request),
+            "require" => Ok(Self::Require),
+            other => Err(format!(
+                "unknown tls.client_auth `{other}`: expected off, request or require"
+            )),
+        }
+    }
 }
 
 impl TlsSection {

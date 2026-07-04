@@ -19,7 +19,7 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::sign::CertifiedKey;
 use tokio_rustls::rustls::{self, ServerConfig as RustlsServerConfig};
 
-pub use fibril_config::TlsMode;
+pub use fibril_config::{ClientAuthMode, TlsMode};
 pub use tokio_rustls;
 pub use tokio_rustls::{TlsAcceptor as RustlsAcceptor, TlsConnector};
 
@@ -140,13 +140,35 @@ impl rustls::server::ResolvesServerCert for ReloadableCertResolver {
     }
 }
 
+/// Client-certificate policy for the server build: the mode plus where the
+/// client CA lives. `ca_path` unset falls back to the generated
+/// `<data_dir>/tls/ca.pem`.
+#[derive(Debug, Clone, Default)]
+pub struct ClientAuthPolicy {
+    pub mode: ClientAuthMode,
+    pub ca_path: Option<PathBuf>,
+}
+
 /// Build the broker TLS acceptor for the configured mode. `extra_sans` adds
 /// hostnames or IPs (typically the advertise hosts) to a generated server
-/// certificate on top of the localhost set.
+/// certificate on top of the localhost set. Client certificates are not
+/// requested; use [`build_server_tls_with_client_auth`] for that.
 pub fn build_server_tls(
     mode: &TlsMode,
     data_dir: &Path,
     extra_sans: &[String],
+) -> Result<Option<ServerTls>, TlsSetupError> {
+    build_server_tls_with_client_auth(mode, data_dir, extra_sans, &ClientAuthPolicy::default())
+}
+
+/// [`build_server_tls`] with a client-certificate policy: `request` verifies
+/// a certificate when one is presented while still admitting certless
+/// clients, `require` rejects certless clients in the handshake.
+pub fn build_server_tls_with_client_auth(
+    mode: &TlsMode,
+    data_dir: &Path,
+    extra_sans: &[String],
+    client_auth: &ClientAuthPolicy,
 ) -> Result<Option<ServerTls>, TlsSetupError> {
     let (material, source) = match mode {
         TlsMode::Disabled => return Ok(None),
@@ -187,10 +209,13 @@ pub fn build_server_tls(
         current: ArcSwap::from_pointee(certified),
     });
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = RustlsServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .with_no_client_auth()
-        .with_cert_resolver(resolver.clone());
+    let builder = RustlsServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?;
+    let config = match client_verifier(client_auth, data_dir)? {
+        Some(verifier) => builder.with_client_cert_verifier(verifier),
+        None => builder.with_no_client_auth(),
+    }
+    .with_cert_resolver(resolver.clone());
     let server_config = Arc::new(config);
     Ok(Some(ServerTls {
         acceptor: TlsAcceptor::from(server_config.clone()),
@@ -199,6 +224,86 @@ pub fn build_server_tls(
         resolver,
         material,
     }))
+}
+
+/// Build the client-certificate verifier for the policy, or `None` when
+/// client auth is off. Client certificates only make sense against a
+/// deployment-controlled CA, so unlike server trust there is no OS-roots
+/// fallback: no explicit `client_ca_path` and no generated CA is a guided
+/// error.
+fn client_verifier(
+    policy: &ClientAuthPolicy,
+    data_dir: &Path,
+) -> Result<Option<Arc<dyn rustls::server::danger::ClientCertVerifier>>, TlsSetupError> {
+    if policy.mode == ClientAuthMode::Off {
+        return Ok(None);
+    }
+    let generated_ca = data_dir.join(GENERATED_TLS_DIR).join("ca.pem");
+    let ca_path = match &policy.ca_path {
+        Some(path) => path.clone(),
+        None if generated_ca.exists() => generated_ca,
+        None => {
+            return Err(TlsSetupError::InvalidUploadedMaterial {
+                detail: "tls.client_auth needs a client CA: set tls.client_ca_path or use \
+                         generated material so <data_dir>/tls/ca.pem exists"
+                    .to_string(),
+            });
+        }
+    };
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in load_certs(&ca_path)? {
+        roots
+            .add(cert)
+            .map_err(|err| TlsSetupError::InvalidUploadedMaterial {
+                detail: format!(
+                    "rejected client CA certificate in {}: {err}",
+                    ca_path.display()
+                ),
+            })?;
+    }
+    let builder = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        Arc::new(rustls::crypto::ring::default_provider()),
+    );
+    let builder = match policy.mode {
+        ClientAuthMode::Request => builder.allow_unauthenticated(),
+        _ => builder,
+    };
+    let verifier = builder
+        .build()
+        .map_err(|err| TlsSetupError::InvalidUploadedMaterial {
+            detail: format!("client certificate verifier rejected: {err}"),
+        })?;
+    Ok(Some(verifier))
+}
+
+/// Identity a verified client certificate asserts: the first DNS subject
+/// alternative name, else the subject common name. Identities in the `@`
+/// namespace never map, so node principals stay unclaimable by certificate.
+pub fn client_identity_from_cert(cert: &CertificateDer<'_>) -> Option<String> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref()).ok()?;
+    let identity = parsed
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .and_then(|san| {
+            san.value.general_names.iter().find_map(|name| match name {
+                x509_parser::extensions::GeneralName::DNSName(dns) => Some(dns.to_string()),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            parsed
+                .subject()
+                .iter_common_name()
+                .next()
+                .and_then(|cn| cn.as_str().ok())
+                .map(str::to_string)
+        })?;
+    if identity.is_empty() || identity.starts_with('@') {
+        return None;
+    }
+    Some(identity)
 }
 
 /// Load and validate the serving pair from disk: the chain (leaf plus the
@@ -437,6 +542,17 @@ pub fn build_peer_connector(
     peer_ca_path: Option<&Path>,
     data_dir: &Path,
 ) -> Result<tokio_rustls::TlsConnector, TlsSetupError> {
+    build_peer_connector_with_identity(peer_ca_path, data_dir, None)
+}
+
+/// [`build_peer_connector`] presenting a client certificate, for dialing
+/// peers that require client auth. `identity` is the certificate chain and
+/// key paths, typically the node's own server leaf.
+pub fn build_peer_connector_with_identity(
+    peer_ca_path: Option<&Path>,
+    data_dir: &Path,
+    identity: Option<(&Path, &Path)>,
+) -> Result<tokio_rustls::TlsConnector, TlsSetupError> {
     let generated_ca = data_dir.join(GENERATED_TLS_DIR).join("ca.pem");
     let ca_path = match peer_ca_path {
         Some(path) => Some(path.to_path_buf()),
@@ -468,8 +584,15 @@ pub fn build_peer_connector(
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        .with_root_certificates(roots);
+    let config = match identity {
+        None => config.with_no_client_auth(),
+        Some((cert_path, key_path)) => {
+            let certs = load_certs(cert_path)?;
+            let key = load_key(key_path)?;
+            config.with_client_auth_cert(certs, key)?
+        }
+    };
     Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
 }
 
@@ -778,6 +901,166 @@ mod tests {
         fs::copy(first_dir.join("server.key"), &key_path).expect("mismatched key");
         assert!(tls.reload().is_err(), "mismatched pair must be rejected");
         assert_eq!(reported, tls.leaf_fingerprint());
+    }
+
+    #[test]
+    fn client_identity_prefers_dns_san_then_cn_and_never_maps_node() {
+        let key = rcgen::KeyPair::generate().expect("key");
+
+        let mut with_san =
+            rcgen::CertificateParams::new(vec!["orders-service".to_string()]).expect("params");
+        with_san
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "cn-name");
+        let cert = with_san.self_signed(&key).expect("cert");
+        assert_eq!(
+            client_identity_from_cert(cert.der()),
+            Some("orders-service".to_string())
+        );
+
+        let mut cn_only = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        cn_only
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "worker-7");
+        let cert = cn_only.self_signed(&key).expect("cert");
+        assert_eq!(
+            client_identity_from_cert(cert.der()),
+            Some("worker-7".to_string())
+        );
+
+        let mut node_claim = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        node_claim
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "@node");
+        let cert = node_claim.self_signed(&key).expect("cert");
+        assert_eq!(client_identity_from_cert(cert.der()), None);
+
+        let mut unnamed = rcgen::CertificateParams::new(Vec::<String>::new()).expect("params");
+        unnamed.distinguished_name = rcgen::DistinguishedName::new();
+        let cert = unnamed.self_signed(&key).expect("cert");
+        assert_eq!(client_identity_from_cert(cert.der()), None);
+    }
+
+    async fn tls_round_trip(
+        connector: &tokio_rustls::TlsConnector,
+        addr: std::net::SocketAddr,
+    ) -> io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let tcp = tokio::net::TcpStream::connect(addr).await?;
+        let name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+        let mut stream = connector.connect(name, tcp).await?;
+        stream.write_all(b"x").await?;
+        stream.flush().await?;
+        let mut buf = [0u8; 1];
+        stream.read_exact(&mut buf).await?;
+        Ok(())
+    }
+
+    async fn echo_server(acceptor: TlsAcceptor) -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    break;
+                };
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut stream) = acceptor.accept(tcp).await {
+                        let mut buf = [0u8; 1];
+                        if stream.read_exact(&mut buf).await.is_ok() {
+                            let _ = stream.write_all(&buf).await;
+                            let _ = stream.flush().await;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn client_auth_modes_gate_the_handshake() {
+        let root = temp_dir("client-auth");
+        let require = build_server_tls_with_client_auth(
+            &TlsMode::AutoSelfSigned,
+            &root,
+            &[],
+            &ClientAuthPolicy {
+                mode: ClientAuthMode::Require,
+                ca_path: None,
+            },
+        )
+        .expect("require build")
+        .expect("enabled");
+        let require_addr = echo_server(require.acceptor.clone()).await;
+
+        let certless = build_peer_connector(None, &root).expect("certless connector");
+        assert!(
+            tls_round_trip(&certless, require_addr).await.is_err(),
+            "require mode must reject a certless client"
+        );
+
+        let tls_dir = root.join(GENERATED_TLS_DIR);
+        let with_cert = build_peer_connector_with_identity(
+            None,
+            &root,
+            Some((&tls_dir.join("server.pem"), &tls_dir.join("server.key"))),
+        )
+        .expect("cert connector");
+        tls_round_trip(&with_cert, require_addr)
+            .await
+            .expect("a deployment-CA certificate passes require mode");
+
+        // Request mode admits both lanes.
+        let request = build_server_tls_with_client_auth(
+            &TlsMode::AutoSelfSigned,
+            &root,
+            &[],
+            &ClientAuthPolicy {
+                mode: ClientAuthMode::Request,
+                ca_path: None,
+            },
+        )
+        .expect("request build")
+        .expect("enabled");
+        let request_addr = echo_server(request.acceptor.clone()).await;
+        tls_round_trip(&certless, request_addr)
+            .await
+            .expect("request mode admits certless clients");
+        tls_round_trip(&with_cert, request_addr)
+            .await
+            .expect("request mode admits cert-bearing clients");
+    }
+
+    #[test]
+    fn client_auth_without_any_ca_is_a_guided_error() {
+        let root = temp_dir("client-auth-no-ca");
+        // Provided-mode material without generated files: no client CA to
+        // fall back to.
+        let material = temp_dir("client-auth-material");
+        build_server_tls(&TlsMode::AutoSelfSigned, &material, &[])
+            .expect("material")
+            .expect("enabled");
+        let material_dir = material.join(GENERATED_TLS_DIR);
+        let Err(err) = build_server_tls_with_client_auth(
+            &TlsMode::Provided {
+                cert_path: material_dir.join("server.pem"),
+                key_path: material_dir.join("server.key"),
+            },
+            &root,
+            &[],
+            &ClientAuthPolicy {
+                mode: ClientAuthMode::Require,
+                ca_path: None,
+            },
+        ) else {
+            panic!("client auth without a CA must be refused");
+        };
+        assert!(err.to_string().contains("client_ca_path"), "{err}");
     }
 
     #[test]
