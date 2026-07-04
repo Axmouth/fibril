@@ -85,7 +85,7 @@ See also: [recovery quarantine](/reliability/recovery-quarantine/).
 | Per-partition quarantine | Implemented | A bad partition is parked (its ops error) while the rest of the broker stays up |
 | Operator repair | Implemented | Admin quarantine banner + `/admin/api/quarantine/repair` truncate-to-valid, follower re-fetches the dropped suffix on next catch-up |
 | Readiness health | Implemented | `/readyz` reflects quarantine state and the configured policy |
-| Quarantine metric | Implemented | `recovery.quarantined` gauge and `quarantines_total` counter in the recovery snapshot |
+| Quarantine metric | Implemented | `recovery.quarantined` gauge and `quarantines_total` counter in the recovery snapshot, exported as `fibril_recovery_quarantined` and `fibril_recovery_quarantines_total` on `/metrics` |
 
 Conditions and limits:
 
@@ -376,6 +376,7 @@ See also: [configuration](/configuration/),
 | TOML startup config | Implemented | Config crate and server binary |
 | Env and CLI overrides | Implemented | Config crate and server binary |
 | Admin auth startup config | Implemented | TOML, env, CLI, server wiring |
+| Metrics exposition startup config | Implemented | `admin.metrics_per_channel` via TOML and env |
 | Keratin fsync and segment startup config | Implemented | Config crate and server wiring |
 | Runtime delivery settings | Implemented | Runtime settings manager and admin UI/API |
 | Runtime idle cleanup settings | Implemented | Runtime settings manager, admin UI/API, broker worker |
@@ -413,6 +414,7 @@ See also: [admin dashboard](/admin-dashboard/).
 | Coordination membership control | Partial | Add/remove a consensus voting member from the topology page and API |
 | Cohort visibility | Partial | Per-broker exclusive-cohort membership on the subscriptions page and `/admin/api/cohorts` |
 | Quarantine banner and repair | Implemented | Global banner, `/admin/api/quarantine`, repair endpoint, `/readyz` |
+| Prometheus metrics endpoint | Implemented | `GET /metrics` on the same listener and auth, see [Metrics Export](#metrics-export) |
 | Basic admin auth | Implemented | Login, logout, session cookie, auth-disabled mode |
 | Fine-grained admin roles | Planned | Current model is admin access or auth disabled |
 
