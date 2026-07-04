@@ -119,7 +119,10 @@ struct SecretGenerateArgs {
 enum CertCommand {
     /// Generate per-deployment TLS material (CA + server certificate) under
     /// <data_dir>/tls, the same material tls.auto_self_signed generates on
-    /// first boot. Existing complete material is kept as is.
+    /// first boot. Existing complete material is kept as is; a directory
+    /// holding only the CA pair (copied from another node, or with the
+    /// server pair removed for rotation) gets a server certificate minted
+    /// from that CA.
     Generate(CertGenerateArgs),
     /// Print the SHA-256 fingerprint of the first certificate in a PEM file.
     Fingerprint(CertFingerprintArgs),

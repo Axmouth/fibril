@@ -12,6 +12,19 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Inter-broker TLS. With TLS enabled, follower-to-owner replication and the
+  coordination raft channel are encrypted too (`tls.inter_broker`, following
+  `tls.enabled`; explicit `false` opts out for mesh deployments). Peers verify
+  each other against `tls.peer_ca_path`, the generated CA, or OS roots, and
+  transport mismatches are named in both directions. A generated-material dir
+  holding only the copied `ca.pem` + `ca.key` mints that node's server
+  certificate from the shared deployment CA. Nodes keep authenticating with
+  the cluster secret inside the session.
+- Live certificate rotation. `POST /admin/api/tls/reload` and
+  `fibrilctl admin reload-tls` re-read and validate the serving pair, then
+  swap it for new handshakes without a restart; invalid material is rejected
+  with the old certificate still serving. CA rotation remains
+  restart-required.
 - Prometheus metrics. `GET /metrics` on the admin listener serves the text
   exposition format behind the same admin auth and HTTPS as the dashboard:
   node-level broker/storage/transport/session-resume counters, open

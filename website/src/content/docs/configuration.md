@@ -42,6 +42,12 @@ enabled = false
 # The admin dashboard serves HTTPS from the same material when TLS is
 # enabled. Opt it out when a reverse proxy terminates TLS for the dashboard:
 # admin_enabled = false
+# Follower-to-owner replication follows `enabled` too. Opt it out when a
+# service mesh or tunnel already encrypts inter-broker traffic:
+# inter_broker = false
+# CA that peer certificates chain to. Unset falls back to the generated
+# <data_dir>/tls/ca.pem, then OS roots:
+# peer_ca_path = "/etc/fibril/tls/ca.pem"
 
 [storage.keratin]
 fsync_interval_ms = 5
@@ -144,6 +150,8 @@ These fields are read on process start.
 | `tls.key_path` | `FIBRIL_TLS_KEY_PATH` | none | unset |
 | `tls.auto_self_signed` | `FIBRIL_TLS_AUTO_SELF_SIGNED` | none | `false` |
 | `tls.admin_enabled` | `FIBRIL_TLS_ADMIN_ENABLED` | none | follows `tls.enabled` |
+| `tls.inter_broker` | `FIBRIL_TLS_INTER_BROKER` | none | follows `tls.enabled` |
+| `tls.peer_ca_path` | `FIBRIL_TLS_PEER_CA_PATH` | none | generated CA, then OS roots |
 | `setup.mode` | `FIBRIL_SETUP_MODE` | none | `false` |
 | `auth.allow_default_loopback` | none | none | `true` |
 | `auth.seed_users` | `FIBRIL_AUTH_USERNAME` + `FIBRIL_AUTH_PASSWORD` (one entry) | none | empty |
@@ -214,6 +222,17 @@ not verify defeats passive snooping only. Fibril never ships certificates.
 where a reverse proxy terminates TLS in front of it. Certificate material is
 read once at startup, so replacing it requires a restart (live reload and
 rotation are planned).
+
+`tls.inter_broker` covers follower-to-owner replication and the coordination
+raft channel. It follows `tls.enabled`, which assumes a homogeneous cluster
+whose certificates chain to one CA - see
+[TLS across nodes](/deployment/cluster/#tls-across-nodes) for the shared-CA
+lane and the rotation runbook. Set it to `false` when a service mesh or
+tunnel already encrypts inter-broker traffic. `tls.peer_ca_path` names the CA
+peers are verified against, falling back to the generated
+`<data_dir>/tls/ca.pem` when present, then OS roots. The serving certificate
+and key reload live via `fibrilctl admin reload-tls` or
+`POST /admin/api/tls/reload`.
 
 The `auth` section governs broker authentication. The built-in default
 credentials (`fibril`/`fibril`) are accepted from loopback connections only,

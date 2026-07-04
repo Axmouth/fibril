@@ -94,8 +94,10 @@ Operational depth on top of the security baseline:
   [monitoring](/deployment/monitoring/).
 - Graceful ownership handoff on drain, so a planned restart moves partition
   ownership to caught-up followers instead of waiting out reactive failover.
-- TLS on inter-broker replication and coordination connections, and
-  certificate rotation.
+- TLS on inter-broker replication and coordination connections, with a
+  shared-CA lane for generated material and live leaf-certificate rotation
+  through the admin API. Landed on main, see
+  [TLS across nodes](/deployment/cluster/#tls-across-nodes).
 
 ### Toward 1.0 (later 0.x minors)
 
@@ -104,8 +106,8 @@ Each subsequent minor knocks off part of a gate, incrementally:
 - The wire protocol is versioned with a back-compat policy and the client APIs
   are frozen, including the Offset/Topic newtype and `Arc<str>` pass (gate 2).
 - Durable restart reconciliation finishes the operational lifecycle (gate 3).
-- The remaining security depth (mTLS, per-topic authorization, inter-broker
-  TLS, certificate rotation) completes gate 4.
+- The remaining security depth (mTLS client auth, per-topic authorization)
+  completes gate 4.
 
 ### After 1.0 (parallel, non-gating)
 

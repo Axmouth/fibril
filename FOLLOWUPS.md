@@ -180,7 +180,28 @@ Tests:
 - Integration (single real broker): draining label visible in topology
   labels, admin drain response reports progress and reaches zero.
 
-### Arc: TLS tail (#153) - inter-broker TLS, coordination TLS, rotation
+### Arc: TLS tail (#153) - inter-broker TLS, coordination TLS, rotation - SHIPPED
+
+Shipped on main (post-0.3, lands in 0.4). As built, matching the brief
+with these concretions: the generation matrix and reloadable resolver
+live in fibril-tls (mint-from-shared-CA is the (ca.pem, ca.key, -, -)
+lane; the resolver is an ArcSwap<CertifiedKey> behind
+rustls ResolvesServerCert, so the admin config shares rotation for
+free); replication dials wrap in a connector carried on
+ProtocolOwnerPeerResolverConfig (protocol Conn became
+Framed<PeerStream> where PeerStream is plain-or-TLS over the net seam);
+the ganglion sibling gained RaftAcceptor mirroring RaftDialer plus
+start_durable_tcp_with_transport, and fibril injects
+TlsRaftDialer/TlsRaftAcceptor (crates/fibril/src/raft_tls.rs) built
+from the same material, with the node's coordination peer host added
+to generated SANs. Rotation is POST /admin/api/tls/reload +
+fibrilctl admin reload-tls, validated before swap, tested under
+publish load. Cluster-secret auth on the RAW raft channel was assessed
+in-brick and split out: it needs a raft-wire handshake change, and the
+TLS peer-CA check now bounds who can reach the channel at all - the
+remaining depth (proof of membership on the raft wire itself) folds
+into the mTLS arc, where client-certificate identity covers it without
+a second mechanism.
 
 Goal: encrypt follower-to-owner replication and ganglion raft traffic,
 and allow certificate replacement without a restart. Completes the

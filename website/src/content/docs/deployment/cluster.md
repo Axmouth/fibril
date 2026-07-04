@@ -19,6 +19,9 @@ Clustering is experimental and not yet production-ready high availability.
   including itself, and exactly one node bootstraps the group on first boot.
 - **TLS, if connections leave the host.** Passwords and replicated data travel
   the network. Enable the `tls` section (see [configuration](/configuration/)).
+  With TLS enabled, replication and coordination traffic between brokers is
+  encrypted too, which requires every node's certificate to chain to a CA all
+  peers trust - see [TLS across nodes](#tls-across-nodes).
 - **Users.** The built-in `fibril`/`fibril` pair works from loopback only, so
   create at least one real user for clients that connect across the network.
 
@@ -40,6 +43,59 @@ Distribute it however your platform distributes secrets:
 Resolution order is `FIBRIL_CLUSTER_SECRET`, then `coordination.secret_path`,
 then the `<data_dir>/cluster.secret` file. User accounts never authenticate
 node-to-node connections, so rotating a user cannot wedge replication.
+
+## TLS across nodes
+
+When `tls.enabled = true`, follower-to-owner replication and the coordination
+raft channel also run over TLS (`tls.inter_broker`, which follows `enabled`
+unless set explicitly). Peers verify each other's certificate against a CA the
+same way clients do, so every node's certificate must chain to a CA all nodes
+trust. Two lanes:
+
+**Bring your own CA.** Issue each node a certificate from your CA, covering
+the node's broker advertise host and its coordination peer host in the
+subject alternative names. Point `tls.peer_ca_path` at the CA on every node
+(unset, it falls back to the generated `<data_dir>/tls/ca.pem` when present,
+then OS roots).
+
+**Shared generated CA.** Generate material on the first node, then copy only
+the CA pair to each other node's TLS dir before its first boot:
+
+```sh
+# On the first node (or ahead of time with fibrilctl cert generate):
+#   <data_dir>/tls/ca.pem  ca.key  server.pem  server.key
+# On every other node, before first boot:
+scp node1:<data_dir>/tls/ca.{pem,key} <data_dir>/tls/
+```
+
+A node that finds only `ca.pem` + `ca.key` mints its own server certificate
+from that CA on boot, so the whole deployment shares one CA and one client
+pin while each node keeps its own key. Independently generated material on
+each node does NOT work for inter-broker TLS: every node would have its own
+CA and reject its peers. If a mesh or tunnel already encrypts inter-broker
+traffic, set `tls.inter_broker = false` instead.
+
+Transport identity and cluster membership stay separate on purpose: TLS
+proves which host a connection reaches, the cluster secret authenticates the
+node inside the session. Both apply.
+
+## Rotating certificates
+
+A node's server certificate rotates without a restart as long as the CA stays
+the same. Replace `server.pem` and `server.key` on disk (for generated
+material: delete the pair and reboot-free mint by running
+`fibrilctl cert generate` again, or issue from your CA), then:
+
+```sh
+fibrilctl admin reload-tls
+```
+
+The broker validates the new pair fully before swapping, so invalid material
+is rejected with the old certificate still serving. New handshakes (clients,
+replication, dashboard) present the new certificate, established connections
+keep the one they negotiated. Rotating the CA itself requires a rolling
+restart with the new CA distributed first, and re-pinning any
+fingerprint-pinned clients.
 
 ## Entry-level: first-boot setup
 
@@ -64,6 +120,11 @@ environment:
   FIBRIL_AUTH_USERNAME: ops
   FIBRIL_AUTH_PASSWORD: ${FIBRIL_OPS_PASSWORD}
 ```
+
+With TLS enabled across several nodes, provision the shared CA pair into each
+node's `<data_dir>/tls` (see [TLS across nodes](#tls-across-nodes)) so the
+generated leaves chain to one CA - or set `FIBRIL_TLS_INTER_BROKER: "false"`
+when something else encrypts the inter-broker path.
 
 With TLS and the secret provided explicitly, setup mode (if set) marks itself
 complete and boots straight through, so the same image works interactively and

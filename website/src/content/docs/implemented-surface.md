@@ -578,12 +578,16 @@ See also: [configuration](/configuration/) for the `tls` section fields.
 | Dashboard TLS status | Implemented | The settings startup summary reports the TLS state, material source, CA fingerprint, and admin coverage, with the enable guide when disabled |
 | Client TLS options | Implemented | Rust, TypeScript, and Python: OS-roots default, CA file, SHA-256 fingerprint pin, server-name override, and the shared typed error taxonomy (426 mismatch vs certificate trust vs config). Python chain pinning needs 3.13, older Pythons pin the leaf |
 | Admin dashboard HTTPS | Implemented | Served from the same `tls` material when enabled, `tls.admin_enabled = false` keeps it on plain HTTP for reverse-proxy setups |
+| Inter-broker TLS | Implemented | `tls.inter_broker` (follows `enabled`) wraps follower-to-owner replication dials and the coordination raft channel; peer trust via `tls.peer_ca_path`, the generated CA, or OS roots; mismatches named in both directions |
+| Shared-CA material lane | Implemented | A generated-material dir holding only `ca.pem` + `ca.key` mints that node's server certificate from the shared CA on boot (or via `fibrilctl cert generate`) |
+| Live certificate reload | Implemented | `POST /admin/api/tls/reload` + `fibrilctl admin reload-tls`: validated swap of the serving pair, old material keeps serving on rejection, established connections unaffected |
 | mTLS client auth | Planned | Reserved config surface, not wired |
-| Inter-broker replication TLS | Planned | Client-facing listeners first |
 
 Conditions and limits:
 
-- Certificate material is read once at startup, so replacing it requires a restart. Live reload and rotation are planned.
+- Live reload rotates the leaf certificate under the same CA. Rotating the CA itself requires a rolling restart and re-pinning fingerprint-pinned clients.
+- Inter-broker TLS assumes every node's certificate chains to one CA. Independently generated per-node CAs do not interoperate; use the shared-CA lane or `tls.inter_broker = false`.
+- The cluster secret keeps authenticating nodes inside the TLS session; transport identity and membership are separate layers.
 - Generated self-signed material that a client does not verify defeats passive snooping only. Clients should trust the generated `ca.pem` or pin the printed fingerprint.
 - Fibril never ships certificates.
 
