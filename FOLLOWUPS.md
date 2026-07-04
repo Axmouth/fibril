@@ -2345,14 +2345,38 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   select repoll per publish (~10us/msg). Socket writes are ALREADY
   coalesced (feed + flush_ticker) and confirms ALREADY pipelined, so
   those are not the limiter.
-  FIX (identified, not yet applied): micro-batch at dispatch - drain the
-  queued commands per wakeup (recv the first, then a bounded try_recv /
-  recv_many loop) and feed them as a batch before returning to select!,
-  amortizing the per-message wakeup. Needs the big command match body
-  factored out of the select! arm so it can run per-drained-command.
-  Expected to lift a single client well past 100k. Validate by re-running
-  the 1-producer bench. Then check the consumer receive path for the
-  symmetric per-message hop. (Bench runs need dangerouslyDisableSandbox.)
+  HYPOTHESIS 1 (batch-drain the command channel) TESTED AND DISPROVEN on
+  branch client-dispatch-batching, reverted. Bounded-drain the select!
+  cmd_rx arm: confirmed 96k->100k (noise), unconfirmed 104k->98k (a
+  regression). A single client does NOT back up the command channel - the
+  writer never gets far enough ahead - so the drain almost always finds
+  one command and the extra try_recv is pure overhead. The engine loop is
+  NOT the limiter.
+
+  HYPOTHESIS 2 (the real one, from reading Publisher::publish): the
+  per-message cost is upstream in the publish call path, redundant work a
+  steady single-partition publisher repeats every message:
+  - engine_for(topic, partition, group).await per message: a topology
+    load + lookup, then TWO awaits through bootstrap_slot and
+    engine_for_operation, each an RwLock read + Arc clone. The resolved
+    Arc<EngineHandle> is the SAME every message for a fixed publisher.
+  - publish() allocates topic.to_string() + group.map(to_string()) per
+    message (Command carries owned Strings), plus into_message() and
+    route().
+  Optimizations to try (each proved by re-benching 1 producer, kept only
+  if it moves the number past noise): cache the resolved Arc<EngineHandle>
+  on the Publisher with cheap revalidation (invalidate on redirect /
+  topology change), and carry Arc<str> topic/group through the Command so
+  a publish clones an Arc instead of allocating. Profile first if a
+  flamegraph is available to rank the costs rather than guess a third
+  time.
+
+  Requirements for whatever lands (standing): edge-case tests (fatal
+  mid-burst, redirect/topology-change invalidating a cached engine,
+  ordering preserved, shutdown), and it must not make MORE ops fail than
+  the unoptimized path would - a cached-engine staleness must resolve to a
+  redirect/retry, never a wrong-owner silent failure. Comment discipline.
+  (Bench runs need dangerouslyDisableSandbox.)
 
   ## Client performance audit - original spec
 
