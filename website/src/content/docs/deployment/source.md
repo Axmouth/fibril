@@ -19,7 +19,8 @@ The current server binary:
 - listens for broker TCP traffic on `0.0.0.0:9876`
 - serves the early admin interface on `0.0.0.0:8081`
 - stores durable state under `server_data/`
-- uses development authentication defaults in the server binary
+- uses development authentication defaults in the server binary (the
+  built-in `fibril`/`fibril` credentials work from loopback only)
 
 These defaults are expected to change as configuration and packaging mature.
 
@@ -152,6 +153,15 @@ chmod +x fibril-server
 ```
 
 ## Health check
+
+## Securing a deployment
+
+Before a broker accepts connections from beyond localhost, enable
+[TLS](/configuration/) (supply PEM files or set `tls.auto_self_signed = true`)
+and create at least one user (`fibrilctl user add`, or the dashboard). The
+admin dashboard serves HTTPS from the same TLS material. For a multi-node
+cluster, see the [cluster setup guide](/deployment/cluster/). `setup.mode`
+can drive the whole choice from a browser on first boot.
 
 The admin surface exposes a lightweight health endpoint:
 

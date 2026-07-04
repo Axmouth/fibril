@@ -21,6 +21,7 @@ It is early-stage (0.x). The useful baseline works and is tested hard, but APIs,
 * Read [many idle queues](/concepts/many-idle-queues/) if your workload defines many queues but only uses a few at once.
 * Check [project status](/status/) before depending on a feature.
 * Check [implemented surface](/implemented-surface/) when you need the detailed answer for whether a path is wired and under what conditions.
+* Secure a deployment with [TLS and users](/configuration/), or bring up a [secured cluster](/deployment/cluster/).
 * Check the [changelog](https://github.com/Axmouth/fibril/blob/main/CHANGELOG.md) for what each release contains and the [roadmap](/roadmap/) for near-term direction.
 * Use the [optimization log](/development/optimization-log/) for benchmark-first performance investigations.
 

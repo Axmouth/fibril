@@ -10,6 +10,67 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-05
+
+The security release. Connections can now be encrypted end to end, and the
+broker authenticates who is connecting instead of accepting a built-in
+credential from anywhere. Both were designed to be easy for an operator: TLS
+material is either supplied or generated per deployment, users are managed from
+the dashboard or `fibrilctl`, and a first-boot setup flow can drive the whole
+thing from a browser. Nothing is encrypted or authenticated by default that was
+not before, so upgrading an existing single-node deployment changes nothing
+until TLS or a user is configured.
+
+Deliberately out of scope for this release, and planned for later: TLS on
+inter-broker replication and coordination connections, mutual-TLS client
+authentication, certificate rotation, and per-topic authorization.
+
+### Added
+
+- TLS in transit. The broker listener serves TLS from operator-supplied PEM
+  files (`tls.cert_path`, `tls.key_path`) or from per-deployment material
+  generated under `<data_dir>/tls` (`tls.auto_self_signed`), with the CA
+  fingerprint printed at startup for clients to pin. The Rust, TypeScript, and
+  Python clients connect over TLS with OS-root trust, a CA file, or a
+  fingerprint pin, and surface a typed error taxonomy that keeps a
+  transport mismatch apart from a certificate-trust failure. A plaintext
+  connection to a TLS listener and a TLS connection to a plaintext listener are
+  each named in both directions rather than hanging or failing opaquely.
+- Broker authentication against a user store. Users are argon2-hashed, seeded
+  from config on first boot, and managed live through `/admin/api/users`,
+  `fibrilctl user add/passwd/remove/list`, and a dashboard Users section. In
+  cluster mode user changes replicate to every node. The built-in
+  `fibril`/`fibril` credentials are accepted from loopback only, so a remote
+  connection requires a real user.
+- Cluster shared secret for node-to-node authentication. Replication and
+  coordination connections authenticate as a node principal with a shared
+  secret (`FIBRIL_CLUSTER_SECRET`, `coordination.secret_path`, or the
+  `<data_dir>/cluster.secret` file written by `fibrilctl secret generate`),
+  never with a user account. Ganglion mode requires one.
+- Admin dashboard HTTPS from the same TLS material, with `tls.admin_enabled`
+  to opt out for reverse-proxy deployments.
+- First-boot setup mode. `setup.mode` serves a localhost setup page before the
+  broker starts: choose or generate TLS material, optionally create an admin
+  user, and optionally set a cluster secret. The choices persist as a config
+  overlay layered below explicit config, so a fully configured deployment boots
+  straight through unattended.
+- `fibrilctl cert generate`/`cert fingerprint` and `fibrilctl secret generate`
+  for provisioning TLS material and the cluster secret ahead of first boot.
+- A cluster setup guide in the docs covering the secret, TLS across nodes, the
+  entry-level setup-mode bring-up, and the unattended config/env lane.
+
+### Changed
+
+- The TLS material and rustls setup live in a dedicated `fibril-tls` crate so
+  the CLI can provision certificates without depending on the server.
+
+### Fixed
+
+- The connection writer now drains and flushes queued frames on shutdown. A
+  final error reply (an authentication denial or a rejected handshake) could
+  previously lose a race with connection teardown and reach the client as a
+  bare end-of-stream instead of the guided error.
+
 ## [0.2.0] - 2026-07-03
 
 The first tagged release. The baseline: durable single-node work queues and

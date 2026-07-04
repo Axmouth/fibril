@@ -76,6 +76,7 @@ export default defineConfig({
             { label: "Replication design", slug: "development/replication-design" },
             { label: "Recovery quarantine internals", slug: "development/recovery-internals" },
             { label: "Deterministic simulation", slug: "development/deterministic-simulation" },
+            { label: "TLS and authentication internals", slug: "development/security-internals" },
             { label: "Versioning and releasing", slug: "development/releasing" },
             { label: "Idle queue internals", slug: "development/idle-queue-internals" },
           ],

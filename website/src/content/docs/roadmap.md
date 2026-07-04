@@ -47,7 +47,7 @@ clients, the admin dashboard, and an experimental cluster path (coordination,
 replication, failover, live repartitioning). Single-node features are Available,
 the cluster path is Experimental, and the API and wire protocol may still change.
 
-### 0.2 (current)
+### 0.2
 
 Cluster confidence and operational hardening - **gate 1 (cluster confidence) is
 met**:
@@ -65,21 +65,34 @@ met**:
 
 The cluster path stays labeled Experimental until the remaining gates land.
 
-### 0.3 (next)
+### 0.3 (current)
 
-Reconnect reconciliation polish and the start of the freeze:
+The security release - **gate 4 (security baseline) is substantially met**:
 
-- A typed subscription-close reason and auto-resubscribe for safe recreate cases.
-- Durable restart reconciliation finishing the operational lifecycle (gate 3).
-- Start the freeze work: the Offset/Topic newtype plus `Arc<str>` pass (gate 2).
+- TLS in transit: the broker listener serves TLS from operator PEMs or
+  per-deployment generated material, the admin dashboard serves HTTPS from the
+  same material, and the Rust, TypeScript, and Python clients connect with
+  OS-root, CA-file, or fingerprint-pin trust and a typed error taxonomy.
+- Broker authentication against an argon2 user store, managed from the
+  dashboard and `fibrilctl`, replicated across the cluster, with the built-in
+  credentials restricted to loopback. Node-to-node connections authenticate
+  with a cluster shared secret, separate from user accounts.
+- A first-boot setup flow (TLS, admin user, and cluster secret) and a cluster
+  setup guide, so both the entry-level and unattended paths are documented.
+
+Mutual-TLS client authentication, per-topic authorization, TLS on inter-broker
+connections, and certificate rotation are the remaining security depth, planned
+for later minors.
 
 ### Toward 1.0 (later 0.x minors)
 
 Each subsequent minor knocks off part of a gate, incrementally:
 
-- TLS and authz land the security baseline (gate 4).
 - The wire protocol is versioned with a back-compat policy and the client APIs
-  are frozen (gate 2).
+  are frozen, including the Offset/Topic newtype and `Arc<str>` pass (gate 2).
+- Durable restart reconciliation finishes the operational lifecycle (gate 3).
+- The remaining security depth (mTLS, per-topic authorization, inter-broker
+  TLS, certificate rotation) completes gate 4.
 
 ### After 1.0 (parallel, non-gating)
 

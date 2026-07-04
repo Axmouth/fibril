@@ -42,7 +42,11 @@ Either way, the development server currently:
 - stores durable state under `server_data/` (the `fibril-server-data` volume with Docker)
 - uses development authentication defaults in the server binary
 
-Do not expose this development server directly to the public internet.
+Do not expose this development server directly to the public internet. Before
+exposing a broker beyond localhost, enable [TLS](/configuration/) and create a
+real user (the built-in `fibril`/`fibril` credentials are accepted from loopback
+only). See the [cluster setup guide](/deployment/cluster/) for a secured
+multi-node bring-up.
 
 ## Client shape
 
