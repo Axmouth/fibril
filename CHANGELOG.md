@@ -10,6 +10,18 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-04
+
+The operations release. Running Fibril in production got materially easier on
+three fronts: Prometheus scrapes the broker directly, a planned restart hands
+partition ownership off before the process stops, and the TLS story is now
+complete end to end - inter-broker encryption, live certificate rotation, and
+mutual TLS that turns client certificates into credentials. Nothing changes
+for existing deployments until the new switches are flipped, with one
+default worth knowing: with TLS enabled, inter-broker traffic now encrypts
+too, so multi-node generated-material deployments need the shared-CA lane
+(or an explicit `tls.inter_broker = false`).
+
 ### Added
 
 - Graceful ownership handoff on drain. `POST /admin/api/drain` now also
@@ -184,5 +196,7 @@ suite, a chaos/soak suite, and a real multi-node failover run.
 - Graceful shutdown flushes pending stream cursor commits, so a planned
   restart loses no committed consumer progress.
 
-[Unreleased]: https://github.com/axmouth/fibril/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/axmouth/fibril/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/axmouth/fibril/releases/tag/v0.4.0
+[0.3.0]: https://github.com/axmouth/fibril/releases/tag/v0.3.0
 [0.2.0]: https://github.com/axmouth/fibril/releases/tag/v0.2.0

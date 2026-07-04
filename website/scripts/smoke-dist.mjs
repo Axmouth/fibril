@@ -47,11 +47,11 @@ const checks = [
     path: "concepts/backpressure/index.html",
     includes: ["<title>Backpressure | Fibril</title>", "prefetch"],
   },
-  // The frozen 0.3 snapshot proves versioning is wired: the overview page exists
-  // under the version slug and its intra-doc links are rewritten to /0.3/.
+  // The frozen 0.4 snapshot proves versioning is wired: the overview page exists
+  // under the version slug and its intra-doc links are rewritten to /0.4/.
   {
-    path: "0.3/index.html",
-    includes: ["<title>Fibril documentation | Fibril</title>", "/0.3/quickstart/"],
+    path: "0.4/index.html",
+    includes: ["<title>Fibril documentation | Fibril</title>", "/0.4/quickstart/"],
   },
   {
     path: "0.3/status/index.html",

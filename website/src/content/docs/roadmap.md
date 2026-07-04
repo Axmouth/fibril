@@ -65,7 +65,7 @@ met**:
 
 The cluster path stays labeled Experimental until the remaining gates land.
 
-### 0.3 (current)
+### 0.3
 
 The security release - **gate 4 (security baseline) is substantially met**:
 
@@ -84,26 +84,27 @@ Mutual-TLS client authentication, per-topic authorization, TLS on inter-broker
 connections, and certificate rotation are the remaining security depth, planned
 for later minors.
 
-### 0.4 (in progress)
+### 0.4 (current)
 
-Operational depth on top of the security baseline:
+The operations release - **gate 4 (security baseline) is effectively
+complete** (per-topic authorization stays shelved until a real need appears)
+and gate 3 gains its drain half:
 
 - A Prometheus `/metrics` endpoint on the admin listener - node-level
   aggregates plus per-channel series from materialized channels, behind the
-  same auth and HTTPS as the dashboard. Landed on main, see
+  same auth and HTTPS as the dashboard. See
   [monitoring](/deployment/monitoring/).
 - Graceful ownership handoff on drain, so a planned restart moves partition
   ownership to caught-up followers instead of waiting out reactive failover.
-  Landed on main, see
+  See
   [failure modes](/reliability/failure-modes/#planned-restart-or-rolling-upgrade).
 - TLS on inter-broker replication and coordination connections, with a
   shared-CA lane for generated material and live leaf-certificate rotation
-  through the admin API. Landed on main, see
+  through the admin API. See
   [TLS across nodes](/deployment/cluster/#tls-across-nodes).
 - Mutual TLS: client certificates as credentials (`tls.client_auth`), with
   certificate identities mapping to store users, `fibrilctl cert issue`, and
   client options plus a typed required-cert error in all three clients.
-  Landed on main.
 
 ### Toward 1.0 (later 0.x minors)
 
