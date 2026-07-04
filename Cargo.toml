@@ -23,7 +23,7 @@ resolver = "3"
 # via `version.workspace = true`. Ganglion and Keratin are separate repos that
 # carry their own version lines.
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 
 [workspace.metadata.sovereignty]
 ai-training = "prohibited"

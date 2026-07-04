@@ -135,7 +135,7 @@ export interface ClientOptionsInit {
 }
 
 const DEFAULT_CLIENT_NAME = "Fibril TS Client";
-const DEFAULT_CLIENT_VERSION = "0.2.0";
+const DEFAULT_CLIENT_VERSION = "0.3.0";
 
 /**
  * Immutable connection option builder.

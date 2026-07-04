@@ -1,0 +1,39 @@
+---
+title: Reliability semantics
+description: The current durability and delivery guarantees in Fibril.
+slug: 0.3/reliability/semantics
+---
+
+Fibril currently targets best-effort at-least-once delivery.
+
+## Durability
+
+Fibril stores message payloads and queue state durably. Recovery is based on:
+
+* persisted message records
+* persisted queue-state records
+* snapshots and replay
+
+Commands are designed to be idempotent and replay-safe.
+
+## Acknowledgements
+
+Acknowledgements are explicit, idempotent, and final. Settlements are tracked as a coalesced set of settled offset ranges, from which the monotonic `settled_until` frontier is derived, so out-of-order acknowledgements are handled without a fixed window.
+
+If a subscription is dropped with prefetched but unacknowledged messages, those messages are returned for redelivery instead of being left behind until lease expiry. This keeps unsubscribe and consumer shutdown behavior aligned with at-least-once delivery.
+
+Short socket breaks can be handled with [reconnect grace](/0.3/reliability/reconnects/) when it is configured and the client reconnects with a valid resume identity before the grace window expires.
+
+## Retries
+
+Immediate requeue is implemented. Delayed retry can hold a nacked message until a `not_before` deadline before making it ready again. Lease expiry can also move inflight messages back to ready.
+
+Delayed retries are wired through the broker/protocol/client path. Max-retry dead-letter routing is also wired, but replay and inspection tooling is still early.
+
+## Backpressure
+
+Delivery is pull-based. Subscriptions set bounded prefetch, so consumers do not accept unlimited inflight work.
+
+## Not a production claim
+
+Durability is a real part of the broker and is tested. The project is still pre-alpha, and production readiness is not claimed.
