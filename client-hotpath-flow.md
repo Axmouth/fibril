@@ -310,3 +310,53 @@ Baselines (1KB, single client, saturate, 3s+ measured), the numbers the split
 
 Client CPU ~1 core, broker ~57% - the split's target is to push client CPU past
 one core and the rates up with it.
+
+## Step 2 - implementation spec (state mapped against the code, 2026-07-05)
+
+State accesses in the single engine task (the spawn at lib.rs ~3812):
+- next_req (u64): allocated ONLY in the cmd arm. WRITE-LOCAL, stays in the write task.
+- waiters HashMap<u64,Waiter>: INSERT in the cmd arm (confirmed publish, Subscribe,
+  DeclareQueue, DeclarePlexus, Topology); REMOVE+fire in the read arm (PublishOk,
+  SubscribeOk, DeclareOk, TopologyOk...). SHARED write->read.
+- subs HashMap<u64,SubState>: GET in the cmd arm (Ack/Nack build from
+  sub.topic/group/partition, ~4055/4066); INSERT in the read arm (SubscribeOk
+  ~4271/4308/4348/4361); GET+cloned + REMOVE in the read arm (Deliver ~4139,
+  dropped-receiver ~4201/4220). SHARED both directions.
+- last_seen Instant: WRITTEN in the read arm per frame (~4095); READ in the
+  heartbeat timeout check (~3912). SHARED read->write.
+- queued_publish_frames/bytes, flush_ticker: WRITE-LOCAL.
+
+Split:
+- WRITE task = existing loop MINUS the framed_read arm (cmd batch-drain, flush
+  ticker, heartbeat PING + timeout check). Owns framed(FramedWrite), next_req.
+- READ task = the framed_read arm extracted into `loop { framed_read.next() => dispatch }`.
+
+Shared types:
+- waiters, subs -> Arc<std::sync::Mutex<HashMap<..>>> (std sync, NOT tokio -
+  critical sections are one insert/remove/get+clone and MUST NOT cross .await).
+  AWAIT-SAFETY FIX REQUIRED: the Ack/Nack cmd handlers hold `subs.get(&sub_id)`
+  across send_encoded_or_die (an await) - would deadlock a Mutex. Restructure to
+  `let info = { subs.lock().get(&sub_id).map(|s| (s.topic.clone(), s.group.clone(),
+  s.partition)) };` then drop guard, then build+send. Deliver path already
+  .cloned(), so lock+clone+drop is mechanical.
+- last_seen -> Arc<AtomicU64> (ms since engine start): read task stores per frame,
+  write task compares on heartbeat tick.
+- next_req stays write-local.
+
+Shutdown/fatal: either task can hit a connection-level fatal; fatal in one must
+stop BOTH and run teardown ONCE. Use tokio_util CancellationToken (verify the
+feature is on; else Arc<Notify> + Arc<AtomicBool> checked at each loop top). First
+fatal records into Arc<Mutex<Option<FibrilError>>>, cancels the token; both loops
+also select the external `shutdown` Notify. A SUPERVISOR (replacing today's single
+spawn) awaits both JoinHandles then runs teardown once: drain+fail waiters, clear
+subs, shutdown.notify_waiters(). The two current teardown sites (read-arm
+connection-error path ~4599 and after-loop fail-waiters ~4637) collapse into it.
+reconnect/resume calls the same spawn helper.
+
+GATE (win-or-shelve): compiles + all client tests pass, then bench saturate
+publish-only + mixed at 1 client (expect client CPU > 1 core, rate up). If
+publish/mixed do NOT clear ~220k, SHELVE the split - keep batch-drain +
+backpressure + the Step 1 FramedRead/Write foundation (all neutral/proven) and
+stop. Correctness before merge: fatal-mid-batch fails all waiters no-hang;
+per-partition publish order; heartbeat fires; reconnect+resume; clean shutdown
+mid-traffic. Then bench the full matrix (step 6) and the TS/Python follow-on.
