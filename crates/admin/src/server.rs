@@ -66,7 +66,22 @@ pub trait QueueRepartitionManager: Send + Sync + 'static {
 /// redirecting to the post-drain owner. Returns how many clients were notified.
 #[async_trait]
 pub trait BrokerDrainController: Send + Sync + 'static {
-    async fn announce_drain(&self, grace_ms: u64, message: String) -> usize;
+    async fn announce_drain(&self, grace_ms: u64, message: String) -> DrainOutcome;
+}
+
+/// What a drain call achieved: connections notified, and in coordinated mode
+/// how far the ownership handoff got within its bounded wait.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DrainOutcome {
+    pub connections_notified: usize,
+    /// Partitions this node still owns when the call returns. Zero means
+    /// the handoff completed and stopping the process is gap-free.
+    pub owned_partitions_remaining: usize,
+    /// Whether ownership fully moved within the wait. `false` after the
+    /// timeout (or in standalone mode, where there is nowhere to move to);
+    /// reactive failover covers the remainder either way.
+    pub handoff_complete: bool,
+    pub handoff_waited_ms: u64,
 }
 
 /// Re-reads and swaps the broker's TLS material, returning the new leaf

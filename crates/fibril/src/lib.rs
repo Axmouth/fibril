@@ -84,6 +84,7 @@ pub fn runtime_seed_from_config(config: &ServerConfig) -> RuntimeSettings {
         },
         connection: BrokerConnectionRuntimeSettings {
             reconnect_grace_ms: config.runtime_seed.connection.reconnect_grace_ms,
+            drain_handoff_timeout_ms: None,
         },
         replication: ReplicationRuntimeSettings {
             confirm_timeout_ms: config.runtime_seed.replication.confirm_timeout_ms,
@@ -201,22 +202,121 @@ pub enum FibrilServerError {
 /// connected clients through the shared connection registry.
 pub struct ConnectionSettingsDrainController {
     connection_settings: ConnectionSettings,
+    handoff: Option<DrainHandoff>,
+}
+
+/// Coordinated-mode drain context: the flag the heartbeat labels publish,
+/// and the committed assignment view the bounded wait polls.
+struct DrainHandoff {
+    coordination: Arc<TcpGanglionCoordination>,
+    node_id: String,
+    draining: Arc<std::sync::atomic::AtomicBool>,
+    runtime_settings: tokio::sync::watch::Receiver<RuntimeSettingsSnapshot>,
 }
 
 impl ConnectionSettingsDrainController {
     pub fn new(connection_settings: ConnectionSettings) -> Self {
         Self {
             connection_settings,
+            handoff: None,
         }
     }
+
+    /// Enable the coordinated handoff: mark this node draining in its
+    /// heartbeat labels and wait (bounded) for the controller to move its
+    /// partitions before the drain call returns.
+    pub fn with_handoff(
+        mut self,
+        coordination: Arc<TcpGanglionCoordination>,
+        node_id: String,
+        draining: Arc<std::sync::atomic::AtomicBool>,
+        runtime_settings: tokio::sync::watch::Receiver<RuntimeSettingsSnapshot>,
+    ) -> Self {
+        self.handoff = Some(DrainHandoff {
+            coordination,
+            node_id,
+            draining,
+            runtime_settings,
+        });
+        self
+    }
+}
+
+/// Partitions (queues and streams) `node_id` owns in the committed snapshot.
+fn owned_partition_count(
+    snapshot: &fibril_broker::coordination::CoordinationSnapshot,
+    node_id: &str,
+) -> usize {
+    snapshot
+        .assignments
+        .values()
+        .filter(|assignment| assignment.is_owned_by(node_id))
+        .count()
+        + snapshot
+            .stream_assignments
+            .values()
+            .filter(|assignment| assignment.owner == node_id)
+            .count()
+}
+
+/// Whether the drain wait is over: everything moved, or the bounded wait is
+/// spent. Pure so the bound is unit-testable.
+pub fn drain_handoff_complete(
+    owned_remaining: usize,
+    elapsed: Duration,
+    timeout: Duration,
+) -> bool {
+    owned_remaining == 0 || elapsed >= timeout
 }
 
 #[async_trait]
 impl fibril_admin::BrokerDrainController for ConnectionSettingsDrainController {
-    async fn announce_drain(&self, grace_ms: u64, message: String) -> usize {
-        self.connection_settings
+    async fn announce_drain(&self, grace_ms: u64, message: String) -> fibril_admin::DrainOutcome {
+        let connections_notified = self
+            .connection_settings
             .announce_going_away(grace_ms, &message)
-            .await
+            .await;
+
+        // Standalone brokers have nowhere to move ownership: announce only,
+        // exactly the pre-handoff behavior.
+        let Some(handoff) = &self.handoff else {
+            return fibril_admin::DrainOutcome {
+                connections_notified,
+                owned_partitions_remaining: 0,
+                handoff_complete: false,
+                handoff_waited_ms: 0,
+            };
+        };
+
+        handoff
+            .draining
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let timeout = Duration::from_millis(
+            handoff
+                .runtime_settings
+                .borrow()
+                .settings
+                .connection
+                .drain_handoff_timeout_ms
+                .unwrap_or(fibril_broker::runtime_settings::DEFAULT_DRAIN_HANDOFF_TIMEOUT_MS),
+        );
+        let started = std::time::Instant::now();
+        let mut remaining =
+            owned_partition_count(&handoff.coordination.snapshot(), &handoff.node_id);
+        while !drain_handoff_complete(remaining, started.elapsed(), timeout) {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            remaining = owned_partition_count(&handoff.coordination.snapshot(), &handoff.node_id);
+            tracing::info!(
+                remaining,
+                "drain handoff waiting for partition ownership to move"
+            );
+        }
+        fibril_admin::DrainOutcome {
+            connections_notified,
+            owned_partitions_remaining: remaining,
+            handoff_complete: remaining == 0,
+            handoff_waited_ms: started.elapsed().as_millis() as u64,
+        }
     }
 }
 
@@ -639,8 +739,15 @@ pub fn broker_heartbeat_labels(
     broker: &Broker<StromaEngine>,
     topology_adoption: Option<&TopologyAdoptionTracker>,
     advertise: &[String],
+    draining: bool,
 ) -> BTreeMap<String, String> {
     let mut labels = BTreeMap::new();
+    if draining {
+        labels.insert(
+            fibril_coordination_ganglion::DRAINING_LABEL.to_string(),
+            "1".to_string(),
+        );
+    }
 
     // The broker's full advertise list, so clients learn every reachable endpoint
     // of an owner (not just the single endpoint registered in the node table).
@@ -713,6 +820,7 @@ pub fn spawn_ganglion_broker_tasks(
     topology_adoption: Option<Arc<TopologyAdoptionTracker>>,
     cluster_secret: &str,
     peer_tls: Option<fibril_tls::TlsConnector>,
+    draining: Arc<std::sync::atomic::AtomicBool>,
 ) -> GanglionBrokerTaskHandles {
     let mut resolver_cfg = fibril_protocol::v1::replication::ProtocolOwnerPeerResolverConfig::new(
         std::collections::HashMap::new(),
@@ -768,6 +876,7 @@ pub fn spawn_ganglion_broker_tasks(
                 &tails_broker,
                 labels_adoption.as_deref(),
                 &heartbeat_advertise,
+                draining.load(std::sync::atomic::Ordering::Relaxed),
             )
         },
     );
@@ -1398,6 +1507,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         None
     };
 
+    // Set by the admin drain endpoint; published as a heartbeat label so the
+    // controller evacuates this node's partitions before the process stops.
+    let draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     let _ganglion_broker_tasks = match (ganglion_parts.as_ref(), cluster_secret.as_deref()) {
         (Some(parts), Some(secret)) => Some(spawn_ganglion_broker_tasks(
             parts,
@@ -1407,6 +1520,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             Some(topology_adoption.clone()),
             secret,
             peer_tls,
+            draining.clone(),
         )),
         // The ganglion-requires-secret check above makes this unreachable,
         // stated here so a future reorder cannot silently spawn
@@ -1565,10 +1679,21 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         None => admin,
     };
 
-    // Operator drain: announce a planned restart to connected clients.
-    let admin = admin.with_drain(Arc::new(ConnectionSettingsDrainController::new(
-        connection_settings.clone(),
-    )));
+    // Operator drain: announce a planned restart to connected clients and,
+    // in coordinated mode, hand partition ownership off before returning.
+    let drain_controller = {
+        let controller = ConnectionSettingsDrainController::new(connection_settings.clone());
+        match ganglion_parts.as_ref() {
+            Some(parts) => controller.with_handoff(
+                parts.coordination.clone(),
+                config.coordination.node_id.clone(),
+                draining.clone(),
+                runtime_settings.subscribe(),
+            ),
+            None => controller,
+        }
+    };
+    let admin = admin.with_drain(Arc::new(drain_controller));
 
     // Per-broker exclusive-cohort view (this node's local cohort membership).
     let admin = admin.with_cohorts({
@@ -2079,6 +2204,19 @@ mod tests {
             Duration::from_secs(0),
             timeout
         ));
+    }
+
+    #[test]
+    fn drain_handoff_gate_completes_on_zero_owned_or_timeout() {
+        let timeout = Duration::from_secs(30);
+
+        // Still owning partitions, wait young -> keep waiting.
+        assert!(!drain_handoff_complete(3, Duration::from_secs(1), timeout));
+        // Everything moved -> done, regardless of the timer.
+        assert!(drain_handoff_complete(0, Duration::from_secs(0), timeout));
+        // The bounded wait is spent -> done (reactive failover backstops).
+        assert!(drain_handoff_complete(3, Duration::from_secs(30), timeout));
+        assert!(drain_handoff_complete(3, Duration::from_secs(45), timeout));
     }
 
     #[test]

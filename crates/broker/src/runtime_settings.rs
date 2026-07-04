@@ -288,7 +288,14 @@ impl IdleQueueCleanupRuntimeSettings {
 #[serde(default)]
 pub struct ConnectionRuntimeSettings {
     pub reconnect_grace_ms: Option<u64>,
+    /// Upper bound (ms) on waiting for partition ownership to hand off
+    /// during a drain, in coordinated mode. Only caps how long the drain
+    /// call waits: reactive failover stays the backstop either way.
+    pub drain_handoff_timeout_ms: Option<u64>,
 }
+
+/// Default drain handoff wait when the runtime setting is unset.
+pub const DEFAULT_DRAIN_HANDOFF_TIMEOUT_MS: u64 = 30_000;
 
 /// Boot-owned locks that prevent selected runtime sections from being overridden by persisted state.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -699,6 +706,7 @@ mod tests {
             },
             connection: ConnectionRuntimeSettings {
                 reconnect_grace_ms: Some(8),
+                drain_handoff_timeout_ms: None,
             },
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),
@@ -738,6 +746,7 @@ mod tests {
             },
             connection: ConnectionRuntimeSettings {
                 reconnect_grace_ms: Some(17),
+                drain_handoff_timeout_ms: None,
             },
             replication: ReplicationRuntimeSettings::default(),
             partitioning: PartitioningRuntimeSettings::default(),

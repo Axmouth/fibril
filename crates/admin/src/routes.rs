@@ -876,10 +876,10 @@ pub async fn drain(
         ));
     };
 
-    let notified = controller
+    let outcome = controller
         .announce_drain(request.grace_ms, request.message)
         .await;
-    Ok(Json(serde_json::json!({ "notified": notified })).into_response())
+    Ok(Json(serde_json::to_value(&outcome).unwrap_or_default()).into_response())
 }
 
 pub async fn runtime_settings(

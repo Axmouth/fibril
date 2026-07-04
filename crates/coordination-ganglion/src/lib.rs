@@ -52,6 +52,12 @@ pub const COHORT_MEMBERSHIP_LABEL: &str = "fibril/cohort_membership";
 /// just the single endpoint registered in the node table.
 pub const ADVERTISE_LABEL: &str = "fibril/advertise";
 
+/// Heartbeat label a draining broker sets (any value). The controller treats
+/// a live draining node as an evacuation source and stops placing anything
+/// new on it. A label rather than a raft attribute so the state expires with
+/// the node's heartbeats and a crashed drain leaves nothing behind.
+pub const DRAINING_LABEL: &str = "fibril/draining";
+
 /// Serialize a broker's advertise list for its heartbeat label.
 pub fn encode_advertise(addrs: &[String]) -> String {
     serde_json::to_string(addrs).unwrap_or_else(|_| "[]".to_string())
@@ -2508,9 +2514,35 @@ impl GanglionCoordination {
             let committed = self.node.committed_snapshot();
             let fibril_committed = to_fibril_snapshot(&committed);
 
+            // Draining nodes leave the placement inputs entirely: nothing new
+            // lands on them (which also keeps a concurrent repartition from
+            // deadlocking against the drain), and the planner treats their
+            // partitions like a dead owner's. The candidate pass below then
+            // either evacuates each one to a caught-up follower or, unlike
+            // death, reverts it to stay put, because the node is still
+            // serving.
+            let draining: std::collections::HashSet<String> = committed
+                .nodes
+                .values()
+                .filter(|node| node.labels.contains_key(DRAINING_LABEL))
+                .map(|node| node.node_id.clone())
+                .filter(|node_id| live_nodes.contains_key(node_id))
+                .collect();
+            let placement_nodes: HashMap<String, NodeInfo> = live_nodes
+                .iter()
+                .filter(|(node_id, _)| !draining.contains(*node_id))
+                .map(|(node_id, info)| (node_id.clone(), info.clone()))
+                .collect();
+            // With every placeable node draining there is nothing useful to
+            // plan; assignments stay put until a node finishes draining or a
+            // non-draining node appears.
+            if placement_nodes.is_empty() {
+                return Ok(Some(fibril_committed));
+            }
+
             let mut plan = planner
                 .plan(PartitionPlacementInput {
-                    nodes: live_nodes.clone(),
+                    nodes: placement_nodes.clone(),
                     queues: queues.to_vec(),
                     existing: fibril_committed.assignments,
                     target_followers,
@@ -2545,7 +2577,7 @@ impl GanglionCoordination {
                 .collect();
             plan.snapshot.stream_assignments = stream_planner
                 .plan(StreamPlacementInput {
-                    nodes: live_nodes.clone(),
+                    nodes: placement_nodes.clone(),
                     streams: streams.to_vec(),
                     existing: fibril_committed.stream_assignments,
                     target_followers: stream_target_followers,
@@ -2556,17 +2588,19 @@ impl GanglionCoordination {
 
             let mut desired = to_ganglion_snapshot(&plan.snapshot);
 
-            // Failover candidate selection: when the committed owner is dead
-            // and the planner moved ownership, prefer the most caught-up LIVE
-            // committed follower (by heartbeat-label applied event tail).
-            // Advisory only — checked promotion on the broker is the safety
-            // gate; with one follower this is a no-op.
+            // Failover candidate selection: when the committed owner is gone
+            // (dead, or live but draining) and the planner moved ownership,
+            // prefer the most caught-up LIVE committed follower (by
+            // heartbeat-label applied event tail). Advisory only — checked
+            // promotion on the broker is the safety gate; with one follower
+            // this is a no-op.
             for (resource, planned) in desired.assignments.iter_mut() {
                 let Some(current) = committed.assignments.get(resource) else {
                     continue;
                 };
-                let owner_died = !live_nodes.contains_key(&current.owner);
-                if !owner_died || planned.owner == current.owner {
+                let owner_draining = draining.contains(&current.owner);
+                let owner_gone = !live_nodes.contains_key(&current.owner) || owner_draining;
+                if !owner_gone || planned.owner == current.owner {
                     continue;
                 }
                 // The applied-tail label is keyed by QueueIdentity. A stream
@@ -2593,23 +2627,36 @@ impl GanglionCoordination {
                         Some((follower.clone(), tails.1))
                     })
                     .max_by_key(|(_, event_tail)| *event_tail);
-                if let Some((best_follower, _)) = best {
-                    if planned.owner != best_follower {
-                        let displaced =
-                            std::mem::replace(&mut planned.owner, best_follower.clone());
-                        // Keep the replica set coherent: the chosen follower
-                        // leaves the follower list; the planner's displaced
-                        // pick joins it (if live and distinct).
-                        planned
-                            .followers
-                            .retain(|follower| *follower != best_follower);
-                        if displaced != best_follower
-                            && live_nodes.contains_key(&displaced)
-                            && !planned.followers.contains(&displaced)
-                        {
-                            planned.followers.push(displaced);
+                match best {
+                    Some((best_follower, _)) => {
+                        if planned.owner != best_follower {
+                            let displaced =
+                                std::mem::replace(&mut planned.owner, best_follower.clone());
+                            // Keep the replica set coherent: the chosen follower
+                            // leaves the follower list; the planner's displaced
+                            // pick joins it (if live and distinct).
+                            planned
+                                .followers
+                                .retain(|follower| *follower != best_follower);
+                            if displaced != best_follower
+                                && live_nodes.contains_key(&displaced)
+                                && !planned.followers.contains(&displaced)
+                            {
+                                planned.followers.push(displaced);
+                            }
                         }
                     }
+                    // A draining owner with no reporting live follower keeps
+                    // the partition: the node is still serving, so staying
+                    // put beats handing ownership to a node without the
+                    // data. Reactive failover stays the backstop once the
+                    // process actually exits. A DEAD owner keeps the
+                    // planner's move, today's behavior.
+                    None if owner_draining => {
+                        planned.owner = current.owner.clone();
+                        planned.followers = current.followers.clone();
+                    }
+                    None => {}
                 }
             }
 
@@ -4196,6 +4243,218 @@ mod tests {
             moved.followers.contains(&"b-slow".to_string()),
             "the displaced candidate stays in the replica set: {moved:?}"
         );
+
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
+    }
+
+    /// Drain evacuation: a live draining owner hands its partition to the
+    /// most caught-up follower through the same fenced move as failover, and
+    /// receives no new placements while draining.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draining_owner_evacuates_and_receives_no_new_placements() {
+        use fibril_broker::coordination::DeterministicPartitionPlacement;
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("a-owner", raft_node);
+
+        let queue = QueueIdentity::new("orders", Partition::new(0), None);
+        let info = |id: &str, port: u16| NodeInfo {
+            node_id: id.to_string(),
+            broker_addr: format!("127.0.0.1:{port}"),
+            admin_addr: None,
+        };
+        let tails = |message: u64, event: u64| {
+            let mut labels = std::collections::BTreeMap::new();
+            labels.insert(applied_tail_label(&queue), format!("{message}:{event}"));
+            labels
+        };
+
+        provider
+            .register_self(&info("a-owner", 9000))
+            .await
+            .expect("a");
+        provider
+            .register_self_with_labels(&info("b-slow", 9001), tails(5, 5))
+            .await
+            .expect("b");
+        provider
+            .register_self_with_labels(&info("c-fast", 9002), tails(9, 9))
+            .await
+            .expect("c");
+        provider.register_queue(&queue).await.expect("queue");
+
+        let mut live = std::collections::HashMap::new();
+        live.insert("a-owner".to_string(), info("a-owner", 9000));
+        live.insert("b-slow".to_string(), info("b-slow", 9001));
+        live.insert("c-fast".to_string(), info("c-fast", 9002));
+        let iterate = |live: std::collections::HashMap<String, NodeInfo>| {
+            let provider = &provider;
+            async move {
+                provider
+                    .control_iteration(
+                        &DeterministicPartitionPlacement,
+                        &provider.registered_queues(),
+                        &DeterministicStreamPlacement,
+                        &provider.registered_streams(),
+                        2,
+                        2,
+                        ReplicationDurabilityPolicy::LocalDurable,
+                        &live,
+                        8,
+                    )
+                    .await
+                    .expect("iteration")
+                    .expect("leader")
+            }
+        };
+
+        let committed = iterate(live.clone()).await;
+        let first = committed
+            .assignment_for("orders", Partition::new(0), None)
+            .expect("assigned")
+            .clone();
+        assert_eq!(first.owner, "a-owner");
+
+        // The owner starts draining while staying live: ownership moves to
+        // the most caught-up follower with the same fencing as failover.
+        let mut draining_labels = std::collections::BTreeMap::new();
+        draining_labels.insert(DRAINING_LABEL.to_string(), "1".to_string());
+        provider
+            .register_self_with_labels(&info("a-owner", 9000), draining_labels)
+            .await
+            .expect("mark draining");
+        let committed = iterate(live.clone()).await;
+        let moved = committed
+            .assignment_for("orders", Partition::new(0), None)
+            .expect("assigned")
+            .clone();
+        assert_eq!(
+            moved.owner, "c-fast",
+            "evacuate to the most caught-up follower"
+        );
+        assert_eq!(moved.epoch, first.epoch + 1, "the move fences");
+        assert!(
+            !moved.is_owned_by("a-owner") && !moved.is_followed_by("a-owner"),
+            "the draining node leaves the replica set: {moved:?}"
+        );
+
+        // A queue declared mid-drain never lands on the draining node.
+        let fresh = QueueIdentity::new("fresh", Partition::new(0), None);
+        provider.register_queue(&fresh).await.expect("fresh");
+        let committed = iterate(live).await;
+        let placed = committed
+            .assignment_for("fresh", Partition::new(0), None)
+            .expect("placed")
+            .clone();
+        assert!(
+            !placed.is_owned_by("a-owner") && !placed.is_followed_by("a-owner"),
+            "no new placement on a draining node: {placed:?}"
+        );
+
+        provider
+            .consensus_node()
+            .shutdown()
+            .await
+            .expect("shutdown");
+    }
+
+    /// A draining owner whose followers report no applied tails keeps its
+    /// partition: the node is still serving, so staying put beats moving
+    /// ownership away from the data. Reactive failover remains the backstop
+    /// after the process exits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn draining_owner_without_reporting_follower_keeps_the_partition() {
+        use fibril_broker::coordination::DeterministicPartitionPlacement;
+
+        let router = InProcessRouter::new();
+        let config = default_raft_config().expect("config");
+        let raft_node = RaftMetadataNode::start(1, config, &router)
+            .await
+            .expect("raft node");
+        let mut members = BTreeMap::new();
+        members.insert(1u64, ganglion_openraft::openraft::BasicNode::new("n1"));
+        raft_node.initialize(members).await.expect("initialize");
+        raft_node
+            .wait_for_leader(1, Duration::from_secs(10))
+            .await
+            .expect("election");
+        let provider = GanglionCoordination::new("a-owner", raft_node);
+
+        let info = |id: &str, port: u16| NodeInfo {
+            node_id: id.to_string(),
+            broker_addr: format!("127.0.0.1:{port}"),
+            admin_addr: None,
+        };
+        provider
+            .register_self(&info("a-owner", 9000))
+            .await
+            .expect("a");
+        provider
+            .register_self(&info("b-fresh", 9001))
+            .await
+            .expect("b");
+        let queue = QueueIdentity::new("solo", Partition::new(0), None);
+        provider.register_queue(&queue).await.expect("queue");
+
+        let mut live = std::collections::HashMap::new();
+        live.insert("a-owner".to_string(), info("a-owner", 9000));
+        live.insert("b-fresh".to_string(), info("b-fresh", 9001));
+        let iterate = |live: std::collections::HashMap<String, NodeInfo>| {
+            let provider = &provider;
+            async move {
+                provider
+                    .control_iteration(
+                        &DeterministicPartitionPlacement,
+                        &provider.registered_queues(),
+                        &DeterministicStreamPlacement,
+                        &provider.registered_streams(),
+                        1,
+                        1,
+                        ReplicationDurabilityPolicy::LocalDurable,
+                        &live,
+                        8,
+                    )
+                    .await
+                    .expect("iteration")
+                    .expect("leader")
+            }
+        };
+
+        let committed = iterate(live.clone()).await;
+        let first = committed
+            .assignment_for("solo", Partition::new(0), None)
+            .expect("assigned")
+            .clone();
+        assert_eq!(first.owner, "a-owner");
+
+        let mut draining_labels = std::collections::BTreeMap::new();
+        draining_labels.insert(DRAINING_LABEL.to_string(), "1".to_string());
+        provider
+            .register_self_with_labels(&info("a-owner", 9000), draining_labels)
+            .await
+            .expect("mark draining");
+        let committed = iterate(live).await;
+        let kept = committed
+            .assignment_for("solo", Partition::new(0), None)
+            .expect("assigned")
+            .clone();
+        assert_eq!(kept.owner, "a-owner", "no reporting follower: stay put");
+        assert_eq!(kept.epoch, first.epoch, "staying put must not fence");
 
         provider
             .consensus_node()
