@@ -3261,7 +3261,11 @@ impl EngineSlot {
     ) -> FibrilResult<Self> {
         let subscriptions = Arc::new(RwLock::new(HashMap::new()));
         let stream = establish_stream(address.as_str(), opts.tls.as_ref()).await?;
-        let framed = Framed::new(stream, ProtoCodec);
+        let mut framed = Framed::new(stream, ProtoCodec);
+        // Raise tokio-util's default 8KB write-buffer flush boundary so it does
+        // not force a socket write every few 1KB frames, which would defeat the
+        // engine's own publish-flush batching (PUBLISH_FLUSH_MESSAGES / _BYTES).
+        framed.set_backpressure_boundary(PUBLISH_FLUSH_BYTES);
         let engine = start_engine(
             framed,
             opts.clone(),
@@ -3301,7 +3305,11 @@ impl EngineSlot {
         let mut opts = self.opts.clone();
         opts.resume_identity = Some(old_engine.resume_identity.clone());
         let stream = establish_stream(self.address.as_str(), opts.tls.as_ref()).await?;
-        let framed = Framed::new(stream, ProtoCodec);
+        let mut framed = Framed::new(stream, ProtoCodec);
+        // Raise tokio-util's default 8KB write-buffer flush boundary so it does
+        // not force a socket write every few 1KB frames, which would defeat the
+        // engine's own publish-flush batching (PUBLISH_FLUSH_MESSAGES / _BYTES).
+        framed.set_backpressure_boundary(PUBLISH_FLUSH_BYTES);
         let tls_opts = opts.tls.clone();
         let new_engine = start_engine(
             framed,
