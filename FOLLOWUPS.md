@@ -1,5 +1,297 @@
 # Follow-ups and pending work
 
+## 0.4 arc plans (2026-07-05) - implementation briefs
+
+Written to be executable by a fresh implementer: goal, decisions,
+invariants, brick order, test cases, and a map of the existing code each
+arc builds on. Recommended execution order: exporter, drain handoff, TLS
+tail - the exporter is independent and makes the other two observable,
+drain handoff's simulation tests then double as regression cover for the
+TLS tail, and the TLS tail is the deepest change.
+
+### Arc: Prometheus exporter (#118)
+
+Goal: GET /metrics on the admin server in Prometheus text exposition
+format, translating counters that already exist. No new hot-path
+instrumentation in this arc - export what is already counted.
+
+Decisions:
+- Hand-rolled exposition writer, no prometheus crate. Everything exported
+  is a counter or gauge already held in atomics; the format is # HELP /
+  # TYPE / name{labels} value lines. A registry dependency buys nothing.
+- The endpoint lives on the ADMIN server (auth, HTTPS, and bind already
+  exist there), path /metrics, behind the same admin basic auth (every
+  scraper speaks basic auth + TLS).
+- Naming: fibril_<subsystem>_<name> with _total on counters. Examples:
+  fibril_broker_published_total, fibril_broker_delivered_total,
+  fibril_tcp_connections_open, fibril_tcp_resume_accepted_total,
+  fibril_stream_delivered_total, fibril_stream_lag_evictions_total,
+  fibril_recovery_quarantined (gauge), fibril_queue_ready{topic,group,
+  partition} (gauge).
+- Cardinality policy: node-level aggregates always. Per-channel series
+  (queue depth/inflight, stream subscriptions/lag evictions) come from
+  the MATERIALIZED channels only, so sparse/idle queues stay out and the
+  series count is bounded by active channels. A config flag
+  admin.metrics_per_channel (default true) turns the per-channel block
+  off for many-active-queue deployments.
+- OpenTelemetry is a separate later item, not this arc.
+
+Invariants:
+1. A scrape never touches a delivery hot path or takes a per-message
+   lock: it reads atomic counters and the same snapshot views the
+   dashboard already uses (queues_debug / streams_debug data sources),
+   nothing else.
+2. Counters are process-lifetime monotonic; restart resets them
+   (standard Prometheus counter semantics - document, do not fight).
+3. Labels contain only channel identity (topic, group, partition, kind),
+   never message data.
+4. /metrics honors admin auth and serves over admin HTTPS when enabled.
+
+Code map:
+- crates/metrics/src: Metrics owns the registries; accessors
+  Metrics::broker() -> Arc<BrokerStats>, ::tcp() -> Arc<TcpStats>,
+  ::connections() -> Arc<ConnectionStats>. BrokerStats has the
+  publish/deliver counters including the stream counts added with the
+  parity work; BrokerStatsSnapshot shows the readable field set.
+- crates/broker/src/broker.rs: StreamStatsEntry (live_subscriptions,
+  lag_evictions), sparse_queue_observability_report(), the recovery
+  snapshot (quarantined gauge + quarantines_total).
+- crates/admin/src/server.rs router() for route registration,
+  routes.rs check_auth + the queues_debug/streams_debug handlers for the
+  safe data sources.
+
+Bricks:
+1. Exposition writer module in the admin crate: counter()/gauge()
+   helpers building the text body; unit tests for formatting and label
+   escaping.
+2. Node-level metrics: tcp, connections, broker, resume outcomes.
+3. Per-channel metrics behind admin.metrics_per_channel: queue
+   ready/inflight from the observability report, stream subscriptions
+   and lag evictions from the streams debug source.
+4. Replication and recovery: follower applied state, quarantine gauge.
+5. Docs: config row, implemented-surface row, admin-dashboard note, and
+   a short monitoring page with an example scrape config.
+
+Tests:
+- Unit: escaping of label values (quote, backslash, newline), exactly
+  one # TYPE per metric name, no trailing whitespace.
+- Admin-crate integration (existing harness): 200 + body parses with a
+  small line-checker (every non-comment line is name{...} float), 401
+  without credentials when auth is enabled.
+- fibril integration: boot a broker, publish and consume N, scrape,
+  assert published_total >= N and delivered_total advanced; scrape over
+  HTTPS reusing the tls_listener harness.
+- Cardinality: three declared queues, flag off = no per-channel series,
+  flag on = exactly the materialized channels appear.
+
+### Arc: Drain ownership handoff (#132)
+
+Goal: a draining broker proactively hands its partition ownership to
+caught-up followers before stopping, so a planned restart produces a
+near-zero delivery gap instead of waiting out reactive failover
+(liveness TTL, default 9s).
+
+Today: POST /admin/api/drain -> ConnectionSettingsDrainController
+(crates/fibril/src/lib.rs, attached via with_drain) announces GoingAway
+(Op 103) to connections; clients settle and reconnect; ownership moves
+only after the node's heartbeat goes stale and the controller runs
+reactive failover.
+
+Decisions:
+- Draining is a coordination-visible state carried as a HEARTBEAT LABEL
+  (broker_heartbeat_labels in crates/fibril/src/lib.rs already carries
+  advertise + per-queue applied tails). A label beats a raft attribute:
+  it expires with the node naturally and needs no new command.
+- The controller treats a draining node as an evacuation source: for
+  each partition it owns with a caught-up follower (applied-tail labels
+  are already how the failover candidate is chosen), plan a promotion
+  through the EXISTING failover path (epoch bump, promote arms from the
+  73x work). Drain handoff adds a trigger, never a second promotion
+  mechanism - the loss-freedom argument is inherited, not re-proven.
+- Draining nodes are excluded as targets for any new assignment,
+  including repartition placements, which is also what prevents a
+  drain/repartition deadlock.
+- The broker finishes draining when its assignment view shows zero owned
+  partitions, or after drain_handoff_timeout_ms (default 30_000). The
+  timeout fallback IS today's behavior: reactive failover remains the
+  backstop, so a drain can never wedge.
+- No client changes: not-owner redirects, TopologyUpdate pushes, and the
+  subscription supervisor already move traffic to the new owner.
+
+Invariants:
+1. Loss-freedom is inherited: only the existing promotion path moves
+   ownership, with its caught-up and fencing rules untouched.
+2. Bounded: a drain completes within the timeout even with zero
+   followers (standalone partitions simply stay put and fail over
+   reactively as today).
+3. Single ownership: at most one owner per partition at every instant
+   (epoch fencing; assert with the existing simulation invariants).
+4. A draining node accepts and serves normally until each partition
+   actually moves - the fence is the promotion, not the drain flag.
+
+Code map:
+- crates/fibril/src/lib.rs: broker_heartbeat_labels (add the draining
+  label), ConnectionSettingsDrainController, and
+  repartition_adoption_satisfied as the model for a pure, unit-testable
+  bounded-wait gate.
+- crates/coordination-ganglion/src/lib.rs: control_iteration and the
+  failover candidate selection (most-caught-up follower via the
+  applied-tail labels), the PromoteFollowerToOwner handling,
+  ControllerStatus for observability.
+- crates/broker: spawn_assignment_watcher_with_follower_replication -
+  the broker's live view of what it owns; the drain wait polls this.
+- crates/admin/src/routes.rs drain handler: extend the response with
+  handoff progress (remaining owned-partition count).
+- crates/protocol/tests/simulation_tests.rs: the turmoil multi-broker
+  harness where the deterministic drain scenarios belong.
+
+Bricks:
+1. Draining label + controller evacuation planning + target exclusion.
+2. Broker drain flow: wait for zero owned partitions with the bounded
+   timeout, progress logging, admin response progress.
+3. Config drain_handoff_timeout_ms (runtime settings, next to the other
+   drain/connection knobs) + docs.
+4. Simulation scenarios + status/implemented-surface rows (gate 3).
+
+Tests:
+- Simulation: three brokers, replicated queue, drain the owner ->
+  ownership moves BEFORE drain completes; publish continuously through
+  the drain and consume everything (no loss, no duplicate-confirm
+  regression); assert no dual-owner instant.
+- Simulation: drain with no caught-up follower -> completes at the
+  timeout, reactive failover later, replica-durable confirms still hold.
+- Simulation: drain during an active repartition transition -> both
+  complete, bounded, no deadlock; draining node receives no new
+  placements.
+- Unit: the bounded-wait gate function (mirroring the
+  repartition_adoption_satisfied test style).
+- Integration (single real broker): draining label visible in topology
+  labels, admin drain response reports progress and reaches zero.
+
+### Arc: TLS tail (#153) - inter-broker TLS, coordination TLS, rotation
+
+Goal: encrypt follower-to-owner replication and ganglion raft traffic,
+and allow certificate replacement without a restart. Completes the
+transport half of gate 4 (mTLS client auth stays separate).
+
+Trust model (the crux): every node's server certificate must chain to a
+CA that all peers trust. Two lanes, mirroring the client lanes:
+- BYO: all node certificates issued from the operator's CA; peers trust
+  it via tls.peer_ca_path (falling back to <data_dir>/tls/ca.pem when
+  present, then OS roots).
+- Generated: the deployment shares ONE generated CA. fibrilctl cert
+  generate on the first node, copy ca.pem + ca.key into each node's tls
+  dir, and each node mints only its own server certificate from that CA.
+  This requires a load-bearing change in fibril-tls: TODAY
+  ensure_generated_material refuses any partial presence; it must learn
+  the "ca.pem + ca.key present, no server material" combination and mint
+  the server cert from the existing CA. Enumerate the full presence
+  matrix in a table test.
+- Peer verification is standard rustls server-name verification against
+  the peer's advertise host (generated SANs already include advertise
+  hosts). The cluster secret keeps authenticating the @node principal
+  INSIDE the session: TLS provides confidentiality and server identity,
+  the secret provides membership - defense in depth, not redundancy.
+- Config: tls.inter_broker (default follows tls.enabled; explicit false
+  for mesh/mTLS-terminating environments) + tls.peer_ca_path.
+- Rotation: server-side hot reload through a rustls ResolvesServerCert
+  implementation reading an ArcSwap<CertifiedKey> held in ServerTls.
+  POST /admin/api/tls/reload (+ fibrilctl admin reload-tls) re-reads
+  material from the configured paths, VALIDATES it fully (the
+  store_provided_material philosophy: prove it loads before anything
+  changes), then swaps. In-flight connections keep the old certificate;
+  new handshakes get the new one. CA rotation stays restart-required and
+  documented (cross-CA bundles are a later refinement).
+
+Invariants:
+1. Mixed TLS/plaintext peers fail loudly: the protocol port already has
+   the sniff + 426 machinery - verify it fires for peer connections and
+   that the follower logs the guide; the raft transport needs an
+   equivalent named error (a raft TLS listener receiving plaintext, and
+   the reverse, must not hang).
+2. A reload never degrades service: invalid new material is rejected
+   with the old material still serving; the swap is atomic.
+3. The generation matrix is total: all 16 presence combinations of
+   {ca.pem, ca.key, server.pem, server.key} have a defined outcome
+   (reuse, mint-from-CA, refuse) and a test each.
+4. The simulation feature keeps compiling (the seam discipline from the
+   TLS arc; tokio-rustls is IO-generic so TLS composes over turmoil
+   streams if a simulated TLS scenario is wanted).
+
+Code map:
+- crates/tls (fibril-tls): ensure_generated_material (the matrix
+  change), server_config_from, ServerTls (grows the reloadable
+  resolver), store_provided_material (validate-before-write model).
+- crates/protocol/src/v1/replication.rs: connect_protocol_owner_peer and
+  the HELLO handshake helper near it - the follower-to-owner connect to
+  wrap in a TLS connector; ProtocolOwnerPeerResolverConfig (with_auth,
+  with_timeouts) is where the connector rides.
+- crates/client/src/tls.rs build_connector: the connector shape to
+  mirror for peers (CA file / OS roots; no fingerprint pin for peers).
+- crates/fibril/src/lib.rs: spawn_ganglion_broker_tasks (peer resolver
+  construction - inject the connector here), open_tcp_ganglion_parts
+  (raft server + dialer injection).
+- ../ganglion crates/ganglion-openraft/src/openraft_runtime/tcp.rs:
+  RaftDialer (line ~314) is the injectable CLIENT side; TcpRaftServer
+  binds tokio TcpListener directly (~line 226) with NO accept seam -
+  the sibling change is an injectable acceptor (mirror the fibril
+  handle_connection-generic approach), with its own ganglion changelog
+  entry.
+- Cluster-secret auth on the raft channel was deferred out of the auth
+  arc; assess in-brick - if it needs a raft handshake protocol change,
+  split it into its own follow-up rather than growing this arc.
+
+Bricks:
+1. fibril-tls: generation matrix + reloadable resolver + validated
+   reload fn. Table tests first, they define the contract.
+2. Replication over TLS: peer connector honoring tls.inter_broker and
+   the peer-CA resolution; mismatch tests both directions.
+3. Raft over TLS: TLS RaftDialer in fibril + the ganglion accept seam
+   (sibling patch); cluster forms over TLS in a test.
+4. Rotation: admin endpoint + fibrilctl command + swap wiring + a
+   rotation runbook section in the cluster guide (same-CA leaf rotation
+   live, CA rotation restart-required).
+5. Docs: cluster guide TLS section, implemented-surface rows (flip the
+   inter-broker and rotation Planned rows), changelog.
+
+Tests:
+- Unit: the 16-combination generation matrix; reload keeps old material
+  on invalid input; two handshakes around a reload observe different
+  leaf serials.
+- Integration: two brokers replicate a queue over TLS end to end
+  (follower catch-up + failover promotion, mirroring the existing
+  replication integration path but with tls.inter_broker on).
+- Mismatch: TLS follower to plaintext owner and reverse - named errors,
+  no hangs; raft equivalent.
+- Rotation under load: continuous publishes while reloading the owner's
+  certificate - zero client-visible errors, new connections present the
+  new serial.
+- Ganglion: cluster formation over the TLS dialer + acceptor.
+
+### After 0.4 - sequencing notes
+
+- Gate 3 remainder (#102-#105, reconnect reconciliation family): typed
+  subscription-close reasons on receive APIs, auto-resubscribe for safe
+  recreate_client_side, inflight reconciliation across reconnect,
+  durable restart reconciliation. Wants its own precedent-and-brief
+  pass when picked up: the close-reason surface interacts with the API
+  freeze, so design it immediately before or together with #111.
+- Gate 2 freeze family (#109-#112): newtype/Arc<str> pass first (pure
+  churn, do it last-moment before freezing), then the wire versioning +
+  back-compat policy, client API freeze, and the compat matrix. Auth
+  settled the handshake, so nothing structural blocks this after the
+  TLS tail lands.
+- Security depth, later minors: mTLS client auth (TlsSection reserved
+  the client-CA slot; server side is with_client_cert_verifier plus a
+  certificate-identity-to-user mapping), per-topic authorization (needs
+  its own precedent pass: Kafka ACLs vs RabbitMQ per-vhost patterns),
+  and the node-enrollment arc recorded above.
+- Go client (#119): parallel-friendly at any point; the Python port
+  playbook plus clients/FEATURE_MATRIX.md is the checklist.
+- benchmarks.md overhaul stays blocked on the NVMe slice; spec recorded
+  earlier in this file.
+
+
 ## Auth beyond the static handler (gate 4, #114) - design brief (2026-07-05)
 
 The next arc. Decisions below are settled from precedent (Kafka, RabbitMQ,
