@@ -309,11 +309,53 @@ Tests:
   durable restart reconciliation. Wants its own precedent-and-brief
   pass when picked up: the close-reason surface interacts with the API
   freeze, so design it immediately before or together with #111.
-- Gate 2 freeze family (#109-#112): newtype/Arc<str> pass first (pure
-  churn, do it last-moment before freezing), then the wire versioning +
-  back-compat policy, client API freeze, and the compat matrix. Auth
-  settled the handshake, so nothing structural blocks this after the
-  TLS tail lands.
+- Gate 2 freeze family (#109-#112): OPENS with the guided-errors pass
+  (below), then newtype/Arc<str> (pure churn, last-moment before
+  freezing), then the wire versioning + back-compat policy, client API
+  freeze, and the compat matrix. Auth settled the handshake, so nothing
+  structural blocks this after the TLS tail lands.
+
+### Guided client errors pass (opens the gate-2 family, user-requested)
+
+Goal: extend the TLS-error philosophy - every error names the likely
+fix - across the client-facing error surface, BEFORE the API freeze
+locks the variants and wording in.
+
+Two lanes, in order:
+1. Broker-side messages first: guides that ride error frames improve
+   all three clients at once with no client changes (precedent: the
+   auth denials and the 426 guide). Candidates by user impact:
+   ERR_NOT_FOUND on publish/subscribe (does the queue exist, is the
+   group part of the identity), declare conflicts (say WHICH setting
+   differs from the existing queue), ERR_NOT_OWNER surfacing to a user
+   (why a redirect loop might be failing), coordination/repartition ops
+   in static mode (this needs ganglion mode), operations on a
+   quarantined partition (point at the repair endpoint and docs page).
+2. Client-local errors second, per client with shared wording:
+   connection refused (is the broker up, broker port vs admin port),
+   heartbeat timeout vs clean close, InvalidName stating the actual
+   naming rules, resume rejection reasons. The reconnect-closure
+   reasons belong to #102 (typed close reasons) - co-design, do not
+   duplicate.
+
+Invariants:
+1. A guide states a fix or a check, never just restates the failure.
+2. No error becomes vaguer or loses machine-readable structure (codes
+   and types stay; the guide is the message text).
+3. Wording parity across Rust/TS/Python via a shared expectations list
+   (the wire_vectors pattern applied to error text where the message
+   originates client-side).
+4. retry_advice stays consistent with the guide (an error telling the
+   user to fix config must not advise Retry).
+
+Method: inventory every user-reachable error path (FibrilError
+variants, broker error_frame call sites, TS/Python error classes),
+rank by how often a NEW user hits it, guide the top of the list, stop
+where no likely fix exists (a guide that guesses wrong is worse than
+none).
+
+Tests: key paths assert the guide is present (contains the fix
+keyword), mirrored in the three clients for client-local errors.
 - Security depth, later minors: mTLS client auth (TlsSection reserved
   the client-CA slot; server side is with_client_cert_verifier plus a
   certificate-identity-to-user mapping), per-topic authorization (needs
