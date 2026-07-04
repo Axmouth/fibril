@@ -413,12 +413,25 @@ unknown-opcode (version skew), stream subscribe not-found (declare
 first), stream not-owner fallback (owner unresolved = converging or no
 coordination). Verified the queue path has NO missing-queue 404 - an
 undeclared queue auto-materializes or returns NotOwner, so the brief's
-Storage/Engine->404 mapping correctly does not apply. REMAINING: brick 3
-declare-conflict "say WHICH setting differs" (fibril/src/lib.rs
-declare_partitioning + the shrink/grow arms), and the whole client-local
-lane (connection-refused, InvalidName rules, heartbeat-vs-clean-close)
-with the clients/error_guides.json parity list. Cohort conflict messages
-already guide well - left as is.
+Storage/Engine->404 mapping correctly does not apply.
+
+Brick 3 (declare conflicts) DONE, mostly by verification: the "say WHICH
+setting differs" premise largely does not apply. Queue re-declares UPDATE
+settings (idempotent, redeclaring_same_kind_is_idempotent), so there is
+no settings-mismatch conflict. Partition grow/shrink already guides well
+(RepartitionQueueError names current + requested + the integer
+multiple/factor constraint). The one real gap was the queue-vs-stream
+kind-mismatch (keratin stroma) stating the problem but not the fix -
+added the fix hint (keratin commit ba76fea). Repartition-in-progress
+message left as is (clear enough). Cohort conflicts already guide.
+
+REMAINING - the client-local lane only (per-client, needs the parity
+mechanism): connection-refused (broker up? broker vs admin port),
+InvalidName stating the actual naming rules, heartbeat-timeout vs clean
+close. Build clients/error_guides.json (does NOT exist yet - proposed,
+modeled on wire_vectors.json) as the {case, must_contain[]} parity list
+consumed by all three client test suites. Reconnect-closure reasons stay
+with #102, do not duplicate.
 
 Two lanes, in order:
 1. Broker-side messages first: guides that ride error frames improve
