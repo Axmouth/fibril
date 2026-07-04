@@ -37,6 +37,14 @@ command-lane depths and timings, command-kind counters, append stats, snapshot
 cost, and recovery counters. Use it when the overview suggests pressure and you
 need the next level of detail.
 
+## Users
+
+The settings page has a Users section: create or rotate a user (argon2-hashed,
+never shown), remove a user, and see the current list with timestamps. The
+built-in `fibril`/`fibril` pair works from loopback only, so create a user for
+remote access. In cluster mode edits replicate to every node. The same
+operations are available from `fibrilctl user add/passwd/remove/list`.
+
 ## Auth State
 
 When admin authentication is configured, dashboard pages redirect unauthenticated

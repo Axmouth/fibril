@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use fibril_admin::{
-    AdminConfig, AdminServer, AdminServerError, CoordinationMembershipManager,
+    AdminConfig, AdminServer, AdminServerError, AdminUserInfo, CoordinationMembershipManager,
     RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
+    UserAdmin,
 };
 use fibril_broker::{
     auth_store::{NODE_PRINCIPAL, StoreAuthHandler, UserStoreError, UserStoreManager},
@@ -1168,6 +1169,18 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     let runtime = &runtime_snapshot.settings;
     let broker_cfg = BrokerConfig::from_runtime_settings(runtime);
 
+    let seed_users: Vec<(String, String)> = config
+        .auth
+        .seed_users
+        .iter()
+        .map(|seed| (seed.username.clone(), seed.password.clone()))
+        .collect();
+    let user_store = Arc::new(
+        UserStoreManager::load_from_stroma_engine(&engine, &seed_users)
+            .await
+            .map_err(FibrilServerError::UserStore)?,
+    );
+
     let ganglion_parts = open_tcp_ganglion_parts(&config).await?;
     if let Some(parts) = &ganglion_parts {
         spawn_ganglion_catalogue_sync(
@@ -1176,6 +1189,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             Duration::from_millis(config.coordination.ganglion.heartbeat_interval_ms),
         );
         spawn_ganglion_runtime_settings_sync(parts, runtime_settings.clone());
+        parts.coordination.spawn_user_store_sync(user_store.clone());
     }
 
     let ownership = queue_ownership_for_ganglion(ganglion_parts.as_ref());
@@ -1232,17 +1246,6 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         });
     }
 
-    let seed_users: Vec<(String, String)> = config
-        .auth
-        .seed_users
-        .iter()
-        .map(|seed| (seed.username.clone(), seed.password.clone()))
-        .collect();
-    let user_store = Arc::new(
-        UserStoreManager::load_from_stroma_engine(&engine, &seed_users)
-            .await
-            .map_err(FibrilServerError::UserStore)?,
-    );
     if user_store.has_users() && !config.tls.enabled {
         tracing::warn!(
             "users are configured but tls.enabled is off: passwords travel in \
@@ -1342,6 +1345,14 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     };
     let tls_acceptor = server_tls.map(|tls| tls.acceptor);
 
+    let user_admin: Arc<dyn UserAdmin> = match ganglion_parts.as_ref() {
+        Some(parts) => Arc::new(GanglionUserAdmin::new(
+            parts.coordination.clone(),
+            user_store.clone(),
+        )),
+        None => Arc::new(LocalUserAdmin::new(user_store.clone())),
+    };
+
     let admin = AdminServer::new(
         metrics.clone(),
         stroma_metrics,
@@ -1373,6 +1384,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
 
     // Plexus stream observability + declare surface (the hosting broker).
     let admin = admin.with_streams(broker.clone());
+    let admin = admin.with_users(user_admin);
 
     // Operator drain: announce a planned restart to connected clients.
     let admin = admin.with_drain(Arc::new(ConnectionSettingsDrainController::new(
@@ -1463,6 +1475,144 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     tokio::try_join!(broker_server_fut, admin_server_fut)?;
 
     Ok(())
+}
+
+/// User management over the local durable store (standalone mode).
+pub struct LocalUserAdmin {
+    store: Arc<UserStoreManager>,
+}
+
+impl LocalUserAdmin {
+    pub fn new(store: Arc<UserStoreManager>) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl UserAdmin for LocalUserAdmin {
+    async fn list_users(&self) -> Result<Vec<AdminUserInfo>, String> {
+        Ok(user_infos(&self.store))
+    }
+
+    async fn upsert_user(&self, username: &str, password: &str) -> Result<(), String> {
+        self.store
+            .upsert_user(username, password)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    async fn remove_user(&self, username: &str) -> Result<(), String> {
+        self.store
+            .remove_user(username)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+/// User management through the cluster-authoritative document: edits CAS
+/// into coordination and apply locally at once, other nodes adopt via the
+/// user store sync task.
+pub struct GanglionUserAdmin {
+    coordination: Arc<GanglionCoordination>,
+    local: Arc<UserStoreManager>,
+}
+
+impl GanglionUserAdmin {
+    pub fn new(coordination: Arc<GanglionCoordination>, local: Arc<UserStoreManager>) -> Self {
+        Self {
+            coordination,
+            local,
+        }
+    }
+
+    async fn mutate_cluster<F>(&self, edit: F) -> Result<(), String>
+    where
+        F: Fn(&mut fibril_broker::auth_store::UserDocument) -> Result<(), String>,
+    {
+        use fibril_coordination_ganglion::ClusterUsersUpdateOutcome;
+        for _ in 0..8 {
+            let current = self
+                .coordination
+                .users_document()
+                .map_err(|err| err.to_string())?;
+            let (version, mut document) = match current {
+                Some(current) => (current.cluster_version, current.document),
+                // First cluster write starts from the local (seeded) view so
+                // config-seeded users are not dropped by the first edit.
+                None => (0, self.local.snapshot().document.as_ref().clone()),
+            };
+            edit(&mut document)?;
+            match self
+                .coordination
+                .update_users(version, &document)
+                .await
+                .map_err(|err| err.to_string())?
+            {
+                ClusterUsersUpdateOutcome::Stored(stored) => {
+                    self.local
+                        .adopt_document(stored.cluster_version, stored.document)
+                        .await
+                        .map_err(|err| err.to_string())?;
+                    return Ok(());
+                }
+                ClusterUsersUpdateOutcome::Conflict(_) => continue,
+            }
+        }
+        Err("user update lost the cluster CAS race repeatedly, try again".to_string())
+    }
+}
+
+#[async_trait]
+impl UserAdmin for GanglionUserAdmin {
+    async fn list_users(&self) -> Result<Vec<AdminUserInfo>, String> {
+        Ok(user_infos(&self.local))
+    }
+
+    async fn upsert_user(&self, username: &str, password: &str) -> Result<(), String> {
+        let password_hash =
+            fibril_broker::auth_store::hash_password(password).map_err(|err| err.to_string())?;
+        let username = username.to_string();
+        self.mutate_cluster(move |document| {
+            let now = fibril_util::unix_millis();
+            document
+                .users
+                .entry(username.clone())
+                .and_modify(|record| {
+                    record.password_hash = password_hash.clone();
+                    record.updated_ms = now;
+                })
+                .or_insert_with(|| fibril_broker::auth_store::UserRecord {
+                    password_hash: password_hash.clone(),
+                    created_ms: now,
+                    updated_ms: now,
+                });
+            Ok(())
+        })
+        .await
+    }
+
+    async fn remove_user(&self, username: &str) -> Result<(), String> {
+        let username = username.to_string();
+        self.mutate_cluster(move |document| {
+            if document.users.remove(&username).is_none() {
+                return Err(format!("unknown user `{username}`"));
+            }
+            Ok(())
+        })
+        .await
+    }
+}
+
+fn user_infos(store: &UserStoreManager) -> Vec<AdminUserInfo> {
+    store
+        .list()
+        .into_iter()
+        .map(|user| AdminUserInfo {
+            username: user.username,
+            created_ms: user.created_ms,
+            updated_ms: user.updated_ms,
+        })
+        .collect()
 }
 
 pub struct GanglionRuntimeSettingsStore {

@@ -576,8 +576,8 @@ See also: [configuration](/configuration/) for the `auth` section.
 | User store | Implemented | Durable document of argon2 hashes, seeded on first boot from `auth.seed_users` or the env pair, after which the store owns the users |
 | Loopback-only default credentials | Implemented | `fibril`/`fibril` works from loopback only, remote rejections carry the create-a-user guide. A real `fibril` user replaces the pair |
 | Cluster secret (node principal) | Implemented | Replication authenticates as `@node` with the shared secret (`fibrilctl secret generate`), required in ganglion mode. Usernames starting with `@` are reserved |
-| User management (fibrilctl + dashboard) | Planned | In progress in this arc |
-| Cluster replication of user changes | Planned | Seeded users are consistent per-node today, live user edits replicate with the management work |
+| User management (fibrilctl + dashboard) | Implemented | `fibrilctl user add/passwd/remove/list` and the dashboard settings Users section, over `/admin/api/users` |
+| Cluster replication of user changes | Implemented | Live edits CAS into the `fibril/auth_users` cluster document and other nodes adopt it, parallel to the runtime-settings document |
 | Authorization (per-topic permissions) | Planned | Separate later arc |
 
 Conditions and limits:

@@ -86,6 +86,23 @@ pub trait RuntimeSettingsClusterStore: Send + Sync + 'static {
     ) -> Result<RuntimeSettingsClusterUpdateOutcome, String>;
 }
 
+/// One user for admin listing: identity and timestamps, never a hash.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AdminUserInfo {
+    pub username: String,
+    pub created_ms: u64,
+    pub updated_ms: u64,
+}
+
+/// Admin-side user management. The binary implements this over the broker
+/// user store (standalone) or the cluster-authoritative document (cluster).
+#[async_trait]
+pub trait UserAdmin: Send + Sync + 'static {
+    async fn list_users(&self) -> Result<Vec<AdminUserInfo>, String>;
+    async fn upsert_user(&self, username: &str, password: &str) -> Result<(), String>;
+    async fn remove_user(&self, username: &str) -> Result<(), String>;
+}
+
 pub struct AdminConfig {
     // TODO: better type, parse earlier
     pub bind: String,
@@ -146,6 +163,8 @@ pub struct AdminServer {
     pub runtime_settings_cluster: Option<Arc<dyn RuntimeSettingsClusterStore>>,
     /// Optional Plexus stream observability + declare surface (the hosting broker).
     pub streams: Option<Arc<dyn StreamAdmin>>,
+    /// Optional user management surface for `/admin/api/users`.
+    pub users: Option<Arc<dyn UserAdmin>>,
     /// Optional drain controller for `POST /admin/api/drain`.
     pub drain: Option<Arc<dyn BrokerDrainController>>,
 }
@@ -186,8 +205,15 @@ impl AdminServer {
             queue_repartition: None,
             runtime_settings_cluster: None,
             streams: None,
+            users: None,
             drain: None,
         }
+    }
+
+    /// Attach the user management surface for `/admin/api/users`.
+    pub fn with_users(mut self, users: Arc<dyn UserAdmin>) -> Self {
+        self.users = Some(users);
+        self
     }
 
     /// Attach the drain controller for `POST /admin/api/drain`.
@@ -340,6 +366,14 @@ impl AdminServer {
                 axum::routing::post(routes::repartition_queue),
             )
             .route("/admin/api/drain", axum::routing::post(routes::drain))
+            .route(
+                "/admin/api/users",
+                get(routes::list_users).post(routes::upsert_user),
+            )
+            .route(
+                "/admin/api/users/{username}",
+                axum::routing::delete(routes::remove_user),
+            )
             .route(
                 "/admin/api/global-dlq",
                 get(routes::global_dlq).put(routes::update_global_dlq),

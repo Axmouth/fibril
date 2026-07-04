@@ -54,11 +54,44 @@ enum Command {
         #[command(subcommand)]
         command: CertCommand,
     },
+    /// Broker user management through the admin API.
+    User {
+        #[command(subcommand)]
+        command: UserCommand,
+    },
     /// Cluster shared secret operations.
     Secret {
         #[command(subcommand)]
         command: SecretCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum UserCommand {
+    /// Create a user or replace an existing user's password.
+    Add(UserAddArgs),
+    /// Change a user's password (same operation as add, named for scripts).
+    Passwd(UserAddArgs),
+    /// Remove a user.
+    Remove(UserRemoveArgs),
+    /// List users (names and timestamps, never hashes).
+    List,
+}
+
+#[derive(Debug, clap::Args)]
+struct UserAddArgs {
+    /// Username to create or update.
+    user: String,
+
+    /// Password for the user.
+    #[arg(long)]
+    user_password: String,
+}
+
+#[derive(Debug, clap::Args)]
+struct UserRemoveArgs {
+    /// Username to remove.
+    user: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -384,6 +417,24 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             }
 
             client.shutdown().await;
+        }
+        Command::User { command } => {
+            let admin_addr = cli
+                .admin
+                .unwrap_or_else(|| connect_addr_for_bind(config.admin.listener.bind));
+            let admin = AdminClient {
+                addr: admin_addr,
+                username: cli.username,
+                password: cli.password,
+                http: reqwest::Client::new(),
+            };
+            match command {
+                UserCommand::Add(args) | UserCommand::Passwd(args) => {
+                    print_json(admin.upsert_user(&args.user, &args.user_password).await?)?
+                }
+                UserCommand::Remove(args) => print_json(admin.remove_user(&args.user).await?)?,
+                UserCommand::List => print_json(admin.list_users().await?)?,
+            }
         }
         Command::Secret { command } => match command {
             SecretCommand::Generate(args) => {
@@ -811,6 +862,33 @@ impl AdminClient {
             &RemoveCoordinationVotingMemberRequest { id: args.id },
         )
         .await
+    }
+
+    async fn list_users(&self) -> anyhow::Result<serde_json::Value> {
+        self.get_json("/admin/api/users", &[]).await
+    }
+
+    async fn upsert_user(
+        &self,
+        username: &str,
+        password: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.post_json(
+            "/admin/api/users",
+            &serde_json::json!({ "username": username, "password": password }),
+        )
+        .await
+    }
+
+    async fn remove_user(&self, username: &str) -> anyhow::Result<serde_json::Value> {
+        let response = self
+            .http
+            .delete(self.url(&format!("/admin/api/users/{username}")))
+            .basic_auth(&self.username, Some(&self.password))
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to admin API at {}", self.addr))?;
+        decode_admin_response(response).await
     }
 
     async fn repartition(&self, args: RepartitionArgs) -> anyhow::Result<serde_json::Value> {

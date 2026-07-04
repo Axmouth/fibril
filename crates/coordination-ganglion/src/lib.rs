@@ -36,6 +36,10 @@ const STREAM_NAMESPACE: &str = "fibril/stream";
 
 /// Attribute key carrying the replicated runtime-settings document.
 pub const RUNTIME_SETTINGS_ATTRIBUTE: &str = "fibril/runtime_settings";
+/// Cluster attribute carrying the authoritative user document (argon2
+/// hashes). Parallel to the runtime-settings document, kept separate so a
+/// settings write can never clobber users.
+pub const AUTH_USERS_ATTRIBUTE: &str = "fibril/auth_users";
 
 /// Heartbeat node-label key carrying a broker's local exclusive-cohort
 /// membership (JSON `Vec<LocalCohortMembership>`). The controller reads every
@@ -317,6 +321,19 @@ pub struct ClusterRuntimeSettings {
 pub enum ClusterRuntimeSettingsUpdateOutcome {
     Stored(ClusterRuntimeSettings),
     Conflict(Option<ClusterRuntimeSettings>),
+}
+
+/// The cluster-authoritative user document plus its CAS version.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClusterUsers {
+    pub cluster_version: u64,
+    pub document: fibril_broker::auth_store::UserDocument,
+}
+
+#[derive(Debug, Clone)]
+pub enum ClusterUsersUpdateOutcome {
+    Stored(ClusterUsers),
+    Conflict(Option<ClusterUsers>),
 }
 
 /// Partitioning version carried by the client topology. Constant while
@@ -1906,6 +1923,137 @@ impl GanglionCoordination {
         Err(OpenraftAdapterError::Storage(
             "runtime settings update lost the CAS race repeatedly".to_string(),
         ))
+    }
+
+    pub fn users_document(&self) -> Result<Option<ClusterUsers>, OpenraftAdapterError> {
+        self.cluster_attribute(AUTH_USERS_ATTRIBUTE)
+            .as_deref()
+            .map(|raw| {
+                serde_json::from_str::<ClusterUsers>(raw).map_err(|error| {
+                    OpenraftAdapterError::Storage(format!(
+                        "decode auth users cluster document: {error}"
+                    ))
+                })
+            })
+            .transpose()
+    }
+
+    /// Update the user document as the cluster truth. `expected_version` 0
+    /// means no cluster document exists yet.
+    pub async fn update_users(
+        &self,
+        expected_version: u64,
+        document: &fibril_broker::auth_store::UserDocument,
+    ) -> Result<ClusterUsersUpdateOutcome, OpenraftAdapterError> {
+        for _ in 0..8 {
+            let current_raw = self.cluster_attribute(AUTH_USERS_ATTRIBUTE);
+            let current_document = current_raw
+                .as_deref()
+                .map(|raw| {
+                    serde_json::from_str::<ClusterUsers>(raw).map_err(|error| {
+                        OpenraftAdapterError::Storage(format!(
+                            "decode auth users cluster document: {error}"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let current_version = current_document
+                .as_ref()
+                .map(|document| document.cluster_version)
+                .unwrap_or(0);
+
+            if current_version != expected_version {
+                return Ok(ClusterUsersUpdateOutcome::Conflict(current_document));
+            }
+
+            let stored = ClusterUsers {
+                cluster_version: expected_version + 1,
+                document: document.clone(),
+            };
+            let value = serde_json::to_string(&stored)
+                .map_err(|error| OpenraftAdapterError::Storage(error.to_string()))?;
+
+            match self
+                .forward_command(MetadataRaftCommand::CompareAndSetAttribute {
+                    key: AUTH_USERS_ATTRIBUTE.to_string(),
+                    expected: current_raw,
+                    value,
+                })
+                .await
+            {
+                Ok(_) => return Ok(ClusterUsersUpdateOutcome::Stored(stored)),
+                Err(OpenraftAdapterError::AttributeMismatch { .. }) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+
+        Err(OpenraftAdapterError::Storage(
+            "auth users update lost the CAS race repeatedly".to_string(),
+        ))
+    }
+
+    /// Adopt the cluster user document into the local store as it changes.
+    /// If no cluster document exists yet and the local store holds seeded
+    /// users, publish them once (first node wins, the rest adopt).
+    pub fn spawn_user_store_sync(
+        self: &std::sync::Arc<Self>,
+        manager: std::sync::Arc<fibril_broker::auth_store::UserStoreManager>,
+    ) -> tokio::task::JoinHandle<()> {
+        let provider = std::sync::Arc::clone(self);
+        tokio::spawn(async move {
+            if provider.users_document().ok().flatten().is_none() && manager.has_users() {
+                let snapshot = manager.snapshot();
+                let _ = provider.update_users(0, &snapshot.document).await;
+            }
+
+            let mut watch = provider.node.watch_committed();
+            let mut last_applied_cluster_version = 0u64;
+            let mut last_bad_raw: Option<String> = None;
+            loop {
+                let raw_document = watch
+                    .borrow_and_update()
+                    .attributes
+                    .get(AUTH_USERS_ATTRIBUTE)
+                    .cloned();
+                let document = match raw_document.as_deref() {
+                    Some(raw) => match serde_json::from_str::<ClusterUsers>(raw) {
+                        Ok(document) => {
+                            last_bad_raw = None;
+                            Some(document)
+                        }
+                        Err(error) => {
+                            if last_bad_raw.as_deref() != Some(raw) {
+                                tracing::warn!(
+                                    %error,
+                                    "replicated auth users document is invalid"
+                                );
+                                last_bad_raw = Some(raw.to_string());
+                            }
+                            None
+                        }
+                    },
+                    None => None,
+                };
+
+                if let Some(document) = document {
+                    if document.cluster_version > last_applied_cluster_version {
+                        match manager
+                            .adopt_document(document.cluster_version, document.document)
+                            .await
+                        {
+                            Ok(()) => last_applied_cluster_version = document.cluster_version,
+                            Err(error) => {
+                                tracing::warn!(%error, "failed to adopt replicated auth users");
+                            }
+                        }
+                    }
+                }
+
+                if watch.changed().await.is_err() {
+                    return;
+                }
+            }
+        })
     }
 
     /// Publish runtime settings as the cluster truth using last-committer-wins

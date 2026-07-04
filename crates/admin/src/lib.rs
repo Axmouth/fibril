@@ -4,7 +4,7 @@ mod server;
 pub mod setup;
 
 pub use server::{
-    AdminConfig, AdminServer, AdminServerError, BrokerDrainController,
+    AdminConfig, AdminServer, AdminServerError, AdminUserInfo, BrokerDrainController,
     CoordinationMembershipManager, QueueRepartitionManager, RuntimeSettingsClusterStore,
-    RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
+    RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary, UserAdmin,
 };

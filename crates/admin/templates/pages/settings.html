@@ -271,6 +271,28 @@
     </div>
   </form>
 
+  <section class="settings-section" id="users-section" hidden>
+    <div class="settings-section-heading">
+      <h5>Users</h5>
+      <p>Broker accounts for client authentication. The built-in fibril/fibril pair works from loopback only, so create a user for remote access. Passwords are stored as argon2 hashes and never shown.</p>
+    </div>
+
+    <div id="users-message" class="settings-message"></div>
+
+    <table class="admin-table" id="users-table">
+      <thead><tr><th>User</th><th>Created</th><th>Updated</th><th></th></tr></thead>
+      <tbody id="users-tbody"></tbody>
+    </table>
+
+    <form id="user-form" class="settings-inline-form">
+      <label class="settings-label" for="user.name">Username</label>
+      <input id="user.name" type="text" autocomplete="off" placeholder="ops">
+      <label class="settings-label" for="user.password">Password</label>
+      <input id="user.password" type="password" autocomplete="new-password" placeholder="set or replace">
+      <button class="btn" type="submit">Save user</button>
+    </form>
+  </section>
+
   <section class="settings-section settings-form-secondary" id="startup-config-section" hidden>
     <div class="settings-section-heading">
       <h5>Startup Config</h5>
@@ -712,6 +734,86 @@ async function loadSettings(message = "Settings loaded.") {
   setMessage(status.text, status.kind);
 }
 
+function fmtTs(ms) {
+  if (!ms) return "-";
+  try { return new Date(Number(ms)).toISOString().replace("T", " ").slice(0, 19); }
+  catch { return String(ms); }
+}
+
+function renderUsers(users) {
+  field("users-section").hidden = false;
+  const tbody = field("users-tbody");
+  tbody.innerHTML = "";
+  if (!users.length) {
+    const row = document.createElement("tr");
+    row.innerHTML = '<td colspan="4" class="settings-help">No users yet. The built-in fibril/fibril pair works from loopback only.</td>';
+    tbody.appendChild(row);
+    return;
+  }
+  for (const user of users) {
+    const row = document.createElement("tr");
+    const name = document.createElement("td");
+    name.textContent = user.username;
+    const created = document.createElement("td");
+    created.textContent = fmtTs(user.created_ms);
+    const updated = document.createElement("td");
+    updated.textContent = fmtTs(user.updated_ms);
+    const actions = document.createElement("td");
+    const remove = document.createElement("button");
+    remove.className = "btn btn-danger";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => removeUser(user.username));
+    actions.appendChild(remove);
+    row.append(name, created, updated, actions);
+    tbody.appendChild(row);
+  }
+}
+
+async function loadUsers() {
+  try {
+    renderUsers(await api("/admin/api/users"));
+  } catch (_err) {
+    // No user surface (should not happen on a normal broker); hide the section.
+    field("users-section").hidden = true;
+  }
+}
+
+function setUsersMessage(text, kind = "info") {
+  const el = field("users-message");
+  el.textContent = text;
+  el.className = `settings-message settings-message-${kind}`;
+}
+
+async function saveUser(event) {
+  event.preventDefault();
+  const username = field("user.name").value.trim();
+  const password = field("user.password").value;
+  if (!username || !password) {
+    setUsersMessage("Username and password are required.", "error");
+    return;
+  }
+  const { ok, data } = await apiPost("/admin/api/users", { username, password });
+  if (ok) {
+    field("user.password").value = "";
+    setUsersMessage(`Saved user "${username}".`, "success");
+    loadUsers();
+  } else {
+    setUsersMessage((data && data.message) || "Failed to save user.", "error");
+  }
+}
+
+async function removeUser(username) {
+  const r = await fetch(`/admin/api/users/${encodeURIComponent(username)}`, { method: "DELETE" });
+  if (r.ok) {
+    setUsersMessage(`Removed user "${username}".`, "success");
+    loadUsers();
+  } else {
+    let message = "Failed to remove user.";
+    try { const data = await r.json(); if (data && data.message) message = data.message; } catch {}
+    setUsersMessage(message, "error");
+  }
+}
+
 async function loadStartupConfig() {
   try {
     const data = await api("/admin/api/startup-config");
@@ -834,6 +936,8 @@ field("queue-dlq-form").addEventListener("submit", saveQueueDlq);
 field("queue-dlq.policy").addEventListener("change", (event) => setQueueDlqTargetFieldsEnabled(event.target.value === "custom"));
 loadSettings();
 loadStartupConfig();
+loadUsers();
+field("user-form").addEventListener("submit", saveUser);
 loadGlobalDlq();
 setQueueDlqTargetFieldsEnabled(field("queue-dlq.policy").value === "custom");
 </script>

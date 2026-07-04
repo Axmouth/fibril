@@ -1020,6 +1020,82 @@ pub async fn update_runtime_settings(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct UpsertUserRequest {
+    pub username: String,
+    pub password: String,
+}
+
+pub async fn list_users(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<crate::server::AdminUserInfo>>, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let Some(users) = &server.users else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    users.list_users().await.map(Json).map_err(|err| {
+        tracing::error!("user listing failed: {err}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+pub async fn upsert_user(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<UpsertUserRequest>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let Some(users) = &server.users else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    if request.password.trim().is_empty() {
+        return Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_user",
+            "password must not be empty",
+        ));
+    }
+    match users
+        .upsert_user(&request.username, &request.password)
+        .await
+    {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "ok", "username": request.username })),
+        )
+            .into_response()),
+        Err(message) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "user_update_failed",
+            message,
+        )),
+    }
+}
+
+pub async fn remove_user(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(username): axum::extract::Path<String>,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let Some(users) = &server.users else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    match users.remove_user(&username).await {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({ "status": "removed", "username": username })),
+        )
+            .into_response()),
+        Err(message) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "user_remove_failed",
+            message,
+        )),
+    }
+}
+
 pub async fn global_dlq(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,
