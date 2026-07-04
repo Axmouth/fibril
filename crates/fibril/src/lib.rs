@@ -340,6 +340,34 @@ impl CoordinationMembershipManager for GanglionCoordinationMembershipManager {
 /// This owns only the coordination process and embedded placement controller.
 /// Broker-specific wiring is separate so tests can build the broker around the
 /// returned ownership provider.
+/// The TLS connector broker-to-broker dials use: peer trust from the
+/// configured peer CA (or the generated CA, then OS roots), presenting this
+/// node's own serving certificate as its client identity. Presenting costs
+/// nothing when the peer does not request a certificate, so dials stay
+/// compatible with peers at any `tls.client_auth` setting.
+fn peer_connector_from_config(
+    config: &ServerConfig,
+) -> Result<fibril_tls::TlsConnector, FibrilServerError> {
+    let identity = match config.tls.mode().map_err(FibrilServerError::TlsConfig)? {
+        fibril_config::TlsMode::Provided {
+            cert_path,
+            key_path,
+        } => Some((cert_path, key_path)),
+        fibril_config::TlsMode::AutoSelfSigned => {
+            let dir = config.server.data_dir.join(tls::GENERATED_TLS_DIR);
+            Some((dir.join("server.pem"), dir.join("server.key")))
+        }
+        fibril_config::TlsMode::Disabled => None,
+    };
+    Ok(fibril_tls::build_peer_connector_with_identity(
+        config.tls.peer_ca_path.as_deref(),
+        &config.server.data_dir,
+        identity
+            .as_ref()
+            .map(|(cert, key)| (cert.as_path(), key.as_path())),
+    )?)
+}
+
 /// TLS transport for the embedded coordinator's raft channel: the acceptor
 /// serves the broker's certificate on the raft listener, the connector
 /// verifies peers against the peer CA.
@@ -1327,10 +1355,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             return Err(FibrilServerError::InterBrokerTlsWithoutMaterial);
         };
         Some(RaftTlsTransport {
-            connector: fibril_tls::build_peer_connector(
-                config.tls.peer_ca_path.as_deref(),
-                &config.server.data_dir,
-            )?,
+            connector: peer_connector_from_config(&config)?,
             acceptor: server_tls.acceptor.clone(),
         })
     } else {
@@ -1368,10 +1393,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     // here so a bad peer CA fails boot with the config error instead of
     // surfacing as per-dial replication failures.
     let peer_tls = if ganglion_parts.is_some() && config.tls.inter_broker_enabled() {
-        Some(fibril_tls::build_peer_connector(
-            config.tls.peer_ca_path.as_deref(),
-            &config.server.data_dir,
-        )?)
+        Some(peer_connector_from_config(&config)?)
     } else {
         None
     };

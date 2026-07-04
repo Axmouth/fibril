@@ -1,12 +1,18 @@
 //! Coordination consensus over TLS: two raft nodes with certificates from
 //! one shared deployment CA (node B's leaf minted from the copied CA pair)
-//! elect a leader through the TLS dialer and acceptor seams.
+//! elect a leader through the TLS dialer and acceptor seams. Client auth is
+//! set to `require` on both listeners and each dial presents the node's own
+//! leaf, so the election also proves the cluster converges when every node
+//! demands client certificates.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use fibril::raft_tls::{TlsRaftAcceptor, TlsRaftDialer};
-use fibril::tls::{GENERATED_TLS_DIR, TlsMode, build_peer_connector, build_server_tls};
+use fibril::tls::{
+    ClientAuthMode, ClientAuthPolicy, GENERATED_TLS_DIR, TlsMode,
+    build_peer_connector_with_identity, build_server_tls_with_client_auth,
+};
 use ganglion::openraft::BasicNode;
 use ganglion::{RaftMetadataNode, WireFormat, default_raft_config};
 
@@ -29,8 +35,12 @@ fn free_loopback_addr() -> std::net::SocketAddr {
 async fn raft_cluster_forms_over_tls() {
     // Node A generates the deployment CA, node B mints its leaf from the
     // copied CA pair (the shared-CA cluster lane).
+    let require = ClientAuthPolicy {
+        mode: ClientAuthMode::Require,
+        ca_path: None,
+    };
     let root_a = temp_root("node-a");
-    let tls_a = build_server_tls(&TlsMode::AutoSelfSigned, &root_a, &[])
+    let tls_a = build_server_tls_with_client_auth(&TlsMode::AutoSelfSigned, &root_a, &[], &require)
         .expect("material a")
         .expect("enabled");
     let root_b = temp_root("node-b");
@@ -39,7 +49,7 @@ async fn raft_cluster_forms_over_tls() {
     let gen_a = root_a.join(GENERATED_TLS_DIR);
     std::fs::copy(gen_a.join("ca.pem"), gen_b.join("ca.pem")).expect("copy ca.pem");
     std::fs::copy(gen_a.join("ca.key"), gen_b.join("ca.key")).expect("copy ca.key");
-    let tls_b = build_server_tls(&TlsMode::AutoSelfSigned, &root_b, &[])
+    let tls_b = build_server_tls_with_client_auth(&TlsMode::AutoSelfSigned, &root_b, &[], &require)
         .expect("material b")
         .expect("enabled");
 
@@ -52,7 +62,14 @@ async fn raft_cluster_forms_over_tls() {
         addr_a,
         root_a.join("raft"),
         WireFormat::default(),
-        TlsRaftDialer::new(build_peer_connector(None, &root_a).expect("connector a")),
+        TlsRaftDialer::new(
+            build_peer_connector_with_identity(
+                None,
+                &root_a,
+                Some((&gen_a.join("server.pem"), &gen_a.join("server.key"))),
+            )
+            .expect("connector a"),
+        ),
         TlsRaftAcceptor::new(tls_a.acceptor.clone()),
     )
     .await
@@ -63,7 +80,14 @@ async fn raft_cluster_forms_over_tls() {
         addr_b,
         root_b.join("raft"),
         WireFormat::default(),
-        TlsRaftDialer::new(build_peer_connector(None, &root_b).expect("connector b")),
+        TlsRaftDialer::new(
+            build_peer_connector_with_identity(
+                None,
+                &root_b,
+                Some((&gen_b.join("server.pem"), &gen_b.join("server.key"))),
+            )
+            .expect("connector b"),
+        ),
         TlsRaftAcceptor::new(tls_b.acceptor.clone()),
     )
     .await
