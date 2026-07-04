@@ -58,17 +58,25 @@ Bricks, in order:
    live user edits do not replicate yet - config-seeded users stay
    consistent because every node seeds the same config. Raft-transport
    secret auth rides with #153 (it needs the transport work there).
-4. User management: fibrilctl user add/remove/passwd + a dashboard page.
-   Decide here whether admin.auth folds into the same store (a role flag)
-   or stays separate.
-5. Setup-mode additions: set-admin-credentials step and an optional
-   cluster-secret card (password-type field, generate here or paste the
-   first node's secret). Fully provisioned config/env auto-completes setup
-   and boots through, which is the unattended lane.
-6. Cluster setup guide in the docs: secret generation and distribution,
-   TLS across nodes, peers and bootstrap, seeded credentials, verification
-   via fibrilctl admin topology, plus the no-intervention variant for
-   automation and autoscaling.
+4. DONE (2026-07-05). UserAdmin trait on the admin server serving
+   /admin/api/users (LocalUserAdmin standalone, GanglionUserAdmin cluster),
+   fibrilctl user add/passwd/remove/list, dashboard Users section, and the
+   cluster bridge: a fibril/auth_users cluster document (versioned, CAS)
+   with a watch-sync task that adopts newer versions locally, parallel to
+   the runtime-settings document. NOTE: admin.auth (dashboard basic auth)
+   still stays a separate config today, not folded into the store - a role
+   flag on the user store is a later refinement, not blocking 0.3.
+5. DONE (2026-07-05). Setup page gained an optional admin-user card and an
+   optional cluster-secret card (none / generate / paste). Credentials
+   persist as auth.seed_users in the config overlay (ConfigOverlay grew an
+   auth section, layered below explicit config), the secret writes to the
+   data-dir convention file. Explicitly configured tls AND auth
+   auto-completes setup. Integration tested end to end (setup-created
+   remote user authenticates over the setup-enabled TLS, secret written).
+6. DONE (2026-07-05). Cluster setup guide at deployment/cluster: secret,
+   TLS across nodes, entry-level setup-mode bring-up, the unattended
+   config/env lane, verification via fibrilctl admin topology, user
+   management. Linked in the sidebar.
 7. Client polish: typed auth errors where they are still generic.
 
 Future arc (assessed 2026-07-05, sequenced after this arc and #153):

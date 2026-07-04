@@ -223,6 +223,7 @@ async fn https_get_status_line<S: tokio::io::AsyncRead + tokio::io::AsyncWrite +
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_dashboard_serves_https_from_the_same_material() {
     let booted = boot_server("admin-https", true).await;
+    wait_for_port(booted.admin_addr).await;
     let ca_pem = booted.data_dir.join("tls").join("ca.pem");
 
     let connector = tls_connector(Some(&ca_pem));
@@ -248,6 +249,7 @@ async fn admin_enabled_false_keeps_the_dashboard_on_plain_http() {
         config.tls.admin_enabled = Some(false);
     })
     .await;
+    wait_for_port(booted.admin_addr).await;
 
     let mut stream = TcpStream::connect(booted.admin_addr)
         .await
@@ -382,5 +384,41 @@ async fn first_boot_setup_skip_records_the_choice_and_stays_plaintext() {
     write_all(&mut stream, &hello_frame(4)).await;
     let frame = read_frame(&mut stream).await;
     assert_eq!(frame.opcode, Op::HelloOk as u16);
+    handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_boot_setup_creates_admin_user_and_cluster_secret() {
+    let root = temp_root("setup-user-secret");
+    let config = setup_mode_config(&root);
+    let broker_addr = config.broker.listener.bind;
+    let admin_addr = config.admin.listener.bind;
+    let data_dir = config.server.data_dir.clone();
+    let handle = tokio::spawn(async move {
+        let _ = run_server_from_config(config).await;
+    });
+
+    let body = "mode=auto&admin_username=ops&admin_password=setup-pass\
+                &secret_mode=generate";
+    let response = post_setup_choice(admin_addr, body).await;
+    assert!(response.contains("setup complete"), "{response}");
+
+    // The cluster secret landed in the data dir.
+    wait_for_port(broker_addr).await;
+    assert!(data_dir.join("cluster.secret").exists());
+
+    // The seeded admin user works remotely (would be rejected if it were the
+    // loopback-only default), proving the overlay auth section applied.
+    use fibril_client::ClientOptions;
+    let ca_pem = data_dir.join("tls").join("ca.pem");
+    let client = ClientOptions::new()
+        .auth("ops", "setup-pass")
+        .tls_ca_path(&ca_pem)
+        .tls_server_name("localhost")
+        .connect(broker_addr.to_string().as_str())
+        .await
+        .expect("setup-created user authenticates over the setup-enabled TLS");
+    client.shutdown().await;
+
     handle.abort();
 }

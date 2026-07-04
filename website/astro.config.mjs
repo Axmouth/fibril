@@ -60,6 +60,7 @@ export default defineConfig({
             { label: "Benchmarks", slug: "benchmarks" },
             { label: "Roadmap", slug: "roadmap" },
             { label: "Deployment", slug: "deployment/source" },
+            { label: "Setting up a cluster", slug: "deployment/cluster" },
           ],
         },
         {

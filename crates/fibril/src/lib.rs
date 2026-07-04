@@ -980,9 +980,13 @@ async fn run_first_boot_setup(config: &ServerConfig) -> Result<(), FibrilServerE
             source: err,
         })
     })?;
-    if config.tls != fibril_config::TlsSection::default() {
+    if config.tls != fibril_config::TlsSection::default()
+        && config.auth != fibril_config::AuthSection::default()
+    {
         write_setup_marker(&data_dir)?;
-        tracing::info!("setup mode: tls is already configured explicitly, marking setup complete");
+        tracing::info!(
+            "setup mode: tls and auth are already configured explicitly, marking setup complete"
+        );
         return Ok(());
     }
 
@@ -1000,8 +1004,8 @@ async fn run_first_boot_setup(config: &ServerConfig) -> Result<(), FibrilServerE
 
     let sans = tls::san_hosts_from_advertise(&config.broker_advertise_addresses());
     let apply_dir = data_dir.clone();
-    let apply: fibril_admin::setup::ApplySetup = Arc::new(move |choice| {
-        apply_setup_choice(&apply_dir, &sans, choice).map_err(|err| err.to_string())
+    let apply: fibril_admin::setup::ApplySetup = Arc::new(move |submission| {
+        apply_setup_submission(&apply_dir, &sans, submission).map_err(|err| err.to_string())
     });
     let applied = fibril_admin::setup::run_setup_server(bind, apply)
         .await
@@ -1010,16 +1014,16 @@ async fn run_first_boot_setup(config: &ServerConfig) -> Result<(), FibrilServerE
     Ok(())
 }
 
-fn apply_setup_choice(
+fn apply_setup_submission(
     data_dir: &std::path::Path,
     sans: &[String],
-    choice: fibril_admin::setup::SetupChoice,
+    submission: fibril_admin::setup::SetupSubmission,
 ) -> Result<fibril_admin::setup::SetupApplied, FibrilServerError> {
-    use fibril_admin::setup::{SetupApplied, SetupChoice};
+    use fibril_admin::setup::{ClusterSecretChoice, SetupApplied, TlsSetupChoice};
 
     let mut overlay_tls = fibril_config::TlsSection::default();
-    let summary = match choice {
-        SetupChoice::AutoSelfSigned => {
+    let tls_summary = match submission.tls {
+        TlsSetupChoice::AutoSelfSigned => {
             let built =
                 tls::build_server_tls(&fibril_config::TlsMode::AutoSelfSigned, data_dir, sans)?
                     .ok_or_else(|| {
@@ -1049,7 +1053,7 @@ fn apply_setup_choice(
                 dir.display()
             )
         }
-        SetupChoice::Provided { cert_pem, key_pem } => {
+        TlsSetupChoice::Provided { cert_pem, key_pem } => {
             let (cert_path, key_path) =
                 fibril_tls::store_provided_material(data_dir, &cert_pem, &key_pem)?;
             overlay_tls.enabled = true;
@@ -1060,19 +1064,73 @@ fn apply_setup_choice(
                 cert_path.display()
             )
         }
-        SetupChoice::SkipTls => {
+        TlsSetupChoice::SkipTls => {
             "Continuing without TLS by explicit choice. Enable it later via the tls \
              config section or fibrilctl cert generate."
                 .to_string()
         }
     };
 
+    let mut summary = vec![tls_summary];
+
+    let overlay_auth = submission.admin_credentials.map(|(username, password)| {
+        summary.push(format!("Created admin user \"{username}\"."));
+        fibril_config::AuthSection {
+            allow_default_loopback: true,
+            seed_users: vec![fibril_config::SeedUser { username, password }],
+        }
+    });
+
+    if let Some(choice) = submission.cluster_secret {
+        let secret = match choice {
+            ClusterSecretChoice::Generate => generate_cluster_secret(),
+            ClusterSecretChoice::Provided(value) => value,
+        };
+        write_cluster_secret(data_dir, &secret)?;
+        summary.push("Cluster secret written to the data dir.".to_string());
+    }
+
     let overlay = fibril_config::ConfigOverlay {
         tls: Some(overlay_tls),
+        auth: overlay_auth,
     };
     write_config_overlay(data_dir, &overlay)?;
     write_setup_marker(data_dir)?;
-    Ok(SetupApplied { summary })
+    Ok(SetupApplied {
+        summary: summary.join(" "),
+    })
+}
+
+fn generate_cluster_secret() -> String {
+    let mut bytes = [0u8; 32];
+    for chunk in bytes.chunks_mut(8) {
+        let value = fastrand::u64(..).to_le_bytes();
+        chunk.copy_from_slice(&value[..chunk.len()]);
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn write_cluster_secret(data_dir: &std::path::Path, secret: &str) -> Result<(), FibrilServerError> {
+    let path = data_dir.join(fibril_config::CLUSTER_SECRET_FILE);
+    std::fs::write(&path, format!("{secret}\n")).map_err(|source| {
+        FibrilServerError::TlsSetup(fibril_tls::TlsSetupError::WriteMaterial {
+            path: path.clone(),
+            source,
+        })
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |source| {
+                FibrilServerError::TlsSetup(fibril_tls::TlsSetupError::WriteMaterial {
+                    path: path.clone(),
+                    source,
+                })
+            },
+        )?;
+    }
+    Ok(())
 }
 
 fn write_config_overlay(

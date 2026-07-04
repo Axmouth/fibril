@@ -250,6 +250,7 @@ pub const CONFIG_OVERLAY_FILE: &str = "config-overlay.toml";
 #[serde(default)]
 pub struct ConfigOverlay {
     pub tls: Option<TlsSection>,
+    pub auth: Option<AuthSection>,
 }
 
 impl ConfigOverlay {
@@ -275,15 +276,21 @@ impl ServerConfig {
         };
         let overlay: ConfigOverlay =
             toml::from_str(&input).map_err(|source| ConfigError::ParseFile { path, source })?;
-        let Some(tls) = overlay.tls else {
-            return Ok(false);
-        };
-        if self.tls != TlsSection::default() {
-            return Ok(false);
+        let mut applied = false;
+        if let Some(tls) = overlay.tls
+            && self.tls == TlsSection::default()
+        {
+            tls.mode()?;
+            self.tls = tls;
+            applied = true;
         }
-        tls.mode()?;
-        self.tls = tls;
-        Ok(true)
+        if let Some(auth) = overlay.auth
+            && self.auth == AuthSection::default()
+        {
+            self.auth = auth;
+            applied = true;
+        }
+        Ok(applied)
     }
 
     /// Whether the completed-setup marker exists under the data dir.

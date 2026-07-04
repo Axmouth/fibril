@@ -22,14 +22,30 @@ use tokio::sync::Notify;
 
 use crate::server::AdminServerError;
 
-/// The operator's setup decision.
-pub enum SetupChoice {
+/// The TLS part of the operator's setup decision.
+pub enum TlsSetupChoice {
     /// Generate per-deployment material (CA + server certificate).
     AutoSelfSigned,
     /// Operator-supplied PEM text.
     Provided { cert_pem: String, key_pem: String },
     /// Continue without TLS, as an explicit decision.
     SkipTls,
+}
+
+/// The cluster-secret part of the setup decision.
+pub enum ClusterSecretChoice {
+    /// Generate a fresh secret and write it to the data dir.
+    Generate,
+    /// Use the secret pasted from an existing node.
+    Provided(String),
+}
+
+/// A full first-boot setup submission: the TLS choice, optional admin
+/// credentials, and an optional cluster secret.
+pub struct SetupSubmission {
+    pub tls: TlsSetupChoice,
+    pub admin_credentials: Option<(String, String)>,
+    pub cluster_secret: Option<ClusterSecretChoice>,
 }
 
 /// What an applied choice produced, echoed on the success page and in logs.
@@ -41,7 +57,7 @@ pub struct SetupApplied {
 /// Applies a setup choice: validates, persists material and the overlay,
 /// and records the completed-setup marker. An `Err` string is shown on the
 /// form so the operator can correct and retry.
-pub type ApplySetup = Arc<dyn Fn(SetupChoice) -> Result<SetupApplied, String> + Send + Sync>;
+pub type ApplySetup = Arc<dyn Fn(SetupSubmission) -> Result<SetupApplied, String> + Send + Sync>;
 
 struct SetupState {
     apply: ApplySetup,
@@ -95,6 +111,14 @@ struct SetupForm {
     cert_pem: String,
     #[serde(default)]
     key_pem: String,
+    #[serde(default)]
+    admin_username: String,
+    #[serde(default)]
+    admin_password: String,
+    #[serde(default)]
+    secret_mode: String,
+    #[serde(default)]
+    secret_value: String,
 }
 
 async fn setup_page(State(_state): State<Arc<SetupState>>) -> Html<String> {
@@ -105,16 +129,46 @@ async fn apply_setup(
     State(state): State<Arc<SetupState>>,
     Form(form): Form<SetupForm>,
 ) -> Html<String> {
-    let choice = match form.mode.as_str() {
-        "auto" => SetupChoice::AutoSelfSigned,
-        "provided" => SetupChoice::Provided {
+    let tls = match form.mode.as_str() {
+        "auto" => TlsSetupChoice::AutoSelfSigned,
+        "provided" => TlsSetupChoice::Provided {
             cert_pem: form.cert_pem,
             key_pem: form.key_pem,
         },
-        "skip" => SetupChoice::SkipTls,
+        "skip" => TlsSetupChoice::SkipTls,
         other => return Html(render_form(Some(&format!("unknown setup mode `{other}`")))),
     };
-    match (state.apply)(choice) {
+    let admin_username = form.admin_username.trim();
+    let admin_credentials = if admin_username.is_empty() && form.admin_password.is_empty() {
+        None
+    } else if admin_username.is_empty() || form.admin_password.is_empty() {
+        return Html(render_form(Some(
+            "set both an admin username and password, or leave both blank",
+        )));
+    } else {
+        Some((admin_username.to_string(), form.admin_password.clone()))
+    };
+    let cluster_secret = match form.secret_mode.as_str() {
+        "" | "none" => None,
+        "generate" => Some(ClusterSecretChoice::Generate),
+        "provided" => {
+            if form.secret_value.trim().is_empty() {
+                return Html(render_form(Some(
+                    "paste the cluster secret from your first node, or choose generate",
+                )));
+            }
+            Some(ClusterSecretChoice::Provided(
+                form.secret_value.trim().to_string(),
+            ))
+        }
+        other => return Html(render_form(Some(&format!("unknown secret mode `{other}`")))),
+    };
+    let submission = SetupSubmission {
+        tls,
+        admin_credentials,
+        cluster_secret,
+    };
+    match (state.apply)(submission) {
         Ok(applied) => {
             let summary = applied.summary.clone();
             *state.applied.lock().unwrap_or_else(|e| e.into_inner()) = Some(applied);
@@ -181,6 +235,28 @@ the broker starts as soon as a choice is applied.</p>
     explicit choice and can be changed later via the <code>tls</code> config
     section or <code>fibrilctl cert generate</code>.</p>
   </div>
+
+  <div class="card">
+    <strong>Admin user (optional)</strong>
+    <p class="muted">Create a broker user now for remote access. Leave blank
+    to keep the loopback-only default and add users later from the dashboard
+    or <code>fibrilctl user add</code>.</p>
+    <label class="muted">Username</label>
+    <input type="text" name="admin_username" autocomplete="off" placeholder="ops">
+    <label class="muted">Password</label>
+    <input type="password" name="admin_password" autocomplete="new-password">
+  </div>
+
+  <div class="card">
+    <strong>Cluster secret (optional)</strong>
+    <p class="muted">Only for a multi-node cluster. Every node shares one
+    secret. Skip this for a single broker.</p>
+    <label><input type="radio" name="secret_mode" value="none" checked> None (single broker)</label>
+    <label><input type="radio" name="secret_mode" value="generate"> Generate one (first node)</label>
+    <label><input type="radio" name="secret_mode" value="provided"> Paste the secret from an existing node</label>
+    <input type="password" name="secret_value" autocomplete="off" placeholder="cluster secret">
+  </div>
+
   <button type="submit">Apply and start the broker</button>
 </form>
 </body></html>"#
