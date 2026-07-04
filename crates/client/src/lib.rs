@@ -51,7 +51,7 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{Mutex, Notify, broadcast, mpsc, oneshot},
 };
-use tokio_util::codec::Framed;
+use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 
 use fibril_protocol::v1::{
@@ -3261,13 +3261,16 @@ impl EngineSlot {
     ) -> FibrilResult<Self> {
         let subscriptions = Arc::new(RwLock::new(HashMap::new()));
         let stream = establish_stream(address.as_str(), opts.tls.as_ref()).await?;
-        let mut framed = Framed::new(stream, ProtoCodec);
+        let (read_half, write_half) = stream.into_halves();
+        let framed_read = FramedRead::new(read_half, ProtoCodec);
+        let mut framed_write = FramedWrite::new(write_half, ProtoCodec);
         // Raise tokio-util's default 8KB write-buffer flush boundary so it does
         // not force a socket write every few 1KB frames, which would defeat the
         // engine's own publish-flush batching (PUBLISH_FLUSH_MESSAGES / _BYTES).
-        framed.set_backpressure_boundary(PUBLISH_FLUSH_BYTES);
+        framed_write.set_backpressure_boundary(PUBLISH_FLUSH_BYTES);
         let engine = start_engine(
-            framed,
+            framed_read,
+            framed_write,
             opts.clone(),
             subscriptions.clone(),
             assignment_tx.clone(),
@@ -3305,14 +3308,17 @@ impl EngineSlot {
         let mut opts = self.opts.clone();
         opts.resume_identity = Some(old_engine.resume_identity.clone());
         let stream = establish_stream(self.address.as_str(), opts.tls.as_ref()).await?;
-        let mut framed = Framed::new(stream, ProtoCodec);
+        let (read_half, write_half) = stream.into_halves();
+        let framed_read = FramedRead::new(read_half, ProtoCodec);
+        let mut framed_write = FramedWrite::new(write_half, ProtoCodec);
         // Raise tokio-util's default 8KB write-buffer flush boundary so it does
         // not force a socket write every few 1KB frames, which would defeat the
         // engine's own publish-flush batching (PUBLISH_FLUSH_MESSAGES / _BYTES).
-        framed.set_backpressure_boundary(PUBLISH_FLUSH_BYTES);
+        framed_write.set_backpressure_boundary(PUBLISH_FLUSH_BYTES);
         let tls_opts = opts.tls.clone();
         let new_engine = start_engine(
-            framed,
+            framed_read,
+            framed_write,
             opts,
             self.subscriptions.clone(),
             self.assignment_tx.clone(),
@@ -3551,14 +3557,14 @@ const PUBLISH_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 // The bound keeps a fast producer from starving the heartbeat, flush, and shutdown arms.
 const ENGINE_CMD_DRAIN_MAX: usize = 256;
 
-async fn feed_protocol_frame<S, T>(
-    framed: &mut Framed<S, ProtoCodec>,
+async fn feed_protocol_frame<W, T>(
+    framed: &mut FramedWrite<W, ProtoCodec>,
     op: Op,
     request_id: u64,
     msg: &T,
 ) -> FibrilResult<usize>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
     T: Serialize + 'static,
 {
     let frame = try_encode(op, request_id, msg).map_err(|err| FibrilError::Unexpected {
@@ -3576,12 +3582,12 @@ where
     Ok(size)
 }
 
-async fn feed_encoded_frame<S>(
-    framed: &mut Framed<S, ProtoCodec>,
+async fn feed_encoded_frame<W>(
+    framed: &mut FramedWrite<W, ProtoCodec>,
     frame: Frame,
 ) -> FibrilResult<usize>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     let size = size_of::<Frame>() + frame.payload.len();
 
@@ -3595,9 +3601,9 @@ where
     Ok(size)
 }
 
-async fn flush_protocol_frames<S>(framed: &mut Framed<S, ProtoCodec>) -> FibrilResult<()>
+async fn flush_protocol_frames<W>(framed: &mut FramedWrite<W, ProtoCodec>) -> FibrilResult<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
 {
     framed
         .flush()
@@ -3607,14 +3613,14 @@ where
         })
 }
 
-async fn send_protocol_frame<S, T>(
-    framed: &mut Framed<S, ProtoCodec>,
+async fn send_protocol_frame<W, T>(
+    framed: &mut FramedWrite<W, ProtoCodec>,
     op: Op,
     request_id: u64,
     msg: &T,
 ) -> FibrilResult<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin,
     T: Serialize + 'static,
 {
     feed_protocol_frame(framed, op, request_id, msg).await?;
@@ -3623,8 +3629,9 @@ where
 
 // TODO: Further reconnection attempts logic
 // TODO: Better handle frame send errors, which currently just get swallowed. These errors indicate a broken connection and should trigger cleanup and reconnection logic.
-async fn start_engine<S>(
-    mut framed: Framed<S, ProtoCodec>,
+async fn start_engine<R, W>(
+    mut framed_read: FramedRead<R, ProtoCodec>,
+    mut framed: FramedWrite<W, ProtoCodec>,
     opts: ClientOptions,
     subscriptions: Arc<RwLock<HashMap<u64, RegisteredSubscription>>>,
     assignment_tx: broadcast::Sender<AssignmentEvent>,
@@ -3632,7 +3639,8 @@ async fn start_engine<S>(
     topology_sink: std::sync::Weak<ClientShared>,
 ) -> FibrilResult<Arc<EngineHandle>>
 where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
 {
     let shutdown = Arc::new(Notify::new());
     // handshake
@@ -3649,7 +3657,7 @@ where
     )
     .await?;
 
-    let frame = framed
+    let frame = framed_read
         .next()
         .await
         .ok_or(FibrilError::Eof)?
@@ -3711,7 +3719,7 @@ where
 
     if let Some(auth) = opts.auth {
         send_protocol_frame(&mut framed, Op::Auth, 2, &auth).await?;
-        let frame = framed
+        let frame = framed_read
             .next()
             .await
             .ok_or(FibrilError::Eof)?
@@ -3756,7 +3764,7 @@ where
             subscriptions: reconcile_subs,
         };
         send_protocol_frame(&mut framed, Op::ReconcileClient, 3, &reconcile).await?;
-        let frame = framed
+        let frame = framed_read
             .next()
             .await
             .ok_or(FibrilError::Eof)?
@@ -4075,7 +4083,7 @@ where
                     pending = cmd_rx.try_recv().ok();
                   }
                 },
-                Some(frame) = framed.next() => {
+                Some(frame) = framed_read.next() => {
                     let frame = match frame {
                         Ok(f) => f,
                         Err(err) => {
@@ -5152,6 +5160,7 @@ impl Default for ClientOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_util::codec::Framed;
     use serde::{Deserialize, Serialize};
     use std::time::Duration;
 

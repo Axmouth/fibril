@@ -18,7 +18,7 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{self, DigitallySignedStruct, SignatureScheme};
 
 use crate::{FibrilError, FibrilResult};
-use fibril_util::net::TcpStream;
+use fibril_util::net::{OwnedReadHalf, OwnedWriteHalf, TcpStream};
 
 /// TLS options for connecting to a TLS-enabled broker.
 ///
@@ -88,6 +88,77 @@ impl AsyncWrite for MaybeTlsStream {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
             Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+/// Owned read half of the transport, for the engine's read task. Plain TCP
+/// splits lock-free via `into_split`; TLS uses `tokio::io::split` (a shared
+/// BiLock) because rustls keeps one state machine for both directions.
+pub(crate) enum MaybeTlsReadHalf {
+    Plain(OwnedReadHalf),
+    Tls(tokio::io::ReadHalf<Box<tokio_rustls::client::TlsStream<TcpStream>>>),
+}
+
+/// Owned write half of the transport, for the engine's write task.
+pub(crate) enum MaybeTlsWriteHalf {
+    Plain(OwnedWriteHalf),
+    Tls(tokio::io::WriteHalf<Box<tokio_rustls::client::TlsStream<TcpStream>>>),
+}
+
+impl MaybeTlsStream {
+    /// Split into independent read and write halves. Plain TCP halves are truly
+    /// independent (no lock); the TLS halves share a BiLock.
+    pub(crate) fn into_halves(self) -> (MaybeTlsReadHalf, MaybeTlsWriteHalf) {
+        match self {
+            Self::Plain(stream) => {
+                let (read, write) = stream.into_split();
+                (MaybeTlsReadHalf::Plain(read), MaybeTlsWriteHalf::Plain(write))
+            }
+            Self::Tls(stream) => {
+                let (read, write) = tokio::io::split(stream);
+                (MaybeTlsReadHalf::Tls(read), MaybeTlsWriteHalf::Tls(write))
+            }
+        }
+    }
+}
+
+impl AsyncRead for MaybeTlsReadHalf {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for MaybeTlsWriteHalf {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
         }
     }
 }
