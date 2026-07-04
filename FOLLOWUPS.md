@@ -568,6 +568,19 @@ Audited facts (2026-07-04) per surface:
   path meanwhile. Reserve a field only when its shape is confident; #105's
   persisted shape is still open. Still open to audit: whether keratin log
   segment headers carry their own version marker beyond STROMA_VER.
+
+  Approach when the first structural change lands (both surfaces): convert
+  the equality gate into version dispatch and migrate forward. Freeze each
+  version's byte-decoder, a copy of its struct, and one Vn->Vn+1
+  migration, and never edit old links, so each release adds exactly one
+  migration. Two keratin simplifiers: the writer stays single-version
+  (snapshots rewrite state current, so keep old DECODERS not encoders, and
+  a format ages out of a live data dir after one snapshot cycle), and
+  links prune with the support window (drop a version's decoder + link +
+  golden fixture together once in-place upgrade from it is no longer
+  promised). Additive trailing fields still need no link - the chain grows
+  only on structural breaks. Migrations must be total and tested end to
+  end (old bytes -> current); the golden fixtures are that test.
 - Ganglion raft-wal.jsonl + snapshot.json: serde_json of
   PersistedMetadataLogEntry (ganglion crates/ganglion-storage/src/
   lib.rs), NO format marker anywhere. Additive serde-default fields
@@ -585,37 +598,50 @@ Audited facts (2026-07-04) per surface:
   the checkpoint frames to clients/wire_vectors.json so the #110
   vectors-diff CI gate pins their encoding.
 
-Golden fixture mechanics (the enforcement):
-1. Contents: a small deterministic data dir - a partitioned queue with
-   a consumer group, messages left in ready / inflight / delayed / DLQ
-   states, a durable stream with a committed cursor plus an ephemeral
-   stream config, a runtime-settings override, one auth user. NO TLS
-   material (never commit certs - TLS regenerates per deployment) and
-   no cluster secret.
-2. Generation: scripts/gen-compat-fixture.sh <tag> builds the broker
-   at the released tag, runs a fixed publish/consume/settle sequence,
-   stops the broker cleanly, then tars the data dir to
-   crates/broker/tests/fixtures/datadir-<tag>.tar.zst with a
-   manifest.json beside it (expected queue/stream counts, payload
-   hashes, cursor positions). The script is committed so every future
-   cut regenerates the same shape.
-3. Opening in CI: a compat_fixture test in crates/broker/tests/
-   unpacks each committed fixture into a temp dir, boots the CURRENT
-   broker on it, and asserts: boot completes with zero quarantined
-   partitions, counts match the manifest, consuming drains the
-   expected payloads (hash check), the durable stream resumes from the
-   committed cursor. A plain #[test], so rust-ci.yaml runs it with no
-   new job.
-4. Mixed-version lane: cluster-tryout.sh grows --mixed-version
-   <prev-image> - node A on the previous release image, B/C on the
-   current build, run the --failover-verify flow. Lands with #112
-   (needs published images), not before.
+Golden fixture mechanics (the enforcement) - BUILT for v0.4.0:
+- Generator: crates/compat-fixture-gen (bin compat-fixture-gen) drives a
+  running broker through a fixed workload - a partitioned queue (orders,
+  4 partitions, group workers, custom DLQ) with messages left ready,
+  acked, dead-lettered, delayed, and inflight, plus a durable stream
+  (events, committed cursor). It prints a manifest (topic/partition/group,
+  state counts, a recoverable_floor, payload prefix). Built from the
+  CURRENT tree and pointed at the tag's server, so it only needs wire ops
+  present since the tag (additive within a protocol version - add a guard
+  when the version bumps).
+- Script: scripts/gen-compat-fixture.sh <tag> builds the tag's broker in
+  a SIBLING git worktree (../fibril-compat-<tag>, so the ../keratin and
+  ../ganglion path patches still resolve), boots it, runs the generator,
+  stops it cleanly, and tars the data dir to
+  crates/broker/tests/fixtures/datadir-<tag>.tar.gz + .manifest.json.
+- CI test: crates/broker/tests/compat_fixture.rs opens every committed
+  fixture with the CURRENT engine and asserts zero quarantined partitions
+  (a quarantine is how a decode failure surfaces), the durable stream
+  recovered, and the queue drains at least recoverable_floor intact
+  payloads. Plain #[test], no new CI job.
 
-Sequencing: fixture (items 1-3) is design-free and should be generated
-from the v0.4.0 tag NOW - retrofit cost grows with every release
-shipped without one. The version markers and decode-arm work land with
-the first format-touching change. The policy prose lands inside #110's
-normative doc. The mixed-version lane lands with #112.
+  Deviations from the original sketch, with reasons:
+  - Artifact is .tar.gz via system tar, not .tar.zst - avoids assuming a
+    zstd-enabled tar on every runner. 484K data dir (preallocated
+    segments) compresses to ~4.7K, so gzip is plenty.
+  - Scope is STANDALONE single-node: covers keratin message logs, event
+    logs, snapshot/kind markers, the durable stream log + cursor, DLQ,
+    and the stroma global store. Does NOT cover the ganglion raft
+    wal/snapshot (needs ganglion mode) - a ganglion fixture variant is
+    future work. The auth-user and runtime-settings global-store docs are
+    reachable in standalone (both persist there) but the current
+    generator does not write them yet - add if that surface needs
+    pinning.
+  - Inflight IS included (MarkInflight events) and is durable on two
+    surfaces per the surface-1/surface-2 note above.
+
+Mixed-version lane (LATER, with #112): cluster-tryout.sh grows
+--mixed-version <prev-image> - node A on the previous release image, B/C
+on the current build, run the --failover-verify flow. Needs published
+images, so it lands with #112, not before.
+
+Sequencing: the fixture is DONE for v0.4.0. The version markers and
+decode-branch work land with the first format-touching change. The
+policy prose lands inside #110's normative doc.
 
 ## Node enrollment arc plan (post-0.4, after #153)
 

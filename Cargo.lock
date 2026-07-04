@@ -1376,6 +1376,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fibril-compat-fixture-gen"
+version = "0.4.0"
+dependencies = [
+ "fibril-client",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fibril-config"
 version = "0.4.0"
 dependencies = [

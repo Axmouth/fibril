@@ -1,0 +1,23 @@
+{
+  "payload_prefix": "orders-",
+  "queue": {
+    "acked": 3,
+    "dead_lettered": 2,
+    "delayed_published": 4,
+    "dlq_topic": "orders.dlq",
+    "group": "workers",
+    "left_inflight": 3,
+    "partitions": 4,
+    "ready_published": 16,
+    "topic": "orders"
+  },
+  "recoverable_floor": 8,
+  "stream": {
+    "consumed": 10,
+    "durable_cursor": "archiver",
+    "partitions": 2,
+    "published": 10,
+    "topic": "events"
+  },
+  "tag": "v0.4.0"
+}
