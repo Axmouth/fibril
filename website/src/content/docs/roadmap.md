@@ -108,14 +108,31 @@ and gate 3 gains its drain half:
 
 ### Toward 1.0 (later 0.x minors)
 
-Each subsequent minor knocks off part of a gate, incrementally:
+Each subsequent minor knocks off part of a gate. The expected shape of the
+next few, as direction rather than a promise - scope can shift between cuts:
 
-- The wire protocol is versioned with a back-compat policy and the client APIs
-  are frozen, including the Offset/Topic newtype and `Arc<str>` pass (gate 2).
-- Durable restart reconciliation finishes the operational lifecycle (gate 3).
+- Next: clearer errors and a typed reconnect lifecycle. Client-facing errors
+  name the likely fix where one exists (the TLS errors set the pattern), and
+  a subscription that ends across a reconnect or broker restart ends with a
+  typed reason instead of silence, including sessions that survive a fast
+  broker restart. This completes gate 3.
+- Then: the compatibility freeze. The wire protocol is versioned with a
+  written back-compat policy, the client APIs are frozen after the
+  Offset/Topic newtype and `Arc<str>` pass, and CI enforces both with
+  cross-client byte vectors and a previous-release compatibility matrix
+  (gate 2). Durable storage formats get the same promise: a data dir
+  upgrades in place from the previous minor, proven by golden fixtures
+  generated at each release.
+- Then: one-command cluster join. An invite token enrolls a fresh node with
+  trust, addressing, and configuration in a single step, the
+  enrollment-token pattern.
 - Per-topic authorization is the only security-depth item left open, and it
   is shelved until a real need appears (it reads as tenancy-adjacent), so
   gate 4 is effectively complete.
+
+1.0 follows once the gates hold and the frozen surface has soaked. More
+first-party clients (Go first) can proceed in parallel once the client API
+freeze lands, conforming to the frozen surface rather than expanding it.
 
 ### After 1.0 (parallel, non-gating)
 
@@ -188,21 +205,14 @@ feeds the milestones above.
 
 - Hardening the experimental replication and clustering path (queues and streams)
   into production guidance and supported defaults.
-- Durable broker restart reconciliation. This extends the live-process graceful
-  reconnect (see [reconnection grace](/development/reconnection-grace/))
-  across a broker process restart. A client whose connection is still within its
-  grace window would reclaim its persisted session and inflight ownership
-  transparently, using a startup grace window before normal redelivery resumes,
-  so a restart is invisible to in-flight work rather than a disconnect. The same
-  property makes rolling upgrades trivial. Current reconnect grace is live-process
-  only. The partition side already has its counterpart: on cold restart a
-  partition reassigned away while the node was down is retained as inert on-disk
-  cold storage rather than served stale or discarded.
-- Planned restart announcement (drain). Before a graceful shutdown or upgrade the
-  broker would push a "going away" notice with a grace deadline, so clients stop
-  issuing new work, settle in-flight, and enter their resume path proactively
-  instead of after a dropped socket. Combined with durable restart reconciliation
-  this turns a rolling upgrade into announce, drain, restart, resume.
+- Fully transparent broker restarts. The near-term reconnect-lifecycle work
+  (see [toward 1.0](#toward-10-later-0x-minors)) makes a restart honest -
+  sessions resume and every outcome is typed. The longer-term extension is
+  making it invisible: a client within its grace window reclaims inflight
+  ownership across the restart, with a startup grace window before normal
+  redelivery resumes, so in-flight work sees no disturbance at all. The
+  drain half already shipped: a draining broker announces itself and hands
+  partition ownership off before stopping.
 - More complete client ecosystem. The Python client (async plus a blocking
   facade) has landed. The next targets are C#, Go, and Java.
 

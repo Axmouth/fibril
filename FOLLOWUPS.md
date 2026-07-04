@@ -1,5 +1,58 @@
 # Follow-ups and pending work
 
+## Recommended release roadmap (as of the 0.4 cut, 2026-07-04)
+
+The sequence for the pending arcs. Two hard ordering constraints drive
+it: gate-3's wire additions must land BEFORE #110 freezes the wire, and
+anything touching protocol or client API (#82 per-stream RF, #62
+TopologyUpdate) must beat the #111 freeze or wait for 2.0.
+
+Immediately (design-free, decays with every commit on main):
+- Generate the v0.4.0 golden fixture from the tag (back-compat brief
+  below has the mechanics). Writing gen-compat-fixture.sh here is the
+  reusable part - every future cut runs it.
+
+0.5 - the clarity release: guided errors + gate-3 reconciliation
+(#102-#105). One release because they are one product story (the broker
+says what happened and what to do) and they co-design at the seam:
+reconnect-closure reasons belong to #102, not the errors pass. Inside
+the arc: broker-side guides first (the broker_error_response funnel is
+brick 1, includes the InvalidArgument 500 -> 400 code fix), client-local
+guides second, then the gate-3 family per its brief. The 0.5 cut is the
+first to prove the back-compat guarantee by opening the v0.4.0 fixture
+in CI, and generates its own fixture on the way out.
+
+0.6 - the freeze release: gate-2 family (#109-#112), strict internal
+order #109 -> #110 -> #111 -> #112. BEFORE #109 starts, sweep in the
+wire-touching stragglers so they do not miss the freeze: #82 per-stream
+RF override at declare, and a decision on #62 TopologyUpdate push+ack
+(do it or explicitly punt to 2.0). The durable-format policy from the
+back-compat brief folds into #110's normative doc.
+
+0.7 - the operator-onboarding release: node enrollment (brief below,
+fully unblocked since #153, admin-surface only so zero interaction with
+the frozen wire). Bundle the small operator polish: #81 stream debug UI
+view, #83 microbatch stream cursor commits.
+
+Parallel track, any time after #111 lands: Go client #119 - built
+against the FROZEN API it conforms rather than expands the freeze
+scope, and joins the #112 matrix as a fourth column. C# (#120) behind
+it.
+
+Then 1.0: gate-4 done, gate-3 completes with 0.5, gate-2 with 0.6,
+cluster confidence met since 0.2. After 0.7 the remaining 1.0 work is
+soak time and doc polish, not features.
+
+Judgment call recorded: enrollment could swap with the freeze family
+(0.6 <-> 0.7) since they do not interact. Freeze stays earlier - every
+release shipped pre-freeze adds compat surface owed forever, while
+enrollment loses nothing by waiting.
+
+Parked with recorded triggers: per-topic authz (tenancy-dependent,
+revisit against the tenancy criteria when a user asks), benchmarks.md
+overhaul (blocked on the NVMe slice), the TUI demo cursor
+(demo/website work, orthogonal - pick up opportunistically).
+
 ## 0.4 arc plans (2026-07-05) - implementation briefs
 
 Written to be executable by a fresh implementer: goal, decisions,
