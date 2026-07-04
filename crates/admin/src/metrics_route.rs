@@ -21,6 +21,10 @@ pub async fn metrics(
     check_auth(&server, &headers).await?;
 
     let mut families = node_families(&server);
+    families.extend(replication_families(
+        &server,
+        server.config.metrics_per_channel,
+    ));
     if server.config.metrics_per_channel {
         families.extend(channel_families(&server).await);
     }
@@ -43,6 +47,7 @@ fn node_families(server: &AdminServer) -> Vec<MetricFamily> {
     let storage = server.metrics.storage().snapshot();
     let tcp = server.metrics.tcp().snapshot();
     let connections = server.metrics.connections();
+    let recovery = server.stroma_metrics.recovery.snapshot();
 
     let counter = |name, help, value: u64| {
         MetricFamily::scalar(name, help, MetricKind::Counter, value as f64)
@@ -160,11 +165,119 @@ fn node_families(server: &AdminServer) -> Vec<MetricFamily> {
             "Currently open subscriptions.",
             connections.open_subscriptions(),
         ),
+        MetricFamily::scalar(
+            "fibril_recovery_quarantined",
+            "Partitions currently quarantined by recovery, awaiting repair.",
+            MetricKind::Gauge,
+            recovery.quarantined as f64,
+        ),
+        counter(
+            "fibril_recovery_quarantines_total",
+            "Partitions quarantined by recovery since process start.",
+            recovery.quarantines_total,
+        ),
     ]
 }
 
 fn reconcile_outcome(outcome: &'static str, value: u64) -> Sample {
     Sample::labeled(vec![("outcome", outcome.to_string())], value as f64)
+}
+
+/// Replication families from the broker observability report. The worker
+/// summary is a node-level aggregate and always exports; the per-partition
+/// follower applied state is a per-channel series and honors the flag.
+fn replication_families(server: &AdminServer, per_channel: bool) -> Vec<MetricFamily> {
+    let Some(observability) = &server.broker_queue_observability else {
+        return Vec::new();
+    };
+    let report = observability();
+    let mut families = Vec::new();
+
+    if let Some(summary) = report.get("replication_summary") {
+        let count = |key: &str| summary.get(key).and_then(|v| v.as_u64()).unwrap_or(0) as f64;
+        let gauge = |name, help, value| MetricFamily::scalar(name, help, MetricKind::Gauge, value);
+        families.push(gauge(
+            "fibril_replication_followers",
+            "Follower replication workers running on this node.",
+            count("follower_worker_count"),
+        ));
+        families.push(gauge(
+            "fibril_replication_followers_caught_up",
+            "Follower replication workers currently caught up to their owner.",
+            count("caught_up_count"),
+        ));
+        families.push(gauge(
+            "fibril_replication_followers_pending_retry",
+            "Follower replication workers waiting to retry after a failure.",
+            count("pending_retry_count"),
+        ));
+        families.push(gauge(
+            "fibril_replication_followers_checkpoint_required",
+            "Follower replication workers that need a checkpoint install to proceed.",
+            count("checkpoint_required_count"),
+        ));
+    }
+
+    if per_channel
+        && let Some(followers) = report
+            .get("replication_followers")
+            .and_then(|v| v.as_array())
+    {
+        let mut messages = Vec::new();
+        let mut events = Vec::new();
+        for follower in followers {
+            let Some(state) = follower.get("state").filter(|s| !s.is_null()) else {
+                continue;
+            };
+            let labels = vec![
+                (
+                    "topic",
+                    follower
+                        .get("topic")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                (
+                    "group",
+                    follower
+                        .get("group")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+                (
+                    "partition",
+                    follower
+                        .get("partition")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            ];
+            let offset =
+                |key: &str| state.get(key).and_then(|v| v.as_u64()).unwrap_or_default() as f64;
+            messages.push(Sample::labeled(
+                labels.clone(),
+                offset("message_next_offset"),
+            ));
+            events.push(Sample::labeled(labels, offset("event_next_offset")));
+        }
+        families.push(MetricFamily {
+            name: "fibril_replication_follower_applied_messages",
+            help: "Next message-log offset a follower on this node will apply for a followed partition.",
+            kind: MetricKind::Gauge,
+            samples: messages,
+        });
+        families.push(MetricFamily {
+            name: "fibril_replication_follower_applied_events",
+            help: "Next event-log offset a follower on this node will apply for a followed partition.",
+            kind: MetricKind::Gauge,
+            samples: events,
+        });
+    }
+
+    families
 }
 
 /// Per-channel families, bounded by what is materialized: queue depth from

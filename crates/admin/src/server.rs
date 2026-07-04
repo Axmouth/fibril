@@ -1028,6 +1028,8 @@ mod tests {
         );
         assert!(body.contains("# TYPE fibril_tcp_connections_open gauge"));
         assert!(body.contains(r#"fibril_tcp_reconcile_outcomes_total{outcome="kept"} 0"#));
+        assert!(body.contains("# TYPE fibril_recovery_quarantined gauge"));
+        assert!(body.contains("fibril_recovery_quarantines_total 0\n"));
 
         // Every non-comment line must parse as `name{labels} value`.
         for line in body.lines() {
@@ -1039,6 +1041,98 @@ mod tests {
             let name = name_part.split('{').next().unwrap();
             assert!(name.starts_with("fibril_"), "bad name in line: {line}");
         }
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_renders_replication_families_from_observability() {
+        let observability: Arc<crate::server::BrokerQueueObservability> = Arc::new(|| {
+            json!({
+                "replication_summary": {
+                    "follower_worker_count": 2,
+                    "caught_up_count": 1,
+                    "pending_retry_count": 0,
+                    "checkpoint_required_count": 0,
+                },
+                "replication_followers": [
+                    {
+                        "topic": "orders",
+                        "partition": 1,
+                        "group": "workers",
+                        "state": { "message_next_offset": 42, "event_next_offset": 7 },
+                        "busy": false,
+                    },
+                    {
+                        "topic": "orders",
+                        "partition": 2,
+                        "group": null,
+                        "state": null,
+                        "busy": false,
+                    },
+                ],
+            })
+        });
+
+        let base = test_server(RuntimeSettingsLocks::default()).await;
+        let mut server = Arc::try_unwrap(base).ok().expect("sole owner");
+        server.broker_queue_observability = Some(observability.clone());
+        let app = AdminServer::router(Arc::new(server));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(body.contains("fibril_replication_followers 2\n"), "{body}");
+        assert!(
+            body.contains("fibril_replication_followers_caught_up 1\n"),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                r#"fibril_replication_follower_applied_messages{topic="orders",group="workers",partition="1"} 42"#
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                r#"fibril_replication_follower_applied_events{topic="orders",group="workers",partition="1"} 7"#
+            ),
+            "{body}"
+        );
+        // A follower with no applied state yet contributes no series.
+        assert!(!body.contains(r#"partition="2""#), "{body}");
+
+        // With per-channel metrics off the summary stays and the
+        // per-partition series drop.
+        let base = test_server(RuntimeSettingsLocks::default()).await;
+        let mut server = Arc::try_unwrap(base).ok().expect("sole owner");
+        server.broker_queue_observability = Some(observability);
+        server.config.metrics_per_channel = false;
+        let app = AdminServer::router(Arc::new(server));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("fibril_replication_followers 2\n"), "{body}");
+        assert!(
+            !body.contains("fibril_replication_follower_applied_messages"),
+            "{body}"
+        );
     }
 
     #[tokio::test]
