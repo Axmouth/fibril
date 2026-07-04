@@ -421,6 +421,179 @@ Tests:
 - Atomicity: inject a write failure between material and overlay ->
   next boot unaffected, re-run enrolls cleanly.
 
+## Gate 3 arc plan: reconnect reconciliation family (#102-#105)
+
+Goal: a client always KNOWS what happened to its subscriptions and
+inflight work across a reconnect or broker restart, as typed surface
+rather than silence or a generic disconnect. Finishes the operational
+lifecycle gate together with drain handoff.
+
+Standing decision (recorded earlier): the typed close-reason surface
+(#102) and auto-resubscribe (#103) are API-shape decisions and are
+designed TOGETHER with the client API freeze (#111). Do not invent the
+enum here and freeze a different one there.
+
+What exists (code map):
+- crates/protocol/src/v1/mod.rs: ReconcileClient/Server/Result,
+  ReconcileAction { Keep, CloseClientSide, CloseServerSide,
+  RecreateClientSide }, ReconcilePolicy { Conservative,
+  RestoreClientSubscriptions }, ResumeIdentity/ResumeOutcome.
+- crates/protocol/src/v1/handler.rs: reconcile_subscriptions, the resume
+  session store (resume_sessions, forget_if_dormant/forget_if_generation),
+  reconnect grace (connection.reconnect_grace_ms).
+- Clients: reconnect_reconcile_policy across Rust/TS/Python; the
+  subscription supervisor (failover.rs / routing) that already
+  re-subscribes on owner moves - auto-resubscribe must go through it,
+  not around it.
+- Done groundwork: #101 cold-start orphaned-partition reconciliation,
+  #108 owner-scoped resume identity.
+
+Design outline:
+- #102 typed close reason: subscription receive APIs end with a typed
+  terminal event, not just stream end: enum SubscriptionClosed { reason:
+  Reconciled(ReconcileAction + human reason), OwnerMoved, Drained,
+  BrokerRestarted, Shutdown, Lagged(stream policy - the deferred P3
+  events fold in here) }. One enum across Rust/TS/Python, wire-carried
+  where the server knows the reason (extend ReconcileSubscriptionResult
+  reason from free string to a tagged code + message, keeping the string
+  for humans).
+- #103 auto-resubscribe: when reconcile returns RecreateClientSide and
+  the subscription is safely recreatable (manual-ack, no exclusive
+  cohort surprise - exclusive rejoin already carries member_id), the
+  client re-subscribes through the existing supervisor instead of
+  surfacing a close. Opt-out flag; default ON for supervised
+  subscriptions to match product philosophy.
+- #104 inflight reconciliation: define and enforce tag validity across
+  resume. Semantics to implement: within reconnect grace + successful
+  resume, delivery tags remain settleable (the session held them); after
+  grace or a failed resume, tags are invalid and settles get a typed
+  stale-delivery error while the messages redeliver. The client marks
+  its in-hand deliveries stale on ResumeOutcome != Resumed so user code
+  learns immediately rather than on the failed ack.
+- #105 durable restart reconciliation: a broker RESTART currently voids
+  sessions (memory of sessions is in-process). Decide the honest scope:
+  persist resume session skeletons (client_id, owner_id, token,
+  subscription set) in the global store with a bounded TTL, so a fast
+  restart lets clients resume with Reconciled outcomes instead of
+  ResumeNotFound; messages redeliver per at-least-once as today. NOT a
+  delivery-tag preservation across restarts - tags die with the
+  process, and #104's stale-tag surface covers that honestly.
+
+Invariants:
+1. At-least-once is never weakened: any ambiguity resolves to
+   redelivery plus a typed signal, never silent drop.
+2. Every subscription termination has exactly one typed terminal event;
+   no path may end a stream silently (test: grep-level exhaustiveness -
+   every `break`/close in the delivery pump maps to a reason).
+3. Auto-resubscribe never changes settlement semantics: unsettled
+   deliveries from the old incarnation stay governed by #104 rules.
+4. Wire changes are additive (serde-default fields, tagged code beside
+   the existing reason string) - this family lands BEFORE the wire
+   freeze and must not force a version bump.
+
+Bricks: (1) wire: tagged reason codes on reconcile results + close
+frames where missing; (2) Rust client terminal-event surface + stale-tag
+marking; (3) auto-resubscribe via the supervisor; (4) TS/Python parity +
+FEATURE_MATRIX rows; (5) broker durable session skeletons + restart
+reconcile path; (6) docs (reconnects page rewrite).
+
+Tests: kill-connection matrix per policy x outcome asserting the exact
+terminal event; settle-after-grace gets the typed stale error and the
+message redelivers exactly once more; auto-resubscribe continuity (no
+gap, no dup-settle) under owner restart; broker restart with skeletons:
+resume succeeds, subscriptions reconcile, redeliveries flagged
+redelivered; soak-suite extension asserting no silent stream ends.
+
+## Gate 2 arc plan: freeze family (#109-#112)
+
+Goal: 1.0's compatibility promise. Sequenced after the reconciliation
+family (its wire additions land first) and after security settled the
+handshake.
+
+- #109 newtype + Arc<str> pass: Offset/Epoch/DeliveryTag-style domain
+  integers get distinct serde(transparent) newtypes (Partition already
+  is one); Topic/Group become validated Arc<str> newtypes end to end
+  (interning groundwork exists from #65). Pure mechanical churn - do it
+  IMMEDIATELY before freezing so nothing re-churns after. Compiler does
+  the work; tests are the existing suites passing.
+- #110 wire versioning + back-compat policy: PROTOCOL_V1 and the HELLO
+  negotiation already exist. Write the policy down as normative doc:
+  additive-only within a protocol version (serde-default fields, new
+  opcodes), version bump criteria, support window (broker supports
+  N and N-1; clients declare, broker answers with negotiated),
+  clients/wire_vectors.json is the cross-client byte pin and CI gate.
+  Add a vectors-diff check to CI so an accidental encoding change fails
+  loudly.
+- #111 client API freeze: the public-API review across Rust/TS/Python
+  against FEATURE_MATRIX; the typed subscription-lifecycle enum from the
+  reconciliation family is ratified here; deprecations resolved; then
+  semver discipline begins (breaking = major).
+- #112 compat matrix + enforcement: a CI job running the PREVIOUS
+  released clients (crates.io/npm/pypi or the previous tag) against the
+  new broker image for a smoke (connect, publish, consume, stream,
+  TLS) - the matrix in docs is generated from what CI actually proves,
+  never hand-claimed.
+
+Invariant: nothing merges to main after the freeze commit that changes
+wire bytes for existing frames (the vectors gate) or breaks the
+previous-client smoke (the matrix gate).
+
+## Security depth plans (post-0.4 minors)
+
+### mTLS client auth (compact brief)
+- Config: tls.client_ca_path (the slot reserved in the TLS arc) +
+  tls.require_client_certs (default false: certs optional, password auth
+  still available; true = handshake rejects certless clients).
+- Server: rustls WebPkiClientVerifier on the existing ServerTls build;
+  identity = first DNS SAN else CN, mapped to a user principal: a cert
+  for identity X authenticates as user X WITHOUT a password (the user
+  must exist in the store, so authz and listing stay uniform; the @node
+  namespace stays reserved and cert identities cannot claim it).
+- Clients: cert_path/key_path options (all three clients), surfaced in
+  the same TlsOptions; errors join the existing taxonomy (a required-
+  cert rejection is a new typed reason, not a generic handshake error).
+- Tests: required-mode rejects certless with a named error; optional
+  mode allows both paths; identity maps to store user and appears in
+  connection auth state; @-identity certs refused.
+
+### Per-topic authorization (compact brief - precedent first)
+- Precedent to weigh in-brick: Kafka ACLs (principal x operation x
+  resource pattern, LITERAL/PREFIXED) vs RabbitMQ per-vhost regex
+  triples (configure/write/read). Lean: per-user rule list
+  { topic_glob, ops subset of publish/consume/declare/admin }, stored ON
+  the user record in the existing replicated user document (no new
+  store), enforced at handler op dispatch where the op already knows
+  topic + authenticated principal.
+- Migration invariant: users without rules keep full access (rules are
+  opt-in narrowing), so shipping authz breaks nobody; a default-deny
+  mode can be a config flag later.
+- Denials are guided (which rule would be needed), 403-coded, never
+  retried by clients (extend retry_advice).
+- Tests: glob matrix, deny messages, rules replicate with the user
+  document, dashboard/fibrilctl editing, @node exempt (node principal
+  is transport, not user ops).
+
+### Go client (#119) playbook (compact)
+- The Python port process is the template: (1) wire codec pinned
+  byte-for-byte against clients/wire_vectors.json first; (2) engine
+  (HELLO/AUTH/heartbeat/dispatch) against the fake-broker harness
+  pattern (see clients/python/tests/fake_broker.py); (3) client layer
+  (topology cache, pool, redirects, supervisor) mirroring
+  clients/ARCHITECTURE.md; (4) TLS + the five-error taxonomy + 426
+  mapping; (5) FEATURE_MATRIX column driven to parity, notes for gaps.
+- Go-specifics decided up front: context.Context on every blocking call,
+  channels for subscriptions, no reflection-based codec (hand-rolled
+  like the others), module path + CI job mirroring the TS workflow.
+
+## Tenancy examination (deferred question, criteria recorded)
+Decide AFTER authz ships, by answering: do groups-as-namespace-prefixes
+plus per-user authz rules already give tenant isolation for the real
+asks (credential isolation: yes after authz; quota isolation: no -
+would need per-principal rate/storage limits, a separate arc; admin
+isolation: no - dashboard is cluster-wide)? If the missing pieces have
+no concrete demand, tenancy stays a documentation pattern (prefix +
+authz rules), not a feature.
+
 
 ## Auth beyond the static handler (gate 4, #114) - design brief (2026-07-05)
 
