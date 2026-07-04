@@ -138,6 +138,7 @@ These fields are read on process start.
 | `admin.auth.enabled` | `FIBRIL_ADMIN_AUTH_ENABLED` | `--admin-auth-enabled` | `false` |
 | `admin.auth.username` | `FIBRIL_ADMIN_USERNAME` | `--admin-username` | `fibril` |
 | `admin.auth.password` | `FIBRIL_ADMIN_PASSWORD` | `--admin-password` | unset |
+| `admin.metrics_per_channel` | `FIBRIL_ADMIN_METRICS_PER_CHANNEL` | none | `true` |
 | `tls.enabled` | `FIBRIL_TLS_ENABLED` | none | `false` |
 | `tls.cert_path` | `FIBRIL_TLS_CERT_PATH` | none | unset |
 | `tls.key_path` | `FIBRIL_TLS_KEY_PATH` | none | unset |
@@ -197,6 +198,11 @@ and `ignore` truncates to the last valid record. See
 
 `admin.auth.enabled = true` requires both `admin.auth.username` and `admin.auth.password`.
 The admin password is intentionally not shown in the dashboard startup summary.
+
+`admin.metrics_per_channel` controls whether the Prometheus `/metrics`
+endpoint on the admin listener includes per-channel series (queue depth,
+stream subscriptions, follower applied state) alongside the always-exported
+node-level aggregates. See [monitoring](/deployment/monitoring/).
 
 `tls.enabled = true` serves TLS on the broker listener and the admin dashboard
 from one certificate. Supply PEM files with `tls.cert_path` and `tls.key_path`,

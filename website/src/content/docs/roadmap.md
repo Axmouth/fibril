@@ -84,6 +84,19 @@ Mutual-TLS client authentication, per-topic authorization, TLS on inter-broker
 connections, and certificate rotation are the remaining security depth, planned
 for later minors.
 
+### 0.4 (in progress)
+
+Operational depth on top of the security baseline:
+
+- A Prometheus `/metrics` endpoint on the admin listener - node-level
+  aggregates plus per-channel series from materialized channels, behind the
+  same auth and HTTPS as the dashboard. Landed on main, see
+  [monitoring](/deployment/monitoring/).
+- Graceful ownership handoff on drain, so a planned restart moves partition
+  ownership to caught-up followers instead of waiting out reactive failover.
+- TLS on inter-broker replication and coordination connections, and
+  certificate rotation.
+
 ### Toward 1.0 (later 0.x minors)
 
 Each subsequent minor knocks off part of a gate, incrementally:
@@ -100,7 +113,7 @@ These add reach and polish without gating 1.0, and several can proceed in
 parallel before then:
 
 - More first-party clients: Go, C#, Java.
-- Observability exporters (Prometheus, OpenTelemetry).
+- OpenTelemetry export (the Prometheus endpoint shipped with 0.4).
 - Continued performance refinement (async replication fsync, staging micro-opts).
 - Optional symmetric conveniences such as wildcard publishers (client-side
   fan-out to every topic matching a pattern, mirroring wildcard subscribe), if a

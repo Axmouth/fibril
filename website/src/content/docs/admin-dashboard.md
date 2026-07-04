@@ -10,8 +10,9 @@ The UI uses the same dark/light visual language as the public site and vendors
 only the small icon set it needs.
 
 The dashboard is not meant to be a high-frequency monitoring feed. Use it to
-answer specific operational questions, then rely on metrics and logs for
-continuous monitoring.
+answer specific operational questions, and point Prometheus at the `/metrics`
+endpoint on the same listener (same auth, same HTTPS) for continuous
+monitoring. See [monitoring](/deployment/monitoring/).
 
 When broker TLS is enabled (`tls.enabled = true`) the dashboard serves HTTPS
 from the same certificate material. Set `tls.admin_enabled = false` to keep it

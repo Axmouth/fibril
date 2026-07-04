@@ -423,6 +423,24 @@ Conditions and limits:
 - Settings updates use version checks.
 - The dashboard is for operational inspection, not continuous high-frequency monitoring.
 
+## Metrics Export
+
+See also: [monitoring](/deployment/monitoring/).
+
+| Item | Status | Implemented surface |
+| --- | --- | --- |
+| Prometheus `/metrics` endpoint | Implemented | Admin listener, text exposition format, behind admin basic auth and admin HTTPS when enabled |
+| Node-level families | Implemented | Broker message totals, storage operation totals, transport and session-resume counters, open connection/subscription gauges, recovery quarantine gauge and counter, replication worker summary |
+| Per-channel series | Implemented | Queue ready/inflight, stream subscriptions and lag evictions, follower applied offsets - materialized channels only, gated by `admin.metrics_per_channel` (default on) |
+| OpenTelemetry export | Planned | Separate later item, not part of the Prometheus endpoint |
+
+Conditions and limits:
+
+- A scrape reads atomic counters and dashboard snapshot views, never a delivery hot path.
+- Counters are process-lifetime monotonic and reset on restart.
+- Labels carry channel identity and outcome tags only, never message data.
+- Sparse (declared but idle) queues contribute no per-channel series until they materialize.
+
 ## CLI Surface
 
 See also: [source deployment](/deployment/source/) and

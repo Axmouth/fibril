@@ -10,6 +10,16 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ## [Unreleased]
 
+### Added
+
+- Prometheus metrics. `GET /metrics` on the admin listener serves the text
+  exposition format behind the same admin auth and HTTPS as the dashboard:
+  node-level broker/storage/transport/session-resume counters, open
+  connection gauges, recovery quarantine state, and replication worker
+  summaries, plus per-channel series (queue ready/inflight, stream
+  subscriptions and lag evictions, follower applied offsets) from
+  materialized channels, gated by `admin.metrics_per_channel` (default on).
+
 ## [0.3.0] - 2026-07-05
 
 The security release. Connections can now be encrypted end to end, and the
