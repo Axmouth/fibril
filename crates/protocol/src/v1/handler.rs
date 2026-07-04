@@ -357,10 +357,54 @@ async fn send_error_response_and_count(
     metrics.error();
 }
 
+/// Map a broker operation error to a client response code and a message that
+/// names the likely fix or check where one exists. Exhaustive so a new
+/// `BrokerError` variant has to choose its code and guide here rather than
+/// silently defaulting to an unguided 500.
 fn broker_error_response(err: &BrokerError) -> (u16, String) {
     match err {
+        // Control flow, not a failure: the caller reached the wrong broker. The
+        // caller resolves the owner and retries, so the message stays as is.
         BrokerError::NotOwner { .. } => (ERR_NOT_OWNER, err.to_string()),
-        _ => (500, err.to_string()),
+
+        // The request itself is malformed or out of range. A client fix, not a
+        // server fault, so 400 (retry_advice reads this as DoNotRetry) rather
+        // than a retryable 500. The call site's message already says what.
+        BrokerError::InvalidArgument(msg) => (ERR_INVALID, msg.clone()),
+
+        // Too few replicas are caught up to meet the queue's durability policy.
+        // Usually transient (a replica catches up or rejoins), so it stays a
+        // retryable 500, but the guide names the two levers so a persistent case
+        // is actionable rather than a bare number.
+        BrokerError::NotEnoughInSyncReplicas {
+            topic,
+            partition,
+            in_sync,
+            required,
+        } => (
+            500,
+            format!(
+                "queue {topic}/{partition} has {in_sync} in-sync replica(s), below the \
+                 {required} its durability policy requires. This usually clears as replicas \
+                 catch up or rejoin; if it persists, bring replicas online or lower the \
+                 queue replication factor"
+            ),
+        ),
+
+        // A genuine broker-side fault. Keep the retryable 500 but say plainly it
+        // is not the caller's request, so a user does not chase a fix on their
+        // end - the broker logs carry the cause.
+        BrokerError::Storage(_)
+        | BrokerError::Engine(_)
+        | BrokerError::ChannelClosed
+        | BrokerError::InvalidReplicationProgress { .. }
+        | BrokerError::Unknown(_) => (
+            500,
+            format!(
+                "internal broker error: {err}. This is a broker-side fault, not a problem \
+                 with your request; check the broker logs for the cause"
+            ),
+        ),
     }
 }
 
@@ -1348,7 +1392,8 @@ async fn install_stream_subscription(
             (
                 ERR_NOT_FOUND,
                 format!(
-                    "stream {} partition {} not found",
+                    "stream {} partition {} not found - declare the stream first (declare \
+                     plexus) or check the topic name",
                     sub.topic,
                     sub.partition.id()
                 ),
@@ -2311,7 +2356,14 @@ where
 
     if frame.opcode != Op::Hello as u16 {
         writer
-            .send(error_frame(frame.request_id, 400, "expected HELLO")?)
+            .send(error_frame(
+                frame.request_id,
+                400,
+                "expected HELLO as the first frame. This is usually a non-Fibril client or a \
+                 connection to the wrong port - the broker speaks the Fibril wire protocol \
+                 (default port 9876), while the admin API and dashboard use a separate HTTP \
+                 port (default 8081)",
+            )?)
             .await
             .ok();
         tcp_stats.error();
@@ -3579,7 +3631,7 @@ where
                                 frame.request_id,
                                 &ErrorMsg {
                                     code: ERR_NOT_OWNER,
-                                    message: "not the owner of this stream partition".into(),
+                                    message: "not the owner of this stream partition, and its current owner could not be resolved - the cluster may still be converging (retry shortly), or coordination is unavailable to route you to the owner".into(),
                                 },
                             )?)
                             .await?;
@@ -3772,7 +3824,7 @@ where
                                     &metrics,
                                     frame.request_id,
                                     ERR_NOT_OWNER,
-                                    "not the owner of this stream partition",
+                                    "not the owner of this stream partition, and its current owner could not be resolved - the cluster may still be converging (retry shortly), or coordination is unavailable to route you to the owner",
                                 )
                                 .await;
                             }
@@ -4033,7 +4085,16 @@ where
             // -------- UNKNOWN -----------------------------------------------
             _ => {
                 frame_tx_high_prio
-                    .send(error_frame(frame.request_id, 400, "unknown opcode")?)
+                    .send(error_frame(
+                        frame.request_id,
+                        400,
+                        format!(
+                            "unknown opcode {}. This usually means the client speaks a newer \
+                             protocol than this broker - upgrade the broker or use a client \
+                             matching its version",
+                            frame.opcode
+                        ),
+                    )?)
                     .await?;
                 metrics.error();
             }
@@ -4225,5 +4286,49 @@ mod going_away_tests {
         let notice = wire::decode_going_away(&frame).expect("decode going away");
         assert_eq!(notice.grace_ms, 30_000);
         assert_eq!(notice.message, "upgrade");
+    }
+}
+
+#[cfg(test)]
+mod error_guide_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_argument_is_a_client_error_not_a_server_fault() {
+        let (code, msg) =
+            broker_error_response(&BrokerError::InvalidArgument("partition 9 out of range".into()));
+        assert_eq!(
+            code, ERR_INVALID,
+            "a malformed request is a 400 (DoNotRetry), not a retryable 500"
+        );
+        assert!(
+            msg.contains("partition 9 out of range"),
+            "the call site's detail is preserved: {msg}"
+        );
+    }
+
+    #[test]
+    fn not_enough_replicas_stays_retryable_and_names_the_levers() {
+        let (code, msg) = broker_error_response(&BrokerError::NotEnoughInSyncReplicas {
+            topic: "orders".into(),
+            partition: Partition::new(0),
+            in_sync: 1,
+            required: 2,
+        });
+        assert_eq!(code, 500, "a transient durability shortfall stays retryable");
+        assert!(
+            msg.contains("replication factor") && msg.contains("replicas"),
+            "the guide names the two levers rather than a bare number: {msg}"
+        );
+    }
+
+    #[test]
+    fn internal_faults_disclaim_the_callers_request() {
+        let (code, msg) = broker_error_response(&BrokerError::Unknown("disk on fire".into()));
+        assert_eq!(code, 500);
+        assert!(
+            msg.contains("broker logs") && msg.contains("not a problem with your request"),
+            "the guide tells the user it is not their fault and where to look: {msg}"
+        );
     }
 }

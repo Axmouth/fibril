@@ -403,6 +403,23 @@ Goal: extend the TLS-error philosophy - every error names the likely
 fix - across the client-facing error surface, BEFORE the API freeze
 locks the variants and wording in.
 
+STATUS (2026-07-04): broker lane brick 1 + most of brick 2 DONE. The
+broker_error_response funnel is now exhaustive per BrokerError variant
+(InvalidArgument 500->400 code fix so retry_advice reads DoNotRetry,
+NotEnoughInSyncReplicas guide names the levers, internal faults say they
+are broker-side + point at the logs), with unit tests in handler.rs
+error_guide_tests. Per-site guides added: expected-HELLO (port hint),
+unknown-opcode (version skew), stream subscribe not-found (declare
+first), stream not-owner fallback (owner unresolved = converging or no
+coordination). Verified the queue path has NO missing-queue 404 - an
+undeclared queue auto-materializes or returns NotOwner, so the brief's
+Storage/Engine->404 mapping correctly does not apply. REMAINING: brick 3
+declare-conflict "say WHICH setting differs" (fibril/src/lib.rs
+declare_partitioning + the shrink/grow arms), and the whole client-local
+lane (connection-refused, InvalidName rules, heartbeat-vs-clean-close)
+with the clients/error_guides.json parity list. Cohort conflict messages
+already guide well - left as is.
+
 Two lanes, in order:
 1. Broker-side messages first: guides that ride error frames improve
    all three clients at once with no client changes (precedent: the
