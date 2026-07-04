@@ -573,23 +573,82 @@ previous-client smoke (the matrix gate).
 
 ## Security depth plans (post-0.4 minors)
 
-### mTLS client auth (compact brief)
-- Config: tls.client_ca_path (the slot reserved in the TLS arc) +
-  tls.require_client_certs (default false: certs optional, password auth
-  still available; true = handshake rejects certless clients).
-- Server: rustls WebPkiClientVerifier on the existing ServerTls build;
-  identity = first DNS SAN else CN, mapped to a user principal: a cert
-  for identity X authenticates as user X WITHOUT a password (the user
-  must exist in the store, so authz and listing stay uniform; the @node
-  namespace stays reserved and cert identities cannot claim it).
-- Clients: cert_path/key_path options (all three clients), surfaced in
-  the same TlsOptions; errors join the existing taxonomy (a required-
-  cert rejection is a new typed reason, not a generic handshake error).
-- Tests: required-mode rejects certless with a named error; optional
-  mode allows both paths; identity maps to store user and appears in
-  connection auth state; @-identity certs refused.
+### Arc: mTLS client auth (#114 tail, gate-4 depth) - ACTIVE
+
+Goal: a verified client certificate is an identity. Workloads connect
+with a certificate instead of a password, an unidentified peer cannot
+finish the handshake when certs are required, and the cluster's raft
+and replication listeners become reachable only by deployment-CA
+certificate holders (closing the raw-raft-channel gap split out of the
+TLS tail).
+
+Decisions:
+- Config: tls.client_auth = "off" | "request" | "require" (default
+  off) + tls.client_ca_path. The client CA falls back to the generated
+  <data_dir>/tls/ca.pem when present (the self-contained deployment
+  lane, which also admits peer brokers' minted leaves); with neither,
+  enabling client_auth is a guided config error - OS roots make no
+  sense for client certificates.
+- Server: WebPkiClientVerifier on the ServerTls build; request mode
+  uses allow_unauthenticated so certless clients still connect and
+  password-auth (the migration lane), require rejects them in the
+  handshake. The verifier is built once at boot; rotating the CLIENT
+  CA is restart-required, same rule as the server CA.
+- Identity: first DNS SAN, else CN. A verified identity X
+  authenticates the connection as user X with no AUTH frame when X
+  exists in the user store - the store stays the single authority on
+  who exists, certs only replace the proof. A valid cert with an
+  unknown identity is a transport pass only: the connection proceeds
+  unauthenticated and may still password-auth. Identities starting
+  with @ never map (the node namespace stays unclaimable), and an AUTH
+  frame on a cert-authenticated connection gets the existing
+  already-authenticated error.
+- Threading: serve_connection captures peer_certificates() after the
+  TLS accept, fibril-tls extracts the identity (x509-parser, already
+  in-tree via rcgen), and handle_connection gains
+  verified_identity: Option<String> alongside peer_addr. The
+  AuthHandler trait gains decide_certificate(identity) so the store
+  handler owns the exists-check and the static test handler stays
+  trivial.
+- Outbound: when client_auth is on, broker peer dials (replication
+  connector and raft dialer) present the node's own server leaf as
+  their client certificate (with_client_auth_cert) - standard node
+  practice, no second key pair. Client options gain
+  cert_path/key_path in the existing TLS options (Rust, then TS and
+  Python in the parity brick); a required-cert rejection joins the
+  typed error taxonomy as its own reason.
+
+Bricks:
+1. fibril-tls: client-verifier modes on the server build, identity
+   extraction (SAN else CN, @ never maps), client-cert-bearing
+   connector variant. Unit tests define the identity contract.
+2. Protocol + broker: verified_identity through serve_connection into
+   handle_connection, decide_certificate on the AuthHandler trait and
+   StoreAuthHandler, pre-authenticated connection state. Integration:
+   cert connect with no AUTH frame against a booted broker.
+3. Inter-broker under require: dials present the node leaf; a cluster
+   replicates and elects with client_auth = require end to end.
+4. Rust client cert options + typed required-cert error; TS + Python
+   parity with shared expectations.
+5. Docs: configuration rows, cluster guide (workload identity lane),
+   implemented-surface flip, status, changelog. No setup-mode card:
+   client certs are PKI-issued, not first-boot material.
+
+Tests: the mode x credential matrix (off/request/require x
+cert/certless/wrong-CA cert), identity-mapped connect performs real
+ops without AUTH, unknown-identity cert still password-auths in
+request mode, @-identity cert never maps, require mode rejects
+certless brokers' dials until they present the leaf (then the cluster
+converges), reload keeps serving after leaf rotation with client_auth
+on.
 
 ### Per-topic authorization (compact brief - precedent first)
+
+Standing note (2026-07-04): the user is NOT committed to this item -
+it reads as tenancy-adjacent ("would be tenancy I guess") and only
+happens if a real need appears. Treat the brief below as a shelf
+design, not queued work; revisit alongside the tenancy criteria.
+
 - Precedent to weigh in-brick: Kafka ACLs (principal x operation x
   resource pattern, LITERAL/PREFIXED) vs RabbitMQ per-vhost regex
   triples (configure/write/read). Lean: per-user rule list
