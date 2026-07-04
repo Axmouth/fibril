@@ -6,15 +6,18 @@
 //! created on first boot and the CA fingerprint is printed so clients can
 //! pin or trust it.
 
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use fibril_config::TlsMode;
 use sha2::{Digest, Sha256};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::sign::CertifiedKey;
 use tokio_rustls::rustls::{self, ServerConfig as RustlsServerConfig};
 
 /// Directory under the data dir holding generated material.
@@ -54,8 +57,9 @@ pub enum TlsSetupError {
     },
     #[error(
         "generated TLS material under {dir} is incomplete: expected ca.pem, ca.key, \
-         server.pem and server.key together. Remove the directory to regenerate, or \
-         supply tls.cert_path and tls.key_path instead"
+         server.pem and server.key together, or only the ca.pem + ca.key pair to mint \
+         this node's server certificate from a shared CA. Remove the directory to \
+         regenerate, or supply tls.cert_path and tls.key_path instead"
     )]
     PartialGeneratedMaterial { dir: PathBuf },
     #[error("uploaded TLS material rejected: {detail}")]
@@ -64,11 +68,15 @@ pub enum TlsSetupError {
 
 /// The acceptor plus where its material came from, for startup reporting.
 /// `server_config` is shared so the admin HTTP server can serve HTTPS from
-/// the same material.
+/// the same material. The certificate is served through a swappable
+/// resolver, so [`ServerTls::reload`] rotates the leaf without touching the
+/// config or any live connection.
 pub struct ServerTls {
     pub acceptor: TlsAcceptor,
     pub server_config: Arc<RustlsServerConfig>,
     pub source: TlsMaterialSource,
+    resolver: Arc<ReloadableCertResolver>,
+    material: MaterialPaths,
 }
 
 pub enum TlsMaterialSource {
@@ -79,6 +87,56 @@ pub enum TlsMaterialSource {
     },
 }
 
+/// Where the serving material lives on disk, so a reload re-reads the same
+/// source the boot did. `chain_ca` is appended to the served chain (the
+/// generated CA), so fingerprint-pinning clients keep seeing the CA.
+#[derive(Debug, Clone)]
+struct MaterialPaths {
+    cert_path: PathBuf,
+    key_path: PathBuf,
+    chain_ca: Option<PathBuf>,
+}
+
+impl ServerTls {
+    /// Re-read the certificate and key from their configured paths,
+    /// validate that they form a working pair, and swap them in. New
+    /// handshakes present the new certificate, connections already
+    /// established keep the one they negotiated. Nothing changes when
+    /// validation fails: the old material keeps serving.
+    ///
+    /// Returns the fingerprint of the new leaf certificate.
+    pub fn reload(&self) -> Result<String, TlsSetupError> {
+        let certified = certified_key_from_paths(&self.material)?;
+        let fingerprint = fingerprint_der(&certified.cert[0]);
+        self.resolver.current.store(Arc::new(certified));
+        Ok(fingerprint)
+    }
+
+    /// Fingerprint of the leaf certificate currently being served to new
+    /// handshakes.
+    pub fn leaf_fingerprint(&self) -> String {
+        fingerprint_der(&self.resolver.current.load().cert[0])
+    }
+}
+
+/// Serves the current certificate to every new handshake, swappable at
+/// runtime for live rotation.
+struct ReloadableCertResolver {
+    current: ArcSwap<CertifiedKey>,
+}
+
+impl fmt::Debug for ReloadableCertResolver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ReloadableCertResolver")
+    }
+}
+
+impl rustls::server::ResolvesServerCert for ReloadableCertResolver {
+    fn resolve(&self, _hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        Some(self.current.load_full())
+    }
+}
+
 /// Build the broker TLS acceptor for the configured mode. `extra_sans` adds
 /// hostnames or IPs (typically the advertise hosts) to a generated server
 /// certificate on top of the localhost set.
@@ -87,53 +145,85 @@ pub fn build_server_tls(
     data_dir: &Path,
     extra_sans: &[String],
 ) -> Result<Option<ServerTls>, TlsSetupError> {
-    match mode {
-        TlsMode::Disabled => Ok(None),
+    let (material, source) = match mode {
+        TlsMode::Disabled => return Ok(None),
         TlsMode::Provided {
             cert_path,
             key_path,
-        } => {
-            let certs = load_certs(cert_path)?;
-            let key = load_key(key_path)?;
-            let server_config = server_config_from(certs, key)?;
-            Ok(Some(ServerTls {
-                acceptor: TlsAcceptor::from(server_config.clone()),
-                server_config,
-                source: TlsMaterialSource::Provided,
-            }))
-        }
+        } => (
+            MaterialPaths {
+                cert_path: cert_path.clone(),
+                key_path: key_path.clone(),
+                chain_ca: None,
+            },
+            TlsMaterialSource::Provided,
+        ),
         TlsMode::AutoSelfSigned => {
             let dir = data_dir.join(GENERATED_TLS_DIR);
             ensure_generated_material(&dir, extra_sans)?;
             let files = GeneratedFiles::new(&dir);
-            // Serve leaf + CA so a client pinning the CA fingerprint can
-            // match it against the presented chain.
-            let mut certs = load_certs(&files.server_pem)?;
-            certs.extend(load_certs(&files.ca_pem)?);
-            let key = load_key(&files.server_key)?;
             let ca_fingerprint = ca_fingerprint(&files.ca_pem)?;
-            let server_config = server_config_from(certs, key)?;
-            Ok(Some(ServerTls {
-                acceptor: TlsAcceptor::from(server_config.clone()),
-                server_config,
-                source: TlsMaterialSource::Generated {
+            (
+                MaterialPaths {
+                    cert_path: files.server_pem,
+                    key_path: files.server_key,
+                    // Serve leaf + CA so a client pinning the CA
+                    // fingerprint can match it against the presented chain.
+                    chain_ca: Some(files.ca_pem),
+                },
+                TlsMaterialSource::Generated {
                     dir,
                     ca_fingerprint,
                 },
-            }))
+            )
         }
+    };
+
+    let certified = certified_key_from_paths(&material)?;
+    let resolver = Arc::new(ReloadableCertResolver {
+        current: ArcSwap::from_pointee(certified),
+    });
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = RustlsServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth()
+        .with_cert_resolver(resolver.clone());
+    let server_config = Arc::new(config);
+    Ok(Some(ServerTls {
+        acceptor: TlsAcceptor::from(server_config.clone()),
+        server_config,
+        source,
+        resolver,
+        material,
+    }))
+}
+
+/// Load and validate the serving pair from disk: the chain (leaf plus the
+/// generated CA when present) and a key proven to match the leaf.
+fn certified_key_from_paths(material: &MaterialPaths) -> Result<CertifiedKey, TlsSetupError> {
+    let mut certs = load_certs(&material.cert_path)?;
+    if let Some(chain_ca) = &material.chain_ca {
+        certs.extend(load_certs(chain_ca)?);
     }
+    let key = load_key(&material.key_path)?;
+    let provider = rustls::crypto::ring::default_provider();
+    Ok(CertifiedKey::from_der(certs, key, &provider)?)
+}
+
+/// SHA-256 fingerprint of a DER certificate, colon-hex.
+fn fingerprint_der(cert: &CertificateDer<'_>) -> String {
+    let digest = Sha256::digest(cert.as_ref());
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// SHA-256 fingerprint of the first certificate in a PEM file, colon-hex.
 pub fn ca_fingerprint(ca_pem: &Path) -> Result<String, TlsSetupError> {
     let certs = load_certs(ca_pem)?;
-    let digest = Sha256::digest(certs[0].as_ref());
-    Ok(digest
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect::<Vec<_>>()
-        .join(":"))
+    Ok(fingerprint_der(&certs[0]))
 }
 
 /// Extract SAN-usable hosts from advertise `host:port` entries. Brackets are
@@ -165,33 +255,94 @@ impl GeneratedFiles {
     }
 }
 
-/// Generate the CA and server certificate if the directory holds none.
-/// Complete material is reused as is, partial material is refused rather
-/// than guessed at.
-fn ensure_generated_material(dir: &Path, extra_sans: &[String]) -> Result<(), TlsSetupError> {
+/// What to do with the generated-material directory, decided from which of
+/// the four files are present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeneratedPlan {
+    /// All four files exist: load them as they are.
+    Reuse,
+    /// Nothing exists: mint a CA and a server certificate.
+    GenerateAll,
+    /// Only the CA pair exists - the shared-CA cluster lane, where the
+    /// operator copied `ca.pem` and `ca.key` from another node. Mint only
+    /// this node's server certificate from that CA.
+    MintServerFromCa,
+}
+
+/// The full presence matrix. Every other combination is partial material
+/// that gets refused rather than guessed at: a lone key cannot be paired,
+/// and a lone certificate cannot be served.
+fn generated_plan(
+    ca_pem: bool,
+    ca_key: bool,
+    server_pem: bool,
+    server_key: bool,
+) -> Option<GeneratedPlan> {
+    match (ca_pem, ca_key, server_pem, server_key) {
+        (true, true, true, true) => Some(GeneratedPlan::Reuse),
+        (false, false, false, false) => Some(GeneratedPlan::GenerateAll),
+        (true, true, false, false) => Some(GeneratedPlan::MintServerFromCa),
+        _ => None,
+    }
+}
+
+/// Generate the CA and server certificate if the directory holds none, mint
+/// a server certificate when only a shared CA pair is present, and reuse
+/// complete material as is. Partial material is refused rather than guessed
+/// at.
+pub fn ensure_generated_material(dir: &Path, extra_sans: &[String]) -> Result<(), TlsSetupError> {
     let files = GeneratedFiles::new(dir);
-    let present = [
+    let plan = generated_plan(
         files.ca_pem.exists(),
         files.ca_key.exists(),
         files.server_pem.exists(),
         files.server_key.exists(),
-    ];
-    if present.iter().all(|p| *p) {
-        return Ok(());
-    }
-    if present.iter().any(|p| *p) {
-        return Err(TlsSetupError::PartialGeneratedMaterial {
-            dir: dir.to_path_buf(),
-        });
-    }
+    )
+    .ok_or_else(|| TlsSetupError::PartialGeneratedMaterial {
+        dir: dir.to_path_buf(),
+    })?;
 
-    let ca_key = rcgen::KeyPair::generate()?;
-    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new())?;
-    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    ca_params
-        .distinguished_name
-        .push(rcgen::DnType::CommonName, "Fibril per-deployment CA");
-    let ca_cert = ca_params.self_signed(&ca_key)?;
+    let (ca_cert, ca_key) = match plan {
+        GeneratedPlan::Reuse => return Ok(()),
+        GeneratedPlan::GenerateAll => {
+            let ca_key = rcgen::KeyPair::generate()?;
+            let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new())?;
+            ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            ca_params
+                .distinguished_name
+                .push(rcgen::DnType::CommonName, "Fibril per-deployment CA");
+            let ca_cert = ca_params.self_signed(&ca_key)?;
+
+            fs::create_dir_all(dir).map_err(|source| TlsSetupError::WriteMaterial {
+                path: dir.to_path_buf(),
+                source,
+            })?;
+            write_public(&files.ca_pem, ca_cert.pem().as_bytes())?;
+            write_secret(&files.ca_key, ca_key.serialize_pem().as_bytes())?;
+            (ca_cert, ca_key)
+        }
+        GeneratedPlan::MintServerFromCa => {
+            let ca_pem = fs::read_to_string(&files.ca_pem).map_err(|source| {
+                TlsSetupError::ReadMaterial {
+                    path: files.ca_pem.clone(),
+                    source,
+                }
+            })?;
+            let ca_key_pem = fs::read_to_string(&files.ca_key).map_err(|source| {
+                TlsSetupError::ReadMaterial {
+                    path: files.ca_key.clone(),
+                    source,
+                }
+            })?;
+            let ca_key = rcgen::KeyPair::from_pem(&ca_key_pem)?;
+            // Rebuild an issuer from the stored CA. Only the issuer name and
+            // signing key matter for the minted certificate; the stored
+            // ca.pem keeps being the one served and fingerprinted.
+            let ca_cert =
+                rcgen::CertificateParams::from_ca_cert_pem(&ca_pem)?.self_signed(&ca_key)?;
+            (ca_cert, ca_key)
+        }
+    };
 
     let mut sans = vec![
         "localhost".to_string(),
@@ -210,12 +361,6 @@ fn ensure_generated_material(dir: &Path, extra_sans: &[String]) -> Result<(), Tl
         .push(rcgen::DnType::CommonName, "fibril-broker");
     let server_cert = server_params.signed_by(&server_key, &ca_cert, &ca_key)?;
 
-    fs::create_dir_all(dir).map_err(|source| TlsSetupError::WriteMaterial {
-        path: dir.to_path_buf(),
-        source,
-    })?;
-    write_public(&files.ca_pem, ca_cert.pem().as_bytes())?;
-    write_secret(&files.ca_key, ca_key.serialize_pem().as_bytes())?;
     write_public(&files.server_pem, server_cert.pem().as_bytes())?;
     write_secret(&files.server_key, server_key.serialize_pem().as_bytes())?;
     Ok(())
@@ -436,6 +581,154 @@ mod tests {
         .expect("load")
         .expect("enabled");
         assert!(matches!(provided.source, TlsMaterialSource::Provided));
+    }
+
+    #[test]
+    fn generation_plan_matrix_is_total() {
+        // (ca.pem, ca.key, server.pem, server.key) -> outcome, all 16.
+        let cases = [
+            (
+                (false, false, false, false),
+                Some(GeneratedPlan::GenerateAll),
+            ),
+            ((false, false, false, true), None),
+            ((false, false, true, false), None),
+            ((false, false, true, true), None),
+            ((false, true, false, false), None),
+            ((false, true, false, true), None),
+            ((false, true, true, false), None),
+            ((false, true, true, true), None),
+            ((true, false, false, false), None),
+            ((true, false, false, true), None),
+            ((true, false, true, false), None),
+            ((true, false, true, true), None),
+            (
+                (true, true, false, false),
+                Some(GeneratedPlan::MintServerFromCa),
+            ),
+            ((true, true, false, true), None),
+            ((true, true, true, false), None),
+            ((true, true, true, true), Some(GeneratedPlan::Reuse)),
+        ];
+        for ((ca_pem, ca_key, server_pem, server_key), expected) in cases {
+            assert_eq!(
+                generated_plan(ca_pem, ca_key, server_pem, server_key),
+                expected,
+                "matrix case ({ca_pem}, {ca_key}, {server_pem}, {server_key})"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_ca_pair_mints_a_server_certificate() {
+        // Node A generates the deployment CA; node B receives only the CA
+        // pair (the shared-CA cluster lane) and must mint its own leaf.
+        let node_a = temp_dir("mint-a");
+        build_server_tls(&TlsMode::AutoSelfSigned, &node_a, &["broker-a".into()])
+            .expect("generate on a")
+            .expect("enabled");
+        let a_dir = node_a.join(GENERATED_TLS_DIR);
+
+        let node_b = temp_dir("mint-b");
+        let b_dir = node_b.join(GENERATED_TLS_DIR);
+        fs::create_dir_all(&b_dir).expect("b dir");
+        fs::copy(a_dir.join("ca.pem"), b_dir.join("ca.pem")).expect("copy ca.pem");
+        fs::copy(a_dir.join("ca.key"), b_dir.join("ca.key")).expect("copy ca.key");
+
+        let b = build_server_tls(&TlsMode::AutoSelfSigned, &node_b, &["broker-b".into()])
+            .expect("mint on b")
+            .expect("enabled");
+
+        // Same CA, distinct leaf.
+        let a_fp = ca_fingerprint(&a_dir.join("ca.pem")).expect("a fp");
+        let TlsMaterialSource::Generated {
+            ca_fingerprint: b_fp,
+            ..
+        } = &b.source
+        else {
+            panic!("expected generated source");
+        };
+        assert_eq!(&a_fp, b_fp);
+        assert_ne!(
+            fs::read(a_dir.join("server.pem")).expect("a leaf"),
+            fs::read(b_dir.join("server.pem")).expect("b leaf"),
+        );
+
+        // B's minted chain verifies against the shared CA root.
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in load_certs(&b_dir.join("ca.pem")).expect("ca certs") {
+            roots.add(cert).expect("add root");
+        }
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .expect("verifier");
+        let chain = load_certs(&b_dir.join("server.pem")).expect("b chain");
+        use rustls::client::danger::ServerCertVerifier as _;
+        verifier
+            .verify_server_cert(
+                &chain[0],
+                &chain[1..],
+                &rustls::pki_types::ServerName::try_from("broker-b").expect("name"),
+                &[],
+                rustls::pki_types::UnixTime::now(),
+            )
+            .expect("minted chain must verify against the shared CA");
+    }
+
+    #[test]
+    fn reload_swaps_the_leaf_and_rejects_bad_material() {
+        // Two generated material sets stand in for a certificate rotation.
+        let first = temp_dir("rotate-first");
+        build_server_tls(&TlsMode::AutoSelfSigned, &first, &[])
+            .expect("first material")
+            .expect("enabled");
+        let second = temp_dir("rotate-second");
+        build_server_tls(&TlsMode::AutoSelfSigned, &second, &[])
+            .expect("second material")
+            .expect("enabled");
+        let first_dir = first.join(GENERATED_TLS_DIR);
+        let second_dir = second.join(GENERATED_TLS_DIR);
+
+        // Serve the first set through Provided mode paths in a live dir.
+        let live = temp_dir("rotate-live");
+        let cert_path = live.join("server.pem");
+        let key_path = live.join("server.key");
+        fs::copy(first_dir.join("server.pem"), &cert_path).expect("stage cert");
+        fs::copy(first_dir.join("server.key"), &key_path).expect("stage key");
+        let tls = build_server_tls(
+            &TlsMode::Provided {
+                cert_path: cert_path.clone(),
+                key_path: key_path.clone(),
+            },
+            &live,
+            &[],
+        )
+        .expect("serve")
+        .expect("enabled");
+        let before = tls.leaf_fingerprint();
+
+        // Rotate: replace the files, reload, observe the new leaf.
+        fs::copy(second_dir.join("server.pem"), &cert_path).expect("rotate cert");
+        fs::copy(second_dir.join("server.key"), &key_path).expect("rotate key");
+        let reported = tls.reload().expect("reload");
+        assert_ne!(before, reported);
+        assert_eq!(reported, tls.leaf_fingerprint());
+
+        // A mismatched pair (new cert, garbage key) is rejected and the
+        // previous material keeps serving.
+        fs::write(&key_path, "not a key").expect("break key");
+        let err = tls.reload().expect_err("bad material must be rejected");
+        assert!(err.to_string().contains("private key"), "{err}");
+        assert_eq!(reported, tls.leaf_fingerprint());
+
+        // A key that parses but does not match the certificate is also
+        // rejected without a swap.
+        fs::copy(first_dir.join("server.key"), &key_path).expect("mismatched key");
+        assert!(tls.reload().is_err(), "mismatched pair must be rejected");
+        assert_eq!(reported, tls.leaf_fingerprint());
     }
 
     #[test]
