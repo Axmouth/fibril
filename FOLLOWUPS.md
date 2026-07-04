@@ -325,6 +325,26 @@ Tests:
   durable restart reconciliation. Wants its own precedent-and-brief
   pass when picked up: the close-reason surface interacts with the API
   freeze, so design it immediately before or together with #111.
+- Storage and snapshot back-compat (raised at the 0.4 cut, co-design
+  with #110/#112): the wire-versioning item covers the PROTOCOL; the
+  durable formats need their own guarantee, and 0.4 made it urgent by
+  making rolling upgrades a first-class flow (drain-restart node by
+  node = a mixed-version cluster for the duration). Surfaces: keratin
+  message/event logs + snapshots (STROMA_VER exists - audit that every
+  layout change bumps it and old versions still OPEN), ganglion
+  raft-wal.jsonl + snapshot.json (no format marker yet - add one),
+  stroma global-store documents (runtime settings, auth users - have
+  CAS versions but no schema version; serde-default discipline is the
+  current guard), and the replication checkpoint export blob (crosses
+  BROKER VERSIONS during a rolling upgrade - the highest-risk surface).
+  Proposed guarantee from 0.5 on: a data dir upgrades in place from the
+  previous minor, and a mixed-version cluster of adjacent minors works
+  for the duration of a rolling upgrade. Enforcement: golden-fixture
+  data dirs generated at each cut and opened by the next version in CI
+  (generate the v0.4.0 fixture BEFORE main drifts), plus a
+  mixed-version scenario in the cluster-tryout script. Retrofit cost
+  grows with every release shipped without fixtures.
+
 - Gate 2 freeze family (#109-#112): OPENS with the guided-errors pass
   (below), then newtype/Arc<str> (pure churn, last-moment before
   freezing), then the wire versioning + back-compat policy, client API
