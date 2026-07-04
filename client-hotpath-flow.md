@@ -293,3 +293,20 @@ already-reworked write task, and only if the numbers justify it.
   message is the same bug shape as the 8KB boundary).
 - Port what applies; wording of guides stays per error_guides.json, numbers
   land next to the FEATURE_MATRIX per-client perf bar.
+
+## Step 0 result - saturate mode + pre-split baselines (branch: batch-drain + backpressure)
+
+steady_c now takes `--rate-per-sec 0` = saturate (no interval tick), so a
+saturation run measures the client, not the rate limiter. Validated: saturate
+publish-only unconfirmed = 173k, matching the tight-loop preload (the old ticked
+path read ~100k - artifact confirmed gone).
+
+Baselines (1KB, single client, saturate, 3s+ measured), the numbers the split
+(step 2) must beat:
+- publish-only unconfirmed: ~173k/s
+- publish-only confirmed (window 1024): ~159k/s, confirm p50=2ms p99=3ms
+- mixed 1 writer + 1 reader (separate connections): ~164k/s each direction
+- consume-drain single reader (from earlier): ~112-148k/s
+
+Client CPU ~1 core, broker ~57% - the split's target is to push client CPU past
+one core and the rates up with it.

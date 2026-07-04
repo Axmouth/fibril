@@ -92,7 +92,9 @@ struct Args {
     #[arg(long, default_value_t = 10)]
     readers: usize,
 
-    /// Target aggregate publish rate
+    /// Target aggregate publish rate. 0 = saturate (no interval pacing, publish
+    /// as fast as the client allows) so the measurement is the client, not the
+    /// rate limiter.
     #[arg(long, default_value_t = 100_000)]
     rate_per_sec: u64,
 
@@ -152,14 +154,15 @@ async fn main() {
     let args = Args::parse();
     let preload_confirmed = !args.preload_unconfirmed;
     match args.mode {
+        // rate_per_sec == 0 means saturate: publish as fast as the client allows
+        // (no interval pacing), so a saturation run measures the client, not the
+        // rate limiter.
         BenchMode::Mixed => {
             assert!(args.writers > 0, "writers must be > 0");
             assert!(args.readers > 0, "readers must be > 0");
-            assert!(args.rate_per_sec > 0, "rate_per_sec must be > 0");
         }
         BenchMode::PublishOnly => {
             assert!(args.writers > 0, "writers must be > 0");
-            assert!(args.rate_per_sec > 0, "rate_per_sec must be > 0");
         }
         BenchMode::ConsumeDrain => {
             assert!(args.readers > 0, "readers must be > 0");
@@ -465,12 +468,13 @@ async fn run_rate_limited_writers(
     measure_end: Instant,
     measured_sent_total: Arc<AtomicU64>,
 ) -> WriterStats {
+    let unthrottled = rate_per_sec == 0;
     let mut writer_handles = Vec::new();
     for writer_id in 0..writers {
         let measured_sent_total = measured_sent_total.clone();
         let writer_rate = rate_for_writer(rate_per_sec, writers, writer_id);
         let topic = topic.clone();
-        if writer_rate == 0 {
+        if !unthrottled && writer_rate == 0 {
             continue;
         }
         writer_handles.push(tokio::spawn(async move {
@@ -482,7 +486,8 @@ async fn run_rate_limited_writers(
             let publisher = client.publisher(&topic).unwrap();
             let mut stats = WriterStats::default();
 
-            let period = Duration::from_secs_f64(1.0 / writer_rate as f64);
+            // Unused when unthrottled; max(1) avoids a divide-by-zero period.
+            let period = Duration::from_secs_f64(1.0 / writer_rate.max(1) as f64);
             let mut tick = tokio::time::interval(period);
             tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
@@ -512,8 +517,9 @@ async fn run_rate_limited_writers(
                     Some((measured, sent_at, result)) = inflight.next(), if !inflight.is_empty() => {
                         record_confirm(&mut stats, measured, sent_at, result);
                     }
-                    // Publish, paced by the tick, gated by the in-flight window.
-                    _ = tick.tick(), if Instant::now() < measure_end
+                    // Publish, paced by the tick (or unthrottled = saturate),
+                    // gated by the in-flight window.
+                    _ = maybe_tick(&mut tick, unthrottled), if Instant::now() < measure_end
                         && (!confirmed || inflight.len() < confirm_window) => {
                         let now = Instant::now();
                         if now >= measure_end {
@@ -714,6 +720,16 @@ async fn collect_writer_stats(
             .append(&mut stats.confirm_latency_ms);
     }
     writer_stats
+}
+
+/// Pace the next publish: await the interval tick when throttled, or return
+/// immediately when unthrottled so the writer saturates. As a select branch this
+/// makes the publish arm always-ready under saturation, still gated by the
+/// caller's in-flight-window condition.
+async fn maybe_tick(tick: &mut tokio::time::Interval, unthrottled: bool) {
+    if !unthrottled {
+        tick.tick().await;
+    }
 }
 
 fn rate_for_writer(rate_per_sec: u64, writers: usize, writer_id: usize) -> u64 {
