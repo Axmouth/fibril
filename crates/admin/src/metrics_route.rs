@@ -7,6 +7,7 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
+use fibril_broker::PartitionKind;
 use std::sync::Arc;
 
 use crate::prometheus::{MetricFamily, MetricKind, Sample, render};
@@ -19,7 +20,11 @@ pub async fn metrics(
 ) -> Result<Response, StatusCode> {
     check_auth(&server, &headers).await?;
 
-    let body = render(&node_families(&server));
+    let mut families = node_families(&server);
+    if server.config.metrics_per_channel {
+        families.extend(channel_families(&server).await);
+    }
+    let body = render(&families);
     Ok((
         [(
             header::CONTENT_TYPE,
@@ -160,4 +165,86 @@ fn node_families(server: &AdminServer) -> Vec<MetricFamily> {
 
 fn reconcile_outcome(outcome: &'static str, value: u64) -> Sample {
     Sample::labeled(vec![("outcome", outcome.to_string())], value as f64)
+}
+
+/// Per-channel families, bounded by what is materialized: queue depth from
+/// the same debug snapshot the dashboard queues page reads, stream
+/// subscription and lag-recovery state from the stream stats surface.
+/// Sparse (declared but idle) queues never contribute a series.
+async fn channel_families(server: &AdminServer) -> Vec<MetricFamily> {
+    let mut families = Vec::new();
+
+    match server.storage.debug_snapshot().await {
+        Ok(snapshot) => {
+            let mut ready = Vec::new();
+            let mut inflight = Vec::new();
+            for queue in &snapshot.queues {
+                if !matches!(queue.kind, PartitionKind::Queue) || !queue.materialized {
+                    continue;
+                }
+                let labels = |value: usize| {
+                    Sample::labeled(
+                        vec![
+                            ("topic", queue.topic.clone()),
+                            ("group", queue.group.clone().unwrap_or_default()),
+                            ("partition", queue.partition.to_string()),
+                        ],
+                        value as f64,
+                    )
+                };
+                ready.push(labels(queue.state.ready_count));
+                inflight.push(labels(queue.state.inflight_count));
+            }
+            families.push(MetricFamily {
+                name: "fibril_queue_ready",
+                help: "Messages ready for delivery in a materialized queue partition.",
+                kind: MetricKind::Gauge,
+                samples: ready,
+            });
+            families.push(MetricFamily {
+                name: "fibril_queue_inflight",
+                help: "Messages leased to consumers in a materialized queue partition.",
+                kind: MetricKind::Gauge,
+                samples: inflight,
+            });
+        }
+        Err(err) => {
+            // The node-level families remain valid, so serve them rather
+            // than failing the whole scrape.
+            tracing::warn!("metrics scrape could not read the queue snapshot: {err}");
+        }
+    }
+
+    if let Some(streams) = &server.streams {
+        let stats = streams.stream_stats().await;
+        let stream_labels = |topic: &str, partition: u32, value: f64| {
+            Sample::labeled(
+                vec![
+                    ("topic", topic.to_string()),
+                    ("partition", partition.to_string()),
+                ],
+                value,
+            )
+        };
+        families.push(MetricFamily {
+            name: "fibril_stream_subscriptions",
+            help: "Live subscription drivers attached to a stream partition.",
+            kind: MetricKind::Gauge,
+            samples: stats
+                .iter()
+                .map(|s| stream_labels(&s.topic, s.partition, s.live_subscriptions as f64))
+                .collect(),
+        });
+        families.push(MetricFamily {
+            name: "fibril_stream_lag_evictions_total",
+            help: "Times a stream subscriber overflowed its live buffer and went through lag recovery.",
+            kind: MetricKind::Counter,
+            samples: stats
+                .iter()
+                .map(|s| stream_labels(&s.topic, s.partition, s.lag_evictions as f64))
+                .collect(),
+        });
+    }
+
+    families
 }

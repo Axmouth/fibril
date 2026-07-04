@@ -110,6 +110,9 @@ pub struct AdminConfig {
     /// When set, the dashboard serves HTTPS with this rustls config (the
     /// same material as the broker listener).
     pub tls: Option<std::sync::Arc<tokio_rustls::rustls::ServerConfig>>,
+    /// Include per-channel series in the /metrics exposition. Node-level
+    /// aggregates are always exported.
+    pub metrics_per_channel: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -791,6 +794,7 @@ mod tests {
                 bind: "127.0.0.1:0".into(),
                 auth,
                 tls: None,
+                metrics_per_channel: true,
             },
             Some(StartupConfigSummary {
                 data_dir: root.display().to_string(),
@@ -2407,6 +2411,7 @@ mod tests {
                 bind: "127.0.0.1:0".into(),
                 auth: None,
                 tls: None,
+                metrics_per_channel: true,
             },
             None,
             Arc::new(engine),
@@ -2533,6 +2538,7 @@ mod tests {
                 bind: "127.0.0.1:0".into(),
                 auth: None,
                 tls: None,
+                metrics_per_channel: true,
             },
             None,
             Arc::new(engine.clone()),

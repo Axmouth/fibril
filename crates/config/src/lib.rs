@@ -535,6 +535,9 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_PASSWORD")? {
             self.admin.auth.password = Some(value);
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_METRICS_PER_CHANNEL")? {
+            self.admin.metrics_per_channel = parse_env("FIBRIL_ADMIN_METRICS_PER_CHANNEL", &value)?;
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_AUTH_USERNAME")? {
             // Paired with FIBRIL_AUTH_PASSWORD below into one seed entry;
             // validation rejects a half-set pair.
@@ -948,6 +951,11 @@ impl Default for BrokerSection {
 pub struct AdminSection {
     pub listener: ListenerSection,
     pub auth: AdminAuthSection,
+    /// Include per-channel series (queue ready/inflight, stream subscriptions
+    /// and lag evictions) in the /metrics exposition. Node-level aggregates
+    /// are always exported. Turn off for deployments with many active
+    /// channels where the series count would strain the scraper.
+    pub metrics_per_channel: bool,
 }
 
 impl Default for AdminSection {
@@ -958,6 +966,7 @@ impl Default for AdminSection {
                 advertise: Vec::new(),
             },
             auth: AdminAuthSection::default(),
+            metrics_per_channel: true,
         }
     }
 }
@@ -2131,6 +2140,7 @@ mod tests {
                 "FIBRIL_ADMIN_AUTH_ENABLED" => Some(Ok("true".to_string())),
                 "FIBRIL_ADMIN_USERNAME" => Some(Ok("env-admin".to_string())),
                 "FIBRIL_ADMIN_PASSWORD" => Some(Ok("env-secret".to_string())),
+                "FIBRIL_ADMIN_METRICS_PER_CHANNEL" => Some(Ok("false".to_string())),
                 "FIBRIL_QUEUE_IDLE_EVICT_AFTER_MS" => Some(Ok("123".to_string())),
                 "FIBRIL_QUEUE_IDLE_SWEEP_INTERVAL_MS" => Some(Ok("".to_string())),
                 "FIBRIL_RECONNECT_GRACE_MS" => Some(Ok("789".to_string())),
@@ -2148,6 +2158,7 @@ mod tests {
         assert!(config.admin.auth.enabled);
         assert_eq!(config.admin.auth.username, "env-admin");
         assert_eq!(config.admin.auth.password.as_deref(), Some("env-secret"));
+        assert!(!config.admin.metrics_per_channel);
         assert_eq!(config.storage.keratin.fsync_interval_ms, 30);
         assert_eq!(
             config.storage.keratin.message_log.segment_max_bytes,

@@ -4,6 +4,13 @@ data_dir = "server_data"
 [broker.listener]
 bind = "0.0.0.0:9876"
 
+[admin]
+# Prometheus /metrics on the admin listener always exports node-level
+# aggregates. This flag adds per-channel series (queue ready/inflight,
+# stream subscriptions and lag evictions) for materialized channels. Turn
+# it off when many active channels would strain the scraper.
+metrics_per_channel = true
+
 [admin.listener]
 bind = "0.0.0.0:8081"
 

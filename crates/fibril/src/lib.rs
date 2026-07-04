@@ -1418,6 +1418,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             bind: config.admin.listener.bind.to_string(),
             auth: admin_auth_handler,
             tls: admin_tls_config,
+            metrics_per_channel: config.admin.metrics_per_channel,
         },
         Some(StartupConfigSummary {
             data_dir: config.server.data_dir.display().to_string(),
