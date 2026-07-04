@@ -397,7 +397,7 @@ Tests:
 - benchmarks.md overhaul stays blocked on the NVMe slice, spec recorded
   earlier in this file.
 
-### Guided client errors pass (opens the gate-2 family, user-requested)
+### Guided client errors pass (opens the gate-2 family)
 
 Goal: extend the TLS-error philosophy - every error names the likely
 fix - across the client-facing error surface, BEFORE the API freeze
@@ -1043,8 +1043,8 @@ on.
 
 ### Per-topic authorization (compact brief - precedent first)
 
-Standing note (2026-07-04): the user is NOT committed to this item -
-it reads as tenancy-adjacent ("would be tenancy I guess") and only
+Standing note (2026-07-04): this item is NOT committed -
+it reads as tenancy-adjacent and only
 happens if a real need appears. Treat the brief below as a shelf
 design, not queued work; revisit alongside the tenancy criteria.
 
@@ -2329,7 +2329,7 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   a new client has a perf bar to hit, not just a feature checklist. The server
   bench (`benches/`) measures the broker; this is the client-overhead view.
 
-  ## Client performance audit (IN PROGRESS, user-requested 2026-07-04)
+  ## Client performance audit (IN PROGRESS, 2026-07-04)
 
   RESULTS (Rust, steady_c, 1KB, localhost, single-node):
   - 1 producer: ~96k/s confirmed (window 1024), ~98k confirmed (window
