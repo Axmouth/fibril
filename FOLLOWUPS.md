@@ -326,30 +326,23 @@ Tests:
   pass when picked up: the close-reason surface interacts with the API
   freeze, so design it immediately before or together with #111.
 - Storage and snapshot back-compat (raised at the 0.4 cut, co-design
-  with #110/#112): the wire-versioning item covers the PROTOCOL; the
-  durable formats need their own guarantee, and 0.4 made it urgent by
-  making rolling upgrades a first-class flow (drain-restart node by
-  node = a mixed-version cluster for the duration). Surfaces: keratin
-  message/event logs + snapshots (STROMA_VER exists - audit that every
-  layout change bumps it and old versions still OPEN), ganglion
-  raft-wal.jsonl + snapshot.json (no format marker yet - add one),
-  stroma global-store documents (runtime settings, auth users - have
-  CAS versions but no schema version; serde-default discipline is the
-  current guard), and the replication checkpoint export blob (crosses
-  BROKER VERSIONS during a rolling upgrade - the highest-risk surface).
-  Proposed guarantee from 0.5 on: a data dir upgrades in place from the
-  previous minor, and a mixed-version cluster of adjacent minors works
-  for the duration of a rolling upgrade. Enforcement: golden-fixture
-  data dirs generated at each cut and opened by the next version in CI
-  (generate the v0.4.0 fixture BEFORE main drifts), plus a
-  mixed-version scenario in the cluster-tryout script. Retrofit cost
-  grows with every release shipped without fixtures.
+  with #110/#112): full brief below ("Storage and snapshot
+  back-compat"). The quick win - generating the v0.4.0 golden fixture -
+  needs no design and should happen BEFORE main drifts.
 
 - Gate 2 freeze family (#109-#112): OPENS with the guided-errors pass
   (below), then newtype/Arc<str> (pure churn, last-moment before
   freezing), then the wire versioning + back-compat policy, client API
   freeze, and the compat matrix. Auth settled the handshake, so nothing
   structural blocks this after the TLS tail lands.
+- Security depth, later minors: per-topic authorization (needs its own
+  precedent pass: Kafka ACLs vs RabbitMQ per-vhost patterns, and it is
+  tenancy-dependent - see the tenancy criteria section) and the
+  node-enrollment arc recorded below. mTLS shipped in 0.4.
+- Go client (#119): parallel-friendly at any point. The Python port
+  playbook plus clients/FEATURE_MATRIX.md is the checklist.
+- benchmarks.md overhaul stays blocked on the NVMe slice, spec recorded
+  earlier in this file.
 
 ### Guided client errors pass (opens the gate-2 family, user-requested)
 
@@ -384,23 +377,159 @@ Invariants:
 4. retry_advice stays consistent with the guide (an error telling the
    user to fix config must not advise Retry).
 
-Method: inventory every user-reachable error path (FibrilError
-variants, broker error_frame call sites, TS/Python error classes),
-rank by how often a NEW user hits it, guide the top of the list, stop
-where no likely fix exists (a guide that guesses wrong is worse than
-none).
+Inventory (done 2026-07-04 - execution starts from this list, the
+grep work is already done):
+
+Broker lane, in leverage order:
+1. The central funnel FIRST: broker_error_response
+   (crates/protocol/src/v1/handler.rs:360) maps only
+   BrokerError::NotOwner to a specific code. Storage, Engine,
+   InvalidArgument, NotEnoughInSyncReplicas and Unknown all flatten to
+   (500, err.to_string()), so most queue-path failures reach users as
+   "500: storage error: ...". Give every BrokerError variant an
+   explicit (code, guide) arm:
+   - InvalidArgument is a 400, not a 500. A code FIX, allowed and
+     wanted before #110 pins codes.
+   - NotEnoughInSyncReplicas keeps 500 + Retry advice but the guide
+     names the knobs (the queue replication factor vs currently live
+     replicas - read the exact setting names from the variant's call
+     sites when there).
+   - Storage/Engine not-found shapes (missing queue, missing
+     partition) map to ERR_NOT_FOUND with "queue `X` has not been
+     declared (group `Y` is part of the queue identity) - declare it
+     or check the name". Verify which ops can actually hit this given
+     auto-create gating, and guide the ones that can.
+2. Per-site messages, all in crates/protocol/src/v1/handler.rs:
+   - :1349 stream subscribe not-found (404): add "declare the stream
+     first or check the name".
+   - :3238 queue-subscribe-on-a-stream (400): already guides ("use a
+     stream subscribe"), wording pass only.
+   - :3581 and :3774 stream not-owner fallback ("not the owner of
+     this stream partition"): the redirect failed, so say why the
+     client sees a terminal error - owner unknown means the cluster is
+     still converging (retry shortly) or the broker runs static mode.
+   - :2314 "expected HELLO" (400): usually a non-Fibril client or the
+     wrong port - "the first frame must be HELLO. Is this a Fibril
+     client pointed at the broker port (9876 by default)? The admin
+     API and dashboard listen on their own port (8081 by default)".
+   - :4036 "unknown opcode" (400): version-skew guide - the client
+     speaks a newer protocol than this broker, upgrade the broker or
+     pin an older client.
+   - :784-787 InstallSubscriptionError arms: CohortConflict and
+     MemberIdConflict guides - "another consumer holds this exclusive
+     group (one cohort per topic+group): use a different group, or
+     join with a distinct member_id".
+3. Declare conflicts (the say-WHICH-setting-differs requirement): the
+   messages originate as Err(String) around declare_partitioning in
+   crates/fibril/src/lib.rs (repartition-in-progress at :352, the
+   shrink/grow arms below it) and reach the client via ERR_CONFLICT at
+   handler.rs:3403/:3486. Audit each origin so the message always
+   names the differing setting with its existing and requested values.
+4. Coordination/repartition ops in static mode: already guided
+   ("requires ganglion coordination", crates/admin/src/routes.rs:790).
+   Wording-parity check only.
+5. Quarantined-partition operations: guide points at the repair
+   endpoint and the recovery-quarantine docs page (the quarantine
+   surface lives in crates/broker/src/queue_engine.rs, QuarantineInfo
+   and repair around :307-:314 - find where a client op meets a
+   quarantined partition and what it returns today).
+
+Client-local lane (taxonomies are already 1:1 - Rust FibrilError at
+crates/client/src/lib.rs:199, TS clients/typescript/src/errors.ts,
+Python clients/python/src/fibril/errors.py):
+- Connection refused at connect time: "is the broker running at
+  {addr}? Clients dial the broker port (9876 by default), not the
+  admin port (8081)". Rust Disconnection, TS/Py DisconnectionError.
+- InvalidName: state the actual rules from the validator (allowed
+  characters, length, the @ prefix reservation), not just "invalid".
+- Heartbeat timeout vs clean close: where the engine can tell them
+  apart, say which happened - heartbeat loss usually means network or
+  broker stall, not a client bug.
+- Resume rejection reasons: NOT here. #102 owns the typed close and
+  resume surface, co-design there.
+
+Wording parity mechanism: add clients/error_guides.json next to
+wire_vectors.json - a list of {case, must_contain: [keywords]}
+consumed by all three client test suites for client-local errors.
+Broker-side guides ride error frames, so one Rust integration test per
+guide is enough (parity across clients is free).
+
+Non-goals: no new codes for existing failures unless the current code
+is a bug (the InvalidArgument 500), no guides that guess (a wrong
+guide is worse than none), no #102 surface.
 
 Tests: key paths assert the guide is present (contains the fix
-keyword), mirrored in the three clients for client-local errors.
-- Security depth, later minors: mTLS client auth (TlsSection reserved
-  the client-CA slot; server side is with_client_cert_verifier plus a
-  certificate-identity-to-user mapping), per-topic authorization (needs
-  its own precedent pass: Kafka ACLs vs RabbitMQ per-vhost patterns),
-  and the node-enrollment arc recorded above.
-- Go client (#119): parallel-friendly at any point; the Python port
-  playbook plus clients/FEATURE_MATRIX.md is the checklist.
-- benchmarks.md overhaul stays blocked on the NVMe slice; spec recorded
-  earlier in this file.
+keyword), mirrored in the three clients for client-local errors via
+error_guides.json.
+
+### Storage and snapshot back-compat (co-design with #110/#112)
+
+Goal: the guarantee, from 0.5 on: a data dir upgrades in place from
+the previous minor, and a mixed-version cluster of adjacent minors
+works for the duration of a rolling upgrade. #110 covers the wire
+protocol - this covers the durable formats. 0.4 made it urgent by
+making rolling upgrades a first-class flow (drain-restart node by
+node = a mixed-version cluster for the duration).
+
+Audited facts (2026-07-04) per surface:
+- Keratin event records: STROMA_VER = 3 (u16, per-record) at
+  keratin stroma/core/src/event.rs:9. CAVEAT CONFIRMED: the decode
+  check at event.rs:645 is an EQUALITY test - `ver != STROMA_VER` is
+  an InvalidData error, so bumping the version makes every existing
+  data dir unreadable. The guarantee therefore needs per-version
+  decode arms (keep decoding v3 when v4 lands), not just "audit that
+  bumps happen". Rule until then: never bump STROMA_VER without adding
+  a decode arm for the previous value. Also audit whether keratin log
+  segment headers and snapshot files carry their own version marker or
+  only the per-record one.
+- Ganglion raft-wal.jsonl + snapshot.json: serde_json of
+  PersistedMetadataLogEntry (ganglion crates/ganglion-storage/src/
+  lib.rs), NO format marker anywhere. Additive serde-default fields
+  are compatible today by luck of the encoding, renames/removals are
+  silent corruption. Add a version field (serde(default) so v0 =
+  absent) in the next ganglion storage change.
+- Stroma global-store documents (runtime settings, auth users): CAS
+  versions exist, schema versions do not. serde-default discipline is
+  the guard - write it down as normative in the #110 policy doc:
+  fields are add-only with defaults, never renamed or repurposed.
+- Replication checkpoint blob: ReplicationStateCheckpoint inside
+  ReplicationCheckpointExportOk/Install (crates/protocol/src/v1/
+  mod.rs:723-733). Crosses BROKER VERSIONS during a rolling upgrade -
+  the highest-risk surface. Same add-only serde discipline, and add
+  the checkpoint frames to clients/wire_vectors.json so the #110
+  vectors-diff CI gate pins their encoding.
+
+Golden fixture mechanics (the enforcement):
+1. Contents: a small deterministic data dir - a partitioned queue with
+   a consumer group, messages left in ready / inflight / delayed / DLQ
+   states, a durable stream with a committed cursor plus an ephemeral
+   stream config, a runtime-settings override, one auth user. NO TLS
+   material (never commit certs - TLS regenerates per deployment) and
+   no cluster secret.
+2. Generation: scripts/gen-compat-fixture.sh <tag> builds the broker
+   at the released tag, runs a fixed publish/consume/settle sequence,
+   stops the broker cleanly, then tars the data dir to
+   crates/broker/tests/fixtures/datadir-<tag>.tar.zst with a
+   manifest.json beside it (expected queue/stream counts, payload
+   hashes, cursor positions). The script is committed so every future
+   cut regenerates the same shape.
+3. Opening in CI: a compat_fixture test in crates/broker/tests/
+   unpacks each committed fixture into a temp dir, boots the CURRENT
+   broker on it, and asserts: boot completes with zero quarantined
+   partitions, counts match the manifest, consuming drains the
+   expected payloads (hash check), the durable stream resumes from the
+   committed cursor. A plain #[test], so rust-ci.yaml runs it with no
+   new job.
+4. Mixed-version lane: cluster-tryout.sh grows --mixed-version
+   <prev-image> - node A on the previous release image, B/C on the
+   current build, run the --failover-verify flow. Lands with #112
+   (needs published images), not before.
+
+Sequencing: fixture (items 1-3) is design-free and should be generated
+from the v0.4.0 tag NOW - retrofit cost grows with every release
+shipped without one. The version markers and decode-arm work land with
+the first format-touching change. The policy prose lands inside #110's
+normative doc. The mixed-version lane lands with #112.
 
 ## Node enrollment arc plan (post-0.4, after #153)
 
@@ -582,8 +711,8 @@ Design outline:
   its in-hand deliveries stale on ResumeOutcome != Resumed so user code
   learns immediately rather than on the failed ack.
 - #105 durable restart reconciliation: a broker RESTART currently voids
-  sessions (memory of sessions is in-process). Decide the honest scope:
-  persist resume session skeletons (client_id, owner_id, token,
+  sessions (memory of sessions is in-process). Decided scope (ratify
+  when picked up): persist resume session skeletons (client_id, owner_id, token,
   subscription set) in the global store with a bounded TTL, so a fast
   restart lets clients resume with Reconciled outcomes instead of
   ResumeNotFound; messages redeliver per at-least-once as today. NOT a
@@ -621,20 +750,31 @@ Goal: 1.0's compatibility promise. Sequenced after the reconciliation
 family (its wire additions land first) and after security settled the
 handshake.
 
-- #109 newtype + Arc<str> pass: Offset/Epoch/DeliveryTag-style domain
-  integers get distinct serde(transparent) newtypes (Partition already
-  is one); Topic/Group become validated Arc<str> newtypes end to end
-  (interning groundwork exists from #65). Pure mechanical churn - do it
-  IMMEDIATELY before freezing so nothing re-churns after. Compiler does
-  the work; tests are the existing suites passing.
+- #109 newtype + Arc<str> pass: Offset/Epoch-style domain integers get
+  distinct serde(transparent) newtypes (Partition already is one,
+  DeliveryTag exists as a struct in crates/common/src/lib.rs:12).
+  Known starting anchors: `pub type Offset = u64` is a bare alias at
+  crates/storage/src/lib.rs:16, and epoch rides as bare u64 inside
+  DeliveryTag (common/src/lib.rs:13) and throughout
+  crates/broker/src/coordination.rs. Topic/Group become validated
+  Arc<str> newtypes end to end (interning groundwork exists from #65).
+  Pure mechanical churn - do it IMMEDIATELY before freezing so nothing
+  re-churns after. Compiler does the work; tests are the existing
+  suites passing. Newtyping wire-visible fields must stay
+  serde(transparent) so no wire bytes change (the vectors gate below
+  proves it).
 - #110 wire versioning + back-compat policy: PROTOCOL_V1 and the HELLO
-  negotiation already exist. Write the policy down as normative doc:
-  additive-only within a protocol version (serde-default fields, new
-  opcodes), version bump criteria, support window (broker supports
-  N and N-1; clients declare, broker answers with negotiated),
-  clients/wire_vectors.json is the cross-client byte pin and CI gate.
-  Add a vectors-diff check to CI so an accidental encoding change fails
-  loudly.
+  negotiation already exist (crates/protocol/src/v1/mod.rs:31). Write
+  the policy down as normative doc: additive-only within a protocol
+  version (serde-default fields, new opcodes), version bump criteria,
+  support window (broker supports N and N-1; clients declare, broker
+  answers with negotiated), clients/wire_vectors.json is the
+  cross-client byte pin and CI gate. Add a vectors-diff check to CI
+  (rust-ci.yaml + typescript-client-ci.yaml already run the vector
+  suites - the missing piece is a regeneration step that fails when
+  committed vectors and regenerated vectors differ). The durable
+  formats get their policy from the back-compat brief above, written
+  into the same doc.
 - #111 client API freeze: the public-API review across Rust/TS/Python
   against FEATURE_MATRIX; the typed subscription-lifecycle enum from the
   reconciliation family is ratified here; deprecations resolved; then
@@ -643,7 +783,9 @@ handshake.
   released clients (crates.io/npm/pypi or the previous tag) against the
   new broker image for a smoke (connect, publish, consume, stream,
   TLS) - the matrix in docs is generated from what CI actually proves,
-  never hand-claimed.
+  never hand-claimed. The mixed-version BROKER lane from the
+  back-compat brief (cluster-tryout.sh --mixed-version <prev-image>)
+  lands here too - same prerequisite (published images), same matrix.
 
 Invariant: nothing merges to main after the freeze commit that changes
 wire bytes for existing frames (the vectors gate) or breaks the
