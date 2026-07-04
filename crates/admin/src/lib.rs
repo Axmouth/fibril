@@ -1,4 +1,5 @@
 mod auth;
+pub mod prometheus;
 mod routes;
 mod server;
 pub mod setup;
