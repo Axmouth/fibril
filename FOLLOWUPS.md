@@ -2329,7 +2329,32 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   a new client has a perf bar to hit, not just a feature checklist. The server
   bench (`benches/`) measures the broker; this is the client-overhead view.
 
-  ## Client performance audit (QUEUED, user-requested 2026-07-04)
+  ## Client performance audit (IN PROGRESS, user-requested 2026-07-04)
+
+  RESULTS (Rust, steady_c, 1KB, localhost, single-node):
+  - 1 producer: ~96k/s confirmed (window 1024), ~98k confirmed (window
+    8192), ~104k UNCONFIRMED. 10 producers: ~708k/s (7.35x).
+  - 1 consumer drain: ~112k/s. 10 consumers: ~510k/s (needs a bigger
+    preload than 2M to trust the 10-reader number - it drains in ~4s).
+  DIAGNOSIS: the single-client ceiling (~100k both sides) is CLIENT-side
+  per-message overhead, NOT the broker (708k with 10) and NOT the confirm
+  path (unconfirmed is no faster, and an 8192 window does not beat 1024,
+  so it is not confirm-RTT bound). Root cause: the client engine select!
+  loop in crates/client/src/lib.rs processes ONE command per iteration
+  (`Some(cmd) = cmd_rx.recv()`), paying a channel recv + task wakeup +
+  select repoll per publish (~10us/msg). Socket writes are ALREADY
+  coalesced (feed + flush_ticker) and confirms ALREADY pipelined, so
+  those are not the limiter.
+  FIX (identified, not yet applied): micro-batch at dispatch - drain the
+  queued commands per wakeup (recv the first, then a bounded try_recv /
+  recv_many loop) and feed them as a batch before returning to select!,
+  amortizing the per-message wakeup. Needs the big command match body
+  factored out of the select! arm so it can run per-drained-command.
+  Expected to lift a single client well past 100k. Validate by re-running
+  the 1-producer bench. Then check the consumer receive path for the
+  symmetric per-message hop. (Bench runs need dangerouslyDisableSandbox.)
+
+  ## Client performance audit - original spec
 
   Goal: a SINGLE client should not be crippled by per-client overhead.
   Compare 1 producer + 1 consumer against 10 + 10, holding everything else
