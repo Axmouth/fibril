@@ -113,7 +113,10 @@ impl MaybeTlsStream {
         match self {
             Self::Plain(stream) => {
                 let (read, write) = stream.into_split();
-                (MaybeTlsReadHalf::Plain(read), MaybeTlsWriteHalf::Plain(write))
+                (
+                    MaybeTlsReadHalf::Plain(read),
+                    MaybeTlsWriteHalf::Plain(write),
+                )
             }
             Self::Tls(stream) => {
                 let (read, write) = tokio::io::split(stream);

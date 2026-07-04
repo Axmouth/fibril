@@ -42,7 +42,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -52,6 +52,7 @@ use tokio::{
     sync::{Mutex, Notify, broadcast, mpsc, oneshot},
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use fibril_protocol::v1::{
@@ -2347,7 +2348,9 @@ impl Client {
     pub async fn shutdown(&self) {
         self.shared.user_shutdown.store(true, Ordering::Release);
         for slot in self.shared.pool.read().values() {
-            slot.current().shutdown.notify_waiters();
+            let engine = slot.current();
+            engine.cancel.cancel();
+            engine.shutdown.notify_waiters();
         }
     }
 }
@@ -3333,6 +3336,7 @@ impl EngineSlot {
 
         self.replace(new_engine);
         self.user_shutdown.store(false, Ordering::Release);
+        old_engine.cancel.cancel();
         old_engine.shutdown.notify_waiters();
 
         Ok(outcome)
@@ -3383,6 +3387,9 @@ impl EngineSlot {
 struct EngineHandle {
     tx: mpsc::Sender<Command>,
     shutdown: Arc<Notify>,
+    // Stops both engine tasks. Level-triggered (unlike the shutdown Notify), so a
+    // stop request cannot be missed by a task that is momentarily not parked.
+    cancel: CancellationToken,
     resume_identity: ResumeIdentity,
     resume_outcome: ResumeOutcome,
 }
@@ -3473,6 +3480,17 @@ enum Command {
         requeue: bool,
         not_before: Option<UnixMillis>,
         request_id: u64,
+    },
+    // Read-task-initiated writes. The read half has no socket, so a Pong reply
+    // and a pushed-topology ack are handed to the write task (the sole writer)
+    // over the same command channel, echoing the request id from the frame that
+    // prompted them.
+    Pong {
+        request_id: u64,
+    },
+    TopologyUpdateAck {
+        request_id: u64,
+        generation: u64,
     },
 }
 
@@ -3790,41 +3808,65 @@ where
     }
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Command>(8192);
+    let cancel = CancellationToken::new();
     let handle = Arc::new(EngineHandle {
         tx: cmd_tx.clone(),
         shutdown: shutdown.clone(),
+        cancel: cancel.clone(),
         resume_identity,
         resume_outcome,
     });
 
-    let mut subs = restored_subs;
     let subscription_registry = subscriptions.clone();
-
-    let shutdown_engine = shutdown.clone();
     let shutdown_acks = shutdown.clone();
 
-    // heartbeat task
+    // State shared across the split read/write engine tasks.
+    // - waiters: the write task inserts before feeding a request (so a reply
+    //   cannot arrive before the entry exists), the read task removes and fires.
+    // - subs: the read task installs on SubscribeOk and drops on a dead receiver,
+    //   the write task reads it to address an Ack/Nack.
+    // - last_seen_ms: millis since engine start, stored by the read task on every
+    //   inbound frame and compared by the write task on its heartbeat tick, so
+    //   liveness needs no lock.
+    // - fatal_slot + cancel: the first task to hit a connection-level fault
+    //   records it and cancels the token, both tasks then stop, and the
+    //   supervisor runs teardown exactly once.
+    let waiters = Arc::new(std::sync::Mutex::new(HashMap::<u64, Waiter>::new()));
+    let subs = Arc::new(std::sync::Mutex::new(restored_subs));
+    let engine_start = tokio::time::Instant::now();
+    let last_seen_ms = Arc::new(AtomicU64::new(0));
+    let fatal_slot = Arc::new(std::sync::Mutex::new(None::<FibrilError>));
+
     let heartbeat_secs = opts
         .heartbeat_interval
         .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL);
 
-    // writer + reader loop
-    tokio::spawn(async move {
+    // WRITE task: the sole owner of the socket write half. Drains the outbound
+    // command channel (batched), owns request-id allocation and the publish-flush
+    // batching, emits heartbeat PINGs, and enforces the liveness deadline.
+    let write_cancel = cancel.clone();
+    let write_waiters = waiters.clone();
+    let write_subs = subs.clone();
+    let write_fatal = fatal_slot.clone();
+    let write_last_seen = last_seen_ms.clone();
+    let write_task = tokio::spawn(async move {
+        let cancel = write_cancel;
+        let waiters = write_waiters;
+        let subs = write_subs;
+        let fatal_slot = write_fatal;
+        let last_seen_ms = write_last_seen;
         let mut next_req = 4u64;
-        let mut waiters: HashMap<u64, Waiter> = HashMap::new();
         let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(heartbeat_secs));
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         heartbeat.tick().await; // consume immediate tick
 
-        let timeout = std::time::Duration::from_secs(heartbeat_secs * 3);
-        let mut last_seen = tokio::time::Instant::now();
+        let timeout_ms = heartbeat_secs * 3 * 1000;
         let mut flush_ticker = tokio::time::interval(PUBLISH_FLUSH_INTERVAL);
         flush_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         flush_ticker.tick().await;
         let mut queued_publish_frames = 0usize;
         let mut queued_publish_bytes = 0usize;
 
-        // In the engine task, before the select! loop:
         let mut fatal_error: Option<FibrilError> = None;
 
         // Helper closure (or just an inline pattern):
@@ -3909,7 +3951,8 @@ where
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
-                    if last_seen.elapsed() > timeout {
+                    let now_ms = engine_start.elapsed().as_millis() as u64;
+                    if now_ms.saturating_sub(last_seen_ms.load(Ordering::Relaxed)) > timeout_ms {
                         tracing::warn!("Heartbeat timout, exiting event loop.");
                         fatal_error = Some(FibrilError::Disconnection {
                             msg: format!(
@@ -3918,7 +3961,7 @@ where
                                  broker rather than a client bug - check broker reachability and \
                                  health. The client will attempt to reconnect if auto-reconnect \
                                  is enabled",
-                                timeout.as_secs()
+                                timeout_ms / 1000
                             ),
                         });
                         break;
@@ -3931,17 +3974,17 @@ where
                     flush_publishes_or_die!(framed, fatal_error)
                 }
 
-                _ = shutdown.notified() => {
+                _ = cancel.cancelled() => {
                     tracing::info!("Shutting down, exiting event loop.");
+                    // Best-effort flush of anything already buffered before exit.
                     if queued_publish_frames > 0 {
-                        if let Err(e) = flush_protocol_frames(&mut framed).await {
-                            fatal_error = Some(e);
-                        }
+                        let _ = flush_protocol_frames(&mut framed).await;
                     }
                     break;
                 }
 
-                Some(cmd) = cmd_rx.recv() => {
+                cmd = cmd_rx.recv() => {
+                  let Some(cmd) = cmd else { break; };
                   let mut pending = Some(cmd);
                   let mut drained = 0usize;
                   while let Some(cmd) = pending.take() {
@@ -3965,7 +4008,7 @@ where
                     }
                     Command::PublishConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, ttl_ms, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::Publish(reply));
+                        lock_recover(&waiters).insert(req_id, Waiter::Publish(reply));
                         let p = Publish {
                             topic,
                             group,
@@ -4000,7 +4043,7 @@ where
                     }
                     Command::PublishDelayedConfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, not_before, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::Publish(reply));
+                        lock_recover(&waiters).insert(req_id, Waiter::Publish(reply));
                         let p = PublishDelayed {
                             topic,
                             group,
@@ -4018,62 +4061,79 @@ where
                     }
                     Command::Subscribe { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::SubscribeManual(reply));
+                        lock_recover(&waiters).insert(req_id, Waiter::SubscribeManual(reply));
                         send_or_die!(framed, Op::Subscribe, req_id, &req, fatal_error)
                     }
                     Command::SubscribeAutoAcked { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::SubscribeAuto(reply));
+                        lock_recover(&waiters).insert(req_id, Waiter::SubscribeAuto(reply));
                         send_or_die!(framed, Op::Subscribe, req_id, &req, fatal_error)
                     }
                     Command::SubscribeStream { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::StreamSubscribeManual(reply));
+                        lock_recover(&waiters).insert(req_id, Waiter::StreamSubscribeManual(reply));
                         send_or_die!(framed, Op::SubscribeStream, req_id, &req, fatal_error)
                     }
                     Command::SubscribeStreamAutoAcked { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::StreamSubscribeAuto(reply));
+                        lock_recover(&waiters).insert(req_id, Waiter::StreamSubscribeAuto(reply));
                         send_or_die!(framed, Op::SubscribeStream, req_id, &req, fatal_error)
                     }
                     Command::DeclareQueue { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::DeclareQueue(reply));
+                        lock_recover(&waiters).insert(req_id, Waiter::DeclareQueue(reply));
                         send_or_die!(framed, Op::DeclareQueue, req_id, &req, fatal_error)
                     }
                     Command::DeclarePlexus { req, reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::DeclareQueue(reply));
+                        lock_recover(&waiters).insert(req_id, Waiter::DeclareQueue(reply));
                         send_or_die!(framed, Op::DeclarePlexus, req_id, &req, fatal_error)
                     }
                     Command::Topology { reply } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
-                        waiters.insert(req_id, Waiter::Topology(reply));
+                        lock_recover(&waiters).insert(req_id, Waiter::Topology(reply));
                         send_or_die!(framed, Op::Topology, req_id, &TopologyRequest::default(), fatal_error)
                     }
                     Command::Ack { sub_id, delivery_tag, request_id } => {
-                        if let Some(sub) = subs.get(&sub_id) {
+                        // Copy the addressing fields out under the lock and drop
+                        // the guard before the send await: a std Mutex guard held
+                        // across .await would wedge the write task.
+                        let addr = lock_recover(&subs)
+                            .get(&sub_id)
+                            .map(|s| (s.topic.clone(), s.group.clone(), s.partition));
+                        if let Some((topic, group, partition)) = addr {
                             let ack = Ack {
-                                topic: sub.topic.clone(),
-                                group: sub.group.clone(),
-                                partition: sub.partition,
+                                topic,
+                                group,
+                                partition,
                                 tags: vec![delivery_tag],
                             };
                             send_encoded_or_die!(framed, wire::encode_ack(request_id, &ack), fatal_error)
                         }
                     }
                     Command::Nack { sub_id, delivery_tag, requeue, not_before, request_id } => {
-                        if let Some(sub) = subs.get(&sub_id) {
+                        let addr = lock_recover(&subs)
+                            .get(&sub_id)
+                            .map(|s| (s.topic.clone(), s.group.clone(), s.partition));
+                        if let Some((topic, group, partition)) = addr {
                             let nack = Nack {
-                                topic: sub.topic.clone(),
-                                group: sub.group.clone(),
-                                partition: sub.partition,
+                                topic,
+                                group,
+                                partition,
                                 tags: vec![delivery_tag],
                                 requeue,
                                 not_before,
                             };
                             send_encoded_or_die!(framed, wire::encode_nack(request_id, &nack), fatal_error)
                         }
+                    }
+                    // The read half has no socket, so a Pong reply and a
+                    // pushed-topology ack come here to the sole writer.
+                    Command::Pong { request_id } => {
+                        send_or_die!(framed, Op::Pong, request_id, &(), fatal_error)
+                    }
+                    Command::TopologyUpdateAck { request_id, generation } => {
+                        send_or_die!(framed, Op::TopologyUpdateAck, request_id, &TopologyUpdateAck { generation }, fatal_error)
                     }
                     }
                     drained += 1;
@@ -4083,576 +4143,672 @@ where
                     pending = cmd_rx.try_recv().ok();
                   }
                 },
-                Some(frame) = framed_read.next() => {
-                    let frame = match frame {
-                        Ok(f) => f,
-                        Err(err) => {
-                            tracing::error!("Error receiving frame: {}", err);
-                            fatal_error = Some(FibrilError::DeserializationFailure { msg: err.to_string() });
-                            break;
-                        }
-                    };
-                    last_seen = tokio::time::Instant::now();
-
-                    match frame.opcode {
-                        x if x == Op::PublishOk as u16 => {
-                            let ok: PublishOk = match wire::decode_publish_ok(&frame) {
-                                Ok(ok) => ok,
-                                Err(err) => {
-                                    fatal_error = Some(FibrilError::DeserializationFailure {
-                                        msg: err.to_string(),
-                                    });
-                                    break;
-                                }
-                            };
-
-                            match waiters.remove(&frame.request_id) {
-                                Some(Waiter::Publish(tx)) => {
-                                    // TODO: use delivery tag?
-                                    let _ = tx.send(Ok(ok.offset));
-                                }
-                                Some(_other) => {
-                                    // protocol violation: PublishOk for non-publish request
-                                    // log + drop
-                                    // TODO
-                                    tracing::error!("Internal error: Wrong request/response match")
-                                }
-                                None => {
-                                    // unexpected PublishOk (fire-and-forget or stale)
-                                    // log + drop
-                                    // Server must not send PublishOk unless require_confirm = true.
-                                    // TODO
-                                    tracing::error!("Internal error: unexpected PublishOk")
-                                }
-                            }
-                        }
-                        x if x == Op::Deliver as u16 => {
-                            let d: Deliver = match wire::decode_deliver(&frame) {
-                                Ok(deliver) => deliver,
-                                Err(err) => {
-                                    fatal_error = Some(FibrilError::DeserializationFailure {
-                                        msg: err.to_string(),
-                                    });
-                                    break;
-                                }
-                            };
-                            if let Some(sub) = subs.get(&d.sub_id).cloned() {
-                                match sub.delivery {
-                                    SubDelivery::Manual(tx) => {
-                                        let (ack_tx, ack_rx) = oneshot::channel();
-                                        let msg = InflightMessage {
-                                            delivery_tag: d.delivery_tag,
-                                            published: d.published,
-                                            publish_received: d.publish_received,
-                                            content_type: d.content_type,
-                                            headers: d.headers,
-                                            payload: d.payload,
-                                            settle: ack_tx,
-                                            request_id: frame.request_id,
-                                        };
-
-                                        if tx.send(msg).await.is_ok() {
-                                            let cmd_tx = cmd_tx.clone();
-                                            let shutdown_acks = shutdown_acks.clone();
-                                            let sub_id = d.sub_id;
-
-                                            tokio::spawn(async move {
-                                                // TODO: add timeout or use a shared queue, or have server handle timeout and add proper handling of relevant error
-
-                                                tokio::select! {
-                                                    Ok(settle_request) = ack_rx => {
-                                                        match settle_request {
-                                                            // TODO: Find way to notify of engine disconnection if this happens.
-                                                            SettleRequest::Ack { tag, request_id, response } => {
-                                                                let res = cmd_tx.send(Command::Ack {
-                                                                    sub_id,
-                                                                    delivery_tag: tag,
-                                                                    request_id,
-                                                                }).await;
-                                                                if let Err(_err) = res {
-                                                                    let _ = response.send(Err(FibrilError::BrokenPipe));
-                                                                } else {
-                                                                    let _ = response.send(Ok(()));
-                                                                }
-                                                            }
-                                                            SettleRequest::Nack { tag, requeue, not_before, request_id, response } => {
-                                                                let res = cmd_tx.send(Command::Nack {
-                                                                    sub_id,
-                                                                    delivery_tag: tag,
-                                                                    requeue,
-                                                                    not_before,
-                                                                    request_id,
-                                                                }).await;
-                                                                if let Err(_err) = res {
-                                                                    let _ = response.send(Err(FibrilError::BrokenPipe));
-                                                                } else {
-                                                                    let _ = response.send(Ok(()));
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                    _ = shutdown_acks.notified() => {
-                                                        // engine is shutting down
-                                                    }
-                                                }
-                                            });
-                                        } else {
-                                            tracing::warn!("Subscription receiver dropped");
-                                            subs.remove(&d.sub_id);
-                                            if let Ok(mut registry) = subscription_registry.write() {
-                                                registry.remove(&d.sub_id);
-                                            }
-                                        }
-                                    }
-
-                                    SubDelivery::Auto(tx) => {
-                                        let res = tx.send(Message {
-                                            delivery_tag: d.delivery_tag,
-                                            published: d.published,
-                                            publish_received: d.publish_received,
-                                            content_type: d.content_type,
-                                            headers: d.headers,
-                                            payload: d.payload,
-                                        }).await;
-
-                                        if res.is_err() {
-                                            tracing::warn!("Subscription receiver dropped");
-                                            subs.remove(&d.sub_id);
-                                            if let Ok(mut registry) = subscription_registry.write() {
-                                                registry.remove(&d.sub_id);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        x if x == Op::AssignmentChanged as u16 => {
-                            let changed: AssignmentChanged = match decode_protocol(&frame) {
-                                Ok(changed) => changed,
-                                Err(err) => {
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            };
-                            // Best-effort fan-out: no subscribers (or a lagging
-                            // one) just means the app isn't watching assignments.
-                            let _ = assignment_tx.send(AssignmentEvent {
-                                topic: changed.topic,
-                                group: changed.group,
-                                consumer_group: changed.consumer_group,
-                                generation: changed.generation,
-                                assigned: changed.assigned,
-                                added: changed.added,
-                                revoked: changed.revoked,
-                            });
-                        }
-                        x if x == Op::SubscribeOk as u16 => {
-                            let ok: SubscribeOk = match decode_protocol(&frame) {
-                                Ok(ok) => ok,
-                                Err(err) => {
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            };
-
-                            // Cache the server-minted cohort member id (write-once)
-                            // so subsequent exclusive subscribes — including to
-                            // other brokers — carry the same identity.
-                            if let Some(member_id) = ok.member_id {
-                                let _ = cohort_member_id.set(member_id);
-                            }
-
-                            if let Some(waiter) = waiters.remove(&frame.request_id) {
-                                match waiter {
-                                    Waiter::SubscribeManual(tx) => {
-                                        let (txm, rxm) = mpsc::channel(ok.prefetch as usize);
-                                        let delivery = SubDelivery::Manual(txm);
-
-                                        subs.insert(ok.sub_id, SubState {
-                                            topic: ok.topic.clone(),
-                                            group: ok.group.clone(),
-                                            partition: ok.partition,
-                                            delivery: delivery.clone(),
-                                        });
-                                        match subscription_registry.write() {
-                                            Ok(mut registry) => {
-                                                registry.insert(
-                                                    ok.sub_id,
-                                                    RegisteredSubscription {
-                                                        reconcile:
-                                                            reconcile_subscription_from_subscribe_ok(
-                                                                &ok, false,
-                                                            ),
-                                                        delivery,
-                                                    },
-                                                );
-                                            }
-                                            Err(_) => {
-                                                fatal_error =
-                                                    Some(client_subscription_registry_poisoned());
-                                                break;
-                                            }
-                                        }
-
-                                        let res = tx.send(Ok(AckableSubChannel { manual: rxm }));
-
-                                        if res.is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-
-                                    Waiter::SubscribeAuto(tx) => {
-                                        let (txa, rxa) = mpsc::channel(ok.prefetch as usize);
-                                        let delivery = SubDelivery::Auto(txa);
-
-                                        subs.insert(ok.sub_id, SubState {
-                                            topic: ok.topic.clone(),
-                                            group: ok.group.clone(),
-                                            partition: ok.partition,
-                                            delivery: delivery.clone(),
-                                        });
-                                        match subscription_registry.write() {
-                                            Ok(mut registry) => {
-                                                registry.insert(
-                                                    ok.sub_id,
-                                                    RegisteredSubscription {
-                                                        reconcile:
-                                                            reconcile_subscription_from_subscribe_ok(
-                                                                &ok, true,
-                                                            ),
-                                                        delivery,
-                                                    },
-                                                );
-                                            }
-                                            Err(_) => {
-                                                fatal_error =
-                                                    Some(client_subscription_registry_poisoned());
-                                                break;
-                                            }
-                                        }
-
-                                        let res = tx.send(Ok(AutoAckedSubChannel { auto: rxa }));
-
-                                        if res.is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-
-                                    // Stream subscriptions register delivery state
-                                    // (for Deliver routing + cursor-advancing acks)
-                                    // but stay OUT of the reconcile registry: the
-                                    // stream fan-in supervisor owns re-subscribe and
-                                    // the durable cursor owns resume.
-                                    Waiter::StreamSubscribeManual(tx) => {
-                                        let (txm, rxm) = mpsc::channel(ok.prefetch as usize);
-                                        subs.insert(ok.sub_id, SubState {
-                                            topic: ok.topic.clone(),
-                                            group: ok.group.clone(),
-                                            partition: ok.partition,
-                                            delivery: SubDelivery::Manual(txm),
-                                        });
-                                        if tx.send(Ok(AckableSubChannel { manual: rxm })).is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-
-                                    Waiter::StreamSubscribeAuto(tx) => {
-                                        let (txa, rxa) = mpsc::channel(ok.prefetch as usize);
-                                        subs.insert(ok.sub_id, SubState {
-                                            topic: ok.topic.clone(),
-                                            group: ok.group.clone(),
-                                            partition: ok.partition,
-                                            delivery: SubDelivery::Auto(txa),
-                                        });
-                                        if tx.send(Ok(AutoAckedSubChannel { auto: rxa })).is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-
-                                    _ => {
-                                        // protocol violation: SubscribeOk for non-subscribe request_id
-                                        // TODO
-                                        tracing::error!("Internal error: protocol violation: SubscribeOk for non-subscribe request_id")
-                                    }
-                                }
-                            }
-                        }
-                        x if x == Op::DeclareQueueOk as u16 => {
-                            let _ok: DeclareQueueOk = match decode_protocol(&frame) {
-                                Ok(ok) => ok,
-                                Err(err) => {
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            };
-
-                            match waiters.remove(&frame.request_id) {
-                                Some(Waiter::DeclareQueue(tx)) => {
-                                    let _ = tx.send(Ok(()));
-                                }
-                                Some(_other) => {
-                                    tracing::error!("Internal error: protocol violation: DeclareQueueOk for non-declare request_id")
-                                }
-                                None => {
-                                    tracing::error!("Internal error: unexpected DeclareQueueOk")
-                                }
-                            }
-                        }
-                        x if x == Op::DeclarePlexusOk as u16 => {
-                            let _ok: DeclarePlexusOk = match decode_protocol(&frame) {
-                                Ok(ok) => ok,
-                                Err(err) => {
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            };
-
-                            match waiters.remove(&frame.request_id) {
-                                Some(Waiter::DeclareQueue(tx)) => {
-                                    let _ = tx.send(Ok(()));
-                                }
-                                Some(_other) => {
-                                    tracing::error!("Internal error: protocol violation: DeclarePlexusOk for non-declare request_id")
-                                }
-                                None => {
-                                    tracing::error!("Internal error: unexpected DeclarePlexusOk")
-                                }
-                            }
-                        }
-                        x if x == Op::TopologyOk as u16 => {
-                            let ok: TopologyOk = match decode_protocol(&frame) {
-                                Ok(ok) => ok,
-                                Err(err) => {
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            };
-                            match waiters.remove(&frame.request_id) {
-                                Some(Waiter::Topology(tx)) => {
-                                    let _ = tx.send(Ok(ok));
-                                }
-                                Some(_other) => {
-                                    tracing::error!("Internal error: protocol violation: TopologyOk for non-topology request_id")
-                                }
-                                None => {
-                                    tracing::error!("Internal error: unexpected TopologyOk")
-                                }
-                            }
-                        }
-                        x if x == Op::TopologyUpdate as u16 => {
-                            // Broker-pushed routing refresh (generation changed).
-                            // Apply it to the shared cache so subsequent ops route
-                            // to the new owners, then ack the generation we now
-                            // reflect so the broker can fence a cutover on it.
-                            let topology: TopologyOk = match decode_protocol(&frame) {
-                                Ok(topology) => topology,
-                                Err(err) => {
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            };
-                            // The shared client outlives its connections; a dropped
-                            // upgrade means the client is shutting down, so there is
-                            // nothing to update and no point acking.
-                            if let Some(shared) = topology_sink.upgrade() {
-                                let generation = shared.apply_pushed_topology(topology);
-                                let ack = TopologyUpdateAck { generation };
-                                let res = send_protocol_frame(
-                                    &mut framed,
-                                    Op::TopologyUpdateAck,
-                                    frame.request_id,
-                                    &ack,
-                                )
-                                .await;
-                                if let Err(err) = res {
-                                    tracing::warn!("Broken pipe");
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            }
-                        }
-                        x if x == Op::Redirect as u16 => {
-                            let redirect: Redirect = match decode_protocol(&frame) {
-                                Ok(redirect) => redirect,
-                                Err(err) => {
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            };
-                            // Surface the redirect on the waiting op so the
-                            // routing layer can update the cache and retry on
-                            // the new owner. Unconfirmed publishes have no
-                            // waiter — best-effort, the cache is corrected by a
-                            // confirmed op or fetch_topology.
-                            match waiters.remove(&frame.request_id) {
-                                Some(waiter) => {
-                                    fail_waiter(waiter, FibrilError::Redirect(Box::new(redirect)));
-                                }
-                                None => {
-                                    tracing::debug!(
-                                        "redirect for uncorrelated request {}; cache unchanged (best-effort path)",
-                                        frame.request_id
-                                    );
-                                }
-                            }
-                        }
-                        x if x == Op::Ping as u16 => {
-                            let res = send_protocol_frame(&mut framed, Op::Pong, frame.request_id, &()).await;
-
-                            if let Err(err) = res {
-                                tracing::warn!("Broken pipe");
-                                fatal_error = Some(err);
-                                break;
-                            }
-                        }
-                        x if x == Op::Pong as u16 => {
-                            // pass
-                        }
-                        x if x == Op::GoingAway as u16 => {
-                            // The broker is draining for a planned shutdown or
-                            // upgrade. Surface it to the app so it can wind down,
-                            // then let the existing reconnect-on-close path
-                            // redirect to the post-drain owner via topology.
-                            let notice: GoingAway = match decode_protocol(&frame) {
-                                Ok(notice) => notice,
-                                Err(err) => {
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            };
-                            tracing::info!(
-                                grace_ms = notice.grace_ms,
-                                "broker going away: {}",
-                                notice.message
-                            );
-                            // The shared client outlives its connections; a
-                            // dropped upgrade means the client is shutting down,
-                            // so there is nothing to notify.
-                            if let Some(shared) = topology_sink.upgrade() {
-                                let _ = shared.going_away_tx.send(GoingAwayNotice {
-                                    grace_ms: notice.grace_ms,
-                                    message: notice.message,
-                                });
-                            }
-                        }
-                        x if x == Op::Error as u16 => {
-                            let err: ErrorMsg = match decode_protocol(&frame) {
-                                Ok(err) => err,
-                                Err(err) => {
-                                    fatal_error = Some(err);
-                                    break;
-                                }
-                            };
-
-                            if let Some(waiter) = waiters.remove(&frame.request_id) {
-                                match waiter {
-                                    Waiter::Publish(tx) => {
-                                        let res = tx.send(Err(FibrilError::Failure {code: err.code, msg: err.message }));
-
-                                        if res.is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-                                    Waiter::DeclareQueue(tx) => {
-                                        let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
-
-                                        if res.is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-                                    Waiter::SubscribeManual(tx) => {
-                                        let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
-
-                                        if res.is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-                                    Waiter::SubscribeAuto(tx) => {
-                                        let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
-
-                                        if res.is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-                                    Waiter::StreamSubscribeManual(tx) => {
-                                        if tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message })).is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-                                    Waiter::StreamSubscribeAuto(tx) => {
-                                        if tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message })).is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-                                    Waiter::Topology(tx) => {
-                                        let res = tx.send(Err(FibrilError::Failure { code: err.code, msg: err.message }));
-
-                                        if res.is_err() {
-                                            tracing::warn!("Broken pipe");
-                                        }
-                                    }
-                                }
-                            } else {
-                                // connection-level error
-                                // fail all waiters
-                                let msg = format!("connection error {}: {}", err.code, err.message);
-                                fatal_error = Some(FibrilError::Disconnection { msg: msg.clone() });
-                                for (_, w) in waiters.drain() {
-                                    fail_waiter(w, FibrilError::Disconnection { msg: msg.clone() });
-                                }
-
-                                // subs cleared
-                                subs.clear();
-
-                                // Closing the subscription channels signals the
-                                // failover supervisor, which owns re-subscribe and
-                                // at-least-once redelivery against the new owner
-                                // (see failover.rs). Unsupervised subs are restored
-                                // by the reconcile-on-reconnect path.
-                                shutdown_engine.notify_waiters();
-
-                                break; // or trigger reconnect
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                else => {
-                    // EOF or channel closed
-                    break;
-                }
             }
-            // A command drained mid-batch can set a fatal error through a
-            // die-macro that only breaks the inner drain loop, so exit the
-            // engine loop here. The other select arms break it directly.
             if fatal_error.is_some() {
                 break;
             }
         }
 
-        // ================================
-        // FAIL ALL PENDING WAITERS
-        // ================================
+        if let Some(err) = fatal_error {
+            record_fatal(&fatal_slot, err);
+        }
+        // Stop the read task too, whichever side failed first.
+        cancel.cancel();
+    });
 
-        for (_, waiter) in waiters.drain() {
-            fail_waiter(
-                waiter,
-                fatal_error
-                    .clone()
-                    .unwrap_or_else(|| FibrilError::Disconnection {
-                        msg: "engine shutdown".into(),
-                    }),
-            );
+    // READ task: the sole owner of the socket read half. Decodes inbound frames,
+    // fires reply waiters, dispatches deliveries, applies pushed topology, and
+    // stamps last_seen. Frames it must answer (Pong, TopologyUpdateAck) are handed
+    // to the write task over the command channel.
+    let read_cancel = cancel.clone();
+    let read_waiters = waiters.clone();
+    let read_subs = subs.clone();
+    let read_fatal = fatal_slot.clone();
+    let read_task = tokio::spawn(async move {
+        let cancel = read_cancel;
+        let waiters = read_waiters;
+        let subs = read_subs;
+        let fatal_slot = read_fatal;
+        let mut fatal_error: Option<FibrilError> = None;
+
+        loop {
+            let frame = tokio::select! {
+                _ = cancel.cancelled() => break,
+                frame = framed_read.next() => frame,
+            };
+            let Some(frame) = frame else {
+                // EOF: the broker closed the connection.
+                break;
+            };
+            let frame = match frame {
+                Ok(f) => f,
+                Err(err) => {
+                    tracing::error!("Error receiving frame: {}", err);
+                    fatal_error = Some(FibrilError::DeserializationFailure {
+                        msg: err.to_string(),
+                    });
+                    break;
+                }
+            };
+            last_seen_ms.store(engine_start.elapsed().as_millis() as u64, Ordering::Relaxed);
+
+            match frame.opcode {
+                x if x == Op::PublishOk as u16 => {
+                    let ok: PublishOk = match wire::decode_publish_ok(&frame) {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            fatal_error = Some(FibrilError::DeserializationFailure {
+                                msg: err.to_string(),
+                            });
+                            break;
+                        }
+                    };
+
+                    match lock_recover(&waiters).remove(&frame.request_id) {
+                        Some(Waiter::Publish(tx)) => {
+                            // TODO: use delivery tag?
+                            let _ = tx.send(Ok(ok.offset));
+                        }
+                        Some(_other) => {
+                            // protocol violation: PublishOk for non-publish request
+                            // log + drop
+                            // TODO
+                            tracing::error!("Internal error: Wrong request/response match")
+                        }
+                        None => {
+                            // unexpected PublishOk (fire-and-forget or stale)
+                            // log + drop
+                            // Server must not send PublishOk unless require_confirm = true.
+                            // TODO
+                            tracing::error!("Internal error: unexpected PublishOk")
+                        }
+                    }
+                }
+                x if x == Op::Deliver as u16 => {
+                    let d: Deliver = match wire::decode_deliver(&frame) {
+                        Ok(deliver) => deliver,
+                        Err(err) => {
+                            fatal_error = Some(FibrilError::DeserializationFailure {
+                                msg: err.to_string(),
+                            });
+                            break;
+                        }
+                    };
+                    // Clone the delivery state out and drop the guard
+                    // before the send await below.
+                    let sub = lock_recover(&subs).get(&d.sub_id).cloned();
+                    if let Some(sub) = sub {
+                        match sub.delivery {
+                            SubDelivery::Manual(tx) => {
+                                let (ack_tx, ack_rx) = oneshot::channel();
+                                let msg = InflightMessage {
+                                    delivery_tag: d.delivery_tag,
+                                    published: d.published,
+                                    publish_received: d.publish_received,
+                                    content_type: d.content_type,
+                                    headers: d.headers,
+                                    payload: d.payload,
+                                    settle: ack_tx,
+                                    request_id: frame.request_id,
+                                };
+
+                                if tx.send(msg).await.is_ok() {
+                                    let cmd_tx = cmd_tx.clone();
+                                    let shutdown_acks = shutdown_acks.clone();
+                                    let sub_id = d.sub_id;
+
+                                    tokio::spawn(async move {
+                                        // TODO: add timeout or use a shared queue, or have server handle timeout and add proper handling of relevant error
+
+                                        tokio::select! {
+                                            Ok(settle_request) = ack_rx => {
+                                                match settle_request {
+                                                    // TODO: Find way to notify of engine disconnection if this happens.
+                                                    SettleRequest::Ack { tag, request_id, response } => {
+                                                        let res = cmd_tx.send(Command::Ack {
+                                                            sub_id,
+                                                            delivery_tag: tag,
+                                                            request_id,
+                                                        }).await;
+                                                        if let Err(_err) = res {
+                                                            let _ = response.send(Err(FibrilError::BrokenPipe));
+                                                        } else {
+                                                            let _ = response.send(Ok(()));
+                                                        }
+                                                    }
+                                                    SettleRequest::Nack { tag, requeue, not_before, request_id, response } => {
+                                                        let res = cmd_tx.send(Command::Nack {
+                                                            sub_id,
+                                                            delivery_tag: tag,
+                                                            requeue,
+                                                            not_before,
+                                                            request_id,
+                                                        }).await;
+                                                        if let Err(_err) = res {
+                                                            let _ = response.send(Err(FibrilError::BrokenPipe));
+                                                        } else {
+                                                            let _ = response.send(Ok(()));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            _ = shutdown_acks.notified() => {
+                                                // engine is shutting down
+                                            }
+                                        }
+                                    });
+                                } else {
+                                    tracing::warn!("Subscription receiver dropped");
+                                    lock_recover(&subs).remove(&d.sub_id);
+                                    if let Ok(mut registry) = subscription_registry.write() {
+                                        registry.remove(&d.sub_id);
+                                    }
+                                }
+                            }
+
+                            SubDelivery::Auto(tx) => {
+                                let res = tx
+                                    .send(Message {
+                                        delivery_tag: d.delivery_tag,
+                                        published: d.published,
+                                        publish_received: d.publish_received,
+                                        content_type: d.content_type,
+                                        headers: d.headers,
+                                        payload: d.payload,
+                                    })
+                                    .await;
+
+                                if res.is_err() {
+                                    tracing::warn!("Subscription receiver dropped");
+                                    lock_recover(&subs).remove(&d.sub_id);
+                                    if let Ok(mut registry) = subscription_registry.write() {
+                                        registry.remove(&d.sub_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                x if x == Op::AssignmentChanged as u16 => {
+                    let changed: AssignmentChanged = match decode_protocol(&frame) {
+                        Ok(changed) => changed,
+                        Err(err) => {
+                            fatal_error = Some(err);
+                            break;
+                        }
+                    };
+                    // Best-effort fan-out: no subscribers (or a lagging
+                    // one) just means the app isn't watching assignments.
+                    let _ = assignment_tx.send(AssignmentEvent {
+                        topic: changed.topic,
+                        group: changed.group,
+                        consumer_group: changed.consumer_group,
+                        generation: changed.generation,
+                        assigned: changed.assigned,
+                        added: changed.added,
+                        revoked: changed.revoked,
+                    });
+                }
+                x if x == Op::SubscribeOk as u16 => {
+                    let ok: SubscribeOk = match decode_protocol(&frame) {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            fatal_error = Some(err);
+                            break;
+                        }
+                    };
+
+                    // Cache the server-minted cohort member id (write-once)
+                    // so subsequent exclusive subscribes — including to
+                    // other brokers — carry the same identity.
+                    if let Some(member_id) = ok.member_id {
+                        let _ = cohort_member_id.set(member_id);
+                    }
+
+                    let waiter = lock_recover(&waiters).remove(&frame.request_id);
+                    if let Some(waiter) = waiter {
+                        match waiter {
+                            Waiter::SubscribeManual(tx) => {
+                                let (txm, rxm) = mpsc::channel(ok.prefetch as usize);
+                                let delivery = SubDelivery::Manual(txm);
+
+                                lock_recover(&subs).insert(
+                                    ok.sub_id,
+                                    SubState {
+                                        topic: ok.topic.clone(),
+                                        group: ok.group.clone(),
+                                        partition: ok.partition,
+                                        delivery: delivery.clone(),
+                                    },
+                                );
+                                match subscription_registry.write() {
+                                    Ok(mut registry) => {
+                                        registry.insert(
+                                            ok.sub_id,
+                                            RegisteredSubscription {
+                                                reconcile: reconcile_subscription_from_subscribe_ok(
+                                                    &ok, false,
+                                                ),
+                                                delivery,
+                                            },
+                                        );
+                                    }
+                                    Err(_) => {
+                                        fatal_error = Some(client_subscription_registry_poisoned());
+                                        break;
+                                    }
+                                }
+
+                                let res = tx.send(Ok(AckableSubChannel { manual: rxm }));
+
+                                if res.is_err() {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+
+                            Waiter::SubscribeAuto(tx) => {
+                                let (txa, rxa) = mpsc::channel(ok.prefetch as usize);
+                                let delivery = SubDelivery::Auto(txa);
+
+                                lock_recover(&subs).insert(
+                                    ok.sub_id,
+                                    SubState {
+                                        topic: ok.topic.clone(),
+                                        group: ok.group.clone(),
+                                        partition: ok.partition,
+                                        delivery: delivery.clone(),
+                                    },
+                                );
+                                match subscription_registry.write() {
+                                    Ok(mut registry) => {
+                                        registry.insert(
+                                            ok.sub_id,
+                                            RegisteredSubscription {
+                                                reconcile: reconcile_subscription_from_subscribe_ok(
+                                                    &ok, true,
+                                                ),
+                                                delivery,
+                                            },
+                                        );
+                                    }
+                                    Err(_) => {
+                                        fatal_error = Some(client_subscription_registry_poisoned());
+                                        break;
+                                    }
+                                }
+
+                                let res = tx.send(Ok(AutoAckedSubChannel { auto: rxa }));
+
+                                if res.is_err() {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+
+                            // Stream subscriptions register delivery state
+                            // (for Deliver routing + cursor-advancing acks)
+                            // but stay OUT of the reconcile registry: the
+                            // stream fan-in supervisor owns re-subscribe and
+                            // the durable cursor owns resume.
+                            Waiter::StreamSubscribeManual(tx) => {
+                                let (txm, rxm) = mpsc::channel(ok.prefetch as usize);
+                                lock_recover(&subs).insert(
+                                    ok.sub_id,
+                                    SubState {
+                                        topic: ok.topic.clone(),
+                                        group: ok.group.clone(),
+                                        partition: ok.partition,
+                                        delivery: SubDelivery::Manual(txm),
+                                    },
+                                );
+                                if tx.send(Ok(AckableSubChannel { manual: rxm })).is_err() {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+
+                            Waiter::StreamSubscribeAuto(tx) => {
+                                let (txa, rxa) = mpsc::channel(ok.prefetch as usize);
+                                lock_recover(&subs).insert(
+                                    ok.sub_id,
+                                    SubState {
+                                        topic: ok.topic.clone(),
+                                        group: ok.group.clone(),
+                                        partition: ok.partition,
+                                        delivery: SubDelivery::Auto(txa),
+                                    },
+                                );
+                                if tx.send(Ok(AutoAckedSubChannel { auto: rxa })).is_err() {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+
+                            _ => {
+                                // protocol violation: SubscribeOk for non-subscribe request_id
+                                // TODO
+                                tracing::error!(
+                                    "Internal error: protocol violation: SubscribeOk for non-subscribe request_id"
+                                )
+                            }
+                        }
+                    }
+                }
+                x if x == Op::DeclareQueueOk as u16 => {
+                    let _ok: DeclareQueueOk = match decode_protocol(&frame) {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            fatal_error = Some(err);
+                            break;
+                        }
+                    };
+
+                    match lock_recover(&waiters).remove(&frame.request_id) {
+                        Some(Waiter::DeclareQueue(tx)) => {
+                            let _ = tx.send(Ok(()));
+                        }
+                        Some(_other) => {
+                            tracing::error!(
+                                "Internal error: protocol violation: DeclareQueueOk for non-declare request_id"
+                            )
+                        }
+                        None => {
+                            tracing::error!("Internal error: unexpected DeclareQueueOk")
+                        }
+                    }
+                }
+                x if x == Op::DeclarePlexusOk as u16 => {
+                    let _ok: DeclarePlexusOk = match decode_protocol(&frame) {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            fatal_error = Some(err);
+                            break;
+                        }
+                    };
+
+                    match lock_recover(&waiters).remove(&frame.request_id) {
+                        Some(Waiter::DeclareQueue(tx)) => {
+                            let _ = tx.send(Ok(()));
+                        }
+                        Some(_other) => {
+                            tracing::error!(
+                                "Internal error: protocol violation: DeclarePlexusOk for non-declare request_id"
+                            )
+                        }
+                        None => {
+                            tracing::error!("Internal error: unexpected DeclarePlexusOk")
+                        }
+                    }
+                }
+                x if x == Op::TopologyOk as u16 => {
+                    let ok: TopologyOk = match decode_protocol(&frame) {
+                        Ok(ok) => ok,
+                        Err(err) => {
+                            fatal_error = Some(err);
+                            break;
+                        }
+                    };
+                    match lock_recover(&waiters).remove(&frame.request_id) {
+                        Some(Waiter::Topology(tx)) => {
+                            let _ = tx.send(Ok(ok));
+                        }
+                        Some(_other) => {
+                            tracing::error!(
+                                "Internal error: protocol violation: TopologyOk for non-topology request_id"
+                            )
+                        }
+                        None => {
+                            tracing::error!("Internal error: unexpected TopologyOk")
+                        }
+                    }
+                }
+                x if x == Op::TopologyUpdate as u16 => {
+                    // Broker-pushed routing refresh (generation changed).
+                    // Apply it to the shared cache so subsequent ops route
+                    // to the new owners, then ack the generation we now
+                    // reflect so the broker can fence a cutover on it.
+                    let topology: TopologyOk = match decode_protocol(&frame) {
+                        Ok(topology) => topology,
+                        Err(err) => {
+                            fatal_error = Some(err);
+                            break;
+                        }
+                    };
+                    // The shared client outlives its connections; a dropped
+                    // upgrade means the client is shutting down, so there is
+                    // nothing to update and no point acking.
+                    if let Some(shared) = topology_sink.upgrade() {
+                        let generation = shared.apply_pushed_topology(topology);
+                        // The write task holds the socket; hand it the ack.
+                        if cmd_tx
+                            .send(Command::TopologyUpdateAck {
+                                request_id: frame.request_id,
+                                generation,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!("Broken pipe");
+                            fatal_error = Some(FibrilError::BrokenPipe);
+                            break;
+                        }
+                    }
+                }
+                x if x == Op::Redirect as u16 => {
+                    let redirect: Redirect = match decode_protocol(&frame) {
+                        Ok(redirect) => redirect,
+                        Err(err) => {
+                            fatal_error = Some(err);
+                            break;
+                        }
+                    };
+                    // Surface the redirect on the waiting op so the
+                    // routing layer can update the cache and retry on
+                    // the new owner. Unconfirmed publishes have no
+                    // waiter — best-effort, the cache is corrected by a
+                    // confirmed op or fetch_topology.
+                    match lock_recover(&waiters).remove(&frame.request_id) {
+                        Some(waiter) => {
+                            fail_waiter(waiter, FibrilError::Redirect(Box::new(redirect)));
+                        }
+                        None => {
+                            tracing::debug!(
+                                "redirect for uncorrelated request {}; cache unchanged (best-effort path)",
+                                frame.request_id
+                            );
+                        }
+                    }
+                }
+                x if x == Op::Ping as u16 => {
+                    // The write task holds the socket; hand it the Pong.
+                    if cmd_tx
+                        .send(Command::Pong {
+                            request_id: frame.request_id,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!("Broken pipe");
+                        fatal_error = Some(FibrilError::BrokenPipe);
+                        break;
+                    }
+                }
+                x if x == Op::Pong as u16 => {
+                    // pass
+                }
+                x if x == Op::GoingAway as u16 => {
+                    // The broker is draining for a planned shutdown or
+                    // upgrade. Surface it to the app so it can wind down,
+                    // then let the existing reconnect-on-close path
+                    // redirect to the post-drain owner via topology.
+                    let notice: GoingAway = match decode_protocol(&frame) {
+                        Ok(notice) => notice,
+                        Err(err) => {
+                            fatal_error = Some(err);
+                            break;
+                        }
+                    };
+                    tracing::info!(
+                        grace_ms = notice.grace_ms,
+                        "broker going away: {}",
+                        notice.message
+                    );
+                    // The shared client outlives its connections; a
+                    // dropped upgrade means the client is shutting down,
+                    // so there is nothing to notify.
+                    if let Some(shared) = topology_sink.upgrade() {
+                        let _ = shared.going_away_tx.send(GoingAwayNotice {
+                            grace_ms: notice.grace_ms,
+                            message: notice.message,
+                        });
+                    }
+                }
+                x if x == Op::Error as u16 => {
+                    let err: ErrorMsg = match decode_protocol(&frame) {
+                        Ok(err) => err,
+                        Err(err) => {
+                            fatal_error = Some(err);
+                            break;
+                        }
+                    };
+
+                    let waiter = lock_recover(&waiters).remove(&frame.request_id);
+                    if let Some(waiter) = waiter {
+                        match waiter {
+                            Waiter::Publish(tx) => {
+                                let res = tx.send(Err(FibrilError::Failure {
+                                    code: err.code,
+                                    msg: err.message,
+                                }));
+
+                                if res.is_err() {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+                            Waiter::DeclareQueue(tx) => {
+                                let res = tx.send(Err(FibrilError::Failure {
+                                    code: err.code,
+                                    msg: err.message,
+                                }));
+
+                                if res.is_err() {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+                            Waiter::SubscribeManual(tx) => {
+                                let res = tx.send(Err(FibrilError::Failure {
+                                    code: err.code,
+                                    msg: err.message,
+                                }));
+
+                                if res.is_err() {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+                            Waiter::SubscribeAuto(tx) => {
+                                let res = tx.send(Err(FibrilError::Failure {
+                                    code: err.code,
+                                    msg: err.message,
+                                }));
+
+                                if res.is_err() {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+                            Waiter::StreamSubscribeManual(tx) => {
+                                if tx
+                                    .send(Err(FibrilError::Failure {
+                                        code: err.code,
+                                        msg: err.message,
+                                    }))
+                                    .is_err()
+                                {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+                            Waiter::StreamSubscribeAuto(tx) => {
+                                if tx
+                                    .send(Err(FibrilError::Failure {
+                                        code: err.code,
+                                        msg: err.message,
+                                    }))
+                                    .is_err()
+                                {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+                            Waiter::Topology(tx) => {
+                                let res = tx.send(Err(FibrilError::Failure {
+                                    code: err.code,
+                                    msg: err.message,
+                                }));
+
+                                if res.is_err() {
+                                    tracing::warn!("Broken pipe");
+                                }
+                            }
+                        }
+                    } else {
+                        // Connection-level error (no correlated request).
+                        // Record it and break; the supervisor fails all
+                        // pending waiters, clears subs (closing the
+                        // subscription channels signals the failover
+                        // supervisor, which owns re-subscribe and
+                        // at-least-once redelivery against the new owner -
+                        // see failover.rs), and notifies shutdown.
+                        let msg = format!("connection error {}: {}", err.code, err.message);
+                        fatal_error = Some(FibrilError::Disconnection { msg });
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            if fatal_error.is_some() {
+                break;
+            }
         }
 
-        // subs cleared
-        subs.clear();
+        if let Some(err) = fatal_error {
+            record_fatal(&fatal_slot, err);
+        }
+        // Stop the write task too, whichever side failed first.
+        cancel.cancel();
+    });
 
-        // notify shutdown listeners
+    // SUPERVISOR: wait for both engine tasks to stop, then run teardown exactly
+    // once - fail every pending waiter with the first fault (or a plain shutdown
+    // if none), drop the subscription state, and wake shutdown listeners (the
+    // per-delivery ack tasks and anything awaiting engine shutdown).
+    tokio::spawn(async move {
+        let _ = write_task.await;
+        let _ = read_task.await;
+        let err = lock_recover(&fatal_slot)
+            .clone()
+            .unwrap_or_else(|| FibrilError::Disconnection {
+                msg: "engine shutdown".into(),
+            });
+        for (_, waiter) in lock_recover(&waiters).drain() {
+            fail_waiter(waiter, err.clone());
+        }
+        lock_recover(&subs).clear();
         shutdown.notify_waiters();
     });
 
     Ok(handle)
+}
+
+// Lock a std Mutex, recovering the guard if a previous holder panicked. The
+// engine's critical sections are a single insert/remove/get/clear and never
+// panic, so poisoning is not expected, but recovering keeps a stray panic from
+// wedging the whole connection.
+fn lock_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+// Record the first connection-level fault seen by either engine task. First
+// writer wins so the original cause is the one the supervisor reports.
+fn record_fatal(slot: &std::sync::Mutex<Option<FibrilError>>, err: FibrilError) {
+    let mut guard = lock_recover(slot);
+    if guard.is_none() {
+        *guard = Some(err);
+    }
 }
 
 fn fail_waiter(waiter: Waiter, err: FibrilError) {
@@ -5160,9 +5316,9 @@ impl Default for ClientOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_util::codec::Framed;
     use serde::{Deserialize, Serialize};
     use std::time::Duration;
+    use tokio_util::codec::Framed;
 
     #[test]
     fn expiring_ttl_follows_delayable_convention() {
@@ -5344,6 +5500,7 @@ mod tests {
         let engine = Arc::new(EngineHandle {
             tx,
             shutdown: Arc::new(Notify::new()),
+            cancel: CancellationToken::new(),
             resume_identity: ResumeIdentity {
                 owner_id: uuid::Uuid::nil(),
                 client_id: uuid::Uuid::nil(),
