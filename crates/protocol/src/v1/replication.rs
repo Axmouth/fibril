@@ -23,6 +23,7 @@ use fibril_util::net::TcpStream;
 use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use tokio::{sync::Mutex, sync::mpsc};
+use tokio_rustls::rustls;
 use tokio_util::sync::CancellationToken;
 
 use crate::v1::{
@@ -31,8 +32,8 @@ use crate::v1::{
     ReplicationCheckpointRequired, ReplicationEventApplyBatch, ReplicationEventRead,
     ReplicationMessageApplyBatch, ReplicationMessageRead, ReplicationRead, ReplicationReadOk,
     ReplicationStreamProgress, ReplicationStreamReset, ReplicationStreamStart,
-    frame::{Frame, ProtoCodec},
-    helper::{Conn, ProtocolError, try_decode, try_encode},
+    frame::Frame,
+    helper::{self, Conn, ProtocolError, try_decode, try_encode},
     replication_stream::{
         self, ApplierExit, FollowerApplyOutcome, FollowerStreamControl, FollowerStreamSink,
         run_follower_stream_applier,
@@ -122,10 +123,23 @@ pub struct ProtocolOwnerPeerAuth {
     pub password: String,
 }
 
+/// TLS connector for follower-to-owner connections. A newtype so the
+/// resolver config keeps deriving `Debug` (the rustls connector does not).
+#[derive(Clone)]
+pub struct PeerTlsConnector(pub tokio_rustls::TlsConnector);
+
+impl std::fmt::Debug for PeerTlsConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PeerTlsConnector")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProtocolOwnerPeerResolverConfig {
     pub nodes: HashMap<String, String>,
     pub auth: Option<ProtocolOwnerPeerAuth>,
+    /// When set, owner connections are wrapped in TLS with this connector.
+    pub tls: Option<PeerTlsConnector>,
     pub client_name: String,
     pub client_version: String,
     /// This follower's node id, stamped into replication reads so the owner
@@ -144,6 +158,7 @@ impl ProtocolOwnerPeerResolverConfig {
         Self {
             nodes,
             auth: None,
+            tls: None,
             client_name: "fibril-replication".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
             reporter_node_id: None,
@@ -185,6 +200,12 @@ impl ProtocolOwnerPeerResolverConfig {
             username: username.into(),
             password: password.into(),
         });
+        self
+    }
+
+    /// Wrap owner connections in TLS with this connector.
+    pub fn with_tls(mut self, connector: tokio_rustls::TlsConnector) -> Self {
+        self.tls = Some(PeerTlsConnector(connector));
         self
     }
 }
@@ -259,6 +280,9 @@ impl BrokerOwnerReplicationPeerResolver for StaticProtocolOwnerPeerResolver {
             .with_owner_connect_timeout_ms(self.cfg.owner_connect_timeout_ms);
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
+            }
+            if let Some(tls) = &self.cfg.tls {
+                built = built.with_peer_tls(tls.clone());
             }
             if kind == ReplicationResourceKind::Stream {
                 built = built.with_stream_mode();
@@ -363,6 +387,9 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
             if let Some(reporter) = &self.cfg.reporter_node_id {
                 built = built.with_reporter(reporter.clone());
             }
+            if let Some(tls) = &self.cfg.tls {
+                built = built.with_peer_tls(tls.clone());
+            }
             if kind == ReplicationResourceKind::Stream {
                 built = built.with_stream_mode();
             }
@@ -383,6 +410,7 @@ impl BrokerOwnerReplicationPeerResolver for CoordinationProtocolOwnerPeerResolve
 async fn open_protocol_owner_conn(
     addr: String,
     auth: Option<&ProtocolOwnerPeerAuth>,
+    tls: Option<&PeerTlsConnector>,
     client_name: &str,
     client_version: &str,
     connect_timeout_ms: u64,
@@ -394,7 +422,16 @@ async fn open_protocol_owner_conn(
         let stream = TcpStream::connect(addr.as_str())
             .await
             .map_err(|err| BrokerError::Unknown(format!("owner peer connect failed: {err}")))?;
-        let mut conn = tokio_util::codec::Framed::new(stream, ProtoCodec);
+        let mut conn = match tls {
+            None => helper::plain_conn(stream),
+            Some(connector) => {
+                let name = peer_server_name(&addr)?;
+                match connector.0.connect(name, stream).await {
+                    Ok(stream) => helper::tls_conn(stream),
+                    Err(err) => return Err(classify_peer_tls_error(err, &addr)),
+                }
+            }
+        };
 
         let request_id = 1;
         conn.send(
@@ -449,9 +486,56 @@ async fn open_protocol_owner_conn(
     }
 }
 
+/// Derive the TLS server name from an owner `host:port` address. Brackets
+/// are stripped so an IPv6 literal verifies as a plain address.
+fn peer_server_name(addr: &str) -> Result<rustls::pki_types::ServerName<'static>, BrokerError> {
+    let host = addr
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(addr)
+        .trim_matches(['[', ']'])
+        .to_string();
+    rustls::pki_types::ServerName::try_from(host).map_err(|err| {
+        BrokerError::Unknown(format!(
+            "invalid TLS server name derived from owner address `{addr}`: {err}"
+        ))
+    })
+}
+
+/// Name a failed peer TLS handshake so the follower log guides the fix: an
+/// early close is almost always a plaintext owner, a certificate failure is
+/// peer-CA trust configuration, everything else stays a handshake error.
+fn classify_peer_tls_error(err: std::io::Error, addr: &str) -> BrokerError {
+    if matches!(
+        err.kind(),
+        std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+    ) {
+        return BrokerError::Unknown(format!(
+            "owner peer at {addr} closed the connection during the TLS handshake: it is \
+             likely serving plaintext. Enable tls on that broker or set \
+             tls.inter_broker = false on this one"
+        ));
+    }
+    if let Some(inner) = err.get_ref()
+        && let Some(tls_err) = inner.downcast_ref::<rustls::Error>()
+        && matches!(tls_err, rustls::Error::InvalidCertificate(_))
+    {
+        return BrokerError::Unknown(format!(
+            "owner peer at {addr} presented a certificate this node does not trust: {tls_err}. \
+             Point tls.peer_ca_path at the CA that issued the peer certificates"
+        ));
+    }
+    BrokerError::Unknown(format!(
+        "owner peer TLS handshake with {addr} failed: {err}"
+    ))
+}
+
 pub async fn connect_protocol_owner_peer(
     addr: String,
     auth: Option<&ProtocolOwnerPeerAuth>,
+    tls: Option<&PeerTlsConnector>,
     client_name: &str,
     client_version: &str,
 ) -> Result<ProtocolOwnerReplicationPeer, BrokerError> {
@@ -459,6 +543,7 @@ pub async fn connect_protocol_owner_peer(
         open_protocol_owner_conn(
             addr,
             auth,
+            tls,
             client_name,
             client_version,
             DEFAULT_OWNER_CONNECT_TIMEOUT_MS,
@@ -471,6 +556,7 @@ pub async fn connect_protocol_owner_peer(
 struct ProtocolOwnerPeerConnectConfig {
     addr: String,
     auth: Option<ProtocolOwnerPeerAuth>,
+    tls: Option<PeerTlsConnector>,
     client_name: String,
     client_version: String,
     connect_timeout_ms: u64,
@@ -481,6 +567,7 @@ impl ProtocolOwnerPeerConnectConfig {
         open_protocol_owner_conn(
             self.addr.clone(),
             self.auth.as_ref(),
+            self.tls.as_ref(),
             &self.client_name,
             &self.client_version,
             self.connect_timeout_ms,
@@ -611,12 +698,22 @@ impl ProtocolOwnerReplicationPeer {
             reconnect: Some(ProtocolOwnerPeerConnectConfig {
                 addr,
                 auth,
+                tls: None,
                 client_name,
                 client_version,
                 connect_timeout_ms: DEFAULT_OWNER_CONNECT_TIMEOUT_MS,
             }),
             close_token: CancellationToken::new(),
         }
+    }
+
+    /// Wrap owner connections in TLS. No-op on a peer that wraps an
+    /// already-open connection (it never reconnects).
+    pub fn with_peer_tls(mut self, tls: PeerTlsConnector) -> Self {
+        if let Some(reconnect) = self.reconnect.as_mut() {
+            reconnect.tls = Some(tls);
+        }
+        self
     }
 
     fn next_request_id(&self) -> u64 {
@@ -1580,7 +1677,7 @@ mod stream_transport_tests {
         // Mock owner: recv Start, push 3 batches, recv 3 progress, send StreamEnd.
         let owner = tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
-            let mut conn = Framed::new(socket, ProtoCodec);
+            let mut conn = helper::plain_conn(socket);
 
             let start_frame = conn.next().await.unwrap().unwrap();
             let start = wire::decode_replication_stream_start(&start_frame).unwrap();
@@ -1617,7 +1714,7 @@ mod stream_transport_tests {
         });
 
         let socket = TcpStream::connect(addr).await.unwrap();
-        let conn = Framed::new(socket, ProtoCodec);
+        let conn = helper::plain_conn(socket);
         let sink = Arc::new(RecordingSink {
             applied: StdMutex::new(Vec::new()),
         });

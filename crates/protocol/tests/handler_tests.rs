@@ -42,7 +42,7 @@ use fibril_protocol::v1::{
         ClientTopologySource, ConnectionSettings, DeclareCoordinator, ProtocolConnectionError,
         TopologyAdoptionTracker, handle_connection,
     },
-    helper::{try_decode, try_encode},
+    helper::{Conn, plain_conn, try_decode, try_encode},
     replication::{
         CoordinationProtocolOwnerPeerResolver, ProtocolOwnerPeerResolverConfig,
         ProtocolOwnerReplicationPeer, ProtocolReplicationCatchUp,
@@ -107,7 +107,7 @@ async fn open_test_broker_with_ownership(
 }
 
 async fn open_protocol_connection() -> (
-    Framed<TcpStream, ProtoCodec>,
+    Conn,
     tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
     TempDir,
 ) {
@@ -119,7 +119,7 @@ async fn open_protocol_connection() -> (
 async fn open_protocol_connection_with_settings(
     settings: ConnectionSettings,
 ) -> (
-    Framed<TcpStream, ProtoCodec>,
+    Conn,
     tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
     TempDir,
     Arc<Broker<StromaEngine>>,
@@ -133,7 +133,7 @@ async fn open_protocol_connection_for_broker(
     broker: Arc<Broker<StromaEngine>>,
     dir: TempDir,
 ) -> (
-    Framed<TcpStream, ProtoCodec>,
+    Conn,
     tokio::task::JoinHandle<Result<(), ProtocolConnectionError>>,
     TempDir,
     Arc<Broker<StromaEngine>>,
@@ -161,7 +161,7 @@ async fn open_protocol_connection_for_broker(
         None,
     ));
 
-    (Framed::new(client, ProtoCodec), server_task, dir, broker)
+    (plain_conn(client), server_task, dir, broker)
 }
 
 async fn start_protocol_listener_for_broker(
@@ -223,7 +223,7 @@ async fn start_checkpoint_required_owner_server(
     let addr = listener.local_addr().unwrap();
     let server_task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
-        let mut conn = Framed::new(stream, ProtoCodec);
+        let mut conn = plain_conn(stream);
 
         let frame = conn
             .next()
@@ -353,7 +353,7 @@ fn read_fake_event_batch(
     }
 }
 
-async fn recv_frame(framed: &mut Framed<TcpStream, ProtoCodec>) -> Frame {
+async fn recv_frame(framed: &mut Conn) -> Frame {
     // A failure-detection bound, not a performance assertion. The whole suite
     // runs many timing-sensitive cohort/failover tests in parallel, so a loaded
     // machine is slow, not stuck. Keep this generous so contention does not flake
@@ -365,7 +365,7 @@ async fn recv_frame(framed: &mut Framed<TcpStream, ProtoCodec>) -> Frame {
         .expect("frame decode failed")
 }
 
-async fn handshake(framed: &mut Framed<TcpStream, ProtoCodec>) {
+async fn handshake(framed: &mut Conn) {
     framed
         .send(
             try_encode(
@@ -390,10 +390,7 @@ async fn handshake(framed: &mut Framed<TcpStream, ProtoCodec>) {
     assert_eq!(hello_ok.resume_outcome, ResumeOutcome::New);
 }
 
-async fn handshake_with_resume(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
-    resume: Option<ResumeIdentity>,
-) -> HelloOk {
+async fn handshake_with_resume(framed: &mut Conn, resume: Option<ResumeIdentity>) -> HelloOk {
     framed
         .send(
             try_encode(
@@ -416,11 +413,7 @@ async fn handshake_with_resume(
     try_decode(&frame).unwrap()
 }
 
-async fn assert_error_frame(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
-    request_id: u64,
-    code: u16,
-) {
+async fn assert_error_frame(framed: &mut Conn, request_id: u64, code: u16) {
     let frame = recv_frame(framed).await;
     assert_eq!(frame.opcode, Op::Error as u16);
     assert_eq!(frame.request_id, request_id);
@@ -429,11 +422,7 @@ async fn assert_error_frame(
     assert!(!err.message.is_empty());
 }
 
-async fn assert_subscribe_error_frame(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
-    request_id: u64,
-    code: u16,
-) {
+async fn assert_subscribe_error_frame(framed: &mut Conn, request_id: u64, code: u16) {
     let frame = recv_frame(framed).await;
     assert_eq!(frame.opcode, Op::SubscribeErr as u16);
     assert_eq!(frame.request_id, request_id);
@@ -442,7 +431,7 @@ async fn assert_subscribe_error_frame(
     assert!(!err.message.is_empty());
 }
 
-async fn assert_connection_still_responds(framed: &mut Framed<TcpStream, ProtoCodec>) {
+async fn assert_connection_still_responds(framed: &mut Conn) {
     framed
         .send(try_encode(Op::Ping, 99, &()).unwrap())
         .await
@@ -453,7 +442,7 @@ async fn assert_connection_still_responds(framed: &mut Framed<TcpStream, ProtoCo
 }
 
 async fn framed_subscribe(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
+    framed: &mut Conn,
     request_id: u64,
     topic: &str,
     group: Option<&str>,
@@ -485,7 +474,7 @@ async fn framed_subscribe(
 }
 
 async fn framed_publish(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
+    framed: &mut Conn,
     request_id: u64,
     topic: &str,
     group: Option<&str>,
@@ -1031,10 +1020,7 @@ async fn reconnect_grace_expiry_requeues_unsettled_inflight() {
     second_task.await.unwrap().unwrap();
 }
 
-async fn recv_delivery_for_topic(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
-    topic: &str,
-) -> Deliver {
+async fn recv_delivery_for_topic(framed: &mut Conn, topic: &str) -> Deliver {
     // Generous failure-detection bound, see recv_frame. Failover delivery in
     // particular waits on an async cleanup + gate recompute, which a loaded
     // parallel run can slow well past a couple seconds.
@@ -1910,6 +1896,104 @@ async fn static_protocol_owner_peer_resolver_can_authenticate() {
         panic!("expected message batch");
     };
     assert_eq!(messages.records[0].1.payload, b"auth-payload");
+
+    drop(peer);
+    drop(resolver);
+    server_task.await.unwrap().unwrap();
+}
+
+/// Replication over TLS end to end: the owner serves its protocol port
+/// behind a TLS acceptor built from generated material, the follower
+/// resolver dials it with a connector trusting the deployment CA, and a
+/// replication read returns the owner's records over the encrypted link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_peer_replication_works_over_tls() {
+    let topic = "replication.resolver.tls";
+    let (owner_broker, _owner_dir) = open_test_broker().await;
+    let publisher = owner_broker
+        .get_publisher(topic, Partition::new(0), &None)
+        .await
+        .unwrap();
+    let reply = publisher
+        .publish(
+            b"tls-payload".to_vec(),
+            unix_millis(),
+            unix_millis(),
+            None,
+            Default::default(),
+            None,
+        )
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+
+    let tls_dir = TempDir {
+        root: std::env::current_dir()
+            .unwrap()
+            .join("test_data")
+            .join(format!("protocol_tls_material-{}", Uuid::now_v7())),
+    };
+    std::fs::create_dir_all(&tls_dir.root).unwrap();
+    let server_tls =
+        fibril_tls::build_server_tls(&fibril_tls::TlsMode::AutoSelfSigned, &tls_dir.root, &[])
+            .unwrap()
+            .unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let acceptor = server_tls.acceptor.clone();
+    let server_broker = owner_broker.clone();
+    let server_task = tokio::spawn(async move {
+        let (tcp, peer) = listener.accept().await.unwrap();
+        let stream = acceptor.accept(tcp).await.unwrap();
+        let tcp_stats = TcpStats::new(10);
+        let connection_stats = ConnectionStats::new();
+        let conn_id = connection_stats.add_connection(peer, Instant::now(), false);
+        handle_connection(
+            stream,
+            Some(peer),
+            server_broker,
+            tcp_stats,
+            connection_stats,
+            conn_id,
+            None::<StaticAuthHandler>,
+            ConnectionSettings::new(Some(60)),
+            None,
+            None,
+            None,
+        )
+        .await
+    });
+
+    let connector = fibril_tls::build_peer_connector(None, &tls_dir.root).unwrap();
+    let resolver = StaticProtocolOwnerPeerResolver::with_config(
+        ProtocolOwnerPeerResolverConfig::new(HashMap::from([(
+            "owner-a".to_string(),
+            addr.to_string(),
+        )]))
+        .with_tls(connector),
+    );
+    let assignment = PartitionAssignment::new(
+        QueueIdentity::new(topic, Partition::new(0), None),
+        "owner-a",
+        vec![],
+        1,
+    );
+
+    let peer = resolver
+        .resolve_owner_peer(&assignment, ReplicationResourceKind::Queue)
+        .await
+        .unwrap()
+        .expect("owner peer");
+    let records = peer
+        .read_owner_replication_records(topic, Partition::new(0), None, 0, 0, 8, 8, usize::MAX, 0)
+        .await
+        .unwrap();
+
+    let OwnerReplicationRead::Batch(messages) = records.messages else {
+        panic!("expected message batch");
+    };
+    assert_eq!(messages.records[0].1.payload, b"tls-payload");
 
     drop(peer);
     drop(resolver);
@@ -3013,7 +3097,7 @@ async fn broker_pushes_topology_update_on_generation_change() {
     });
 
     let client = TcpStream::connect(addr).await.unwrap();
-    let mut framed = Framed::new(client, ProtoCodec);
+    let mut framed = plain_conn(client);
     handshake(&mut framed).await;
 
     // Bump the coordination generation; the broker pushes on its next tick.
@@ -3133,7 +3217,7 @@ async fn broker_does_not_push_topology_when_content_unchanged() {
     });
 
     let client = TcpStream::connect(addr).await.unwrap();
-    let mut framed = Framed::new(client, ProtoCodec);
+    let mut framed = plain_conn(client);
     handshake(&mut framed).await;
 
     // Over several topology ticks (1s each) the generation churns but content does
@@ -3213,7 +3297,7 @@ async fn handler_answers_topology_query_from_source() {
     });
 
     let client = TcpStream::connect(addr).await.unwrap();
-    let mut framed = Framed::new(client, ProtoCodec);
+    let mut framed = plain_conn(client);
     handshake(&mut framed).await;
 
     // Full topology.
@@ -3304,7 +3388,7 @@ async fn unowned_publish_redirects_to_current_owner() {
     });
 
     let client = TcpStream::connect(addr).await.unwrap();
-    let mut framed = Framed::new(client, ProtoCodec);
+    let mut framed = plain_conn(client);
     handshake(&mut framed).await;
 
     framed
@@ -3388,7 +3472,7 @@ async fn stale_partitioning_version_publish_is_fenced() {
     });
 
     let client = TcpStream::connect(addr).await.unwrap();
-    let mut framed = Framed::new(client, ProtoCodec);
+    let mut framed = plain_conn(client);
     handshake(&mut framed).await;
 
     // Client routed under version 2; the queue is now at version 5.
@@ -3442,7 +3526,7 @@ async fn multi_partition_publish_subscribe_is_isolated_e2e() {
             .await;
 
     let client = TcpStream::connect(addr).await.unwrap();
-    let mut framed = Framed::new(client, ProtoCodec);
+    let mut framed = plain_conn(client);
     handshake(&mut framed).await;
 
     let topic = "jobs";
@@ -3557,7 +3641,7 @@ async fn start_multi_connection_listener(
 }
 
 async fn subscribe_exclusive(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
+    framed: &mut Conn,
     request_id: u64,
     topic: &str,
     partition: u32,
@@ -3599,7 +3683,7 @@ async fn subscribe_exclusive(
 /// Read frames until an `AssignmentChanged` satisfying `pred`, returning it
 /// (skipping any other frames, e.g. SubscribeOk / Deliver / earlier assignments).
 async fn recv_assignment_until(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
+    framed: &mut Conn,
     pred: impl Fn(&fibril_protocol::v1::AssignmentChanged) -> bool,
 ) -> fibril_protocol::v1::AssignmentChanged {
     // Generous failure-detection bound, see recv_frame.
@@ -3620,7 +3704,7 @@ async fn recv_assignment_until(
 }
 
 async fn publish_to_partition(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
+    framed: &mut Conn,
     request_id: u64,
     topic: &str,
     partition: u32,
@@ -3654,11 +3738,7 @@ async fn publish_to_partition(
 }
 
 /// Read `count` deliveries for `topic` and return the distinct partitions seen.
-async fn collected_partitions(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
-    topic: &str,
-    count: usize,
-) -> HashSet<u32> {
+async fn collected_partitions(framed: &mut Conn, topic: &str, count: usize) -> HashSet<u32> {
     let mut partitions = HashSet::new();
     for _ in 0..count {
         partitions.insert(recv_delivery_for_topic(framed, topic).await.partition.id());
@@ -3678,8 +3758,8 @@ async fn exclusive_consumer_group_splits_partitions_and_fails_over_e2e() {
     let topic = "exgroup";
     let cohort = "g";
 
-    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
-    let mut b = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut a = plain_conn(TcpStream::connect(addr).await.unwrap());
+    let mut b = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut a).await;
     handshake(&mut b).await;
 
@@ -3695,7 +3775,7 @@ async fn exclusive_consumer_group_splits_partitions_and_fails_over_e2e() {
     subscribe_exclusive(&mut b, 21, topic, 1, cohort, None, member_b).await;
 
     // Publisher connection: two messages into each partition.
-    let mut publisher = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut publisher = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut publisher).await;
     for round in 0..2u64 {
         for partition in 0..2u32 {
@@ -3764,8 +3844,8 @@ async fn exclusive_consumer_group_member_target_shapes_split_e2e() {
 
     // `capped` self-limits to 1 partition; `flex` is uncapped. Both fan in to all
     // three partitions of the queue.
-    let mut capped = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
-    let mut flex = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut capped = plain_conn(TcpStream::connect(addr).await.unwrap());
+    let mut flex = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut capped).await;
     handshake(&mut flex).await;
 
@@ -3796,7 +3876,7 @@ async fn exclusive_consumer_group_member_target_shapes_split_e2e() {
         .await;
     }
 
-    let mut publisher = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut publisher = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut publisher).await;
     for partition in 0..3u32 {
         publish_to_partition(
@@ -3847,7 +3927,7 @@ async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
     // Raw subscribe sends (no eager read) so the AssignmentChanged pushes are not
     // consumed while waiting for SubscribeOk.
     async fn send_sub(
-        framed: &mut Framed<TcpStream, ProtoCodec>,
+        framed: &mut Conn,
         req: u64,
         topic: &str,
         partition: u32,
@@ -3876,7 +3956,7 @@ async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
             .unwrap();
     }
 
-    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut a = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut a).await;
     let member_a = uuid::Uuid::new_v4();
     send_sub(&mut a, 10, topic, 0, cohort, member_a).await;
@@ -3891,7 +3971,7 @@ async fn exclusive_consumer_group_pushes_assignment_changes_e2e() {
     assert_eq!(both, vec![0, 1]);
 
     // Second member joins -> the cohort rebalances to one partition each.
-    let mut b = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut b = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut b).await;
     let member_b = uuid::Uuid::new_v4();
     send_sub(&mut b, 20, topic, 0, cohort, member_b).await;
@@ -3943,8 +4023,8 @@ async fn exclusive_cohort_works_across_partition_owners_e2e() {
 
     // The cohort member subscribes to each partition on its owner (the fan-in the
     // client performs after topology routing).
-    let mut a = Framed::new(TcpStream::connect(addr_a).await.unwrap(), ProtoCodec);
-    let mut b = Framed::new(TcpStream::connect(addr_b).await.unwrap(), ProtoCodec);
+    let mut a = plain_conn(TcpStream::connect(addr_a).await.unwrap());
+    let mut b = plain_conn(TcpStream::connect(addr_b).await.unwrap());
     handshake(&mut a).await;
     handshake(&mut b).await;
     // One logical consumer spanning both owners carries the SAME member id, so
@@ -3954,8 +4034,8 @@ async fn exclusive_cohort_works_across_partition_owners_e2e() {
     subscribe_exclusive(&mut b, 20, topic, 1, "default", None, member).await;
 
     // Publish to each partition on its owner.
-    let mut pa = Framed::new(TcpStream::connect(addr_a).await.unwrap(), ProtoCodec);
-    let mut pb = Framed::new(TcpStream::connect(addr_b).await.unwrap(), ProtoCodec);
+    let mut pa = plain_conn(TcpStream::connect(addr_a).await.unwrap());
+    let mut pb = plain_conn(TcpStream::connect(addr_b).await.unwrap());
     handshake(&mut pa).await;
     handshake(&mut pb).await;
     publish_to_partition(&mut pa, 100, topic, 0, b"p0".to_vec()).await;
@@ -3990,7 +4070,7 @@ async fn exclusive_consumer_group_rejects_second_cohort_e2e() {
     let topic = "exgroup-conflict";
 
     // First cohort claims the queue.
-    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut a = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut a).await;
     subscribe_exclusive(
         &mut a,
@@ -4004,7 +4084,7 @@ async fn exclusive_consumer_group_rejects_second_cohort_e2e() {
     .await;
 
     // A different cohort id on the same queue is refused.
-    let mut b = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut b = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut b).await;
     b.send(
         try_encode(
@@ -4046,7 +4126,7 @@ async fn exclusive_subscribe_rejects_nil_member_id() {
     let (addr, shutdown) =
         start_multi_connection_listener(ConnectionSettings::new(None), broker.clone()).await;
 
-    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut a = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut a).await;
     a.send(
         try_encode(
@@ -4087,7 +4167,7 @@ async fn exclusive_subscribe_rejects_mismatched_member_id_on_same_connection() {
         start_multi_connection_listener(ConnectionSettings::new(None), broker.clone()).await;
     let topic = "exgroup-identity";
 
-    let mut a = Framed::new(TcpStream::connect(addr).await.unwrap(), ProtoCodec);
+    let mut a = plain_conn(TcpStream::connect(addr).await.unwrap());
     handshake(&mut a).await;
     // First exclusive subscribe establishes member id `first` on this connection.
     let first = uuid::Uuid::new_v4();
@@ -4246,7 +4326,7 @@ async fn declare_uses_coordinator_effective_count() {
     });
 
     let client = TcpStream::connect(addr).await.unwrap();
-    let mut framed = Framed::new(client, ProtoCodec);
+    let mut framed = plain_conn(client);
     handshake(&mut framed).await;
     framed
         .send(
@@ -5294,7 +5374,7 @@ async fn publisher_cache_idle_timeout_updates_existing_connection() {
 // ---------------------------------------------------------------------------
 
 async fn framed_declare_plexus(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
+    framed: &mut Conn,
     request_id: u64,
     topic: &str,
     partition_count: Option<u32>,
@@ -5322,7 +5402,7 @@ async fn framed_declare_plexus(
 }
 
 async fn framed_subscribe_stream(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
+    framed: &mut Conn,
     request_id: u64,
     topic: &str,
     partition: u32,
@@ -5355,7 +5435,7 @@ async fn framed_subscribe_stream(
 }
 
 async fn send_stream_publish(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
+    framed: &mut Conn,
     request_id: u64,
     topic: &str,
     partition: u32,
@@ -5388,7 +5468,7 @@ async fn send_stream_publish(
 }
 
 /// Read frames until the next `Deliver`, skipping confirms (`PublishOk`).
-async fn recv_stream_deliver(framed: &mut Framed<TcpStream, ProtoCodec>) -> Deliver {
+async fn recv_stream_deliver(framed: &mut Conn) -> Deliver {
     loop {
         let frame = recv_frame(framed).await;
         if frame.opcode == Op::Deliver as u16 {
@@ -5565,9 +5645,9 @@ async fn start_fanout_broker() -> (std::net::SocketAddr, Arc<Broker<StromaEngine
     (addr, broker, dir)
 }
 
-async fn connect_and_handshake(addr: std::net::SocketAddr) -> Framed<TcpStream, ProtoCodec> {
+async fn connect_and_handshake(addr: std::net::SocketAddr) -> Conn {
     let client = TcpStream::connect(addr).await.unwrap();
-    let mut framed = Framed::new(client, ProtoCodec);
+    let mut framed = plain_conn(client);
     handshake(&mut framed).await;
     framed
 }
@@ -5796,7 +5876,7 @@ async fn multi_partition_queue_blocks_plexus_no_mixed_partitions() {
 }
 
 async fn framed_declare_plexus_durability(
-    framed: &mut Framed<TcpStream, ProtoCodec>,
+    framed: &mut Conn,
     request_id: u64,
     topic: &str,
     durability: StreamDurability,

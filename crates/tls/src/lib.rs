@@ -13,12 +13,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use fibril_config::TlsMode;
 use sha2::{Digest, Sha256};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio_rustls::rustls::sign::CertifiedKey;
 use tokio_rustls::rustls::{self, ServerConfig as RustlsServerConfig};
+
+pub use fibril_config::TlsMode;
+pub use tokio_rustls::TlsConnector;
 
 /// Directory under the data dir holding generated material.
 pub const GENERATED_TLS_DIR: &str = "tls";
@@ -422,6 +424,52 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsSetupError> {
         .ok_or_else(|| TlsSetupError::NoPrivateKey {
             path: path.to_path_buf(),
         })
+}
+
+/// Build the TLS connector for outbound peer connections (replication and
+/// coordination dials). Trust resolution: an explicit peer CA file, else the
+/// deployment's generated `<data_dir>/tls/ca.pem` when present, else OS
+/// roots. Peer certificates are verified against the peer's host name, the
+/// standard server verification - node membership is authenticated
+/// separately by the cluster secret inside the session.
+pub fn build_peer_connector(
+    peer_ca_path: Option<&Path>,
+    data_dir: &Path,
+) -> Result<tokio_rustls::TlsConnector, TlsSetupError> {
+    let generated_ca = data_dir.join(GENERATED_TLS_DIR).join("ca.pem");
+    let ca_path = match peer_ca_path {
+        Some(path) => Some(path.to_path_buf()),
+        None if generated_ca.exists() => Some(generated_ca),
+        None => None,
+    };
+
+    let mut roots = rustls::RootCertStore::empty();
+    if let Some(ca_path) = &ca_path {
+        for cert in load_certs(ca_path)? {
+            roots
+                .add(cert)
+                .map_err(|err| TlsSetupError::InvalidUploadedMaterial {
+                    detail: format!("rejected CA certificate in {}: {err}", ca_path.display()),
+                })?;
+        }
+    } else {
+        for cert in rustls_native_certs::load_native_certs().certs {
+            let _ = roots.add(cert);
+        }
+        if roots.is_empty() {
+            return Err(TlsSetupError::InvalidUploadedMaterial {
+                detail: "no OS trust roots available for peer TLS, set tls.peer_ca_path"
+                    .to_string(),
+            });
+        }
+    }
+
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(tokio_rustls::TlsConnector::from(Arc::new(config)))
 }
 
 /// Validate uploaded PEM text (a certificate chain and its private key) and

@@ -40,6 +40,7 @@ simulation = ["fibril-util/simulation"]
 
 [dev-dependencies]
 fibril-coordination-ganglion = { path = "../coordination-ganglion" }
+fibril-tls = { path = "../tls" }
 ganglion = { git = "https://github.com/Axmouth/ganglion.git", branch = "main" }
 ganglion-openraft = { git = "https://github.com/Axmouth/ganglion.git", branch = "main", features = ["openraft"] }
 criterion = "0.8"

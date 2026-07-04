@@ -48,6 +48,12 @@ enabled = false
 # The admin dashboard serves HTTPS from the same material when TLS is
 # enabled. Opt it out when a reverse proxy terminates TLS for the dashboard:
 # admin_enabled = false
+# Follower-to-owner replication follows `enabled` too. Opt it out when a
+# service mesh or tunnel already encrypts inter-broker traffic:
+# inter_broker = false
+# CA that peer certificates chain to. Unset falls back to the generated
+# <data_dir>/tls/ca.pem, then OS roots:
+# peer_ca_path = "/etc/fibril/tls/ca.pem"
 
 [storage.keratin]
 fsync_interval_ms = 5

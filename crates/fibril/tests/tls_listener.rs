@@ -241,6 +241,60 @@ async fn admin_dashboard_serves_https_from_the_same_material() {
     booted.handle.abort();
 }
 
+/// A follower dialing an owner with TLS while the owner serves plaintext
+/// must fail fast with the plaintext guide, not hang or time out opaquely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tls_peer_dial_names_a_plaintext_owner() {
+    let booted = boot_server("peer-tls-on-plain", false).await;
+
+    // Peer trust material from a scratch deployment; the trust choice never
+    // comes into play because the handshake dies on the plaintext listener.
+    let material = temp_root("peer-material");
+    fibril::tls::build_server_tls(&fibril::tls::TlsMode::AutoSelfSigned, &material, &[])
+        .expect("material")
+        .expect("enabled");
+    let connector = fibril::tls::build_peer_connector(None, &material).expect("connector");
+
+    let Err(err) = fibril_protocol::v1::replication::connect_protocol_owner_peer(
+        booted.broker_addr.to_string(),
+        None,
+        Some(&fibril_protocol::v1::replication::PeerTlsConnector(
+            connector,
+        )),
+        "mismatch-test",
+        "0",
+    )
+    .await
+    else {
+        panic!("plaintext owner must be named");
+    };
+    assert!(err.to_string().contains("plaintext"), "{err}");
+
+    booted.handle.abort();
+}
+
+/// The reverse direction: a plaintext peer dial against a TLS listener gets
+/// the in-band 426 guide the sniff path sends, not a hang.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plaintext_peer_dial_names_a_tls_owner() {
+    let booted = boot_server("peer-plain-on-tls", true).await;
+
+    let Err(err) = fibril_protocol::v1::replication::connect_protocol_owner_peer(
+        booted.broker_addr.to_string(),
+        None,
+        None,
+        "mismatch-test",
+        "0",
+    )
+    .await
+    else {
+        panic!("TLS owner must be named");
+    };
+    assert!(err.to_string().contains("TLS"), "{err}");
+
+    booted.handle.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metrics_scrape_works_over_admin_https() {
     let booted = boot_server("metrics-https", true).await;

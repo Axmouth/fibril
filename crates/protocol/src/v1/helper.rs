@@ -1,7 +1,11 @@
 use fibril_util::net::TcpStream;
 use serde::{Deserialize, Serialize};
 use std::any::{Any, TypeId};
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::codec::Framed;
 
 use crate::v1::{
@@ -10,7 +14,65 @@ use crate::v1::{
     *,
 };
 
-pub type Conn = Framed<TcpStream, ProtoCodec>;
+pub type Conn = Framed<PeerStream, ProtoCodec>;
+
+/// Outbound connection transport for peers and tools: plaintext or TLS over
+/// the same net seam. One enum keeps [`Conn`] a single concrete type while
+/// the choice stays runtime config.
+pub enum PeerStream {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+/// Wrap a plaintext stream as a [`Conn`].
+pub fn plain_conn(stream: TcpStream) -> Conn {
+    Framed::new(PeerStream::Plain(stream), ProtoCodec)
+}
+
+/// Wrap a client-side TLS stream as a [`Conn`].
+pub fn tls_conn(stream: tokio_rustls::client::TlsStream<TcpStream>) -> Conn {
+    Framed::new(PeerStream::Tls(Box::new(stream)), ProtoCodec)
+}
+
+impl AsyncRead for PeerStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for PeerStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Error)]
 pub enum ProtocolError {

@@ -653,19 +653,24 @@ pub fn spawn_ganglion_broker_tasks(
     runtime: &RuntimeSettings,
     topology_adoption: Option<Arc<TopologyAdoptionTracker>>,
     cluster_secret: &str,
+    peer_tls: Option<fibril_tls::TlsConnector>,
 ) -> GanglionBrokerTaskHandles {
+    let mut resolver_cfg = fibril_protocol::v1::replication::ProtocolOwnerPeerResolverConfig::new(
+        std::collections::HashMap::new(),
+    )
+    .with_reporter(config.coordination.node_id.clone())
+    .with_auth(NODE_PRINCIPAL, cluster_secret.to_string())
+    .with_timeouts(
+        runtime.replication.read_timeout_slack_ms,
+        runtime.replication.owner_connect_timeout_ms,
+    );
+    if let Some(connector) = peer_tls {
+        resolver_cfg = resolver_cfg.with_tls(connector);
+    }
     let resolver = Arc::new(
         fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::with_config(
             parts.coordination.clone(),
-            fibril_protocol::v1::replication::ProtocolOwnerPeerResolverConfig::new(
-                std::collections::HashMap::new(),
-            )
-            .with_reporter(config.coordination.node_id.clone())
-            .with_auth(NODE_PRINCIPAL, cluster_secret.to_string())
-            .with_timeouts(
-                runtime.replication.read_timeout_slack_ms,
-                runtime.replication.owner_connect_timeout_ms,
-            ),
+            resolver_cfg,
         ),
     );
     broker.spawn_assignment_watcher_with_follower_replication(
@@ -1266,6 +1271,18 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     // labels (which report this node's minimum).
     let topology_adoption = Arc::new(TopologyAdoptionTracker::new());
 
+    // The peer connector encrypts follower-to-owner replication dials. Built
+    // here so a bad peer CA fails boot with the config error instead of
+    // surfacing as per-dial replication failures.
+    let peer_tls = if ganglion_parts.is_some() && config.tls.inter_broker_enabled() {
+        Some(fibril_tls::build_peer_connector(
+            config.tls.peer_ca_path.as_deref(),
+            &config.server.data_dir,
+        )?)
+    } else {
+        None
+    };
+
     let _ganglion_broker_tasks = match (ganglion_parts.as_ref(), cluster_secret.as_deref()) {
         (Some(parts), Some(secret)) => Some(spawn_ganglion_broker_tasks(
             parts,
@@ -1274,6 +1291,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             runtime,
             Some(topology_adoption.clone()),
             secret,
+            peer_tls,
         )),
         // The ganglion-requires-secret check above makes this unreachable,
         // stated here so a future reorder cannot silently spawn

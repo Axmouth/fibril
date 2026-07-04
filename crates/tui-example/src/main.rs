@@ -21,7 +21,7 @@ use fibril_protocol::v1::{
     Ack, AssignmentChanged, Auth, DeclareQueue, Deliver, DeliveryTag, ErrorMsg, Hello, Nack, Op,
     PROTOCOL_V1, Partition, Pong, Publish, Subscribe, SubscribeOk, TopologyOk, TopologyRequest,
     TopologyUpdateAck,
-    frame::{Frame, ProtoCodec},
+    frame::Frame,
     helper::{Conn, try_decode, try_encode},
 };
 use fibril_util::unix_millis;
@@ -35,7 +35,6 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use tokio::{net::TcpStream, sync::mpsc};
-use tokio_util::codec::Framed;
 
 /// Live visualizer of real Fibril traffic and partition routing.
 #[derive(Debug, Clone, Parser)]
@@ -815,7 +814,7 @@ fn parse_auth(auth: &str) -> Option<(String, String)> {
 async fn connect(addr: &str) -> anyhow::Result<Conn> {
     let stream = TcpStream::connect(addr).await?;
     stream.set_nodelay(true)?;
-    Ok(Framed::new(stream, ProtoCodec))
+    Ok(fibril_protocol::v1::helper::plain_conn(stream))
 }
 
 /// Handshake (hello + optional auth). Emits the setup frames for `client`.

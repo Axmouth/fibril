@@ -578,6 +578,12 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_TLS_ADMIN_ENABLED")? {
             self.tls.admin_enabled = Some(parse_env("FIBRIL_TLS_ADMIN_ENABLED", &value)?);
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_TLS_INTER_BROKER")? {
+            self.tls.inter_broker = Some(parse_env("FIBRIL_TLS_INTER_BROKER", &value)?);
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_TLS_PEER_CA_PATH")? {
+            self.tls.peer_ca_path = Some(PathBuf::from(value));
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_KERATIN_FSYNC_INTERVAL_MS")? {
             self.storage.keratin.fsync_interval_ms =
                 parse_env("FIBRIL_KERATIN_FSYNC_INTERVAL_MS", &value)?;
@@ -1010,6 +1016,20 @@ pub struct TlsSection {
     pub auto_self_signed: bool,
     /// TLS on the admin listener. Unset follows `enabled`.
     pub admin_enabled: Option<bool>,
+    /// TLS on follower-to-owner replication connections. Unset follows
+    /// `enabled`, which assumes a homogeneous cluster. Set to `false` when a
+    /// service mesh or tunnel already encrypts inter-broker traffic.
+    pub inter_broker: Option<bool>,
+    /// PEM file with the CA that peer server certificates chain to. Unset
+    /// falls back to `<data_dir>/tls/ca.pem` when present, then OS roots.
+    pub peer_ca_path: Option<PathBuf>,
+}
+
+impl TlsSection {
+    /// Whether replication connections to peer brokers use TLS.
+    pub fn inter_broker_enabled(&self) -> bool {
+        self.inter_broker.unwrap_or(self.enabled)
+    }
 }
 
 /// The certificate source resolved from a validated [`TlsSection`].
@@ -2367,6 +2387,8 @@ mod tests {
                 "FIBRIL_TLS_CERT_PATH" => Some(Ok("/env/server.pem".to_string())),
                 "FIBRIL_TLS_KEY_PATH" => Some(Ok("/env/server.key".to_string())),
                 "FIBRIL_TLS_ADMIN_ENABLED" => Some(Ok("false".to_string())),
+                "FIBRIL_TLS_INTER_BROKER" => Some(Ok("false".to_string())),
+                "FIBRIL_TLS_PEER_CA_PATH" => Some(Ok("/env/peer-ca.pem".to_string())),
                 _ => None,
             })
             .unwrap();
@@ -2379,6 +2401,21 @@ mod tests {
             }
         );
         assert!(!config.tls.admin_tls());
+        assert!(!config.tls.inter_broker_enabled());
+        assert_eq!(
+            config.tls.peer_ca_path.as_deref(),
+            Some(std::path::Path::new("/env/peer-ca.pem"))
+        );
+    }
+
+    #[test]
+    fn inter_broker_tls_follows_enabled_when_unset() {
+        let mut config = ServerConfig::default();
+        assert!(!config.tls.inter_broker_enabled());
+        config.tls.enabled = true;
+        assert!(config.tls.inter_broker_enabled());
+        config.tls.inter_broker = Some(false);
+        assert!(!config.tls.inter_broker_enabled());
     }
 
     #[test]

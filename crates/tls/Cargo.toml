@@ -7,6 +7,7 @@ edition = "2024"
 fibril-config = { path = "../config" }
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring", "x509-parser"] }
 arc-swap = "1.9"
+rustls-native-certs = "0.8"
 rustls-pemfile = "2"
 sha2 = "0.10"
 thiserror = "2.0"
