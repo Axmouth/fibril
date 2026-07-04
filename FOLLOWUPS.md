@@ -1,5 +1,62 @@
 # Follow-ups and pending work
 
+## Auth beyond the static handler (gate 4, #114) - design brief (2026-07-05)
+
+The next arc. Decisions below are settled from precedent (Kafka, RabbitMQ,
+Elasticsearch, etcd, MongoDB), with the TLS arc as the prerequisite that
+makes password auth meaningful on the wire.
+
+Decided model:
+- Users are cluster-shared DATA, replicated through the same machinery as
+  the runtime-settings document (raft-backed in ganglion mode, node-local
+  persisted standalone). Create once anywhere, works everywhere, survives
+  failover. Redis-style per-node ACL files are the known anti-pattern.
+  Stored as salted argon2 hashes (SCRAM verifiers are a possible later
+  upgrade for challenge-response on the wire).
+- Wire auth stays username/password over the existing AUTH frame, verified
+  server-side against the store. This assumes TLS, like SASL/PLAIN
+  everywhere else. Loud guide when real auth is enabled on a plaintext
+  non-loopback listener.
+- Node-to-node trust is OPERATOR-PROVISIONED and separate from the user
+  database - that is how every system breaks the circularity of "user data
+  syncs over replication but replication needs auth". A cluster shared
+  secret (Erlang cookie / MongoDB keyFile precedent, fibrilctl secret
+  generate) authenticates follower-to-owner replication and ganglion peer
+  connections as a NODE principal, never as a user account (the Kafka
+  inter-broker-user wart entangles node trust with user lifecycle).
+  Cert-based node identity is the later evolution and converges with #153,
+  but auto mode mints a CA per node, so cluster CA sharing/enrollment
+  machinery belongs there, not here.
+- Default credentials (fibril/fibril) become LOOPBACK-ONLY, the RabbitMQ
+  guest model: localhost dev stays zero-friction, a remote connection with
+  default credentials is rejected with a mini-guide to create a real user.
+- First-boot setup mode gains a set-admin-credentials step alongside the
+  TLS choice.
+- Authz (per-topic permissions) is a separate later arc. This one is
+  authentication only.
+
+Bricks, in order:
+1. Credential store: replicated user document (name + argon2 hash), seeded
+   from config on first boot, standalone persistence via the existing
+   runtime-settings path.
+2. Broker AUTH verifies against the store, loopback-only default
+   credentials, loud guides on rejection and on plaintext+auth.
+3. Cluster secret: config surface (path-based), fibrilctl secret generate,
+   node-principal authentication on replication and coordination
+   connections.
+4. User management: fibrilctl user add/remove/passwd + a dashboard page.
+   Decide here whether admin.auth folds into the same store (a role flag)
+   or stays separate.
+5. Setup-mode credentials step + docs currency.
+6. Client polish: typed auth errors where they are still generic.
+
+MILESTONE: cut v0.3.0 when bricks 1-5 land. Theme: security (TLS in
+transit + real authentication). Do NOT hold the cut for #153, mTLS,
+authz, or the Prometheus exporter - those are 0.4 material. The deployed
+docs only refresh at a release, so the TLS work stays invisible on the
+site until this cut.
+
+
 ## TLS in transit (gate 4, #113) - design brief (2026-07-04)
 
 The next arc. Decisions below are settled; implementation has not started.
