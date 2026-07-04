@@ -12,6 +12,15 @@ versions may still change the API and wire protocol. 1.0 commits to stability.
 
 ### Added
 
+- Graceful ownership handoff on drain. `POST /admin/api/drain` now also
+  marks a coordinated-mode broker as draining: the controller hands each
+  partition with a caught-up follower to it through the same fenced
+  promotion as failover, the draining node receives no new placements, and
+  the call returns with handoff progress (`owned_partitions_remaining`,
+  `handoff_complete`) once ownership has moved or
+  `connection.drain_handoff_timeout_ms` (default 30s) elapses. A planned
+  restart moves from a liveness-TTL delivery gap to near zero; follower-less
+  partitions stay put and fail over reactively as before.
 - Inter-broker TLS. With TLS enabled, follower-to-owner replication and the
   coordination raft channel are encrypted too (`tls.inter_broker`, following
   `tls.enabled`; explicit `false` opts out for mesh deployments). Peers verify

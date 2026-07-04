@@ -327,6 +327,7 @@ See [many idle queues](/concepts/many-idle-queues/) for the user-facing behavior
 | TOML field | Env/CLI compatibility | Default | Meaning |
 | --- | --- | --- | --- |
 | `runtime_seed.connection.reconnect_grace_ms` | `FIBRIL_RECONNECT_GRACE_MS`, `--reconnect-grace-ms` | `5000` | Keeps a disconnected resumable client alive for this long before cleaning up subscriptions and requeueing unsettled messages. On by default so a transient blip resumes transparently; set `0` to disable. |
+| `connection.drain_handoff_timeout_ms` (runtime settings) | none | `30000` | Upper bound on how long a drain call waits for partition ownership to hand off to caught-up followers in coordinated mode. Only caps the wait: reactive failover stays the backstop either way. Adjustable live from the settings page. |
 
 Reconnect grace is disabled when unset. It only helps clients that use the resume identity handshake.
 

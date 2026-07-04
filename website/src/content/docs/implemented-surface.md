@@ -208,7 +208,7 @@ See also: [reconnects](/reliability/reconnects/) and
 | Conservative subscription reconciliation | Implemented | Broker, Rust client, TypeScript client, Python client |
 | Restore-client-subscriptions policy | Implemented | Broker, Rust client, TypeScript client, Python client |
 | Reconnect observability | Implemented | Admin overview, TCP metrics log, structured reconciliation logs |
-| Planned restart drain notice | Partial | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients. All three clients surface it as an app-observable event (`going_away_events` / `onGoingAway` / `on_going_away`) so the app can wind down, then rely on reconnect-on-close for the redirect. Broker-side graceful ownership handoff on drain (for true zero-downtime) is pending |
+| Planned restart drain | Implemented | `POST /admin/api/drain` broadcasts a `GoingAway` push (grace deadline + message) to connected clients, surfaced by all three clients as an app-observable event. In coordinated mode the node also marks itself draining: the controller hands each partition with a caught-up follower to it through the same fenced promotion as failover, the draining node receives no new placements, and the call returns with handoff progress once ownership has moved or `connection.drain_handoff_timeout_ms` (default 30s) elapses. Follower-less partitions stay put and fail over reactively as before |
 | Durable broker restart reconciliation | Planned | Design notes only |
 | In-flight publish replay | Out of scope | Clients do not replay old in-flight protocol requests |
 

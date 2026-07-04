@@ -94,6 +94,8 @@ Operational depth on top of the security baseline:
   [monitoring](/deployment/monitoring/).
 - Graceful ownership handoff on drain, so a planned restart moves partition
   ownership to caught-up followers instead of waiting out reactive failover.
+  Landed on main, see
+  [failure modes](/reliability/failure-modes/#planned-restart-or-rolling-upgrade).
 - TLS on inter-broker replication and coordination connections, with a
   shared-CA lane for generated material and live leaf-certificate rotation
   through the admin API. Landed on main, see

@@ -96,7 +96,23 @@ Tests:
 - Cardinality: three declared queues, flag off = no per-channel series,
   flag on = exactly the materialized channels appear.
 
-### Arc: Drain ownership handoff (#132)
+### Arc: Drain ownership handoff (#132) - SHIPPED
+
+Shipped on main (post-0.3, lands in 0.4), built to the decisions below
+with one refinement the brief left implicit: a draining owner whose
+followers report NO applied tails keeps its partition (reverting the
+planner's move), because unlike a dead owner it is still serving - so
+evacuation requires caught-up evidence and never hands ownership away
+from the data. As-built pointers: DRAINING_LABEL + evacuation +
+placement exclusion in control_iteration; ConnectionSettingsDrainController
+.with_handoff (flag + bounded wait over the committed snapshot);
+DrainOutcome from /admin/api/drain; drain_handoff_complete pure gate;
+sim scenario ganglion_draining_owner_hands_off_before_stopping (label
+on a LIVE owner moves ownership under the fence, old owner demotes and
+refuses, no loss, owned count reaches zero). The drain-during-repartition
+non-deadlock is held by construction (draining nodes leave placement
+inputs) plus the no-new-placements controller test rather than a
+dedicated sim scenario.
 
 Goal: a draining broker proactively hands its partition ownership to
 caught-up followers before stopping, so a planned restart produces a

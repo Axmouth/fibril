@@ -60,17 +60,27 @@ Cross-cutting guarantees that hold across a restart or a clean failover:
 Use drain so in-flight work is not dropped:
 
 1. `POST /admin/api/drain` (optionally `{ "grace_ms": 5000, "message": "upgrade" }`).
-   The broker pushes a going-away notice to every connected client.
-2. Clients surface it (so apps can stop producing or finish in-flight work) and,
-   when the socket closes, reconnect - redirecting to the current owner.
-3. Restart the broker.
+   The broker pushes a going-away notice to every connected client and, in
+   coordinated mode, marks itself draining so the controller hands its
+   partition ownership to caught-up followers. The call returns once
+   ownership has moved or `connection.drain_handoff_timeout_ms` (default
+   30s) elapses, reporting `owned_partitions_remaining` and
+   `handoff_complete` so a restart script knows whether stopping now is
+   gap-free.
+2. Clients surface the notice (so apps can stop producing or finish
+   in-flight work); ownership moves push topology updates that redirect
+   traffic to the new owners while this broker keeps serving whatever it
+   still owns.
+3. Restart the broker once the drain call returns.
 
 Reconnect grace (on by default, `connection.reconnect_grace_ms`, 5s) keeps a
-returning client's session and inflight work intact across the brief break. For
-true zero-downtime in a cluster, graceful ownership handoff on drain (moving
-ownership to a follower before the node goes down) is still pending; today a
-single-owner `local_durable` partition is briefly unavailable across its
-restart.
+returning client's session and inflight work intact across the brief break.
+The handoff only moves partitions with a caught-up follower, through the same
+fenced promotion as failover: a partition with no follower stays put and
+fails over reactively as before, so a single-owner `local_durable` partition
+is still briefly unavailable across its restart. A draining node receives no
+new placements, which also keeps a concurrent repartition from deadlocking
+against the drain.
 
 ### An owner broker dies (cluster)
 
