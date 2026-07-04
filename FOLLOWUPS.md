@@ -61,6 +61,20 @@ Bricks, in order:
    automation and autoscaling.
 7. Client polish: typed auth errors where they are still generic.
 
+Future arc (assessed 2026-07-05, sequenced after this arc and #153):
+NODE ENROLLMENT. fibrilctl pointed at a freshly booted node enrolls it
+into an existing cluster - the docker swarm join / Elasticsearch
+enrollment-token pattern. An existing node issues a short-lived token
+(HMAC-signed with the cluster secret) carrying coordination endpoints,
+the secret, and the cluster CA once inter-node TLS exists. The new node
+redeems it through its local admin/setup surface (or a "join a cluster"
+field on the setup page), which installs the secret and CA into the data
+dir, extends the config overlay with the coordination bits, and drives
+add-voting-member. Users then arrive by replication automatically:
+enrollment installs TRUST only, which is exactly why node trust and user
+data are kept separate in this arc. Needs #153 first to be safe over a
+network, and ConfigOverlay grows a coordination section.
+
 Post-arc examination item: tenancy. Fibril groups are already namespace
 prefixes, which is a natural hook if multi-tenant isolation ever becomes
 meaningful. Assess after the arc, not designed now.
