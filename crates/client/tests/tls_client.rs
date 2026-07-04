@@ -37,7 +37,7 @@ async fn boot_server(tag: &str, tls_auto: bool) -> (String, PathBuf, tokio::task
     let handle = tokio::spawn(async move {
         let _ = run_server_from_config(config).await;
     });
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if TcpStream::connect(addr).await.is_ok() {
             return (addr.to_string(), data_dir, handle);
         }

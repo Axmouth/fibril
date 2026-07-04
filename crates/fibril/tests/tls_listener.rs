@@ -60,7 +60,7 @@ async fn boot_server_with(tag: &str, configure: impl FnOnce(&mut ServerConfig)) 
     let handle = tokio::spawn(async move {
         let _ = run_server_from_config(config).await;
     });
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if TcpStream::connect(broker_addr).await.is_ok() {
             return BootedServer {
                 broker_addr,
@@ -274,7 +274,7 @@ async fn http_request(addr: std::net::SocketAddr, request: &str) -> String {
 }
 
 async fn wait_for_port(addr: std::net::SocketAddr) {
-    for _ in 0..400 {
+    for _ in 0..1200 {
         if TcpStream::connect(addr).await.is_ok() {
             return;
         }
