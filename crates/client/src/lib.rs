@@ -3537,6 +3537,11 @@ fn apply_reconcile_result(
 const PUBLISH_FLUSH_MESSAGES: usize = 128;
 const PUBLISH_FLUSH_BYTES: usize = 1024 * 1024;
 const PUBLISH_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_micros(250);
+// Max commands drained from the outbound channel per event-loop wakeup. Under a
+// saturating producer the channel backs up and the writer blocks on send; draining
+// a burst per wakeup relieves that backpressure faster than one-command-per-select.
+// The bound keeps a fast producer from starving the heartbeat, flush, and shutdown arms.
+const ENGINE_CMD_DRAIN_MAX: usize = 256;
 
 async fn feed_protocol_frame<S, T>(
     framed: &mut Framed<S, ProtoCodec>,
@@ -3920,7 +3925,11 @@ where
                     break;
                 }
 
-                Some(cmd) = cmd_rx.recv() => match cmd {
+                Some(cmd) = cmd_rx.recv() => {
+                  let mut pending = Some(cmd);
+                  let mut drained = 0usize;
+                  while let Some(cmd) = pending.take() {
+                    match cmd {
                     Command::PublishUnconfirmed { topic, group, partition, partitioning_version, content_type, headers, payload, published, ttl_ms } => {
                         let req_id = next_req; next_req = next_req.wrapping_add(1);
                         let p = Publish {
@@ -4050,6 +4059,13 @@ where
                             send_encoded_or_die!(framed, wire::encode_nack(request_id, &nack), fatal_error)
                         }
                     }
+                    }
+                    drained += 1;
+                    if drained >= ENGINE_CMD_DRAIN_MAX {
+                        break;
+                    }
+                    pending = cmd_rx.try_recv().ok();
+                  }
                 },
                 Some(frame) = framed.next() => {
                     let frame = match frame {
@@ -4589,6 +4605,12 @@ where
                     // EOF or channel closed
                     break;
                 }
+            }
+            // A command drained mid-batch can set a fatal error through a
+            // die-macro that only breaks the inner drain loop, so exit the
+            // engine loop here. The other select arms break it directly.
+            if fatal_error.is_some() {
+                break;
             }
         }
 
