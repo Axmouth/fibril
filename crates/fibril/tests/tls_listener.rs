@@ -242,6 +242,44 @@ async fn admin_dashboard_serves_https_from_the_same_material() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_scrape_works_over_admin_https() {
+    let booted = boot_server("metrics-https", true).await;
+    wait_for_port(booted.admin_addr).await;
+    let ca_pem = booted.data_dir.join("tls").join("ca.pem");
+
+    let connector = tls_connector(Some(&ca_pem));
+    let tcp = TcpStream::connect(booted.admin_addr)
+        .await
+        .expect("tcp connect");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let mut stream = connector
+        .connect(name, tcp)
+        .await
+        .expect("admin tls handshake");
+    write_all(
+        &mut stream,
+        b"GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+        }
+    }
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.contains("fibril_broker_published_total"),
+        "{response}"
+    );
+
+    booted.handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_enabled_false_keeps_the_dashboard_on_plain_http() {
     let booted = boot_server_with("admin-optout", |config| {
         config.tls.enabled = true;

@@ -391,6 +391,7 @@ impl AdminServer {
                 "/admin/api/quarantine/repair",
                 axum::routing::post(routes::repair_partition),
             )
+            .route("/metrics", get(crate::metrics_route::metrics))
             .route("/healthz", get(|| async { "ok" }))
             .route("/readyz", get(routes::readyz))
             .fallback(not_found)
@@ -986,6 +987,85 @@ mod tests {
             .next()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_renders_node_families() {
+        let server = test_server(RuntimeSettingsLocks::default()).await;
+        server.metrics.broker().published_many(5);
+        server.metrics.tcp().resume_accepted();
+        let app = AdminServer::router(server);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(content_type.starts_with("text/plain"), "{content_type}");
+
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("fibril_broker_published_total 5\n"), "{body}");
+        assert!(
+            body.contains("fibril_tcp_resume_accepted_total 1\n"),
+            "{body}"
+        );
+        assert!(body.contains("# TYPE fibril_tcp_connections_open gauge"));
+        assert!(body.contains(r#"fibril_tcp_reconcile_outcomes_total{outcome="kept"} 0"#));
+
+        // Every non-comment line must parse as `name{labels} value`.
+        for line in body.lines() {
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            let (name_part, value) = line.rsplit_once(' ').expect("sample line has a value");
+            assert!(value.parse::<f64>().is_ok(), "bad value in line: {line}");
+            let name = name_part.split('{').next().unwrap();
+            assert!(name.starts_with("fibril_"), "bad name in line: {line}");
+        }
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_requires_auth_when_enabled() {
+        let server =
+            test_server_with_auth(RuntimeSettingsLocks::default(), Some(test_auth())).await;
+        let app = AdminServer::router(server);
+
+        let denied = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+
+        let allowed = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .header(header::AUTHORIZATION, basic_auth_header("fibril", "secret"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(allowed.status(), StatusCode::OK);
     }
 
     #[tokio::test]

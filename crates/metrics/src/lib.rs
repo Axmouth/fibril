@@ -1355,6 +1355,15 @@ impl ConnectionStats {
 
         false
     }
+
+    pub fn open_connections(&self) -> usize {
+        self.connections.len()
+    }
+
+    pub fn open_subscriptions(&self) -> usize {
+        self.connections.iter().map(|c| c.subs.len()).sum()
+    }
+
     pub fn snapshot(&self) -> serde_json::Value {
         let mut conns = Vec::new();
 

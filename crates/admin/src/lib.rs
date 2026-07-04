@@ -1,4 +1,5 @@
 mod auth;
+mod metrics_route;
 pub mod prometheus;
 mod routes;
 mod server;

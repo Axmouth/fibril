@@ -343,7 +343,7 @@ fn locked_status() -> StatusCode {
     StatusCode::from_u16(423).unwrap_or(StatusCode::CONFLICT)
 }
 
-async fn check_auth(
+pub(crate) async fn check_auth(
     server: &AdminServer,
     headers: &axum::http::HeaderMap,
 ) -> Result<(), StatusCode> {
