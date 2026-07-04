@@ -9,7 +9,19 @@ tail - the exporter is independent and makes the other two observable,
 drain handoff's simulation tests then double as regression cover for the
 TLS tail, and the TLS tail is the deepest change.
 
-### Arc: Prometheus exporter (#118)
+### Arc: Prometheus exporter (#118) - SHIPPED
+
+Shipped on main (post-0.3, lands in 0.4). As built, matching the brief
+below with these concretions: the exposition writer is
+crates/admin/src/prometheus.rs and the endpoint is
+crates/admin/src/metrics_route.rs; queue ready/inflight come from the
+per-partition debug snapshot (materialized, kind == Queue) rather than
+get_queues_stats, which collapses partitions; replication adds a
+node-level worker summary (always) plus per-follower applied
+message/event offsets (flag-gated); recovery exports the quarantine
+gauge and counter from the stroma recovery metrics. Docs: an Operations
+sidebar section now exists and deployment/monitoring.md documents the
+endpoint with scrape configs. OpenTelemetry remains a separate item.
 
 Goal: GET /metrics on the admin server in Prometheus text exposition
 format, translating counters that already exist. No new hot-path
