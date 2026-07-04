@@ -832,6 +832,35 @@ fn default_drain_message() -> String {
 /// POST /admin/api/drain: announce a planned restart or upgrade to connected
 /// clients so they settle in-flight work and reconnect. Does not stop the
 /// broker; the operator restarts it after the grace window.
+/// Re-read the TLS certificate and key from their configured paths and
+/// serve the new pair to subsequent handshakes. Invalid material is
+/// rejected with the old material still serving.
+pub async fn reload_tls(
+    State(server): State<Arc<AdminServer>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, StatusCode> {
+    check_auth(&server, &headers).await?;
+    let Some(reload) = &server.tls_reload else {
+        return Ok(admin_error(
+            StatusCode::NOT_FOUND,
+            "tls_reload_unavailable",
+            "TLS is not enabled on this broker",
+        ));
+    };
+    match reload() {
+        Ok(fingerprint) => Ok(Json(serde_json::json!({
+            "reloaded": true,
+            "leaf_sha256": fingerprint,
+        }))
+        .into_response()),
+        Err(message) => Ok(admin_error(
+            StatusCode::BAD_REQUEST,
+            "tls_reload_rejected",
+            message,
+        )),
+    }
+}
+
 pub async fn drain(
     State(server): State<Arc<AdminServer>>,
     headers: axum::http::HeaderMap,

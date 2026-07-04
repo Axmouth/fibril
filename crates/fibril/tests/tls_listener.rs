@@ -352,6 +352,98 @@ async fn admin_enabled_false_keeps_the_dashboard_on_plain_http() {
     booted.handle.abort();
 }
 
+/// SHA-256 colon-hex fingerprint of the leaf certificate a fresh TLS
+/// handshake against `addr` presents.
+async fn handshake_leaf_fingerprint(addr: std::net::SocketAddr, ca_pem: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let connector = tls_connector(Some(ca_pem));
+    let tcp = TcpStream::connect(addr).await.expect("tcp connect");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let stream = connector.connect(name, tcp).await.expect("tls handshake");
+    let (_, session) = stream.get_ref();
+    let leaf = session
+        .peer_certificates()
+        .and_then(|certs| certs.first())
+        .expect("peer leaf certificate");
+    Sha256::digest(leaf.as_ref())
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Live certificate rotation: mint a new leaf from the deployment CA, hit
+/// the reload endpoint, and new handshakes present the new certificate
+/// while an established client keeps publishing with zero errors.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn certificate_reload_rotates_the_leaf_under_load() {
+    let booted = boot_server_with("rotate", |config| {
+        config.tls.enabled = true;
+        config.tls.auto_self_signed = true;
+        // Keep the reload call itself on plain HTTP so the test exercises
+        // one moving part at a time.
+        config.tls.admin_enabled = Some(false);
+    })
+    .await;
+    wait_for_port(booted.admin_addr).await;
+    let tls_dir = booted.data_dir.join("tls");
+    let ca_pem = tls_dir.join("ca.pem");
+
+    let client = fibril_client::ClientOptions::new()
+        .auth("fibril", "fibril")
+        .tls()
+        .tls_ca_path(&ca_pem)
+        .tls_server_name("localhost")
+        .connect(booted.broker_addr.to_string().as_str())
+        .await
+        .expect("client connect");
+    let publisher = client.publisher("rotate.jobs").expect("publisher");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let publish_loop = {
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            let mut published = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                publisher.publish("payload").await.expect("publish");
+                published += 1;
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            published
+        })
+    };
+
+    let before = handshake_leaf_fingerprint(booted.broker_addr, &ca_pem).await;
+
+    // Rotate: drop the leaf pair and mint a fresh one from the CA (the
+    // shared-CA generation lane), then swap it in live.
+    std::fs::remove_file(tls_dir.join("server.pem")).expect("remove leaf");
+    std::fs::remove_file(tls_dir.join("server.key")).expect("remove key");
+    fibril::tls::ensure_generated_material(&tls_dir, &[]).expect("mint new leaf");
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/admin/api/tls/reload", booted.admin_addr))
+        .send()
+        .await
+        .expect("reload request");
+    assert!(response.status().is_success(), "{}", response.status());
+    let body: serde_json::Value = response.json().await.expect("reload body");
+    let reported = body["leaf_sha256"]
+        .as_str()
+        .expect("fingerprint")
+        .to_string();
+
+    let after = handshake_leaf_fingerprint(booted.broker_addr, &ca_pem).await;
+    assert_ne!(before, after);
+    assert_eq!(reported, after);
+
+    // The established connection never saw the swap.
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let published = publish_loop.await.expect("publish loop");
+    assert!(published > 0);
+    client.shutdown().await;
+
+    booted.handle.abort();
+}
+
 /// One plaintext HTTP request, reading until the peer closes.
 async fn http_request(addr: std::net::SocketAddr, request: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.expect("http connect");

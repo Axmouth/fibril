@@ -1483,7 +1483,10 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     } else {
         None
     };
-    let tls_acceptor = server_tls.map(|tls| tls.acceptor);
+    // ServerTls stays alive behind an Arc so the admin reload endpoint can
+    // swap material for the lifetime of the process.
+    let server_tls = server_tls.map(Arc::new);
+    let tls_acceptor = server_tls.as_ref().map(|tls| tls.acceptor.clone());
 
     let user_admin: Arc<dyn UserAdmin> = match ganglion_parts.as_ref() {
         Some(parts) => Arc::new(GanglionUserAdmin::new(
@@ -1526,6 +1529,15 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     // Plexus stream observability + declare surface (the hosting broker).
     let admin = admin.with_streams(broker.clone());
     let admin = admin.with_users(user_admin);
+    let admin = match &server_tls {
+        Some(tls) => {
+            let tls = tls.clone();
+            admin.with_tls_reload(Arc::new(move || {
+                tls.reload().map_err(|err| err.to_string())
+            }))
+        }
+        None => admin,
+    };
 
     // Operator drain: announce a planned restart to connected clients.
     let admin = admin.with_drain(Arc::new(ConnectionSettingsDrainController::new(

@@ -69,6 +69,10 @@ pub trait BrokerDrainController: Send + Sync + 'static {
     async fn announce_drain(&self, grace_ms: u64, message: String) -> usize;
 }
 
+/// Re-reads and swaps the broker's TLS material, returning the new leaf
+/// certificate fingerprint. Errors leave the old material serving.
+pub type TlsReloadHandler = dyn Fn() -> Result<String, String> + Send + Sync;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeSettingsClusterUpdateOutcome {
     Stored(RuntimeSettingsSnapshot),
@@ -170,6 +174,8 @@ pub struct AdminServer {
     pub users: Option<Arc<dyn UserAdmin>>,
     /// Optional drain controller for `POST /admin/api/drain`.
     pub drain: Option<Arc<dyn BrokerDrainController>>,
+    /// Optional live TLS reload for `POST /admin/api/tls/reload`.
+    pub tls_reload: Option<Arc<TlsReloadHandler>>,
 }
 
 fn render<T: Template>(tpl: T) -> Html<String> {
@@ -210,6 +216,7 @@ impl AdminServer {
             streams: None,
             users: None,
             drain: None,
+            tls_reload: None,
         }
     }
 
@@ -222,6 +229,12 @@ impl AdminServer {
     /// Attach the drain controller for `POST /admin/api/drain`.
     pub fn with_drain(mut self, drain: Arc<dyn BrokerDrainController>) -> Self {
         self.drain = Some(drain);
+        self
+    }
+
+    /// Attach the live TLS reload for `POST /admin/api/tls/reload`.
+    pub fn with_tls_reload(mut self, reload: Arc<TlsReloadHandler>) -> Self {
+        self.tls_reload = Some(reload);
         self
     }
 
@@ -369,6 +382,10 @@ impl AdminServer {
                 axum::routing::post(routes::repartition_queue),
             )
             .route("/admin/api/drain", axum::routing::post(routes::drain))
+            .route(
+                "/admin/api/tls/reload",
+                axum::routing::post(routes::reload_tls),
+            )
             .route(
                 "/admin/api/users",
                 get(routes::list_users).post(routes::upsert_user),

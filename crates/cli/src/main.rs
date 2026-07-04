@@ -181,6 +181,9 @@ enum AdminCommand {
     /// Live-repartition a queue: grow (to a multiple) or shrink (to a factor) of
     /// its current partition count.
     Repartition(RepartitionArgs),
+    /// Re-read the broker's TLS certificate and key and serve the new pair to
+    /// subsequent handshakes (same-CA leaf rotation without a restart).
+    ReloadTls,
 }
 
 #[derive(Debug, Parser)]
@@ -572,6 +575,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     }
                 },
                 AdminCommand::Repartition(args) => print_json(admin.repartition(args).await?)?,
+                AdminCommand::ReloadTls => print_json(admin.reload_tls().await?)?,
             }
         }
     }
@@ -901,6 +905,11 @@ impl AdminClient {
             },
         )
         .await
+    }
+
+    async fn reload_tls(&self) -> anyhow::Result<serde_json::Value> {
+        self.post_json("/admin/api/tls/reload", &serde_json::json!({}))
+            .await
     }
 
     async fn get_json<T: for<'de> Deserialize<'de>>(
