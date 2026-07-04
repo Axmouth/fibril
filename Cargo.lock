@@ -1478,6 +1478,7 @@ dependencies = [
  "arc-swap",
  "fastrand",
  "fibril-config",
+ "fibril-util",
  "rcgen",
  "rustls-native-certs",
  "rustls-pemfile",
@@ -1485,7 +1486,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
- "x509-parser",
 ]
 
 [[package]]
@@ -1528,6 +1528,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "turmoil",
+ "x509-parser",
 ]
 
 [[package]]

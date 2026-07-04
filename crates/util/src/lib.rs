@@ -186,6 +186,46 @@ pub trait AuthHandler {
             }
         }
     }
+
+    /// Whether a TLS-verified client-certificate identity authenticates the
+    /// connection as that user with no password. The default never maps, so
+    /// handlers without a user store keep password auth only; a denial here
+    /// is not an error, the connection just stays unauthenticated.
+    async fn decide_certificate(&self, identity: &str) -> AuthDecision {
+        let _ = identity;
+        AuthDecision::Deny {
+            message: "certificate identities are not mapped by this broker".to_string(),
+        }
+    }
+}
+
+/// Identity a verified client certificate asserts: the first DNS subject
+/// alternative name, else the subject common name. Identities in the `@`
+/// namespace never map, so node principals stay unclaimable by certificate.
+pub fn client_identity_from_der(cert_der: &[u8]) -> Option<String> {
+    let (_, parsed) = x509_parser::parse_x509_certificate(cert_der).ok()?;
+    let identity = parsed
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .and_then(|san| {
+            san.value.general_names.iter().find_map(|name| match name {
+                x509_parser::extensions::GeneralName::DNSName(dns) => Some(dns.to_string()),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            parsed
+                .subject()
+                .iter_common_name()
+                .next()
+                .and_then(|cn| cn.as_str().ok())
+                .map(str::to_string)
+        })?;
+    if identity.is_empty() || identity.starts_with('@') {
+        return None;
+    }
+    Some(identity)
 }
 
 #[derive(Debug, Clone)]

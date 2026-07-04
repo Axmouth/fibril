@@ -277,33 +277,49 @@ fn client_verifier(
     Ok(Some(verifier))
 }
 
-/// Identity a verified client certificate asserts: the first DNS subject
-/// alternative name, else the subject common name. Identities in the `@`
-/// namespace never map, so node principals stay unclaimable by certificate.
+/// Identity a verified client certificate asserts. See
+/// [`fibril_util::client_identity_from_der`]; this is the certificate-typed
+/// convenience over the same contract.
 pub fn client_identity_from_cert(cert: &CertificateDer<'_>) -> Option<String> {
-    let (_, parsed) = x509_parser::parse_x509_certificate(cert.as_ref()).ok()?;
-    let identity = parsed
-        .subject_alternative_name()
-        .ok()
-        .flatten()
-        .and_then(|san| {
-            san.value.general_names.iter().find_map(|name| match name {
-                x509_parser::extensions::GeneralName::DNSName(dns) => Some(dns.to_string()),
-                _ => None,
-            })
-        })
-        .or_else(|| {
-            parsed
-                .subject()
-                .iter_common_name()
-                .next()
-                .and_then(|cn| cn.as_str().ok())
-                .map(str::to_string)
-        })?;
+    fibril_util::client_identity_from_der(cert.as_ref())
+}
+
+/// Issue a client certificate for `identity` from the deployment CA under
+/// `tls_dir`, returning the certificate and key as PEM. The identity rides
+/// as the DNS subject alternative name and common name, matching what the
+/// broker extracts on a verified connection.
+pub fn issue_client_certificate(
+    tls_dir: &Path,
+    identity: &str,
+) -> Result<(String, String), TlsSetupError> {
     if identity.is_empty() || identity.starts_with('@') {
-        return None;
+        return Err(TlsSetupError::InvalidUploadedMaterial {
+            detail: format!(
+                "client certificate identity `{identity}` is not usable: it must be                  non-empty and outside the @ node namespace"
+            ),
+        });
     }
-    Some(identity)
+    let files = GeneratedFiles::new(tls_dir);
+    let ca_pem =
+        fs::read_to_string(&files.ca_pem).map_err(|source| TlsSetupError::ReadMaterial {
+            path: files.ca_pem.clone(),
+            source,
+        })?;
+    let ca_key_pem =
+        fs::read_to_string(&files.ca_key).map_err(|source| TlsSetupError::ReadMaterial {
+            path: files.ca_key.clone(),
+            source,
+        })?;
+    let ca_key = rcgen::KeyPair::from_pem(&ca_key_pem)?;
+    let ca_cert = rcgen::CertificateParams::from_ca_cert_pem(&ca_pem)?.self_signed(&ca_key)?;
+
+    let client_key = rcgen::KeyPair::generate()?;
+    let mut params = rcgen::CertificateParams::new(vec![identity.to_string()])?;
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, identity);
+    let cert = params.signed_by(&client_key, &ca_cert, &ca_key)?;
+    Ok((cert.pem(), client_key.serialize_pem()))
 }
 
 /// Load and validate the serving pair from disk: the chain (leaf plus the

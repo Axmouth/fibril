@@ -444,6 +444,142 @@ async fn certificate_reload_rotates_the_leaf_under_load() {
     booted.handle.abort();
 }
 
+/// HELLO then a TopologyRequest on `stream` with no AUTH frame in between,
+/// returning the opcode the TopologyRequest got back. Auth is required for
+/// every non-auth op, so the reply opcode reads out whether the connection
+/// arrived pre-authenticated.
+async fn hello_then_topology_opcode<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> u16 {
+    write_all(stream, &hello_frame(1)).await;
+    let hello_reply = read_frame(stream).await;
+    assert_eq!(hello_reply.opcode, Op::HelloOk as u16);
+
+    let request = fibril_protocol::v1::wire::encode_topology_request(
+        2,
+        &fibril_protocol::v1::TopologyRequest {
+            topic: None,
+            group: None,
+        },
+    )
+    .expect("encode topology request");
+    write_all(stream, &frame_bytes(&request)).await;
+    read_frame(stream).await.opcode
+}
+
+/// A verified client certificate whose identity names an existing user
+/// authenticates the connection with no AUTH frame; an unknown identity is
+/// only a transport pass and the connection stays gated.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_certificate_identity_authenticates_without_auth_frame() {
+    let booted = boot_server_with("mtls-identity", |config| {
+        config.tls.enabled = true;
+        config.tls.auto_self_signed = true;
+        config.tls.client_auth = fibril_config::ClientAuthMode::Request;
+        config.tls.admin_enabled = Some(false);
+    })
+    .await;
+    wait_for_port(booted.admin_addr).await;
+    let tls_dir = booted.data_dir.join("tls");
+
+    // The user the certificate will claim.
+    let created = reqwest::Client::new()
+        .post(format!("http://{}/admin/api/users", booted.admin_addr))
+        .json(&serde_json::json!({ "username": "svc-a", "password": "unused-here" }))
+        .send()
+        .await
+        .expect("create user");
+    assert!(created.status().is_success());
+
+    let issue = |identity: &str| {
+        let (cert_pem, key_pem) =
+            fibril::tls::issue_client_certificate(&tls_dir, identity).expect("issue cert");
+        let cert_path = tls_dir.join(format!("{identity}.pem"));
+        let key_path = tls_dir.join(format!("{identity}.key"));
+        std::fs::write(&cert_path, cert_pem).expect("write cert");
+        std::fs::write(&key_path, key_pem).expect("write key");
+        fibril::tls::build_peer_connector_with_identity(
+            None,
+            &booted.data_dir,
+            Some((&cert_path, &key_path)),
+        )
+        .expect("connector")
+    };
+
+    // Known identity: authenticated at connect, no AUTH frame needed.
+    let connector = issue("svc-a");
+    let tcp = TcpStream::connect(booted.broker_addr).await.expect("tcp");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+    let mut stream = connector.connect(name, tcp).await.expect("handshake");
+    assert_eq!(
+        hello_then_topology_opcode(&mut stream).await,
+        Op::TopologyOk as u16,
+        "a mapped certificate identity must authenticate the connection"
+    );
+
+    // Unknown identity: the certificate passes the handshake but does not
+    // authenticate, so the gated op is refused.
+    let connector = issue("ghost");
+    let tcp = TcpStream::connect(booted.broker_addr).await.expect("tcp");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+    let mut stream = connector.connect(name, tcp).await.expect("handshake");
+    assert_eq!(
+        hello_then_topology_opcode(&mut stream).await,
+        Op::Error as u16,
+        "an unmapped certificate identity must stay unauthenticated"
+    );
+
+    booted.handle.abort();
+}
+
+/// `require` mode gates the handshake itself: certless clients cannot reach
+/// the protocol at all, cert-bearing ones proceed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn require_client_auth_gates_certless_clients() {
+    let booted = boot_server_with("mtls-require", |config| {
+        config.tls.enabled = true;
+        config.tls.auto_self_signed = true;
+        config.tls.client_auth = fibril_config::ClientAuthMode::Require;
+        config.tls.admin_enabled = Some(false);
+    })
+    .await;
+    let tls_dir = booted.data_dir.join("tls");
+    let ca_pem = tls_dir.join("ca.pem");
+
+    let certless = tls_connector(Some(&ca_pem));
+    let tcp = TcpStream::connect(booted.broker_addr).await.expect("tcp");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+    let outcome = async {
+        let mut stream = certless.connect(name, tcp).await?;
+        write_all(&mut stream, &hello_frame(1)).await;
+        let mut buf = [0u8; 1];
+        stream.read_exact(&mut buf).await.map(|_| ())
+    }
+    .await;
+    assert!(
+        outcome.is_err(),
+        "require mode must reject certless clients"
+    );
+
+    let (cert_pem, key_pem) =
+        fibril::tls::issue_client_certificate(&tls_dir, "svc-b").expect("issue cert");
+    let cert_path = tls_dir.join("svc-b.pem");
+    let key_path = tls_dir.join("svc-b.key");
+    std::fs::write(&cert_path, cert_pem).expect("write cert");
+    std::fs::write(&key_path, key_pem).expect("write key");
+    let with_cert = fibril::tls::build_peer_connector_with_identity(
+        None,
+        &booted.data_dir,
+        Some((&cert_path, &key_path)),
+    )
+    .expect("connector");
+    let tcp = TcpStream::connect(booted.broker_addr).await.expect("tcp");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+    let mut stream = with_cert.connect(name, tcp).await.expect("handshake");
+    write_all(&mut stream, &hello_frame(1)).await;
+    assert_eq!(read_frame(&mut stream).await.opcode, Op::HelloOk as u16);
+
+    booted.handle.abort();
+}
+
 /// One plaintext HTTP request, reading until the peer closes.
 async fn http_request(addr: std::net::SocketAddr, request: &str) -> String {
     let mut stream = TcpStream::connect(addr).await.expect("http connect");

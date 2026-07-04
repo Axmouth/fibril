@@ -2152,6 +2152,12 @@ async fn serve_connection(
                 .accept(stream)
                 .await
                 .map_err(ProtocolConnectionError::TlsHandshake)?;
+            let verified_identity = tls_stream
+                .get_ref()
+                .1
+                .peer_certificates()
+                .and_then(|certs| certs.first())
+                .and_then(|cert| fibril_util::client_identity_from_der(cert.as_ref()));
             handle_connection(
                 tls_stream,
                 Some(peer),
@@ -2160,6 +2166,7 @@ async fn serve_connection(
                 connection_stats,
                 conn_id,
                 auth,
+                verified_identity,
                 connection_settings,
                 topology_source,
                 declare_coordinator,
@@ -2186,6 +2193,7 @@ async fn serve_connection(
                 connection_stats,
                 conn_id,
                 auth,
+                None,
                 connection_settings,
                 topology_source,
                 declare_coordinator,
@@ -2248,6 +2256,7 @@ pub async fn handle_connection<S>(
     connection_stats: Arc<ConnectionStats>,
     conn_id: Uuid,
     auth_handler: Option<impl AuthHandler + Send + Sync>,
+    verified_identity: Option<String>,
     connection_settings: ConnectionSettings,
     topology_source: Option<Arc<dyn ClientTopologySource>>,
     declare_coordinator: Option<Arc<dyn DeclareCoordinator>>,
@@ -2354,6 +2363,20 @@ where
     let logical = resume.logical.clone();
     let transport_generation = logical.attach_transport(frame_tx_high_prio.clone());
     client_id = resume.client_id;
+    // A TLS-verified certificate identity that the auth handler maps to a
+    // user authenticates the connection with no AUTH frame. A denial is not
+    // an error: the connection stays unauthenticated and may still
+    // password-auth (the certificate was only a transport pass).
+    if let (Some(identity), Some(handler)) = (&verified_identity, &auth_handler)
+        && matches!(
+            handler.decide_certificate(identity).await,
+            fibril_util::AuthDecision::Allow
+        )
+    {
+        logical.state.lock().await.authenticated = true;
+        connection_stats.set_connection_auth(&conn_id, true);
+        tracing::info!("conn {conn_id} authenticated as `{identity}` by client certificate");
+    }
     let hello_ok = HelloOk {
         protocol_version: PROTOCOL_V1,
         owner_id: connection_settings.resume_sessions.owner_id,

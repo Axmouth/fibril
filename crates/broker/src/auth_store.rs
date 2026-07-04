@@ -510,6 +510,21 @@ impl fibril_util::AuthHandler for StoreAuthHandler {
         dummy_verify(password).await;
         deny("invalid credentials")
     }
+
+    /// A certificate identity authenticates as a user only when that user
+    /// exists: the store stays the single authority on who exists, the
+    /// certificate replaces the password proof. The node principal cannot
+    /// be claimed this way (identity extraction already drops the @
+    /// namespace; this guards the invariant even if a caller bypasses it).
+    async fn decide_certificate(&self, identity: &str) -> fibril_util::AuthDecision {
+        if !identity.starts_with('@') && self.users.snapshot().document.users.contains_key(identity)
+        {
+            return fibril_util::AuthDecision::Allow;
+        }
+        fibril_util::AuthDecision::Deny {
+            message: format!("certificate identity `{identity}` does not name an existing user"),
+        }
+    }
 }
 
 /// Length-guarded constant-time byte comparison for the cluster secret.

@@ -1290,10 +1290,14 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             }
         }
     }
-    let server_tls = tls::build_server_tls(
+    let server_tls = tls::build_server_tls_with_client_auth(
         &config.tls.mode().map_err(FibrilServerError::TlsConfig)?,
         &config.server.data_dir,
         &tls_sans,
+        &tls::ClientAuthPolicy {
+            mode: config.tls.client_auth,
+            ca_path: config.tls.client_ca_path.clone(),
+        },
     )?;
     match &server_tls {
         Some(tls::ServerTls {
