@@ -2375,7 +2375,7 @@ where
         return Err(ProtocolConnectionError::ComplianceMarkerMismatch);
     }
 
-    let writer_task = tokio::spawn(async move {
+    let mut writer_task = tokio::spawn(async move {
         tracing::debug!("[writer] START");
 
         let metrics = metrics_clone.clone();
@@ -2392,6 +2392,16 @@ where
                 // ---- Shutdown signal -----------------------------------------
                 _ = &mut shutdown_rx => {
                     tracing::debug!("[writer] Received shutdown signal");
+                    // Drain frames already queued and flush before closing:
+                    // the final frame is often an error reply (auth denial,
+                    // rejected HELLO) and losing it to this race would turn
+                    // a guided failure into a bare disconnect.
+                    while let Ok(frame) = frame_rx_high_prio.try_recv() {
+                        if writer.feed(frame).await.is_err() {
+                            break;
+                        }
+                    }
+                    let _ = writer.flush().await;
                     break;
                 }
 
@@ -2750,30 +2760,34 @@ where
                         let auth_frame: Auth =
                             decode_or_400!(frame, frame_tx_high_prio, metrics, Auth);
 
-                        let verified = auth_handler
-                            .verify(&auth_frame.username, &auth_frame.password)
+                        let decision = auth_handler
+                            .decide(
+                                &auth_frame.username,
+                                &auth_frame.password,
+                                peer_addr.map(|peer| peer.ip()),
+                            )
                             .await;
 
-                        if verified {
-                            logical.state.lock().await.authenticated = true;
-                            frame_tx_high_prio
-                                .send(try_encode(Op::AuthOk, frame.request_id, &())?)
-                                .await?;
-                            connection_stats.set_connection_auth(&conn_id, true);
-                        } else {
-                            frame_tx_high_prio
-                                .send(try_encode(
-                                    Op::AuthErr,
-                                    frame.request_id,
-                                    &ErrorMsg {
-                                        code: 401,
-                                        message: "invalid credentials".into(),
-                                    },
-                                )?)
-                                .await?;
-                            metrics.error();
+                        match decision {
+                            fibril_util::AuthDecision::Allow => {
+                                logical.state.lock().await.authenticated = true;
+                                frame_tx_high_prio
+                                    .send(try_encode(Op::AuthOk, frame.request_id, &())?)
+                                    .await?;
+                                connection_stats.set_connection_auth(&conn_id, true);
+                            }
+                            fibril_util::AuthDecision::Deny { message } => {
+                                frame_tx_high_prio
+                                    .send(try_encode(
+                                        Op::AuthErr,
+                                        frame.request_id,
+                                        &ErrorMsg { code: 401, message },
+                                    )?)
+                                    .await?;
+                                metrics.error();
 
-                            break; // close connection
+                                break; // close connection
+                            }
                         }
                     }
                 }
@@ -4047,6 +4061,9 @@ where
     drop(frame_tx_low_prio);
 
     let _ = shutdown_tx.send(());
+    // Bounded window for the writer to flush final frames, abort as the
+    // backstop for a peer that stops reading.
+    let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut writer_task).await;
     writer_task.abort();
     pub_queue_handle.await?;
 

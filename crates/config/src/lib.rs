@@ -138,6 +138,7 @@ pub struct ServerConfig {
     pub coordination: CoordinationSection,
     pub recovery: RecoverySection,
     pub setup: SetupSection,
+    pub auth: AuthSection,
 }
 
 impl Default for ServerConfig {
@@ -153,6 +154,7 @@ impl Default for ServerConfig {
             coordination: CoordinationSection::default(),
             recovery: RecoverySection::default(),
             setup: SetupSection::default(),
+            auth: AuthSection::default(),
         }
     }
 }
@@ -194,6 +196,35 @@ impl std::str::FromStr for RecoveryMismatchMode {
             }),
         }
     }
+}
+
+/// Broker authentication: first-boot user seeds and the default-credential
+/// policy. After first boot the persisted user store owns the users
+/// (managed via fibrilctl or the dashboard), these seeds do not overwrite it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AuthSection {
+    /// Accept the built-in default credentials (fibril/fibril) from loopback
+    /// connections. Remote connections never accept them, they require a
+    /// real user. Disable to require real users everywhere.
+    pub allow_default_loopback: bool,
+    /// Users created when the user store is empty (first boot only).
+    pub seed_users: Vec<SeedUser>,
+}
+
+impl Default for AuthSection {
+    fn default() -> Self {
+        Self {
+            allow_default_loopback: true,
+            seed_users: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SeedUser {
+    pub username: String,
+    pub password: String,
 }
 
 /// First-boot setup mode. When `mode` is set and the data dir holds no
@@ -264,7 +295,48 @@ impl ServerConfig {
     pub fn setup_pending(&self) -> bool {
         self.setup.mode && !self.setup_marker_exists()
     }
+
+    /// Resolve the cluster shared secret: `FIBRIL_CLUSTER_SECRET` env, then
+    /// `coordination.secret_path`, then the `<data_dir>/cluster.secret`
+    /// convention file. Trimmed so a trailing newline in a mounted secret
+    /// file does not change the value.
+    pub fn resolve_cluster_secret(&self) -> ConfigResult<Option<String>> {
+        if let Some(value) = optional_string_env("FIBRIL_CLUSTER_SECRET")? {
+            return Ok(Some(value.trim().to_string()));
+        }
+        let candidates = [
+            self.coordination.secret_path.clone(),
+            Some(self.server.data_dir.join(CLUSTER_SECRET_FILE)),
+        ];
+        for path in candidates.into_iter().flatten() {
+            match std::fs::read_to_string(&path) {
+                Ok(raw) => {
+                    let trimmed = raw.trim();
+                    if trimmed.is_empty() {
+                        return Err(ConfigError::validation(format!(
+                            "cluster secret file {} is empty",
+                            path.display()
+                        )));
+                    }
+                    return Ok(Some(trimmed.to_string()));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    // An explicitly configured path that is missing is an
+                    // error, the convention file is optional.
+                    if Some(&path) == self.coordination.secret_path.as_ref() {
+                        return Err(ConfigError::ReadFile { path, source: err });
+                    }
+                }
+                Err(source) => return Err(ConfigError::ReadFile { path, source }),
+            }
+        }
+        Ok(None)
+    }
 }
+
+/// File name of the cluster shared secret under the data dir (the
+/// convention location fibrilctl secret generate and setup mode write).
+pub const CLUSTER_SECRET_FILE: &str = "cluster.secret";
 
 impl ServerConfig {
     pub fn load() -> ConfigResult<Self> {
@@ -456,6 +528,28 @@ impl ServerConfig {
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_PASSWORD")? {
             self.admin.auth.password = Some(value);
         }
+        if let Some(value) = env_value(&mut get, "FIBRIL_AUTH_USERNAME")? {
+            // Paired with FIBRIL_AUTH_PASSWORD below into one seed entry;
+            // validation rejects a half-set pair.
+            self.auth.seed_users.push(SeedUser {
+                username: value,
+                password: String::new(),
+            });
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_AUTH_PASSWORD")? {
+            match self.auth.seed_users.last_mut() {
+                Some(seed) if seed.password.is_empty() => seed.password = value,
+                _ => {
+                    self.auth.seed_users.push(SeedUser {
+                        username: String::new(),
+                        password: value,
+                    });
+                }
+            }
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_CLUSTER_SECRET_PATH")? {
+            self.coordination.secret_path = Some(PathBuf::from(value));
+        }
         if let Some(value) = env_value(&mut get, "FIBRIL_SETUP_MODE")? {
             self.setup.mode = parse_env("FIBRIL_SETUP_MODE", &value)?;
         }
@@ -616,6 +710,14 @@ impl ServerConfig {
             {
                 return Err(ConfigError::validation(
                     "admin.auth.password must be set when admin auth is enabled",
+                ));
+            }
+        }
+        for seed in &self.auth.seed_users {
+            if seed.username.trim().is_empty() || seed.password.trim().is_empty() {
+                return Err(ConfigError::validation(
+                    "auth.seed_users entries need both username and password (set \
+                     FIBRIL_AUTH_USERNAME and FIBRIL_AUTH_PASSWORD together)",
                 ));
             }
         }
@@ -958,6 +1060,12 @@ pub struct CoordinationSection {
     pub mode: CoordinationMode,
     /// This broker's identity in coordination snapshots.
     pub node_id: String,
+    /// Cluster shared secret file. Every node holds the same secret and
+    /// node-to-node connections authenticate with it (never with a user
+    /// account). Resolution order: `FIBRIL_CLUSTER_SECRET` env, this path,
+    /// then `<data_dir>/cluster.secret` if present. Required in ganglion
+    /// mode.
+    pub secret_path: Option<PathBuf>,
     pub ganglion: GanglionCoordinationSection,
 }
 
@@ -966,6 +1074,7 @@ impl Default for CoordinationSection {
         Self {
             mode: CoordinationMode::Static,
             node_id: "local".into(),
+            secret_path: None,
             ganglion: GanglionCoordinationSection::default(),
         }
     }

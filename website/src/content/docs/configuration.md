@@ -144,6 +144,9 @@ These fields are read on process start.
 | `tls.auto_self_signed` | `FIBRIL_TLS_AUTO_SELF_SIGNED` | none | `false` |
 | `tls.admin_enabled` | `FIBRIL_TLS_ADMIN_ENABLED` | none | follows `tls.enabled` |
 | `setup.mode` | `FIBRIL_SETUP_MODE` | none | `false` |
+| `auth.allow_default_loopback` | none | none | `true` |
+| `auth.seed_users` | `FIBRIL_AUTH_USERNAME` + `FIBRIL_AUTH_PASSWORD` (one entry) | none | empty |
+| `coordination.secret_path` | `FIBRIL_CLUSTER_SECRET_PATH` (or `FIBRIL_CLUSTER_SECRET` for the value) | none | unset |
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.min_fsync_interval_ms` | `FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS` | `--keratin-min-fsync-interval-ms` | `0` |
 | `storage.keratin.message_log.segment_max_bytes` | `FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES` | `--keratin-message-log-segment-max-bytes` | `268435456` |
@@ -205,6 +208,24 @@ not verify defeats passive snooping only. Fibril never ships certificates.
 where a reverse proxy terminates TLS in front of it. Certificate material is
 read once at startup, so replacing it requires a restart (live reload and
 rotation are planned).
+
+The `auth` section governs broker authentication. The built-in default
+credentials (`fibril`/`fibril`) are accepted from loopback connections only,
+so local development works out of the box while remote access always requires
+a real user. `auth.seed_users` creates users when the user store is empty
+(first boot only, after which the persisted store owns the users), and the
+`FIBRIL_AUTH_USERNAME`/`FIBRIL_AUTH_PASSWORD` pair seeds one user from the
+environment. A real user named `fibril` replaces the built-in pair entirely.
+Passwords are stored as argon2 hashes. With users configured and TLS off, the
+server warns loudly: passwords travel in cleartext on non-loopback plaintext
+connections.
+
+The cluster shared secret authenticates node-to-node connections (replication)
+as a node principal, never as a user account, and is required in `ganglion`
+mode. Resolution order: `FIBRIL_CLUSTER_SECRET` (the value itself), then
+`coordination.secret_path`, then `<data_dir>/cluster.secret` if present -
+which is what `fibrilctl secret generate` writes. Every node holds the same
+secret.
 
 `setup.mode = true` arms first-boot setup: when the data dir holds no
 `setup_complete` marker, the server serves only a setup page on

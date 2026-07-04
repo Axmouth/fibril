@@ -84,6 +84,14 @@ impl UserStoreManager {
     /// credentials only when no document exists yet (first boot). After
     /// that the persisted document owns the users, matching runtime
     /// settings semantics.
+    pub async fn load_from_stroma_engine(
+        engine: &crate::queue_engine::StromaEngine,
+        seed: &[(String, String)],
+    ) -> Result<Self, UserStoreError> {
+        let store = engine.global_store().await?;
+        Self::load_from_store(store, seed).await
+    }
+
     pub async fn load_from_store(
         store: Arc<GlobalStore>,
         seed: &[(String, String)],
@@ -295,6 +303,11 @@ fn validate_username(username: &str) -> Result<String, UserStoreError> {
             "username must not contain whitespace or control characters".to_string(),
         ));
     }
+    if trimmed.starts_with('@') {
+        return Err(UserStoreError::InvalidUsername(
+            "usernames starting with @ are reserved for node principals".to_string(),
+        ));
+    }
     Ok(trimmed.to_string())
 }
 
@@ -394,5 +407,222 @@ mod tests {
         assert!(validate_username("").is_err());
         assert!(validate_username("two words").is_err());
         assert!(validate_username(&"x".repeat(200)).is_err());
+    }
+}
+
+/// Reserved username for node-to-node connections, authenticated with the
+/// cluster shared secret rather than a stored user. Real usernames cannot
+/// start with `@`, so it can never collide.
+pub const NODE_PRINCIPAL: &str = "@node";
+/// Built-in default credentials, accepted from loopback only.
+pub const DEFAULT_USERNAME: &str = "fibril";
+pub const DEFAULT_PASSWORD: &str = "fibril";
+
+/// Broker AUTH handler over the user store.
+///
+/// Decision order: the node principal against the cluster secret, then
+/// stored users (from any peer), then the built-in default pair from
+/// loopback only - the RabbitMQ guest model, so localhost development works
+/// out of the box while remote access requires a real user.
+#[derive(Clone)]
+pub struct StoreAuthHandler {
+    users: Arc<UserStoreManager>,
+    allow_default_loopback: bool,
+    cluster_secret: Option<Arc<str>>,
+}
+
+impl StoreAuthHandler {
+    pub fn new(
+        users: Arc<UserStoreManager>,
+        allow_default_loopback: bool,
+        cluster_secret: Option<Arc<str>>,
+    ) -> Self {
+        Self {
+            users,
+            allow_default_loopback,
+            cluster_secret,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl fibril_util::AuthHandler for StoreAuthHandler {
+    /// Context-free verification treats the peer as remote, so only stored
+    /// users and the node principal can pass.
+    async fn verify(&self, username: &str, password: &str) -> bool {
+        matches!(
+            self.decide(username, password, None).await,
+            fibril_util::AuthDecision::Allow
+        )
+    }
+
+    async fn decide(
+        &self,
+        username: &str,
+        password: &str,
+        peer: Option<std::net::IpAddr>,
+    ) -> fibril_util::AuthDecision {
+        use fibril_util::AuthDecision;
+
+        let deny = |message: &str| AuthDecision::Deny {
+            message: message.to_string(),
+        };
+
+        if username == NODE_PRINCIPAL {
+            return match &self.cluster_secret {
+                Some(secret) if constant_time_eq(password.as_bytes(), secret.as_bytes()) => {
+                    AuthDecision::Allow
+                }
+                Some(_) => deny("invalid node credentials"),
+                None => deny(
+                    "this node has no cluster secret configured. Generate one with \
+                     fibrilctl secret generate and distribute the same secret to \
+                     every node (FIBRIL_CLUSTER_SECRET, coordination.secret_path, \
+                     or <data_dir>/cluster.secret)",
+                ),
+            };
+        }
+
+        if self.users.snapshot().document.users.contains_key(username) {
+            return if self.users.verify(username, password).await {
+                AuthDecision::Allow
+            } else {
+                deny("invalid credentials")
+            };
+        }
+
+        if self.allow_default_loopback
+            && username == DEFAULT_USERNAME
+            && password == DEFAULT_PASSWORD
+        {
+            return match peer {
+                Some(ip) if ip.is_loopback() => AuthDecision::Allow,
+                _ => deny(
+                    "default credentials are accepted from loopback only. Create a \
+                     user for remote access: fibrilctl user add <name>, or the \
+                     dashboard settings page",
+                ),
+            };
+        }
+
+        // Burn a hash verification for unknown users too, so response timing
+        // does not reveal whether a username exists.
+        dummy_verify(password).await;
+        deny("invalid credentials")
+    }
+}
+
+/// Length-guarded constant-time byte comparison for the cluster secret.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
+}
+
+async fn dummy_verify(password: &str) {
+    static DUMMY_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let hash = DUMMY_HASH
+        .get_or_init(|| hash_password("fibril-timing-pad").unwrap_or_default())
+        .clone();
+    let password = password.to_string();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(parsed) = PasswordHash::new(&hash) {
+            let _ = Argon2::default().verify_password(password.as_bytes(), &parsed);
+        }
+    })
+    .await;
+}
+
+#[cfg(test)]
+mod handler_tests {
+    use super::*;
+    use fibril_util::{AuthDecision, AuthHandler};
+    use std::net::{IpAddr, Ipv4Addr};
+    use stroma_core::{KeratinConfig, SnapshotConfig, Stroma, StromaKeratinConfig, test_dir};
+
+    const LOOPBACK: Option<IpAddr> = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+    const REMOTE: Option<IpAddr> = Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9)));
+
+    async fn handler(tag: &str, secret: Option<&str>) -> (StoreAuthHandler, stroma_core::TempDir) {
+        let dir = test_dir!(tag);
+        let stroma = Stroma::open(
+            &dir.root,
+            StromaKeratinConfig::from_message_log(KeratinConfig::test_default()),
+            SnapshotConfig::default(),
+        )
+        .await
+        .expect("open stroma");
+        let store = stroma.global_store().await.expect("global store");
+        let users = Arc::new(
+            UserStoreManager::load_from_store(store, &[])
+                .await
+                .expect("load users"),
+        );
+        (
+            StoreAuthHandler::new(users.clone(), true, secret.map(Arc::from)),
+            dir,
+        )
+    }
+
+    fn allowed(decision: &AuthDecision) -> bool {
+        matches!(decision, AuthDecision::Allow)
+    }
+
+    #[tokio::test]
+    async fn default_credentials_are_loopback_only_with_a_guide() {
+        let (auth, _dir) = handler("decide-default", None).await;
+        assert!(allowed(&auth.decide("fibril", "fibril", LOOPBACK).await));
+
+        let denied = auth.decide("fibril", "fibril", REMOTE).await;
+        let AuthDecision::Deny { message } = denied else {
+            panic!("remote default credentials must be denied");
+        };
+        assert!(message.contains("loopback"), "{message}");
+        assert!(message.contains("fibrilctl user add"), "{message}");
+
+        // Unknown peer is treated as remote.
+        assert!(!allowed(&auth.decide("fibril", "fibril", None).await));
+    }
+
+    #[tokio::test]
+    async fn stored_users_work_from_anywhere_and_shadow_the_default_pair() {
+        let (auth, _dir) = handler("decide-store", None).await;
+        auth.users
+            .upsert_user("ops", "real-password")
+            .await
+            .expect("create");
+        assert!(allowed(&auth.decide("ops", "real-password", REMOTE).await));
+        assert!(!allowed(&auth.decide("ops", "wrong", LOOPBACK).await));
+
+        // A real user named like the default takes over completely: the
+        // built-in pair stops working even from loopback.
+        auth.users
+            .upsert_user("fibril", "rotated")
+            .await
+            .expect("shadow");
+        assert!(!allowed(&auth.decide("fibril", "fibril", LOOPBACK).await));
+        assert!(allowed(&auth.decide("fibril", "rotated", REMOTE).await));
+    }
+
+    #[tokio::test]
+    async fn node_principal_authenticates_with_the_cluster_secret_only() {
+        let (auth, _dir) = handler("decide-node", Some("s3cret-value")).await;
+        assert!(allowed(&auth.decide("@node", "s3cret-value", REMOTE).await));
+        assert!(!allowed(&auth.decide("@node", "wrong", REMOTE).await));
+
+        let (no_secret, _dir2) = handler("decide-node-none", None).await;
+        let AuthDecision::Deny { message } = no_secret.decide("@node", "anything", REMOTE).await
+        else {
+            panic!("node principal without a secret must be denied");
+        };
+        assert!(message.contains("fibrilctl secret generate"), "{message}");
+    }
+
+    #[test]
+    fn real_usernames_cannot_claim_the_node_namespace() {
+        assert!(validate_username("@node").is_err());
+        assert!(validate_username("@anything").is_err());
     }
 }

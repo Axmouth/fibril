@@ -26,6 +26,15 @@ hood. You do not configure Raft directly beyond its timings: Fibril's surface
 talks in terms of coordination, owners, followers, and a leader, and the
 consensus protocol is an implementation detail of the coordinator.
 
+## Cluster secret
+
+Nodes authenticate to each other with a shared secret: generate one with
+`fibrilctl secret generate` and give every node the same value
+(`FIBRIL_CLUSTER_SECRET`, `coordination.secret_path`, or the
+`<data_dir>/cluster.secret` file). Ganglion mode refuses to start without
+one. User accounts never authenticate node-to-node connections, so rotating
+a user cannot wedge replication.
+
 ## Try a cluster with Docker
 
 The fastest way to see a cluster, in under a minute, with no clone and no build.

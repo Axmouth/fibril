@@ -54,6 +54,32 @@ enum Command {
         #[command(subcommand)]
         command: CertCommand,
     },
+    /// Cluster shared secret operations.
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SecretCommand {
+    /// Generate the cluster shared secret at <data_dir>/cluster.secret (kept
+    /// as is when it already exists). Every node holds the same secret, so
+    /// copy this file (or its value) to the other nodes.
+    Generate(SecretGenerateArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct SecretGenerateArgs {
+    /// Data directory to write under. Defaults to the configured
+    /// server.data_dir.
+    #[arg(long)]
+    data_dir: Option<std::path::PathBuf>,
+
+    /// Print the secret value (for pasting into FIBRIL_CLUSTER_SECRET on
+    /// other nodes). Off by default to keep it out of terminal scrollback.
+    #[arg(long)]
+    show: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -359,6 +385,49 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
             client.shutdown().await;
         }
+        Command::Secret { command } => match command {
+            SecretCommand::Generate(args) => {
+                let data_dir = args.data_dir.unwrap_or(config.server.data_dir);
+                std::fs::create_dir_all(&data_dir)
+                    .with_context(|| format!("failed to create {}", data_dir.display()))?;
+                let path = data_dir.join(fibril_config::CLUSTER_SECRET_FILE);
+                let secret = if path.exists() {
+                    println!(
+                        "Cluster secret already exists at {}, keeping it.",
+                        path.display()
+                    );
+                    std::fs::read_to_string(&path)
+                        .with_context(|| format!("failed to read {}", path.display()))?
+                        .trim()
+                        .to_string()
+                } else {
+                    let mut bytes = [0u8; 32];
+                    getrandom::getrandom(&mut bytes)
+                        .map_err(|err| anyhow::anyhow!("failed to gather entropy: {err}"))?;
+                    let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    std::fs::write(&path, format!("{secret}\n"))
+                        .with_context(|| format!("failed to write {}", path.display()))?;
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                            .with_context(|| format!("failed to chmod {}", path.display()))?;
+                    }
+                    println!("Cluster secret written to {} (0600).", path.display());
+                    secret
+                };
+                println!();
+                println!("Give every node the same secret:");
+                println!("  copy this file to each node's data dir, or set");
+                println!("  FIBRIL_CLUSTER_SECRET / coordination.secret_path there.");
+                if args.show {
+                    println!();
+                    println!("{secret}");
+                } else {
+                    println!("Run with --show to print the value.");
+                }
+            }
+        },
         Command::Cert { command } => match command {
             CertCommand::Generate(args) => {
                 let data_dir = args.data_dir.unwrap_or(config.server.data_dir);

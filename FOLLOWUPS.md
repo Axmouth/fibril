@@ -39,15 +39,25 @@ Bricks, in order:
 1. Credential store: replicated user document (name + argon2 hash), seeded
    from config on first boot, standalone persistence via the existing
    runtime-settings path.
-2. Broker AUTH verifies against the store, loopback-only default
-   credentials, loud guides on rejection and on plaintext+auth.
-3. Cluster secret: config cluster.secret_path + FIBRIL_CLUSTER_SECRET env
-   (container lanes: mounted secret file or env one-liner), with
-   <data_dir>/cluster.secret as the convention location that fibrilctl
-   secret generate and setup mode write. Explicit config/env wins over the
-   convention file. generate writes 0600 and keeps the value out of
-   scrollback unless --show. Node-principal authentication on replication
-   and coordination connections.
+2. DONE (2026-07-05). AuthDecision on the AuthHandler trait (denials carry
+   the guide the client sees in AuthErr), StoreAuthHandler decision order:
+   node principal, stored users from anywhere, default pair from loopback
+   only with the create-a-user guide, timing-flattened unknown-user
+   denials. Boot warns loudly on users + no TLS. Ride-along fix: the
+   connection writer now drains and flushes queued frames on shutdown
+   (bounded, abort backstop) - final error replies used to lose a race
+   with teardown and surface as bare EOF.
+3. DONE (2026-07-05). Cluster secret: FIBRIL_CLUSTER_SECRET env, then
+   coordination.secret_path, then the <data_dir>/cluster.secret convention
+   file (what fibrilctl secret generate writes, 0600, value behind
+   --show). Ganglion mode refuses to start without one (guided error).
+   Replication authenticates as the @node principal with the secret,
+   usernames starting with @ are reserved for node principals. The demo
+   compose carries a labelled demo-only secret. NOTE: the user document
+   is per-node local until the coordination bridge lands with brick 4, so
+   live user edits do not replicate yet - config-seeded users stay
+   consistent because every node seeds the same config. Raft-transport
+   secret auth rides with #153 (it needs the transport work there).
 4. User management: fibrilctl user add/remove/passwd + a dashboard page.
    Decide here whether admin.auth folds into the same store (a role flag)
    or stays separate.

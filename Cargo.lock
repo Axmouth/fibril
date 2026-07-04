@@ -1270,6 +1270,7 @@ dependencies = [
  "fibril-client",
  "fibril-config",
  "fibril-tls",
+ "getrandom 0.2.17",
  "reqwest",
  "serde",
  "serde_json",

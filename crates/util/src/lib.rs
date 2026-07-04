@@ -155,9 +155,37 @@ pub fn init_tracing_dbg() {
 
 // TODO: make a "common" crate?
 
+/// Outcome of an authentication attempt. A denial carries the message the
+/// client sees in `AuthErr`, so peer-dependent rules can guide the fix
+/// instead of failing opaquely.
+#[derive(Debug, Clone)]
+pub enum AuthDecision {
+    Allow,
+    Deny { message: String },
+}
+
 #[async_trait::async_trait]
 pub trait AuthHandler {
     async fn verify(&self, username: &str, password: &str) -> bool;
+
+    /// Authentication with connection context. The default adapts `verify`;
+    /// handlers with peer-dependent rules (loopback-only default
+    /// credentials) override this.
+    async fn decide(
+        &self,
+        username: &str,
+        password: &str,
+        peer: Option<std::net::IpAddr>,
+    ) -> AuthDecision {
+        let _ = peer;
+        if self.verify(username, password).await {
+            AuthDecision::Allow
+        } else {
+            AuthDecision::Deny {
+                message: "invalid credentials".to_string(),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

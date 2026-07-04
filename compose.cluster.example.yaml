@@ -29,6 +29,9 @@ services:
       FIBRIL_BROKER_BIND: 0.0.0.0:9876
       FIBRIL_ADMIN_BIND: 0.0.0.0:8081
       FIBRIL_COORDINATION_MODE: ganglion
+      # Demo-only shared secret. Real deployments generate their own with
+      # fibrilctl secret generate and never commit it.
+      FIBRIL_CLUSTER_SECRET: fibril-demo-cluster-secret
       FIBRIL_COORDINATION_NODE_ID: broker-1
       FIBRIL_COORDINATION_RAFT_ID: "1"
       FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
@@ -46,6 +49,9 @@ services:
       FIBRIL_BROKER_BIND: 0.0.0.0:9876
       FIBRIL_ADMIN_BIND: 0.0.0.0:8081
       FIBRIL_COORDINATION_MODE: ganglion
+      # Demo-only shared secret. Real deployments generate their own with
+      # fibrilctl secret generate and never commit it.
+      FIBRIL_CLUSTER_SECRET: fibril-demo-cluster-secret
       FIBRIL_COORDINATION_NODE_ID: broker-2
       FIBRIL_COORDINATION_RAFT_ID: "2"
       FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000
@@ -62,6 +68,9 @@ services:
       FIBRIL_BROKER_BIND: 0.0.0.0:9876
       FIBRIL_ADMIN_BIND: 0.0.0.0:8081
       FIBRIL_COORDINATION_MODE: ganglion
+      # Demo-only shared secret. Real deployments generate their own with
+      # fibrilctl secret generate and never commit it.
+      FIBRIL_CLUSTER_SECRET: fibril-demo-cluster-secret
       FIBRIL_COORDINATION_NODE_ID: broker-3
       FIBRIL_COORDINATION_RAFT_ID: "3"
       FIBRIL_COORDINATION_LISTEN: 0.0.0.0:7000

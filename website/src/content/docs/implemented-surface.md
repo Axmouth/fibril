@@ -567,6 +567,26 @@ Conditions and limits:
 - Generated self-signed material that a client does not verify defeats passive snooping only. Clients should trust the generated `ca.pem` or pin the printed fingerprint.
 - Fibril never ships certificates.
 
+## Authentication
+
+See also: [configuration](/configuration/) for the `auth` section.
+
+| Item | Status | Implemented surface |
+| --- | --- | --- |
+| User store | Implemented | Durable document of argon2 hashes, seeded on first boot from `auth.seed_users` or the env pair, after which the store owns the users |
+| Loopback-only default credentials | Implemented | `fibril`/`fibril` works from loopback only, remote rejections carry the create-a-user guide. A real `fibril` user replaces the pair |
+| Cluster secret (node principal) | Implemented | Replication authenticates as `@node` with the shared secret (`fibrilctl secret generate`), required in ganglion mode. Usernames starting with `@` are reserved |
+| User management (fibrilctl + dashboard) | Planned | In progress in this arc |
+| Cluster replication of user changes | Planned | Seeded users are consistent per-node today, live user edits replicate with the management work |
+| Authorization (per-topic permissions) | Planned | Separate later arc |
+
+Conditions and limits:
+
+- Password verification assumes TLS on non-loopback connections; the server
+  warns loudly when users exist and TLS is off.
+- The auth failure reply names the fix (loopback rule, missing cluster
+  secret) instead of failing opaquely.
+
 ## Experimental Cluster and Replication Surface
 
 See also: [clustering](/concepts/clustering/) and

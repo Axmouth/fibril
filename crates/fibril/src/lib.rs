@@ -14,6 +14,7 @@ use fibril_admin::{
     RuntimeSettingsClusterStore, RuntimeSettingsClusterUpdateOutcome, StartupConfigSummary,
 };
 use fibril_broker::{
+    auth_store::{NODE_PRINCIPAL, StoreAuthHandler, UserStoreError, UserStoreManager},
     broker::{
         Broker, BrokerConfig, FollowerReplicationWorkerConfig, OwnAllQueues, OwnAllStreams,
         QueueOwnership, StreamOwnership,
@@ -175,6 +176,15 @@ pub enum FibrilServerError {
     AdminListener(#[source] AdminServerError),
     #[error("tls configuration: {0}")]
     TlsConfig(#[source] ConfigError),
+    #[error(
+        "coordination.mode = ganglion requires a cluster secret for node-to-node \
+         authentication. Generate one with fibrilctl secret generate and give every \
+         node the same value via FIBRIL_CLUSTER_SECRET, coordination.secret_path, or \
+         <data_dir>/cluster.secret"
+    )]
+    MissingClusterSecret,
+    #[error("user store: {0}")]
+    UserStore(#[from] UserStoreError),
     #[error(transparent)]
     TlsSetup(#[from] TlsSetupError),
 }
@@ -641,6 +651,7 @@ pub fn spawn_ganglion_broker_tasks(
     config: &ServerConfig,
     runtime: &RuntimeSettings,
     topology_adoption: Option<Arc<TopologyAdoptionTracker>>,
+    cluster_secret: &str,
 ) -> GanglionBrokerTaskHandles {
     let resolver = Arc::new(
         fibril_protocol::v1::replication::CoordinationProtocolOwnerPeerResolver::with_config(
@@ -649,7 +660,7 @@ pub fn spawn_ganglion_broker_tasks(
                 std::collections::HashMap::new(),
             )
             .with_reporter(config.coordination.node_id.clone())
-            .with_auth("fibril", "fibril")
+            .with_auth(NODE_PRINCIPAL, cluster_secret.to_string())
             .with_timeouts(
                 runtime.replication.read_timeout_slack_ms,
                 runtime.replication.owner_connect_timeout_ms,
@@ -1132,6 +1143,17 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     });
 
     let runtime_seed = runtime_seed_from_config(&config);
+    // Node-to-node trust: the cluster secret is operator-provisioned and
+    // required in cluster mode, where replication must authenticate across
+    // machines. Users are data and cannot bootstrap that trust.
+    let cluster_secret = config
+        .resolve_cluster_secret()
+        .map_err(FibrilServerError::TlsConfig)?;
+    if config.coordination.mode == CoordinationMode::Ganglion && cluster_secret.is_none() {
+        return Err(FibrilServerError::MissingClusterSecret);
+    }
+    let cluster_secret: Option<Arc<str>> = cluster_secret.map(Arc::from);
+
     let runtime_settings = Arc::new(
         RuntimeSettingsManager::load_from_stroma_engine(
             &engine,
@@ -1172,15 +1194,21 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
     // labels (which report this node's minimum).
     let topology_adoption = Arc::new(TopologyAdoptionTracker::new());
 
-    let _ganglion_broker_tasks = ganglion_parts.as_ref().map(|parts| {
-        spawn_ganglion_broker_tasks(
+    let _ganglion_broker_tasks = match (ganglion_parts.as_ref(), cluster_secret.as_deref()) {
+        (Some(parts), Some(secret)) => Some(spawn_ganglion_broker_tasks(
             parts,
             broker.clone(),
             &config,
             runtime,
             Some(topology_adoption.clone()),
-        )
-    });
+            secret,
+        )),
+        // The ganglion-requires-secret check above makes this unreachable,
+        // stated here so a future reorder cannot silently spawn
+        // unauthenticated node connections.
+        (Some(_), None) => return Err(FibrilServerError::MissingClusterSecret),
+        (None, _) => None,
+    };
 
     let connection_settings = ConnectionSettings::new(None)
         .with_publisher_cache_idle_timeout_ms(runtime.idle_queue_cleanup.publisher_idle_timeout_ms)
@@ -1204,7 +1232,29 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         });
     }
 
-    let auth_handler = StaticAuthHandler::new("fibril".to_string(), "fibril".to_string());
+    let seed_users: Vec<(String, String)> = config
+        .auth
+        .seed_users
+        .iter()
+        .map(|seed| (seed.username.clone(), seed.password.clone()))
+        .collect();
+    let user_store = Arc::new(
+        UserStoreManager::load_from_stroma_engine(&engine, &seed_users)
+            .await
+            .map_err(FibrilServerError::UserStore)?,
+    );
+    if user_store.has_users() && !config.tls.enabled {
+        tracing::warn!(
+            "users are configured but tls.enabled is off: passwords travel in \
+             cleartext on non-loopback connections. Enable the tls section or set \
+             tls.auto_self_signed = true"
+        );
+    }
+    let auth_handler = StoreAuthHandler::new(
+        user_store.clone(),
+        config.auth.allow_default_loopback,
+        cluster_secret.clone(),
+    );
     let admin_auth_handler = if config.admin.auth.enabled {
         let password = config
             .admin

@@ -19,6 +19,18 @@ username = "fibril"
 [setup]
 mode = false
 
+[auth]
+# The built-in fibril/fibril pair works from loopback only. Remote
+# connections need a real user (seeded here on first boot, or created via
+# fibrilctl / the dashboard afterwards).
+allow_default_loopback = true
+# seed_users = [{ username = "ops", password = "change-me" }]
+
+# [coordination]
+# Cluster shared secret for node-to-node authentication, required in
+# ganglion mode. Generate with: fibrilctl secret generate
+# secret_path = "/etc/fibril/cluster.secret"
+
 [tls]
 enabled = false
 # Supply your own PEM files:
