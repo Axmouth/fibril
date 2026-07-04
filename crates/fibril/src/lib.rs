@@ -954,7 +954,147 @@ pub fn declare_coordinator_for_ganglion(parts: &TcpGanglionParts) -> Arc<dyn Dec
 /// The binary is intentionally a thin wrapper around this function. Keeping the
 /// server composition here lets integration tests reuse production wiring
 /// without shelling out to `fibril-server`.
+/// First-boot setup: serve only the localhost setup page until the operator
+/// picks a TLS path (generate, supply, or an explicit skip), persist the
+/// choice as the config overlay plus material, and record the
+/// completed-setup marker. The broker listener stays down throughout, so no
+/// plaintext traffic can precede the choice. With tls already configured
+/// explicitly there is nothing to decide, so the marker is written directly.
+async fn run_first_boot_setup(config: &ServerConfig) -> Result<(), FibrilServerError> {
+    let data_dir = config.server.data_dir.clone();
+    std::fs::create_dir_all(&data_dir).map_err(|err| {
+        FibrilServerError::TlsSetup(fibril_tls::TlsSetupError::WriteMaterial {
+            path: data_dir.clone(),
+            source: err,
+        })
+    })?;
+    if config.tls != fibril_config::TlsSection::default() {
+        write_setup_marker(&data_dir)?;
+        tracing::info!("setup mode: tls is already configured explicitly, marking setup complete");
+        return Ok(());
+    }
+
+    // Loopback only: the supply path uploads a private key, and no
+    // credentials exist yet to protect a wider bind.
+    let bind = std::net::SocketAddr::from(([127, 0, 0, 1], config.admin.listener.bind.port()));
+    tracing::info!(
+        "FIRST-BOOT SETUP: the broker is not serving yet. Open http://{bind}/ to choose \
+         how connections are secured (generate TLS material, supply a certificate, or \
+         continue without TLS). The choice persists in {} and {} under the data dir; \
+         delete the marker and boot with setup mode to run this again",
+        fibril_config::CONFIG_OVERLAY_FILE,
+        fibril_config::SETUP_MARKER_FILE,
+    );
+
+    let sans = tls::san_hosts_from_advertise(&config.broker_advertise_addresses());
+    let apply_dir = data_dir.clone();
+    let apply: fibril_admin::setup::ApplySetup = Arc::new(move |choice| {
+        apply_setup_choice(&apply_dir, &sans, choice).map_err(|err| err.to_string())
+    });
+    let applied = fibril_admin::setup::run_setup_server(bind, apply)
+        .await
+        .map_err(FibrilServerError::AdminListener)?;
+    tracing::info!("first-boot setup complete: {}", applied.summary);
+    Ok(())
+}
+
+fn apply_setup_choice(
+    data_dir: &std::path::Path,
+    sans: &[String],
+    choice: fibril_admin::setup::SetupChoice,
+) -> Result<fibril_admin::setup::SetupApplied, FibrilServerError> {
+    use fibril_admin::setup::{SetupApplied, SetupChoice};
+
+    let mut overlay_tls = fibril_config::TlsSection::default();
+    let summary = match choice {
+        SetupChoice::AutoSelfSigned => {
+            let built =
+                tls::build_server_tls(&fibril_config::TlsMode::AutoSelfSigned, data_dir, sans)?
+                    .ok_or_else(|| {
+                        FibrilServerError::TlsSetup(
+                            fibril_tls::TlsSetupError::InvalidUploadedMaterial {
+                                detail: "generation produced no material".to_string(),
+                            },
+                        )
+                    })?;
+            let TlsMaterialSource::Generated {
+                dir,
+                ca_fingerprint,
+            } = built.source
+            else {
+                return Err(FibrilServerError::TlsSetup(
+                    fibril_tls::TlsSetupError::InvalidUploadedMaterial {
+                        detail: "generation reported operator-supplied material".to_string(),
+                    },
+                ));
+            };
+            overlay_tls.enabled = true;
+            overlay_tls.auto_self_signed = true;
+            format!(
+                "TLS enabled with generated material at {}. CA SHA-256 fingerprint: \
+                 {ca_fingerprint}. Clients trust {}/ca.pem or pin the fingerprint.",
+                dir.display(),
+                dir.display()
+            )
+        }
+        SetupChoice::Provided { cert_pem, key_pem } => {
+            let (cert_path, key_path) =
+                fibril_tls::store_provided_material(data_dir, &cert_pem, &key_pem)?;
+            overlay_tls.enabled = true;
+            overlay_tls.cert_path = Some(cert_path.clone());
+            overlay_tls.key_path = Some(key_path);
+            format!(
+                "TLS enabled with the supplied certificate, stored at {}.",
+                cert_path.display()
+            )
+        }
+        SetupChoice::SkipTls => {
+            "Continuing without TLS by explicit choice. Enable it later via the tls \
+             config section or fibrilctl cert generate."
+                .to_string()
+        }
+    };
+
+    let overlay = fibril_config::ConfigOverlay {
+        tls: Some(overlay_tls),
+    };
+    write_config_overlay(data_dir, &overlay)?;
+    write_setup_marker(data_dir)?;
+    Ok(SetupApplied { summary })
+}
+
+fn write_config_overlay(
+    data_dir: &std::path::Path,
+    overlay: &fibril_config::ConfigOverlay,
+) -> Result<(), FibrilServerError> {
+    overlay
+        .write(data_dir)
+        .map_err(FibrilServerError::TlsConfig)
+}
+
+fn write_setup_marker(data_dir: &std::path::Path) -> Result<(), FibrilServerError> {
+    let path = data_dir.join(fibril_config::SETUP_MARKER_FILE);
+    let stamp = format!("completed_at_ms = {}\n", fibril_util::unix_millis());
+    std::fs::write(&path, stamp).map_err(|source| {
+        FibrilServerError::TlsSetup(fibril_tls::TlsSetupError::WriteMaterial { path, source })
+    })
+}
+
 pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilServerError> {
+    let mut config = config;
+    // The setup-owned overlay layers below explicit config: it applies only
+    // when file/env/CLI left the tls section untouched.
+    config
+        .apply_setup_overlay()
+        .map_err(FibrilServerError::TlsConfig)?;
+    if config.setup_pending() {
+        run_first_boot_setup(&config).await?;
+        config
+            .apply_setup_overlay()
+            .map_err(FibrilServerError::TlsConfig)?;
+    }
+    let config = config;
+
     let metrics = Metrics::new(3 * 60 * 60);
     let keratin_default = KeratinConfig::default();
     let keratin_message_cfg = KeratinConfig {
@@ -1126,6 +1266,25 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         Some(_) => tracing::info!("TLS enabled with operator-supplied certificate"),
         None => {}
     }
+    let tls_status = match &server_tls {
+        None => {
+            "disabled - enable via the tls config section or fibrilctl cert generate".to_string()
+        }
+        Some(tls) => {
+            let source = match &tls.source {
+                TlsMaterialSource::Generated { ca_fingerprint, .. } => {
+                    format!("generated material, CA SHA-256 {ca_fingerprint}")
+                }
+                TlsMaterialSource::Provided => "operator certificates".to_string(),
+            };
+            let admin = if config.tls.admin_tls() {
+                "admin HTTPS on"
+            } else {
+                "admin HTTPS off (reverse proxy opt-out)"
+            };
+            format!("enabled ({source}), {admin}")
+        }
+    };
     let admin_tls_config = if config.tls.admin_tls() {
         server_tls.as_ref().map(|tls| tls.server_config.clone())
     } else {
@@ -1143,6 +1302,7 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         },
         Some(StartupConfigSummary {
             data_dir: config.server.data_dir.display().to_string(),
+            tls_status,
             broker_bind: config.broker.listener.bind.to_string(),
             admin_bind: config.admin.listener.bind.to_string(),
             admin_auth_enabled: config.admin.auth.enabled,

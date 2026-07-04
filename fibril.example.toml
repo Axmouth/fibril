@@ -12,6 +12,13 @@ enabled = false
 username = "fibril"
 # password = "change-me"
 
+# First-boot setup: with mode = true and no completed-setup marker in the
+# data dir, the server serves only a localhost setup page (choose generated
+# TLS, supply a certificate, or explicitly skip) and the broker starts after
+# the choice. Delete <data_dir>/setup_complete to run setup again.
+[setup]
+mode = false
+
 [tls]
 enabled = false
 # Supply your own PEM files:

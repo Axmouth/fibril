@@ -27,6 +27,14 @@ pub enum ConfigError {
     },
     #[error("failed to parse config TOML: {0}")]
     ParseToml(#[from] toml::de::Error),
+    #[error("failed to encode config overlay: {0}")]
+    EncodeToml(#[from] toml::ser::Error),
+    #[error("failed to write {path}: {source}")]
+    WriteFile {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{name} is not valid unicode: {source}")]
     EnvUnicode {
         name: String,
@@ -129,6 +137,7 @@ pub struct ServerConfig {
     pub runtime_locks: RuntimeLocksSection,
     pub coordination: CoordinationSection,
     pub recovery: RecoverySection,
+    pub setup: SetupSection,
 }
 
 impl Default for ServerConfig {
@@ -143,6 +152,7 @@ impl Default for ServerConfig {
             runtime_locks: RuntimeLocksSection::default(),
             coordination: CoordinationSection::default(),
             recovery: RecoverySection::default(),
+            setup: SetupSection::default(),
         }
     }
 }
@@ -183,6 +193,76 @@ impl std::str::FromStr for RecoveryMismatchMode {
                 value: other.to_string(),
             }),
         }
+    }
+}
+
+/// First-boot setup mode. When `mode` is set and the data dir holds no
+/// completed-setup marker, the server starts only a localhost setup page and
+/// the broker listener stays down until setup completes. Completion records
+/// the marker, so restarts boot normally. Deleting the marker re-arms setup
+/// on the next boot. Deployments that configure everything via file or env
+/// never enable this and are unaffected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct SetupSection {
+    pub mode: bool,
+}
+
+/// File name of the completed-setup marker under the data dir.
+pub const SETUP_MARKER_FILE: &str = "setup_complete";
+/// File name of the setup-owned config overlay under the data dir.
+pub const CONFIG_OVERLAY_FILE: &str = "config-overlay.toml";
+
+/// The subset of config a completed setup may own. Only sections listed here
+/// can come from the overlay.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConfigOverlay {
+    pub tls: Option<TlsSection>,
+}
+
+impl ConfigOverlay {
+    /// Persist under the data dir for boot to layer below explicit config.
+    pub fn write(&self, data_dir: &Path) -> ConfigResult<()> {
+        let path = data_dir.join(CONFIG_OVERLAY_FILE);
+        let encoded = toml::to_string_pretty(self)?;
+        std::fs::write(&path, encoded).map_err(|source| ConfigError::WriteFile { path, source })
+    }
+}
+
+impl ServerConfig {
+    /// Layer the setup-owned overlay from the data dir below explicit config:
+    /// an overlay section applies only when file/env/CLI left that section at
+    /// its default, so explicit config always wins. Returns whether the tls
+    /// section came from the overlay.
+    pub fn apply_setup_overlay(&mut self) -> ConfigResult<bool> {
+        let path = self.server.data_dir.join(CONFIG_OVERLAY_FILE);
+        let input = match std::fs::read_to_string(&path) {
+            Ok(input) => input,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(ConfigError::ReadFile { path, source }),
+        };
+        let overlay: ConfigOverlay =
+            toml::from_str(&input).map_err(|source| ConfigError::ParseFile { path, source })?;
+        let Some(tls) = overlay.tls else {
+            return Ok(false);
+        };
+        if self.tls != TlsSection::default() {
+            return Ok(false);
+        }
+        tls.mode()?;
+        self.tls = tls;
+        Ok(true)
+    }
+
+    /// Whether the completed-setup marker exists under the data dir.
+    pub fn setup_marker_exists(&self) -> bool {
+        self.server.data_dir.join(SETUP_MARKER_FILE).exists()
+    }
+
+    /// Whether this boot should enter first-boot setup mode.
+    pub fn setup_pending(&self) -> bool {
+        self.setup.mode && !self.setup_marker_exists()
     }
 }
 
@@ -375,6 +455,9 @@ impl ServerConfig {
         }
         if let Some(value) = env_value(&mut get, "FIBRIL_ADMIN_PASSWORD")? {
             self.admin.auth.password = Some(value);
+        }
+        if let Some(value) = env_value(&mut get, "FIBRIL_SETUP_MODE")? {
+            self.setup.mode = parse_env("FIBRIL_SETUP_MODE", &value)?;
         }
         if let Some(value) = env_value(&mut get, "FIBRIL_TLS_ENABLED")? {
             self.tls.enabled = parse_env("FIBRIL_TLS_ENABLED", &value)?;
@@ -2169,6 +2252,71 @@ mod tests {
             }
         );
         assert!(!config.tls.admin_tls());
+    }
+
+    #[test]
+    fn setup_overlay_applies_only_when_tls_is_unset() {
+        let dir = std::env::temp_dir().join(format!(
+            "fibril-overlay-{}-{}",
+            std::process::id(),
+            fastrand_like_seed()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(CONFIG_OVERLAY_FILE),
+            "[tls]\nenabled = true\nauto_self_signed = true\n",
+        )
+        .unwrap();
+
+        // Unset tls -> the overlay applies.
+        let mut config = ServerConfig::default();
+        config.server.data_dir = dir.clone();
+        assert!(config.apply_setup_overlay().unwrap());
+        assert!(config.tls.enabled);
+        assert_eq!(config.tls.mode().unwrap(), TlsMode::AutoSelfSigned);
+
+        // Explicit tls in config -> the overlay is ignored.
+        let mut config = ServerConfig::default();
+        config.server.data_dir = dir.clone();
+        config.tls.enabled = true;
+        config.tls.cert_path = Some(PathBuf::from("/etc/fibril/server.pem"));
+        config.tls.key_path = Some(PathBuf::from("/etc/fibril/server.key"));
+        assert!(!config.apply_setup_overlay().unwrap());
+        assert!(config.tls.cert_path.is_some());
+
+        // No overlay file -> a no-op.
+        let mut config = ServerConfig::default();
+        config.server.data_dir = dir.join("missing");
+        assert!(!config.apply_setup_overlay().unwrap());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn setup_pending_requires_mode_and_no_marker() {
+        let dir = std::env::temp_dir().join(format!(
+            "fibril-setup-pending-{}-{}",
+            std::process::id(),
+            fastrand_like_seed()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut config = ServerConfig::default();
+        config.server.data_dir = dir.clone();
+        assert!(!config.setup_pending());
+        config.setup.mode = true;
+        assert!(config.setup_pending());
+        std::fs::write(dir.join(SETUP_MARKER_FILE), "").unwrap();
+        assert!(!config.setup_pending());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn fastrand_like_seed() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
     }
 
     #[test]

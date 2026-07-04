@@ -16,7 +16,15 @@ continuous monitoring.
 When broker TLS is enabled (`tls.enabled = true`) the dashboard serves HTTPS
 from the same certificate material. Set `tls.admin_enabled = false` to keep it
 on plain HTTP behind a reverse proxy that terminates TLS. See
-[configuration](/configuration/) for the `tls` section.
+[configuration](/configuration/) for the `tls` section. The settings page
+startup summary shows the current TLS state, including the CA fingerprint for
+generated material.
+
+With `setup.mode = true` and a fresh data dir, the server boots into a
+first-boot setup page on `127.0.0.1:<admin port>` instead of serving: choose
+generated TLS material, paste a certificate and key, or explicitly continue
+without TLS, and the broker starts once the choice is applied. See
+[configuration](/configuration/) for the mechanics.
 
 ## Overview And Diagnostics
 

@@ -295,6 +295,10 @@
         <dd id="startup.admin_auth_enabled"></dd>
       </div>
       <div>
+        <dt>TLS</dt>
+        <dd id="startup.tls_status"></dd>
+      </div>
+      <div>
         <dt>Keratin fsync interval</dt>
         <dd id="startup.keratin_fsync_interval_ms"></dd>
       </div>
@@ -584,6 +588,7 @@ function renderStartupConfig(data) {
   field("startup.broker_bind").textContent = data.broker_bind;
   field("startup.admin_bind").textContent = data.admin_bind;
   field("startup.admin_auth_enabled").textContent = data.admin_auth_enabled ? "enabled" : "disabled";
+  field("startup.tls_status").textContent = data.tls_status || "unknown";
   field("startup.keratin_fsync_interval_ms").textContent = `${data.keratin_fsync_interval_ms} ms`;
   field("startup.keratin_message_log_segment_max_bytes").textContent = formatBytes(data.keratin_message_log_segment_max_bytes);
   field("startup.keratin_event_log_segment_max_bytes").textContent = formatBytes(data.keratin_event_log_segment_max_bytes);

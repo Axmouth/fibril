@@ -29,6 +29,9 @@ enabled = false
 username = "fibril"
 # password = "change-me"
 
+[setup]
+mode = false
+
 [tls]
 enabled = false
 # Supply your own PEM files:
@@ -140,6 +143,7 @@ These fields are read on process start.
 | `tls.key_path` | `FIBRIL_TLS_KEY_PATH` | none | unset |
 | `tls.auto_self_signed` | `FIBRIL_TLS_AUTO_SELF_SIGNED` | none | `false` |
 | `tls.admin_enabled` | `FIBRIL_TLS_ADMIN_ENABLED` | none | follows `tls.enabled` |
+| `setup.mode` | `FIBRIL_SETUP_MODE` | none | `false` |
 | `storage.keratin.fsync_interval_ms` | `FIBRIL_KERATIN_FSYNC_INTERVAL_MS` | `--keratin-fsync-interval-ms` | `5` |
 | `storage.keratin.min_fsync_interval_ms` | `FIBRIL_KERATIN_MIN_FSYNC_INTERVAL_MS` | `--keratin-min-fsync-interval-ms` | `0` |
 | `storage.keratin.message_log.segment_max_bytes` | `FIBRIL_KERATIN_MESSAGE_LOG_SEGMENT_MAX_BYTES` | `--keratin-message-log-segment-max-bytes` | `268435456` |
@@ -201,6 +205,18 @@ not verify defeats passive snooping only. Fibril never ships certificates.
 where a reverse proxy terminates TLS in front of it. Certificate material is
 read once at startup, so replacing it requires a restart (live reload and
 rotation are planned).
+
+`setup.mode = true` arms first-boot setup: when the data dir holds no
+`setup_complete` marker, the server serves only a setup page on
+`127.0.0.1:<admin port>` and the broker listener stays down until the operator
+chooses generated TLS material, supplies a certificate, or explicitly
+continues without TLS. The choice is written to `<data_dir>/config-overlay.toml`,
+which boot layers below explicit config, so anything set in the `tls` section
+by file, environment, or CLI always wins over a setup choice. Completion
+writes the marker and the broker starts in the same process. Deleting the
+marker and booting with setup mode runs setup again. Deployments that
+configure TLS explicitly never need setup mode, and with it armed they boot
+straight through (the marker is written automatically).
 
 `storage.keratin.message_log.segment_max_bytes` and `storage.keratin.event_log.segment_max_bytes` are rollover thresholds. A segment rolls after an append crosses the configured size, so an individual segment can be slightly larger than this value.
 

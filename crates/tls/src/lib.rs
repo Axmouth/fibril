@@ -19,6 +19,10 @@ use tokio_rustls::rustls::{self, ServerConfig as RustlsServerConfig};
 
 /// Directory under the data dir holding generated material.
 pub const GENERATED_TLS_DIR: &str = "tls";
+/// Directory under the data dir holding operator material uploaded through
+/// first-boot setup, kept apart from the generated dir so the
+/// partial-material check there stays meaningful.
+pub const PROVIDED_TLS_DIR: &str = "tls-provided";
 
 #[derive(Debug, thiserror::Error)]
 pub enum TlsSetupError {
@@ -54,6 +58,8 @@ pub enum TlsSetupError {
          supply tls.cert_path and tls.key_path instead"
     )]
     PartialGeneratedMaterial { dir: PathBuf },
+    #[error("uploaded TLS material rejected: {detail}")]
+    InvalidUploadedMaterial { detail: String },
 }
 
 /// The acceptor plus where its material came from, for startup reporting.
@@ -271,6 +277,47 @@ fn load_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsSetupError> {
         .ok_or_else(|| TlsSetupError::NoPrivateKey {
             path: path.to_path_buf(),
         })
+}
+
+/// Validate uploaded PEM text (a certificate chain and its private key) and
+/// store it under `<data_dir>/tls-provided` with a 0600 key. The pair is
+/// proven to load as a working rustls config before anything is written.
+pub fn store_provided_material(
+    data_dir: &Path,
+    cert_pem: &str,
+    key_pem: &str,
+) -> Result<(PathBuf, PathBuf), TlsSetupError> {
+    let certs = rustls_pemfile::certs(&mut io::Cursor::new(cert_pem.as_bytes()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| TlsSetupError::InvalidUploadedMaterial {
+            detail: format!("certificate is not valid PEM: {err}"),
+        })?;
+    if certs.is_empty() {
+        return Err(TlsSetupError::InvalidUploadedMaterial {
+            detail: "no certificates found in the uploaded chain".to_string(),
+        });
+    }
+    let key = rustls_pemfile::private_key(&mut io::Cursor::new(key_pem.as_bytes()))
+        .map_err(|err| TlsSetupError::InvalidUploadedMaterial {
+            detail: format!("key is not valid PEM: {err}"),
+        })?
+        .ok_or_else(|| TlsSetupError::InvalidUploadedMaterial {
+            detail: "no private key found in the uploaded PEM".to_string(),
+        })?;
+    server_config_from(certs, key).map_err(|err| TlsSetupError::InvalidUploadedMaterial {
+        detail: format!("certificate and key do not form a working TLS config: {err}"),
+    })?;
+
+    let dir = data_dir.join(PROVIDED_TLS_DIR);
+    fs::create_dir_all(&dir).map_err(|source| TlsSetupError::WriteMaterial {
+        path: dir.clone(),
+        source,
+    })?;
+    let cert_path = dir.join("server.pem");
+    let key_path = dir.join("server.key");
+    write_public(&cert_path, cert_pem.as_bytes())?;
+    write_secret(&key_path, key_pem.as_bytes())?;
+    Ok((cert_path, key_path))
 }
 
 fn server_config_from(

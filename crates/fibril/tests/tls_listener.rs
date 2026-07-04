@@ -257,3 +257,130 @@ async fn admin_enabled_false_keeps_the_dashboard_on_plain_http() {
 
     booted.handle.abort();
 }
+
+/// One plaintext HTTP request, reading until the peer closes.
+async fn http_request(addr: std::net::SocketAddr, request: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.expect("http connect");
+    write_all(&mut stream, request.as_bytes()).await;
+    let mut body = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => body.extend_from_slice(&buf[..n]),
+        }
+    }
+    String::from_utf8_lossy(&body).to_string()
+}
+
+async fn wait_for_port(addr: std::net::SocketAddr) {
+    for _ in 0..400 {
+        if TcpStream::connect(addr).await.is_ok() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("port {addr} did not come up");
+}
+
+fn setup_mode_config(root: &std::path::Path) -> ServerConfig {
+    let mut config = ServerConfig::default();
+    config.server.data_dir = root.join("data");
+    config.broker.listener.bind = free_loopback_addr();
+    config.admin.listener.bind = free_loopback_addr();
+    config.setup.mode = true;
+    config
+}
+
+async fn post_setup_choice(admin_addr: std::net::SocketAddr, body: &str) -> String {
+    wait_for_port(admin_addr).await;
+    let page = http_request(
+        admin_addr,
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(page.contains("first-boot setup"), "{page}");
+    http_request(
+        admin_addr,
+        &format!(
+            "POST /setup HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_boot_setup_auto_flow_then_normal_reboot() {
+    let root = temp_root("setup-auto");
+    let config = setup_mode_config(&root);
+    let broker_addr = config.broker.listener.bind;
+    let admin_addr = config.admin.listener.bind;
+    let data_dir = config.server.data_dir.clone();
+    let handle = tokio::spawn(async move {
+        let _ = run_server_from_config(config).await;
+    });
+
+    // While setup is pending the broker listener must be down.
+    wait_for_port(admin_addr).await;
+    assert!(
+        TcpStream::connect(broker_addr).await.is_err(),
+        "broker must not serve before setup completes"
+    );
+
+    let response = post_setup_choice(admin_addr, "mode=auto").await;
+    assert!(response.contains("setup complete"), "{response}");
+
+    // The choice persists, and the broker comes up serving TLS.
+    wait_for_port(broker_addr).await;
+    assert!(data_dir.join("setup_complete").exists());
+    assert!(data_dir.join("config-overlay.toml").exists());
+    let ca_pem = data_dir.join("tls").join("ca.pem");
+    let connector = tls_connector(Some(&ca_pem));
+    let tcp = TcpStream::connect(broker_addr).await.expect("tcp connect");
+    let name = rustls::pki_types::ServerName::try_from("localhost").expect("server name");
+    let mut stream = connector.connect(name, tcp).await.expect("tls handshake");
+    write_all(&mut stream, &hello_frame(3)).await;
+    let frame = read_frame(&mut stream).await;
+    assert_eq!(frame.opcode, Op::HelloOk as u16);
+    handle.abort();
+
+    // A reboot with the marker present skips setup and adopts the overlay.
+    // Asserted at the config layer because the first boot's storage threads
+    // still hold the data dir within this test process.
+    let mut rebooted = setup_mode_config(&root);
+    rebooted.server.data_dir = data_dir.clone();
+    assert!(
+        !rebooted.setup_pending(),
+        "marker must skip setup on reboot"
+    );
+    assert!(rebooted.apply_setup_overlay().expect("overlay applies"));
+    assert_eq!(
+        rebooted.tls.mode().expect("overlay tls mode"),
+        fibril_config::TlsMode::AutoSelfSigned
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_boot_setup_skip_records_the_choice_and_stays_plaintext() {
+    let root = temp_root("setup-skip");
+    let config = setup_mode_config(&root);
+    let broker_addr = config.broker.listener.bind;
+    let admin_addr = config.admin.listener.bind;
+    let data_dir = config.server.data_dir.clone();
+    let handle = tokio::spawn(async move {
+        let _ = run_server_from_config(config).await;
+    });
+
+    let response = post_setup_choice(admin_addr, "mode=skip").await;
+    assert!(response.contains("setup complete"), "{response}");
+
+    wait_for_port(broker_addr).await;
+    assert!(data_dir.join("setup_complete").exists());
+    let mut stream = TcpStream::connect(broker_addr).await.expect("tcp connect");
+    write_all(&mut stream, &hello_frame(4)).await;
+    let frame = read_frame(&mut stream).await;
+    assert_eq!(frame.opcode, Op::HelloOk as u16);
+    handle.abort();
+}

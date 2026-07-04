@@ -110,6 +110,9 @@ pub enum AdminServerError {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StartupConfigSummary {
     pub data_dir: String,
+    /// Human-readable TLS state: disabled (with the enable guide), or
+    /// enabled with the material source and admin coverage.
+    pub tls_status: String,
     pub broker_bind: String,
     pub admin_bind: String,
     pub admin_auth_enabled: bool,
@@ -756,6 +759,7 @@ mod tests {
             },
             Some(StartupConfigSummary {
                 data_dir: root.display().to_string(),
+                tls_status: "disabled".to_string(),
                 broker_bind: "127.0.0.1:9876".into(),
                 admin_bind: "127.0.0.1:0".into(),
                 admin_auth_enabled,

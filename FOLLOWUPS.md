@@ -14,28 +14,21 @@ Decided cert model:
   first boot when enabled, print the CA fingerprint for clients to pin.
   Clients gain ca_path and fingerprint-pin options. Docs honesty: a
   self-signed cert the client does not verify defeats passive snooping only.
-- Setup UX, both paths easy: a fibrilctl cert command and tryout/demo
-  scripts staying one command via the auto path. The admin board shows TLS
-  setup status plus the guide as the floor. Target by end of arc: the whole
-  TLS setup drivable from the dashboard in a few clicks, BYO or auto. The
-  two cruxes noted at design time now have assessed directions:
-  - Board reachability before TLS exists: a first-boot setup mode. When an
-    external opt-in (config or env) is set and no completed-setup marker is
-    recorded, the server starts only the admin listener (localhost-bound by
-    default) and the broker listener stays down until setup completes.
-    Completion records the marker, clearing it re-arms setup on the next
-    boot. Precedent: MinIO, Grafana first login, Portainer. Stronger than a
-    degraded plaintext-pending boot because no broker traffic can precede
-    the choice, and the external opt-in keeps automated env/config
-    deployments from ever blocking on a wizard. The marker is node-local
-    data-dir state, not the cluster-replicated settings document, because
-    TLS material is per-node.
-  - Board writing startup config: setup writes a dashboard-owned config
-    overlay in the data dir that boot layers below explicit file/env
-    config. Explicit config wins and the board shows the group as
-    config-managed in that case. BYO cert/key upload happens only in setup
-    mode over the localhost-bound listener. Applying should re-arm the
-    listeners in-process rather than demand a manual process restart.
+- Setup UX (SHIPPED 2026-07-04): fibrilctl cert generate/fingerprint, and
+  first-boot setup mode as designed. setup.mode = true (or
+  FIBRIL_SETUP_MODE) with no setup_complete marker in the data dir serves
+  ONLY a loopback setup page (generate material, paste a PEM pair which is
+  validated before writing, or an explicit continue-without-TLS) while the
+  broker listener stays down, so no plaintext traffic can precede the
+  choice. The choice persists as <data_dir>/config-overlay.toml, layered
+  below explicit file/env config (explicit tls settings always win), plus
+  the marker. The broker then starts in the same process (nothing else had
+  started, so re-arm is falling through). Deleting the marker re-arms
+  setup. With tls already configured explicitly, setup marks itself
+  complete and boots through. The normal-mode dashboard shows the TLS
+  state (source, CA fingerprint, admin coverage, enable guide) in the
+  startup summary. Post-setup changes go through config or fibrilctl, not
+  the dashboard - re-running setup means deleting the marker.
 - Misconfiguration is loud and guided on BOTH sides: server logs a mini
   guide (admin board link, fibrilctl command, the concrete steps), and the
   client surfaces a SOLID TYPED ERROR from connect (not a log line)
@@ -95,14 +88,11 @@ same change, settings discipline for every knob):
    fallback below that). Tests mint throwaway certs with the openssl
    binary at run time, so no certificate material is committed. Wire
    vectors unaffected (TLS sits below framing).
-5. PARTLY DONE (2026-07-04): fibrilctl cert generate (creates or reuses
-   the per-deployment material, prints the fingerprint, the config
-   snippet, and client trust hints, extra SANs via --san) and fibrilctl
-   cert fingerprint landed. The TLS material module moved to its own
-   crates/tls (fibril-tls) so the CLI does not pull the server crate;
-   fibril re-exports it as fibril::tls. REMAINING: the first-boot setup
-   mode + dashboard-driven few-clicks setup + TLS status/guide display on
-   the board (the design is in the setup UX bullet above).
+5. DONE (2026-07-04): fibrilctl cert generate/fingerprint (material
+   module lives in crates/tls as fibril-tls, re-exported as fibril::tls),
+   first-boot setup mode with the loopback setup page, the config
+   overlay, and the dashboard TLS status line. As-built details in the
+   setup UX bullet above.
 6. DONE (2026-07-04). Admin server HTTPS: the dashboard serves HTTPS via
    axum-server (tls-rustls-no-provider) from the shared ServerTls
    rustls config, tls.admin_enabled = false keeps it plain HTTP for
