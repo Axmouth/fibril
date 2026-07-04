@@ -480,7 +480,14 @@ async function runEngineLoop(args: EngineLoopArgs): Promise<void> {
 
   const heartbeatTick = async (): Promise<void> => {
     if (Date.now() - lastSeen > timeoutMs) {
-      markDead(new DisconnectionError("Heartbeat timeout"));
+      markDead(
+        new DisconnectionError(
+          `heartbeat timeout: no response from the broker for over ${timeoutMs / 1000}s. ` +
+            `This usually means a network stall or an overloaded or stopped broker rather ` +
+            `than a client bug - check broker reachability and health. The client will ` +
+            `attempt to reconnect if auto-reconnect is enabled`,
+        ),
+      );
       return;
     }
     await sendOrDie(buildFrame(Op.Ping, nextReqId(), null));

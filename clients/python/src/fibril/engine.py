@@ -434,7 +434,15 @@ class Engine:
                 if self._closed:
                     return
                 if asyncio.get_running_loop().time() - self._last_seen > timeout:
-                    self._mark_dead(DisconnectionError("heartbeat timeout"))
+                    self._mark_dead(
+                        DisconnectionError(
+                            f"heartbeat timeout: no response from the broker for over "
+                            f"{timeout:g}s. This usually means a network stall or an "
+                            "overloaded or stopped broker rather than a client bug - check "
+                            "broker reachability and health. The client will attempt to "
+                            "reconnect if auto-reconnect is enabled"
+                        )
+                    )
                     return
                 await self._send_or_die(build_frame(Op.PING, self._alloc_id(), b""))
         except asyncio.CancelledError:

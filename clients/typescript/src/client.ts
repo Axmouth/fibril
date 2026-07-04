@@ -577,11 +577,15 @@ function openSocket(host: string, port: number, tls?: TlsOptions): Promise<Socke
     socket.once("error", (err) => {
       if (settled) return;
       settled = true;
-      reject(
-        new DisconnectionError(
-          `Failed to connect to ${host}:${port}: ${err.message}`,
-        ),
-      );
+      // A refused connection is the most common first-run stumble: name the
+      // two checks that resolve almost all of them.
+      const detail =
+        (err as NodeJS.ErrnoException).code === "ECONNREFUSED"
+          ? `connection refused by ${host}:${port}. Is the broker running and reachable ` +
+            `there? Clients connect to the broker port (default 9876), not the admin API ` +
+            `or dashboard port (default 8081)`
+          : `Failed to connect to ${host}:${port}: ${err.message}`;
+      reject(new DisconnectionError(detail));
     });
   });
 }

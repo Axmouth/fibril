@@ -387,6 +387,14 @@ async def _open_connection(
     if tls is None:
         try:
             reader, writer = await asyncio.open_connection(host, port)
+        except ConnectionRefusedError as err:
+            # The most common first-run stumble: name the two checks that
+            # resolve almost all of them.
+            raise DisconnectionError(
+                f"connection refused by {host}:{port}. Is the broker running and reachable "
+                "there? Clients connect to the broker port (default 9876), not the admin API "
+                "or dashboard port (default 8081)"
+            ) from err
         except (ConnectionError, OSError) as err:
             raise DisconnectionError(f"failed to connect to {host}:{port}: {err}") from err
     else:

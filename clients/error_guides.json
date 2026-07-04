@@ -1,0 +1,11 @@
+{
+  "_note": "Shared expectations for client-LOCAL error guides (errors a client raises itself, without a broker error frame). Each client test suite asserts that its message for a case contains every substring in must_contain, matched case-insensitively. Keeps the guided wording in parity across the Rust, TypeScript, and Python clients the way wire_vectors.json keeps the wire encoding in parity. Broker-side guides ride error frames and are covered by broker tests, so they are not listed here.",
+  "connection_refused": {
+    "description": "Raised at connect time when the TCP connection is refused (no broker listening at the address).",
+    "must_contain": ["connection refused", "broker port", "9876", "8081"]
+  },
+  "heartbeat_timeout": {
+    "description": "Raised when the broker sends no response within the heartbeat timeout window.",
+    "must_contain": ["heartbeat timeout", "network stall", "reconnect"]
+  }
+}

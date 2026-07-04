@@ -425,13 +425,26 @@ kind-mismatch (keratin stroma) stating the problem but not the fix -
 added the fix hint (keratin commit ba76fea). Repartition-in-progress
 message left as is (clear enough). Cohort conflicts already guide.
 
-REMAINING - the client-local lane only (per-client, needs the parity
-mechanism): connection-refused (broker up? broker vs admin port),
-InvalidName stating the actual naming rules, heartbeat-timeout vs clean
-close. Build clients/error_guides.json (does NOT exist yet - proposed,
-modeled on wire_vectors.json) as the {case, must_contain[]} parity list
-consumed by all three client test suites. Reconnect-closure reasons stay
-with #102, do not duplicate.
+Client-local lane DONE (2026-07-04). connection-refused now names the
+broker-up + broker-vs-admin-port checks in all three clients (Rust
+tls.rs connect_error, TS openSocket ECONNREFUSED branch, Python
+_open_connection ConnectionRefusedError branch). heartbeat-timeout now
+says network/broker stall not a client bug + mentions reconnect, in all
+three (Rust engine loop, TS engine.ts heartbeatTick, Python engine.py
+_heartbeat_loop). InvalidName left as is - already precise (each message
+states the exact rule violated: 1-128 bytes, allowed chars, no leading/
+trailing/consecutive dots), better than dumping all rules. Built
+clients/error_guides.json as the {case, must_contain[]} parity list, and
+a connection_refused parity test in each client reads it (Rust
+tests/error_guides.rs, TS tests/error-guides.test.ts, Python
+tests/test_error_guides.py) - all green, all connect to a bound-then-
+freed ephemeral port. DEFERRED: a live heartbeat_timeout test needs a
+stalled-broker harness (accept then go silent) in each client - the
+wording is ported and spec'd in error_guides.json, only the live
+assertion is pending. Reconnect-closure reasons stay with #102.
+
+The guided-errors pass is now COMPLETE (broker lane + client-local
+lane). Opens the gate-2 freeze family per the roadmap.
 
 Two lanes, in order:
 1. Broker-side messages first: guides that ride error frames improve
@@ -2315,6 +2328,44 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   measure it with a small client-side bench, and record it next to the matrix so
   a new client has a perf bar to hit, not just a feature checklist. The server
   bench (`benches/`) measures the broker; this is the client-overhead view.
+
+  ## Client performance audit (QUEUED, user-requested 2026-07-04)
+
+  Goal: a SINGLE client should not be crippled by per-client overhead.
+  Compare 1 producer + 1 consumer against 10 + 10, holding everything else
+  equal, and confirm parallelism scales aggregate WITHOUT the single-client
+  number collapsing. Target: a single Rust client sustains >=100k msg/s
+  (1KB) on its own; multi-client scales toward the broker's multi-core
+  aggregate. Stretch: similar single-client numbers in Python and TS.
+
+  The deciding variable is PIPELINING, not the broker. A synchronous
+  client (publish -> await confirm -> repeat) is RTT-bound (~20-50k/s on
+  localhost) no matter how fast the broker is; 100k+ needs confirms in
+  flight (publish_with_confirmation, not publish_confirmed), fire-and-
+  forget, or batching. The broker already saturates single-node at
+  ~500-600k/s (1KB), so 100k single-client is ~1/5 of ceiling - a modest
+  ask if the client pipelines. Precedent: NATS millions/s fire-and-forget,
+  Kafka hundreds-of-thousands-to-millions with batching (few thousand
+  synchronous acks=all), RabbitMQ tens-of-thousands to ~100k, all
+  per-connection.
+
+  Method (apples to apples is the whole point):
+  - Every number states confirm mode + in-flight depth + payload size. Do
+    NOT compare a synchronous single client against a pipelined 10-client
+    aggregate - that "learns" the wrong lesson.
+  - Reuse benches/steady_c + scripts/bench-e2e-c.sh / bench-matrix.sh (they
+    already take an in-flight-confirm depth for --confirmed). Add a 1-vs-N
+    producers/consumers sweep. (Bench runs need dangerouslyDisableSandbox.)
+  - Diagnostic: if a single client sits at ~30k while 10 aggregate to
+    ~500k, parallelism is hiding synchronous per-client blocking - the fix
+    is client-side pipelining, not more clients. Suspects to inspect:
+    confirmed-publish in-flight cap, consumer prefetch/credit release
+    timing, per-message syscalls vs batched writes, ack round-trips.
+  - Python: GIL + per-message overhead means ~10-30k synchronous but 100k+
+    is reachable batched/pipelined. TS (Node): event-loop pipelined can
+    clear 100k for small payloads, msgpack encode is the CPU ceiling.
+  - benchmarks.md overhaul (blocked on the NVMe slice) is where the final
+    numbers land; this audit can run on the current hardware first.
 - TypeScript client parity pass (BIG, multi-brick): `clients/typescript` is
   basically pre-replication-branch (~3100 lines). It has the single-broker basics
   (publish/confirm/delayed, manual+auto ack, reconnect) but is behind on two big

@@ -3890,7 +3890,16 @@ where
                 _ = heartbeat.tick() => {
                     if last_seen.elapsed() > timeout {
                         tracing::warn!("Heartbeat timout, exiting event loop.");
-                        fatal_error = Some(FibrilError::Disconnection { msg: "heartbeat timeout".into() });
+                        fatal_error = Some(FibrilError::Disconnection {
+                            msg: format!(
+                                "heartbeat timeout: no response from the broker for over {}s. \
+                                 This usually means a network stall or an overloaded or stopped \
+                                 broker rather than a client bug - check broker reachability and \
+                                 health. The client will attempt to reconnect if auto-reconnect \
+                                 is enabled",
+                                timeout.as_secs()
+                            ),
+                        });
                         break;
                     }
                     let req_id = next_req; next_req = next_req.wrapping_add(1);

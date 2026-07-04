@@ -99,7 +99,7 @@ pub(crate) async fn establish_stream(
 ) -> FibrilResult<MaybeTlsStream> {
     let stream = TcpStream::connect(address)
         .await
-        .map_err(|e| FibrilError::Disconnection { msg: e.to_string() })?;
+        .map_err(|e| connect_error(e, address))?;
     stream
         .set_nodelay(true)
         .map_err(|e| FibrilError::Disconnection {
@@ -113,6 +113,25 @@ pub(crate) async fn establish_stream(
     match connector.connect(name, stream).await {
         Ok(stream) => Ok(MaybeTlsStream::Tls(Box::new(stream))),
         Err(err) => Err(classify_tls_connect_error(err, address)),
+    }
+}
+
+/// Map a failed TCP connect to a guided error. A refused connection is the most
+/// common first-run stumble, so it names the two checks that resolve almost all
+/// of them: is the broker actually up there, and is this the broker port rather
+/// than the admin/dashboard port.
+fn connect_error(err: io::Error, address: &str) -> FibrilError {
+    if err.kind() == io::ErrorKind::ConnectionRefused {
+        return FibrilError::Disconnection {
+            msg: format!(
+                "connection refused by {address}. Is the broker running and reachable there? \
+                 Clients connect to the broker port (default 9876), not the admin API or \
+                 dashboard port (default 8081)"
+            ),
+        };
+    }
+    FibrilError::Disconnection {
+        msg: err.to_string(),
     }
 }
 
