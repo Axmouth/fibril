@@ -2353,23 +2353,42 @@ BUILD ORDER (prerequisite chain, each step is final-form, not an MVP gate):
   one command and the extra try_recv is pure overhead. The engine loop is
   NOT the limiter.
 
-  HYPOTHESIS 2 (the real one, from reading Publisher::publish): the
-  per-message cost is upstream in the publish call path, redundant work a
-  steady single-partition publisher repeats every message:
-  - engine_for(topic, partition, group).await per message: a topology
-    load + lookup, then TWO awaits through bootstrap_slot and
-    engine_for_operation, each an RwLock read + Arc clone. The resolved
-    Arc<EngineHandle> is the SAME every message for a fixed publisher.
-  - publish() allocates topic.to_string() + group.map(to_string()) per
-    message (Command carries owned Strings), plus into_message() and
-    route().
-  Optimizations to try (each proved by re-benching 1 producer, kept only
-  if it moves the number past noise): cache the resolved Arc<EngineHandle>
-  on the Publisher with cheap revalidation (invalidate on redirect /
-  topology change), and carry Arc<str> topic/group through the Command so
-  a publish clones an Arc instead of allocating. Profile first if a
-  flamegraph is available to rank the costs rather than guess a third
-  time.
+  HYPOTHESIS 2 (engine_for re-resolution / per-message String allocs is
+  the cost) ALSO DISPROVEN by profiling. perf is blocked (paranoid=4), so
+  used in-code per-segment timers on publish() (temp, reverted). Result,
+  ns/msg averaged over 3M publishes: into_message=22, route=83,
+  engine_for=156, send=156 unsaturated. engine_for is only 156ns - not a
+  meaningful cost. publish() total is ~554ns, i.e. a single publish could
+  sustain ~1.8M/s on its own.
+
+  THE ACTUAL RANKING (profiled):
+  - The original "100k" numbers were a BENCH ARTIFACT. steady_c's
+    run_rate_limited_writers paces every publish through a
+    tokio::time::interval(period).tick().await; a timer-wheel tick per
+    message is ~microseconds and caps a ticked writer near 100k
+    regardless of client speed. The tight-loop preload path (no tick)
+    hits ~148k unconfirmed and ~150k confirmed - the REAL single-client
+    ceiling.
+  - Under saturation (tight loop) the send segment jumps 156ns -> 1561ns:
+    that is publish_unconfirmed().await blocking on the bounded command
+    channel. The real limiter is the writer->engine TASK HANDOFF (channel
+    round-trip + scheduling), not publish() logic and not the broker
+    (708k with 10 clients). So a single client at ~148-150k already has
+    the whole broker to itself and is bounded by its own client-side
+    pipeline handoff.
+
+  NEXT (informed by the profile, not guessed):
+  - Re-test the batch-drain HERE, on the tight-loop scenario where the
+    channel actually backs up (send=1561ns) - the earlier test used the
+    ticked path that never backed up, so it was measured in the wrong
+    place. This is the one scenario where amortizing the engine drain can
+    help.
+  - Consider the cmd channel capacity and reducing writer->engine hops
+    (the handoff, not publish() internals, is the lever).
+  - Restate the goal honestly: single-client real ceiling is ~150k, not
+    100k. Decide whether ~150k is "enough" or worth pushing via the
+    handoff, and fix the BENCH so its rate limiter does not cap the
+    unthrottled measurement (add a no-tick saturate mode).
 
   Requirements for whatever lands (standing): edge-case tests (fatal
   mid-burst, redirect/topology-change invalidating a cached engine,
