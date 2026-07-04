@@ -585,6 +585,81 @@ previous-client smoke (the matrix gate).
   channels for subscriptions, no reflection-based codec (hand-rolled
   like the others), module path + CI job mirroring the TS workflow.
 
+### C# client (#120) playbook (investigated brief)
+
+How .NET messaging clients are actually consumed, from the ecosystem
+reference points: Confluent.Kafka (poll loop, callback logging),
+RabbitMQ.Client v7 (async-first rewrite, IChannel), NATS.Net (the most
+modern shape: IAsyncEnumerable subscriptions, ValueTask, Channels), and
+Azure Service Bus (Sender/Receiver plus a callback Processor). The
+dominant consumption pattern is an ASP.NET Core app registering the
+client as a DI singleton and consuming inside an IHostedService
+background loop with a CancellationToken. Decisions below follow the
+NATS.Net-style modern shape, which matches Fibril's pull model best.
+
+Stack decisions:
+- Target net8.0 (LTS floor; multi-target net9.0 if free). NuGet package
+  Fibril.Client, SourceLink, XML docs, nullable enabled.
+- Transport: System.IO.Pipelines over NetworkStream/SslStream - the
+  canonical high-performance framing stack; the 20-byte frame header
+  parses with BinaryPrimitives (big-endian) over spans. Codec is
+  hand-rolled like every other client, zero codec dependencies.
+- TLS: SslStream with SslClientAuthenticationOptions. ca_path lane uses
+  X509Certificate2.CreateFromPemFile + X509ChainPolicy.CustomTrustStore
+  with TrustMode.CustomRootTrust (the proper custom-CA mechanism since
+  net5, not a hand-rolled callback). Fingerprint-pin lane uses a
+  RemoteCertificateValidationCallback hashing cert.RawData across the
+  presented chain (SHA-256, colons optional - same normalization rules
+  as the other clients). Server-name override maps to TargetHost.
+- Errors are EXCEPTIONS, per platform law, mirroring the taxonomy 1:1:
+  FibrilException base; TlsRequiredByBrokerException (the 426 mapping in
+  the HELLO wait), TlsNotSupportedByBrokerException,
+  TlsCertificateUntrustedException, TlsConfigException,
+  ServerException(Code), DisconnectionException, plus RetryAdvice
+  exposed as a property/helper so retry classification survives the
+  enum-to-exception translation.
+- API shape: immutable options builder in PascalCase
+  (new ClientOptions().WithAuth(...).WithTlsCaPath(...)), then
+  ConnectAsync(address, CancellationToken). Subscriptions are
+  IAsyncEnumerable<FibrilMessage> (await foreach + msg.CompleteAsync() /
+  RetryAsync / FailAsync), backed internally by a bounded
+  System.Threading.Channels channel so prefetch backpressure is
+  structural. CancellationToken on every awaitable; IAsyncDisposable on
+  client and subscription (await using). PeriodicTimer for heartbeats.
+  No callback Processor and no sync facade in v1 (TS precedent: n/a).
+- MsgPack content type: optional, matching the #95 policy - core stays
+  dependency-free (raw/json/text built in via System.Text.Json);
+  MessagePack support ships as a small companion package
+  (Fibril.Client.MessagePack) since NuGet has no feature flags.
+- Core stays free of Microsoft.Extensions.*: no ILogger dependency in
+  the client itself (diagnostic hooks as plain events). A DI companion
+  (AddFibrilClient(IServiceCollection) + options binding) is a
+  follow-up nicety once the core is stable, not part of v1 parity.
+
+Port order (the Python playbook, restated for this stack):
+1. Wire codec pinned byte-for-byte against clients/wire_vectors.json
+   (xUnit theory over the vector file) before any networking.
+2. Engine: HELLO/AUTH/heartbeat/dispatch against a fake broker
+   (TcpListener speaking the real codec - port the shape of
+   clients/python/tests/fake_broker.py).
+3. Client layer: topology cache, per-endpoint pool, redirect follow,
+   publish failover retry, subscription supervisor - mirror
+   clients/ARCHITECTURE.md, using Channels and tasks where Python used
+   asyncio primitives.
+4. TLS + the full error taxonomy including the 426 path, tested with
+   run-time-minted openssl certs like the TS/Python suites (no
+   committed material).
+5. FEATURE_MATRIX column driven to parity with notes; CI job mirroring
+   the TS workflow (dotnet test on ubuntu, plus the examples-as-tests
+   lane against the published broker image).
+
+Invariants: wire bytes proven by the shared vectors before anything
+else builds on them; every blocking operation accepts a
+CancellationToken; no exception path loses the taxonomy (a transport
+mismatch must never surface as a bare IOException); package versioning
+tracks the workspace release line like the TS and Python packages.
+
+
 ## Tenancy examination (deferred question, criteria recorded)
 Decide AFTER authz ships, by answering: do groups-as-namespace-prefixes
 plus per-user authz rules already give tenant isolation for the real
