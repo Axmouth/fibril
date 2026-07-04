@@ -20,6 +20,7 @@ import {
   TlsCertificateUntrustedError,
   TlsConfigError,
   TlsHandshakeError,
+  TlsClientCertificateRequiredError,
   TlsNotSupportedByBrokerError,
 } from "./errors.js";
 import { deferred } from "./internal/deferred.js";
@@ -84,6 +85,13 @@ export interface TlsOptions {
    * the host part of the connect address.
    */
   serverName?: string;
+  /**
+   * PEM client certificate chain presented to the broker, for
+   * `tls.client_auth` deployments. Set together with `keyPath`.
+   */
+  certPath?: string;
+  /** PEM private key for the client certificate. */
+  keyPath?: string;
 }
 
 /**
@@ -232,6 +240,14 @@ export class ClientOptions {
    */
   withTlsServerName(serverName: string): ClientOptions {
     return this.#copy({ tls: { ...(this.tls ?? {}), serverName } });
+  }
+
+  /**
+   * Present a client certificate (PEM chain and key) to the broker, for
+   * `tls.client_auth` deployments. Enables TLS if not already enabled.
+   */
+  withTlsClientCert(certPath: string, keyPath: string): ClientOptions {
+    return this.#copy({ tls: { ...(this.tls ?? {}), certPath, keyPath } });
   }
 
   /**
@@ -625,6 +641,13 @@ function classifyTlsError(
   port: number,
 ): FibrilError {
   const code = err.code ?? "";
+  if (isCertificateRequired(err)) {
+    return new TlsClientCertificateRequiredError(
+      `the broker at ${host}:${port} requires a client certificate: provide one \
+with withTlsClientCert(certPath, keyPath). Deployment-CA certificates are \
+issued with fibrilctl cert issue`,
+    );
+  }
   if (
     code === "ECONNRESET" ||
     /disconnected before secure TLS connection/i.test(err.message)
@@ -635,6 +658,19 @@ function classifyTlsError(
     return new TlsCertificateUntrustedError(err.message);
   }
   return new TlsHandshakeError(`TLS handshake failed: ${err.message}`);
+}
+
+/**
+ * With TLS 1.3 the client side of the handshake completes before the
+ * broker's client-certificate verdict, so a `require` rejection can land on
+ * the first read after connect instead of in the handshake itself.
+ */
+function isCertificateRequired(err: Error): boolean {
+  const code = (err as NodeJS.ErrnoException).code ?? "";
+  return (
+    code === "ERR_SSL_TLSV13_ALERT_CERTIFICATE_REQUIRED" ||
+    /certificate required/i.test(err.message)
+  );
 }
 
 function openTlsSocket(host: string, port: number, tls: TlsOptions): Promise<Socket> {
@@ -658,12 +694,35 @@ function openTlsSocket(host: string, port: number, tls: TlsOptions): Promise<Soc
       return Promise.reject(err);
     }
   }
+  if ((tls.certPath === undefined) !== (tls.keyPath === undefined)) {
+    return Promise.reject(
+      new TlsConfigError(
+        "client certificate options must be set together: both certPath and keyPath",
+      ),
+    );
+  }
+  let cert: Buffer | undefined;
+  let key: Buffer | undefined;
+  if (tls.certPath !== undefined && tls.keyPath !== undefined) {
+    try {
+      cert = readFileSync(tls.certPath);
+      key = readFileSync(tls.keyPath);
+    } catch (err) {
+      return Promise.reject(
+        new TlsConfigError(
+          `failed to read tls client certificate material: ${(err as Error).message}`,
+        ),
+      );
+    }
+  }
   const servername = tls.serverName ?? (isIP(host) ? undefined : host);
   return new Promise<Socket>((resolve, reject) => {
     const socket = tlsConnect({
       host,
       port,
       ca,
+      cert,
+      key,
       servername,
       // A pin replaces chain-of-trust verification; the match happens on
       // secureConnect below. The handshake still proves key possession.
@@ -748,6 +807,12 @@ class PooledConnection {
         return engine;
       } catch (err) {
         socket.destroy();
+        if (this.opts.tls && isCertificateRequired(err as Error)) {
+          throw new TlsClientCertificateRequiredError(
+            `the broker at ${this.host}:${this.port} requires a client certificate: \
+provide one with withTlsClientCert(certPath, keyPath)`,
+          );
+        }
         if (err instanceof FibrilError) throw err;
         throw new DisconnectionError(`Engine failed to start: ${(err as Error).message}`);
       } finally {
@@ -1118,6 +1183,12 @@ export class Client {
       );
     } catch (err) {
       socket.destroy();
+      if (opts.tls && isCertificateRequired(err as Error)) {
+        throw new TlsClientCertificateRequiredError(
+          `the broker at ${addr.host}:${addr.port} requires a client certificate: \
+provide one with withTlsClientCert(certPath, keyPath)`,
+        );
+      }
       if (err instanceof FibrilError) throw err;
       throw new DisconnectionError(
         `Engine failed to start: ${(err as Error).message}`,

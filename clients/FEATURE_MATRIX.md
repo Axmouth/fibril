@@ -29,6 +29,7 @@ Superscript numbers refer to the Notes under the tables.
 | Username/password auth | done | done | done |
 | TLS connect (OS roots / CA file / fingerprint pin) | done | done | done <sup>12</sup> |
 | Typed TLS error taxonomy (426 mismatch / trust / config) | done | done | done |
+| Client certificate (mTLS) + typed required-cert error | done | done | done <sup>13</sup> |
 | Heartbeat ping/pong + timeout | done | done | done |
 | Typed wire parse errors | done | done <sup>1</sup> | done <sup>1</sup> |
 
@@ -177,6 +178,9 @@ the same durable name tracks an independent cursor per partition.
 12. The Python fingerprint pin checks the whole presented chain on Python 3.13
     and later. Older Pythons only expose the leaf certificate to the check, so
     pin the server certificate there or trust the CA via ``ca_path``.
+13. asyncio flattens the broker's certificate-required TLS alert into a clean
+    EOF, so the Python client attributes a certless TLS connect that ends with
+    no HELLO reply to the certificate requirement.
 
 See the repo-root `FOLLOWUPS.md` "Clients" section for the brick-by-brick plan
 behind these rows.

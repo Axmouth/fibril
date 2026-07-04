@@ -25,13 +25,23 @@ fn free_loopback_addr() -> std::net::SocketAddr {
 }
 
 async fn boot_server(tag: &str, tls_auto: bool) -> (String, PathBuf, tokio::task::JoinHandle<()>) {
+    boot_server_with(tag, |config| {
+        config.tls.enabled = tls_auto;
+        config.tls.auto_self_signed = tls_auto;
+    })
+    .await
+}
+
+async fn boot_server_with(
+    tag: &str,
+    configure: impl FnOnce(&mut ServerConfig),
+) -> (String, PathBuf, tokio::task::JoinHandle<()>) {
     let root = temp_root(tag);
     let mut config = ServerConfig::default();
     config.server.data_dir = root.join("data");
     config.broker.listener.bind = free_loopback_addr();
     config.admin.listener.bind = free_loopback_addr();
-    config.tls.enabled = tls_auto;
-    config.tls.auto_self_signed = tls_auto;
+    configure(&mut config);
     let addr = config.broker.listener.bind;
     let data_dir = config.server.data_dir.clone();
     let handle = tokio::spawn(async move {
@@ -44,6 +54,78 @@ async fn boot_server(tag: &str, tls_auto: bool) -> (String, PathBuf, tokio::task
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     panic!("broker listener did not come up");
+}
+
+/// A certificate whose identity names a seeded user connects and works with
+/// no password at all: the certificate is the credential.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_certificate_connects_without_password() {
+    let (addr, data_dir, server) = boot_server_with("mtls-cert", |config| {
+        config.tls.enabled = true;
+        config.tls.auto_self_signed = true;
+        config.tls.client_auth = fibril_config::ClientAuthMode::Request;
+        config.auth.seed_users = vec![fibril_config::SeedUser {
+            username: "svc-a".into(),
+            password: "never-used".into(),
+        }];
+    })
+    .await;
+    let tls_dir = data_dir.join("tls");
+    let (cert_pem, key_pem) =
+        fibril::tls::issue_client_certificate(&tls_dir, "svc-a").expect("issue cert");
+    let cert_path = tls_dir.join("svc-a.pem");
+    let key_path = tls_dir.join("svc-a.key");
+    std::fs::write(&cert_path, cert_pem).expect("write cert");
+    std::fs::write(&key_path, key_pem).expect("write key");
+
+    let client = ClientOptions::new()
+        .tls_ca_path(tls_dir.join("ca.pem"))
+        .tls_server_name("localhost")
+        .tls_client_cert(&cert_path, &key_path)
+        .connect(addr.as_str())
+        .await
+        .expect("certificate-only connect");
+    client
+        .declare_queue(QueueConfig::new("mtls-smoke").expect("queue config"))
+        .await
+        .expect("declare with certificate identity");
+    let offset = client
+        .publisher("mtls-smoke")
+        .expect("publisher")
+        .publish_confirmed(NewMessage::raw(b"cert identity".to_vec()))
+        .await
+        .expect("confirmed publish with certificate identity");
+    assert_eq!(offset, 0);
+
+    client.shutdown().await;
+    server.abort();
+}
+
+/// `require` mode without a client certificate surfaces the typed error
+/// with the fix, not a generic disconnect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn certless_client_gets_the_required_certificate_error() {
+    let (addr, data_dir, server) = boot_server_with("mtls-certless", |config| {
+        config.tls.enabled = true;
+        config.tls.auto_self_signed = true;
+        config.tls.client_auth = fibril_config::ClientAuthMode::Require;
+    })
+    .await;
+    let ca_pem = data_dir.join("tls").join("ca.pem");
+
+    let err = ClientOptions::new()
+        .auth("fibril", "fibril")
+        .tls_ca_path(&ca_pem)
+        .tls_server_name("localhost")
+        .connect(addr.as_str())
+        .await
+        .expect_err("certless connect must be refused");
+    assert!(
+        matches!(err, FibrilError::TlsClientCertificateRequired { .. }),
+        "{err:?}"
+    );
+
+    server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

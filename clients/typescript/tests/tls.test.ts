@@ -17,6 +17,7 @@ import { Client, ClientOptions } from "../src/client.js";
 import {
   ERR_TLS_REQUIRED,
   TlsCertificateUntrustedError,
+  TlsClientCertificateRequiredError,
   TlsNotSupportedByBrokerError,
   TlsRequiredByBrokerError,
 } from "../src/errors.js";
@@ -65,17 +66,53 @@ function mintCerts(): { dir: string; caPem: string; serverPem: string; serverKey
   return { dir, caPem, serverPem, serverKey };
 }
 
+/** Mint a client certificate from the test CA, identity as CN. */
+function mintClientCert(dir: string, caPem: string, identity: string): {
+  certPem: string;
+  keyPem: string;
+} {
+  const caKey = join(dir, "ca.key");
+  const keyPem = join(dir, `${identity}.key`);
+  const csr = join(dir, `${identity}.csr`);
+  const certPem = join(dir, `${identity}.pem`);
+  const ossl = (args: string[]) => execFileSync("openssl", args, { stdio: "pipe" });
+  ossl([
+    "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+    "-keyout", keyPem, "-out", csr, "-nodes", "-subj", `/CN=${identity}`,
+  ]);
+  ossl([
+    "x509", "-req", "-in", csr, "-CA", caPem, "-CAkey", caKey,
+    "-CAcreateserial", "-out", certPem, "-days", "2",
+  ]);
+  return { certPem, keyPem };
+}
+
 /** A fake broker speaking the wire over TLS, answering HELLO. */
 class FakeTlsBroker {
   #server!: TlsServer;
   port = 0;
 
-  async start(serverPem: string, serverKey: string, caPem: string): Promise<void> {
+  async start(
+    serverPem: string,
+    serverKey: string,
+    caPem: string,
+    requireClientCert = false,
+  ): Promise<void> {
     // Serve leaf + CA like the real broker's generated mode, so a CA
     // fingerprint pin can match the presented chain.
     const chain = readFileSync(serverPem, "utf8") + readFileSync(caPem, "utf8");
     this.#server = createTlsServer(
-      { cert: chain, key: readFileSync(serverKey) },
+      {
+        cert: chain,
+        key: readFileSync(serverKey),
+        ...(requireClientCert
+          ? {
+              requestCert: true,
+              rejectUnauthorized: true,
+              ca: readFileSync(caPem),
+            }
+          : {}),
+      },
       (socket: TLSSocket) => {
         let buf = new Uint8Array(0);
         socket.on("data", (chunk) => {
@@ -108,6 +145,36 @@ class FakeTlsBroker {
     await new Promise<void>((resolve) => this.#server.close(() => resolve()));
   }
 }
+
+test("a client certificate passes a broker that requires one", async () => {
+  const { dir, caPem, serverPem, serverKey } = mintCerts();
+  const { certPem, keyPem } = mintClientCert(dir, caPem, "svc-a");
+  const broker = new FakeTlsBroker();
+  await broker.start(serverPem, serverKey, caPem, true);
+  const client = await Client.connect(
+    { host: "localhost", port: broker.port },
+    new ClientOptions().withTlsCaPath(caPem).withTlsClientCert(certPem, keyPem),
+  );
+  await client.shutdown();
+  await broker.stop();
+});
+
+test("a certless client against a requiring broker gets the typed error", async () => {
+  const { caPem, serverPem, serverKey } = mintCerts();
+  const broker = new FakeTlsBroker();
+  await broker.start(serverPem, serverKey, caPem, true);
+  try {
+    await assert.rejects(
+      Client.connect(
+        { host: "localhost", port: broker.port },
+        new ClientOptions().withTlsCaPath(caPem),
+      ),
+      TlsClientCertificateRequiredError,
+    );
+  } finally {
+    await broker.stop();
+  }
+});
 
 test("TLS connect with caPath trust completes the handshake and HELLO", async () => {
   const { caPem, serverPem, serverKey } = mintCerts();

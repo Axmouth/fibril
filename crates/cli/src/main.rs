@@ -126,6 +126,28 @@ enum CertCommand {
     Generate(CertGenerateArgs),
     /// Print the SHA-256 fingerprint of the first certificate in a PEM file.
     Fingerprint(CertFingerprintArgs),
+    /// Issue a client certificate from the deployment CA under
+    /// <data_dir>/tls. The identity becomes the certificate's name and, on
+    /// brokers with tls.client_auth, authenticates connections as the user
+    /// of the same name without a password.
+    Issue(CertIssueArgs),
+}
+
+#[derive(Debug, clap::Args)]
+struct CertIssueArgs {
+    /// Identity the certificate asserts (must name an existing broker user
+    /// to authenticate; @ names are reserved for nodes).
+    identity: String,
+
+    /// Data directory holding the deployment CA (material under
+    /// <data_dir>/tls). Defaults to the configured server.data_dir.
+    #[arg(long)]
+    data_dir: Option<std::path::PathBuf>,
+
+    /// Directory the certificate and key files are written to. Defaults to
+    /// the current directory.
+    #[arg(long)]
+    out_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -513,6 +535,35 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 println!(
                     "Clients trust {}/ca.pem or pin the fingerprint above.",
                     dir.display()
+                );
+            }
+            CertCommand::Issue(args) => {
+                let data_dir = args.data_dir.unwrap_or(config.server.data_dir);
+                let tls_dir = data_dir.join(fibril_tls::GENERATED_TLS_DIR);
+                let (cert_pem, key_pem) =
+                    fibril_tls::issue_client_certificate(&tls_dir, &args.identity)?;
+                let out_dir = args
+                    .out_dir
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                std::fs::create_dir_all(&out_dir)?;
+                let cert_path = out_dir.join(format!("{}.pem", args.identity));
+                let key_path = out_dir.join(format!("{}.key", args.identity));
+                std::fs::write(&cert_path, cert_pem)?;
+                std::fs::write(&key_path, key_pem)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+                }
+                println!("Issued client certificate for `{}`:", args.identity);
+                println!("  {}", cert_path.display());
+                println!("  {} (0600)", key_path.display());
+                println!();
+                println!(
+                    "It authenticates as the broker user `{}` (create it with \
+                     fibrilctl user add). Clients present it via their TLS \
+                     client-certificate options.",
+                    args.identity
                 );
             }
             CertCommand::Fingerprint(args) => {

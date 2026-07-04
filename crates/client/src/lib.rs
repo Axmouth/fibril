@@ -258,6 +258,12 @@ pub enum FibrilError {
     /// Any other TLS handshake failure.
     #[error("TLS handshake failed: {msg}")]
     TlsHandshake { msg: String },
+    /// The broker requires a client certificate (`tls.client_auth =
+    /// require`) and this client presented none.
+    #[error(
+        "the broker at {address} requires a client certificate: provide one with          .tls_client_cert(cert, key). Deployment-CA certificates are issued with          fibrilctl cert issue"
+    )]
+    TlsClientCertificateRequired { address: String },
     /// A protocol invariant or internal state expectation was violated.
     #[error("Unexpected error: {msg}")]
     Unexpected { msg: String },
@@ -3264,7 +3270,8 @@ impl EngineSlot {
             cohort_member_id.clone(),
             topology_sink.clone(),
         )
-        .await?;
+        .await
+        .map_err(|err| tls::refine_post_connect_error(err, opts.tls.as_ref(), &address))?;
         let mut slot = Self::from_engine(
             address,
             opts,
@@ -3295,6 +3302,7 @@ impl EngineSlot {
         opts.resume_identity = Some(old_engine.resume_identity.clone());
         let stream = establish_stream(self.address.as_str(), opts.tls.as_ref()).await?;
         let framed = Framed::new(stream, ProtoCodec);
+        let tls_opts = opts.tls.clone();
         let new_engine = start_engine(
             framed,
             opts,
@@ -3303,7 +3311,8 @@ impl EngineSlot {
             self.cohort_member_id.clone(),
             self.topology_sink.clone(),
         )
-        .await?;
+        .await
+        .map_err(|err| tls::refine_post_connect_error(err, tls_opts.as_ref(), &self.address))?;
         let outcome = ReconnectOutcome {
             resume_outcome: new_engine.resume_outcome,
         };
@@ -4974,6 +4983,19 @@ impl ClientOptions {
     /// Return a copy with TLS enabled and an explicit certificate name to
     /// verify (and send as SNI), when the connect address is not the name on
     /// the certificate.
+    /// Present a client certificate (PEM chain and key) to the broker, for
+    /// `tls.client_auth` deployments. Enables TLS if not already enabled.
+    pub fn tls_client_cert(
+        mut self,
+        cert_path: impl Into<std::path::PathBuf>,
+        key_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let tls = self.tls.get_or_insert_with(TlsClientOptions::default);
+        tls.client_cert_path = Some(cert_path.into());
+        tls.client_key_path = Some(key_path.into());
+        self
+    }
+
     pub fn tls_server_name(mut self, name: impl Into<String>) -> Self {
         let mut tls = self.tls.take().unwrap_or_default();
         tls.server_name = Some(name.into());

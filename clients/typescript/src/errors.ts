@@ -195,6 +195,16 @@ export class TlsHandshakeError extends FibrilError {
 }
 
 /**
+ * The broker requires a client certificate (`tls.client_auth = require`)
+ * and this client presented none. Provide one with
+ * `withTlsClientCert(certPath, keyPath)`; deployment-CA certificates are
+ * issued with `fibrilctl cert issue`.
+ */
+export class TlsClientCertificateRequiredError extends FibrilError {
+  override readonly name = "TlsClientCertificateRequiredError";
+}
+
+/**
  * Whether an error is a transient transport failure: a connect or severed
  * connection. Narrow on purpose - this is the subset the client retries
  * automatically against a refreshed owner during a failover.

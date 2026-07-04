@@ -157,6 +157,13 @@ class TlsHandshakeError(FibrilError):
     """Any other TLS handshake failure."""
 
 
+class TlsClientCertificateRequiredError(FibrilError):
+    """The broker requires a client certificate (``tls.client_auth =
+    require``) and this client presented none. Provide one with
+    ``with_tls_client_cert(cert_path, key_path)``; deployment-CA
+    certificates are issued with ``fibrilctl cert issue``."""
+
+
 def is_transient_error(err: BaseException) -> bool:
     """Whether an error is a transient transport failure (connect or severed).
 

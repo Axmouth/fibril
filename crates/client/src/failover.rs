@@ -120,7 +120,8 @@ impl FibrilError {
             | FibrilError::TlsNotSupportedByBroker { .. }
             | FibrilError::TlsCertificateUntrusted { .. }
             | FibrilError::TlsConfig { .. }
-            | FibrilError::TlsHandshake { .. } => RetryAdvice::DoNotRetry,
+            | FibrilError::TlsHandshake { .. }
+            | FibrilError::TlsClientCertificateRequired { .. } => RetryAdvice::DoNotRetry,
         }
     }
 

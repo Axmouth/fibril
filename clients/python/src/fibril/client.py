@@ -22,9 +22,11 @@ from .engine import Engine, EngineOptions, SubscribeResult, SubscriptionRegistry
 from .errors import (
     BrokenPipeError,
     DisconnectionError,
+    EofError,
     FibrilError,
     TlsCertificateUntrustedError,
     TlsConfigError,
+    TlsClientCertificateRequiredError,
     TlsHandshakeError,
     TlsNotSupportedByBrokerError,
 )
@@ -68,6 +70,11 @@ class TlsOptions:
     #: Name verified against the certificate (and sent as SNI). Defaults to
     #: the host part of the connect address.
     server_name: Optional[str] = None
+    #: PEM client certificate chain presented to the broker, for
+    #: ``tls.client_auth`` deployments. Set together with ``client_key_path``.
+    client_cert_path: Optional[str] = None
+    #: PEM private key for the client certificate.
+    client_key_path: Optional[str] = None
 
 
 @dataclass
@@ -111,6 +118,19 @@ class ClientOptions:
         """TLS with an explicit certificate name to verify (and send as SNI),
         when the connect address is not the name on the certificate."""
         return replace(self, tls=replace(self.tls or TlsOptions(), server_name=server_name))
+
+    def with_tls_client_cert(self, cert_path: str, key_path: str) -> "ClientOptions":
+        """Present a client certificate (PEM chain and key) to the broker,
+        for ``tls.client_auth`` deployments. Enables TLS if not already
+        enabled."""
+        return replace(
+            self,
+            tls=replace(
+                self.tls or TlsOptions(),
+                client_cert_path=str(cert_path),
+                client_key_path=str(key_path),
+            ),
+        )
 
     def with_heartbeat_interval(self, seconds: float) -> "ClientOptions":
         return replace(self, heartbeat_interval_seconds=seconds)
@@ -289,6 +309,31 @@ def _normalize_fingerprint(raw: str) -> bytes:
     return bytes.fromhex(hex_digits)
 
 
+def _certificate_required_error(
+    err: BaseException, tls: Optional[TlsOptions]
+) -> Optional[TlsClientCertificateRequiredError]:
+    """With TLS 1.3 the client side of the handshake completes before the
+    broker's client-certificate verdict, so a ``require`` rejection lands
+    after connect instead of in the handshake itself. asyncio flattens the
+    broker's certificate-required alert into a clean EOF, so a certless TLS
+    connect that ends with no reply to HELLO is attributed to the
+    certificate requirement - the one broker behavior that produces exactly
+    this shape."""
+    if tls is None:
+        return None
+    message = (
+        "the broker likely requires a client certificate "
+        "(tls.client_auth = require): provide one with "
+        "with_tls_client_cert(cert_path, key_path). Deployment-CA "
+        "certificates are issued with fibrilctl cert issue"
+    )
+    if "certificate required" in str(err).lower():
+        return TlsClientCertificateRequiredError(message)
+    if tls.client_cert_path is None and isinstance(err, EofError):
+        return TlsClientCertificateRequiredError(message)
+    return None
+
+
 def _build_ssl_context(tls: TlsOptions) -> ssl.SSLContext:
     if tls.ca_fingerprint is not None:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -296,13 +341,26 @@ def _build_ssl_context(tls: TlsOptions) -> ssl.SSLContext:
         # after the handshake, which still proves key possession.
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
-        return context
-    if tls.ca_path is not None:
+    elif tls.ca_path is not None:
         try:
-            return ssl.create_default_context(cafile=tls.ca_path)
+            context = ssl.create_default_context(cafile=tls.ca_path)
         except (OSError, ssl.SSLError) as err:
             raise TlsConfigError(f"failed to load tls ca_path {tls.ca_path}: {err}") from err
-    return ssl.create_default_context()
+    else:
+        context = ssl.create_default_context()
+    if (tls.client_cert_path is None) != (tls.client_key_path is None):
+        raise TlsConfigError(
+            "client certificate options must be set together: both the "
+            "certificate and its key"
+        )
+    if tls.client_cert_path is not None and tls.client_key_path is not None:
+        try:
+            context.load_cert_chain(tls.client_cert_path, tls.client_key_path)
+        except (OSError, ssl.SSLError) as err:
+            raise TlsConfigError(
+                f"failed to load tls client certificate material: {err}"
+            ) from err
+    return context
 
 
 def _chain_matches_pin(ssl_object: ssl.SSLObject, pin: bytes) -> bool:
@@ -350,6 +408,12 @@ async def _open_connection(
             # closing on sighting the ClientHello.
             raise TlsNotSupportedByBrokerError(f"{host}:{port}") from err
         except ssl.SSLError as err:
+            if "certificate required" in str(err).lower():
+                raise TlsClientCertificateRequiredError(
+                    f"the broker at {host}:{port} requires a client certificate: "
+                    "provide one with with_tls_client_cert(cert_path, key_path). "
+                    "Deployment-CA certificates are issued with fibrilctl cert issue"
+                ) from err
             raise TlsHandshakeError(f"TLS handshake failed: {err}") from err
         except ConnectionResetError as err:
             raise TlsNotSupportedByBrokerError(f"{host}:{port}") from err
@@ -407,8 +471,11 @@ class _PooledConnection:
                     self._on_topology_update,
                     self._on_going_away,
                 )
-            except BaseException:
+            except BaseException as err:
                 writer.close()
+                refined = _certificate_required_error(err, self._opts.tls)
+                if refined is not None:
+                    raise refined from err
                 raise
             self._engine = engine
             return engine
@@ -612,8 +679,11 @@ class Client:
                 on_topology_update,
                 emit_going_away,
             )
-        except BaseException:
+        except BaseException as err:
             writer.close()
+            refined = _certificate_required_error(err, opts.tls)
+            if refined is not None:
+                raise refined from err
             raise
         client = cls(
             addr,
@@ -699,8 +769,11 @@ class Client:
                 self._on_topology_update,
                 self._emit_going_away,
             )
-        except BaseException:
+        except BaseException as err:
             writer.close()
+            refined = _certificate_required_error(err, self._opts.tls)
+            if refined is not None:
+                raise refined from err
             raise
         self._engine = engine
         self._user_shutdown = False

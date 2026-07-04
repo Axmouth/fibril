@@ -38,6 +38,11 @@ pub struct TlsClientOptions {
     /// Name verified against the certificate (and sent as SNI). Defaults to
     /// the host part of the connect address.
     pub server_name: Option<String>,
+    /// PEM client certificate chain presented to the broker, for
+    /// `tls.client_auth` deployments. Set together with `client_key_path`.
+    pub client_cert_path: Option<PathBuf>,
+    /// PEM private key for the client certificate.
+    pub client_key_path: Option<PathBuf>,
 }
 
 /// The connection transport: plaintext or TLS over the same net seam. One
@@ -129,6 +134,14 @@ fn classify_tls_connect_error(err: io::Error, address: &str) -> FibrilError {
     if let Some(inner) = err.get_ref()
         && let Some(tls_err) = inner.downcast_ref::<rustls::Error>()
     {
+        if matches!(
+            tls_err,
+            rustls::Error::AlertReceived(rustls::AlertDescription::CertificateRequired)
+        ) {
+            return FibrilError::TlsClientCertificateRequired {
+                address: address.to_string(),
+            };
+        }
         if matches!(tls_err, rustls::Error::InvalidCertificate(_)) {
             return FibrilError::TlsCertificateUntrusted {
                 msg: tls_err.to_string(),
@@ -143,18 +156,66 @@ fn classify_tls_connect_error(err: io::Error, address: &str) -> FibrilError {
     }
 }
 
+/// With TLS 1.3 the client side of the handshake completes before the
+/// broker's client-certificate verdict, so a `require` rejection lands on
+/// the first read after connect instead of in the handshake itself. This
+/// refines that failure into the typed error when TLS was in play.
+pub(crate) fn refine_post_connect_error(
+    err: FibrilError,
+    tls: Option<&TlsClientOptions>,
+    address: &str,
+) -> FibrilError {
+    if tls.is_some()
+        && let FibrilError::Disconnection { msg } = &err
+        && msg.contains("CertificateRequired")
+    {
+        return FibrilError::TlsClientCertificateRequired {
+            address: address.to_string(),
+        };
+    }
+    err
+}
+
 fn build_connector(tls: &TlsClientOptions) -> FibrilResult<TlsConnector> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|e| FibrilError::TlsConfig { msg: e.to_string() })?;
 
+    let client_identity = match (&tls.client_cert_path, &tls.client_key_path) {
+        (Some(cert_path), Some(key_path)) => Some(load_client_identity(cert_path, key_path)?),
+        (None, None) => None,
+        _ => {
+            return Err(FibrilError::TlsConfig {
+                msg: "client certificate options must be set together: both the                       certificate and its key"
+                    .into(),
+            });
+        }
+    };
+    let with_identity = |built: rustls::ConfigBuilder<
+        rustls::ClientConfig,
+        rustls::client::WantsClientCert,
+    >|
+     -> FibrilResult<rustls::ClientConfig> {
+        match client_identity {
+            None => Ok(built.with_no_client_auth()),
+            Some((certs, key)) => {
+                built
+                    .with_client_auth_cert(certs, key)
+                    .map_err(|e| FibrilError::TlsConfig {
+                        msg: format!("client certificate rejected: {e}"),
+                    })
+            }
+        }
+    };
+
     let config = if let Some(raw) = &tls.ca_fingerprint {
         let pin = parse_fingerprint(raw)?;
-        builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(FingerprintVerifier { pin, provider }))
-            .with_no_client_auth()
+        with_identity(
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(FingerprintVerifier { pin, provider })),
+        )?
     } else {
         let mut roots = rustls::RootCertStore::empty();
         if let Some(path) = &tls.ca_path {
@@ -186,9 +247,44 @@ fn build_connector(tls: &TlsClientOptions) -> FibrilResult<TlsConnector> {
                 });
             }
         }
-        builder.with_root_certificates(roots).with_no_client_auth()
+        with_identity(builder.with_root_certificates(roots))?
     };
     Ok(TlsConnector::from(Arc::new(config)))
+}
+
+fn load_client_identity(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> FibrilResult<(
+    Vec<CertificateDer<'static>>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+)> {
+    let open = |path: &std::path::Path| {
+        std::fs::File::open(path).map_err(|e| FibrilError::TlsConfig {
+            msg: format!("failed to open {}: {e}", path.display()),
+        })
+    };
+    let certs = rustls_pemfile::certs(&mut io::BufReader::new(open(cert_path)?))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| FibrilError::TlsConfig {
+            msg: format!(
+                "failed to parse client certificate {}: {e}",
+                cert_path.display()
+            ),
+        })?;
+    if certs.is_empty() {
+        return Err(FibrilError::TlsConfig {
+            msg: format!("no certificates found in {}", cert_path.display()),
+        });
+    }
+    let key = rustls_pemfile::private_key(&mut io::BufReader::new(open(key_path)?))
+        .map_err(|e| FibrilError::TlsConfig {
+            msg: format!("failed to parse client key {}: {e}", key_path.display()),
+        })?
+        .ok_or_else(|| FibrilError::TlsConfig {
+            msg: format!("no private key found in {}", key_path.display()),
+        })?;
+    Ok((certs, key))
 }
 
 fn resolve_server_name(address: &str, tls: &TlsClientOptions) -> FibrilResult<ServerName<'static>> {

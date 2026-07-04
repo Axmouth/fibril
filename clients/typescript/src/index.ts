@@ -54,6 +54,7 @@ export {
   TlsNotSupportedByBrokerError,
   TlsCertificateUntrustedError,
   TlsConfigError,
+  TlsClientCertificateRequiredError,
   TlsHandshakeError,
   isRetryable,
   retryAdvice,
