@@ -59,6 +59,8 @@ use ganglion::{TcpRaftServer, WireFormat, WireFormatParseError, openraft::BasicN
 
 pub use fibril_tls as tls;
 
+pub mod raft_tls;
+
 use fibril_tls::{TlsMaterialSource, TlsSetupError};
 
 /// Map the startup config's runtime-seed section into the broker's
@@ -177,6 +179,11 @@ pub enum FibrilServerError {
     AdminListener(#[source] AdminServerError),
     #[error("tls configuration: {0}")]
     TlsConfig(#[source] ConfigError),
+    #[error(
+        "tls.inter_broker is enabled without server TLS material: the coordination and \
+         replication listeners need tls.enabled with a certificate to serve"
+    )]
+    InterBrokerTlsWithoutMaterial,
     #[error(
         "coordination.mode = ganglion requires a cluster secret for node-to-node \
          authentication. Generate one with fibrilctl secret generate and give every \
@@ -333,8 +340,17 @@ impl CoordinationMembershipManager for GanglionCoordinationMembershipManager {
 /// This owns only the coordination process and embedded placement controller.
 /// Broker-specific wiring is separate so tests can build the broker around the
 /// returned ownership provider.
+/// TLS transport for the embedded coordinator's raft channel: the acceptor
+/// serves the broker's certificate on the raft listener, the connector
+/// verifies peers against the peer CA.
+pub struct RaftTlsTransport {
+    pub connector: fibril_tls::TlsConnector,
+    pub acceptor: fibril_tls::RustlsAcceptor,
+}
+
 pub async fn open_tcp_ganglion_parts(
     config: &ServerConfig,
+    raft_tls: Option<RaftTlsTransport>,
 ) -> Result<Option<TcpGanglionParts>, FibrilServerError> {
     match config.coordination.mode {
         CoordinationMode::Static => Ok(None),
@@ -351,16 +367,31 @@ pub async fn open_tcp_ganglion_parts(
                 .wire_format
                 .parse()
                 .map_err(FibrilServerError::CoordinationWireFormat)?;
-            let (node, consensus_server) =
-                ganglion::RaftMetadataNode::start_durable_tcp_with_format(
-                    section.raft_node_id,
-                    consensus_config,
-                    section.listen,
-                    &data_dir,
-                    wire_format,
-                )
-                .await
-                .map_err(|error| FibrilServerError::EmbeddedCoordinatorStart(error.to_string()))?;
+            let (node, consensus_server) = match raft_tls {
+                Some(transport) => {
+                    ganglion::RaftMetadataNode::start_durable_tcp_with_transport(
+                        section.raft_node_id,
+                        consensus_config,
+                        section.listen,
+                        &data_dir,
+                        wire_format,
+                        raft_tls::TlsRaftDialer::new(transport.connector),
+                        raft_tls::TlsRaftAcceptor::new(transport.acceptor),
+                    )
+                    .await
+                }
+                None => {
+                    ganglion::RaftMetadataNode::start_durable_tcp_with_format(
+                        section.raft_node_id,
+                        consensus_config,
+                        section.listen,
+                        &data_dir,
+                        wire_format,
+                    )
+                    .await
+                }
+            }
+            .map_err(|error| FibrilServerError::EmbeddedCoordinatorStart(error.to_string()))?;
             let consensus_server = Arc::new(consensus_server);
 
             if section.bootstrap {
@@ -1244,7 +1275,65 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
             .map_err(FibrilServerError::UserStore)?,
     );
 
-    let ganglion_parts = open_tcp_ganglion_parts(&config).await?;
+    // TLS material is resolved before the coordinator starts so the raft
+    // listener can serve the same certificate. In ganglion mode peers dial
+    // this node at its coordination peer address, so that host joins the
+    // generated certificate's names alongside the broker advertise hosts.
+    let mut tls_sans = tls::san_hosts_from_advertise(&config.broker_advertise_addresses());
+    if config.coordination.mode == CoordinationMode::Ganglion {
+        let section = &config.coordination.ganglion;
+        if let Some(own_addr) = section.peers.get(&section.raft_node_id.to_string()) {
+            for host in tls::san_hosts_from_advertise(std::slice::from_ref(own_addr)) {
+                if !tls_sans.contains(&host) {
+                    tls_sans.push(host);
+                }
+            }
+        }
+    }
+    let server_tls = tls::build_server_tls(
+        &config.tls.mode().map_err(FibrilServerError::TlsConfig)?,
+        &config.server.data_dir,
+        &tls_sans,
+    )?;
+    match &server_tls {
+        Some(tls::ServerTls {
+            source:
+                TlsMaterialSource::Generated {
+                    dir,
+                    ca_fingerprint,
+                },
+            ..
+        }) => {
+            tracing::info!(
+                "TLS enabled with per-deployment generated material at {}. CA SHA-256 \
+                 fingerprint: {ca_fingerprint}. Clients trust {}/ca.pem or pin the \
+                 fingerprint",
+                dir.display(),
+                dir.display()
+            );
+        }
+        Some(_) => tracing::info!("TLS enabled with operator-supplied certificate"),
+        None => {}
+    }
+
+    let raft_tls = if config.coordination.mode == CoordinationMode::Ganglion
+        && config.tls.inter_broker_enabled()
+    {
+        let Some(server_tls) = &server_tls else {
+            return Err(FibrilServerError::InterBrokerTlsWithoutMaterial);
+        };
+        Some(RaftTlsTransport {
+            connector: fibril_tls::build_peer_connector(
+                config.tls.peer_ca_path.as_deref(),
+                &config.server.data_dir,
+            )?,
+            acceptor: server_tls.acceptor.clone(),
+        })
+    } else {
+        None
+    };
+
+    let ganglion_parts = open_tcp_ganglion_parts(&config, raft_tls).await?;
     if let Some(parts) = &ganglion_parts {
         spawn_ganglion_catalogue_sync(
             parts,
@@ -1370,31 +1459,6 @@ pub async fn run_server_from_config(config: ServerConfig) -> Result<(), FibrilSe
         })
     };
 
-    let server_tls = tls::build_server_tls(
-        &config.tls.mode().map_err(FibrilServerError::TlsConfig)?,
-        &config.server.data_dir,
-        &tls::san_hosts_from_advertise(&config.broker_advertise_addresses()),
-    )?;
-    match &server_tls {
-        Some(tls::ServerTls {
-            source:
-                TlsMaterialSource::Generated {
-                    dir,
-                    ca_fingerprint,
-                },
-            ..
-        }) => {
-            tracing::info!(
-                "TLS enabled with per-deployment generated material at {}. CA SHA-256 \
-                 fingerprint: {ca_fingerprint}. Clients trust {}/ca.pem or pin the \
-                 fingerprint",
-                dir.display(),
-                dir.display()
-            );
-        }
-        Some(_) => tracing::info!("TLS enabled with operator-supplied certificate"),
-        None => {}
-    }
     let tls_status = match &server_tls {
         None => {
             "disabled - enable via the tls config section or fibrilctl cert generate".to_string()
@@ -2075,7 +2139,7 @@ mod tests {
         config.coordination.ganglion.controller_tick_ms = 50;
         config.coordination.ganglion.liveness_ttl_ms = 200;
 
-        let parts = open_tcp_ganglion_parts(&config)
+        let parts = open_tcp_ganglion_parts(&config, None)
             .await
             .expect("start ganglion")
             .expect("ganglion parts");

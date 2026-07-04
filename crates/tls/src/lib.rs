@@ -20,7 +20,8 @@ use tokio_rustls::rustls::sign::CertifiedKey;
 use tokio_rustls::rustls::{self, ServerConfig as RustlsServerConfig};
 
 pub use fibril_config::TlsMode;
-pub use tokio_rustls::TlsConnector;
+pub use tokio_rustls;
+pub use tokio_rustls::{TlsAcceptor as RustlsAcceptor, TlsConnector};
 
 /// Directory under the data dir holding generated material.
 pub const GENERATED_TLS_DIR: &str = "tls";
